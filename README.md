@@ -8,9 +8,29 @@ A dockerized FastAPI service that provides REST API access to Claude Code CLI wi
 - **REST API Wrapper** - FastAPI-based HTTP interface for Claude interactions
 - **Persistent Authentication** - OAuth tokens persist across container restarts
 - **Docker Containerized** - Easy deployment on Unraid or any Docker host
+- **Pre-built Images** - Available on ghcr.io, no build required
 - **Interactive Login** - Simple OAuth flow via `claude login`
 - **Health Monitoring** - Built-in health checks and status endpoints
 - **Command Execution** - Execute any Claude Code CLI command via API
+
+## Docker Image
+
+Pre-built multi-architecture images are automatically published to GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/<your-username>/proxy-python-sdk:latest
+```
+
+**Available tags:**
+- `latest` - Latest build from main branch
+- `v*.*.*` - Specific version releases
+- `main` - Latest main branch build
+
+**Supported platforms:**
+- `linux/amd64` - Standard x86_64 systems, Intel/AMD CPUs
+- `linux/arm64` - ARM systems like Raspberry Pi 4/5, Apple Silicon
+
+> **📖 For detailed information about GitHub Container Registry setup, publishing, and troubleshooting, see [GHCR_SETUP.md](GHCR_SETUP.md)**
 
 ## Prerequisites
 
@@ -20,29 +40,47 @@ A dockerized FastAPI service that provides REST API access to Claude Code CLI wi
 
 ## Quick Start
 
-### 1. Clone and Setup
+### Option A: Use Pre-built Image (Recommended for Unraid)
+
+The easiest way is to pull the pre-built image from GitHub Container Registry:
 
 ```bash
-git clone <your-repo-url>
-cd Proxy-Python-SDK
-```
+# Create directory and config
+mkdir -p /mnt/user/appdata/claude-sdk
+cd /mnt/user/appdata/claude-sdk
 
-### 2. Optional: Configure Environment
+# Download docker-compose.yml
+curl -O https://raw.githubusercontent.com/<your-username>/Proxy-Python-SDK/main/docker-compose.yml
 
-```bash
-cp .env.example .env
-# Edit .env if you want to change defaults (port, logging, etc.)
-```
+# Optional: Download and customize .env
+curl -O https://raw.githubusercontent.com/<your-username>/Proxy-Python-SDK/main/.env.example
+mv .env.example .env
 
-### 3. Build and Start
-
-```bash
+# Pull and start (will use pre-built image from ghcr.io)
+docker-compose pull
 docker-compose up -d
 ```
 
-### 4. Authenticate with Claude (REQUIRED)
+### Option B: Build from Source
 
-After starting the container, you must login to Claude Code:
+If you prefer to build the image yourself:
+
+```bash
+# 1. Clone and Setup
+git clone <your-repo-url>
+cd Proxy-Python-SDK
+
+# 2. Optional: Configure Environment
+cp .env.example .env
+# Edit .env if you want to change defaults (port, logging, etc.)
+
+# 3. Build and Start
+docker-compose up -d --build
+```
+
+### Authentication (Required for Both Options)
+
+After starting the container (regardless of which method you used), you must login to Claude Code:
 
 ```bash
 # Access the container
@@ -58,7 +96,7 @@ exit
 
 Your authentication will persist in the `claude-auth` volume.
 
-### 5. Verify
+### Verify Authentication
 
 ```bash
 # Check authentication status
@@ -111,7 +149,29 @@ curl -X POST http://localhost:8000/auth/logout
 
 ## Unraid Deployment
 
-### Method 1: Docker Compose (Recommended)
+### Method 1: Pre-built Image (Fastest)
+
+1. SSH into your Unraid server
+2. Create directory and download config:
+   ```bash
+   cd /mnt/user/appdata/
+   mkdir claude-sdk && cd claude-sdk
+   curl -O https://raw.githubusercontent.com/<your-username>/Proxy-Python-SDK/main/docker-compose.yml
+   curl -O https://raw.githubusercontent.com/<your-username>/Proxy-Python-SDK/main/.env.example
+   mv .env.example .env
+   ```
+3. Edit `.env` if needed (optional)
+4. Pull and start:
+   ```bash
+   docker-compose pull
+   docker-compose up -d
+   ```
+5. Login to Claude:
+   ```bash
+   docker exec -it claude-sdk-agent claude login
+   ```
+
+### Method 2: Build from Source
 
 1. SSH into your Unraid server
 2. Navigate to `/mnt/user/appdata/`
@@ -123,26 +183,27 @@ curl -X POST http://localhost:8000/auth/logout
    ```
 4. Start the container:
    ```bash
-   docker-compose up -d
+   docker-compose up -d --build
    ```
 5. Login to Claude:
    ```bash
    docker exec -it claude-sdk-agent claude login
    ```
 
-### Method 2: Unraid Docker UI
+### Method 3: Unraid Docker UI
 
 1. Open Unraid Web UI → Docker tab
 2. Click "Add Container"
 3. Configure:
    - **Name**: `claude-sdk-agent`
-   - **Repository**: `claude-code-sdk:latest` (build first)
+   - **Repository**: `ghcr.io/<your-username>/proxy-python-sdk:latest`
    - **Network Type**: `bridge`
    - **Port**: `8000` (Container) → `8000` (Host)
    - **Volume**: Add path mapping for auth persistence:
      - Container Path: `/home/appuser/.config/claude`
      - Host Path: `/mnt/user/appdata/claude-sdk/auth`
      - Access Mode: `Read/Write`
+   - **Console shell command**: `Bash`
 4. Apply and start
 5. Use console to run `claude login`
 

@@ -4,13 +4,34 @@ Get your Claude Code AI agent running on Unraid in 5 minutes!
 
 ## Step 1: Deploy to Unraid
 
+### Option A: Use Pre-built Image (Fastest - No Build Required)
+
 SSH into your Unraid server and run:
+
+```bash
+cd /mnt/user/appdata/
+mkdir claude-sdk && cd claude-sdk
+
+# Download docker-compose.yml and .env
+curl -O https://raw.githubusercontent.com/<your-username>/Proxy-Python-SDK/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/<your-username>/Proxy-Python-SDK/main/.env.example
+mv .env.example .env
+
+# Edit docker-compose.yml and replace <your-username> with your GitHub username
+# Or use sed: sed -i 's/<your-username>/YOUR_GITHUB_USERNAME/g' docker-compose.yml
+
+# Pull and start
+docker-compose pull
+docker-compose up -d
+```
+
+### Option B: Build from Source
 
 ```bash
 cd /mnt/user/appdata/
 git clone <your-repo-url> claude-sdk
 cd claude-sdk
-docker-compose up -d
+docker-compose up -d --build
 ```
 
 ## Step 2: Login to Claude (REQUIRED)
@@ -65,7 +86,10 @@ docker logs claude-sdk-agent -f
 # Restart
 docker-compose restart
 
-# Update
+# Update (pre-built image)
+docker-compose pull && docker-compose up -d
+
+# Update (build from source)
 git pull && docker-compose down && docker-compose up -d --build
 ```
 
