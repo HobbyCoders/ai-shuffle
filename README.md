@@ -4,6 +4,7 @@ A dockerized FastAPI service that provides REST API access to Claude Code CLI wi
 
 ## Key Features
 
+### Core Infrastructure
 - **Claude Code CLI Integration** - Uses official Claude Code CLI with OAuth (not API keys)
 - **REST API Wrapper** - FastAPI-based HTTP interface for Claude interactions
 - **Persistent Authentication** - OAuth tokens persist across container restarts
@@ -11,7 +12,15 @@ A dockerized FastAPI service that provides REST API access to Claude Code CLI wi
 - **Pre-built Images** - Available on ghcr.io, no build required
 - **Interactive Login** - Simple OAuth flow via `claude login`
 - **Health Monitoring** - Built-in health checks and status endpoints
-- **Command Execution** - Execute any Claude Code CLI command via API
+
+### AI Capabilities (v2.1+)
+- **Structured Prompting** - System instructions + context + JSON parsing
+- **File/HTML Analysis** - Analyze and extract data from any content type
+- **Multi-turn Conversations** - Context-aware chatbot capabilities
+- **JSON Mode** - Automatic JSON extraction and parsing from responses
+- **Flexible Output Formats** - JSON, Markdown, text, or list formats
+- **Large Context Support** - Handle up to 50k characters of context
+- **Model Selection** - Choose between Claude Haiku, Sonnet, or Opus
 
 ## Docker Image
 
@@ -211,6 +220,23 @@ curl -X POST http://localhost:8000/auth/logout
 
 Authentication tokens are stored in a Docker volume (`claude-auth`) and persist across container restarts and updates.
 
+## Use Cases
+
+### General AI Assistant
+Use the basic `/chat` endpoint for simple Q&A and assistance.
+
+### Application Integration (Kavita, etc.)
+Use `/prompt/structured` and `/analyze/file` endpoints for:
+- Web scraping and data extraction
+- HTML/JSON parsing
+- Content analysis
+- Structured data generation
+
+See [KAVITA_INTEGRATION.md](KAVITA_INTEGRATION.md) for a complete integration guide.
+
+### Chatbots & Conversational AI
+Use `/conversation` endpoint for multi-turn conversations with context.
+
 ## API Endpoints
 
 ### Authentication Endpoints
@@ -297,6 +323,113 @@ Get Claude Code version.
 
 ```bash
 curl http://localhost:8000/version
+```
+
+### Advanced AI Endpoints (v2.1+)
+
+#### POST `/prompt/structured`
+**Most powerful endpoint** - Structured prompting with system instructions, context, and JSON parsing.
+
+**Use for**: Web scraping, data extraction, content analysis, structured output.
+
+```bash
+curl -X POST http://localhost:8000/prompt/structured \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_prompt": "Extract all product names and prices from this HTML",
+    "system_prompt": "You are a data extractor. Return valid JSON only in format: {\"products\": [{\"name\": string, \"price\": number}]}",
+    "context": "<html><div class=\"product\">Widget - $19.99</div></html>",
+    "json_mode": true,
+    "model": "claude-haiku-4"
+  }'
+```
+
+**Response**:
+```json
+{
+  "success": true,
+  "response": "{\"products\": [{\"name\": \"Widget\", \"price\": 19.99}]}",
+  "parsed_json": {
+    "products": [{"name": "Widget", "price": 19.99}]
+  },
+  "metadata": {
+    "json_parsed": true,
+    "response_length": 156
+  }
+}
+```
+
+**Parameters**:
+- `user_prompt` (required) - Your main question/instruction
+- `system_prompt` (optional) - System-level behavior instructions
+- `context` (optional) - Large context (HTML, code, documents up to 50k chars)
+- `json_mode` (boolean) - Auto-parse JSON from response
+- `model` (optional) - Claude model to use
+- `temperature` (optional) - 0.0-1.0, controls randomness
+- `max_tokens` (optional) - Max response length
+
+---
+
+#### POST `/analyze/file`
+Analyze file content (HTML, JSON, XML, code, text) with specific instructions.
+
+**Use for**: HTML parsing, code analysis, document understanding, format conversion.
+
+```bash
+curl -X POST http://localhost:8000/analyze/file \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "<html>...</html>",
+    "content_type": "html",
+    "analysis_instructions": "Extract all chapter links and titles",
+    "output_format": "json",
+    "model": "claude-haiku-4"
+  }'
+```
+
+**Content Types**:
+- `html` - HTML parsing and data extraction
+- `json` - JSON analysis and transformation
+- `xml` - XML parsing
+- `code` - Code analysis (any language)
+- `text` - Text analysis
+
+**Output Formats**:
+- `json` - Structured JSON
+- `markdown` - Formatted markdown
+- `list` - Bulleted or numbered list
+- `text` - Plain text
+
+---
+
+#### POST `/conversation`
+Multi-turn conversation with full context retention.
+
+**Use for**: Chatbots, interactive assistants, contextual Q&A.
+
+```bash
+curl -X POST http://localhost:8000/conversation \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {"role": "user", "content": "What is Python?"},
+      {"role": "assistant", "content": "Python is a programming language..."},
+      {"role": "user", "content": "What can I build with it?"}
+    ],
+    "system_prompt": "You are a helpful programming tutor.",
+    "model": "claude-sonnet-4"
+  }'
+```
+
+**Response**:
+```json
+{
+  "response": "With Python you can build web applications, data analysis tools...",
+  "status": "success",
+  "metadata": {
+    "message_count": 3
+  }
+}
 ```
 
 ## Usage Examples
