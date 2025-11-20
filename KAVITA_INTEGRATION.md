@@ -10,11 +10,37 @@ The SDK provides general-purpose AI endpoints that Kavita can use to:
 - Extract chapter lists from manga websites
 - Transform unstructured web content into structured JSON
 
-## Key Endpoints for Kavita
+## Available Endpoints
 
-### 1. Structured Prompting (`POST /prompt/structured`)
+### 1. Simple Chat (`POST /chat`)
 
-The most flexible endpoint for custom extraction tasks.
+Simple one-off prompts without context.
+
+**Parameters:**
+- `prompt` (required): The question/prompt to send
+- `system_prompt` (optional): System instructions
+- `model` (optional): `"sonnet"`, `"opus"`, or `"haiku"` (defaults to sonnet)
+
+**Example:**
+```http
+POST http://your-unraid-ip:8000/chat
+Content-Type: application/json
+
+{
+  "prompt": "What is the best way to parse HTML in C#?",
+  "model": "haiku"
+}
+```
+
+### 2. Structured Prompting (`POST /prompt/structured`)
+
+The most powerful endpoint - perfect for data extraction with context.
+
+**Parameters:**
+- `user_prompt` (required): Your main question/instruction
+- `system_prompt` (optional): System instructions to guide Claude's behavior
+- `context` (optional): Additional data (HTML, JSON, code, etc.)
+- `model` (optional): `"sonnet"`, `"opus"`, or `"haiku"`
 
 **Use Case**: Extract manga metadata and chapters from any website
 
@@ -23,40 +49,37 @@ POST http://your-unraid-ip:8000/prompt/structured
 Content-Type: application/json
 
 {
-  "user_prompt": "Extract the manga series metadata and all available chapters from this HTML",
+  "user_prompt": "Extract the manga series metadata and all available chapters. Return ONLY valid JSON with no markdown or extra text.",
   "system_prompt": "You are a manga metadata extractor. Return ONLY valid JSON in this exact format:\n{\n  \"metadata\": {\"title\": string, \"author\": string, \"artist\": string, \"genres\": [strings], \"description\": string, \"status\": string, \"year\": number},\n  \"chapters\": [{\"number\": string, \"title\": string, \"url\": string, \"releaseDate\": string}]\n}",
   "context": "<html>... the manga page HTML ...</html>",
-  "json_mode": true,
-  "model": "claude-sonnet-4"
+  "model": "sonnet"
 }
 ```
 
-**Response**:
+**Response:**
 ```json
 {
-  "success": true,
-  "response": "{\"metadata\": {...}, \"chapters\": [...]}",
-  "parsed_json": {
-    "metadata": {
-      "title": "One Piece",
-      "author": "Eiichiro Oda",
-      "genres": ["Action", "Adventure"],
-      ...
-    },
-    "chapters": [
-      {"number": "1", "title": "Romance Dawn", "url": "..."},
-      ...
-    ]
-  },
+  "response": "{\"metadata\": {\"title\": \"One Piece\", \"author\": \"Eiichiro Oda\", \"artist\": \"Eiichiro Oda\", \"genres\": [\"Action\", \"Adventure\"], \"description\": \"...\", \"status\": \"ongoing\", \"year\": 1997}, \"chapters\": [{\"number\": \"1\", \"title\": \"Romance Dawn\", \"url\": \"...\", \"releaseDate\": \"1997-07-22\"}]}",
+  "status": "success",
   "metadata": {
-    "json_parsed": true
+    "model": "claude-sonnet-4-5-20250929",
+    "duration_ms": 3500,
+    "num_turns": 1,
+    "total_cost_usd": 0.0087,
+    "is_error": false
   }
 }
 ```
 
-### 2. File Analysis (`POST /analyze/file`)
+### 3. File Analysis (`POST /analyze/file`)
 
-Specialized endpoint for analyzing HTML, JSON, XML, etc.
+Specialized endpoint for analyzing file content.
+
+**Parameters:**
+- `content` (required): The file content as a string
+- `content_type` (required): Type of content - `"html"`, `"json"`, `"xml"`, `"code"`, or `"text"`
+- `analysis_instructions` (required): What you want Claude to do with the content
+- `model` (optional): `"sonnet"`, `"opus"`, or `"haiku"`
 
 **Use Case**: Parse HTML specifically for manga data
 
@@ -67,9 +90,32 @@ Content-Type: application/json
 {
   "content": "<html>...</html>",
   "content_type": "html",
-  "analysis_instructions": "Extract all chapter numbers, titles, and URLs. Return as JSON array.",
-  "output_format": "json",
-  "model": "claude-haiku-4"
+  "analysis_instructions": "Extract all chapter numbers, titles, and URLs. Return as a JSON array with no markdown formatting.",
+  "model": "haiku"
+}
+```
+
+### 4. Multi-Turn Conversation (`POST /conversation`)
+
+Maintain conversation context across multiple messages.
+
+**Parameters:**
+- `messages` (required): Array of messages with `role` ("user") and `content`
+- `system_prompt` (optional): System instructions
+- `model` (optional): `"sonnet"`, `"opus"`, or `"haiku"`
+
+**Example:**
+```http
+POST http://your-unraid-ip:8000/conversation
+Content-Type: application/json
+
+{
+  "messages": [
+    {"role": "user", "content": "I'm going to send you HTML from a manga site."},
+    {"role": "user", "content": "Here it is: <html>...</html>"},
+    {"role": "user", "content": "Now extract the title and author as JSON."}
+  ],
+  "model": "sonnet"
 }
 ```
 
@@ -108,11 +154,13 @@ public class ClaudeSdkClient
 {
     private readonly HttpClient _httpClient;
     private readonly string _sdkBaseUrl;
+    private readonly ILogger<ClaudeSdkClient> _logger;
 
-    public ClaudeSdkClient(string sdkBaseUrl)
+    public ClaudeSdkClient(string sdkBaseUrl, ILogger<ClaudeSdkClient> logger)
     {
         _sdkBaseUrl = sdkBaseUrl; // http://unraid-ip:8000
-        _httpClient = new HttpClient();
+        _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(120) };
+        _logger = logger;
     }
 
     public async Task<MangaExtractionResult> ExtractMangaDataAsync(
@@ -121,8 +169,8 @@ public class ClaudeSdkClient
     {
         var request = new
         {
-            user_prompt = "Extract manga series metadata and all chapters",
-            system_prompt = @"You are a manga metadata extractor. Return ONLY valid JSON:
+            user_prompt = "Extract manga series metadata and all chapters. Return ONLY valid JSON with no markdown formatting or code blocks.",
+            system_prompt = @"You are a manga metadata extractor. Return ONLY valid JSON in this exact format:
 {
   ""metadata"": {
     ""title"": string,
@@ -143,8 +191,7 @@ public class ClaudeSdkClient
   ]
 }",
             context = html,
-            json_mode = true,
-            model = "claude-haiku-4"  // Fast & cheap for scraping
+            model = "haiku"  // Fast & cheap for scraping (sonnet/opus/haiku)
         };
 
         var response = await _httpClient.PostAsJsonAsync(
@@ -152,18 +199,59 @@ public class ClaudeSdkClient
             request
         );
 
-        var result = await response.Content
-            .ReadFromJsonAsync<ClaudeResponse>();
+        response.EnsureSuccessStatusCode();
 
-        if (result.Success && result.ParsedJson != null)
+        var result = await response.Content
+            .ReadFromJsonAsync<ClaudeApiResponse>();
+
+        if (result?.Status == "success" && !string.IsNullOrEmpty(result.Response))
         {
-            return JsonSerializer.Deserialize<MangaExtractionResult>(
-                result.ParsedJson.ToString()
-            );
+            // Claude's response is the JSON string
+            try
+            {
+                return JsonSerializer.Deserialize<MangaExtractionResult>(result.Response);
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogError(ex, "Failed to parse Claude response as JSON. Raw response: {Response}",
+                    result.Response);
+                throw new Exception($"Invalid JSON response from Claude: {ex.Message}");
+            }
         }
 
-        throw new Exception($"Extraction failed: {result.Error}");
+        throw new Exception($"Extraction failed: {result?.Status ?? "unknown error"}");
     }
+}
+
+// Response models
+public class ClaudeApiResponse
+{
+    [JsonPropertyName("response")]
+    public string Response { get; set; }
+
+    [JsonPropertyName("status")]
+    public string Status { get; set; }
+
+    [JsonPropertyName("metadata")]
+    public ClaudeMetadata Metadata { get; set; }
+}
+
+public class ClaudeMetadata
+{
+    [JsonPropertyName("model")]
+    public string Model { get; set; }
+
+    [JsonPropertyName("duration_ms")]
+    public int DurationMs { get; set; }
+
+    [JsonPropertyName("num_turns")]
+    public int NumTurns { get; set; }
+
+    [JsonPropertyName("total_cost_usd")]
+    public decimal TotalCostUsd { get; set; }
+
+    [JsonPropertyName("is_error")]
+    public bool IsError { get; set; }
 }
 ```
 
@@ -234,9 +322,9 @@ public class ScraperService
    - For chapter lists only, can send filtered HTML (just the chapter list section)
 
 4. **Model Selection**
-   - `claude-haiku-4` - Fast, cheap, good for simple extraction
-   - `claude-sonnet-4` - Best balance for complex pages
-   - `claude-opus-4` - Most accurate but expensive
+   - `"haiku"` - Fast, cheap, good for simple extraction (~$0.01 per request)
+   - `"sonnet"` - Best balance for complex pages (default, ~$0.01-0.02 per request)
+   - `"opus"` - Most accurate but expensive (~$0.05+ per request)
 
 ## Error Handling
 
@@ -298,26 +386,35 @@ private async Task ProcessScrapingQueueWithRateLimitAsync()
 Test the SDK independently before integrating:
 
 ```bash
-# 1. Test authentication
-curl http://your-unraid-ip:8000/auth/status
+# 1. Test health and authentication
+curl http://your-unraid-ip:8000/health
 
-# 2. Test with sample HTML
+# 2. Test simple chat
+curl -X POST http://your-unraid-ip:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Say hello",
+    "model": "haiku"
+  }'
+
+# 3. Test with sample HTML
 curl -X POST http://your-unraid-ip:8000/analyze/file \
   -H "Content-Type: application/json" \
   -d '{
-    "content": "<html><h1>Test Manga</h1></html>",
+    "content": "<html><h1>Test Manga</h1><p>by Author Name</p></html>",
     "content_type": "html",
-    "analysis_instructions": "Extract the title",
-    "output_format": "json"
+    "analysis_instructions": "Extract the title and author as JSON",
+    "model": "haiku"
   }'
 
-# 3. Test structured prompting
+# 4. Test structured prompting (recommended for Kavita)
 curl -X POST http://your-unraid-ip:8000/prompt/structured \
   -H "Content-Type: application/json" \
   -d '{
-    "user_prompt": "What is this?",
-    "context": "<html>manga page</html>",
-    "json_mode": true
+    "user_prompt": "Extract the manga title and return it as JSON",
+    "context": "<html><h1>One Piece</h1></html>",
+    "system_prompt": "Return only valid JSON",
+    "model": "haiku"
   }'
 ```
 
@@ -329,8 +426,8 @@ Add to `appsettings.json`:
 {
   "Scraper": {
     "ClaudeSdkUrl": "http://your-unraid-ip:8000",
-    "DefaultModel": "claude-haiku-4",
-    "RequestTimeout": 300,
+    "DefaultModel": "haiku",
+    "RequestTimeout": 120,
     "RateLimitPerMinute": 30,
     "EnableAutomaticScraping": true
   }
@@ -348,15 +445,27 @@ Add to `appsettings.json`:
 
 ## Troubleshooting
 
-### SDK Returns Empty parsed_json
+### Claude Returns Markdown-Formatted JSON
 
-**Cause**: Claude returned text instead of JSON
+**Cause**: Claude wrapped JSON in markdown code blocks (```json ... ```)
 
-**Solution**: Make system prompt more explicit
+**Solution**: Be explicit in prompts to avoid markdown
 ```json
 {
-  "system_prompt": "CRITICAL: Return ONLY the JSON object. Start with { and end with }. No other text."
+  "user_prompt": "Extract the data. Return ONLY valid JSON with no markdown formatting or code blocks.",
+  "system_prompt": "Return ONLY the JSON object. Start with { and end with }. No markdown, no explanation."
 }
+```
+
+Then in C#, strip markdown if needed:
+```csharp
+var response = result.Response;
+// Remove markdown code blocks if present
+if (response.StartsWith("```"))
+{
+    response = Regex.Replace(response, @"^```(json)?\s*|\s*```$", "").Trim();
+}
+var data = JsonSerializer.Deserialize<MangaExtractionResult>(response);
 ```
 
 ### Extraction Misses Some Chapters
@@ -370,9 +479,15 @@ Add to `appsettings.json`:
 **Cause**: Large HTML + Claude processing time
 
 **Solutions**:
-- Use `claude-haiku-4` model (fastest)
-- Filter HTML to relevant sections only
-- Cache results aggressively
+- Use `"haiku"` model (fastest, ~1-3s response time)
+- Filter HTML to relevant sections only before sending
+- Cache results aggressively in Kavita database
+- Process scraping in background jobs, not on-demand
+
+**Benchmark Response Times:**
+- Haiku: 1-3 seconds for typical manga pages
+- Sonnet: 3-5 seconds for complex pages
+- Opus: 5-10 seconds (use only when accuracy is critical)
 
 ## Next Steps
 
