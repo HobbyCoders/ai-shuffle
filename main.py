@@ -108,7 +108,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Claude Code SDK Proxy",
     description="REST API wrapper for Claude Agent SDK with OAuth authentication",
-    version="3.0.0",
+    version="3.1.0",
     lifespan=lifespan
 )
 
@@ -126,11 +126,33 @@ def build_options(
     model: Optional[str] = None,
     system_prompt: Optional[str] = None
 ) -> ClaudeAgentOptions:
-    """Build ClaudeAgentOptions from parameters"""
+    """Build ClaudeAgentOptions with secure defaults"""
+    # Use Claude Code's system prompt as base if no custom prompt provided
+    if system_prompt is None:
+        final_system_prompt = {
+            "type": "preset",
+            "preset": "claude_code"
+        }
+    else:
+        # Append user's system prompt to Claude Code preset
+        final_system_prompt = {
+            "type": "preset",
+            "preset": "claude_code",
+            "append": system_prompt
+        }
+
     return ClaudeAgentOptions(
         model=model,
-        system_prompt=system_prompt,
-        permission_mode="acceptEdits"  # Auto-accept for API usage
+        system_prompt=final_system_prompt,
+        # Read-only tools for security - no file modifications
+        allowed_tools=[
+            "Read",        # Read files
+            "Grep",        # Search content
+            "Glob",        # Find files
+            "WebFetch",    # Fetch web content
+            "WebSearch"    # Search the web
+        ],
+        permission_mode="bypassPermissions"  # No interactive prompts for API
     )
 
 
@@ -169,7 +191,7 @@ async def root():
     return {
         "status": "healthy",
         "service": os.getenv("SERVICE_NAME", "claude-code-sdk"),
-        "version": "3.0.0",
+        "version": "3.1.0",
         "authenticated": is_auth
     }
 
@@ -188,7 +210,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": os.getenv("SERVICE_NAME", "claude-code-sdk"),
-        "version": "3.0.0",
+        "version": "3.1.0",
         "authenticated": is_auth
     }
 
