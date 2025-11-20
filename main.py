@@ -435,27 +435,23 @@ async def multi_turn_conversation(request: ConversationRequest):
 
         # Use ClaudeSDKClient for conversation
         async with ClaudeSDKClient(options=options) as client:
+            response_text = []
+            metadata = {}
+
             # Send all messages in sequence
             for msg in request.messages:
                 if msg.role == "user":
                     await client.query(msg.content)
-                    # Consume assistant responses
-                    async for _ in client.receive_response():
-                        pass
-
-            # Get the final response
-            response_text = []
-            metadata = {}
-
-            async for message in client.receive_response():
-                if isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        if isinstance(block, TextBlock):
-                            response_text.append(block.text)
-                    metadata["model"] = message.model
-                elif isinstance(message, ResultMessage):
-                    metadata["duration_ms"] = message.duration_ms
-                    metadata["num_turns"] = message.num_turns
+                    # Collect response for this query
+                    async for message in client.receive_response():
+                        if isinstance(message, AssistantMessage):
+                            for block in message.content:
+                                if isinstance(block, TextBlock):
+                                    response_text.append(block.text)
+                            metadata["model"] = message.model
+                        elif isinstance(message, ResultMessage):
+                            metadata["duration_ms"] = message.duration_ms
+                            metadata["num_turns"] = message.num_turns
 
             return {
                 "response": "\n".join(response_text),
