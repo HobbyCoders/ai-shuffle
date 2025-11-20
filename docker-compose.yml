@@ -31,8 +31,8 @@ services:
 
     # Volume mounts for persistent auth and data
     volumes:
-      # Persist Claude Code authentication tokens
-      - claude-auth:/home/appuser/.config/claude
+      # Persist Claude Code authentication tokens and data
+      - claude-auth:/home/appuser/.claude
       # Optional: Mount a workspace directory
       - ${WORKSPACE_DIR:-./workspace}:/workspace
 

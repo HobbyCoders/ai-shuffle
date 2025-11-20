@@ -37,7 +37,7 @@
   <DonateLink/>
   <Requires/>
   <Config Name="WebUI Port" Target="8000" Default="8000" Mode="tcp" Description="Web interface and API port" Type="Port" Display="always" Required="true" Mask="false">8000</Config>
-  <Config Name="Appdata" Target="/home/appuser/.config/claude" Default="/mnt/user/appdata/claude-sdk" Mode="rw" Description="Persistent storage for Claude authentication tokens" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/claude-sdk</Config>
+  <Config Name="Appdata" Target="/home/appuser/.claude" Default="/mnt/user/appdata/claude-sdk" Mode="rw" Description="Persistent storage for Claude authentication tokens and data" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/claude-sdk</Config>
   <Config Name="Workspace (Optional)" Target="/workspace" Default="/mnt/user/appdata/claude-sdk/workspace" Mode="rw" Description="Optional workspace directory for file operations" Type="Path" Display="advanced" Required="false" Mask="false">/mnt/user/appdata/claude-sdk/workspace</Config>
   <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User ID (99 for Unraid compatibility)" Type="Variable" Display="advanced" Required="true" Mask="false">99</Config>
   <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group ID (100 for Unraid compatibility)" Type="Variable" Display="advanced" Required="true" Mask="false">100</Config>

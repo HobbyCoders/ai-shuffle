@@ -465,24 +465,17 @@ async def auth_diagnostics():
         except Exception as e:
             diagnostics["config_dir_error"] = str(e)
 
-    # Run claude auth status with full output
+    # Check for credentials file (Claude Code has no non-interactive status command)
     try:
-        env = os.environ.copy()
-        env['HOME'] = os.environ.get('HOME', '/home/appuser')
-
-        result = subprocess.run(
-            ['claude', 'auth', 'status'],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=env
-        )
-
-        diagnostics["auth_status_returncode"] = result.returncode
-        diagnostics["auth_status_stdout"] = result.stdout
-        diagnostics["auth_status_stderr"] = result.stderr
+        creds_file = home_dir / '.claude' / '.credentials.json'
+        if creds_file.exists():
+            diagnostics["credentials_file_exists"] = True
+            diagnostics["credentials_file_size"] = creds_file.stat().st_size
+            diagnostics["credentials_file_permissions"] = oct(creds_file.stat().st_mode)[-3:]
+        else:
+            diagnostics["credentials_file_exists"] = False
     except Exception as e:
-        diagnostics["auth_status_error"] = str(e)
+        diagnostics["credentials_check_error"] = str(e)
 
     # Check current process user
     try:

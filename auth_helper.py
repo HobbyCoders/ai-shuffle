@@ -41,26 +41,21 @@ class ClaudeAuthHelper:
             bool: True if authenticated, False otherwise
         """
         try:
-            # Pass environment variables explicitly to ensure HOME is set
-            env = os.environ.copy()
-            env['HOME'] = os.environ.get('HOME', '/home/appuser')
+            # Check for credentials file in ~/.claude/ directory
+            # Claude Code 2.x stores credentials in ~/.claude/.credentials.json
+            home = os.environ.get('HOME', '/home/appuser')
+            claude_dir = Path(home) / '.claude'
+            credentials_file = claude_dir / '.credentials.json'
 
-            result = subprocess.run(
-                ['claude', 'auth', 'status'],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=env
-            )
+            authenticated = credentials_file.exists() and credentials_file.stat().st_size > 0
 
-            # Log detailed information for debugging
-            logger.info(f"Auth check return code: {result.returncode}")
-            logger.info(f"Auth check stdout: {result.stdout}")
-            logger.info(f"Auth check stderr: {result.stderr}")
-            logger.info(f"HOME env var: {env['HOME']}")
+            logger.info(f"Auth check - credentials file: {credentials_file}")
+            logger.info(f"Auth check - exists: {credentials_file.exists()}")
+            logger.info(f"Auth check - authenticated: {authenticated}")
+            logger.info(f"HOME env var: {home}")
             logger.info(f"Config dir: {self.config_dir}")
 
-            return result.returncode == 0
+            return authenticated
         except Exception as e:
             logger.error(f"Error checking auth status: {e}")
             return False
