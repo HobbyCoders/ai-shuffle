@@ -49,3 +49,4 @@ logs/
 docker-compose.override.yml
 /.claude
 Claude Code.bat
+/docs
