@@ -41,20 +41,35 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY main.py .
-COPY auth_helper.py .
+# Build frontend
+COPY frontend/package*.json ./frontend/
+WORKDIR /app/frontend
+RUN npm install
+
+COPY frontend/ ./
+RUN npm run build
+
+# Copy built frontend to app/static
+RUN mkdir -p /app/app/static && cp -r build/* /app/app/static/
+
+WORKDIR /app
+
+# Copy application code - new modular structure
+COPY app/ ./app/
 COPY .env.example .
 
 # Copy entrypoint script
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+# Create required directories
+RUN mkdir -p /data /workspace
+
 # Create a non-root user for security (default UID/GID, will be modified at runtime)
 RUN groupadd -g 1000 appuser && \
     useradd -m -u 1000 -g 1000 appuser && \
-    mkdir -p /home/appuser/.config/claude && \
-    chown -R appuser:appuser /app /home/appuser
+    mkdir -p /home/appuser/.config/claude /home/appuser/.claude && \
+    chown -R appuser:appuser /app /home/appuser /data /workspace
 
 # Expose port
 EXPOSE 8000
