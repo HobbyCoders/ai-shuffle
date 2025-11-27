@@ -51,8 +51,29 @@ export class ApiClient {
 		return this.request<T>('PATCH', path, body);
 	}
 
-	async delete<T>(path: string): Promise<T> {
-		return this.request<T>('DELETE', path);
+	async delete<T>(path: string): Promise<T | void> {
+		const response = await fetch(`${API_BASE}${path}`, {
+			method: 'DELETE',
+			headers: {
+				'Content-Type': 'application/json'
+			},
+			credentials: 'include'
+		});
+
+		if (!response.ok) {
+			const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+			throw {
+				detail: error.detail || 'Request failed',
+				status: response.status
+			} as ApiError;
+		}
+
+		// Handle 204 No Content
+		if (response.status === 204) {
+			return;
+		}
+
+		return response.json();
 	}
 }
 

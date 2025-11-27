@@ -74,3 +74,48 @@ code {
 .card {
 	@apply bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg;
 }
+
+/* Mobile optimizations */
+@media (max-width: 640px) {
+	html {
+		font-size: 16px;
+		-webkit-text-size-adjust: 100%;
+	}
+
+	.btn {
+		@apply min-h-[44px] px-4;
+	}
+
+	.input {
+		@apply min-h-[44px];
+		font-size: 16px; /* Prevents zoom on iOS */
+	}
+
+	select.input {
+		font-size: 16px;
+	}
+}
+
+/* Touch-friendly tap targets */
+button, a, .clickable {
+	-webkit-tap-highlight-color: transparent;
+}
+
+/* Prevent text selection on interactive elements */
+.no-select {
+	-webkit-user-select: none;
+	user-select: none;
+}
+
+/* Safe area insets for notched devices */
+@supports (padding-bottom: env(safe-area-inset-bottom)) {
+	.safe-bottom {
+		padding-bottom: env(safe-area-inset-bottom);
+	}
+}
+
+/* Smooth scrolling on mobile */
+.smooth-scroll {
+	-webkit-overflow-scrolling: touch;
+	scroll-behavior: smooth;
+}

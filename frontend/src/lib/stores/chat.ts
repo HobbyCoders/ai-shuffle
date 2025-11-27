@@ -1,5 +1,6 @@
 /**
  * Chat/conversation store with SSE streaming support
+ * Includes sessions, profiles, and projects management
  */
 
 import { writable, derived, get } from 'svelte/store';
@@ -21,11 +22,24 @@ export interface ToolUse {
 	output?: string;
 }
 
+export interface Project {
+	id: string;
+	name: string;
+	description?: string;
+	path: string;
+	settings: Record<string, unknown>;
+	created_at: string;
+	updated_at: string;
+}
+
 interface ChatState {
 	sessionId: string | null;
 	messages: ChatMessage[];
 	profiles: Profile[];
 	selectedProfile: string;
+	projects: Project[];
+	selectedProject: string;
+	sessions: Session[];
 	isStreaming: boolean;
 	error: string | null;
 	abortController: AbortController | null;
@@ -37,6 +51,9 @@ function createChatStore() {
 		messages: [],
 		profiles: [],
 		selectedProfile: 'claude-code',
+		projects: [],
+		selectedProject: '',
+		sessions: [],
 		isStreaming: false,
 		error: null,
 		abortController: null
@@ -53,6 +70,24 @@ function createChatStore() {
 				update(s => ({ ...s, profiles }));
 			} catch (e) {
 				console.error('Failed to load profiles:', e);
+			}
+		},
+
+		async loadProjects() {
+			try {
+				const projects = await api.get<Project[]>('/projects');
+				update(s => ({ ...s, projects }));
+			} catch (e) {
+				console.error('Failed to load projects:', e);
+			}
+		},
+
+		async loadSessions() {
+			try {
+				const sessions = await api.get<Session[]>('/sessions?limit=50');
+				update(s => ({ ...s, sessions }));
+			} catch (e) {
+				console.error('Failed to load sessions:', e);
 			}
 		},
 
@@ -80,6 +115,10 @@ function createChatStore() {
 			update(s => ({ ...s, selectedProfile: profileId }));
 		},
 
+		setProject(projectId: string) {
+			update(s => ({ ...s, selectedProject: projectId }));
+		},
+
 		startNewChat() {
 			update(s => ({
 				...s,
@@ -87,6 +126,47 @@ function createChatStore() {
 				messages: [],
 				error: null
 			}));
+		},
+
+		async createProfile(data: { id: string; name: string; description?: string; config: Record<string, unknown> }) {
+			try {
+				await api.post('/profiles', data);
+				await this.loadProfiles();
+			} catch (e: any) {
+				update(s => ({ ...s, error: e.detail || 'Failed to create profile' }));
+			}
+		},
+
+		async deleteProfile(profileId: string) {
+			try {
+				await api.delete(`/profiles/${profileId}`);
+				await this.loadProfiles();
+			} catch (e: any) {
+				update(s => ({ ...s, error: e.detail || 'Failed to delete profile' }));
+			}
+		},
+
+		async createProject(data: { id: string; name: string; description?: string }) {
+			try {
+				await api.post('/projects', data);
+				await this.loadProjects();
+			} catch (e: any) {
+				update(s => ({ ...s, error: e.detail || 'Failed to create project' }));
+			}
+		},
+
+		async deleteProject(projectId: string) {
+			try {
+				await api.delete(`/projects/${projectId}`);
+				await this.loadProjects();
+				// Reset selected project if it was the deleted one
+				update(s => ({
+					...s,
+					selectedProject: s.selectedProject === projectId ? '' : s.selectedProject
+				}));
+			} catch (e: any) {
+				update(s => ({ ...s, error: e.detail || 'Failed to delete project' }));
+			}
 		},
 
 		async sendMessage(prompt: string) {
@@ -129,6 +209,10 @@ function createChatStore() {
 
 			if (state.sessionId) {
 				body.session_id = state.sessionId;
+			}
+
+			if (state.selectedProject) {
+				body.project = state.selectedProject;
 			}
 
 			try {
@@ -179,6 +263,10 @@ function createChatStore() {
 						}
 					}
 				}
+
+				// Reload sessions to update the list
+				await this.loadSessions();
+
 			} catch (e: any) {
 				// Don't show error for intentional abort
 				if (e.name === 'AbortError') {
@@ -322,3 +410,7 @@ export const isStreaming = derived(chat, $chat => $chat.isStreaming);
 export const chatError = derived(chat, $chat => $chat.error);
 export const profiles = derived(chat, $chat => $chat.profiles);
 export const selectedProfile = derived(chat, $chat => $chat.selectedProfile);
+export const projects = derived(chat, $chat => $chat.projects);
+export const selectedProject = derived(chat, $chat => $chat.selectedProject);
+export const sessions = derived(chat, $chat => $chat.sessions);
+export const currentSessionId = derived(chat, $chat => $chat.sessionId);

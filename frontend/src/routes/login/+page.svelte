@@ -17,13 +17,15 @@
 
 <svelte:head>
 	<title>Login - AI Hub</title>
+	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
 </svelte:head>
 
 <div class="min-h-screen flex items-center justify-center p-4">
-	<div class="card p-8 w-full max-w-md">
-		<div class="text-center mb-8">
-			<h1 class="text-2xl font-bold text-white mb-2">AI Hub</h1>
-			<p class="text-gray-400">Sign in to continue</p>
+	<div class="card p-6 sm:p-8 w-full max-w-md">
+		<div class="text-center mb-6 sm:mb-8">
+			<div class="text-4xl mb-3">🤖</div>
+			<h1 class="text-xl sm:text-2xl font-bold text-white mb-2">AI Hub</h1>
+			<p class="text-gray-400 text-sm sm:text-base">Sign in to continue</p>
 		</div>
 
 		<form on:submit|preventDefault={handleSubmit} class="space-y-4">
@@ -58,14 +60,14 @@
 			</div>
 
 			{#if $authError}
-				<div class="bg-red-900/50 border border-red-500 text-red-300 px-4 py-3 rounded-lg">
+				<div class="bg-red-900/50 border border-red-500 text-red-300 px-3 sm:px-4 py-3 rounded-lg text-sm">
 					{$authError}
 				</div>
 			{/if}
 
 			<button
 				type="submit"
-				class="btn btn-primary w-full"
+				class="btn btn-primary w-full py-3"
 				disabled={$authLoading}
 			>
 				{#if $authLoading}
