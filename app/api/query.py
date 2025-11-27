@@ -130,7 +130,7 @@ async def conversation(
 
         result = await execute_query(
             prompt=request.prompt,
-            profile_id=request.profile or "code-reader",
+            profile_id=request.profile or "claude-code",
             project_id=request.project,
             overrides=overrides,
             session_id=request.session_id
@@ -172,7 +172,7 @@ async def stream_conversation(
 
             async for event in stream_query(
                 prompt=request.prompt,
-                profile_id=request.profile or "code-reader",
+                profile_id=request.profile or "claude-code",
                 project_id=request.project,
                 overrides=overrides,
                 session_id=request.session_id
