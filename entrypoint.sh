@@ -5,7 +5,30 @@ set -e
 PUID=${PUID:-99}
 PGID=${PGID:-100}
 
+# Check if updates are enabled (default: true)
+AUTO_UPDATE=${AUTO_UPDATE:-true}
+
 echo "Starting with PUID=${PUID} and PGID=${PGID}"
+
+# Update Claude Code and GitHub CLI if enabled
+if [ "$AUTO_UPDATE" = "true" ]; then
+    echo "Checking for updates..."
+
+    # Update Claude Code
+    echo "Updating Claude Code..."
+    npm update -g @anthropic-ai/claude-code 2>/dev/null || echo "Claude Code update check failed (continuing anyway)"
+
+    # Update GitHub CLI
+    echo "Updating GitHub CLI..."
+    apt-get update -qq && apt-get install -y --only-upgrade gh 2>/dev/null || echo "GitHub CLI update check failed (continuing anyway)"
+
+    # Clean up apt cache
+    rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+
+    echo "Update check complete"
+    claude --version
+    gh --version
+fi
 
 # Get current UID/GID of appuser
 CURRENT_UID=$(id -u appuser)

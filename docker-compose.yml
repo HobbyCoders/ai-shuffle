@@ -24,6 +24,8 @@ services:
       - COMMAND_TIMEOUT=${COMMAND_TIMEOUT:-300}
       - PUID=${PUID:-99}
       - PGID=${PGID:-100}
+      # Auto-update Claude Code and GitHub CLI on container start (default: true)
+      - AUTO_UPDATE=${AUTO_UPDATE:-true}
 
     # Load environment from .env file (optional)
     env_file:
