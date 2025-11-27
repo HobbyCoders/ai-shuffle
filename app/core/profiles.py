@@ -62,11 +62,7 @@ BUILTIN_PROFILES: Dict[str, Dict[str, Any]] = {
         "is_builtin": True,
         "config": {
             "model": "sonnet",
-            "allowed_tools": [
-                "Read", "Write", "Edit", "Glob", "Grep", "Bash",
-                "WebFetch", "WebSearch", "NotebookEdit", "TodoWrite",
-                "Task", "BashOutput", "KillShell"
-            ],
+            "allowed_tools": [],
             "permission_mode": "bypassPermissions",
             "system_prompt": {
                 "type": "preset",
