@@ -28,6 +28,7 @@ interface ChatState {
 	selectedProfile: string;
 	isStreaming: boolean;
 	error: string | null;
+	abortController: AbortController | null;
 }
 
 function createChatStore() {
@@ -37,7 +38,8 @@ function createChatStore() {
 		profiles: [],
 		selectedProfile: 'claude-code',
 		isStreaming: false,
-		error: null
+		error: null,
+		abortController: null
 	});
 
 	let currentEventSource: EventSource | null = null;
@@ -90,6 +92,9 @@ function createChatStore() {
 		async sendMessage(prompt: string) {
 			const state = get({ subscribe });
 
+			// Create abort controller for this request
+			const abortController = new AbortController();
+
 			// Add user message
 			const userMsgId = `msg-${Date.now()}`;
 			const userMessage: ChatMessage = {
@@ -112,7 +117,8 @@ function createChatStore() {
 				...s,
 				messages: [...s.messages, userMessage, assistantMessage],
 				isStreaming: true,
-				error: null
+				error: null,
+				abortController
 			}));
 
 			// Build request
@@ -133,7 +139,8 @@ function createChatStore() {
 						'Content-Type': 'application/json'
 					},
 					credentials: 'include',
-					body: JSON.stringify(body)
+					body: JSON.stringify(body),
+					signal: abortController.signal
 				});
 
 				if (!response.ok) {
@@ -173,12 +180,62 @@ function createChatStore() {
 					}
 				}
 			} catch (e: any) {
+				// Don't show error for intentional abort
+				if (e.name === 'AbortError') {
+					update(s => {
+						const messages = [...s.messages];
+						const msgIndex = messages.findIndex(m => m.id === assistantMsgId);
+						if (msgIndex !== -1) {
+							messages[msgIndex] = {
+								...messages[msgIndex],
+								streaming: false,
+								content: messages[msgIndex].content + '\n\n[Stopped]'
+							};
+						}
+						return {
+							...s,
+							messages,
+							isStreaming: false,
+							abortController: null
+						};
+					});
+					return;
+				}
+
 				update(s => ({
 					...s,
 					isStreaming: false,
-					error: e.message || 'Failed to send message'
+					error: e.message || 'Failed to send message',
+					abortController: null
 				}));
 			}
+		},
+
+		async stopGeneration() {
+			const state = get({ subscribe });
+
+			// Abort the fetch request
+			if (state.abortController) {
+				state.abortController.abort();
+			}
+
+			// Also call the server-side interrupt if we have a session
+			if (state.sessionId) {
+				try {
+					await fetch(`/api/v1/session/${state.sessionId}/interrupt`, {
+						method: 'POST',
+						credentials: 'include'
+					});
+				} catch (e) {
+					console.error('Failed to interrupt session:', e);
+				}
+			}
+
+			update(s => ({
+				...s,
+				isStreaming: false,
+				abortController: null
+			}));
 		},
 
 		handleStreamEvent(event: Record<string, unknown>, msgId: string) {
@@ -221,7 +278,18 @@ function createChatStore() {
 						return {
 							...s,
 							messages: [...messages.slice(0, msgIndex), msg, ...messages.slice(msgIndex + 1)],
-							isStreaming: false
+							isStreaming: false,
+							abortController: null
+						};
+
+					case 'interrupted':
+						msg.streaming = false;
+						msg.content += '\n\n[Interrupted]';
+						return {
+							...s,
+							messages: [...messages.slice(0, msgIndex), msg, ...messages.slice(msgIndex + 1)],
+							isStreaming: false,
+							abortController: null
 						};
 
 					case 'error':
@@ -230,7 +298,8 @@ function createChatStore() {
 							...s,
 							messages: [...messages.slice(0, msgIndex), msg, ...messages.slice(msgIndex + 1)],
 							isStreaming: false,
-							error: event.message as string
+							error: event.message as string,
+							abortController: null
 						};
 				}
 

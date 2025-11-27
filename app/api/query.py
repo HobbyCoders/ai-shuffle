@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from app.core.models import (
     QueryRequest, QueryResponse, ConversationRequest, QueryMetadata
 )
-from app.core.query_engine import execute_query, stream_query
+from app.core.query_engine import execute_query, stream_query, interrupt_session, get_active_sessions
 from app.core.auth import auth_service
 from app.api.auth import require_auth
 
@@ -195,3 +195,33 @@ async def stream_conversation(
             "X-Accel-Buffering": "no"
         }
     )
+
+
+@router.post("/session/{session_id}/interrupt")
+async def interrupt(
+    session_id: str,
+    token: str = Depends(require_auth)
+):
+    """
+    Interrupt an active streaming session.
+    Returns success if the session was interrupted, error if not found or already completed.
+    """
+    success = await interrupt_session(session_id)
+
+    if success:
+        return {"status": "interrupted", "session_id": session_id}
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No active session found with ID: {session_id}"
+        )
+
+
+@router.get("/sessions/active")
+async def list_active_sessions(
+    token: str = Depends(require_auth)
+):
+    """
+    List all currently active streaming sessions.
+    """
+    return {"active_sessions": get_active_sessions()}

@@ -192,17 +192,23 @@
 					rows="1"
 					disabled={$isStreaming || !$claudeAuthenticated}
 				></textarea>
-				<button
-					type="submit"
-					class="btn btn-primary"
-					disabled={$isStreaming || !prompt.trim() || !$claudeAuthenticated}
-				>
-					{#if $isStreaming}
-						<span class="inline-block animate-spin">&#9696;</span>
-					{:else}
+				{#if $isStreaming}
+					<button
+						type="button"
+						class="btn btn-danger"
+						on:click={() => chat.stopGeneration()}
+					>
+						Stop
+					</button>
+				{:else}
+					<button
+						type="submit"
+						class="btn btn-primary"
+						disabled={!prompt.trim() || !$claudeAuthenticated}
+					>
 						Send
-					{/if}
-				</button>
+					</button>
+				{/if}
 			</form>
 
 			{#if !$claudeAuthenticated}

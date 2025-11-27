@@ -61,6 +61,10 @@ code {
 	@apply bg-[var(--color-surface)] text-[var(--color-text)] hover:bg-[var(--color-surface-hover)] border border-[var(--color-border)];
 }
 
+.btn-danger {
+	@apply bg-red-600 text-white hover:bg-red-700;
+}
+
 /* Input styles */
 .input {
 	@apply w-full px-4 py-2 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-primary)] transition-colors;

@@ -4,9 +4,10 @@ Query engine for executing Claude queries with profiles
 
 import logging
 import uuid
+import asyncio
 from typing import Optional, Dict, Any, AsyncGenerator
 
-from claude_agent_sdk import query, ClaudeAgentOptions
+from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient
 from claude_agent_sdk import (
     AssistantMessage, TextBlock, ToolUseBlock, ToolResultBlock,
     ResultMessage, SystemMessage
@@ -17,6 +18,9 @@ from app.core.config import settings
 from app.core.profiles import get_profile_or_builtin
 
 logger = logging.getLogger(__name__)
+
+# Track active streaming clients for interrupt support
+_active_clients: Dict[str, ClaudeSDKClient] = {}
 
 
 # Security restrictions that apply to all requests
@@ -240,7 +244,7 @@ async def stream_query(
     overrides: Optional[Dict[str, Any]] = None,
     session_id: Optional[str] = None
 ) -> AsyncGenerator[Dict[str, Any], None]:
-    """Execute a streaming query, yielding events"""
+    """Execute a streaming query using ClaudeSDKClient for interrupt support"""
 
     # Get profile
     profile = get_profile_or_builtin(profile_id)
@@ -290,13 +294,21 @@ async def stream_query(
     # Yield init event
     yield {"type": "init", "session_id": session_id}
 
-    # Execute query and stream response
+    # Execute query using ClaudeSDKClient for interrupt support
     response_text = []
     metadata = {}
     sdk_session_id = None
+    client = None
+    interrupted = False
 
     try:
-        async for message in query(prompt=prompt, options=options):
+        client = ClaudeSDKClient(options=options)
+        _active_clients[session_id] = client
+
+        await client.connect()
+        await client.query(prompt)
+
+        async for message in client.receive_response():
             if isinstance(message, SystemMessage):
                 # session_id comes in warmup message data after first query
                 if message.subtype == "init" and "session_id" in message.data:
@@ -332,10 +344,24 @@ async def stream_query(
                 metadata["total_cost_usd"] = message.total_cost_usd
                 metadata["is_error"] = message.is_error
 
+    except asyncio.CancelledError:
+        interrupted = True
+        logger.info(f"Query interrupted for session {session_id}")
+        yield {"type": "interrupted", "message": "Query was interrupted"}
+
     except Exception as e:
         logger.error(f"Stream query error: {e}")
         yield {"type": "error", "message": str(e)}
-        return
+
+    finally:
+        # Clean up client
+        if session_id in _active_clients:
+            del _active_clients[session_id]
+        if client:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
 
     # Update session
     if sdk_session_id:
@@ -348,27 +374,49 @@ async def stream_query(
 
     # Store assistant response
     full_response = "\n".join(response_text)
-    database.add_session_message(
-        session_id=session_id,
-        role="assistant",
-        content=full_response,
-        metadata=metadata
-    )
+    if full_response or interrupted:
+        database.add_session_message(
+            session_id=session_id,
+            role="assistant",
+            content=full_response + ("\n[Interrupted]" if interrupted else ""),
+            metadata=metadata
+        )
 
     # Log usage
-    database.log_usage(
-        session_id=session_id,
-        profile_id=profile_id,
-        model=metadata.get("model"),
-        tokens_in=0,
-        tokens_out=0,
-        cost_usd=metadata.get("total_cost_usd", 0),
-        duration_ms=metadata.get("duration_ms", 0)
-    )
+    if metadata:
+        database.log_usage(
+            session_id=session_id,
+            profile_id=profile_id,
+            model=metadata.get("model"),
+            tokens_in=0,
+            tokens_out=0,
+            cost_usd=metadata.get("total_cost_usd", 0),
+            duration_ms=metadata.get("duration_ms", 0)
+        )
 
-    # Yield done event
-    yield {
-        "type": "done",
-        "session_id": session_id,
-        "metadata": metadata
-    }
+    # Yield done event (unless already yielded error/interrupted)
+    if not interrupted:
+        yield {
+            "type": "done",
+            "session_id": session_id,
+            "metadata": metadata
+        }
+
+
+async def interrupt_session(session_id: str) -> bool:
+    """Interrupt an active streaming session"""
+    if session_id in _active_clients:
+        client = _active_clients[session_id]
+        try:
+            await client.interrupt()
+            logger.info(f"Interrupted session {session_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to interrupt session {session_id}: {e}")
+            return False
+    return False
+
+
+def get_active_sessions() -> list:
+    """Get list of active streaming session IDs"""
+    return list(_active_clients.keys())
