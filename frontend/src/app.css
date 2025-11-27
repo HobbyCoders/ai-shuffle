@@ -1,0 +1,72 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+	--color-bg: #0f0f0f;
+	--color-surface: #1a1a1a;
+	--color-surface-hover: #252525;
+	--color-border: #333;
+	--color-text: #e5e5e5;
+	--color-text-muted: #888;
+	--color-primary: #e5604d;
+	--color-primary-hover: #d14430;
+}
+
+body {
+	@apply bg-[var(--color-bg)] text-[var(--color-text)] min-h-screen;
+	font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+	width: 8px;
+	height: 8px;
+}
+
+::-webkit-scrollbar-track {
+	background: var(--color-surface);
+}
+
+::-webkit-scrollbar-thumb {
+	background: var(--color-border);
+	border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+	background: #444;
+}
+
+/* Code blocks */
+pre {
+	@apply bg-[var(--color-surface)] rounded-lg p-4 overflow-x-auto;
+	font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace;
+	font-size: 0.875rem;
+}
+
+code {
+	font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace;
+}
+
+/* Button base styles */
+.btn {
+	@apply px-4 py-2 rounded-lg font-medium transition-colors duration-200;
+}
+
+.btn-primary {
+	@apply bg-[var(--color-primary)] text-white hover:bg-[var(--color-primary-hover)];
+}
+
+.btn-secondary {
+	@apply bg-[var(--color-surface)] text-[var(--color-text)] hover:bg-[var(--color-surface-hover)] border border-[var(--color-border)];
+}
+
+/* Input styles */
+.input {
+	@apply w-full px-4 py-2 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:border-[var(--color-primary)] transition-colors;
+}
+
+/* Card styles */
+.card {
+	@apply bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg;
+}
