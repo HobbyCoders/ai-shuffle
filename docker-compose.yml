@@ -1,25 +1,25 @@
 version: '3.8'
 
 services:
-  claude-sdk:
+  ai-hub:
     # Use pre-built image from GitHub Container Registry
     # Replace <your-username> with your GitHub username
     # Or comment out 'image' and uncomment 'build' to build locally
-    image: ghcr.io/<your-username>/proxy-python-sdk:latest
+    # image: ghcr.io/<your-username>/ai-hub:latest
 
-    # Uncomment to build locally instead of using pre-built image:
-    # build:
-    #   context: .
-    #   dockerfile: Dockerfile
+    # Build locally (recommended for development)
+    build:
+      context: .
+      dockerfile: Dockerfile
 
-    container_name: claude-sdk-agent
+    container_name: ai-hub
     restart: unless-stopped
 
     # Environment variables (override with .env file or Unraid template)
     environment:
       - HOST=0.0.0.0
       - PORT=8000
-      - SERVICE_NAME=${SERVICE_NAME:-claude-code-sdk}
+      - SERVICE_NAME=${SERVICE_NAME:-ai-hub}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - COMMAND_TIMEOUT=${COMMAND_TIMEOUT:-300}
       - PUID=${PUID:-99}
@@ -29,11 +29,13 @@ services:
     env_file:
       - .env
 
-    # Volume mounts for persistent auth and data
+    # Volume mounts for persistent data
     volumes:
-      # Persist Claude Code authentication tokens and data
+      # Persist Claude Code authentication tokens
       - claude-auth:/home/appuser/.claude
-      # Optional: Mount a workspace directory
+      # Persist database and session data
+      - ai-hub-data:/data
+      # Mount workspace directory for projects
       - ${WORKSPACE_DIR:-./workspace}:/workspace
 
     # Port mapping
@@ -76,6 +78,9 @@ services:
 volumes:
   # Named volume for Claude authentication persistence
   claude-auth:
+    driver: local
+  # Named volume for AI Hub data (database, sessions)
+  ai-hub-data:
     driver: local
 
 networks:
