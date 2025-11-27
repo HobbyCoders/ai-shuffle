@@ -32,9 +32,24 @@ fi
 mkdir -p /home/appuser/.config/claude /home/appuser/.claude
 chown -R appuser:appuser /home/appuser/.config /home/appuser/.claude
 
+# Copy Claude credentials from root if they exist and appuser doesn't have them
+if [ -f /root/.claude/.credentials.json ] && [ ! -f /home/appuser/.claude/.credentials.json ]; then
+    echo "Copying Claude credentials from root to appuser..."
+    cp -r /root/.claude/* /home/appuser/.claude/ 2>/dev/null || true
+    chown -R appuser:appuser /home/appuser/.claude
+fi
+
+# Also check .config/claude location
+if [ -f /root/.config/claude/credentials.json ] && [ ! -f /home/appuser/.config/claude/credentials.json ]; then
+    echo "Copying Claude config from root to appuser..."
+    mkdir -p /home/appuser/.config/claude
+    cp -r /root/.config/claude/* /home/appuser/.config/claude/ 2>/dev/null || true
+    chown -R appuser:appuser /home/appuser/.config
+fi
+
 # Ensure data and workspace directories are writable
 chown -R appuser:appuser /data /workspace
 
-# Switch to appuser and run the application with proper HOME
+# Switch to appuser and run the application
 echo "Starting AI Hub as appuser (${PUID}:${PGID})"
-exec gosu appuser env HOME=/home/appuser python -m app.main
+exec setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser python -m app.main
