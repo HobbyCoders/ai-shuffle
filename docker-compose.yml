@@ -33,6 +33,8 @@ services:
     volumes:
       # Persist Claude Code authentication tokens
       - claude-auth:/home/appuser/.claude
+      # Persist GitHub CLI authentication
+      - gh-auth:/home/appuser/.config/gh
       # Persist database and session data
       - ai-hub-data:/data
       # Mount workspace directory for projects
@@ -78,6 +80,9 @@ services:
 volumes:
   # Named volume for Claude authentication persistence
   claude-auth:
+    driver: local
+  # Named volume for GitHub CLI authentication persistence
+  gh-auth:
     driver: local
   # Named volume for AI Hub data (database, sessions)
   ai-hub-data:

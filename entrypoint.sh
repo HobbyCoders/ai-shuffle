@@ -49,6 +49,21 @@ if [ -f /root/.config/claude/credentials.json ] && [ ! -f /home/appuser/.config/
     chown -R appuser:appuser /home/appuser/.config
 fi
 
+# Copy GitHub CLI auth from root if it exists and appuser doesn't have it
+# gh stores auth in ~/.config/gh/hosts.yml
+if [ -f /root/.config/gh/hosts.yml ] && [ ! -f /home/appuser/.config/gh/hosts.yml ]; then
+    echo "Copying GitHub CLI auth from root to appuser..."
+    mkdir -p /home/appuser/.config/gh
+    cp -r /root/.config/gh/* /home/appuser/.config/gh/ 2>/dev/null || true
+    chown -R appuser:appuser /home/appuser/.config/gh
+fi
+
+# Configure git to use gh as credential helper for appuser
+if [ -f /home/appuser/.config/gh/hosts.yml ]; then
+    # Set git credential helper to use gh
+    git config --global credential.helper '!gh auth git-credential'
+fi
+
 # Ensure data and workspace directories are writable
 chown -R appuser:appuser /data /workspace
 
