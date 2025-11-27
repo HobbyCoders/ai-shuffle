@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - master
+      - ai-hub
       - 'claude/**'  # Allow builds from Claude feature branches
     tags:
       - 'v*.*.*'
