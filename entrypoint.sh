@@ -51,8 +51,8 @@ else
     echo "UID/GID already correct, skipping user modification"
 fi
 
-# Ensure config directory exists with correct permissions
-mkdir -p /home/appuser/.config/claude /home/appuser/.claude
+# Ensure config directories exist with correct permissions
+mkdir -p /home/appuser/.config/claude /home/appuser/.claude /home/appuser/.config/gh
 chown -R appuser:appuser /home/appuser/.config /home/appuser/.claude
 
 # Copy Claude credentials from root if they exist and appuser doesn't have them
@@ -74,17 +74,20 @@ fi
 
 # Copy GitHub CLI auth from root if it exists and appuser doesn't have it
 # gh stores auth in ~/.config/gh/hosts.yml
-if [ -f /root/.config/gh/hosts.yml ] && [ ! -f /home/appuser/.config/gh/hosts.yml ]; then
+if [ -f /root/.config/gh/hosts.yml ]; then
     echo "Copying GitHub CLI auth from root to appuser..."
-    mkdir -p /home/appuser/.config/gh
+    # Always copy if root has auth (volume may be empty or stale)
+    cp /root/.config/gh/hosts.yml /home/appuser/.config/gh/ 2>/dev/null || true
     cp -r /root/.config/gh/* /home/appuser/.config/gh/ 2>/dev/null || true
     chown -R appuser:appuser /home/appuser/.config/gh
+    echo "GitHub CLI auth copied successfully"
 fi
 
-# Configure git to use gh as credential helper for appuser
+# Configure git to use gh as credential helper
 if [ -f /home/appuser/.config/gh/hosts.yml ]; then
-    # Set git credential helper to use gh
+    # Set git credential helper to use gh for appuser
     git config --global credential.helper '!gh auth git-credential'
+    echo "Git configured to use GitHub CLI for authentication"
 fi
 
 # Ensure data and workspace directories are writable

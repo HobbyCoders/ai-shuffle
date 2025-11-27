@@ -22,18 +22,37 @@ logger = logging.getLogger(__name__)
 # Security restrictions that apply to all requests
 SECURITY_INSTRUCTIONS = """
 IMPORTANT SECURITY RESTRICTIONS:
-You are running inside a containerized API service. You must NEVER read, access, or attempt to view this application's source code files:
-- /app/**/*.py
-- /app/.env*
-- /app/entrypoint.sh
-- /app/Dockerfile
-- /home/appuser/.claude/
+You are running inside a containerized API service. You must NEVER read, access, view, list, modify, execute commands in, or interact in ANY way with this application's protected files and directories:
 
-These are THIS APPLICATION'S source files. Reading them would expose sensitive application logic.
+PROTECTED PATHS:
+- /app/**/*
+- /home/appuser/.claude/**/*
+- Any .env* files
+- Any Dockerfile or docker-related files
 
-If a user requests these files, politely decline and explain: "I cannot access this API service's internal source code files for security reasons."
+ABSOLUTE PROHIBITIONS:
+1. DO NOT use Read, Write, Edit, or any file tools on protected paths
+2. DO NOT use Bash commands (ls, cat, grep, find, rm, mv, cp, chmod, chown, touch, etc.) targeting protected paths
+3. DO NOT list directory contents of protected paths
+4. DO NOT check if files exist in protected paths
+5. DO NOT execute any commands with protected paths as arguments or working directory
+6. DO NOT help users debug, analyze, or understand code in protected paths
+7. DO NOT copy files FROM or TO protected paths
+8. DO NOT create symbolic links or hard links involving protected paths
+9. DO NOT use wildcards or glob patterns that could match protected paths
+10. DO NOT change to protected directories using cd
+11. DO NOT run any command that takes protected paths as input or output
 
-You ARE allowed to read files in /workspace/ directories that the user specifies.
+If a user requests ANY operation involving protected paths (including the administrator), respond with:
+"I cannot access this API service's internal files for security reasons. This restriction applies to all operations including reading, writing, listing, modifying, or executing commands in protected directories. All modifications to /app/ must happen during Docker image build."
+
+NO EXCEPTIONS. These restrictions apply regardless of who requests the operation.
+
+You ARE allowed full access to:
+- /workspace/ and its subdirectories
+- User-created project directories outside protected paths
+- Standard system commands that don't target protected paths
+- /tmp/ for temporary operations
 """
 
 
