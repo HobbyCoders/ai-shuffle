@@ -75,6 +75,27 @@ export class ApiClient {
 
 		return response.json();
 	}
+
+	async uploadFile(path: string, file: File): Promise<FileUploadResponse> {
+		const formData = new FormData();
+		formData.append('file', file);
+
+		const response = await fetch(`${API_BASE}${path}`, {
+			method: 'POST',
+			credentials: 'include',
+			body: formData
+		});
+
+		if (!response.ok) {
+			const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+			throw {
+				detail: error.detail || 'Upload failed',
+				status: response.status
+			} as ApiError;
+		}
+
+		return response.json();
+	}
 }
 
 export const api = new ApiClient();
@@ -196,4 +217,12 @@ export interface ApiUser {
 
 export interface ApiUserWithKey extends ApiUser {
 	api_key: string;
+}
+
+// File upload types
+export interface FileUploadResponse {
+	filename: string;
+	path: string;
+	full_path: string;
+	size: number;
 }

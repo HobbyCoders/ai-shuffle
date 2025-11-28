@@ -5,7 +5,7 @@ Project management API routes
 from typing import List
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File
 
 from app.core.models import Project, ProjectCreate, ProjectUpdate
 from app.core.config import settings
@@ -174,3 +174,63 @@ async def list_project_files(
     files.sort(key=lambda x: (x["type"] != "directory", x["name"].lower()))
 
     return {"files": files, "path": path}
+
+
+@router.post("/{project_id}/upload")
+async def upload_file(
+    project_id: str,
+    file: UploadFile = File(...),
+    token: str = Depends(require_auth)
+):
+    """Upload a file to the project's uploads directory"""
+    project = database.get_project(project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {project_id}"
+        )
+
+    # Create uploads directory within project
+    uploads_path = validate_project_path(f"{project['path']}/uploads")
+    uploads_path.mkdir(parents=True, exist_ok=True)
+
+    # Sanitize filename
+    safe_filename = Path(file.filename).name
+    if not safe_filename or safe_filename.startswith('.'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid filename"
+        )
+
+    # Full file path
+    file_path = uploads_path / safe_filename
+
+    # Handle duplicate filenames by adding counter
+    if file_path.exists():
+        stem = file_path.stem
+        suffix = file_path.suffix
+        counter = 1
+        while file_path.exists():
+            file_path = uploads_path / f"{stem}_{counter}{suffix}"
+            counter += 1
+
+    # Save the file
+    try:
+        content = await file.read()
+        file_path.write_bytes(content)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save file: {str(e)}"
+        )
+
+    # Return relative path for reference
+    base_path = settings.workspace_dir / project["path"]
+    relative_path = file_path.relative_to(base_path)
+
+    return {
+        "filename": file_path.name,
+        "path": str(relative_path),
+        "full_path": str(file_path),
+        "size": len(content)
+    }

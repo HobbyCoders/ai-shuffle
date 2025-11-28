@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { auth, username, claudeAuthenticated } from '$lib/stores/auth';
 	import { chat, messages, isStreaming, chatError, profiles, selectedProfile, sessions, currentSessionId, projects, selectedProject } from '$lib/stores/chat';
+	import { api, type FileUploadResponse } from '$lib/api/client';
 	import { marked } from 'marked';
 
 	let prompt = '';
@@ -15,6 +16,9 @@
 	let showNewProfileForm = false;
 	let showNewProjectForm = false;
 	let editingProfile: any = null;
+	let fileInput: HTMLInputElement;
+	let isUploading = false;
+	let uploadedFiles: FileUploadResponse[] = [];
 
 	// Profile form state
 	let profileForm = {
@@ -83,6 +87,7 @@
 		if (!prompt.trim() || $isStreaming) return;
 		const userPrompt = prompt;
 		prompt = '';
+		uploadedFiles = []; // Clear uploaded files after sending
 		await chat.sendMessage(userPrompt);
 	}
 
@@ -282,6 +287,49 @@
 		if (confirm('Are you sure you want to delete this project?')) {
 			await chat.deleteProject(projectId);
 		}
+	}
+
+	function triggerFileUpload() {
+		if (!$selectedProject) {
+			alert('Please select a project first to upload files.');
+			return;
+		}
+		fileInput?.click();
+	}
+
+	async function handleFileSelect(event: Event) {
+		const input = event.target as HTMLInputElement;
+		const files = input.files;
+		if (!files || files.length === 0 || !$selectedProject) return;
+
+		isUploading = true;
+		try {
+			for (const file of Array.from(files)) {
+				const result = await api.uploadFile(`/projects/${$selectedProject}/upload`, file);
+				uploadedFiles = [...uploadedFiles, result];
+				// Insert file reference into the prompt
+				const fileRef = `[File: ${result.path}]`;
+				if (prompt.trim()) {
+					prompt = prompt + '\n' + fileRef;
+				} else {
+					prompt = fileRef;
+				}
+			}
+		} catch (error: any) {
+			console.error('Upload failed:', error);
+			alert(`Upload failed: ${error.detail || 'Unknown error'}`);
+		} finally {
+			isUploading = false;
+			// Reset input so same file can be selected again
+			input.value = '';
+		}
+	}
+
+	function removeUploadedFile(index: number) {
+		const file = uploadedFiles[index];
+		const fileRef = `[File: ${file.path}]`;
+		prompt = prompt.replace(fileRef, '').replace(/\n\n+/g, '\n').trim();
+		uploadedFiles = uploadedFiles.filter((_, i) => i !== index);
 	}
 
 	function handleNewChat() {
@@ -583,7 +631,60 @@
 			<!-- Input area -->
 			<div class="border-t border-[var(--color-border)] bg-[var(--color-bg)]">
 				<div class="max-w-4xl mx-auto px-4 py-3">
+					<!-- Uploaded files display -->
+					{#if uploadedFiles.length > 0}
+						<div class="mb-2 flex flex-wrap gap-2">
+							{#each uploadedFiles as file, index}
+								<div class="flex items-center gap-1 bg-[var(--color-surface)] text-sm px-2 py-1 rounded-lg">
+									<svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+									</svg>
+									<span class="text-gray-300 truncate max-w-[150px]" title={file.path}>{file.filename}</span>
+									<button
+										type="button"
+										on:click={() => removeUploadedFile(index)}
+										class="text-gray-500 hover:text-red-400 ml-1"
+										title="Remove file"
+									>
+										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+										</svg>
+									</button>
+								</div>
+							{/each}
+						</div>
+					{/if}
+
+					<!-- Hidden file input -->
+					<input
+						type="file"
+						bind:this={fileInput}
+						on:change={handleFileSelect}
+						class="hidden"
+						multiple
+					/>
+
 					<form on:submit|preventDefault={handleSubmit} class="flex gap-2">
+						<!-- File upload button -->
+						<button
+							type="button"
+							on:click={triggerFileUpload}
+							class="btn btn-secondary shrink-0 px-3"
+							disabled={$isStreaming || !$claudeAuthenticated || isUploading}
+							title={$selectedProject ? 'Upload file' : 'Select a project to upload files'}
+						>
+							{#if isUploading}
+								<svg class="w-5 h-5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+									<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+								</svg>
+							{:else}
+								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+								</svg>
+							{/if}
+						</button>
+
 						<textarea
 							bind:value={prompt}
 							on:keydown={handleKeyDown}
@@ -614,6 +715,12 @@
 					{#if !$claudeAuthenticated}
 						<p class="mt-2 text-xs sm:text-sm text-yellow-500">
 							Claude CLI not authenticated. Run <code class="bg-[var(--color-surface)] px-1 rounded text-xs">docker exec -it ai-hub claude login</code>
+						</p>
+					{/if}
+
+					{#if !$selectedProject}
+						<p class="mt-2 text-xs text-gray-500">
+							Select a project to enable file uploads
 						</p>
 					{/if}
 				</div>
