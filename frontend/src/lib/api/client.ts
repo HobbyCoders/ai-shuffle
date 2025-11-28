@@ -101,11 +101,20 @@ export class ApiClient {
 export const api = new ApiClient();
 
 // Auth types
+export interface ApiUserInfo {
+	id: string;
+	name: string;
+	project_id: string | null;
+	profile_id: string | null;
+}
+
 export interface AuthStatus {
 	authenticated: boolean;
+	is_admin: boolean;
 	setup_required: boolean;
 	claude_authenticated: boolean;
 	username: string | null;
+	api_user: ApiUserInfo | null;
 }
 
 // Profile types

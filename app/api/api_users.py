@@ -1,5 +1,5 @@
 """
-API User management routes
+API User management routes - Admin only
 """
 
 import secrets
@@ -10,7 +10,7 @@ from typing import List
 from fastapi import APIRouter, HTTPException, Depends, status
 
 from app.core.models import ApiUser, ApiUserCreate, ApiUserUpdate, ApiUserWithKey
-from app.api.auth import require_auth
+from app.api.auth import require_admin
 from app.db import database as db
 
 router = APIRouter(prefix="/api/v1/api-users", tags=["API Users"])
@@ -27,15 +27,15 @@ def hash_api_key(api_key: str) -> str:
 
 
 @router.get("", response_model=List[ApiUser])
-async def list_api_users(token: str = Depends(require_auth)):
-    """List all API users"""
+async def list_api_users(token: str = Depends(require_admin)):
+    """List all API users - Admin only"""
     users = db.get_all_api_users()
     return users
 
 
 @router.get("/{user_id}", response_model=ApiUser)
-async def get_api_user(user_id: str, token: str = Depends(require_auth)):
-    """Get an API user by ID"""
+async def get_api_user(user_id: str, token: str = Depends(require_admin)):
+    """Get an API user by ID - Admin only"""
     user = db.get_api_user(user_id)
     if not user:
         raise HTTPException(
@@ -46,7 +46,7 @@ async def get_api_user(user_id: str, token: str = Depends(require_auth)):
 
 
 @router.post("", response_model=ApiUserWithKey, status_code=status.HTTP_201_CREATED)
-async def create_api_user(request: ApiUserCreate, token: str = Depends(require_auth)):
+async def create_api_user(request: ApiUserCreate, token: str = Depends(require_admin)):
     """Create a new API user and return the API key (shown only once)"""
     # Validate project exists if provided
     if request.project_id:
@@ -89,9 +89,9 @@ async def create_api_user(request: ApiUserCreate, token: str = Depends(require_a
 async def update_api_user(
     user_id: str,
     request: ApiUserUpdate,
-    token: str = Depends(require_auth)
+    token: str = Depends(require_admin)
 ):
-    """Update an API user"""
+    """Update an API user - Admin only"""
     existing = db.get_api_user(user_id)
     if not existing:
         raise HTTPException(
@@ -130,8 +130,8 @@ async def update_api_user(
 
 
 @router.post("/{user_id}/regenerate-key", response_model=ApiUserWithKey)
-async def regenerate_api_key(user_id: str, token: str = Depends(require_auth)):
-    """Regenerate the API key for an API user"""
+async def regenerate_api_key(user_id: str, token: str = Depends(require_admin)):
+    """Regenerate the API key for an API user - Admin only"""
     existing = db.get_api_user(user_id)
     if not existing:
         raise HTTPException(
@@ -149,8 +149,8 @@ async def regenerate_api_key(user_id: str, token: str = Depends(require_auth)):
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_api_user(user_id: str, token: str = Depends(require_auth)):
-    """Delete an API user"""
+async def delete_api_user(user_id: str, token: str = Depends(require_admin)):
+    """Delete an API user - Admin only"""
     if not db.delete_api_user(user_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

@@ -23,12 +23,27 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class ApiKeyLoginRequest(BaseModel):
+    """API key login request for web UI"""
+    api_key: str
+
+
+class ApiUserInfo(BaseModel):
+    """API user info in auth responses"""
+    id: str
+    name: str
+    project_id: Optional[str] = None
+    profile_id: Optional[str] = None
+
+
 class AuthStatus(BaseModel):
     """Authentication status response"""
     authenticated: bool
+    is_admin: bool = True
     setup_required: bool
     claude_authenticated: bool
     username: Optional[str] = None
+    api_user: Optional[ApiUserInfo] = None
 
 
 # ============================================================================

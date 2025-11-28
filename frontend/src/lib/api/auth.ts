@@ -2,7 +2,7 @@
  * Authentication API functions
  */
 
-import { api, type AuthStatus } from './client';
+import { api, type AuthStatus, type ApiUserInfo } from './client';
 
 export async function getAuthStatus(): Promise<AuthStatus> {
 	return api.get<AuthStatus>('/auth/status');
@@ -14,6 +14,15 @@ export async function setup(username: string, password: string): Promise<void> {
 
 export async function login(username: string, password: string): Promise<void> {
 	await api.post('/auth/login', { username, password });
+}
+
+export async function loginWithApiKey(apiKey: string): Promise<{
+	status: string;
+	message: string;
+	is_admin: boolean;
+	api_user: ApiUserInfo;
+}> {
+	return api.post('/auth/login/api-key', { api_key: apiKey });
 }
 
 export async function logout(): Promise<void> {

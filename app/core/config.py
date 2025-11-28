@@ -34,6 +34,17 @@ class Settings(BaseSettings):
     # Claude
     command_timeout: int = 300
 
+    # Security - Rate Limiting
+    max_login_attempts: int = 5  # Max failed attempts before lockout
+    login_attempt_window_minutes: int = 15  # Time window for counting attempts
+    lockout_duration_minutes: int = 30  # Duration of lockout after max attempts
+
+    # Security - API Key Session
+    api_key_session_expire_hours: int = 24  # API key web session duration
+
+    # Security - Trusted Proxies (for getting real IP behind reverse proxy)
+    trusted_proxy_headers: str = "X-Forwarded-For,X-Real-IP"  # Comma-separated
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
