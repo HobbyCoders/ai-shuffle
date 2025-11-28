@@ -301,9 +301,8 @@ function createChatStore() {
 			}
 
 			case 'state': {
-				// State event from WebSocket connection
-				// Note: loadSession() handles initial state merge with streaming messages
-				// This handler is for state updates AFTER initial load (e.g., reconnects)
+				// State event from WebSocket connection (received on connect/reconnect)
+				// This tells us if the session is currently streaming on another device
 				const isStreaming = event.data.is_streaming as boolean;
 				const streamingMessages = event.data.streaming_messages as Array<{
 					type: string;
@@ -315,20 +314,18 @@ function createChatStore() {
 					streaming?: boolean;
 				}> | undefined;
 
-				// Only update streaming state, don't replace messages
-				// The loadSession() function handles merging messages properly
 				update((s) => {
-					// If we're already streaming locally or have messages, don't overwrite
-					if (s.isStreaming || s.messages.length === 0) {
-						return { ...s, isRemoteStreaming: isStreaming };
+					// If we're streaming locally, don't overwrite our state
+					if (s.isStreaming) {
+						return s;
 					}
 
-					// If session is streaming and we have streaming messages, check if we need to append
+					// If session is streaming remotely and we have buffered messages, merge them
 					if (isStreaming && streamingMessages && streamingMessages.length > 0) {
-						// Check if we already have these streaming messages
+						// Check if we already have streaming messages (avoid duplicates)
 						const hasStreamingMsgs = s.messages.some(m => m.streaming);
 						if (!hasStreamingMsgs) {
-							console.log('[Chat] State event: appending streaming messages:', streamingMessages.length);
+							console.log('[Chat] State event: session is streaming, appending buffered messages:', streamingMessages.length);
 							const newMsgs = streamingMessages.map((sm, i) => ({
 								id: `stream-${Date.now()}-${i}`,
 								role: sm.role as 'user' | 'assistant',
@@ -424,7 +421,7 @@ function createChatStore() {
 		async loadSession(sessionId: string): Promise<boolean> {
 			try {
 				const session = await api.get<Session & { messages: SessionMessage[] }>(`/sessions/${sessionId}`);
-				const dbMessages: ChatMessage[] = session.messages.map((m, i) => ({
+				const messages: ChatMessage[] = session.messages.map((m, i) => ({
 					id: `msg-${i}`,
 					role: m.role as 'user' | 'assistant',
 					content: m.content,
@@ -432,80 +429,21 @@ function createChatStore() {
 					metadata: m.metadata,
 					streaming: false
 				}));
-
-				// Connect to sync first and wait for state to get streaming messages
-				// This ensures we merge streaming content with database messages
-				let streamingMessages: ChatMessage[] = [];
-				let isRemoteStreaming = false;
-
-				try {
-					// Set up a one-time listener for the state event
-					const statePromise = new Promise<{ streaming: boolean; messages: ChatMessage[] }>((resolve) => {
-						const timeout = setTimeout(() => {
-							resolve({ streaming: false, messages: [] });
-						}, 2000); // 2 second timeout
-
-						const unsubscribe = sync.onEvent((event) => {
-							if (event.event_type === 'state' && event.session_id === sessionId) {
-								clearTimeout(timeout);
-								unsubscribe();
-
-								const isStreaming = event.data.is_streaming as boolean;
-								const rawStreamingMsgs = event.data.streaming_messages as Array<{
-									type: string;
-									role: string;
-									content: string;
-									tool_name?: string;
-									tool_id?: string;
-									tool_input?: Record<string, unknown>;
-									streaming?: boolean;
-								}> | undefined;
-
-								const chatMsgs: ChatMessage[] = [];
-								if (isStreaming && rawStreamingMsgs && rawStreamingMsgs.length > 0) {
-									console.log('[Chat] Session is streaming, got buffered messages:', rawStreamingMsgs.length);
-									rawStreamingMsgs.forEach((sm, i) => {
-										chatMsgs.push({
-											id: `stream-${Date.now()}-${i}`,
-											role: sm.role as 'user' | 'assistant',
-											content: sm.content || '',
-											type: sm.type as MessageType,
-											toolName: sm.tool_name,
-											toolId: sm.tool_id,
-											toolInput: sm.tool_input,
-											streaming: sm.streaming ?? true
-										});
-									});
-								}
-
-								resolve({ streaming: isStreaming, messages: chatMsgs });
-							}
-						});
-					});
-
-					// Connect to sync
-					await connectSync(sessionId);
-
-					// Wait for state event
-					const state = await statePromise;
-					isRemoteStreaming = state.streaming;
-					streamingMessages = state.messages;
-				} catch (syncError) {
-					console.warn('[Chat] Failed to connect sync, session loaded without real-time updates:', syncError);
-				}
-
-				// Merge database messages with streaming messages
-				const finalMessages = [...dbMessages, ...streamingMessages];
-
 				// Don't change selectedProfile when resuming - keep user's current selection
 				update(s => ({
 					...s,
 					sessionId: session.id,
-					messages: finalMessages,
-					isRemoteStreaming,
+					messages,
 					error: null // Clear any previous errors on successful load
 				}));
 
+				// Connect to sync for real-time updates from other devices
+				// This is non-critical - session should load even if sync fails
+				try {
+					await connectSync(sessionId);
+				} catch (syncError) {
+					console.warn('[Chat] Failed to connect sync, session loaded without real-time updates:', syncError);
+				}
 				return true;
 			} catch (e: any) {
 				update(s => ({ ...s, error: e.detail || 'Failed to load session' }));

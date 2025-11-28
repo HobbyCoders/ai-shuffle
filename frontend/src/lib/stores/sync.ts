@@ -78,13 +78,20 @@ function createSyncStore() {
 		const deviceId = getDeviceIdSync();
 		const state = get({ subscribe });
 
-		// Already connected to this session
+		// Already connected to this session - just request fresh state
 		if (state.connected && state.sessionId === sessionId && websocket?.readyState === WebSocket.OPEN) {
+			console.log(`[Sync] Already connected to session ${sessionId}, requesting state update`);
+			requestState();
 			return true;
 		}
 
-		// Disconnect from previous session
-		disconnect();
+		// Disconnect from previous session (only if different session)
+		if (state.sessionId && state.sessionId !== sessionId) {
+			disconnect();
+		} else if (websocket && websocket.readyState !== WebSocket.OPEN) {
+			// Clean up dead connection
+			websocket = null;
+		}
 
 		// Get auth token from cookie
 		const token = authToken || getCookieToken();
