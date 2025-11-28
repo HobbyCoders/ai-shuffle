@@ -557,14 +557,21 @@
 					{:else}
 						{#each $messages as message}
 							<div class="flex flex-col {message.role === 'user' ? 'items-end' : 'items-start'}">
-								<!-- Role label -->
-								<div class="text-xs text-gray-500 mb-1 px-1">
-									{message.role === 'user' ? 'You' : 'Claude'}
-								</div>
+								<!-- Role label - only show for user messages and text assistant messages -->
+								{#if message.role === 'user' || message.type === 'text'}
+									<div class="text-xs text-gray-500 mb-1 px-1">
+										{message.role === 'user' ? 'You' : 'Claude'}
+									</div>
+								{/if}
 
-								<!-- Message content -->
-								<div class="w-full max-w-[85%] sm:max-w-[75%] card p-3 sm:p-4 {message.role === 'user' ? 'bg-[var(--color-primary)]/10 border-[var(--color-primary)]/30' : ''}">
-									{#if message.role === 'assistant'}
+								<!-- User message -->
+								{#if message.role === 'user'}
+									<div class="w-full max-w-[85%] sm:max-w-[75%] card p-3 sm:p-4 bg-[var(--color-primary)]/10 border-[var(--color-primary)]/30">
+										<p class="whitespace-pre-wrap break-words">{message.content}</p>
+									</div>
+								<!-- Assistant text message -->
+								{:else if message.type === 'text' || !message.type}
+									<div class="w-full max-w-[85%] sm:max-w-[75%] card p-3 sm:p-4">
 										<div class="prose prose-invert prose-sm max-w-none">
 											{@html renderMarkdown(message.content)}
 										</div>
@@ -577,29 +584,8 @@
 											</div>
 										{/if}
 
-										<!-- Tool uses -->
-										{#if message.toolUses && message.toolUses.length > 0}
-											<div class="mt-3 space-y-2">
-												{#each message.toolUses as tool}
-													<details class="bg-[var(--color-bg)] rounded-lg overflow-hidden">
-														<summary class="px-3 py-2 cursor-pointer text-sm text-gray-300 hover:bg-[var(--color-surface-hover)]">
-															Tool: {tool.name}
-														</summary>
-														<div class="px-3 py-2 border-t border-[var(--color-border)]">
-															<div class="text-xs text-gray-500 mb-1">Input:</div>
-															<pre class="text-xs overflow-x-auto">{JSON.stringify(tool.input, null, 2)}</pre>
-															{#if tool.output}
-																<div class="text-xs text-gray-500 mt-2 mb-1">Output:</div>
-																<pre class="text-xs overflow-x-auto max-h-40">{tool.output}</pre>
-															{/if}
-														</div>
-													</details>
-												{/each}
-											</div>
-										{/if}
-
-										<!-- Metadata -->
-										{#if message.metadata && !message.streaming}
+										<!-- Metadata - only show on last message in group -->
+										{#if message.metadata && !message.streaming && message.isLastInGroup}
 											<div class="mt-3 pt-2 border-t border-[var(--color-border)] text-xs text-gray-500 flex flex-wrap gap-2 sm:gap-4">
 												{#if message.metadata.total_cost_usd}
 													<span>Cost: {formatCost(message.metadata.total_cost_usd as number)}</span>
@@ -609,10 +595,51 @@
 												{/if}
 											</div>
 										{/if}
-									{:else}
-										<p class="whitespace-pre-wrap break-words">{message.content}</p>
-									{/if}
-								</div>
+									</div>
+								<!-- Tool use message -->
+								{:else if message.type === 'tool_use'}
+									<div class="w-full max-w-[85%] sm:max-w-[75%] card p-3 sm:p-4 bg-blue-900/20 border-blue-500/30">
+										<div class="flex items-center gap-2 text-sm text-blue-300">
+											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+											</svg>
+											<span class="font-medium">Tool: {message.toolName}</span>
+											{#if message.streaming}
+												<span class="ml-auto text-xs text-blue-400 animate-pulse">Running...</span>
+											{/if}
+										</div>
+										{#if message.toolInput}
+											<details class="mt-2">
+												<summary class="text-xs text-gray-400 cursor-pointer hover:text-gray-300">Show input</summary>
+												<pre class="mt-1 text-xs overflow-x-auto bg-[var(--color-bg)] rounded p-2">{JSON.stringify(message.toolInput, null, 2)}</pre>
+											</details>
+										{/if}
+									</div>
+								<!-- Tool result message -->
+								{:else if message.type === 'tool_result'}
+									<div class="w-full max-w-[85%] sm:max-w-[75%] card p-3 sm:p-4 bg-green-900/20 border-green-500/30">
+										<div class="flex items-center gap-2 text-sm text-green-300 mb-2">
+											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+											</svg>
+											<span class="font-medium">Result: {message.toolName}</span>
+										</div>
+										<pre class="text-xs overflow-x-auto max-h-60 bg-[var(--color-bg)] rounded p-2">{message.content}</pre>
+
+										<!-- Metadata - only show on last message in group -->
+										{#if message.metadata && message.isLastInGroup}
+											<div class="mt-3 pt-2 border-t border-[var(--color-border)] text-xs text-gray-500 flex flex-wrap gap-2 sm:gap-4">
+												{#if message.metadata.total_cost_usd}
+													<span>Cost: {formatCost(message.metadata.total_cost_usd as number)}</span>
+												{/if}
+												{#if message.metadata.duration_ms}
+													<span>Time: {((message.metadata.duration_ms as number) / 1000).toFixed(1)}s</span>
+												{/if}
+											</div>
+										{/if}
+									</div>
+								{/if}
 							</div>
 						{/each}
 					{/if}

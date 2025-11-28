@@ -10,13 +10,18 @@ import { api } from '$lib/api/client';
 import { sync, type SyncEvent } from './sync';
 import { getDeviceIdSync } from './device';
 
+export type MessageType = 'text' | 'tool_use' | 'tool_result';
+
 export interface ChatMessage {
 	id: string;
 	role: 'user' | 'assistant' | 'system';
 	content: string;
-	toolUses?: ToolUse[];
+	type?: MessageType;
+	toolName?: string;
+	toolInput?: Record<string, unknown>;
 	metadata?: Record<string, unknown>;
 	streaming?: boolean;
+	isLastInGroup?: boolean; // Marks the last message in an assistant response group
 }
 
 export interface ToolUse {
@@ -105,7 +110,7 @@ function createChatStore() {
 					id: remoteMsgId,
 					role: 'assistant',
 					content: '',
-					toolUses: [],
+					type: 'text',
 					streaming: true
 				};
 				update((s) => ({
@@ -123,36 +128,80 @@ function createChatStore() {
 
 				update((s) => {
 					const messages = [...s.messages];
-					const msgIndex = messages.findIndex((m) => m.id === msgId);
-
-					if (msgIndex === -1) return s;
-
-					const msg = { ...messages[msgIndex] };
+					const textMsgIndex = messages.findIndex((m) => m.id === msgId);
 
 					switch (chunkType) {
-						case 'text':
-							msg.content += event.data.content as string;
-							break;
-
-						case 'tool_use':
-							msg.toolUses = msg.toolUses || [];
-							msg.toolUses.push({
-								name: event.data.name as string,
-								input: event.data.input as Record<string, unknown>
-							});
-							break;
-
-						case 'tool_result':
-							if (msg.toolUses && msg.toolUses.length > 0) {
-								const lastTool = msg.toolUses[msg.toolUses.length - 1];
-								if (lastTool.name === event.data.name) {
-									lastTool.output = event.data.output as string;
-								}
+						case 'text': {
+							if (textMsgIndex !== -1) {
+								const msg = { ...messages[textMsgIndex] };
+								msg.content += event.data.content as string;
+								messages[textMsgIndex] = msg;
 							}
 							break;
+						}
+
+						case 'tool_use': {
+							// Mark current text message as not streaming if it has content
+							if (textMsgIndex !== -1 && messages[textMsgIndex].content) {
+								messages[textMsgIndex] = {
+									...messages[textMsgIndex],
+									streaming: false
+								};
+							}
+
+							// Add a new message for the tool use
+							const toolMsgId = `tool-sync-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+							const toolMessage: ChatMessage = {
+								id: toolMsgId,
+								role: 'assistant',
+								type: 'tool_use',
+								content: '',
+								toolName: event.data.name as string,
+								toolInput: event.data.input as Record<string, unknown>,
+								streaming: true
+							};
+							messages.push(toolMessage);
+							break;
+						}
+
+						case 'tool_result': {
+							// Find the tool_use message for this tool and mark it as not streaming
+							const toolUseIndex = messages.findLastIndex(
+								(m) => m.type === 'tool_use' && m.toolName === event.data.name && m.streaming
+							);
+							if (toolUseIndex !== -1) {
+								messages[toolUseIndex] = {
+									...messages[toolUseIndex],
+									streaming: false
+								};
+							}
+
+							// Add a new message for the tool result
+							const resultMsgId = `result-sync-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+							const resultMessage: ChatMessage = {
+								id: resultMsgId,
+								role: 'assistant',
+								type: 'tool_result',
+								content: event.data.output as string,
+								toolName: event.data.name as string,
+								streaming: false
+							};
+							messages.push(resultMessage);
+
+							// Add a new text message placeholder for any following text
+							const newTextMsgId = `msg-sync-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+							const newTextMessage: ChatMessage = {
+								id: newTextMsgId,
+								role: 'assistant',
+								type: 'text',
+								content: '',
+								streaming: true
+							};
+							messages.push(newTextMessage);
+							break;
+						}
 					}
 
-					messages[msgIndex] = msg;
 					return { ...s, messages };
 				});
 				break;
@@ -160,27 +209,39 @@ function createChatStore() {
 
 			case 'stream_end': {
 				// Streaming completed on another device
-				const msgId = event.data.message_id as string;
 				const metadata = event.data.metadata as Record<string, unknown>;
 				const interrupted = event.data.interrupted as boolean;
 
 				update((s) => {
-					const messages = [...s.messages];
-					const msgIndex = messages.findIndex((m) => m.id === msgId);
+					// Mark all streaming messages as done
+					const finalMessages = s.messages.map(m => {
+						if (m.streaming) {
+							return { ...m, streaming: false };
+						}
+						return m;
+					});
 
-					if (msgIndex !== -1) {
-						messages[msgIndex] = {
-							...messages[msgIndex],
-							streaming: false,
-							metadata,
-							content:
-								messages[msgIndex].content + (interrupted ? '\n\n[Interrupted]' : '')
-						};
+					// Remove empty text messages
+					const cleanedMessages = finalMessages.filter(
+						m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
+					);
+
+					// Add metadata to the last assistant message
+					if (cleanedMessages.length > 0) {
+						const lastAssistantIndex = cleanedMessages.findLastIndex(m => m.role === 'assistant');
+						if (lastAssistantIndex !== -1) {
+							cleanedMessages[lastAssistantIndex] = {
+								...cleanedMessages[lastAssistantIndex],
+								metadata,
+								content: cleanedMessages[lastAssistantIndex].content + (interrupted ? '\n\n[Interrupted]' : ''),
+								isLastInGroup: true
+							};
+						}
 					}
 
 					return {
 						...s,
-						messages,
+						messages: cleanedMessages,
 						isRemoteStreaming: false
 					};
 				});
@@ -385,13 +446,13 @@ function createChatStore() {
 				content: prompt
 			};
 
-			// Add placeholder for assistant response
+			// Add placeholder for assistant response (text message)
 			const assistantMsgId = `msg-${Date.now() + 1}`;
 			const assistantMessage: ChatMessage = {
 				id: assistantMsgId,
 				role: 'assistant',
 				content: '',
-				toolUses: [],
+				type: 'text',
 				streaming: true
 			};
 
@@ -556,66 +617,174 @@ function createChatStore() {
 
 			update(s => {
 				const messages = [...s.messages];
-				const msgIndex = messages.findIndex(m => m.id === msgId);
 
-				if (msgIndex === -1) return s;
-
-				const msg = { ...messages[msgIndex] };
+				// Find the current text message or last message
+				const textMsgIndex = messages.findIndex(m => m.id === msgId);
 
 				switch (event.type) {
-					case 'text':
-						msg.content += event.content as string;
-						break;
-
-					case 'tool_use':
-						msg.toolUses = msg.toolUses || [];
-						msg.toolUses.push({
-							name: event.name as string,
-							input: event.input as Record<string, unknown>
-						});
-						break;
-
-					case 'tool_result':
-						if (msg.toolUses && msg.toolUses.length > 0) {
-							const lastTool = msg.toolUses[msg.toolUses.length - 1];
-							if (lastTool.name === event.name) {
-								lastTool.output = event.output as string;
-							}
+					case 'text': {
+						// Append text to the current text message
+						if (textMsgIndex !== -1) {
+							const msg = { ...messages[textMsgIndex] };
+							msg.content += event.content as string;
+							messages[textMsgIndex] = msg;
 						}
 						break;
+					}
 
-					case 'done':
-						msg.streaming = false;
-						msg.metadata = event.metadata as Record<string, unknown>;
+					case 'tool_use': {
+						// Mark current text message as not streaming if it has content
+						if (textMsgIndex !== -1 && messages[textMsgIndex].content) {
+							messages[textMsgIndex] = {
+								...messages[textMsgIndex],
+								streaming: false
+							};
+						}
+
+						// Add a new message for the tool use
+						const toolMsgId = `tool-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+						const toolMessage: ChatMessage = {
+							id: toolMsgId,
+							role: 'assistant',
+							type: 'tool_use',
+							content: '',
+							toolName: event.name as string,
+							toolInput: event.input as Record<string, unknown>,
+							streaming: true
+						};
+						messages.push(toolMessage);
+						break;
+					}
+
+					case 'tool_result': {
+						// Find the tool_use message for this tool and mark it as not streaming
+						const toolUseIndex = messages.findLastIndex(
+							m => m.type === 'tool_use' && m.toolName === event.name && m.streaming
+						);
+						if (toolUseIndex !== -1) {
+							messages[toolUseIndex] = {
+								...messages[toolUseIndex],
+								streaming: false
+							};
+						}
+
+						// Add a new message for the tool result
+						const resultMsgId = `result-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+						const resultMessage: ChatMessage = {
+							id: resultMsgId,
+							role: 'assistant',
+							type: 'tool_result',
+							content: event.output as string,
+							toolName: event.name as string,
+							streaming: false
+						};
+						messages.push(resultMessage);
+
+						// Add a new text message placeholder for any following text
+						const newTextMsgId = `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+						const newTextMessage: ChatMessage = {
+							id: newTextMsgId,
+							role: 'assistant',
+							type: 'text',
+							content: '',
+							streaming: true
+						};
+						messages.push(newTextMessage);
+						break;
+					}
+
+					case 'done': {
+						// Mark all streaming messages as done and add metadata to last message
+						const finalMessages = messages.map((m, i) => {
+							if (m.streaming) {
+								return { ...m, streaming: false };
+							}
+							return m;
+						});
+
+						// Remove empty text messages
+						const cleanedMessages = finalMessages.filter(
+							m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
+						);
+
+						// Add metadata to the last assistant message
+						if (cleanedMessages.length > 0) {
+							const lastAssistantIndex = cleanedMessages.findLastIndex(m => m.role === 'assistant');
+							if (lastAssistantIndex !== -1) {
+								cleanedMessages[lastAssistantIndex] = {
+									...cleanedMessages[lastAssistantIndex],
+									metadata: event.metadata as Record<string, unknown>,
+									isLastInGroup: true
+								};
+							}
+						}
+
 						return {
 							...s,
-							messages: [...messages.slice(0, msgIndex), msg, ...messages.slice(msgIndex + 1)],
+							messages: cleanedMessages,
 							isStreaming: false,
 							abortController: null
 						};
+					}
 
-					case 'interrupted':
-						msg.streaming = false;
-						msg.content += '\n\n[Interrupted]';
+					case 'interrupted': {
+						// Mark all streaming messages as done
+						const finalMessages = messages.map(m => {
+							if (m.streaming) {
+								return { ...m, streaming: false };
+							}
+							return m;
+						});
+
+						// Remove empty text messages
+						const cleanedMessages = finalMessages.filter(
+							m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
+						);
+
+						// Add interrupted notice to last message
+						if (cleanedMessages.length > 0) {
+							const lastIndex = cleanedMessages.length - 1;
+							if (cleanedMessages[lastIndex].role === 'assistant') {
+								cleanedMessages[lastIndex] = {
+									...cleanedMessages[lastIndex],
+									content: cleanedMessages[lastIndex].content + '\n\n[Interrupted]',
+									isLastInGroup: true
+								};
+							}
+						}
+
 						return {
 							...s,
-							messages: [...messages.slice(0, msgIndex), msg, ...messages.slice(msgIndex + 1)],
+							messages: cleanedMessages,
 							isStreaming: false,
 							abortController: null
 						};
+					}
 
-					case 'error':
-						msg.streaming = false;
+					case 'error': {
+						// Mark all streaming messages as done
+						const finalMessages = messages.map(m => {
+							if (m.streaming) {
+								return { ...m, streaming: false };
+							}
+							return m;
+						});
+
+						// Remove empty text messages
+						const cleanedMessages = finalMessages.filter(
+							m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
+						);
+
 						return {
 							...s,
-							messages: [...messages.slice(0, msgIndex), msg, ...messages.slice(msgIndex + 1)],
+							messages: cleanedMessages,
 							isStreaming: false,
 							error: event.message as string,
 							abortController: null
 						};
+					}
 				}
 
-				messages[msgIndex] = msg;
 				return { ...s, messages };
 			});
 		},
