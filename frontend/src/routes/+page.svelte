@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { auth, username, claudeAuthenticated } from '$lib/stores/auth';
-	import { chat, messages, isStreaming, chatError, profiles, selectedProfile, sessions, currentSessionId, projects, selectedProject } from '$lib/stores/chat';
+	import { chat, messages, isStreaming, chatError, profiles, selectedProfile, sessions, currentSessionId, projects, selectedProject, activeSessionIds } from '$lib/stores/chat';
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import { marked } from 'marked';
 
@@ -66,8 +66,14 @@
 		Promise.all([
 			chat.loadProfiles(),
 			chat.loadSessions(),
-			chat.loadProjects()
+			chat.loadProjects(),
+			chat.loadActiveSessions()
 		]);
+
+		// Poll for active sessions every 3 seconds to show which are streaming
+		const activeSessionsInterval = setInterval(() => {
+			chat.loadActiveSessions();
+		}, 3000);
 
 		// Handle page visibility changes (user leaving and returning)
 		// This reconnects to the session when the user returns to the page
@@ -125,6 +131,7 @@
 		// Cleanup on unmount
 		return () => {
 			document.removeEventListener('visibilitychange', handleVisibilityChange);
+			clearInterval(activeSessionsInterval);
 		};
 	});
 
@@ -541,14 +548,24 @@
 			{:else}
 				<div class="space-y-1">
 					{#each $sessions as session}
+						{@const isActive = $activeSessionIds.has(session.id)}
 						<button
-							class="w-full text-left p-2 rounded-lg transition-colors {$currentSessionId === session.id ? 'bg-[var(--color-surface-hover)]' : 'hover:bg-[var(--color-surface)]'}"
+							class="w-full text-left p-2 rounded-lg transition-colors {$currentSessionId === session.id ? 'bg-[var(--color-surface-hover)]' : 'hover:bg-[var(--color-surface)]'} {isActive ? 'border-l-2 border-green-500' : ''}"
 							on:click={() => selectSession(session.id)}
 						>
-							<div class="text-sm text-white truncate">
-								{truncateTitle(session.title)}
+							<div class="flex items-center gap-2">
+								{#if isActive}
+									<span class="flex-shrink-0 w-2 h-2 bg-green-500 rounded-full animate-pulse" title="Streaming"></span>
+								{/if}
+								<span class="text-sm text-white truncate">
+									{truncateTitle(session.title)}
+								</span>
 							</div>
-							<div class="flex items-center gap-2 mt-1 text-xs text-gray-500">
+							<div class="flex items-center gap-2 mt-1 text-xs text-gray-500 {isActive ? 'ml-4' : ''}">
+								{#if isActive}
+									<span class="text-green-400">Active</span>
+									<span>•</span>
+								{/if}
 								<span>{formatDate(session.updated_at)}</span>
 								{#if session.total_cost_usd > 0}
 									<span>• {formatCost(session.total_cost_usd)}</span>

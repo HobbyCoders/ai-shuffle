@@ -49,6 +49,7 @@ interface ChatState {
 	projects: Project[];
 	selectedProject: string;
 	sessions: Session[];
+	activeSessionIds: Set<string>; // Sessions currently streaming
 	isStreaming: boolean;
 	isRemoteStreaming: boolean; // True when another device is streaming
 	error: string | null;
@@ -64,6 +65,7 @@ function createChatStore() {
 		projects: [],
 		selectedProject: '',
 		sessions: [],
+		activeSessionIds: new Set(),
 		isStreaming: false,
 		isRemoteStreaming: false,
 		error: null,
@@ -376,6 +378,16 @@ function createChatStore() {
 				update(s => ({ ...s, sessions }));
 			} catch (e) {
 				console.error('Failed to load sessions:', e);
+			}
+		},
+
+		async loadActiveSessions() {
+			try {
+				const response = await api.get<{ active_sessions: string[] }>('/query/sessions/active');
+				const activeIds = new Set(response.active_sessions || []);
+				update(s => ({ ...s, activeSessionIds: activeIds }));
+			} catch (e) {
+				console.error('Failed to load active sessions:', e);
 			}
 		},
 
@@ -899,3 +911,4 @@ export const projects = derived(chat, $chat => $chat.projects);
 export const selectedProject = derived(chat, $chat => $chat.selectedProject);
 export const sessions = derived(chat, $chat => $chat.sessions);
 export const currentSessionId = derived(chat, $chat => $chat.sessionId);
+export const activeSessionIds = derived(chat, $chat => $chat.activeSessionIds);
