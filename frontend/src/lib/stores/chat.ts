@@ -452,7 +452,7 @@ function createChatStore() {
 
 		async loadActiveSessions() {
 			try {
-				const response = await api.get<{ active_sessions: string[] }>('/query/sessions/active');
+				const response = await api.get<{ active_sessions: string[] }>('/streaming/active');
 				const activeIds = new Set(response.active_sessions || []);
 				update(s => ({ ...s, activeSessionIds: activeIds }));
 			} catch (e) {

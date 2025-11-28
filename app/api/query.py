@@ -301,7 +301,7 @@ async def interrupt(
         )
 
 
-@router.get("/sessions/active")
+@router.get("/streaming/active")
 async def list_active_sessions(
     token: str = Depends(require_auth)
 ):

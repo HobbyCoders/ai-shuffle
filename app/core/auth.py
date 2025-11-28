@@ -3,6 +3,8 @@ Authentication service for AI Hub
 """
 
 import os
+import sys
+import shutil
 import secrets
 import logging
 import subprocess
@@ -18,6 +20,56 @@ from app.db import database
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def find_claude_executable() -> Optional[str]:
+    """Find the claude executable, handling Windows/npm installations"""
+    # First try shutil.which (works for PATH)
+    claude_path = shutil.which('claude')
+    if claude_path:
+        return claude_path
+
+    # On Windows, check common npm installation paths
+    if sys.platform == 'win32':
+        possible_paths = [
+            Path(os.environ.get('APPDATA', '')) / 'npm' / 'claude.cmd',
+            Path(os.environ.get('APPDATA', '')) / 'npm' / 'claude',
+            Path.home() / 'AppData' / 'Roaming' / 'npm' / 'claude.cmd',
+        ]
+        for p in possible_paths:
+            if p.exists():
+                return str(p)
+
+    return None
+
+
+def find_gh_executable() -> Optional[str]:
+    """Find the gh executable, handling Windows installations"""
+    # First try shutil.which (works for PATH)
+    gh_path = shutil.which('gh')
+    if gh_path:
+        return gh_path
+
+    # On Windows, check common installation paths
+    if sys.platform == 'win32':
+        possible_paths = [
+            Path(os.environ.get('ProgramFiles', '')) / 'GitHub CLI' / 'gh.exe',
+            Path(os.environ.get('LOCALAPPDATA', '')) / 'Programs' / 'GitHub CLI' / 'gh.exe',
+            Path.home() / 'scoop' / 'apps' / 'gh' / 'current' / 'gh.exe',
+        ]
+        for p in possible_paths:
+            if p.exists():
+                return str(p)
+
+    return None
+
+
+def run_subprocess_cmd(cmd: list, **kwargs) -> subprocess.CompletedProcess:
+    """Run a subprocess command with proper Windows handling"""
+    if sys.platform == 'win32' and cmd and cmd[0].endswith('.cmd'):
+        # On Windows, .cmd files need shell=True
+        return subprocess.run(' '.join(f'"{c}"' if ' ' in c else c for c in cmd), shell=True, **kwargs)
+    return subprocess.run(cmd, **kwargs)
 
 
 class AuthService:
@@ -152,12 +204,25 @@ class AuthService:
     def claude_logout(self) -> Dict[str, Any]:
         """Logout from Claude CLI"""
         try:
-            home_env = os.environ.get('HOME', '/home/appuser')
+            home_env = os.environ.get('HOME', str(Path.home()))
+
+            # Find claude executable
+            claude_cmd = find_claude_executable()
+            if not claude_cmd:
+                return {
+                    "success": False,
+                    "message": "Claude CLI not found",
+                    "error": "Could not find 'claude' command."
+                }
+
+            use_shell = sys.platform == 'win32' and claude_cmd.endswith('.cmd')
+
             result = subprocess.run(
-                ['claude', 'logout'],
+                [claude_cmd, 'logout'] if not use_shell else f'"{claude_cmd}" logout',
                 capture_output=True,
                 text=True,
                 timeout=30,
+                shell=use_shell,
                 env={**os.environ, 'HOME': home_env}
             )
 
@@ -197,9 +262,13 @@ class AuthService:
 
         # Verify with gh auth status
         try:
-            home_env = os.environ.get('HOME', '/home/appuser')
+            gh_cmd = find_gh_executable()
+            if not gh_cmd:
+                return False
+
+            home_env = os.environ.get('HOME', str(Path.home()))
             result = subprocess.run(
-                ['gh', 'auth', 'status'],
+                [gh_cmd, 'auth', 'status'],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -217,16 +286,18 @@ class AuthService:
 
         if authenticated:
             try:
-                home_env = os.environ.get('HOME', '/home/appuser')
-                result = subprocess.run(
-                    ['gh', 'api', 'user', '-q', '.login'],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                    env={**os.environ, 'HOME': home_env}
-                )
-                if result.returncode == 0:
-                    user = result.stdout.strip()
+                gh_cmd = find_gh_executable()
+                if gh_cmd:
+                    home_env = os.environ.get('HOME', str(Path.home()))
+                    result = subprocess.run(
+                        [gh_cmd, 'api', 'user', '-q', '.login'],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        env={**os.environ, 'HOME': home_env}
+                    )
+                    if result.returncode == 0:
+                        user = result.stdout.strip()
             except Exception as e:
                 logger.warning(f"Could not get GitHub user: {e}")
 
@@ -239,14 +310,22 @@ class AuthService:
     def github_login_with_token(self, token: str) -> Dict[str, Any]:
         """Login to GitHub CLI using a personal access token"""
         try:
-            home_env = os.environ.get('HOME', '/home/appuser')
+            gh_cmd = find_gh_executable()
+            if not gh_cmd:
+                return {
+                    "success": False,
+                    "message": "GitHub CLI not found",
+                    "error": "Could not find 'gh' command. Please install GitHub CLI."
+                }
+
+            home_env = os.environ.get('HOME', str(Path.home()))
 
             # Ensure config directory exists
             self.gh_config_dir.mkdir(parents=True, exist_ok=True)
 
             # Login with the token
             result = subprocess.run(
-                ['gh', 'auth', 'login', '--with-token'],
+                [gh_cmd, 'auth', 'login', '--with-token'],
                 input=token,
                 capture_output=True,
                 text=True,
@@ -256,12 +335,14 @@ class AuthService:
 
             if result.returncode == 0:
                 # Configure git credential helper
-                subprocess.run(
-                    ['git', 'config', '--global', 'credential.helper', '!gh auth git-credential'],
-                    capture_output=True,
-                    timeout=10,
-                    env={**os.environ, 'HOME': home_env}
-                )
+                git_cmd = shutil.which('git')
+                if git_cmd:
+                    subprocess.run(
+                        [git_cmd, 'config', '--global', 'credential.helper', '!gh auth git-credential'],
+                        capture_output=True,
+                        timeout=10,
+                        env={**os.environ, 'HOME': home_env}
+                    )
 
                 logger.info("GitHub CLI login successful")
                 return {
@@ -294,9 +375,20 @@ class AuthService:
     def github_logout(self) -> Dict[str, Any]:
         """Logout from GitHub CLI"""
         try:
-            home_env = os.environ.get('HOME', '/home/appuser')
+            gh_cmd = find_gh_executable()
+            if not gh_cmd:
+                # Just remove the config file if gh not found
+                hosts_file = self.gh_config_dir / 'hosts.yml'
+                if hosts_file.exists():
+                    hosts_file.unlink()
+                return {
+                    "success": True,
+                    "message": "Logged out from GitHub (config removed)"
+                }
+
+            home_env = os.environ.get('HOME', str(Path.home()))
             result = subprocess.run(
-                ['gh', 'auth', 'logout', '--hostname', 'github.com'],
+                [gh_cmd, 'auth', 'logout', '--hostname', 'github.com'],
                 input='Y\n',  # Confirm logout
                 capture_output=True,
                 text=True,
@@ -335,56 +427,102 @@ class AuthService:
     def start_claude_oauth_login(self) -> Dict[str, Any]:
         """
         Start Claude Code OAuth login process.
-        Returns the OAuth URL for the user to complete in their browser.
+
+        The claude login flow is interactive:
+        1. CLI displays an OAuth URL
+        2. User opens URL in browser and authenticates with Anthropic
+        3. User copies the resulting code and pastes it back into CLI
+        4. CLI creates ~/.claude/.credentials.json
+
+        For Docker: We run this in the container and guide user through the process
+        For Windows/native: User should run 'claude login' in their terminal
         """
         try:
-            home_env = os.environ.get('HOME', '/home/appuser')
-
-            # Ensure config directory exists
-            self.config_dir.mkdir(parents=True, exist_ok=True)
-
-            # Start claude login in a way that captures the URL
-            # The --no-open flag prevents auto-opening browser
-            result = subprocess.run(
-                ['claude', 'login', '--no-open'],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env={**os.environ, 'HOME': home_env}
-            )
-
-            # Parse output to find OAuth URL
-            output = result.stdout + result.stderr
-
-            # Look for URL in output
-            import re
-            url_match = re.search(r'(https://[^\s]+anthropic[^\s]+)', output)
-
-            if url_match:
-                return {
-                    "success": True,
-                    "oauth_url": url_match.group(1),
-                    "message": "Open this URL in your browser to complete login"
-                }
-            elif result.returncode == 0:
-                # Already logged in
+            # Check if already authenticated
+            if self.is_claude_authenticated():
                 return {
                     "success": True,
                     "already_authenticated": True,
                     "message": "Already authenticated with Claude Code"
                 }
-            else:
+
+            home_env = os.environ.get('HOME', str(Path.home()))
+
+            # Ensure config directory exists
+            self.config_dir.mkdir(parents=True, exist_ok=True)
+
+            # Find claude executable
+            claude_cmd = find_claude_executable()
+            if not claude_cmd:
                 return {
                     "success": False,
-                    "message": "Could not start OAuth login",
-                    "error": output
+                    "message": "Claude CLI not found",
+                    "error": "Could not find 'claude' command. Please ensure Claude Code CLI is installed."
+                }
+
+            # Check if we're in Docker (typical indicators)
+            in_docker = (
+                os.path.exists('/.dockerenv') or
+                os.environ.get('DOCKER_CONTAINER') == 'true' or
+                os.path.exists('/app/main.py')  # Our Docker layout
+            )
+
+            if in_docker:
+                # In Docker, we can try to run claude login and capture output
+                # The login command will print a URL that user needs to visit
+                use_shell = False
+
+                result = subprocess.run(
+                    [claude_cmd, 'login'],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,  # Short timeout - we just want to capture the URL
+                    env={**os.environ, 'HOME': home_env}
+                )
+
+                # Parse output to find OAuth URL
+                output = result.stdout + result.stderr
+
+                # Look for URL in output
+                import re
+                url_match = re.search(r'(https://[^\s]+)', output)
+
+                if url_match:
+                    return {
+                        "success": True,
+                        "oauth_url": url_match.group(1),
+                        "message": "Open this URL in your browser to complete login. After authenticating, copy the code and use the /auth/claude/complete endpoint.",
+                        "requires_code": True
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "message": "Could not extract OAuth URL",
+                        "error": output or "No output from claude login command",
+                        "instructions": "Run 'claude login' manually in the container terminal"
+                    }
+            else:
+                # Not in Docker - provide instructions for manual login
+                return {
+                    "success": False,
+                    "message": "Manual login required",
+                    "error": "In-app OAuth login is only available in Docker deployments",
+                    "instructions": [
+                        "1. Open a terminal/command prompt",
+                        "2. Run: claude login",
+                        "3. Click the URL that appears",
+                        "4. Complete authentication in your browser",
+                        "5. Copy the code and paste it back in the terminal",
+                        "6. Refresh this page to verify authentication"
+                    ]
                 }
 
         except subprocess.TimeoutExpired:
+            # Timeout is expected for interactive command - check if URL was printed
             return {
                 "success": False,
-                "message": "Login process timed out",
-                "error": "Claude login process timed out"
+                "message": "Login requires terminal interaction",
+                "instructions": "Run 'claude login' in your terminal to complete authentication"
             }
         except Exception as e:
             logger.error(f"Claude OAuth login error: {e}")
