@@ -18,6 +18,7 @@ export interface ChatMessage {
 	content: string;
 	type?: MessageType;
 	toolName?: string;
+	toolId?: string; // Unique ID for matching tool_use with tool_result
 	toolInput?: Record<string, unknown>;
 	metadata?: Record<string, unknown>;
 	streaming?: boolean;
@@ -162,6 +163,7 @@ function createChatStore() {
 								type: 'tool_use',
 								content: '',
 								toolName: event.data.name as string,
+								toolId: event.data.id as string, // Store the tool_use ID
 								toolInput: event.data.input as Record<string, unknown>,
 								streaming: true
 							};
@@ -170,10 +172,22 @@ function createChatStore() {
 						}
 
 						case 'tool_result': {
-							// Find the tool_use message for this tool and mark it as not streaming
-							const toolUseIndex = messages.findLastIndex(
-								(m) => m.type === 'tool_use' && m.toolName === event.data.name && m.streaming
-							);
+							// Find the tool_use message by tool_use_id (preferred) or by name (fallback)
+							const toolUseId = event.data.tool_use_id as string;
+							let toolUseIndex = -1;
+
+							if (toolUseId) {
+								toolUseIndex = messages.findLastIndex(
+									(m) => m.type === 'tool_use' && m.toolId === toolUseId
+								);
+							}
+
+							if (toolUseIndex === -1) {
+								toolUseIndex = messages.findLastIndex(
+									(m) => m.type === 'tool_use' && m.toolName === event.data.name && m.streaming
+								);
+							}
+
 							if (toolUseIndex !== -1) {
 								messages[toolUseIndex] = {
 									...messages[toolUseIndex],
@@ -189,6 +203,7 @@ function createChatStore() {
 								type: 'tool_result',
 								content: event.data.output as string,
 								toolName: event.data.name as string,
+								toolId: toolUseId,
 								streaming: false
 							};
 							messages.push(resultMessage);
@@ -659,6 +674,7 @@ function createChatStore() {
 							type: 'tool_use',
 							content: '',
 							toolName: event.name as string,
+							toolId: event.id as string, // Store the tool_use ID for matching with result
 							toolInput: event.input as Record<string, unknown>,
 							streaming: true
 						};
@@ -667,10 +683,24 @@ function createChatStore() {
 					}
 
 					case 'tool_result': {
-						// Find the tool_use message for this tool and mark it as not streaming
-						const toolUseIndex = messages.findLastIndex(
-							m => m.type === 'tool_use' && m.toolName === event.name && m.streaming
-						);
+						// Find the tool_use message by tool_use_id (preferred) or by name (fallback)
+						const toolUseId = event.tool_use_id as string;
+						let toolUseIndex = -1;
+
+						if (toolUseId) {
+							// Match by tool_use_id (most reliable)
+							toolUseIndex = messages.findLastIndex(
+								m => m.type === 'tool_use' && m.toolId === toolUseId
+							);
+						}
+
+						if (toolUseIndex === -1) {
+							// Fallback: match by name and streaming status
+							toolUseIndex = messages.findLastIndex(
+								m => m.type === 'tool_use' && m.toolName === event.name && m.streaming
+							);
+						}
+
 						if (toolUseIndex !== -1) {
 							messages[toolUseIndex] = {
 								...messages[toolUseIndex],
@@ -686,6 +716,7 @@ function createChatStore() {
 							type: 'tool_result',
 							content: event.output as string,
 							toolName: event.name as string,
+							toolId: toolUseId, // Store for reference
 							streaming: false
 						};
 						messages.push(resultMessage);
