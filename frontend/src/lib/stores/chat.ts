@@ -394,11 +394,17 @@ function createChatStore() {
 				update(s => ({
 					...s,
 					sessionId: session.id,
-					messages
+					messages,
+					error: null // Clear any previous errors on successful load
 				}));
 
 				// Connect to sync for real-time updates from other devices
-				await connectSync(sessionId);
+				// This is non-critical - session should load even if sync fails
+				try {
+					await connectSync(sessionId);
+				} catch (syncError) {
+					console.warn('[Chat] Failed to connect sync, session loaded without real-time updates:', syncError);
+				}
 			} catch (e: any) {
 				update(s => ({ ...s, error: e.detail || 'Failed to load session' }));
 			}
