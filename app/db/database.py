@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 # Schema version for migrations
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def get_connection() -> sqlite3.Connection:
@@ -135,7 +135,7 @@ def _create_schema(cursor: sqlite3.Cursor):
         )
     """)
 
-    # Session messages
+    # Session messages (with sync support)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS session_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -145,6 +145,22 @@ def _create_schema(cursor: sqlite3.Cursor):
             tool_name TEXT,
             tool_input JSON,
             metadata JSON,
+            version INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Sync log for tracking changes (used for polling fallback)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sync_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT,
+            data JSON,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
         )
@@ -201,6 +217,8 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_users_active ON api_users(is_active)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_api_user ON sessions(api_user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_session ON sync_log(session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_created ON sync_log(created_at)")
 
 
 def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
@@ -829,3 +847,116 @@ def delete_api_user(user_id: str) -> bool:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM api_users WHERE id = ?", (user_id,))
         return cursor.rowcount > 0
+
+
+# ============================================================================
+# Sync Log Operations (for cross-device synchronization)
+# ============================================================================
+
+def add_sync_log(
+    session_id: str,
+    event_type: str,
+    entity_type: str,
+    entity_id: Optional[str] = None,
+    data: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Add an entry to the sync log for polling fallback"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO sync_log (session_id, event_type, entity_type, entity_id, data, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (session_id, event_type, entity_type, entity_id,
+             json.dumps(data) if data else None, now)
+        )
+        return {
+            "id": cursor.lastrowid,
+            "session_id": session_id,
+            "event_type": event_type,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "data": data,
+            "created_at": now
+        }
+
+
+def get_sync_logs(
+    session_id: str,
+    since_id: int = 0,
+    limit: int = 100
+) -> List[Dict[str, Any]]:
+    """Get sync log entries for a session since a given ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT * FROM sync_log
+               WHERE session_id = ? AND id > ?
+               ORDER BY id ASC
+               LIMIT ?""",
+            (session_id, since_id, limit)
+        )
+        rows = rows_to_list(cursor.fetchall())
+        for row in rows:
+            if row.get("data"):
+                row["data"] = json.loads(row["data"]) if isinstance(row["data"], str) else row["data"]
+        return rows
+
+
+def get_latest_sync_id(session_id: str) -> int:
+    """Get the latest sync log ID for a session"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT MAX(id) as max_id FROM sync_log WHERE session_id = ?",
+            (session_id,)
+        )
+        row = cursor.fetchone()
+        return row["max_id"] or 0
+
+
+def cleanup_old_sync_logs(max_age_hours: int = 24):
+    """Remove sync log entries older than max_age_hours"""
+    from datetime import timedelta
+    cutoff = (datetime.utcnow() - timedelta(hours=max_age_hours)).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM sync_log WHERE created_at < ?",
+            (cutoff,)
+        )
+        return cursor.rowcount
+
+
+def update_message_content(
+    message_id: int,
+    content: str,
+    metadata: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, Any]]:
+    """Update message content (used during streaming)"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        updates = ["content = ?", "updated_at = ?", "version = version + 1"]
+        values = [content, now]
+
+        if metadata is not None:
+            updates.append("metadata = ?")
+            values.append(json.dumps(metadata))
+
+        values.append(message_id)
+
+        cursor.execute(
+            f"UPDATE session_messages SET {', '.join(updates)} WHERE id = ?",
+            values
+        )
+
+        if cursor.rowcount > 0:
+            cursor.execute("SELECT * FROM session_messages WHERE id = ?", (message_id,))
+            row = row_to_dict(cursor.fetchone())
+            if row and row.get("metadata"):
+                row["metadata"] = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]
+            return row
+
+    return None

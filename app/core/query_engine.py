@@ -23,6 +23,7 @@ from claude_agent_sdk import (
 from app.db import database
 from app.core.config import settings
 from app.core.profiles import get_profile_or_builtin
+from app.core.sync_engine import sync_engine
 
 logger = logging.getLogger(__name__)
 
@@ -317,7 +318,8 @@ async def stream_query(
     project_id: Optional[str] = None,
     overrides: Optional[Dict[str, Any]] = None,
     session_id: Optional[str] = None,
-    api_user_id: Optional[str] = None
+    api_user_id: Optional[str] = None,
+    device_id: Optional[str] = None  # Source device for sync
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Execute a streaming query using ClaudeSDKClient.
@@ -369,11 +371,27 @@ async def stream_query(
         is_new_session = True
         logger.info(f"Created new session {session_id} with title: {title}")
 
-    # Store user message
-    database.add_session_message(
+    # Store user message and broadcast to other devices
+    user_msg = database.add_session_message(
         session_id=session_id,
         role="user",
         content=prompt
+    )
+
+    # Broadcast user message to other devices
+    await sync_engine.broadcast_message_added(
+        session_id=session_id,
+        message=user_msg,
+        source_device_id=device_id
+    )
+
+    # Log to sync log for polling fallback
+    database.add_sync_log(
+        session_id=session_id,
+        event_type="message_added",
+        entity_type="message",
+        entity_id=str(user_msg["id"]),
+        data=user_msg
     )
 
     # Build options
@@ -426,6 +444,25 @@ async def stream_query(
     state.is_streaming = True
     state.last_activity = datetime.now()
 
+    # Generate a message ID for streaming sync
+    assistant_msg_id = f"streaming-{session_id}-{datetime.now().timestamp()}"
+
+    # Broadcast stream start to other devices
+    await sync_engine.broadcast_stream_start(
+        session_id=session_id,
+        message_id=assistant_msg_id,
+        source_device_id=device_id
+    )
+
+    # Log stream start for polling fallback
+    database.add_sync_log(
+        session_id=session_id,
+        event_type="stream_start",
+        entity_type="message",
+        entity_id=assistant_msg_id,
+        data={"message_id": assistant_msg_id}
+    )
+
     # Execute query
     response_text = []
     metadata = {}
@@ -449,12 +486,30 @@ async def stream_query(
                         response_text.append(block.text)
                         yield {"type": "text", "content": block.text}
 
+                        # Broadcast text chunk to other devices
+                        await sync_engine.broadcast_stream_chunk(
+                            session_id=session_id,
+                            message_id=assistant_msg_id,
+                            chunk_type="text",
+                            chunk_data={"content": block.text},
+                            source_device_id=device_id
+                        )
+
                     elif isinstance(block, ToolUseBlock):
                         yield {
                             "type": "tool_use",
                             "name": block.name,
                             "input": block.input
                         }
+
+                        # Broadcast tool use to other devices
+                        await sync_engine.broadcast_stream_chunk(
+                            session_id=session_id,
+                            message_id=assistant_msg_id,
+                            chunk_type="tool_use",
+                            chunk_data={"name": block.name, "input": block.input},
+                            source_device_id=device_id
+                        )
 
                     elif isinstance(block, ToolResultBlock):
                         # Truncate large outputs
@@ -464,6 +519,15 @@ async def stream_query(
                             "name": getattr(block, 'name', 'unknown'),
                             "output": output
                         }
+
+                        # Broadcast tool result to other devices
+                        await sync_engine.broadcast_stream_chunk(
+                            session_id=session_id,
+                            message_id=assistant_msg_id,
+                            chunk_type="tool_result",
+                            chunk_data={"name": getattr(block, 'name', 'unknown'), "output": output},
+                            source_device_id=device_id
+                        )
 
                 metadata["model"] = message.model
 
@@ -490,6 +554,15 @@ async def stream_query(
         state.is_streaming = False
         state.last_activity = datetime.now()
 
+        # Broadcast stream end to other devices
+        await sync_engine.broadcast_stream_end(
+            session_id=session_id,
+            message_id=assistant_msg_id,
+            metadata=metadata,
+            interrupted=interrupted,
+            source_device_id=device_id
+        )
+
     # Update session in database
     if sdk_session_id:
         database.update_session(
@@ -503,11 +576,24 @@ async def stream_query(
     # Store assistant response
     full_response = "\n".join(response_text)
     if full_response or interrupted:
-        database.add_session_message(
+        assistant_msg = database.add_session_message(
             session_id=session_id,
             role="assistant",
             content=full_response + ("\n[Interrupted]" if interrupted else ""),
             metadata=metadata
+        )
+
+        # Log stream end for polling fallback
+        database.add_sync_log(
+            session_id=session_id,
+            event_type="stream_end",
+            entity_type="message",
+            entity_id=str(assistant_msg["id"]),
+            data={
+                "message": assistant_msg,
+                "metadata": metadata,
+                "interrupted": interrupted
+            }
         )
 
     # Log usage

@@ -18,7 +18,7 @@ from app.core.profiles import seed_builtin_profiles
 from app.core.auth import auth_service
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, api_users
+from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket
 
 # Configure logging
 logging.basicConfig(
@@ -91,6 +91,7 @@ app.include_router(projects.router)
 app.include_router(sessions.router)
 app.include_router(query.router)
 app.include_router(api_users.router)
+app.include_router(websocket.router)
 
 # Serve static files (Svelte build) if they exist
 static_dir = Path(__file__).parent / "static"

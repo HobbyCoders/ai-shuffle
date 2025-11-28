@@ -1,11 +1,14 @@
 /**
  * Chat/conversation store with SSE streaming support
  * Includes sessions, profiles, and projects management
+ * With cross-device synchronization support
  */
 
 import { writable, derived, get } from 'svelte/store';
 import type { Session, SessionMessage, Profile } from '$lib/api/client';
 import { api } from '$lib/api/client';
+import { sync, type SyncEvent } from './sync';
+import { getDeviceIdSync } from './device';
 
 export interface ChatMessage {
 	id: string;
@@ -41,6 +44,7 @@ interface ChatState {
 	selectedProject: string;
 	sessions: Session[];
 	isStreaming: boolean;
+	isRemoteStreaming: boolean; // True when another device is streaming
 	error: string | null;
 	abortController: AbortController | null;
 }
@@ -55,11 +59,195 @@ function createChatStore() {
 		selectedProject: '',
 		sessions: [],
 		isStreaming: false,
+		isRemoteStreaming: false,
 		error: null,
 		abortController: null
 	});
 
 	let currentEventSource: EventSource | null = null;
+	let syncUnsubscribe: (() => void) | null = null;
+	let remoteMsgId: string | null = null; // Track remote streaming message ID
+
+	/**
+	 * Handle sync events from other devices
+	 */
+	function handleSyncEvent(event: SyncEvent) {
+		const state = get({ subscribe });
+
+		// Only process events for the current session
+		if (event.session_id !== state.sessionId) {
+			return;
+		}
+
+		switch (event.event_type) {
+			case 'message_added': {
+				// Another device added a message (user message)
+				const message = event.data.message as Record<string, unknown>;
+				if (message) {
+					const newMsg: ChatMessage = {
+						id: `sync-${message.id}`,
+						role: message.role as 'user' | 'assistant',
+						content: message.content as string,
+						metadata: message.metadata as Record<string, unknown>
+					};
+					update((s) => ({
+						...s,
+						messages: [...s.messages, newMsg]
+					}));
+				}
+				break;
+			}
+
+			case 'stream_start': {
+				// Another device started streaming
+				remoteMsgId = event.data.message_id as string;
+				const placeholderMsg: ChatMessage = {
+					id: remoteMsgId,
+					role: 'assistant',
+					content: '',
+					toolUses: [],
+					streaming: true
+				};
+				update((s) => ({
+					...s,
+					isRemoteStreaming: true,
+					messages: [...s.messages, placeholderMsg]
+				}));
+				break;
+			}
+
+			case 'stream_chunk': {
+				// Streaming chunk from another device
+				const chunkType = event.data.chunk_type as string;
+				const msgId = event.data.message_id as string;
+
+				update((s) => {
+					const messages = [...s.messages];
+					const msgIndex = messages.findIndex((m) => m.id === msgId);
+
+					if (msgIndex === -1) return s;
+
+					const msg = { ...messages[msgIndex] };
+
+					switch (chunkType) {
+						case 'text':
+							msg.content += event.data.content as string;
+							break;
+
+						case 'tool_use':
+							msg.toolUses = msg.toolUses || [];
+							msg.toolUses.push({
+								name: event.data.name as string,
+								input: event.data.input as Record<string, unknown>
+							});
+							break;
+
+						case 'tool_result':
+							if (msg.toolUses && msg.toolUses.length > 0) {
+								const lastTool = msg.toolUses[msg.toolUses.length - 1];
+								if (lastTool.name === event.data.name) {
+									lastTool.output = event.data.output as string;
+								}
+							}
+							break;
+					}
+
+					messages[msgIndex] = msg;
+					return { ...s, messages };
+				});
+				break;
+			}
+
+			case 'stream_end': {
+				// Streaming completed on another device
+				const msgId = event.data.message_id as string;
+				const metadata = event.data.metadata as Record<string, unknown>;
+				const interrupted = event.data.interrupted as boolean;
+
+				update((s) => {
+					const messages = [...s.messages];
+					const msgIndex = messages.findIndex((m) => m.id === msgId);
+
+					if (msgIndex !== -1) {
+						messages[msgIndex] = {
+							...messages[msgIndex],
+							streaming: false,
+							metadata,
+							content:
+								messages[msgIndex].content + (interrupted ? '\n\n[Interrupted]' : '')
+						};
+					}
+
+					return {
+						...s,
+						messages,
+						isRemoteStreaming: false
+					};
+				});
+
+				remoteMsgId = null;
+				break;
+			}
+
+			case 'session_updated': {
+				// Session metadata changed - reload sessions list
+				// This is non-critical, so we just refresh in background
+				api.get<Session[]>('/sessions?limit=50')
+					.then((sessions) => update((s) => ({ ...s, sessions })))
+					.catch(console.error);
+				break;
+			}
+
+			case 'state': {
+				// Initial state from WebSocket connection
+				const isStreaming = event.data.is_streaming as boolean;
+				const messages = event.data.messages as SessionMessage[];
+
+				if (messages && messages.length > 0) {
+					const chatMessages: ChatMessage[] = messages.map((m, i) => ({
+						id: `msg-${i}`,
+						role: m.role as 'user' | 'assistant',
+						content: m.content,
+						metadata: m.metadata
+					}));
+
+					update((s) => ({
+						...s,
+						messages: chatMessages,
+						isRemoteStreaming: isStreaming
+					}));
+				}
+				break;
+			}
+		}
+	}
+
+	/**
+	 * Connect to sync for a session
+	 */
+	async function connectSync(sessionId: string) {
+		// Unsubscribe from previous handler
+		if (syncUnsubscribe) {
+			syncUnsubscribe();
+		}
+
+		// Subscribe to sync events
+		syncUnsubscribe = sync.onEvent(handleSyncEvent);
+
+		// Connect WebSocket
+		await sync.connect(sessionId);
+	}
+
+	/**
+	 * Disconnect from sync
+	 */
+	function disconnectSync() {
+		if (syncUnsubscribe) {
+			syncUnsubscribe();
+			syncUnsubscribe = null;
+		}
+		sync.disconnect();
+	}
 
 	return {
 		subscribe,
@@ -106,6 +294,9 @@ function createChatStore() {
 					sessionId: session.id,
 					messages
 				}));
+
+				// Connect to sync for real-time updates from other devices
+				await connectSync(sessionId);
 			} catch (e: any) {
 				update(s => ({ ...s, error: e.detail || 'Failed to load session' }));
 			}
@@ -120,10 +311,14 @@ function createChatStore() {
 		},
 
 		startNewChat() {
+			// Disconnect from sync when starting a new chat
+			disconnectSync();
+
 			update(s => ({
 				...s,
 				sessionId: null,
 				messages: [],
+				isRemoteStreaming: false,
 				error: null
 			}));
 		},
@@ -220,10 +415,14 @@ function createChatStore() {
 				};
 			});
 
+			// Get device ID for cross-device sync
+			const deviceId = getDeviceIdSync();
+
 			// Build request with captured values
 			const body: Record<string, unknown> = {
 				prompt,
-				profile: currentProfile
+				profile: currentProfile,
+				device_id: deviceId // Include device ID for sync
 			};
 
 			if (currentSessionId) {
@@ -346,6 +545,15 @@ function createChatStore() {
 		},
 
 		handleStreamEvent(event: Record<string, unknown>, msgId: string) {
+			// Handle init event specially - connect to sync for new session
+			if (event.type === 'init') {
+				const sessionId = event.session_id as string;
+				update(s => ({ ...s, sessionId }));
+				// Connect to sync for this new session
+				connectSync(sessionId).catch(console.error);
+				return;
+			}
+
 			update(s => {
 				const messages = [...s.messages];
 				const msgIndex = messages.findIndex(m => m.id === msgId);
@@ -355,9 +563,6 @@ function createChatStore() {
 				const msg = { ...messages[msgIndex] };
 
 				switch (event.type) {
-					case 'init':
-						return { ...s, sessionId: event.session_id as string };
-
 					case 'text':
 						msg.content += event.content as string;
 						break;
@@ -426,6 +631,8 @@ export const chat = createChatStore();
 // Derived stores
 export const messages = derived(chat, $chat => $chat.messages);
 export const isStreaming = derived(chat, $chat => $chat.isStreaming);
+export const isRemoteStreaming = derived(chat, $chat => $chat.isRemoteStreaming);
+export const isAnyStreaming = derived(chat, $chat => $chat.isStreaming || $chat.isRemoteStreaming);
 export const chatError = derived(chat, $chat => $chat.error);
 export const profiles = derived(chat, $chat => $chat.profiles);
 export const selectedProfile = derived(chat, $chat => $chat.selectedProfile);

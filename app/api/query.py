@@ -192,7 +192,8 @@ async def stream_conversation(
                 project_id=project_id,
                 overrides=overrides,
                 session_id=request.session_id,
-                api_user_id=api_user_id
+                api_user_id=api_user_id,
+                device_id=request.device_id  # Pass device ID for cross-device sync
             ):
                 event_type = event.get("type", "message")
                 data = json.dumps(event)

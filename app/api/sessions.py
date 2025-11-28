@@ -102,3 +102,81 @@ async def archive_session(session_id: str, token: str = Depends(require_auth)):
     )
 
     return {"status": "ok", "message": "Session archived"}
+
+
+# ============================================================================
+# Sync endpoints for cross-device synchronization (polling fallback)
+# ============================================================================
+
+@router.get("/{session_id}/sync")
+async def get_sync_changes(
+    session_id: str,
+    since_id: int = Query(0, description="Get changes after this sync ID"),
+    token: str = Depends(require_auth)
+):
+    """
+    Get sync changes for a session since a specific sync ID.
+    Used as a polling fallback when WebSocket is unavailable.
+
+    Returns:
+        - changes: List of sync events since since_id
+        - latest_id: The most recent sync ID (use for next poll)
+        - is_streaming: Whether the session is currently streaming
+    """
+    existing = database.get_session(session_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}"
+        )
+
+    changes = database.get_sync_logs(session_id, since_id=since_id)
+    latest_id = database.get_latest_sync_id(session_id)
+
+    # Check if streaming (import here to avoid circular import)
+    from app.core.sync_engine import sync_engine
+    is_streaming = sync_engine.is_session_streaming(session_id)
+
+    return {
+        "changes": changes,
+        "latest_id": latest_id,
+        "is_streaming": is_streaming,
+        "connected_devices": sync_engine.get_device_count(session_id)
+    }
+
+
+@router.get("/{session_id}/state")
+async def get_session_state(
+    session_id: str,
+    token: str = Depends(require_auth)
+):
+    """
+    Get full session state for initial sync.
+    Called when a device first connects to get caught up.
+
+    Returns:
+        - session: Session metadata
+        - messages: All messages in the session
+        - is_streaming: Whether the session is currently streaming
+        - latest_sync_id: Current sync ID for subsequent polling
+    """
+    session = database.get_session(session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}"
+        )
+
+    messages = database.get_session_messages(session_id)
+    latest_id = database.get_latest_sync_id(session_id)
+
+    from app.core.sync_engine import sync_engine
+    is_streaming = sync_engine.is_session_streaming(session_id)
+
+    return {
+        "session": session,
+        "messages": messages,
+        "is_streaming": is_streaming,
+        "latest_sync_id": latest_id,
+        "connected_devices": sync_engine.get_device_count(session_id)
+    }

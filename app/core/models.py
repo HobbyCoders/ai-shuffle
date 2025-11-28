@@ -218,6 +218,7 @@ class ConversationRequest(BaseModel):
     profile: Optional[str] = "claude-code"  # Used only for new sessions
     project: Optional[str] = None  # Used only for new sessions
     overrides: Optional[QueryOverrides] = None
+    device_id: Optional[str] = None  # Device identifier for cross-device sync
 
 
 class QueryMetadata(BaseModel):
