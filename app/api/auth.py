@@ -237,6 +237,7 @@ async def get_auth_status(request: Request):
         "is_admin": is_admin_authenticated,
         "setup_required": auth_service.is_setup_required(),
         "claude_authenticated": auth_service.is_claude_authenticated(),
+        "github_authenticated": auth_service.is_github_authenticated(),
         "username": username,
         "api_user": api_user_info
     }
@@ -399,10 +400,82 @@ async def claude_login_instructions():
     return auth_service.get_login_instructions()
 
 
+@router.post("/claude/login")
+async def claude_login(token: str = Depends(require_admin)):
+    """
+    Start Claude Code OAuth login process.
+    Returns an OAuth URL that the user should open in their browser.
+    """
+    return auth_service.start_claude_oauth_login()
+
+
+@router.get("/claude/login/poll")
+async def claude_login_poll(token: str = Depends(require_admin)):
+    """
+    Poll for Claude authentication status after user completes OAuth flow.
+    Returns when authentication is detected or after a short timeout.
+    """
+    # Short poll - check once with a brief delay for UI responsiveness
+    import asyncio
+    await asyncio.sleep(1)
+    if auth_service.is_claude_authenticated():
+        return {
+            "success": True,
+            "authenticated": True,
+            "message": "Successfully authenticated with Claude Code"
+        }
+    return {
+        "success": False,
+        "authenticated": False,
+        "message": "Not yet authenticated. Continue polling or try again."
+    }
+
+
 @router.post("/claude/logout")
-async def claude_logout(token: str = Depends(require_auth)):
+async def claude_logout(token: str = Depends(require_admin)):
     """Logout from Claude CLI"""
     return auth_service.claude_logout()
+
+
+# =========================================================================
+# GitHub CLI Authentication
+# =========================================================================
+
+@router.get("/github/status")
+async def github_auth_status():
+    """Get GitHub CLI authentication status"""
+    return auth_service.get_github_auth_info()
+
+
+@router.post("/github/login")
+async def github_login(request: Request, token: str = Depends(require_admin)):
+    """
+    Login to GitHub CLI using a personal access token.
+    Expects JSON body with 'token' field containing the GitHub PAT.
+    """
+    try:
+        body = await request.json()
+        gh_token = body.get("token")
+        if not gh_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="GitHub token is required"
+            )
+        return auth_service.github_login_with_token(gh_token)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"GitHub login error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
+@router.post("/github/logout")
+async def github_logout(token: str = Depends(require_admin)):
+    """Logout from GitHub CLI"""
+    return auth_service.github_logout()
 
 
 @router.get("/diagnostics")

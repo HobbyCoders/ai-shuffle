@@ -399,11 +399,22 @@ def update_profile(
     profile_id: str,
     name: Optional[str] = None,
     description: Optional[str] = None,
-    config: Optional[Dict[str, Any]] = None
+    config: Optional[Dict[str, Any]] = None,
+    allow_builtin: bool = False
 ) -> Optional[Dict[str, Any]]:
-    """Update a profile"""
+    """Update a profile
+
+    Args:
+        profile_id: The profile ID to update
+        name: Optional new name
+        description: Optional new description
+        config: Optional new config
+        allow_builtin: If True, allows updating builtin profiles (for migrations)
+    """
     existing = get_profile(profile_id)
-    if not existing or existing["is_builtin"]:
+    if not existing:
+        return None
+    if existing["is_builtin"] and not allow_builtin:
         return None
 
     updates = []

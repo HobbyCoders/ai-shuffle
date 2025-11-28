@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { auth, username, isAdmin, apiUser } from '$lib/stores/auth';
+	import { auth, username, isAdmin, apiUser, claudeAuthenticated, githubAuthenticated } from '$lib/stores/auth';
 	import { api } from '$lib/api/client';
 	import type { ApiUser, ApiUserWithKey, Profile } from '$lib/api/client';
 	import type { Project } from '$lib/stores/chat';
@@ -18,6 +18,14 @@
 	let newlyCreatedKey: string | null = null;
 	let regeneratedKey: string | null = null;
 
+	// Auth state
+	let githubToken = '';
+	let githubLoginLoading = false;
+	let claudeLoginLoading = false;
+	let claudeOAuthUrl: string | null = null;
+	let claudePolling = false;
+	let githubUser: string | null = null;
+
 	let formData = {
 		name: '',
 		description: '',
@@ -32,6 +40,7 @@
 			return;
 		}
 		await loadData();
+		await loadAuthStatus();
 	});
 
 	async function loadData() {
@@ -50,6 +59,105 @@
 			error = e.detail || 'Failed to load data';
 		}
 		loading = false;
+	}
+
+	async function loadAuthStatus() {
+		try {
+			const ghStatus = await api.get<{authenticated: boolean, user: string | null}>('/auth/github/status');
+			githubUser = ghStatus.user;
+		} catch (e) {
+			console.error('Failed to load GitHub status:', e);
+		}
+	}
+
+	// GitHub Authentication
+	async function handleGitHubLogin() {
+		if (!githubToken.trim()) {
+			error = 'Please enter a GitHub token';
+			return;
+		}
+		githubLoginLoading = true;
+		error = '';
+		try {
+			const result = await api.post<{success: boolean, message: string, error?: string}>('/auth/github/login', { token: githubToken });
+			if (result.success) {
+				githubToken = '';
+				await auth.checkAuth();
+				await loadAuthStatus();
+			} else {
+				error = result.error || result.message;
+			}
+		} catch (e: any) {
+			error = e.detail || 'GitHub login failed';
+		}
+		githubLoginLoading = false;
+	}
+
+	async function handleGitHubLogout() {
+		try {
+			await api.post('/auth/github/logout');
+			githubUser = null;
+			await auth.checkAuth();
+		} catch (e: any) {
+			error = e.detail || 'GitHub logout failed';
+		}
+	}
+
+	// Claude Code Authentication
+	async function handleClaudeLogin() {
+		claudeLoginLoading = true;
+		claudeOAuthUrl = null;
+		error = '';
+		try {
+			const result = await api.post<{success: boolean, oauth_url?: string, already_authenticated?: boolean, message: string}>('/auth/claude/login');
+			if (result.already_authenticated) {
+				await auth.checkAuth();
+				claudeLoginLoading = false;
+				return;
+			}
+			if (result.oauth_url) {
+				claudeOAuthUrl = result.oauth_url;
+				// Start polling for auth status
+				claudePolling = true;
+				pollClaudeAuth();
+			} else {
+				error = result.message || 'Failed to start OAuth login';
+			}
+		} catch (e: any) {
+			error = e.detail || 'Claude login failed';
+		}
+		claudeLoginLoading = false;
+	}
+
+	async function pollClaudeAuth() {
+		while (claudePolling) {
+			try {
+				const result = await api.get<{success: boolean, authenticated: boolean}>('/auth/claude/login/poll');
+				if (result.authenticated) {
+					claudePolling = false;
+					claudeOAuthUrl = null;
+					await auth.checkAuth();
+					return;
+				}
+			} catch (e) {
+				// Continue polling
+			}
+			await new Promise(r => setTimeout(r, 2000));
+		}
+	}
+
+	function cancelClaudeLogin() {
+		claudePolling = false;
+		claudeOAuthUrl = null;
+	}
+
+	async function handleClaudeLogout() {
+		try {
+			await api.post('/auth/claude/logout');
+			await auth.checkAuth();
+		} catch (e: any) {
+			error = e.detail || 'Claude logout failed';
+		}
 	}
 
 	function resetForm() {
@@ -209,6 +317,113 @@
 		</header>
 
 		<main class="max-w-6xl mx-auto px-4 py-6">
+			<!-- Service Authentication Section -->
+			<section class="mb-8">
+				<h2 class="text-xl font-bold text-white mb-4">Service Authentication</h2>
+				<p class="text-sm text-gray-500 mb-4">
+					Connect Claude Code and GitHub CLI to enable AI features and repository management.
+				</p>
+
+				<div class="grid md:grid-cols-2 gap-4">
+					<!-- Claude Code Auth -->
+					<div class="card p-4">
+						<div class="flex items-center justify-between mb-3">
+							<div class="flex items-center gap-2">
+								<svg class="w-5 h-5 text-orange-400" viewBox="0 0 24 24" fill="currentColor">
+									<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+								</svg>
+								<span class="font-medium text-white">Claude Code</span>
+							</div>
+							{#if $claudeAuthenticated}
+								<span class="text-xs px-2 py-0.5 rounded bg-green-900/50 text-green-400">Connected</span>
+							{:else}
+								<span class="text-xs px-2 py-0.5 rounded bg-yellow-900/50 text-yellow-400">Not Connected</span>
+							{/if}
+						</div>
+
+						{#if $claudeAuthenticated}
+							<p class="text-sm text-gray-400 mb-3">Claude Code is authenticated and ready to use.</p>
+							<button on:click={handleClaudeLogout} class="btn btn-secondary text-sm w-full">
+								Disconnect
+							</button>
+						{:else if claudeOAuthUrl}
+							<div class="space-y-3">
+								<p class="text-sm text-gray-400">Complete login in your browser:</p>
+								<a href={claudeOAuthUrl} target="_blank" rel="noopener noreferrer" class="btn btn-primary text-sm w-full flex items-center justify-center gap-2">
+									<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+									</svg>
+									Open Login Page
+								</a>
+								<div class="flex items-center gap-2 text-xs text-gray-500">
+									<div class="animate-spin w-3 h-3 border border-gray-500 border-t-transparent rounded-full"></div>
+									Waiting for authentication...
+								</div>
+								<button on:click={cancelClaudeLogin} class="text-xs text-gray-500 hover:text-gray-300">
+									Cancel
+								</button>
+							</div>
+						{:else}
+							<p class="text-sm text-gray-400 mb-3">Connect to enable AI-powered code assistance.</p>
+							<button on:click={handleClaudeLogin} disabled={claudeLoginLoading} class="btn btn-primary text-sm w-full">
+								{#if claudeLoginLoading}
+									<span class="animate-spin inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full mr-2"></span>
+								{/if}
+								Connect Claude Code
+							</button>
+						{/if}
+					</div>
+
+					<!-- GitHub CLI Auth -->
+					<div class="card p-4">
+						<div class="flex items-center justify-between mb-3">
+							<div class="flex items-center gap-2">
+								<svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="currentColor">
+									<path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+								</svg>
+								<span class="font-medium text-white">GitHub CLI</span>
+							</div>
+							{#if $githubAuthenticated}
+								<span class="text-xs px-2 py-0.5 rounded bg-green-900/50 text-green-400">Connected</span>
+							{:else}
+								<span class="text-xs px-2 py-0.5 rounded bg-yellow-900/50 text-yellow-400">Not Connected</span>
+							{/if}
+						</div>
+
+						{#if $githubAuthenticated}
+							<p class="text-sm text-gray-400 mb-3">
+								Connected as <span class="text-white font-medium">{githubUser || 'GitHub User'}</span>
+							</p>
+							<button on:click={handleGitHubLogout} class="btn btn-secondary text-sm w-full">
+								Disconnect
+							</button>
+						{:else}
+							<p class="text-sm text-gray-400 mb-3">Connect to enable repository management.</p>
+							<div class="space-y-2">
+								<input
+									type="password"
+									bind:value={githubToken}
+									placeholder="GitHub Personal Access Token"
+									class="input text-sm"
+								/>
+								<button on:click={handleGitHubLogin} disabled={githubLoginLoading} class="btn btn-primary text-sm w-full">
+									{#if githubLoginLoading}
+										<span class="animate-spin inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full mr-2"></span>
+									{/if}
+									Connect GitHub
+								</button>
+								<p class="text-xs text-gray-600">
+									<a href="https://github.com/settings/tokens/new?scopes=repo,read:org,gist,workflow" target="_blank" rel="noopener noreferrer" class="text-blue-400 hover:underline">
+										Create a token
+									</a>
+									with repo, read:org, gist, workflow scopes
+								</p>
+							</div>
+						{/if}
+					</div>
+				</div>
+			</section>
+
 			<!-- API Users Section -->
 			<section class="mb-8">
 				<div class="flex items-center justify-between mb-4">
