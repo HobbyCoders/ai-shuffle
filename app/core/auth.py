@@ -468,37 +468,141 @@ class AuthService:
             )
 
             if in_docker:
-                # In Docker, we can try to run claude login and capture output
-                # The login command will print a URL that user needs to visit
-                use_shell = False
+                # In Docker, we run claude login and capture output
+                # claude login is interactive - it prints a URL then waits for the code
+                # We need to use a pseudo-terminal (pty) because claude login
+                # may buffer output or behave differently without a TTY
+                import re
+                import time
 
-                result = subprocess.run(
-                    [claude_cmd, 'login'],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,  # Short timeout - we just want to capture the URL
-                    env={**os.environ, 'HOME': home_env}
-                )
+                output = ""
+                process = None
+
+                try:
+                    # Try using pty for proper TTY emulation (Unix only)
+                    try:
+                        import pty
+                        import os as os_module
+
+                        master_fd, slave_fd = pty.openpty()
+
+                        process = subprocess.Popen(
+                            [claude_cmd, 'login'],
+                            stdin=slave_fd,
+                            stdout=slave_fd,
+                            stderr=slave_fd,
+                            close_fds=True,
+                            env={**os.environ, 'HOME': home_env}
+                        )
+
+                        os_module.close(slave_fd)
+
+                        # Read from master with timeout
+                        import select
+                        start = time.time()
+                        while time.time() - start < 8:
+                            ready, _, _ = select.select([master_fd], [], [], 0.5)
+                            if ready:
+                                try:
+                                    data = os_module.read(master_fd, 4096)
+                                    if data:
+                                        chunk = data.decode('utf-8', errors='replace')
+                                        output += chunk
+                                        logger.debug(f"Claude login pty output: {repr(chunk)}")
+
+                                        # Check if we found a URL
+                                        url_match = re.search(r'(https://[^\s\x00-\x1f]+)', output)
+                                        if url_match:
+                                            break
+                                except OSError:
+                                    break
+
+                        os_module.close(master_fd)
+
+                    except (ImportError, OSError) as pty_error:
+                        # pty not available (Windows) or failed, try regular subprocess
+                        logger.debug(f"PTY not available, using regular subprocess: {pty_error}")
+
+                        # Use threading approach as fallback
+                        import threading
+                        import queue
+
+                        process = subprocess.Popen(
+                            [claude_cmd, 'login'],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            stdin=subprocess.PIPE,
+                            text=True,
+                            env={**os.environ, 'HOME': home_env}
+                        )
+
+                        def read_output(pipe, q):
+                            try:
+                                for line in iter(pipe.readline, ''):
+                                    q.put(line)
+                            except:
+                                pass
+
+                        stdout_queue = queue.Queue()
+                        stderr_queue = queue.Queue()
+
+                        stdout_thread = threading.Thread(target=read_output, args=(process.stdout, stdout_queue))
+                        stderr_thread = threading.Thread(target=read_output, args=(process.stderr, stderr_queue))
+                        stdout_thread.daemon = True
+                        stderr_thread.daemon = True
+                        stdout_thread.start()
+                        stderr_thread.start()
+
+                        # Wait up to 8 seconds for output
+                        start = time.time()
+                        while time.time() - start < 8:
+                            try:
+                                line = stdout_queue.get_nowait()
+                                output += line
+                                logger.debug(f"Claude login stdout: {line}")
+                            except queue.Empty:
+                                pass
+                            try:
+                                line = stderr_queue.get_nowait()
+                                output += line
+                                logger.debug(f"Claude login stderr: {line}")
+                            except queue.Empty:
+                                pass
+
+                            # Check if we found a URL
+                            url_match = re.search(r'(https://[^\s\x00-\x1f]+)', output)
+                            if url_match:
+                                break
+
+                            time.sleep(0.1)
+
+                finally:
+                    # Kill the process - we just needed the URL
+                    if process:
+                        try:
+                            process.kill()
+                            process.wait(timeout=2)
+                        except:
+                            pass
 
                 # Parse output to find OAuth URL
-                output = result.stdout + result.stderr
-
-                # Look for URL in output
-                import re
-                url_match = re.search(r'(https://[^\s]+)', output)
+                url_match = re.search(r'(https://[^\s\x00-\x1f]+)', output)
 
                 if url_match:
+                    oauth_url = url_match.group(1)
+                    logger.info(f"Extracted OAuth URL: {oauth_url}")
                     return {
                         "success": True,
-                        "oauth_url": url_match.group(1),
+                        "oauth_url": oauth_url,
                         "message": "Open this URL in your browser to complete login. After authenticating, copy the code and use the /auth/claude/complete endpoint.",
                         "requires_code": True
                     }
                 else:
+                    logger.warning(f"Could not find URL in claude login output: {repr(output)}")
                     return {
                         "success": False,
                         "message": "Could not extract OAuth URL",
-                        "error": output or "No output from claude login command",
+                        "error": output or "No output from claude login command. The command may require a TTY.",
                         "instructions": "Run 'claude login' manually in the container terminal"
                     }
             else:
