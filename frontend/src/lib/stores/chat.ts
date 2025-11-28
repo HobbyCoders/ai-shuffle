@@ -379,7 +379,7 @@ function createChatStore() {
 			}
 		},
 
-		async loadSession(sessionId: string) {
+		async loadSession(sessionId: string): Promise<boolean> {
 			try {
 				const session = await api.get<Session & { messages: SessionMessage[] }>(`/sessions/${sessionId}`);
 				const messages: ChatMessage[] = session.messages.map((m, i) => ({
@@ -405,8 +405,10 @@ function createChatStore() {
 				} catch (syncError) {
 					console.warn('[Chat] Failed to connect sync, session loaded without real-time updates:', syncError);
 				}
+				return true;
 			} catch (e: any) {
 				update(s => ({ ...s, error: e.detail || 'Failed to load session' }));
+				return false;
 			}
 		},
 

@@ -71,7 +71,7 @@
 
 		// Handle page visibility changes (user leaving and returning)
 		// This reconnects to the session when the user returns to the page
-		const handleVisibilityChange = () => {
+		const handleVisibilityChange = async () => {
 			if (document.visibilityState === 'visible') {
 				// Use get() to access store value synchronously
 				const sessionId = $currentSessionId;
@@ -85,14 +85,31 @@
 					// Clear any network errors from when the page was in background
 					chat.clearError();
 
-					// Reload the current session to get latest messages
-					chat.loadSession(sessionId);
+					// Helper to load with retry
+					const loadWithRetry = async (retries: number = 3, delay: number = 500) => {
+						for (let i = 0; i < retries; i++) {
+							const success = await chat.loadSession(sessionId);
+							if (success) {
+								console.log('[UI] Session loaded successfully');
+								return true;
+							}
+							console.warn(`[UI] Load attempt ${i + 1} failed, ${retries - i - 1} retries left`);
+							if (i < retries - 1) {
+								await new Promise(r => setTimeout(r, delay));
+								chat.clearError();
+							}
+						}
+						return false;
+					};
+
+					// Load with retry
+					loadWithRetry();
 					// Also refresh sessions list in case title changed
 					chat.loadSessions();
 
 					// Keep clearing errors for a grace period (old SSE errors may come in async)
 					const clearErrorsInterval = setInterval(() => {
-						if (Date.now() - lastVisibleTime < 2000) {
+						if (Date.now() - lastVisibleTime < 3000) {
 							chat.clearError();
 						} else {
 							errorGracePeriod = false;
@@ -737,7 +754,7 @@
 						{/each}
 					{/if}
 
-					{#if $chatError}
+					{#if $chatError && !errorGracePeriod}
 						<div class="bg-red-900/50 border border-red-500 text-red-300 px-4 py-3 rounded-lg">
 							{$chatError}
 							<button on:click={() => chat.clearError()} class="ml-2 text-red-400 hover:text-red-300">
