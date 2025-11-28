@@ -36,6 +36,7 @@ class SessionState:
     is_connected: bool = False
     is_streaming: bool = False
     last_activity: datetime = field(default_factory=datetime.now)
+    background_task: Optional[asyncio.Task] = None  # Track background streaming task
 
 
 # Track active sessions - key is our session_id, value is SessionState
@@ -615,6 +616,337 @@ async def stream_query(
             "session_id": session_id,
             "metadata": metadata
         }
+
+
+async def _run_background_query(
+    session_id: str,
+    prompt: str,
+    profile: Dict[str, Any],
+    project: Optional[Dict[str, Any]],
+    overrides: Optional[Dict[str, Any]],
+    resume_id: Optional[str],
+    device_id: Optional[str],
+    api_user_id: Optional[str]
+):
+    """
+    Run a streaming query in the background, independent of HTTP connection.
+
+    This allows work to continue even when:
+    - User locks their phone
+    - Browser tab is backgrounded
+    - HTTP connection is interrupted
+
+    All events are broadcast via sync_engine for WebSocket delivery.
+    """
+    # Store user message and broadcast to other devices
+    user_msg = database.add_session_message(
+        session_id=session_id,
+        role="user",
+        content=prompt
+    )
+
+    # Broadcast user message to other devices
+    await sync_engine.broadcast_message_added(
+        session_id=session_id,
+        message=user_msg,
+        source_device_id=device_id
+    )
+
+    # Log to sync log for polling fallback
+    database.add_sync_log(
+        session_id=session_id,
+        event_type="message_added",
+        entity_type="message",
+        entity_id=str(user_msg["id"]),
+        data=user_msg
+    )
+
+    # Build options
+    options = build_options_from_profile(
+        profile=profile,
+        project=project,
+        overrides=overrides,
+        resume_session_id=resume_id
+    )
+
+    # Clean up any existing state for this session
+    state = _active_sessions.get(session_id)
+    if state:
+        logger.info(f"Cleaning up existing state for session {session_id}")
+        try:
+            await state.client.disconnect()
+        except Exception:
+            pass
+        del _active_sessions[session_id]
+
+    # Always create new client
+    logger.info(f"[Background] Creating new ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
+    client = ClaudeSDKClient(options=options)
+
+    # Connect
+    try:
+        await client.connect()
+        logger.info(f"[Background] Connected to Claude SDK for session {session_id}")
+    except Exception as e:
+        logger.error(f"[Background] Failed to connect to Claude SDK for session {session_id}: {e}")
+        # Broadcast error
+        await sync_engine.broadcast_stream_end(
+            session_id=session_id,
+            message_id=f"error-{session_id}",
+            metadata={"error": str(e)},
+            interrupted=True,
+            source_device_id=device_id
+        )
+        return
+
+    state = SessionState(
+        client=client,
+        sdk_session_id=resume_id,
+        is_connected=True
+    )
+    _active_sessions[session_id] = state
+
+    # Mark as streaming
+    state.is_streaming = True
+    state.last_activity = datetime.now()
+
+    # Generate a message ID for streaming sync
+    assistant_msg_id = f"streaming-{session_id}-{datetime.now().timestamp()}"
+
+    # Broadcast stream start to all devices (including the one that initiated)
+    await sync_engine.broadcast_stream_start(
+        session_id=session_id,
+        message_id=assistant_msg_id,
+        source_device_id=None  # Don't exclude any device - all should see it
+    )
+
+    # Log stream start for polling fallback
+    database.add_sync_log(
+        session_id=session_id,
+        event_type="stream_start",
+        entity_type="message",
+        entity_id=assistant_msg_id,
+        data={"message_id": assistant_msg_id}
+    )
+
+    # Execute query
+    response_text = []
+    metadata = {}
+    sdk_session_id = resume_id
+    interrupted = False
+
+    try:
+        await state.client.query(prompt)
+
+        async for message in state.client.receive_response():
+            if isinstance(message, SystemMessage):
+                if message.subtype == "init" and "session_id" in message.data:
+                    sdk_session_id = message.data["session_id"]
+                    state.sdk_session_id = sdk_session_id
+                    logger.info(f"[Background] Captured SDK session ID: {sdk_session_id}")
+
+            elif isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        response_text.append(block.text)
+                        # Broadcast text chunk to all devices
+                        await sync_engine.broadcast_stream_chunk(
+                            session_id=session_id,
+                            message_id=assistant_msg_id,
+                            chunk_type="text",
+                            chunk_data={"content": block.text},
+                            source_device_id=None
+                        )
+
+                    elif isinstance(block, ToolUseBlock):
+                        await sync_engine.broadcast_stream_chunk(
+                            session_id=session_id,
+                            message_id=assistant_msg_id,
+                            chunk_type="tool_use",
+                            chunk_data={
+                                "name": block.name,
+                                "id": getattr(block, 'id', None),
+                                "input": block.input
+                            },
+                            source_device_id=None
+                        )
+
+                    elif isinstance(block, ToolResultBlock):
+                        output = str(block.content)[:2000]
+                        await sync_engine.broadcast_stream_chunk(
+                            session_id=session_id,
+                            message_id=assistant_msg_id,
+                            chunk_type="tool_result",
+                            chunk_data={
+                                "name": getattr(block, 'name', 'unknown'),
+                                "tool_use_id": getattr(block, 'tool_use_id', None),
+                                "output": output
+                            },
+                            source_device_id=None
+                        )
+
+                metadata["model"] = message.model
+
+            elif isinstance(message, ResultMessage):
+                metadata["duration_ms"] = message.duration_ms
+                metadata["num_turns"] = message.num_turns
+                metadata["total_cost_usd"] = message.total_cost_usd
+                metadata["is_error"] = message.is_error
+
+    except asyncio.CancelledError:
+        interrupted = True
+        logger.info(f"[Background] Query interrupted for session {session_id}")
+
+    except Exception as e:
+        logger.error(f"[Background] Stream query error for session {session_id}: {e}")
+        state.is_connected = False
+        metadata["error"] = str(e)
+
+    finally:
+        state.is_streaming = False
+        state.last_activity = datetime.now()
+        state.background_task = None
+
+        # Broadcast stream end to all devices
+        await sync_engine.broadcast_stream_end(
+            session_id=session_id,
+            message_id=assistant_msg_id,
+            metadata=metadata,
+            interrupted=interrupted,
+            source_device_id=None
+        )
+
+    # Update session in database
+    if sdk_session_id:
+        database.update_session(
+            session_id=session_id,
+            sdk_session_id=sdk_session_id,
+            cost_increment=metadata.get("total_cost_usd", 0),
+            turn_increment=metadata.get("num_turns", 0)
+        )
+        logger.info(f"[Background] Updated session {session_id}, sdk_session_id={sdk_session_id}")
+
+    # Store assistant response
+    full_response = "\n".join(response_text)
+    if full_response or interrupted:
+        assistant_msg = database.add_session_message(
+            session_id=session_id,
+            role="assistant",
+            content=full_response + ("\n[Interrupted]" if interrupted else ""),
+            metadata=metadata
+        )
+
+        # Log stream end for polling fallback
+        database.add_sync_log(
+            session_id=session_id,
+            event_type="stream_end",
+            entity_type="message",
+            entity_id=str(assistant_msg["id"]),
+            data={
+                "message": assistant_msg,
+                "metadata": metadata,
+                "interrupted": interrupted
+            }
+        )
+
+    # Log usage
+    if metadata and not metadata.get("error"):
+        database.log_usage(
+            session_id=session_id,
+            profile_id=profile["id"],
+            model=metadata.get("model"),
+            tokens_in=0,
+            tokens_out=0,
+            cost_usd=metadata.get("total_cost_usd", 0),
+            duration_ms=metadata.get("duration_ms", 0)
+        )
+
+    logger.info(f"[Background] Query completed for session {session_id}")
+
+
+async def start_background_query(
+    prompt: str,
+    profile_id: str,
+    project_id: Optional[str] = None,
+    overrides: Optional[Dict[str, Any]] = None,
+    session_id: Optional[str] = None,
+    api_user_id: Optional[str] = None,
+    device_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Start a streaming query in a background task.
+
+    Returns immediately with session info. Work continues in background.
+    Use interrupt_session() to stop.
+    """
+    # Get profile
+    profile = get_profile_or_builtin(profile_id)
+    if not profile:
+        raise ValueError(f"Profile not found: {profile_id}")
+
+    # Get project if specified
+    project = None
+    if project_id:
+        project = database.get_project(project_id)
+        if not project:
+            raise ValueError(f"Project not found: {project_id}")
+
+    # Get or create session in database
+    resume_id = None
+
+    if session_id:
+        session = database.get_session(session_id)
+        if not session:
+            raise ValueError(f"Session not found: {session_id}")
+        resume_id = session.get("sdk_session_id")
+        logger.info(f"Resuming session {session_id} with SDK session {resume_id}")
+    else:
+        session_id = str(uuid.uuid4())
+        title = prompt[:50].strip()
+        if len(prompt) > 50:
+            title += "..."
+        session = database.create_session(
+            session_id=session_id,
+            profile_id=profile_id,
+            project_id=project_id,
+            title=title,
+            api_user_id=api_user_id
+        )
+        logger.info(f"Created new session {session_id} with title: {title}")
+
+    # Start background task
+    task = asyncio.create_task(
+        _run_background_query(
+            session_id=session_id,
+            prompt=prompt,
+            profile=profile,
+            project=project,
+            overrides=overrides,
+            resume_id=resume_id,
+            device_id=device_id,
+            api_user_id=api_user_id
+        )
+    )
+
+    # Store task reference for interrupt support
+    # Note: state may not exist yet, it will be created in the background task
+    # We'll store the task reference after the state is created
+    # For now, we use a temporary holder
+    asyncio.get_event_loop().call_soon(
+        lambda: _store_background_task(session_id, task)
+    )
+
+    return {
+        "session_id": session_id,
+        "status": "started"
+    }
+
+
+def _store_background_task(session_id: str, task: asyncio.Task):
+    """Store background task reference after state is created"""
+    state = _active_sessions.get(session_id)
+    if state:
+        state.background_task = task
 
 
 async def interrupt_session(session_id: str) -> bool:

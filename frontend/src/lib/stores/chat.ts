@@ -53,7 +53,6 @@ interface ChatState {
 	isStreaming: boolean;
 	isRemoteStreaming: boolean; // True when another device is streaming
 	error: string | null;
-	abortController: AbortController | null;
 }
 
 function createChatStore() {
@@ -68,11 +67,8 @@ function createChatStore() {
 		activeSessionIds: new Set(),
 		isStreaming: false,
 		isRemoteStreaming: false,
-		error: null,
-		abortController: null
+		error: null
 	});
-
-	let currentEventSource: EventSource | null = null;
 	let syncUnsubscribe: (() => void) | null = null;
 	let remoteMsgId: string | null = null; // Track remote streaming message ID
 
@@ -523,10 +519,7 @@ function createChatStore() {
 		},
 
 		async sendMessage(prompt: string) {
-			// Create abort controller for this request
-			const abortController = new AbortController();
-
-			// Add user message
+			// Add user message immediately for responsive UI
 			const userMsgId = `msg-${Date.now()}`;
 			const userMessage: ChatMessage = {
 				id: userMsgId,
@@ -545,13 +538,11 @@ function createChatStore() {
 			};
 
 			// Capture current state values AFTER updating UI
-			// This ensures we get the latest sessionId even if loadSession just completed
 			let currentSessionId: string | null = null;
 			let currentProfile: string = 'claude-code';
 			let currentProject: string = '';
 
 			update(s => {
-				// Capture current values from store during update
 				currentSessionId = s.sessionId;
 				currentProfile = s.selectedProfile;
 				currentProject = s.selectedProject;
@@ -559,19 +550,18 @@ function createChatStore() {
 					...s,
 					messages: [...s.messages, userMessage, assistantMessage],
 					isStreaming: true,
-					error: null,
-					abortController
+					error: null
 				};
 			});
 
 			// Get device ID for cross-device sync
 			const deviceId = getDeviceIdSync();
 
-			// Build request with captured values
+			// Build request
 			const body: Record<string, unknown> = {
 				prompt,
 				profile: currentProfile,
-				device_id: deviceId // Include device ID for sync
+				device_id: deviceId
 			};
 
 			if (currentSessionId) {
@@ -583,85 +573,42 @@ function createChatStore() {
 			}
 
 			try {
-				// Use fetch for SSE
-				const response = await fetch('/api/v1/conversation/stream', {
+				// Start background query - returns immediately
+				// Streaming events come via WebSocket, not HTTP
+				const response = await fetch('/api/v1/conversation/start', {
 					method: 'POST',
 					headers: {
 						'Content-Type': 'application/json'
 					},
 					credentials: 'include',
-					body: JSON.stringify(body),
-					signal: abortController.signal
+					body: JSON.stringify(body)
 				});
 
 				if (!response.ok) {
 					const error = await response.json();
-					throw new Error(error.detail || 'Stream request failed');
+					throw new Error(error.detail || 'Failed to start conversation');
 				}
 
-				const reader = response.body?.getReader();
-				const decoder = new TextDecoder();
+				const result = await response.json();
+				const newSessionId = result.session_id;
 
-				if (!reader) {
-					throw new Error('No response body');
-				}
+				// Update session ID and connect to sync for this session
+				update(s => ({ ...s, sessionId: newSessionId }));
 
-				let buffer = '';
+				// Connect to WebSocket for streaming updates
+				// The sync handler will receive stream_start, stream_chunk, stream_end events
+				await connectSync(newSessionId);
 
-				while (true) {
-					const { done, value } = await reader.read();
-					if (done) break;
-
-					buffer += decoder.decode(value, { stream: true });
-
-					// Process SSE events
-					const lines = buffer.split('\n');
-					buffer = lines.pop() || '';
-
-					for (const line of lines) {
-						if (line.startsWith('data: ')) {
-							const data = line.slice(6);
-							try {
-								const event = JSON.parse(data);
-								this.handleStreamEvent(event, assistantMsgId);
-							} catch (e) {
-								console.error('Failed to parse SSE event:', data);
-							}
-						}
-					}
-				}
-
-				// Reload sessions to update the list
+				// Reload sessions list to show new session
 				await this.loadSessions();
 
 			} catch (e: any) {
-				// Don't show error for intentional abort
-				if (e.name === 'AbortError') {
-					update(s => {
-						const messages = [...s.messages];
-						const msgIndex = messages.findIndex(m => m.id === assistantMsgId);
-						if (msgIndex !== -1) {
-							messages[msgIndex] = {
-								...messages[msgIndex],
-								streaming: false,
-								content: messages[msgIndex].content + '\n\n[Stopped]'
-							};
-						}
-						return {
-							...s,
-							messages,
-							isStreaming: false,
-							abortController: null
-						};
-					});
-					return;
-				}
-
+				// Remove the placeholder messages on error
 				update(s => ({
 					...s,
+					messages: s.messages.filter(m => m.id !== userMsgId && m.id !== assistantMsgId),
 					isStreaming: false,
-					error: e.message || 'Failed to send message',
-					abortController: null
+					error: e.message || 'Failed to send message'
 				}));
 			}
 		},
@@ -669,27 +616,28 @@ function createChatStore() {
 		async stopGeneration() {
 			const state = get({ subscribe });
 
-			// Abort the fetch request
-			if (state.abortController) {
-				state.abortController.abort();
-			}
-
-			// Also call the server-side interrupt if we have a session
+			// Call the server-side interrupt to stop the background task
 			if (state.sessionId) {
 				try {
-					await fetch(`/api/v1/session/${state.sessionId}/interrupt`, {
+					const response = await fetch(`/api/v1/session/${state.sessionId}/interrupt`, {
 						method: 'POST',
 						credentials: 'include'
 					});
+
+					if (!response.ok) {
+						console.warn('Interrupt request failed:', response.status);
+					}
 				} catch (e) {
 					console.error('Failed to interrupt session:', e);
 				}
 			}
 
+			// Update local state - the stream_end event from WebSocket will also update this
+			// but we do it immediately for responsive UI
 			update(s => ({
 				...s,
 				isStreaming: false,
-				abortController: null
+				isRemoteStreaming: false
 			}));
 		},
 
@@ -851,8 +799,7 @@ function createChatStore() {
 						return {
 							...s,
 							messages: cleanedMessages,
-							isStreaming: false,
-							abortController: null
+							isStreaming: false
 						};
 					}
 
@@ -885,8 +832,7 @@ function createChatStore() {
 						return {
 							...s,
 							messages: cleanedMessages,
-							isStreaming: false,
-							abortController: null
+							isStreaming: false
 						};
 					}
 
@@ -908,8 +854,7 @@ function createChatStore() {
 							...s,
 							messages: cleanedMessages,
 							isStreaming: false,
-							error: event.message as string,
-							abortController: null
+							error: event.message as string
 						};
 					}
 				}
