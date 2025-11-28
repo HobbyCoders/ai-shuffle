@@ -46,7 +46,7 @@ class SystemPromptConfig(BaseModel):
 class ProfileConfig(BaseModel):
     """Claude Agent configuration stored in profile - maps to ClaudeAgentOptions"""
     # Core settings
-    model: Optional[str] = "claude-sonnet-4"
+    model: Optional[str] = "sonnet"
     permission_mode: Optional[str] = "default"  # default, acceptEdits, plan, bypassPermissions
     max_turns: Optional[int] = None
 

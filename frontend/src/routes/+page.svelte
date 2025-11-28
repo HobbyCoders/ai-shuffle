@@ -20,7 +20,7 @@
 		name: '',
 		description: '',
 		// Core settings
-		model: 'claude-sonnet-4',
+		model: 'sonnet',
 		permission_mode: 'default',
 		max_turns: null as number | null,
 		// Tool configuration
@@ -121,7 +121,7 @@
 			id: '',
 			name: '',
 			description: '',
-			model: 'claude-sonnet-4',
+			model: 'sonnet',
 			permission_mode: 'default',
 			max_turns: null,
 			allowed_tools: '',
@@ -156,7 +156,7 @@
 			id: profile.id,
 			name: profile.name,
 			description: profile.description || '',
-			model: config.model || 'claude-sonnet-4',
+			model: config.model || 'sonnet',
 			permission_mode: config.permission_mode || 'default',
 			max_turns: config.max_turns || null,
 			allowed_tools: (config.allowed_tools || []).join(', '),
@@ -648,9 +648,9 @@
 								<div>
 									<label class="block text-sm text-gray-400 mb-1">Model</label>
 									<select bind:value={profileForm.model} class="input">
-										<option value="claude-sonnet-4">Sonnet</option>
-										<option value="claude-opus-4">Opus</option>
-										<option value="claude-haiku-3-5">Haiku</option>
+										<option value="sonnet">Sonnet</option>
+										<option value="opus">Opus</option>
+										<option value="haiku">Haiku</option>
 									</select>
 								</div>
 								<div>
@@ -876,7 +876,7 @@
 										<p class="text-xs text-gray-500 truncate">{profile.description}</p>
 									{/if}
 									<p class="text-xs text-gray-600 mt-1">
-										{profile.config?.model || 'claude-sonnet-4'} • {profile.config?.permission_mode || 'default'}
+										{profile.config?.model || 'sonnet'} • {profile.config?.permission_mode || 'default'}
 									</p>
 								</div>
 								<div class="flex items-center gap-1 ml-2">
