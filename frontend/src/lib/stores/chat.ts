@@ -139,6 +139,17 @@ function createChatStore() {
 								const msg = { ...messages[lastStreamingTextIndex] };
 								msg.content += event.data.content as string;
 								messages[lastStreamingTextIndex] = msg;
+							} else {
+								// No streaming text message found - create one
+								console.warn('[Sync] No streaming text message found, creating new one');
+								const newTextMsgId = `msg-sync-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+								messages.push({
+									id: newTextMsgId,
+									role: 'assistant',
+									type: 'text',
+									content: event.data.content as string,
+									streaming: true
+								});
 							}
 							break;
 						}
@@ -367,7 +378,9 @@ function createChatStore() {
 					id: `msg-${i}`,
 					role: m.role as 'user' | 'assistant',
 					content: m.content,
-					metadata: m.metadata
+					type: m.role === 'assistant' ? 'text' : undefined, // Set type for assistant messages
+					metadata: m.metadata,
+					streaming: false
 				}));
 				// Don't change selectedProfile when resuming - keep user's current selection
 				update(s => ({
@@ -650,6 +663,18 @@ function createChatStore() {
 							const msg = { ...messages[lastStreamingTextIndex] };
 							msg.content += event.content as string;
 							messages[lastStreamingTextIndex] = msg;
+						} else {
+							// No streaming text message found - create one
+							// This can happen if we receive text without a prior placeholder
+							console.warn('[Chat] No streaming text message found, creating new one');
+							const newTextMsgId = `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+							messages.push({
+								id: newTextMsgId,
+								role: 'assistant',
+								type: 'text',
+								content: event.content as string,
+								streaming: true
+							});
 						}
 						break;
 					}
