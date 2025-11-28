@@ -8,6 +8,8 @@
 	let prompt = '';
 	let messagesContainer: HTMLElement;
 	let sidebarOpen = false;
+	let shouldAutoScroll = true;
+	let lastMessageCount = 0;
 	let showProfileModal = false;
 	let showProjectModal = false;
 	let showNewProfileForm = false;
@@ -58,10 +60,23 @@
 		]);
 	});
 
-	$: if ($messages.length && messagesContainer) {
-		setTimeout(() => {
-			messagesContainer.scrollTop = messagesContainer.scrollHeight;
-		}, 10);
+	// Auto-scroll only when new messages arrive or during streaming, and user hasn't scrolled up
+	$: if (messagesContainer && $messages.length > 0) {
+		const newMessageArrived = $messages.length > lastMessageCount;
+		lastMessageCount = $messages.length;
+
+		if ((newMessageArrived || $isStreaming) && shouldAutoScroll) {
+			setTimeout(() => {
+				messagesContainer.scrollTop = messagesContainer.scrollHeight;
+			}, 10);
+		}
+	}
+
+	function handleScroll() {
+		if (!messagesContainer) return;
+		// Check if user is near the bottom (within 100px)
+		const { scrollTop, scrollHeight, clientHeight } = messagesContainer;
+		shouldAutoScroll = scrollHeight - scrollTop - clientHeight < 100;
 	}
 
 	async function handleSubmit() {
@@ -472,6 +487,7 @@
 			<!-- Messages -->
 			<div
 				bind:this={messagesContainer}
+				on:scroll={handleScroll}
 				class="flex-1 overflow-y-auto min-h-0"
 			>
 				<div class="max-w-4xl mx-auto px-4 py-4 space-y-6">

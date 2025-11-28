@@ -5,7 +5,7 @@ Complete API documentation for integrating external applications with AI Hub.
 ## Base URL
 
 ```
-http://localhost:8000/api/v1
+<Server-IP>/api/v1
 ```
 
 ## Authentication
