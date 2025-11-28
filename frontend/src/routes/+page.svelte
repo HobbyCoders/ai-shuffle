@@ -11,6 +11,7 @@
 	let sidebarOpen = false;
 	let shouldAutoScroll = true;
 	let lastMessageCount = 0;
+	let lastContentLength = 0;
 	let showProfileModal = false;
 	let showProjectModal = false;
 	let showNewProfileForm = false;
@@ -64,23 +65,39 @@
 		]);
 	});
 
-	// Auto-scroll only when new messages arrive or during streaming, and user hasn't scrolled up
+	// Check if user is near the bottom of scroll area
+	function isNearBottom(threshold = 100): boolean {
+		if (!messagesContainer) return true;
+		const { scrollTop, scrollHeight, clientHeight } = messagesContainer;
+		return scrollHeight - scrollTop - clientHeight < threshold;
+	}
+
+	// Auto-scroll only when user is at the bottom - respects user scroll position
 	$: if (messagesContainer && $messages.length > 0) {
 		const newMessageArrived = $messages.length > lastMessageCount;
 		lastMessageCount = $messages.length;
 
-		if ((newMessageArrived || $isStreaming) && shouldAutoScroll) {
+		// Calculate total content length to detect streaming updates
+		const totalContentLength = $messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+		const contentUpdated = totalContentLength > lastContentLength;
+		lastContentLength = totalContentLength;
+
+		// Only auto-scroll if user is near the bottom AND (new message OR content updated during streaming)
+		if ((newMessageArrived || (contentUpdated && $isStreaming)) && shouldAutoScroll) {
 			setTimeout(() => {
-				messagesContainer.scrollTop = messagesContainer.scrollHeight;
+				// Double-check position before scrolling (user may have scrolled during timeout)
+				if (isNearBottom(150)) {
+					messagesContainer.scrollTop = messagesContainer.scrollHeight;
+				}
 			}, 10);
 		}
 	}
 
 	function handleScroll() {
 		if (!messagesContainer) return;
-		// Check if user is near the bottom (within 100px)
-		const { scrollTop, scrollHeight, clientHeight } = messagesContainer;
-		shouldAutoScroll = scrollHeight - scrollTop - clientHeight < 100;
+		// Update shouldAutoScroll based on current position
+		// Use a generous threshold so small content additions don't break it
+		shouldAutoScroll = isNearBottom(100);
 	}
 
 	async function handleSubmit() {
