@@ -843,8 +843,8 @@
 							bind:value={prompt}
 							on:keydown={handleKeyDown}
 							placeholder="Type a message..."
-							class="input flex-1 resize-none min-h-[44px] max-h-32"
-							rows="1"
+							class="input flex-1 resize-none min-h-[80px] max-h-48 py-3 text-base leading-relaxed"
+							rows="3"
 							disabled={$isStreaming || !$claudeAuthenticated}
 						></textarea>
 						{#if $isStreaming}
