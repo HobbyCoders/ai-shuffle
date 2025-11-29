@@ -565,37 +565,60 @@ class AuthService:
                     self._claude_login_process = process
                     self._claude_login_master_fd = master_fd
 
-                    # Wait a moment for initial output
-                    time.sleep(0.5)
+                    all_output = ""
 
-                    # Read initial output (theme selection)
+                    # Wait for initial output and theme selection
+                    time.sleep(1.5)  # Give CLI more time to fully render
                     output = self._read_pty_output(timeout=3.0)
+                    all_output += output
                     logger.info(f"Initial claude output: {repr(output[:500] if len(output) > 500 else output)}")
 
-                    # Step 1: Theme selection - send "1" for default theme
-                    # Look for theme selection prompt
-                    if 'theme' in output.lower() or 'select' in output.lower() or '1.' in output:
-                        logger.info("Sending theme selection: 1")
-                        self._write_pty_input("1\n")
-                        time.sleep(0.5)
+                    # Step 1: Theme selection
+                    # The CLI uses arrow key selection with Enter to confirm
+                    # Default is already "Dark mode" (option 1), just press Enter
+                    if 'theme' in output.lower() or 'Dark mode' in output or 'text style' in output.lower():
+                        logger.info("Theme selection detected - pressing Enter to accept default")
+                        self._write_pty_input("\n")  # Just Enter to accept default
+                        time.sleep(1.0)
                         output = self._read_pty_output(timeout=3.0)
+                        all_output += output
                         logger.info(f"After theme selection: {repr(output[:500] if len(output) > 500 else output)}")
 
-                    # Step 2: Login method selection - send "1" for browser OAuth
-                    if 'login' in output.lower() or 'method' in output.lower() or '1.' in output:
-                        logger.info("Sending login method selection: 1")
-                        self._write_pty_input("1\n")
-                        time.sleep(1.0)  # Give more time for URL to appear
+                    # Step 2: Login method selection
+                    # Look for login-related prompts
+                    if 'login' in output.lower() or 'sign in' in output.lower() or 'authenticate' in output.lower() or 'account' in output.lower():
+                        logger.info("Login method detected - pressing Enter to accept default (browser OAuth)")
+                        self._write_pty_input("\n")  # Just Enter to accept default
+                        time.sleep(1.5)  # Give more time for URL to appear
                         output = self._read_pty_output(timeout=5.0)
+                        all_output += output
                         logger.info(f"After login method: {repr(output[:500] if len(output) > 500 else output)}")
 
-                    # Step 3: Extract the OAuth URL
-                    # The URL should be displayed after browser fails to open
-                    all_output = output
-                    url_match = re.search(r'(https://[^\s\x00-\x1f\]]+)', all_output)
+                    # Keep reading until we see a URL or timeout
+                    for attempt in range(3):
+                        # Check for URL in all accumulated output
+                        url_match = re.search(r'(https://console\.anthropic\.com[^\s\x00-\x1f\]]*|https://[^\s\x00-\x1f\]]*oauth[^\s\x00-\x1f\]]*|https://[^\s\x00-\x1f\]]*auth[^\s\x00-\x1f\]]*)', all_output)
+                        if url_match:
+                            break
+                        # If we see a prompt that needs input, try pressing Enter
+                        if '❯' in output or 'press enter' in output.lower():
+                            logger.info(f"Prompt detected (attempt {attempt + 1}), pressing Enter")
+                            self._write_pty_input("\n")
+                        time.sleep(1.5)
+                        output = self._read_pty_output(timeout=3.0)
+                        all_output += output
+                        logger.info(f"Additional output (attempt {attempt + 1}): {repr(output[:300] if len(output) > 300 else output)}")
+
+                    # Step 3: Extract the OAuth URL from all accumulated output
+                    # Look for anthropic console URL or other auth URLs
+                    url_match = re.search(r'(https://console\.anthropic\.com[^\s\x00-\x1f\]\)]*|https://[^\s\x00-\x1f\]\)]*oauth[^\s\x00-\x1f\]\)]*|https://[^\s\x00-\x1f\]\)]*auth[^\s\x00-\x1f\]\)]*)', all_output)
+
+                    if not url_match:
+                        # Try a more generic URL pattern
+                        url_match = re.search(r'(https://[^\s\x00-\x1f\]\)]+)', all_output)
 
                     if url_match:
-                        oauth_url = url_match.group(1).rstrip(')')
+                        oauth_url = url_match.group(1).rstrip(')').rstrip(']')
                         logger.info(f"Extracted OAuth URL: {oauth_url}")
                         return {
                             "success": True,
@@ -605,32 +628,15 @@ class AuthService:
                             "process_active": True
                         }
                     else:
-                        # Try reading more output in case URL is delayed
-                        time.sleep(2.0)
-                        more_output = self._read_pty_output(timeout=5.0)
-                        all_output += more_output
-                        logger.info(f"Additional output: {repr(more_output[:500] if len(more_output) > 500 else more_output)}")
-
-                        url_match = re.search(r'(https://[^\s\x00-\x1f\]]+)', all_output)
-                        if url_match:
-                            oauth_url = url_match.group(1).rstrip(')')
-                            logger.info(f"Extracted OAuth URL (delayed): {oauth_url}")
-                            return {
-                                "success": True,
-                                "oauth_url": oauth_url,
-                                "message": "Open this URL in your browser, authenticate, then copy the code and use /auth/claude/complete to finish.",
-                                "requires_code": True,
-                                "process_active": True
-                            }
-
                         # Still no URL - clean up and report error
                         self._cleanup_claude_login_process()
-                        logger.warning(f"Could not find URL in claude output: {repr(all_output)}")
+                        # Strip ANSI codes for cleaner error message
+                        clean_output = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', all_output)
+                        logger.warning(f"Could not find URL in claude output: {repr(all_output[:1000])}")
                         return {
                             "success": False,
                             "message": "Could not extract OAuth URL",
-                            "error": all_output or "No URL found in claude output",
-                            "raw_output": all_output,
+                            "error": clean_output[:500] if clean_output else "No URL found in claude output",
                             "instructions": "Run 'claude' manually in the container terminal: docker exec -it <container> claude"
                         }
 
