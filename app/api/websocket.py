@@ -1,16 +1,18 @@
 """
-WebSocket API for real-time cross-device synchronization.
+WebSocket API for real-time chat and synchronization.
 
-Provides bidirectional communication for:
-- Real-time message streaming across devices
-- Session state synchronization
-- Connection health monitoring
+Primary endpoint: /ws/chat/{session_id}
+- Handles all chat interactions via WebSocket
+- Streams Claude responses directly to client
+- Simple, reliable, no race conditions
 """
 
 import logging
 import json
 import asyncio
+import uuid
 from typing import Optional
+from datetime import datetime
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, HTTPException, status
 from fastapi.websockets import WebSocketState
@@ -18,10 +20,14 @@ from fastapi.websockets import WebSocketState
 from app.core.sync_engine import sync_engine, SyncEvent
 from app.db import database
 from app.core.auth import auth_service
+from app.core.profiles import get_profile_or_builtin
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["WebSocket"])
+
+# Track active chat sessions for interruption
+_active_chat_sessions: dict[str, asyncio.Task] = {}
 
 
 async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> bool:
@@ -43,6 +49,204 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
 
     return False
 
+
+# =============================================================================
+# PRIMARY CHAT WEBSOCKET - Simple, reliable streaming
+# =============================================================================
+
+@router.websocket("/ws/chat")
+async def chat_websocket(
+    websocket: WebSocket,
+    token: str = Query(..., description="Authentication token")
+):
+    """
+    Primary WebSocket endpoint for chat.
+
+    This is the ONLY streaming mechanism needed. Simple flow:
+    1. Client connects
+    2. Client sends: {"type": "query", "prompt": "...", "session_id": "...", "profile": "..."}
+    3. Server streams response chunks directly
+    4. Server sends: {"type": "done", ...} when complete
+
+    Message types FROM server:
+    - history: Full message history for session (on connect or session switch)
+    - start: Query started, streaming will begin
+    - chunk: Text content chunk
+    - tool_use: Tool being used
+    - tool_result: Tool result
+    - done: Query complete with metadata
+    - error: Error occurred
+    - ping: Keep-alive
+
+    Message types TO server:
+    - query: Start a new query
+    - stop: Interrupt current query
+    - load_session: Load/switch to a session
+    - pong: Response to ping
+    """
+    # Authenticate
+    if not await authenticate_websocket(websocket, token):
+        await websocket.close(code=4001, reason="Authentication failed")
+        return
+
+    await websocket.accept()
+    logger.info("Chat WebSocket connected")
+
+    current_session_id: Optional[str] = None
+    query_task: Optional[asyncio.Task] = None
+
+    async def send_json(data: dict):
+        """Safe JSON send with connection check"""
+        if websocket.client_state == WebSocketState.CONNECTED:
+            try:
+                await websocket.send_json(data)
+            except Exception as e:
+                logger.warning(f"Failed to send WebSocket message: {e}")
+
+    async def run_query(prompt: str, session_id: str, profile_id: str, project_id: Optional[str]):
+        """Execute query and stream results directly to WebSocket"""
+        nonlocal current_session_id
+
+        from app.core.query_engine import stream_to_websocket
+
+        try:
+            await send_json({"type": "start", "session_id": session_id})
+
+            async for event in stream_to_websocket(
+                prompt=prompt,
+                session_id=session_id,
+                profile_id=profile_id,
+                project_id=project_id
+            ):
+                await send_json(event)
+
+        except asyncio.CancelledError:
+            await send_json({"type": "stopped", "session_id": session_id})
+            logger.info(f"Query cancelled for session {session_id}")
+
+        except Exception as e:
+            logger.error(f"Query error: {e}")
+            await send_json({"type": "error", "message": str(e)})
+
+        finally:
+            # Clean up task reference
+            if session_id in _active_chat_sessions:
+                del _active_chat_sessions[session_id]
+
+    try:
+        # Start ping task
+        ping_task = asyncio.create_task(ping_loop(websocket, "chat"))
+
+        try:
+            while True:
+                try:
+                    data = await asyncio.wait_for(
+                        websocket.receive_json(),
+                        timeout=60.0
+                    )
+
+                    msg_type = data.get("type")
+
+                    if msg_type == "query":
+                        # Start a new query
+                        prompt = data.get("prompt", "").strip()
+                        session_id = data.get("session_id")
+                        profile_id = data.get("profile", "claude-code")
+                        project_id = data.get("project")
+
+                        if not prompt:
+                            await send_json({"type": "error", "message": "Empty prompt"})
+                            continue
+
+                        # Create or get session
+                        if not session_id:
+                            # Create new session
+                            session_id = str(uuid.uuid4())
+                            database.create_session(
+                                session_id=session_id,
+                                profile_id=profile_id,
+                                project_id=project_id
+                            )
+
+                        current_session_id = session_id
+
+                        # Store user message
+                        database.add_session_message(
+                            session_id=session_id,
+                            role="user",
+                            content=prompt
+                        )
+
+                        # Cancel any existing query for this session
+                        if session_id in _active_chat_sessions:
+                            _active_chat_sessions[session_id].cancel()
+                            try:
+                                await _active_chat_sessions[session_id]
+                            except asyncio.CancelledError:
+                                pass
+
+                        # Start new query task
+                        query_task = asyncio.create_task(
+                            run_query(prompt, session_id, profile_id, project_id)
+                        )
+                        _active_chat_sessions[session_id] = query_task
+
+                    elif msg_type == "stop":
+                        # Stop current query
+                        session_id = data.get("session_id") or current_session_id
+                        if session_id and session_id in _active_chat_sessions:
+                            _active_chat_sessions[session_id].cancel()
+
+                    elif msg_type == "load_session":
+                        # Load a session's message history
+                        session_id = data.get("session_id")
+                        if session_id:
+                            session = database.get_session(session_id)
+                            if session:
+                                messages = database.get_session_messages(session_id)
+                                current_session_id = session_id
+                                await send_json({
+                                    "type": "history",
+                                    "session_id": session_id,
+                                    "session": session,
+                                    "messages": messages
+                                })
+                            else:
+                                await send_json({"type": "error", "message": "Session not found"})
+
+                    elif msg_type == "pong":
+                        pass  # Keep-alive response
+
+                except asyncio.TimeoutError:
+                    if websocket.client_state != WebSocketState.CONNECTED:
+                        break
+                    continue
+
+        finally:
+            ping_task.cancel()
+            try:
+                await ping_task
+            except asyncio.CancelledError:
+                pass
+
+            # Cancel any running query
+            if query_task and not query_task.done():
+                query_task.cancel()
+                try:
+                    await query_task
+                except asyncio.CancelledError:
+                    pass
+
+    except WebSocketDisconnect:
+        logger.info("Chat WebSocket disconnected")
+
+    except Exception as e:
+        logger.error(f"Chat WebSocket error: {e}")
+
+
+# =============================================================================
+# LEGACY SYNC WEBSOCKET - Kept for backwards compatibility
+# =============================================================================
 
 @router.websocket("/ws/sessions/{session_id}")
 async def session_sync_websocket(

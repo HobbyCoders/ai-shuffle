@@ -1,14 +1,19 @@
 /**
- * Chat/conversation store with SSE streaming support
- * Includes sessions, profiles, and projects management
- * With cross-device synchronization support
+ * Simplified Chat Store with WebSocket-first Architecture
+ *
+ * Core principle: The WebSocket connection IS the streaming channel.
+ * No sync engine, no background tasks, no event filtering complexity.
+ *
+ * Flow:
+ * 1. User sends message via WebSocket
+ * 2. Backend streams response directly through same WebSocket
+ * 3. Frontend displays each chunk immediately
+ * 4. Single isStreaming state tracks everything
  */
 
 import { writable, derived, get } from 'svelte/store';
-import type { Session, SessionMessage, Profile } from '$lib/api/client';
+import type { Session, Profile } from '$lib/api/client';
 import { api } from '$lib/api/client';
-import { sync, type SyncEvent } from './sync';
-import { getDeviceIdSync } from './device';
 
 export type MessageType = 'text' | 'tool_use' | 'tool_result';
 
@@ -18,17 +23,10 @@ export interface ChatMessage {
 	content: string;
 	type?: MessageType;
 	toolName?: string;
-	toolId?: string; // Unique ID for matching tool_use with tool_result
+	toolId?: string;
 	toolInput?: Record<string, unknown>;
 	metadata?: Record<string, unknown>;
 	streaming?: boolean;
-	isLastInGroup?: boolean; // Marks the last message in an assistant response group
-}
-
-export interface ToolUse {
-	name: string;
-	input: Record<string, unknown>;
-	output?: string;
 }
 
 export interface Project {
@@ -49,10 +47,9 @@ interface ChatState {
 	projects: Project[];
 	selectedProject: string;
 	sessions: Session[];
-	activeSessionIds: Set<string>; // Sessions currently streaming
 	isStreaming: boolean;
-	isRemoteStreaming: boolean; // True when another device is streaming
 	error: string | null;
+	wsConnected: boolean;
 }
 
 function createChatStore() {
@@ -64,191 +61,194 @@ function createChatStore() {
 		projects: [],
 		selectedProject: '',
 		sessions: [],
-		activeSessionIds: new Set(),
 		isStreaming: false,
-		isRemoteStreaming: false,
-		error: null
+		error: null,
+		wsConnected: false
 	});
-	let syncUnsubscribe: (() => void) | null = null;
-	let remoteMsgId: string | null = null; // Track remote streaming message ID
+
+	let ws: WebSocket | null = null;
+	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+	let pingTimer: ReturnType<typeof setInterval> | null = null;
 
 	/**
-	 * Handle sync events from other devices
+	 * Get WebSocket URL for chat
 	 */
-	function handleSyncEvent(event: SyncEvent) {
-		const state = get({ subscribe });
+	function getWsUrl(): string {
+		const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+		const host = window.location.host;
+		return `${protocol}//${host}/api/v1/ws/chat`;
+	}
 
-		console.log('[Chat] handleSyncEvent:', event.event_type, 'session:', event.session_id, 'current:', state.sessionId);
+	/**
+	 * Get auth token from cookie
+	 */
+	function getAuthToken(): string | null {
+		const cookies = document.cookie.split(';');
+		for (const cookie of cookies) {
+			const [name, value] = cookie.trim().split('=');
+			if (name === 'session_token') {
+				return value;
+			}
+		}
+		return null;
+	}
 
-		// Only process events for the current session
-		if (event.session_id !== state.sessionId) {
-			console.log('[Chat] Ignoring event for different session');
+	/**
+	 * Connect to WebSocket
+	 */
+	function connect() {
+		if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
 			return;
 		}
 
-		switch (event.event_type) {
-			case 'message_added': {
-				// Another device added a message (user message)
-				const message = event.data.message as Record<string, unknown>;
-				if (message) {
-					const newMsg: ChatMessage = {
-						id: `sync-${message.id}`,
-						role: message.role as 'user' | 'assistant',
-						content: message.content as string,
-						metadata: message.metadata as Record<string, unknown>
-					};
-					update((s) => ({
-						...s,
-						messages: [...s.messages, newMsg]
-					}));
+		const token = getAuthToken();
+		if (!token) {
+			console.error('[Chat] No auth token available');
+			update(s => ({ ...s, error: 'Not authenticated' }));
+			return;
+		}
+
+		const url = `${getWsUrl()}?token=${encodeURIComponent(token)}`;
+		console.log('[Chat] Connecting to WebSocket...');
+
+		ws = new WebSocket(url);
+
+		ws.onopen = () => {
+			console.log('[Chat] WebSocket connected');
+			update(s => ({ ...s, wsConnected: true, error: null }));
+
+			// Start ping timer
+			if (pingTimer) clearInterval(pingTimer);
+			pingTimer = setInterval(() => {
+				if (ws?.readyState === WebSocket.OPEN) {
+					ws.send(JSON.stringify({ type: 'pong' }));
 				}
+			}, 25000);
+		};
+
+		ws.onclose = (event) => {
+			console.log('[Chat] WebSocket closed:', event.code, event.reason);
+			update(s => ({ ...s, wsConnected: false }));
+
+			if (pingTimer) {
+				clearInterval(pingTimer);
+				pingTimer = null;
+			}
+
+			// Reconnect after delay (unless intentionally closed)
+			if (event.code !== 1000) {
+				if (reconnectTimer) clearTimeout(reconnectTimer);
+				reconnectTimer = setTimeout(() => {
+					console.log('[Chat] Attempting reconnect...');
+					connect();
+				}, 3000);
+			}
+		};
+
+		ws.onerror = (error) => {
+			console.error('[Chat] WebSocket error:', error);
+		};
+
+		ws.onmessage = (event) => {
+			try {
+				const data = JSON.parse(event.data);
+				handleMessage(data);
+			} catch (e) {
+				console.error('[Chat] Failed to parse message:', e);
+			}
+		};
+	}
+
+	/**
+	 * Disconnect WebSocket
+	 */
+	function disconnect() {
+		if (reconnectTimer) {
+			clearTimeout(reconnectTimer);
+			reconnectTimer = null;
+		}
+		if (pingTimer) {
+			clearInterval(pingTimer);
+			pingTimer = null;
+		}
+		if (ws) {
+			ws.close(1000);
+			ws = null;
+		}
+		update(s => ({ ...s, wsConnected: false }));
+	}
+
+	/**
+	 * Handle incoming WebSocket message
+	 */
+	function handleMessage(data: Record<string, unknown>) {
+		const msgType = data.type as string;
+		// console.log('[Chat] Received:', msgType, data);
+
+		switch (msgType) {
+			case 'history': {
+				// Session history loaded
+				const messages = (data.messages as Array<Record<string, unknown>>)?.map((m, i) => ({
+					id: `msg-${m.id || i}`,
+					role: m.role as 'user' | 'assistant',
+					content: m.content as string,
+					type: m.role === 'assistant' ? 'text' as const : undefined,
+					metadata: m.metadata as Record<string, unknown>,
+					streaming: false
+				})) || [];
+
+				update(s => ({
+					...s,
+					sessionId: data.session_id as string,
+					messages
+				}));
 				break;
 			}
 
-			case 'stream_start': {
-				// Streaming started (either local or remote)
-				remoteMsgId = event.data.message_id as string;
-				const placeholderMsg: ChatMessage = {
-					id: remoteMsgId,
-					role: 'assistant',
-					content: '',
-					type: 'text',
-					streaming: true
-				};
-				update((s) => {
-					// Check if we already have a streaming message (avoid duplicates)
-					const hasStreamingMsg = s.messages.some(m => m.streaming && m.role === 'assistant');
-					if (hasStreamingMsg) {
-						// Already have a streaming message, just update streaming state
-						return { ...s, isStreaming: true };
-					}
-					return {
-						...s,
-						isStreaming: true,
-						messages: [...s.messages, placeholderMsg]
-					};
-				});
+			case 'start': {
+				// Query started, streaming begins
+				const sessionId = data.session_id as string;
+				const assistantMsgId = `assistant-${Date.now()}`;
+
+				update(s => ({
+					...s,
+					sessionId,
+					isStreaming: true,
+					messages: [...s.messages, {
+						id: assistantMsgId,
+						role: 'assistant',
+						content: '',
+						type: 'text',
+						streaming: true
+					}]
+				}));
 				break;
 			}
 
-			case 'stream_chunk': {
-				// Streaming chunk (from background task or another device)
-				const chunkType = event.data.chunk_type as string;
-				console.log('[Chat] Received stream_chunk:', chunkType, event.data);
-
-				update((s) => {
+			case 'chunk': {
+				// Text content chunk
+				update(s => {
 					const messages = [...s.messages];
 
-					switch (chunkType) {
-						case 'text': {
-							// Mark any streaming tool_use messages as complete when we receive text
-							// This handles the case where backend doesn't send tool_result events
-							for (let i = 0; i < messages.length; i++) {
-								if (messages[i].type === 'tool_use' && messages[i].streaming) {
-									messages[i] = { ...messages[i], streaming: false };
-								}
-							}
+					// Find the last streaming text message
+					const streamingIdx = messages.findLastIndex(
+						m => m.type === 'text' && m.role === 'assistant' && m.streaming
+					);
 
-							// Find the LAST streaming text message
-							const lastStreamingTextIndex = messages.findLastIndex(
-								(m) => m.type === 'text' && m.role === 'assistant' && m.streaming
-							);
-							if (lastStreamingTextIndex !== -1) {
-								const msg = { ...messages[lastStreamingTextIndex] };
-								msg.content += event.data.content as string;
-								messages[lastStreamingTextIndex] = msg;
-							} else {
-								// No streaming text message found - create one
-								console.warn('[Sync] No streaming text message found, creating new one');
-								const newTextMsgId = `msg-sync-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-								messages.push({
-									id: newTextMsgId,
-									role: 'assistant',
-									type: 'text',
-									content: event.data.content as string,
-									streaming: true
-								});
-							}
-							break;
-						}
-
-						case 'tool_use': {
-							// Find and mark current streaming text message as not streaming
-							const currentTextIndex = messages.findLastIndex(
-								(m) => m.type === 'text' && m.role === 'assistant' && m.streaming
-							);
-							if (currentTextIndex !== -1 && messages[currentTextIndex].content) {
-								messages[currentTextIndex] = {
-									...messages[currentTextIndex],
-									streaming: false
-								};
-							}
-
-							// Add a new message for the tool use
-							const toolMsgId = `tool-sync-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-							const toolMessage: ChatMessage = {
-								id: toolMsgId,
-								role: 'assistant',
-								type: 'tool_use',
-								content: '',
-								toolName: event.data.name as string,
-								toolId: event.data.id as string, // Store the tool_use ID
-								toolInput: event.data.input as Record<string, unknown>,
-								streaming: true
-							};
-							messages.push(toolMessage);
-							break;
-						}
-
-						case 'tool_result': {
-							// Find the tool_use message by tool_use_id (preferred) or by name (fallback)
-							const toolUseId = event.data.tool_use_id as string;
-							let toolUseIndex = -1;
-
-							if (toolUseId) {
-								toolUseIndex = messages.findLastIndex(
-									(m) => m.type === 'tool_use' && m.toolId === toolUseId
-								);
-							}
-
-							if (toolUseIndex === -1) {
-								toolUseIndex = messages.findLastIndex(
-									(m) => m.type === 'tool_use' && m.toolName === event.data.name && m.streaming
-								);
-							}
-
-							if (toolUseIndex !== -1) {
-								messages[toolUseIndex] = {
-									...messages[toolUseIndex],
-									streaming: false
-								};
-							}
-
-							// Add a new message for the tool result
-							const resultMsgId = `result-sync-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-							const resultMessage: ChatMessage = {
-								id: resultMsgId,
-								role: 'assistant',
-								type: 'tool_result',
-								content: event.data.output as string,
-								toolName: event.data.name as string,
-								toolId: toolUseId,
-								streaming: false
-							};
-							messages.push(resultMessage);
-
-							// Add a new text message placeholder for any following text
-							const newTextMsgId = `msg-sync-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-							const newTextMessage: ChatMessage = {
-								id: newTextMsgId,
-								role: 'assistant',
-								type: 'text',
-								content: '',
-								streaming: true
-							};
-							messages.push(newTextMessage);
-							break;
-						}
+					if (streamingIdx !== -1) {
+						messages[streamingIdx] = {
+							...messages[streamingIdx],
+							content: messages[streamingIdx].content + (data.content as string)
+						};
+					} else {
+						// No streaming message found, create one
+						messages.push({
+							id: `text-${Date.now()}`,
+							role: 'assistant',
+							content: data.content as string,
+							type: 'text',
+							streaming: true
+						});
 					}
 
 					return { ...s, messages };
@@ -256,201 +256,269 @@ function createChatStore() {
 				break;
 			}
 
-			case 'stream_end': {
-				// Streaming completed (local or remote)
-				const metadata = event.data.metadata as Record<string, unknown>;
-				const interrupted = event.data.interrupted as boolean;
+			case 'tool_use': {
+				// Tool being used
+				update(s => {
+					const messages = [...s.messages];
 
-				update((s) => {
-					// Mark all streaming messages as done
-					const finalMessages = s.messages.map(m => {
-						if (m.streaming) {
-							return { ...m, streaming: false };
-						}
-						return m;
+					// Mark current streaming text as not streaming (but keep content)
+					const streamingIdx = messages.findLastIndex(
+						m => m.type === 'text' && m.role === 'assistant' && m.streaming
+					);
+					if (streamingIdx !== -1 && messages[streamingIdx].content) {
+						messages[streamingIdx] = {
+							...messages[streamingIdx],
+							streaming: false
+						};
+					}
+
+					// Add tool use message
+					messages.push({
+						id: `tool-${Date.now()}-${data.id || ''}`,
+						role: 'assistant',
+						content: '',
+						type: 'tool_use',
+						toolName: data.name as string,
+						toolId: data.id as string,
+						toolInput: data.input as Record<string, unknown>,
+						streaming: true
 					});
 
+					return { ...s, messages };
+				});
+				break;
+			}
+
+			case 'tool_result': {
+				// Tool result
+				update(s => {
+					const messages = [...s.messages];
+
+					// Mark the matching tool_use as complete
+					const toolUseId = data.tool_use_id as string;
+					const toolUseIdx = messages.findLastIndex(
+						m => m.type === 'tool_use' && (m.toolId === toolUseId || m.streaming)
+					);
+					if (toolUseIdx !== -1) {
+						messages[toolUseIdx] = {
+							...messages[toolUseIdx],
+							streaming: false
+						};
+					}
+
+					// Add tool result message
+					messages.push({
+						id: `result-${Date.now()}`,
+						role: 'assistant',
+						content: data.output as string,
+						type: 'tool_result',
+						toolName: data.name as string,
+						toolId: toolUseId,
+						streaming: false
+					});
+
+					// Add new text placeholder for continuation
+					messages.push({
+						id: `text-${Date.now()}-cont`,
+						role: 'assistant',
+						content: '',
+						type: 'text',
+						streaming: true
+					});
+
+					return { ...s, messages };
+				});
+				break;
+			}
+
+			case 'done': {
+				// Query complete
+				const metadata = data.metadata as Record<string, unknown>;
+
+				update(s => {
+					// Mark all streaming messages as complete
+					let messages = s.messages.map(m =>
+						m.streaming ? { ...m, streaming: false } : m
+					);
+
 					// Remove empty text messages
-					const cleanedMessages = finalMessages.filter(
+					messages = messages.filter(
 						m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
 					);
 
-					// Add metadata to the last assistant message
-					if (cleanedMessages.length > 0) {
-						const lastAssistantIndex = cleanedMessages.findLastIndex(m => m.role === 'assistant');
-						if (lastAssistantIndex !== -1) {
-							cleanedMessages[lastAssistantIndex] = {
-								...cleanedMessages[lastAssistantIndex],
-								metadata,
-								content: cleanedMessages[lastAssistantIndex].content + (interrupted ? '\n\n[Interrupted]' : ''),
-								isLastInGroup: true
+					// Add metadata to last assistant message
+					if (messages.length > 0) {
+						const lastIdx = messages.findLastIndex(m => m.role === 'assistant');
+						if (lastIdx !== -1) {
+							messages[lastIdx] = {
+								...messages[lastIdx],
+								metadata
 							};
 						}
 					}
 
 					return {
 						...s,
-						messages: cleanedMessages,
+						messages,
 						isStreaming: false,
-						isRemoteStreaming: false
+						sessionId: data.session_id as string || s.sessionId
 					};
 				});
 
-				remoteMsgId = null;
+				// Refresh sessions list
+				loadSessionsInternal();
 				break;
 			}
 
-			case 'session_updated': {
-				// Session metadata changed - reload sessions list
-				// This is non-critical, so we just refresh in background
-				api.get<Session[]>('/sessions?limit=50')
-					.then((sessions) => update((s) => ({ ...s, sessions })))
-					.catch(console.error);
-				break;
-			}
+			case 'stopped': {
+				// Query was stopped/interrupted
+				update(s => {
+					let messages = s.messages.map(m =>
+						m.streaming ? { ...m, streaming: false } : m
+					);
 
-			case 'state': {
-				// State event from WebSocket connection (received on connect/reconnect)
-				// This tells us if the session is currently streaming on another device
-				const serverIsStreaming = event.data.is_streaming as boolean;
-				const streamingMessages = event.data.streaming_messages as Array<{
-					type: string;
-					role: string;
-					content: string;
-					tool_name?: string;
-					tool_id?: string;
-					tool_input?: Record<string, unknown>;
-					streaming?: boolean;
-				}> | undefined;
+					messages = messages.filter(
+						m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
+					);
 
-				console.log('[Chat] State event: is_streaming=', serverIsStreaming, 'buffered messages:', streamingMessages?.length || 0);
-
-				update((s) => {
-					// If server says streaming is complete but we still think we're streaming,
-					// reset the streaming state (fixes stuck stop button)
-					if (!serverIsStreaming && (s.isStreaming || s.isRemoteStreaming)) {
-						console.log('[Chat] Server says streaming complete, resetting streaming state');
-						// Mark any streaming messages as complete
-						const finalMessages = s.messages.map(m => {
-							if (m.streaming) {
-								return { ...m, streaming: false };
-							}
-							return m;
-						});
-						// Remove empty text messages
-						const cleanedMessages = finalMessages.filter(
-							m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
-						);
-						return {
-							...s,
-							messages: cleanedMessages,
-							isStreaming: false,
-							isRemoteStreaming: false
-						};
-					}
-
-					// If session is streaming and we have buffered messages, merge them
-					if (serverIsStreaming && streamingMessages && streamingMessages.length > 0) {
-						const messages = [...s.messages];
-
-						// Find existing streaming assistant message
-						const streamingMsgIndex = messages.findIndex(m => m.streaming && m.role === 'assistant');
-
-						if (streamingMsgIndex !== -1) {
-							// Merge buffered content into existing streaming message
-							console.log('[Chat] Merging buffered content into existing streaming message');
-							for (const sm of streamingMessages) {
-								if (sm.type === 'text' && sm.content) {
-									// Append text content
-									messages[streamingMsgIndex] = {
-										...messages[streamingMsgIndex],
-										content: (messages[streamingMsgIndex].content || '') + sm.content
-									};
-								} else if (sm.type === 'tool_use') {
-									// Add tool use message
-									messages.push({
-										id: `tool-${Date.now()}-${sm.tool_id}`,
-										role: 'assistant' as const,
-										content: '',
-										type: 'tool_use' as const,
-										toolName: sm.tool_name,
-										toolId: sm.tool_id,
-										toolInput: sm.tool_input,
-										streaming: sm.streaming ?? true
-									});
-								}
-							}
-							return {
-								...s,
-								messages,
-								isStreaming: true,
-								isRemoteStreaming: serverIsStreaming
-							};
-						} else {
-							// No existing streaming message - create new ones from buffer
-							console.log('[Chat] No streaming message found, creating from buffer');
-							const newMsgs = streamingMessages.map((sm, i) => ({
-								id: `stream-${Date.now()}-${i}`,
-								role: sm.role as 'user' | 'assistant',
-								content: sm.content || '',
-								type: sm.type as MessageType,
-								toolName: sm.tool_name,
-								toolId: sm.tool_id,
-								toolInput: sm.tool_input,
-								streaming: sm.streaming ?? true
-							}));
-							return {
-								...s,
-								messages: [...s.messages, ...newMsgs],
-								isStreaming: true,
-								isRemoteStreaming: serverIsStreaming
+					// Add interrupted notice to last message
+					if (messages.length > 0) {
+						const lastIdx = messages.findLastIndex(m => m.role === 'assistant');
+						if (lastIdx !== -1) {
+							messages[lastIdx] = {
+								...messages[lastIdx],
+								content: messages[lastIdx].content + '\n\n[Stopped]'
 							};
 						}
 					}
 
-					// If server says streaming but no buffered messages,
-					// keep our current isStreaming and update isRemoteStreaming
-					if (serverIsStreaming) {
-						return { ...s, isStreaming: s.isStreaming || true, isRemoteStreaming: true };
-					}
-
-					// Don't change isStreaming if we're already streaming locally
-					return { ...s, isRemoteStreaming: serverIsStreaming };
+					return { ...s, messages, isStreaming: false };
 				});
+				break;
+			}
+
+			case 'error': {
+				// Error occurred
+				update(s => {
+					let messages = s.messages.map(m =>
+						m.streaming ? { ...m, streaming: false } : m
+					);
+
+					messages = messages.filter(
+						m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
+					);
+
+					return {
+						...s,
+						messages,
+						isStreaming: false,
+						error: data.message as string
+					};
+				});
+				break;
+			}
+
+			case 'ping': {
+				// Respond to ping
+				if (ws?.readyState === WebSocket.OPEN) {
+					ws.send(JSON.stringify({ type: 'pong' }));
+				}
 				break;
 			}
 		}
 	}
 
 	/**
-	 * Connect to sync for a session
+	 * Send a query via WebSocket
 	 */
-	async function connectSync(sessionId: string) {
-		// Unsubscribe from previous handler
-		if (syncUnsubscribe) {
-			syncUnsubscribe();
+	function sendQuery(prompt: string) {
+		const state = get({ subscribe });
+
+		if (!ws || ws.readyState !== WebSocket.OPEN) {
+			update(s => ({ ...s, error: 'Not connected' }));
+			return;
 		}
 
-		// Subscribe to sync events
-		syncUnsubscribe = sync.onEvent(handleSyncEvent);
+		// Add user message immediately
+		const userMsgId = `user-${Date.now()}`;
+		update(s => ({
+			...s,
+			messages: [...s.messages, {
+				id: userMsgId,
+				role: 'user',
+				content: prompt
+			}],
+			isStreaming: true,
+			error: null
+		}));
 
-		// Connect WebSocket
-		await sync.connect(sessionId);
+		// Send query via WebSocket
+		ws.send(JSON.stringify({
+			type: 'query',
+			prompt,
+			session_id: state.sessionId,
+			profile: state.selectedProfile,
+			project: state.selectedProject || undefined
+		}));
 	}
 
 	/**
-	 * Disconnect from sync
+	 * Stop current generation
 	 */
-	function disconnectSync() {
-		if (syncUnsubscribe) {
-			syncUnsubscribe();
-			syncUnsubscribe = null;
+	function stopGeneration() {
+		const state = get({ subscribe });
+
+		if (ws?.readyState === WebSocket.OPEN && state.sessionId) {
+			ws.send(JSON.stringify({
+				type: 'stop',
+				session_id: state.sessionId
+			}));
 		}
-		sync.disconnect();
+
+		// Optimistically update UI
+		update(s => ({ ...s, isStreaming: false }));
+	}
+
+	/**
+	 * Load a specific session
+	 */
+	async function loadSession(sessionId: string) {
+		if (ws?.readyState === WebSocket.OPEN) {
+			ws.send(JSON.stringify({
+				type: 'load_session',
+				session_id: sessionId
+			}));
+		}
+	}
+
+	/**
+	 * Internal function to load sessions list
+	 */
+	async function loadSessionsInternal() {
+		try {
+			const sessions = await api.get<Session[]>('/sessions?limit=50');
+			update(s => ({ ...s, sessions }));
+		} catch (e) {
+			console.error('Failed to load sessions:', e);
+		}
 	}
 
 	return {
 		subscribe,
+
+		/**
+		 * Initialize the store and connect WebSocket
+		 */
+		init() {
+			connect();
+		},
+
+		/**
+		 * Cleanup on destroy
+		 */
+		destroy() {
+			disconnect();
+		},
 
 		async loadProfiles() {
 			try {
@@ -471,53 +539,33 @@ function createChatStore() {
 		},
 
 		async loadSessions() {
-			try {
-				const sessions = await api.get<Session[]>('/sessions?limit=50');
-				update(s => ({ ...s, sessions }));
-			} catch (e) {
-				console.error('Failed to load sessions:', e);
-			}
+			await loadSessionsInternal();
 		},
 
-		async loadActiveSessions() {
+		async loadSession(sessionId: string) {
+			// First load from REST API for reliable data
 			try {
-				const response = await api.get<{ active_sessions: string[] }>('/streaming/active');
-				const activeIds = new Set(response.active_sessions || []);
-				update(s => ({ ...s, activeSessionIds: activeIds }));
-			} catch (e) {
-				console.error('Failed to load active sessions:', e);
-			}
-		},
-
-		async loadSession(sessionId: string): Promise<boolean> {
-			try {
-				const session = await api.get<Session & { messages: SessionMessage[] }>(`/sessions/${sessionId}`);
+				const session = await api.get<Session & { messages: Array<Record<string, unknown>> }>(`/sessions/${sessionId}`);
 				const messages: ChatMessage[] = session.messages.map((m, i) => ({
-					id: `msg-${i}`,
+					id: `msg-${m.id || i}`,
 					role: m.role as 'user' | 'assistant',
-					content: m.content,
-					type: m.role === 'assistant' ? 'text' : undefined, // Set type for assistant messages
-					metadata: m.metadata,
+					content: m.content as string,
+					type: m.role === 'assistant' ? 'text' as const : undefined,
+					metadata: m.metadata as Record<string, unknown>,
 					streaming: false
 				}));
-				// Don't change selectedProfile when resuming - keep user's current selection
+
 				update(s => ({
 					...s,
 					sessionId: session.id,
 					messages,
-					error: null // Clear any previous errors on successful load
+					error: null
 				}));
 
-				// Connect to sync for real-time updates from other devices
-				// This is non-critical - session should load even if sync fails
-				try {
-					await connectSync(sessionId);
-				} catch (syncError) {
-					console.warn('[Chat] Failed to connect sync, session loaded without real-time updates:', syncError);
-				}
 				return true;
-			} catch (e: any) {
-				update(s => ({ ...s, error: e.detail || 'Failed to load session' }));
+			} catch (e: unknown) {
+				const error = e as { detail?: string };
+				update(s => ({ ...s, error: error.detail || 'Failed to load session' }));
 				return false;
 			}
 		},
@@ -531,14 +579,11 @@ function createChatStore() {
 		},
 
 		startNewChat() {
-			// Disconnect from sync when starting a new chat
-			disconnectSync();
-
 			update(s => ({
 				...s,
 				sessionId: null,
 				messages: [],
-				isRemoteStreaming: false,
+				isStreaming: false,
 				error: null
 			}));
 		},
@@ -547,8 +592,9 @@ function createChatStore() {
 			try {
 				await api.post('/profiles', data);
 				await this.loadProfiles();
-			} catch (e: any) {
-				update(s => ({ ...s, error: e.detail || 'Failed to create profile' }));
+			} catch (e: unknown) {
+				const error = e as { detail?: string };
+				update(s => ({ ...s, error: error.detail || 'Failed to create profile' }));
 			}
 		},
 
@@ -556,8 +602,9 @@ function createChatStore() {
 			try {
 				await api.put(`/profiles/${profileId}`, data);
 				await this.loadProfiles();
-			} catch (e: any) {
-				update(s => ({ ...s, error: e.detail || 'Failed to update profile' }));
+			} catch (e: unknown) {
+				const error = e as { detail?: string };
+				update(s => ({ ...s, error: error.detail || 'Failed to update profile' }));
 			}
 		},
 
@@ -565,8 +612,9 @@ function createChatStore() {
 			try {
 				await api.delete(`/profiles/${profileId}`);
 				await this.loadProfiles();
-			} catch (e: any) {
-				update(s => ({ ...s, error: e.detail || 'Failed to delete profile' }));
+			} catch (e: unknown) {
+				const error = e as { detail?: string };
+				update(s => ({ ...s, error: error.detail || 'Failed to delete profile' }));
 			}
 		},
 
@@ -574,8 +622,9 @@ function createChatStore() {
 			try {
 				await api.post('/projects', data);
 				await this.loadProjects();
-			} catch (e: any) {
-				update(s => ({ ...s, error: e.detail || 'Failed to create project' }));
+			} catch (e: unknown) {
+				const error = e as { detail?: string };
+				update(s => ({ ...s, error: error.detail || 'Failed to create project' }));
 			}
 		},
 
@@ -583,366 +632,39 @@ function createChatStore() {
 			try {
 				await api.delete(`/projects/${projectId}`);
 				await this.loadProjects();
-				// Reset selected project if it was the deleted one
 				update(s => ({
 					...s,
 					selectedProject: s.selectedProject === projectId ? '' : s.selectedProject
 				}));
-			} catch (e: any) {
-				update(s => ({ ...s, error: e.detail || 'Failed to delete project' }));
+			} catch (e: unknown) {
+				const error = e as { detail?: string };
+				update(s => ({ ...s, error: error.detail || 'Failed to delete project' }));
 			}
 		},
 
-		async sendMessage(prompt: string) {
-			// Add user message immediately for responsive UI
-			const userMsgId = `msg-${Date.now()}`;
-			const userMessage: ChatMessage = {
-				id: userMsgId,
-				role: 'user',
-				content: prompt
-			};
-
-			// Capture current state values
-			let currentSessionId: string | null = null;
-			let currentProfile: string = 'claude-code';
-			let currentProject: string = '';
-
-			update(s => {
-				currentSessionId = s.sessionId;
-				currentProfile = s.selectedProfile;
-				currentProject = s.selectedProject;
-				return {
-					...s,
-					// Only add user message - assistant placeholder will come from stream_start event
-					messages: [...s.messages, userMessage],
-					isStreaming: true,
-					error: null
-				};
-			});
-
-			// Get device ID for cross-device sync
-			const deviceId = getDeviceIdSync();
-
-			// Build request
-			const body: Record<string, unknown> = {
-				prompt,
-				profile: currentProfile,
-				device_id: deviceId
-			};
-
-			if (currentSessionId) {
-				body.session_id = currentSessionId;
-			}
-
-			if (currentProject) {
-				body.project = currentProject;
-			}
-
+		async deleteSession(sessionId: string) {
 			try {
-				// Start background query - returns immediately
-				// Streaming events come via WebSocket, not HTTP
-				const response = await fetch('/api/v1/conversation/start', {
-					method: 'POST',
-					headers: {
-						'Content-Type': 'application/json'
-					},
-					credentials: 'include',
-					body: JSON.stringify(body)
-				});
-
-				if (!response.ok) {
-					const error = await response.json();
-					throw new Error(error.detail || 'Failed to start conversation');
-				}
-
-				const result = await response.json();
-				const newSessionId = result.session_id;
-				const streamingMsgId = result.message_id;
-
-				// Update session ID and add assistant placeholder immediately
-				// This ensures we have a streaming message ready for chunks
-				update(s => ({
-					...s,
-					sessionId: newSessionId,
-					messages: [...s.messages, {
-						id: streamingMsgId,
-						role: 'assistant' as const,
-						content: '',
-						type: 'text' as const,
-						streaming: true
-					}]
-				}));
-
-				// Connect to WebSocket for streaming updates
-				// The sync handler will receive stream_chunk, stream_end events
-				await connectSync(newSessionId);
-
-				// After WebSocket connects, request current state to catch up on any
-				// events that may have been broadcast before we connected
-				sync.requestState();
-
-				// Reload sessions list to show new session
+				await api.delete(`/sessions/${sessionId}`);
 				await this.loadSessions();
-
-			} catch (e: any) {
-				// Remove the user message on error
-				update(s => ({
-					...s,
-					messages: s.messages.filter(m => m.id !== userMsgId),
-					isStreaming: false,
-					error: e.message || 'Failed to send message'
-				}));
+				// If we deleted the current session, start a new chat
+				update(s => {
+					if (s.sessionId === sessionId) {
+						return { ...s, sessionId: null, messages: [] };
+					}
+					return s;
+				});
+			} catch (e: unknown) {
+				const error = e as { detail?: string };
+				update(s => ({ ...s, error: error.detail || 'Failed to delete session' }));
 			}
 		},
 
-		async stopGeneration() {
-			const state = get({ subscribe });
-
-			// Call the server-side interrupt to stop the background task
-			if (state.sessionId) {
-				try {
-					const response = await fetch(`/api/v1/session/${state.sessionId}/interrupt`, {
-						method: 'POST',
-						credentials: 'include'
-					});
-
-					if (!response.ok) {
-						console.warn('Interrupt request failed:', response.status);
-					}
-				} catch (e) {
-					console.error('Failed to interrupt session:', e);
-				}
-			}
-
-			// Update local state - the stream_end event from WebSocket will also update this
-			// but we do it immediately for responsive UI
-			update(s => ({
-				...s,
-				isStreaming: false,
-				isRemoteStreaming: false
-			}));
+		sendMessage(prompt: string) {
+			sendQuery(prompt);
 		},
 
-		handleStreamEvent(event: Record<string, unknown>, msgId: string) {
-			// Handle init event specially - connect to sync for new session
-			if (event.type === 'init') {
-				const sessionId = event.session_id as string;
-				update(s => ({ ...s, sessionId }));
-				// Connect to sync for this new session
-				connectSync(sessionId).catch(console.error);
-				return;
-			}
-
-			update(s => {
-				const messages = [...s.messages];
-
-				switch (event.type) {
-					case 'text': {
-						// Mark any streaming tool_use messages as complete when we receive text
-						// This handles the case where backend doesn't send tool_result events
-						for (let i = 0; i < messages.length; i++) {
-							if (messages[i].type === 'tool_use' && messages[i].streaming) {
-								messages[i] = { ...messages[i], streaming: false };
-							}
-						}
-
-						// Find the LAST streaming text message (not the original msgId)
-						// This ensures text goes to the correct message after tool results
-						const lastStreamingTextIndex = messages.findLastIndex(
-							m => m.type === 'text' && m.role === 'assistant' && m.streaming
-						);
-
-						if (lastStreamingTextIndex !== -1) {
-							const msg = { ...messages[lastStreamingTextIndex] };
-							msg.content += event.content as string;
-							messages[lastStreamingTextIndex] = msg;
-						} else {
-							// No streaming text message found - create one
-							// This can happen if we receive text without a prior placeholder
-							console.warn('[Chat] No streaming text message found, creating new one');
-							const newTextMsgId = `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-							messages.push({
-								id: newTextMsgId,
-								role: 'assistant',
-								type: 'text',
-								content: event.content as string,
-								streaming: true
-							});
-						}
-						break;
-					}
-
-					case 'tool_use': {
-						// Find and mark current streaming text message as not streaming
-						const currentTextIndex = messages.findLastIndex(
-							m => m.type === 'text' && m.role === 'assistant' && m.streaming
-						);
-						if (currentTextIndex !== -1 && messages[currentTextIndex].content) {
-							messages[currentTextIndex] = {
-								...messages[currentTextIndex],
-								streaming: false
-							};
-						}
-
-						// Add a new message for the tool use
-						const toolMsgId = `tool-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-						const toolMessage: ChatMessage = {
-							id: toolMsgId,
-							role: 'assistant',
-							type: 'tool_use',
-							content: '',
-							toolName: event.name as string,
-							toolId: event.id as string, // Store the tool_use ID for matching with result
-							toolInput: event.input as Record<string, unknown>,
-							streaming: true
-						};
-						messages.push(toolMessage);
-						break;
-					}
-
-					case 'tool_result': {
-						// Find the tool_use message by tool_use_id (preferred) or by name (fallback)
-						const toolUseId = event.tool_use_id as string;
-						let toolUseIndex = -1;
-
-						if (toolUseId) {
-							// Match by tool_use_id (most reliable)
-							toolUseIndex = messages.findLastIndex(
-								m => m.type === 'tool_use' && m.toolId === toolUseId
-							);
-						}
-
-						if (toolUseIndex === -1) {
-							// Fallback: match by name and streaming status
-							toolUseIndex = messages.findLastIndex(
-								m => m.type === 'tool_use' && m.toolName === event.name && m.streaming
-							);
-						}
-
-						if (toolUseIndex !== -1) {
-							messages[toolUseIndex] = {
-								...messages[toolUseIndex],
-								streaming: false
-							};
-						}
-
-						// Add a new message for the tool result
-						const resultMsgId = `result-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-						const resultMessage: ChatMessage = {
-							id: resultMsgId,
-							role: 'assistant',
-							type: 'tool_result',
-							content: event.output as string,
-							toolName: event.name as string,
-							toolId: toolUseId, // Store for reference
-							streaming: false
-						};
-						messages.push(resultMessage);
-
-						// Add a new text message placeholder for any following text
-						const newTextMsgId = `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-						const newTextMessage: ChatMessage = {
-							id: newTextMsgId,
-							role: 'assistant',
-							type: 'text',
-							content: '',
-							streaming: true
-						};
-						messages.push(newTextMessage);
-						break;
-					}
-
-					case 'done': {
-						// Mark all streaming messages as done and add metadata to last message
-						const finalMessages = messages.map((m, i) => {
-							if (m.streaming) {
-								return { ...m, streaming: false };
-							}
-							return m;
-						});
-
-						// Remove empty text messages
-						const cleanedMessages = finalMessages.filter(
-							m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
-						);
-
-						// Add metadata to the last assistant message
-						if (cleanedMessages.length > 0) {
-							const lastAssistantIndex = cleanedMessages.findLastIndex(m => m.role === 'assistant');
-							if (lastAssistantIndex !== -1) {
-								cleanedMessages[lastAssistantIndex] = {
-									...cleanedMessages[lastAssistantIndex],
-									metadata: event.metadata as Record<string, unknown>,
-									isLastInGroup: true
-								};
-							}
-						}
-
-						return {
-							...s,
-							messages: cleanedMessages,
-							isStreaming: false
-						};
-					}
-
-					case 'interrupted': {
-						// Mark all streaming messages as done
-						const finalMessages = messages.map(m => {
-							if (m.streaming) {
-								return { ...m, streaming: false };
-							}
-							return m;
-						});
-
-						// Remove empty text messages
-						const cleanedMessages = finalMessages.filter(
-							m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
-						);
-
-						// Add interrupted notice to last message
-						if (cleanedMessages.length > 0) {
-							const lastIndex = cleanedMessages.length - 1;
-							if (cleanedMessages[lastIndex].role === 'assistant') {
-								cleanedMessages[lastIndex] = {
-									...cleanedMessages[lastIndex],
-									content: cleanedMessages[lastIndex].content + '\n\n[Interrupted]',
-									isLastInGroup: true
-								};
-							}
-						}
-
-						return {
-							...s,
-							messages: cleanedMessages,
-							isStreaming: false
-						};
-					}
-
-					case 'error': {
-						// Mark all streaming messages as done
-						const finalMessages = messages.map(m => {
-							if (m.streaming) {
-								return { ...m, streaming: false };
-							}
-							return m;
-						});
-
-						// Remove empty text messages
-						const cleanedMessages = finalMessages.filter(
-							m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
-						);
-
-						return {
-							...s,
-							messages: cleanedMessages,
-							isStreaming: false,
-							error: event.message as string
-						};
-					}
-				}
-
-				return { ...s, messages };
-			});
+		stopGeneration() {
+			stopGeneration();
 		},
 
 		clearError() {
@@ -953,11 +675,9 @@ function createChatStore() {
 
 export const chat = createChatStore();
 
-// Derived stores
+// Derived stores for convenience
 export const messages = derived(chat, $chat => $chat.messages);
 export const isStreaming = derived(chat, $chat => $chat.isStreaming);
-export const isRemoteStreaming = derived(chat, $chat => $chat.isRemoteStreaming);
-export const isAnyStreaming = derived(chat, $chat => $chat.isStreaming || $chat.isRemoteStreaming);
 export const chatError = derived(chat, $chat => $chat.error);
 export const profiles = derived(chat, $chat => $chat.profiles);
 export const selectedProfile = derived(chat, $chat => $chat.selectedProfile);
@@ -965,4 +685,4 @@ export const projects = derived(chat, $chat => $chat.projects);
 export const selectedProject = derived(chat, $chat => $chat.selectedProject);
 export const sessions = derived(chat, $chat => $chat.sessions);
 export const currentSessionId = derived(chat, $chat => $chat.sessionId);
-export const activeSessionIds = derived(chat, $chat => $chat.activeSessionIds);
+export const wsConnected = derived(chat, $chat => $chat.wsConnected);
