@@ -36,6 +36,20 @@
 	let isUploading = false;
 	let textareas: Record<string, HTMLTextAreaElement> = {};
 
+	// Accordion states for profile form sections
+	let expandedSections: Record<string, boolean> = {
+		toolConfig: false,
+		behavior: false,
+		systemPrompt: false,
+		settingSources: false,
+		advanced: false
+	};
+
+	function toggleSection(section: string) {
+		expandedSections[section] = !expandedSections[section];
+		expandedSections = expandedSections; // Trigger reactivity
+	}
+
 	// Profile form state
 	let profileForm = {
 		id: '',
@@ -970,6 +984,184 @@
 								<label class="block text-xs text-gray-500 mb-1">Max Turns</label>
 								<input type="number" bind:value={profileForm.max_turns} class="w-full bg-[#2a2a2a] border-0 rounded-lg px-3 py-2 text-sm text-white" placeholder="Unlimited" />
 							</div>
+						</div>
+
+						<!-- Tool Configuration Accordion -->
+						<div class="border border-[#2a2a2a] rounded-lg overflow-hidden">
+							<button
+								type="button"
+								on:click={() => toggleSection('toolConfig')}
+								class="w-full px-3 py-2 bg-[#252525] flex items-center justify-between text-sm text-gray-300 hover:bg-[#2a2a2a]"
+							>
+								<span>Tool Configuration</span>
+								<svg class="w-4 h-4 transition-transform {expandedSections.toolConfig ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+								</svg>
+							</button>
+							{#if expandedSections.toolConfig}
+								<div class="p-3 space-y-3 bg-[#1a1a1a]">
+									<div>
+										<label class="block text-xs text-gray-500 mb-1">Allowed Tools</label>
+										<input bind:value={profileForm.allowed_tools} class="w-full bg-[#2a2a2a] border-0 rounded-lg px-3 py-2 text-sm text-white" placeholder="Read, Write, Bash (comma-separated)" />
+										<p class="text-xs text-gray-600 mt-1">Empty = all tools allowed</p>
+									</div>
+									<div>
+										<label class="block text-xs text-gray-500 mb-1">Disallowed Tools</label>
+										<input bind:value={profileForm.disallowed_tools} class="w-full bg-[#2a2a2a] border-0 rounded-lg px-3 py-2 text-sm text-white" placeholder="Write, Edit (comma-separated)" />
+									</div>
+								</div>
+							{/if}
+						</div>
+
+						<!-- Behavior Settings Accordion -->
+						<div class="border border-[#2a2a2a] rounded-lg overflow-hidden">
+							<button
+								type="button"
+								on:click={() => toggleSection('behavior')}
+								class="w-full px-3 py-2 bg-[#252525] flex items-center justify-between text-sm text-gray-300 hover:bg-[#2a2a2a]"
+							>
+								<span>Behavior Settings</span>
+								<svg class="w-4 h-4 transition-transform {expandedSections.behavior ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+								</svg>
+							</button>
+							{#if expandedSections.behavior}
+								<div class="p-3 space-y-3 bg-[#1a1a1a]">
+									<label class="flex items-center gap-2 cursor-pointer">
+										<input type="checkbox" bind:checked={profileForm.include_partial_messages} class="w-4 h-4 rounded bg-[#2a2a2a] border-0 text-violet-600 focus:ring-violet-500" />
+										<div>
+											<span class="text-sm text-gray-300">Include Partial Messages</span>
+											<p class="text-xs text-gray-600">Stream partial text as it's being generated</p>
+										</div>
+									</label>
+									<label class="flex items-center gap-2 cursor-pointer">
+										<input type="checkbox" bind:checked={profileForm.continue_conversation} class="w-4 h-4 rounded bg-[#2a2a2a] border-0 text-violet-600 focus:ring-violet-500" />
+										<div>
+											<span class="text-sm text-gray-300">Continue Conversation</span>
+											<p class="text-xs text-gray-600">Automatically continue most recent conversation</p>
+										</div>
+									</label>
+									<label class="flex items-center gap-2 cursor-pointer">
+										<input type="checkbox" bind:checked={profileForm.fork_session} class="w-4 h-4 rounded bg-[#2a2a2a] border-0 text-violet-600 focus:ring-violet-500" />
+										<div>
+											<span class="text-sm text-gray-300">Fork Session</span>
+											<p class="text-xs text-gray-600">Create new session ID when resuming</p>
+										</div>
+									</label>
+								</div>
+							{/if}
+						</div>
+
+						<!-- System Prompt Accordion -->
+						<div class="border border-[#2a2a2a] rounded-lg overflow-hidden">
+							<button
+								type="button"
+								on:click={() => toggleSection('systemPrompt')}
+								class="w-full px-3 py-2 bg-[#252525] flex items-center justify-between text-sm text-gray-300 hover:bg-[#2a2a2a]"
+							>
+								<span>System Prompt</span>
+								<svg class="w-4 h-4 transition-transform {expandedSections.systemPrompt ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+								</svg>
+							</button>
+							{#if expandedSections.systemPrompt}
+								<div class="p-3 space-y-3 bg-[#1a1a1a]">
+									<div>
+										<label class="block text-xs text-gray-500 mb-1">Prompt Type</label>
+										<select bind:value={profileForm.system_prompt_type} class="w-full bg-[#2a2a2a] border-0 rounded-lg px-3 py-2 text-sm text-white">
+											<option value="preset">Use Claude Code Preset</option>
+											<option value="custom">Custom Prompt</option>
+										</select>
+									</div>
+									{#if profileForm.system_prompt_type === 'preset'}
+										<div>
+											<label class="block text-xs text-gray-500 mb-1">Preset</label>
+											<select bind:value={profileForm.system_prompt_preset} class="w-full bg-[#2a2a2a] border-0 rounded-lg px-3 py-2 text-sm text-white">
+												<option value="claude_code">Claude Code</option>
+												<option value="default">Default</option>
+											</select>
+										</div>
+										<div>
+											<label class="block text-xs text-gray-500 mb-1">Append Instructions</label>
+											<textarea bind:value={profileForm.system_prompt_append} class="w-full bg-[#2a2a2a] border-0 rounded-lg px-3 py-2 text-sm text-white resize-none" rows="3" placeholder="Additional instructions to append to the system prompt..."></textarea>
+										</div>
+									{:else}
+										<div>
+											<label class="block text-xs text-gray-500 mb-1">Custom System Prompt</label>
+											<textarea bind:value={profileForm.system_prompt_content} class="w-full bg-[#2a2a2a] border-0 rounded-lg px-3 py-2 text-sm text-white resize-none" rows="4" placeholder="Enter your custom system prompt..."></textarea>
+										</div>
+									{/if}
+								</div>
+							{/if}
+						</div>
+
+						<!-- Settings Sources Accordion -->
+						<div class="border border-[#2a2a2a] rounded-lg overflow-hidden">
+							<button
+								type="button"
+								on:click={() => toggleSection('settingSources')}
+								class="w-full px-3 py-2 bg-[#252525] flex items-center justify-between text-sm text-gray-300 hover:bg-[#2a2a2a]"
+							>
+								<span>Settings Sources</span>
+								<svg class="w-4 h-4 transition-transform {expandedSections.settingSources ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+								</svg>
+							</button>
+							{#if expandedSections.settingSources}
+								<div class="p-3 bg-[#1a1a1a]">
+									<p class="text-xs text-gray-500 mb-2">Load settings from filesystem locations</p>
+									<div class="flex flex-wrap gap-3">
+										<label class="flex items-center gap-2 cursor-pointer">
+											<input type="checkbox" checked={profileForm.setting_sources.includes('user')} on:change={() => toggleSettingSource('user')} class="w-4 h-4 rounded bg-[#2a2a2a] border-0 text-violet-600 focus:ring-violet-500" />
+											<span class="text-sm text-gray-300">User (~/.claude)</span>
+										</label>
+										<label class="flex items-center gap-2 cursor-pointer">
+											<input type="checkbox" checked={profileForm.setting_sources.includes('project')} on:change={() => toggleSettingSource('project')} class="w-4 h-4 rounded bg-[#2a2a2a] border-0 text-violet-600 focus:ring-violet-500" />
+											<span class="text-sm text-gray-300">Project (.claude)</span>
+										</label>
+										<label class="flex items-center gap-2 cursor-pointer">
+											<input type="checkbox" checked={profileForm.setting_sources.includes('local')} on:change={() => toggleSettingSource('local')} class="w-4 h-4 rounded bg-[#2a2a2a] border-0 text-violet-600 focus:ring-violet-500" />
+											<span class="text-sm text-gray-300">Local</span>
+										</label>
+									</div>
+								</div>
+							{/if}
+						</div>
+
+						<!-- Advanced Settings Accordion -->
+						<div class="border border-[#2a2a2a] rounded-lg overflow-hidden">
+							<button
+								type="button"
+								on:click={() => toggleSection('advanced')}
+								class="w-full px-3 py-2 bg-[#252525] flex items-center justify-between text-sm text-gray-300 hover:bg-[#2a2a2a]"
+							>
+								<span>Advanced Settings</span>
+								<svg class="w-4 h-4 transition-transform {expandedSections.advanced ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+								</svg>
+							</button>
+							{#if expandedSections.advanced}
+								<div class="p-3 space-y-3 bg-[#1a1a1a]">
+									<div class="grid grid-cols-2 gap-3">
+										<div>
+											<label class="block text-xs text-gray-500 mb-1">Working Directory</label>
+											<input bind:value={profileForm.cwd} class="w-full bg-[#2a2a2a] border-0 rounded-lg px-3 py-2 text-sm text-white" placeholder="/workspace/my-project" />
+										</div>
+										<div>
+											<label class="block text-xs text-gray-500 mb-1">User Identifier</label>
+											<input bind:value={profileForm.user} class="w-full bg-[#2a2a2a] border-0 rounded-lg px-3 py-2 text-sm text-white" placeholder="user@example.com" />
+										</div>
+									</div>
+									<div>
+										<label class="block text-xs text-gray-500 mb-1">Additional Directories</label>
+										<input bind:value={profileForm.add_dirs} class="w-full bg-[#2a2a2a] border-0 rounded-lg px-3 py-2 text-sm text-white" placeholder="/extra/dir1, /extra/dir2 (comma-separated)" />
+									</div>
+									<div>
+										<label class="block text-xs text-gray-500 mb-1">Max Buffer Size (bytes)</label>
+										<input type="number" bind:value={profileForm.max_buffer_size} class="w-full bg-[#2a2a2a] border-0 rounded-lg px-3 py-2 text-sm text-white" placeholder="Default" />
+									</div>
+								</div>
+							{/if}
 						</div>
 
 						<div class="flex gap-2 pt-4">
