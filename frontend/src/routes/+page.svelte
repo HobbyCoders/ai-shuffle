@@ -889,7 +889,7 @@
 							<button
 								type="submit"
 								class="flex-shrink-0 w-10 h-10 flex items-center justify-center bg-violet-600 hover:bg-violet-500 text-white rounded-lg transition-colors disabled:opacity-50 disabled:hover:bg-violet-600"
-								disabled={!getTabPrompt(tabId).trim() || !$claudeAuthenticated}
+								disabled={!(tabInputs[tabId] || '').trim() || !$claudeAuthenticated}
 							>
 								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
