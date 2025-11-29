@@ -24,7 +24,7 @@ from app.core.profiles import get_profile_or_builtin
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["WebSocket"])
+router = APIRouter(prefix="/api/v1", tags=["WebSocket"])
 
 # Track active chat sessions for interruption
 _active_chat_sessions: dict[str, asyncio.Task] = {}
