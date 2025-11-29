@@ -431,6 +431,36 @@ async def claude_login_poll(token: str = Depends(require_admin)):
     }
 
 
+@router.post("/claude/complete")
+async def claude_login_complete(request: Request, token: str = Depends(require_admin)):
+    """
+    Complete the Claude OAuth login by providing the authorization code.
+
+    After starting the login with /auth/claude/login and getting an OAuth URL,
+    the user visits the URL in their browser, authenticates, and receives a code.
+    They then call this endpoint with that code to complete the login flow.
+
+    Expects JSON body with 'code' field containing the auth code from the browser.
+    """
+    try:
+        body = await request.json()
+        auth_code = body.get("code")
+        if not auth_code:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Authorization code is required"
+            )
+        return auth_service.complete_claude_oauth_login(auth_code)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Claude complete login error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
 @router.post("/claude/logout")
 async def claude_logout(token: str = Depends(require_admin)):
     """Logout from Claude CLI"""

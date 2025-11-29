@@ -23,7 +23,8 @@
 	let githubLoginLoading = false;
 	let claudeLoginLoading = false;
 	let claudeOAuthUrl: string | null = null;
-	let claudePolling = false;
+	let claudeAuthCode = '';
+	let claudeCompletingLogin = false;
 	let githubUser: string | null = null;
 
 	let formData = {
@@ -107,9 +108,10 @@
 	async function handleClaudeLogin() {
 		claudeLoginLoading = true;
 		claudeOAuthUrl = null;
+		claudeAuthCode = '';
 		error = '';
 		try {
-			const result = await api.post<{success: boolean, oauth_url?: string, already_authenticated?: boolean, message: string}>('/auth/claude/login');
+			const result = await api.post<{success: boolean, oauth_url?: string, already_authenticated?: boolean, message: string, error?: string}>('/auth/claude/login');
 			if (result.already_authenticated) {
 				await auth.checkAuth();
 				claudeLoginLoading = false;
@@ -117,11 +119,8 @@
 			}
 			if (result.oauth_url) {
 				claudeOAuthUrl = result.oauth_url;
-				// Start polling for auth status
-				claudePolling = true;
-				pollClaudeAuth();
 			} else {
-				error = result.message || 'Failed to start OAuth login';
+				error = result.error || result.message || 'Failed to start OAuth login';
 			}
 		} catch (e: any) {
 			error = e.detail || 'Claude login failed';
@@ -129,26 +128,31 @@
 		claudeLoginLoading = false;
 	}
 
-	async function pollClaudeAuth() {
-		while (claudePolling) {
-			try {
-				const result = await api.get<{success: boolean, authenticated: boolean}>('/auth/claude/login/poll');
-				if (result.authenticated) {
-					claudePolling = false;
-					claudeOAuthUrl = null;
-					await auth.checkAuth();
-					return;
-				}
-			} catch (e) {
-				// Continue polling
-			}
-			await new Promise(r => setTimeout(r, 2000));
+	async function completeClaudeLogin() {
+		if (!claudeAuthCode.trim()) {
+			error = 'Please enter the authorization code';
+			return;
 		}
+		claudeCompletingLogin = true;
+		error = '';
+		try {
+			const result = await api.post<{success: boolean, message: string, authenticated?: boolean, error?: string}>('/auth/claude/complete', { code: claudeAuthCode.trim() });
+			if (result.success && result.authenticated) {
+				claudeOAuthUrl = null;
+				claudeAuthCode = '';
+				await auth.checkAuth();
+			} else {
+				error = result.error || result.message || 'Authentication failed';
+			}
+		} catch (e: any) {
+			error = e.detail || 'Failed to complete Claude login';
+		}
+		claudeCompletingLogin = false;
 	}
 
 	function cancelClaudeLogin() {
-		claudePolling = false;
 		claudeOAuthUrl = null;
+		claudeAuthCode = '';
 	}
 
 	async function handleClaudeLogout() {
@@ -348,18 +352,31 @@
 							</button>
 						{:else if claudeOAuthUrl}
 							<div class="space-y-3">
-								<p class="text-sm text-gray-400">Complete login in your browser:</p>
+								<p class="text-sm text-gray-400">Step 1: Open the login page in your browser:</p>
 								<a href={claudeOAuthUrl} target="_blank" rel="noopener noreferrer" class="btn btn-primary text-sm w-full flex items-center justify-center gap-2">
 									<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
 									</svg>
 									Open Login Page
 								</a>
-								<div class="flex items-center gap-2 text-xs text-gray-500">
-									<div class="animate-spin w-3 h-3 border border-gray-500 border-t-transparent rounded-full"></div>
-									Waiting for authentication...
-								</div>
-								<button on:click={cancelClaudeLogin} class="text-xs text-gray-500 hover:text-gray-300">
+								<p class="text-sm text-gray-400">Step 2: After authenticating, paste the code here:</p>
+								<input
+									type="text"
+									bind:value={claudeAuthCode}
+									placeholder="Paste authorization code here"
+									class="input text-sm"
+								/>
+								<button
+									on:click={completeClaudeLogin}
+									disabled={claudeCompletingLogin || !claudeAuthCode.trim()}
+									class="btn btn-primary text-sm w-full"
+								>
+									{#if claudeCompletingLogin}
+										<span class="animate-spin inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full mr-2"></span>
+									{/if}
+									Complete Login
+								</button>
+								<button on:click={cancelClaudeLogin} class="text-xs text-gray-500 hover:text-gray-300 w-full text-center">
 									Cancel
 								</button>
 							</div>

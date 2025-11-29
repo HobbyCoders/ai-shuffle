@@ -79,6 +79,9 @@ class AuthService:
         """Initialize auth service"""
         self.config_dir = Path(os.environ.get('HOME', '/home/appuser')) / '.claude'
         self.gh_config_dir = Path(os.environ.get('HOME', '/home/appuser')) / '.config' / 'gh'
+        # Store active OAuth login process for multi-step flow
+        self._claude_login_process = None
+        self._claude_login_master_fd = None
 
     # =========================================================================
     # Web UI Authentication
@@ -424,18 +427,84 @@ class AuthService:
     # Claude Code OAuth Login (in-app)
     # =========================================================================
 
+    def _cleanup_claude_login_process(self):
+        """Clean up any existing claude login process"""
+        if self._claude_login_process:
+            try:
+                self._claude_login_process.kill()
+                self._claude_login_process.wait(timeout=2)
+            except:
+                pass
+            self._claude_login_process = None
+
+        if self._claude_login_master_fd:
+            try:
+                import os as os_module
+                os_module.close(self._claude_login_master_fd)
+            except:
+                pass
+            self._claude_login_master_fd = None
+
+    def _read_pty_output(self, timeout: float = 5.0) -> str:
+        """Read available output from the PTY master fd"""
+        import select
+        import os as os_module
+        import time
+
+        output = ""
+        start = time.time()
+
+        while time.time() - start < timeout:
+            if not self._claude_login_master_fd:
+                break
+
+            ready, _, _ = select.select([self._claude_login_master_fd], [], [], 0.3)
+            if ready:
+                try:
+                    data = os_module.read(self._claude_login_master_fd, 4096)
+                    if data:
+                        chunk = data.decode('utf-8', errors='replace')
+                        output += chunk
+                        logger.debug(f"PTY read: {repr(chunk)}")
+                except OSError:
+                    break
+            else:
+                # No more data available right now
+                if output:
+                    break
+
+        return output
+
+    def _write_pty_input(self, text: str):
+        """Write input to the PTY master fd"""
+        import os as os_module
+
+        if self._claude_login_master_fd:
+            try:
+                os_module.write(self._claude_login_master_fd, text.encode('utf-8'))
+                logger.debug(f"PTY write: {repr(text)}")
+            except OSError as e:
+                logger.error(f"Failed to write to PTY: {e}")
+
     def start_claude_oauth_login(self) -> Dict[str, Any]:
         """
         Start Claude Code OAuth login process.
 
-        The claude login flow is interactive:
-        1. CLI displays an OAuth URL
-        2. User opens URL in browser and authenticates with Anthropic
-        3. User copies the resulting code and pastes it back into CLI
-        4. CLI creates ~/.claude/.credentials.json
+        The claude CLI login flow is interactive with multiple steps:
+        1. Theme selection - we send "1"
+        2. Login method selection - we send "1" (browser-based OAuth)
+        3. CLI displays an OAuth URL (browser fails to open in Docker)
+        4. User opens URL in browser and authenticates with Anthropic
+        5. User copies the resulting code
+        6. User calls /auth/claude/complete with the code
+        7. We send the code to the CLI process
+        8. CLI shows confirmation - we send Enter
+        9. Security notes - we send Enter
+        10. Folder permission (/app) - we send "1"
+        11. CLI creates ~/.claude/.credentials.json
 
-        For Docker: We run this in the container and guide user through the process
-        For Windows/native: User should run 'claude login' in their terminal
+        For Docker: We run this in the container and manage the process
+        For Windows/native: User should run 'claude' in their terminal
         """
         try:
             # Check if already authenticated
@@ -445,6 +514,9 @@ class AuthService:
                     "already_authenticated": True,
                     "message": "Already authenticated with Claude Code"
                 }
+
+            # Clean up any existing login process
+            self._cleanup_claude_login_process()
 
             home_env = os.environ.get('HOME', str(Path.home()))
 
@@ -468,143 +540,110 @@ class AuthService:
             )
 
             if in_docker:
-                # In Docker, we run claude login and capture output
-                # claude login is interactive - it prints a URL then waits for the code
-                # We need to use a pseudo-terminal (pty) because claude login
-                # may buffer output or behave differently without a TTY
                 import re
                 import time
-
-                output = ""
-                process = None
+                import pty
+                import os as os_module
 
                 try:
-                    # Try using pty for proper TTY emulation (Unix only)
-                    try:
-                        import pty
-                        import os as os_module
+                    # Create PTY for interactive communication
+                    master_fd, slave_fd = pty.openpty()
 
-                        master_fd, slave_fd = pty.openpty()
+                    # Start claude (not 'claude login' - just 'claude' will prompt for login if needed)
+                    process = subprocess.Popen(
+                        [claude_cmd],
+                        stdin=slave_fd,
+                        stdout=slave_fd,
+                        stderr=slave_fd,
+                        close_fds=True,
+                        env={**os.environ, 'HOME': home_env, 'TERM': 'xterm'}
+                    )
 
-                        process = subprocess.Popen(
-                            [claude_cmd, 'login'],
-                            stdin=slave_fd,
-                            stdout=slave_fd,
-                            stderr=slave_fd,
-                            close_fds=True,
-                            env={**os.environ, 'HOME': home_env}
-                        )
+                    os_module.close(slave_fd)
 
-                        os_module.close(slave_fd)
+                    # Store references for later use
+                    self._claude_login_process = process
+                    self._claude_login_master_fd = master_fd
 
-                        # Read from master with timeout
-                        import select
-                        start = time.time()
-                        while time.time() - start < 8:
-                            ready, _, _ = select.select([master_fd], [], [], 0.5)
-                            if ready:
-                                try:
-                                    data = os_module.read(master_fd, 4096)
-                                    if data:
-                                        chunk = data.decode('utf-8', errors='replace')
-                                        output += chunk
-                                        logger.debug(f"Claude login pty output: {repr(chunk)}")
+                    # Wait a moment for initial output
+                    time.sleep(0.5)
 
-                                        # Check if we found a URL
-                                        url_match = re.search(r'(https://[^\s\x00-\x1f]+)', output)
-                                        if url_match:
-                                            break
-                                except OSError:
-                                    break
+                    # Read initial output (theme selection)
+                    output = self._read_pty_output(timeout=3.0)
+                    logger.info(f"Initial claude output: {repr(output[:500] if len(output) > 500 else output)}")
 
-                        os_module.close(master_fd)
+                    # Step 1: Theme selection - send "1" for default theme
+                    # Look for theme selection prompt
+                    if 'theme' in output.lower() or 'select' in output.lower() or '1.' in output:
+                        logger.info("Sending theme selection: 1")
+                        self._write_pty_input("1\n")
+                        time.sleep(0.5)
+                        output = self._read_pty_output(timeout=3.0)
+                        logger.info(f"After theme selection: {repr(output[:500] if len(output) > 500 else output)}")
 
-                    except (ImportError, OSError) as pty_error:
-                        # pty not available (Windows) or failed, try regular subprocess
-                        logger.debug(f"PTY not available, using regular subprocess: {pty_error}")
+                    # Step 2: Login method selection - send "1" for browser OAuth
+                    if 'login' in output.lower() or 'method' in output.lower() or '1.' in output:
+                        logger.info("Sending login method selection: 1")
+                        self._write_pty_input("1\n")
+                        time.sleep(1.0)  # Give more time for URL to appear
+                        output = self._read_pty_output(timeout=5.0)
+                        logger.info(f"After login method: {repr(output[:500] if len(output) > 500 else output)}")
 
-                        # Use threading approach as fallback
-                        import threading
-                        import queue
+                    # Step 3: Extract the OAuth URL
+                    # The URL should be displayed after browser fails to open
+                    all_output = output
+                    url_match = re.search(r'(https://[^\s\x00-\x1f\]]+)', all_output)
 
-                        process = subprocess.Popen(
-                            [claude_cmd, 'login'],
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            stdin=subprocess.PIPE,
-                            text=True,
-                            env={**os.environ, 'HOME': home_env}
-                        )
+                    if url_match:
+                        oauth_url = url_match.group(1).rstrip(')')
+                        logger.info(f"Extracted OAuth URL: {oauth_url}")
+                        return {
+                            "success": True,
+                            "oauth_url": oauth_url,
+                            "message": "Open this URL in your browser, authenticate, then copy the code and use /auth/claude/complete to finish.",
+                            "requires_code": True,
+                            "process_active": True
+                        }
+                    else:
+                        # Try reading more output in case URL is delayed
+                        time.sleep(2.0)
+                        more_output = self._read_pty_output(timeout=5.0)
+                        all_output += more_output
+                        logger.info(f"Additional output: {repr(more_output[:500] if len(more_output) > 500 else more_output)}")
 
-                        def read_output(pipe, q):
-                            try:
-                                for line in iter(pipe.readline, ''):
-                                    q.put(line)
-                            except:
-                                pass
+                        url_match = re.search(r'(https://[^\s\x00-\x1f\]]+)', all_output)
+                        if url_match:
+                            oauth_url = url_match.group(1).rstrip(')')
+                            logger.info(f"Extracted OAuth URL (delayed): {oauth_url}")
+                            return {
+                                "success": True,
+                                "oauth_url": oauth_url,
+                                "message": "Open this URL in your browser, authenticate, then copy the code and use /auth/claude/complete to finish.",
+                                "requires_code": True,
+                                "process_active": True
+                            }
 
-                        stdout_queue = queue.Queue()
-                        stderr_queue = queue.Queue()
+                        # Still no URL - clean up and report error
+                        self._cleanup_claude_login_process()
+                        logger.warning(f"Could not find URL in claude output: {repr(all_output)}")
+                        return {
+                            "success": False,
+                            "message": "Could not extract OAuth URL",
+                            "error": all_output or "No URL found in claude output",
+                            "raw_output": all_output,
+                            "instructions": "Run 'claude' manually in the container terminal: docker exec -it <container> claude"
+                        }
 
-                        stdout_thread = threading.Thread(target=read_output, args=(process.stdout, stdout_queue))
-                        stderr_thread = threading.Thread(target=read_output, args=(process.stderr, stderr_queue))
-                        stdout_thread.daemon = True
-                        stderr_thread.daemon = True
-                        stdout_thread.start()
-                        stderr_thread.start()
-
-                        # Wait up to 8 seconds for output
-                        start = time.time()
-                        while time.time() - start < 8:
-                            try:
-                                line = stdout_queue.get_nowait()
-                                output += line
-                                logger.debug(f"Claude login stdout: {line}")
-                            except queue.Empty:
-                                pass
-                            try:
-                                line = stderr_queue.get_nowait()
-                                output += line
-                                logger.debug(f"Claude login stderr: {line}")
-                            except queue.Empty:
-                                pass
-
-                            # Check if we found a URL
-                            url_match = re.search(r'(https://[^\s\x00-\x1f]+)', output)
-                            if url_match:
-                                break
-
-                            time.sleep(0.1)
-
-                finally:
-                    # Kill the process - we just needed the URL
-                    if process:
-                        try:
-                            process.kill()
-                            process.wait(timeout=2)
-                        except:
-                            pass
-
-                # Parse output to find OAuth URL
-                url_match = re.search(r'(https://[^\s\x00-\x1f]+)', output)
-
-                if url_match:
-                    oauth_url = url_match.group(1)
-                    logger.info(f"Extracted OAuth URL: {oauth_url}")
-                    return {
-                        "success": True,
-                        "oauth_url": oauth_url,
-                        "message": "Open this URL in your browser to complete login. After authenticating, copy the code and use the /auth/claude/complete endpoint.",
-                        "requires_code": True
-                    }
-                else:
-                    logger.warning(f"Could not find URL in claude login output: {repr(output)}")
+                except (ImportError, OSError) as e:
+                    self._cleanup_claude_login_process()
+                    logger.error(f"PTY error: {e}")
                     return {
                         "success": False,
-                        "message": "Could not extract OAuth URL",
-                        "error": output or "No output from claude login command. The command may require a TTY.",
-                        "instructions": "Run 'claude login' manually in the container terminal"
+                        "message": "Failed to start interactive login",
+                        "error": str(e),
+                        "instructions": "Run 'claude' manually in the container terminal"
                     }
+
             else:
                 # Not in Docker - provide instructions for manual login
                 return {
@@ -613,26 +652,111 @@ class AuthService:
                     "error": "In-app OAuth login is only available in Docker deployments",
                     "instructions": [
                         "1. Open a terminal/command prompt",
-                        "2. Run: claude login",
-                        "3. Click the URL that appears",
-                        "4. Complete authentication in your browser",
-                        "5. Copy the code and paste it back in the terminal",
-                        "6. Refresh this page to verify authentication"
+                        "2. Run: claude",
+                        "3. Follow the prompts (select theme, login method)",
+                        "4. Click the URL that appears",
+                        "5. Complete authentication in your browser",
+                        "6. Copy the code and paste it back in the terminal",
+                        "7. Refresh this page to verify authentication"
                     ]
                 }
 
-        except subprocess.TimeoutExpired:
-            # Timeout is expected for interactive command - check if URL was printed
-            return {
-                "success": False,
-                "message": "Login requires terminal interaction",
-                "instructions": "Run 'claude login' in your terminal to complete authentication"
-            }
         except Exception as e:
+            self._cleanup_claude_login_process()
             logger.error(f"Claude OAuth login error: {e}")
             return {
                 "success": False,
                 "message": "Login failed",
+                "error": str(e)
+            }
+
+    def complete_claude_oauth_login(self, auth_code: str) -> Dict[str, Any]:
+        """
+        Complete the Claude OAuth login by sending the auth code to the waiting process.
+
+        After the user visits the OAuth URL and gets a code, they call this endpoint
+        to complete the authentication flow.
+        """
+        import time
+        import re
+
+        if not self._claude_login_process or not self._claude_login_master_fd:
+            return {
+                "success": False,
+                "message": "No active login process",
+                "error": "Please start the login process first with /auth/claude/login"
+            }
+
+        # Check if process is still running
+        if self._claude_login_process.poll() is not None:
+            self._cleanup_claude_login_process()
+            return {
+                "success": False,
+                "message": "Login process has ended",
+                "error": "The login process is no longer running. Please start again."
+            }
+
+        try:
+            # Send the auth code
+            logger.info(f"Sending auth code: {auth_code[:10]}...")
+            self._write_pty_input(f"{auth_code}\n")
+            time.sleep(1.0)
+
+            # Read response
+            output = self._read_pty_output(timeout=3.0)
+            logger.info(f"After auth code: {repr(output[:500] if len(output) > 500 else output)}")
+
+            # Step 5: Confirmation prompt - send Enter
+            if output:
+                logger.info("Sending confirmation Enter")
+                self._write_pty_input("\n")
+                time.sleep(0.5)
+                output = self._read_pty_output(timeout=2.0)
+                logger.info(f"After confirmation: {repr(output[:300] if len(output) > 300 else output)}")
+
+            # Step 6: Security notes - send Enter
+            if output:
+                logger.info("Sending security notes Enter")
+                self._write_pty_input("\n")
+                time.sleep(0.5)
+                output = self._read_pty_output(timeout=2.0)
+                logger.info(f"After security notes: {repr(output[:300] if len(output) > 300 else output)}")
+
+            # Step 7: Folder permission (/app) - send "1" for yes
+            if 'folder' in output.lower() or 'permission' in output.lower() or '/app' in output or '1.' in output:
+                logger.info("Sending folder permission: 1")
+                self._write_pty_input("1\n")
+                time.sleep(1.0)
+                output = self._read_pty_output(timeout=3.0)
+                logger.info(f"After folder permission: {repr(output[:300] if len(output) > 300 else output)}")
+
+            # Give time for credentials to be written
+            time.sleep(1.0)
+
+            # Clean up the process
+            self._cleanup_claude_login_process()
+
+            # Check if authentication succeeded
+            if self.is_claude_authenticated():
+                return {
+                    "success": True,
+                    "message": "Successfully authenticated with Claude Code",
+                    "authenticated": True
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": "Authentication may have failed",
+                    "error": "Credentials file not found after login process. Check the output for errors.",
+                    "last_output": output
+                }
+
+        except Exception as e:
+            self._cleanup_claude_login_process()
+            logger.error(f"Error completing Claude login: {e}")
+            return {
+                "success": False,
+                "message": "Failed to complete login",
                 "error": str(e)
             }
 
