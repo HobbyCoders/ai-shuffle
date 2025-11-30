@@ -286,14 +286,30 @@ function createTabsStore() {
 
 		switch (msgType) {
 			case 'history': {
-				const messages = (data.messages as Array<Record<string, unknown>>)?.map((m, i) => ({
-					id: `msg-${m.id || i}`,
-					role: m.role as 'user' | 'assistant',
-					content: m.content as string,
-					type: m.role === 'assistant' ? 'text' as const : undefined,
-					metadata: m.metadata as Record<string, unknown>,
-					streaming: false
-				})) || [];
+				// Handle both JSONL format (with explicit type) and legacy DB format
+				const messages = (data.messages as Array<Record<string, unknown>>)?.map((m, i) => {
+					// Determine message type - JSONL messages have explicit 'type' field
+					let msgType: MessageType | undefined = m.type as MessageType | undefined;
+
+					// Legacy DB format: infer type from role
+					if (!msgType && m.role === 'assistant') {
+						msgType = 'text';
+					} else if (!msgType && (m.role === 'tool_use' || m.role === 'tool_result')) {
+						msgType = m.role as MessageType;
+					}
+
+					return {
+						id: String(m.id || `msg-${i}`),
+						role: (m.role === 'tool_use' || m.role === 'tool_result' ? 'assistant' : m.role) as 'user' | 'assistant',
+						content: m.content as string,
+						type: msgType,
+						toolName: (m.toolName || m.tool_name) as string | undefined,
+						toolId: m.toolId as string | undefined,
+						toolInput: (m.toolInput || m.tool_input) as Record<string, unknown> | undefined,
+						metadata: m.metadata as Record<string, unknown>,
+						streaming: false
+					};
+				}) || [];
 
 				updateTab(tabId, {
 					sessionId: data.session_id as string,
