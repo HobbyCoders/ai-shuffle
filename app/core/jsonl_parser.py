@@ -166,16 +166,21 @@ def parse_session_history(
                     if isinstance(block, dict):
                         if block.get("type") == "tool_result":
                             msg_counter += 1
-                            tool_result = entry.get("toolUseResult", {})
+                            tool_result = entry.get("toolUseResult")
                             output = block.get("content", "")
+                            is_error = block.get("is_error", False)
 
                             # Get output from toolUseResult if available (has stdout/stderr)
-                            if tool_result:
+                            if tool_result and isinstance(tool_result, dict):
                                 stdout = tool_result.get("stdout", "")
                                 stderr = tool_result.get("stderr", "")
                                 output = stdout
                                 if stderr:
                                     output = f"{stdout}\n{stderr}" if stdout else stderr
+                                is_error = is_error or tool_result.get("is_error", False)
+                            elif tool_result and isinstance(tool_result, str):
+                                # Sometimes toolUseResult is just a string
+                                output = tool_result
 
                             messages.append({
                                 "id": f"result-{uuid}",
@@ -186,7 +191,7 @@ def parse_session_history(
                                 "toolName": None,  # Will be matched by frontend
                                 "metadata": {
                                     "timestamp": timestamp,
-                                    "is_error": block.get("is_error", False) or tool_result.get("is_error", False)
+                                    "is_error": is_error
                                 },
                                 "streaming": False
                             })

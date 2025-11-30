@@ -126,13 +126,18 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
         jsonl_messages = parse_session_history(sdk_session_id, working_dir)
         if jsonl_messages:
             # Transform to expected format for SessionWithMessages
+            # Use camelCase for frontend compatibility (toolName, toolInput, toolId)
             for i, m in enumerate(jsonl_messages):
                 messages.append({
                     "id": i,
                     "role": m.get("role", "user"),
                     "content": m.get("content", ""),
-                    "tool_name": m.get("toolName"),
-                    "tool_input": m.get("toolInput"),
+                    "type": m.get("type"),  # Critical for tool_use/tool_result rendering
+                    "toolName": m.get("toolName"),  # camelCase for frontend
+                    "toolInput": m.get("toolInput"),  # camelCase for frontend
+                    "toolId": m.get("toolId"),
+                    "tool_name": m.get("toolName"),  # Also include snake_case for compatibility
+                    "tool_input": m.get("toolInput"),  # Also include snake_case for compatibility
                     "metadata": m.get("metadata"),
                     "created_at": m.get("metadata", {}).get("timestamp") or session.get("created_at")
                 })
