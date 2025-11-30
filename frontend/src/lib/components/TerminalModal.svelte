@@ -100,9 +100,27 @@
     terminal.writeln('\x1b[90mConnecting...\x1b[0m');
   }
 
+  function getAuthToken(): string | null {
+    const cookies = document.cookie.split(';');
+    for (const cookie of cookies) {
+      const [name, value] = cookie.trim().split('=');
+      if (name === 'session') {
+        return value;
+      }
+    }
+    // Cookie might be httpOnly, return null and let server check cookie directly
+    return null;
+  }
+
   function connectWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/api/v1/ws/cli/${sessionId}`;
+    let wsUrl = `${protocol}//${window.location.host}/api/v1/ws/cli/${sessionId}`;
+
+    // Add auth token if available (same as chat WebSocket)
+    const token = getAuthToken();
+    if (token) {
+      wsUrl = `${wsUrl}?token=${encodeURIComponent(token)}`;
+    }
 
     ws = new WebSocket(wsUrl);
 

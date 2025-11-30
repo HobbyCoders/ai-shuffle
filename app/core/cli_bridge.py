@@ -89,10 +89,27 @@ class CLIBridge:
                 # Child process - execute claude CLI
                 os.chdir(self.working_dir)
 
-                # Set up environment
+                # Set up environment - ensure HOME and user directories are set
                 env = os.environ.copy()
                 env["TERM"] = "xterm-256color"
                 env["COLORTERM"] = "truecolor"
+
+                # Ensure HOME is set correctly for Claude credentials
+                # This is critical - Claude looks for ~/.claude/.credentials.json
+                import pwd
+                home_dir = pwd.getpwuid(os.getuid()).pw_dir
+                env["HOME"] = home_dir
+
+                # Ensure PATH includes common binary locations
+                if "PATH" not in env:
+                    env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
+
+                # Verify credentials file exists (debug logging)
+                creds_path = os.path.join(home_dir, ".claude", ".credentials.json")
+                if not os.path.exists(creds_path):
+                    # Can't use logger in child process, write to stderr
+                    import sys
+                    sys.stderr.write(f"WARNING: Credentials file not found at {creds_path}\n")
 
                 # Execute claude with --resume to use existing session
                 # Then we'll send the command via stdin
@@ -131,10 +148,10 @@ class CLIBridge:
                 self._read_task = asyncio.create_task(self._read_output())
 
                 # Wait a moment for claude to start, then send the command
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.0)  # Give more time for CLI to initialize
                 await self.send_input(command + "\n")
 
-                logger.info(f"Started CLI bridge for session {self.session_id}, pid={pid}")
+                logger.info(f"Started CLI bridge for session {self.session_id}, pid={pid}, sdk_session={self.sdk_session_id}")
                 return True
 
         except Exception as e:

@@ -15,9 +15,10 @@
     onSelect: (command: Command) => void;
     onClose: () => void;
     visible: boolean;
+    onKeyDown?: (event: KeyboardEvent) => boolean; // Returns true if event was handled
   }
 
-  let { inputValue, projectId, onSelect, onClose, visible }: Props = $props();
+  let { inputValue, projectId, onSelect, onClose, visible, onKeyDown }: Props = $props();
 
   let commands = $state<Command[]>([]);
   let filteredCommands = $state<Command[]>([]);
@@ -70,34 +71,44 @@
     }
   }
 
-  function handleKeyDown(event: KeyboardEvent) {
-    if (!visible || filteredCommands.length === 0) return;
+  /**
+   * Handle keyboard events for the autocomplete.
+   * Returns true if the event was handled (parent should not process it).
+   * This function is exported so the parent can call it from its keydown handler.
+   */
+  export function handleKeyDown(event: KeyboardEvent): boolean {
+    if (!visible || filteredCommands.length === 0) return false;
 
     switch (event.key) {
       case 'ArrowDown':
         event.preventDefault();
         selectedIndex = Math.min(selectedIndex + 1, filteredCommands.length - 1);
         scrollToSelected();
-        break;
+        return true;
 
       case 'ArrowUp':
         event.preventDefault();
         selectedIndex = Math.max(selectedIndex - 1, 0);
         scrollToSelected();
-        break;
+        return true;
 
       case 'Enter':
       case 'Tab':
         if (filteredCommands[selectedIndex]) {
           event.preventDefault();
+          event.stopPropagation();
           onSelect(filteredCommands[selectedIndex]);
+          return true;
         }
-        break;
+        return false;
 
       case 'Escape':
         event.preventDefault();
         onClose();
-        break;
+        return true;
+
+      default:
+        return false;
     }
   }
 
@@ -114,8 +125,6 @@
     onSelect(command);
   }
 </script>
-
-<svelte:window onkeydown={handleKeyDown} />
 
 {#if visible && filteredCommands.length > 0}
   <div class="absolute bottom-full left-0 right-0 mb-2 bg-gray-800 border border-gray-700 rounded-lg shadow-xl max-h-64 overflow-hidden z-50">

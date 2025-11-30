@@ -61,6 +61,7 @@
 
 	// Command autocomplete state
 	let showCommandAutocomplete: Record<string, boolean> = {};
+	let commandAutocompleteRefs: Record<string, CommandAutocomplete> = {};
 
 	// Accordion states for profile form sections
 	let expandedSections: Record<string, boolean> = {
@@ -208,6 +209,16 @@
 	}
 
 	function handleKeyDown(e: KeyboardEvent, tabId: string) {
+		// Let the command autocomplete handle the event first if visible
+		const autocomplete = commandAutocompleteRefs[tabId];
+		if (autocomplete && showCommandAutocomplete[tabId]) {
+			const handled = autocomplete.handleKeyDown(e);
+			if (handled) {
+				return; // Autocomplete handled the event
+			}
+		}
+
+		// Normal textarea behavior
 		if (e.key === 'Enter' && !e.shiftKey) {
 			e.preventDefault();
 			handleSubmit(tabId);
@@ -1294,6 +1305,7 @@
 						<div class="flex-1 relative">
 							<!-- Command Autocomplete -->
 							<CommandAutocomplete
+								bind:this={commandAutocompleteRefs[tabId]}
 								inputValue={tabInputs[tabId] || ''}
 								projectId={currentTab.project}
 								visible={showCommandAutocomplete[tabId] || false}
