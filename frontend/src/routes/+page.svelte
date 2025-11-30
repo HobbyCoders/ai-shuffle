@@ -19,6 +19,7 @@
 		selectedAdminSessionIds,
 		selectionMode,
 		adminSelectionMode,
+		sessionsLoading,
 		type ChatMessage,
 		type ChatTab,
 		type ApiUser
@@ -141,6 +142,24 @@
 			}
 			Promise.all(promises);
 		}
+
+		// Handle page restored from bfcache (back/forward navigation)
+		// This ensures sessions list is fresh after browser back/forward
+		const handlePageShow = (event: PageTransitionEvent) => {
+			if (event.persisted && $isAuthenticated) {
+				console.log('[Page] Restored from bfcache, refreshing sessions');
+				tabs.loadSessions();
+				if ($isAdmin) {
+					tabs.loadAdminSessions();
+				}
+			}
+		};
+
+		window.addEventListener('pageshow', handlePageShow);
+
+		return () => {
+			window.removeEventListener('pageshow', handlePageShow);
+		};
 	});
 
 	onDestroy(() => {
@@ -353,6 +372,11 @@
 
 	// Open session in new tab
 	function openSessionInNewTab(sessionId: string) {
+		// Prevent clicking while sessions are loading (race condition with bfcache)
+		if ($sessionsLoading) {
+			console.log('[Page] Ignoring session click while loading');
+			return;
+		}
 		tabs.createTab(sessionId);
 		sidebarOpen = false;
 	}
@@ -735,7 +759,7 @@
 							</div>
 						{/if}
 
-						<div class="space-y-1">
+						<div class="space-y-1" class:opacity-50={$sessionsLoading} class:pointer-events-none={$sessionsLoading}>
 							{#each $sessions as session}
 								<div
 									class="group flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-accent cursor-pointer transition-colors {$selectionMode && $selectedSessionIds.has(session.id) ? 'bg-accent/50' : ''}"
@@ -772,7 +796,9 @@
 									{/if}
 								</div>
 							{/each}
-							{#if $sessions.length === 0}
+							{#if $sessionsLoading}
+								<p class="text-xs text-muted-foreground px-2 animate-pulse">Loading sessions...</p>
+							{:else if $sessions.length === 0}
 								<p class="text-xs text-muted-foreground px-2">No chat history yet</p>
 							{/if}
 						</div>

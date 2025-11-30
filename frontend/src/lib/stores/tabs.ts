@@ -73,6 +73,8 @@ interface TabsState {
 	selectedAdminSessionIds: Set<string>;
 	selectionMode: boolean;
 	adminSelectionMode: boolean;
+	// Loading state to prevent race conditions
+	sessionsLoading: boolean;
 }
 
 // WebSocket connections per tab
@@ -127,7 +129,9 @@ function createTabsStore() {
 		selectedSessionIds: new Set<string>(),
 		selectedAdminSessionIds: new Set<string>(),
 		selectionMode: false,
-		adminSelectionMode: false
+		adminSelectionMode: false,
+		// Initialize loading state
+		sessionsLoading: false
 	});
 
 	/**
@@ -593,12 +597,14 @@ function createTabsStore() {
 	 * For API users: the backend automatically filters to their sessions
 	 */
 	async function loadSessionsInternal() {
+		update(s => ({ ...s, sessionsLoading: true }));
 		try {
 			// Load user's own sessions (admin_only=true for admins gets sessions without api_user_id)
 			const sessions = await api.get<Session[]>('/sessions?limit=50&admin_only=true');
-			update(s => ({ ...s, sessions }));
+			update(s => ({ ...s, sessions, sessionsLoading: false }));
 		} catch (e) {
 			console.error('Failed to load sessions:', e);
+			update(s => ({ ...s, sessionsLoading: false }));
 		}
 	}
 
@@ -1117,3 +1123,5 @@ export const selectedSessionIds = derived(tabs, $tabs => $tabs.selectedSessionId
 export const selectedAdminSessionIds = derived(tabs, $tabs => $tabs.selectedAdminSessionIds);
 export const selectionMode = derived(tabs, $tabs => $tabs.selectionMode);
 export const adminSelectionMode = derived(tabs, $tabs => $tabs.adminSelectionMode);
+// Loading state
+export const sessionsLoading = derived(tabs, $tabs => $tabs.sessionsLoading);

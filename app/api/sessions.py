@@ -99,10 +99,14 @@ async def list_sessions(
 async def get_session(request: Request, session_id: str, token: str = Depends(require_auth)):
     """Get a session with its message history. API users can only access their assigned sessions."""
     import logging
+    import traceback
     logger = logging.getLogger(__name__)
+
+    logger.info(f"Loading session: {session_id}")
 
     session = database.get_session(session_id)
     if not session:
+        logger.warning(f"Session not found in database: {session_id}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session not found: {session_id}"
@@ -132,6 +136,10 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                 # Transform to expected format for SessionWithMessages
                 # Use camelCase for frontend compatibility (toolName, toolInput, toolId)
                 for i, m in enumerate(jsonl_messages):
+                    # Get timestamp from metadata, ensuring it's properly formatted
+                    timestamp = m.get("metadata", {}).get("timestamp")
+                    # Don't pass raw timestamp strings to Pydantic datetime field
+                    # The frontend handles timestamp display from metadata anyway
                     messages.append({
                         "id": m.get("id", i),
                         "role": m.get("role", "user"),
@@ -143,7 +151,7 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                         "tool_name": m.get("toolName"),  # Also include snake_case for compatibility
                         "tool_input": m.get("toolInput"),  # Also include snake_case for compatibility
                         "metadata": m.get("metadata"),
-                        "created_at": m.get("metadata", {}).get("timestamp") or session.get("created_at")
+                        "created_at": None  # Let Pydantic use default; timestamp is in metadata
                     })
         except Exception as e:
             # Log the error but don't fail - fall back to database
@@ -167,7 +175,15 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
 
     session["messages"] = messages
 
-    return session
+    logger.info(f"Returning session {session_id} with {len(messages)} messages")
+    try:
+        return session
+    except Exception as e:
+        logger.error(f"Failed to serialize session {session_id}: {e}\n{traceback.format_exc()}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to serialize session: {str(e)}"
+        )
 
 
 @router.patch("/{session_id}")
