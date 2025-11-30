@@ -177,7 +177,41 @@ class AuthService:
             return False
 
         logger.debug("Credentials file exists and has content")
+        # Ensure onboarding is marked complete when credentials exist
+        self._ensure_onboarding_complete()
         return True
+
+    def _ensure_onboarding_complete(self):
+        """
+        Ensure settings.json has hasCompletedOnboarding=true.
+        This prevents the CLI from showing the onboarding wizard when
+        spawning interactive terminals (like /rewind).
+        """
+        settings_file = self.config_dir / 'settings.json'
+
+        try:
+            # Read existing settings or start with empty dict
+            if settings_file.exists():
+                with open(settings_file, 'r') as f:
+                    settings_data = json.load(f)
+            else:
+                settings_data = {}
+
+            # Only update if not already set
+            if not settings_data.get('hasCompletedOnboarding'):
+                settings_data['hasCompletedOnboarding'] = True
+
+                # Set default theme if not present
+                if 'theme' not in settings_data:
+                    settings_data['theme'] = 'dark'
+
+                # Write back
+                with open(settings_file, 'w') as f:
+                    json.dump(settings_data, f, indent=2)
+
+                logger.info("Set hasCompletedOnboarding=true in settings.json")
+        except Exception as e:
+            logger.warning(f"Could not update settings.json: {e}")
 
     def get_claude_auth_info(self) -> Dict[str, Any]:
         """Get Claude CLI authentication info"""
@@ -828,6 +862,8 @@ class AuthService:
 
             # Check if authentication succeeded
             if self.is_claude_authenticated():
+                # Also set hasCompletedOnboarding to prevent CLI from showing onboarding
+                self._ensure_onboarding_complete()
                 return {
                     "success": True,
                     "message": "Successfully authenticated with Claude Code",
