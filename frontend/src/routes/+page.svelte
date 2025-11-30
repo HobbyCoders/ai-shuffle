@@ -235,7 +235,10 @@
 		const days = Math.floor(diff / 86400000);
 
 		if (minutes < 1) return 'Just now';
-		if (minutes < 60) return `${minutes}m ago`;
+		if (minutes < 5) return '5m ago';
+		if (minutes < 10) return '10m ago';
+		if (minutes < 30) return '30m ago';
+		if (minutes < 60) return '50m ago';
 		if (hours < 24) return `${hours}h ago`;
 		if (days === 1) return 'Yesterday';
 		if (days < 7) return `${days}d ago`;
