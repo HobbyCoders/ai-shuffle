@@ -67,6 +67,12 @@ class CLIBridge:
         self._read_task: Optional[asyncio.Task] = None
         self._is_running = False
 
+        # For handling Claude's theme selection prompt
+        self._output_buffer: str = ""
+        self._theme_prompt_handled: bool = False
+        self._pending_command: Optional[str] = None
+        self._command_sent: bool = False
+
     async def start(self, command: str = "/rewind") -> bool:
         """
         Start the Claude CLI with the specified command.
@@ -144,12 +150,14 @@ class CLIBridge:
                 )
                 _cli_sessions[self.session_id] = cli_session
 
-                # Start reading output
+                # Start reading output with theme detection
+                self._output_buffer = ""
+                self._theme_prompt_handled = False
+                self._pending_command = command
                 self._read_task = asyncio.create_task(self._read_output())
 
-                # Wait a moment for claude to start, then send the command
-                await asyncio.sleep(1.0)  # Give more time for CLI to initialize
-                await self.send_input(command + "\n")
+                # The actual command will be sent after theme selection is handled
+                # (see _handle_theme_selection in _read_output)
 
                 logger.info(f"Started CLI bridge for session {self.session_id}, pid={pid}, sdk_session={self.sdk_session_id}")
                 return True
@@ -163,6 +171,53 @@ class CLIBridge:
         if self._fd is not None:
             winsize = struct.pack("HHHH", rows, cols, 0, 0)
             fcntl.ioctl(self._fd, termios.TIOCSWINSZ, winsize)
+
+    async def _handle_theme_selection(self):
+        """
+        Detect and auto-confirm the theme selection prompt.
+
+        Claude CLI v2.x shows a theme selection on first interactive launch.
+        This detects that prompt and auto-presses Enter to accept the default
+        (Dark mode), then sends the actual command.
+        """
+        # Check if we see the theme selection prompt
+        # The prompt shows "Choose the text style" with numbered options
+        if "Choose the text style" in self._output_buffer and "Dark mode" in self._output_buffer:
+            logger.info(f"Detected theme selection prompt for session {self.session_id}, auto-confirming...")
+
+            # Mark as handled so we don't try again
+            self._theme_prompt_handled = True
+
+            # Wait a tiny bit for the prompt to fully render
+            await asyncio.sleep(0.3)
+
+            # Send Enter to accept the default selection (Dark mode is pre-selected)
+            await self.send_input("\r")
+
+            # Wait for CLI to process the selection
+            await asyncio.sleep(0.8)
+
+            # Now send the actual command if we have one
+            if self._pending_command and not self._command_sent:
+                self._command_sent = True
+                logger.info(f"Sending pending command: {self._pending_command}")
+                await self.send_input(self._pending_command + "\n")
+
+        # Also check for ready prompt (in case theme selection was already done)
+        # The > prompt or input area indicates CLI is ready
+        elif not self._command_sent and (
+            # Claude shows a prompt like ╭─ when ready for input
+            "╭─" in self._output_buffer or
+            # Or could be past the welcome banner
+            ("Welcome to Claude Code" in self._output_buffer and len(self._output_buffer) > 2000)
+        ):
+            self._theme_prompt_handled = True
+
+            if self._pending_command:
+                self._command_sent = True
+                await asyncio.sleep(0.5)
+                logger.info(f"CLI ready, sending pending command: {self._pending_command}")
+                await self.send_input(self._pending_command + "\n")
 
     async def resize(self, cols: int, rows: int):
         """Resize the terminal"""
@@ -230,6 +285,13 @@ class CLIBridge:
                         data = os.read(self._fd, 4096)
                         if data:
                             output = data.decode("utf-8", errors="replace")
+
+                            # Accumulate output for theme detection
+                            self._output_buffer += output
+
+                            # Check for theme selection prompt and auto-confirm
+                            if not self._theme_prompt_handled:
+                                await self._handle_theme_selection()
 
                             # Store in buffer
                             if self.session_id in _cli_sessions:

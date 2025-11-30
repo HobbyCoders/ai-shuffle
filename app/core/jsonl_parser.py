@@ -221,14 +221,35 @@ def parse_session_history(
                             is_error = block.get("is_error", False)
                             tool_use_id = block.get("tool_use_id")
 
-                            # Get output from toolUseResult if available (has stdout/stderr)
+                            # Get output from toolUseResult if available
+                            # toolUseResult can have different formats depending on the tool:
+                            # - Bash: {"stdout": "...", "stderr": "...", "is_error": bool}
+                            # - Read: {"type": "text", "file": {"filePath": "...", "content": "..."}}
+                            # - Other tools: may be a string directly
                             if tool_result and isinstance(tool_result, dict):
-                                stdout = tool_result.get("stdout", "")
-                                stderr = tool_result.get("stderr", "")
-                                output = stdout
-                                if stderr:
-                                    output = f"{stdout}\n{stderr}" if stdout else stderr
-                                is_error = is_error or tool_result.get("is_error", False)
+                                # Handle Bash-style results with stdout/stderr
+                                if "stdout" in tool_result or "stderr" in tool_result:
+                                    stdout = tool_result.get("stdout", "")
+                                    stderr = tool_result.get("stderr", "")
+                                    output = stdout
+                                    if stderr:
+                                        output = f"{stdout}\n{stderr}" if stdout else stderr
+                                    is_error = is_error or tool_result.get("is_error", False)
+                                # Handle Read-style results with file content
+                                elif tool_result.get("type") == "text" and "file" in tool_result:
+                                    file_info = tool_result.get("file", {})
+                                    file_content = file_info.get("content", "")
+                                    file_path = file_info.get("filePath", "")
+                                    # Format like the streaming version does
+                                    if file_path and file_content:
+                                        output = f"File: {file_path}\n{file_content}"
+                                    elif file_content:
+                                        output = file_content
+                                # Handle other dict-based results
+                                elif tool_result.get("content"):
+                                    output = tool_result.get("content", "")
+                                elif tool_result.get("result"):
+                                    output = str(tool_result.get("result", ""))
                             elif tool_result and isinstance(tool_result, str):
                                 # Sometimes toolUseResult is just a string (error messages)
                                 output = tool_result
