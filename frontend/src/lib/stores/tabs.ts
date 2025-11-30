@@ -504,7 +504,11 @@ function createTabsStore() {
 				break;
 			}
 
-			case 'stopped': {
+			case 'stopped':
+			case 'interrupted': {
+				// Both 'stopped' (from task cancellation) and 'interrupted' (from SDK interrupt)
+				// should be handled the same way - stop streaming and mark as stopped
+				console.log(`[Tab ${tabId}] Received ${msgType} message`);
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
@@ -759,6 +763,10 @@ function createTabsStore() {
 
 		/**
 		 * Stop generation in a specific tab
+		 *
+		 * Note: We do NOT set isStreaming: false here. We wait for the backend
+		 * to send a 'stopped' message confirming the stop was successful.
+		 * This prevents the UI from showing "stopped" while the backend continues.
 		 */
 		stopGeneration(tabId: string) {
 			const tab = getTab(tabId);
@@ -766,13 +774,15 @@ function createTabsStore() {
 
 			const ws = tabConnections.get(tabId);
 			if (ws?.readyState === WebSocket.OPEN && tab.sessionId) {
+				console.log(`[Tab ${tabId}] Sending stop request for session ${tab.sessionId}`);
 				ws.send(JSON.stringify({
 					type: 'stop',
 					session_id: tab.sessionId
 				}));
 			}
 
-			updateTab(tabId, { isStreaming: false });
+			// Don't set isStreaming: false here - wait for 'stopped' confirmation from backend
+			// The backend will send either 'stopped' or 'done' when it actually stops
 		},
 
 		/**

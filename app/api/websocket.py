@@ -206,10 +206,23 @@ async def chat_websocket(
                         _active_chat_sessions[session_id] = query_task
 
                     elif msg_type == "stop":
-                        # Stop current query
+                        # Stop current query - use interrupt_session for proper SDK-level cancellation
                         session_id = data.get("session_id") or current_session_id
-                        if session_id and session_id in _active_chat_sessions:
-                            _active_chat_sessions[session_id].cancel()
+                        if session_id:
+                            from app.core.query_engine import interrupt_session
+                            # First, try to interrupt at the SDK level (this signals Claude to stop)
+                            interrupted = await interrupt_session(session_id)
+                            logger.info(f"Interrupt session {session_id}: {interrupted}")
+
+                            # Then cancel the asyncio task as a backup
+                            if session_id in _active_chat_sessions:
+                                task = _active_chat_sessions[session_id]
+                                if not task.done():
+                                    task.cancel()
+                                    try:
+                                        await asyncio.wait_for(task, timeout=2.0)
+                                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                                        pass
 
                     elif msg_type == "load_session":
                         # Load a session's message history

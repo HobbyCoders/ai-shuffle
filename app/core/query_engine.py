@@ -35,6 +35,7 @@ class SessionState:
     sdk_session_id: Optional[str] = None
     is_connected: bool = False
     is_streaming: bool = False
+    interrupt_requested: bool = False  # Flag to signal interrupt request
     last_activity: datetime = field(default_factory=datetime.now)
     background_task: Optional[asyncio.Task] = None  # Track background streaming task
 
@@ -1079,17 +1080,39 @@ def _store_background_task(session_id: str, task: asyncio.Task):
 
 
 async def interrupt_session(session_id: str) -> bool:
-    """Interrupt an active streaming session"""
+    """Interrupt an active streaming session.
+
+    This calls the SDK's interrupt() method which signals the Claude API
+    to stop processing. This is more reliable than just cancelling the
+    asyncio task, which only takes effect at the next await point.
+    """
     state = _active_sessions.get(session_id)
-    if state and state.is_connected and state.is_streaming:
-        try:
-            await state.client.interrupt()
-            logger.info(f"Interrupted session {session_id}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to interrupt session {session_id}: {e}")
-            return False
-    return False
+    if not state:
+        logger.warning(f"No active session found for {session_id}")
+        return False
+
+    if not state.is_connected:
+        logger.warning(f"Session {session_id} is not connected")
+        return False
+
+    # Set interrupt flag first - this is checked in the streaming loop as a failsafe
+    state.interrupt_requested = True
+
+    # Don't check is_streaming too strictly - there might be race conditions
+    # and it's better to try to interrupt anyway
+    logger.info(f"Attempting to interrupt session {session_id} (streaming={state.is_streaming})")
+
+    try:
+        await state.client.interrupt()
+        # Mark as not streaming immediately after interrupt
+        state.is_streaming = False
+        logger.info(f"Successfully interrupted session {session_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to interrupt session {session_id}: {e}", exc_info=True)
+        # Even if interrupt failed, mark as not streaming to prevent getting stuck
+        state.is_streaming = False
+        return False
 
 
 def get_active_sessions() -> list:
@@ -1201,6 +1224,12 @@ async def stream_to_websocket(
         await state.client.query(prompt)
 
         async for message in state.client.receive_response():
+            # Check for interrupt request as a failsafe
+            if state.interrupt_requested:
+                logger.info(f"[WS] Interrupt flag detected for session {session_id}, breaking out of loop")
+                interrupted = True
+                break
+
             if isinstance(message, SystemMessage):
                 if message.subtype == "init" and "session_id" in message.data:
                     sdk_session_id = message.data["session_id"]
@@ -1208,6 +1237,12 @@ async def stream_to_websocket(
                     logger.info(f"[WS] Captured SDK session ID: {sdk_session_id}")
 
             elif isinstance(message, AssistantMessage):
+                # Check interrupt before processing each message block
+                if state.interrupt_requested:
+                    logger.info(f"[WS] Interrupt flag detected during message processing for session {session_id}")
+                    interrupted = True
+                    break
+
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         response_text.append(block.text)
@@ -1257,8 +1292,8 @@ async def stream_to_websocket(
 
     except asyncio.CancelledError:
         interrupted = True
-        logger.info(f"[WS] Query interrupted for session {session_id}")
-        raise  # Re-raise so caller can handle
+        logger.info(f"[WS] Query cancelled for session {session_id}")
+        # Don't re-raise - we handle it gracefully by yielding interrupted message
 
     except Exception as e:
         logger.error(f"[WS] Query error for session {session_id}: {e}")
@@ -1267,8 +1302,9 @@ async def stream_to_websocket(
         return
 
     finally:
-        # Mark as not streaming
+        # Mark as not streaming and reset interrupt flag
         state.is_streaming = False
+        state.interrupt_requested = False
         state.last_activity = datetime.now()
 
     # Update session in database - always update title to the last user message
@@ -1307,11 +1343,11 @@ async def stream_to_websocket(
 
     # Store assistant response
     full_response = "".join(response_text)
-    if full_response or tool_messages:
+    if full_response or tool_messages or interrupted:
         database.add_session_message(
             session_id=session_id,
             role="assistant",
-            content=full_response,
+            content=full_response + ("\n\n[Interrupted]" if interrupted else ""),
             metadata=metadata
         )
 
@@ -1327,9 +1363,16 @@ async def stream_to_websocket(
             duration_ms=metadata.get("duration_ms", 0)
         )
 
-    # Yield done event
-    yield {
-        "type": "done",
-        "session_id": session_id,
-        "metadata": metadata
-    }
+    # Yield done or interrupted event
+    if interrupted:
+        yield {
+            "type": "interrupted",
+            "session_id": session_id,
+            "message": "Query was interrupted"
+        }
+    else:
+        yield {
+            "type": "done",
+            "session_id": session_id,
+            "metadata": metadata
+        }
