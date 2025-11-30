@@ -233,12 +233,52 @@ async def chat_websocket(
                                         pass
 
                     elif msg_type == "load_session":
-                        # Load a session's message history
+                        # Load a session's message history from JSONL file
                         session_id = data.get("session_id")
                         if session_id:
                             session = database.get_session(session_id)
                             if session:
-                                messages = database.get_session_messages(session_id)
+                                # Try to load from JSONL file first (source of truth)
+                                sdk_session_id = session.get("sdk_session_id")
+                                messages = []
+
+                                if sdk_session_id:
+                                    from app.core.jsonl_parser import parse_session_history
+                                    # Get working dir from project if available
+                                    working_dir = "/workspace"
+                                    project_id = session.get("project_id")
+                                    if project_id:
+                                        project = database.get_project(project_id)
+                                        if project:
+                                            from app.core.config import settings
+                                            working_dir = str(settings.workspace_dir / project["path"])
+
+                                    messages = parse_session_history(sdk_session_id, working_dir)
+                                    logger.info(f"Loaded {len(messages)} messages from JSONL for session {session_id}")
+
+                                # Fall back to database if JSONL not available
+                                if not messages:
+                                    db_messages = database.get_session_messages(session_id)
+                                    # Transform DB messages to streaming format
+                                    for m in db_messages:
+                                        msg_type_value = None
+                                        if m.get("role") == "assistant":
+                                            msg_type_value = "text"
+                                        elif m.get("role") in ("tool_use", "tool_result"):
+                                            msg_type_value = m.get("role")
+
+                                        messages.append({
+                                            "id": f"msg-{m.get('id', 0)}",
+                                            "role": "assistant" if m.get("role") in ("tool_use", "tool_result") else m.get("role"),
+                                            "content": m.get("content", ""),
+                                            "type": msg_type_value,
+                                            "toolName": m.get("tool_name"),
+                                            "toolInput": m.get("tool_input"),
+                                            "metadata": m.get("metadata"),
+                                            "streaming": False
+                                        })
+                                    logger.info(f"Loaded {len(messages)} messages from DB for session {session_id}")
+
                                 current_session_id = session_id
                                 await send_json({
                                     "type": "history",

@@ -107,7 +107,40 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
 
     check_session_access(request, session)
 
-    messages = database.get_session_messages(session_id)
+    # Try to load messages from JSONL file first (source of truth for consistency)
+    sdk_session_id = session.get("sdk_session_id")
+    messages = []
+
+    if sdk_session_id:
+        from app.core.jsonl_parser import parse_session_history
+        from app.core.config import settings
+
+        # Get working dir from project if available
+        working_dir = "/workspace"
+        project_id = session.get("project_id")
+        if project_id:
+            project = database.get_project(project_id)
+            if project:
+                working_dir = str(settings.workspace_dir / project["path"])
+
+        jsonl_messages = parse_session_history(sdk_session_id, working_dir)
+        if jsonl_messages:
+            # Transform to expected format for SessionWithMessages
+            for i, m in enumerate(jsonl_messages):
+                messages.append({
+                    "id": i,
+                    "role": m.get("role", "user"),
+                    "content": m.get("content", ""),
+                    "tool_name": m.get("toolName"),
+                    "tool_input": m.get("toolInput"),
+                    "metadata": m.get("metadata"),
+                    "created_at": m.get("metadata", {}).get("timestamp") or session.get("created_at")
+                })
+
+    # Fall back to database if JSONL not available
+    if not messages:
+        messages = database.get_session_messages(session_id)
+
     session["messages"] = messages
 
     return session

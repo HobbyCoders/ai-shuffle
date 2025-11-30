@@ -791,14 +791,29 @@ function createTabsStore() {
 		async loadSessionInTab(tabId: string, sessionId: string) {
 			try {
 				const session = await api.get<Session & { messages: Array<Record<string, unknown>> }>(`/sessions/${sessionId}`);
-				const messages: ChatMessage[] = session.messages.map((m, i) => ({
-					id: `msg-${m.id || i}`,
-					role: m.role as 'user' | 'assistant',
-					content: m.content as string,
-					type: m.role === 'assistant' ? 'text' as const : undefined,
-					metadata: m.metadata as Record<string, unknown>,
-					streaming: false
-				}));
+				const messages: ChatMessage[] = session.messages.map((m, i) => {
+					// Determine message type - JSONL messages have explicit 'type' field
+					let msgType: MessageType | undefined = m.type as MessageType | undefined;
+
+					// Legacy DB format: infer type from role
+					if (!msgType && m.role === 'assistant') {
+						msgType = 'text';
+					} else if (!msgType && (m.role === 'tool_use' || m.role === 'tool_result')) {
+						msgType = m.role as MessageType;
+					}
+
+					return {
+						id: String(m.id || `msg-${i}`),
+						role: (m.role === 'tool_use' || m.role === 'tool_result' ? 'assistant' : m.role) as 'user' | 'assistant',
+						content: m.content as string,
+						type: msgType,
+						toolName: (m.toolName || m.tool_name) as string | undefined,
+						toolId: m.toolId as string | undefined,
+						toolInput: (m.toolInput || m.tool_input) as Record<string, unknown> | undefined,
+						metadata: m.metadata as Record<string, unknown>,
+						streaming: false
+					};
+				});
 
 				// Generate title from first user message
 				let title = 'Chat';
