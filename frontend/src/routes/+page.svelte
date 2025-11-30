@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { auth, username, claudeAuthenticated, isAuthenticated } from '$lib/stores/auth';
+	import { auth, username, claudeAuthenticated, isAuthenticated, isAdmin } from '$lib/stores/auth';
 	import {
 		tabs,
 		allTabs,
@@ -10,10 +10,14 @@
 		profiles,
 		projects,
 		sessions,
+		adminSessions,
+		apiUsers,
+		adminSessionsFilter,
 		defaultProfile,
 		defaultProject,
 		type ChatMessage,
-		type ChatTab
+		type ChatTab,
+		type ApiUser
 	} from '$lib/stores/tabs';
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import { marked } from 'marked';
@@ -24,6 +28,7 @@
 
 	let messagesContainers: Record<string, HTMLElement> = {};
 	let sidebarOpen = false;
+	let sidebarTab: 'my-chats' | 'admin' = 'my-chats';
 	let shouldAutoScroll: Record<string, boolean> = {};
 	let lastMessageCounts: Record<string, number> = {};
 	let lastContentLengths: Record<string, number> = {};
@@ -89,6 +94,11 @@
 		tabs.loadProfiles();
 		tabs.loadSessions();
 		tabs.loadProjects();
+		// Load admin-specific data if user is admin
+		if ($isAdmin) {
+			tabs.loadApiUsers();
+			tabs.loadAdminSessions();
+		}
 	} else if (!$isAuthenticated && wasAuthenticated) {
 		wasAuthenticated = false;
 	}
@@ -97,11 +107,17 @@
 		if ($isAuthenticated) {
 			wasAuthenticated = true;
 			tabs.init();
-			Promise.all([
+			const promises = [
 				tabs.loadProfiles(),
 				tabs.loadSessions(),
 				tabs.loadProjects()
-			]);
+			];
+			// Load admin-specific data if user is admin
+			if ($isAdmin) {
+				promises.push(tabs.loadApiUsers());
+				promises.push(tabs.loadAdminSessions());
+			}
+			Promise.all(promises);
 		}
 	});
 
@@ -513,34 +529,114 @@
 				</button>
 			</div>
 
-			<!-- Session History -->
-			<div class="flex-1 overflow-y-auto px-3 pb-3">
-				<div class="text-xs text-gray-500 uppercase tracking-wider px-2 mb-2">History</div>
-				<div class="space-y-1">
-					{#each $sessions as session}
-						<div
-							class="group flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-[#252525] cursor-pointer transition-colors"
-							on:click={() => openSessionInNewTab(session.id)}
-							on:keypress={(e) => e.key === 'Enter' && openSessionInNewTab(session.id)}
-							role="button"
-							tabindex="0"
+			<!-- Session History with Tabs -->
+			<div class="flex-1 overflow-hidden flex flex-col">
+				<!-- Sidebar Tab Selector (only show for admins) -->
+				{#if $isAdmin}
+					<div class="px-3 pt-2 flex gap-1">
+						<button
+							on:click={() => sidebarTab = 'my-chats'}
+							class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'my-chats'
+								? 'bg-violet-600 text-white'
+								: 'text-gray-400 hover:text-white hover:bg-[#252525]'}"
 						>
-							<div class="flex-1 min-w-0">
-								<p class="text-sm text-gray-300 truncate">{truncateTitle(session.title)}</p>
-								<p class="text-xs text-gray-600">{formatDate(session.updated_at)}</p>
-							</div>
-							<button
-								on:click|stopPropagation={(e) => deleteSession(e, session.id)}
-								class="opacity-0 group-hover:opacity-100 p-1 text-gray-500 hover:text-red-400 transition-opacity"
-								title="Delete session"
-							>
-								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-								</svg>
-							</button>
+							My Chats
+						</button>
+						<button
+							on:click={() => sidebarTab = 'admin'}
+							class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'admin'
+								? 'bg-violet-600 text-white'
+								: 'text-gray-400 hover:text-white hover:bg-[#252525]'}"
+						>
+							Admin
+						</button>
+					</div>
+				{/if}
+
+				<!-- My Chats Tab Content -->
+				{#if sidebarTab === 'my-chats'}
+					<div class="flex-1 overflow-y-auto px-3 pb-3 pt-2">
+						<div class="text-xs text-gray-500 uppercase tracking-wider px-2 mb-2">History</div>
+						<div class="space-y-1">
+							{#each $sessions as session}
+								<div
+									class="group flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-[#252525] cursor-pointer transition-colors"
+									on:click={() => openSessionInNewTab(session.id)}
+									on:keypress={(e) => e.key === 'Enter' && openSessionInNewTab(session.id)}
+									role="button"
+									tabindex="0"
+								>
+									<div class="flex-1 min-w-0">
+										<p class="text-sm text-gray-300 truncate">{truncateTitle(session.title)}</p>
+										<p class="text-xs text-gray-600">{formatDate(session.updated_at)}</p>
+									</div>
+									<button
+										on:click|stopPropagation={(e) => deleteSession(e, session.id)}
+										class="opacity-0 group-hover:opacity-100 p-1 text-gray-500 hover:text-red-400 transition-opacity"
+										title="Delete session"
+									>
+										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+										</svg>
+									</button>
+								</div>
+							{/each}
+							{#if $sessions.length === 0}
+								<p class="text-xs text-gray-600 px-2">No chat history yet</p>
+							{/if}
 						</div>
-					{/each}
-				</div>
+					</div>
+				{/if}
+
+				<!-- Admin Tab Content -->
+				{#if sidebarTab === 'admin' && $isAdmin}
+					<div class="flex-1 overflow-y-auto px-3 pb-3 pt-2">
+						<!-- API User Filter -->
+						<div class="mb-3">
+							<label class="text-xs text-gray-500 uppercase tracking-wider px-2 block mb-1">Filter by User</label>
+							<select
+								class="w-full bg-[#252525] border border-[#3a3a3a] rounded-md px-3 py-1.5 text-sm text-gray-300 focus:outline-none focus:border-violet-500"
+								value={$adminSessionsFilter ?? ''}
+								on:change={(e) => tabs.setAdminSessionsFilter(e.currentTarget.value || null)}
+							>
+								<option value="">All API Users</option>
+								{#each $apiUsers as user}
+									<option value={user.id}>{user.name}</option>
+								{/each}
+							</select>
+						</div>
+
+						<div class="text-xs text-gray-500 uppercase tracking-wider px-2 mb-2">API User Sessions</div>
+						<div class="space-y-1">
+							{#each $adminSessions as session}
+								<div
+									class="group flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-[#252525] cursor-pointer transition-colors"
+									on:click={() => openSessionInNewTab(session.id)}
+									on:keypress={(e) => e.key === 'Enter' && openSessionInNewTab(session.id)}
+									role="button"
+									tabindex="0"
+								>
+									<div class="flex-1 min-w-0">
+										<p class="text-sm text-gray-300 truncate">{truncateTitle(session.title)}</p>
+										<p class="text-xs text-gray-600">{formatDate(session.updated_at)}</p>
+									</div>
+									<button
+										on:click|stopPropagation={(e) => deleteSession(e, session.id)}
+										class="opacity-0 group-hover:opacity-100 p-1 text-gray-500 hover:text-red-400 transition-opacity"
+										title="Delete session"
+									>
+										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+										</svg>
+									</button>
+								</div>
+							{/each}
+							{#if $adminSessions.length === 0}
+								<p class="text-xs text-gray-600 px-2">No API user sessions found</p>
+							{/if}
+						</div>
+					</div>
+				{/if}
 			</div>
 
 			<!-- Sidebar Footer -->

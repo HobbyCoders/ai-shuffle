@@ -42,6 +42,8 @@ async def list_sessions(
     project_id: Optional[str] = Query(None, description="Filter by project"),
     profile_id: Optional[str] = Query(None, description="Filter by profile"),
     status_filter: Optional[str] = Query(None, alias="status", description="Filter by status"),
+    api_user_id: Optional[str] = Query(None, description="Filter by API user ID (admin only)"),
+    admin_only: bool = Query(False, description="Show only admin sessions (no API user)"),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
     token: str = Depends(require_auth)
@@ -55,11 +57,25 @@ async def list_sessions(
             project_id = api_user["project_id"]
         if api_user.get("profile_id"):
             profile_id = api_user["profile_id"]
+        # API users can only see their own sessions
+        api_user_id = api_user["id"]
+        admin_only = False
+
+    # Determine api_user_id filter value
+    # - If admin_only=True, filter for sessions with api_user_id IS NULL
+    # - If api_user_id is specified, filter for that specific user
+    # - Otherwise, show all sessions
+    filter_api_user_id = None
+    if admin_only:
+        filter_api_user_id = ""  # Empty string signals "IS NULL" in database.get_sessions
+    elif api_user_id:
+        filter_api_user_id = api_user_id
 
     sessions = database.get_sessions(
         project_id=project_id,
         profile_id=profile_id,
         status=status_filter,
+        api_user_id=filter_api_user_id,
         limit=limit,
         offset=offset
     )
