@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     # Paths
     data_dir: Path = Path("/data")
     workspace_dir: Path = Path("/workspace")
+    claude_projects_dir: Optional[Path] = None  # Override for Claude SDK projects dir (defaults to ~/.claude/projects)
 
     # Database
     database_url: Optional[str] = None
@@ -58,6 +59,13 @@ class Settings(BaseSettings):
     def sessions_dir(self) -> Path:
         """Get the sessions directory"""
         return self.data_dir / "sessions"
+
+    @property
+    def get_claude_projects_dir(self) -> Path:
+        """Get the Claude SDK projects directory"""
+        if self.claude_projects_dir:
+            return self.claude_projects_dir
+        return Path.home() / ".claude" / "projects"
 
     def get_database_url(self) -> str:
         """Get database URL, defaulting to SQLite"""

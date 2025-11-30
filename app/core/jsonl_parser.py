@@ -24,11 +24,9 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Generator
 from datetime import datetime
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
-
-
-# Path to Claude's project history files
-CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 
 def get_project_dir_name(working_dir: str) -> str:
@@ -53,23 +51,33 @@ def get_session_jsonl_path(sdk_session_id: str, working_dir: str = "/workspace")
     Returns:
         Path to the JSONL file, or None if not found
     """
+    # Get Claude projects directory from config (supports custom paths via CLAUDE_PROJECTS_DIR env var)
+    claude_projects_dir = settings.get_claude_projects_dir
+
+    logger.debug(f"Looking for JSONL in claude_projects_dir: {claude_projects_dir}")
+
     # Try to find the project directory
     project_dir_name = get_project_dir_name(working_dir)
-    project_dir = CLAUDE_PROJECTS_DIR / project_dir_name
+    project_dir = claude_projects_dir / project_dir_name
+
+    logger.debug(f"Checking project dir: {project_dir}")
 
     if project_dir.exists():
         jsonl_path = project_dir / f"{sdk_session_id}.jsonl"
+        logger.debug(f"Checking JSONL path: {jsonl_path}")
         if jsonl_path.exists():
             return jsonl_path
 
     # Try to search all project directories for this session
-    if CLAUDE_PROJECTS_DIR.exists():
-        for proj_dir in CLAUDE_PROJECTS_DIR.iterdir():
+    if claude_projects_dir.exists():
+        for proj_dir in claude_projects_dir.iterdir():
             if proj_dir.is_dir():
                 jsonl_path = proj_dir / f"{sdk_session_id}.jsonl"
                 if jsonl_path.exists():
+                    logger.debug(f"Found JSONL in alternate project dir: {jsonl_path}")
                     return jsonl_path
 
+    logger.warning(f"JSONL file not found for session {sdk_session_id} in {claude_projects_dir}")
     return None
 
 
@@ -398,8 +406,9 @@ def list_available_sessions(working_dir: str = "/workspace") -> List[Dict[str, A
 
     Returns list of dicts with: sdk_session_id, path, modified_at
     """
+    claude_projects_dir = settings.get_claude_projects_dir
     project_dir_name = get_project_dir_name(working_dir)
-    project_dir = CLAUDE_PROJECTS_DIR / project_dir_name
+    project_dir = claude_projects_dir / project_dir_name
 
     sessions = []
 
