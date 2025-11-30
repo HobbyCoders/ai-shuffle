@@ -10,6 +10,12 @@ JSONL Format (from Claude SDK ~/.claude/projects/[project]/[session_id].jsonl):
 - Assistant messages: {"type":"assistant", "message":{"role":"assistant","content":[blocks]}, "uuid":"...", "timestamp":"..."}
 - Tool results: {"type":"user", "message":{"role":"user","content":[{"tool_use_id":"...","type":"tool_result","content":"..."}]}, "toolUseResult":{...}}
 - Queue operations: {"type":"queue-operation", ...} - ignored
+- File snapshots: {"type":"file-history-snapshot", ...} - ignored
+
+Key fields that affect parsing:
+- isMeta: Boolean - meta messages like slash commands, system prompts (should be skipped for display)
+- isSidechain: Boolean - messages in alternate conversation branches (should be skipped)
+- parentUuid: String - points to parent message in conversation tree
 """
 
 import json
@@ -106,6 +112,35 @@ def extract_text_from_content(content: Any) -> str:
     return ""
 
 
+def _is_system_content(content: str) -> bool:
+    """
+    Check if content is a system/meta message that should be filtered out.
+
+    These include:
+    - Command-related tags like <command-name>, <command-message>, etc.
+    - Local command stdout markers
+    - Interrupt messages
+    - Empty XML tags
+    """
+    if not content:
+        return True
+
+    # Check for system/meta content patterns
+    system_patterns = [
+        "<command-",
+        "<local-command-stdout>",
+        "[Request interrupted by user]",
+        "Caveat: The messages below were generated",
+    ]
+
+    content_lower = content.strip()
+    for pattern in system_patterns:
+        if content_lower.startswith(pattern):
+            return True
+
+    return False
+
+
 def parse_session_history(
     sdk_session_id: str,
     working_dir: str = "/workspace"
@@ -134,11 +169,22 @@ def parse_session_history(
     messages: List[Dict[str, Any]] = []
     msg_counter = 0
 
+    # Track tool names by ID for matching tool_result to tool_use
+    tool_names_by_id: Dict[str, str] = {}
+
     for entry in parse_jsonl_file(jsonl_path):
         entry_type = entry.get("type")
 
-        # Skip queue operations and other non-message entries
-        if entry_type == "queue-operation":
+        # Skip non-message entries
+        if entry_type in ("queue-operation", "file-history-snapshot"):
+            continue
+
+        # Skip meta messages (slash commands, system prompts, etc.)
+        if entry.get("isMeta"):
+            continue
+
+        # Skip sidechain messages (alternate conversation branches)
+        if entry.get("isSidechain"):
             continue
 
         message_data = entry.get("message", {})
@@ -148,20 +194,24 @@ def parse_session_history(
         uuid = entry.get("uuid", f"msg-{msg_counter}")
 
         if entry_type == "user" and role == "user":
-            # User message - can be plain text or tool results
+            # User message - can be plain text, tool results, or array with text blocks
             if isinstance(content, str):
-                # Plain user message
-                msg_counter += 1
-                messages.append({
-                    "id": uuid,
-                    "role": "user",
-                    "content": content,
-                    "type": None,
-                    "metadata": {"timestamp": timestamp},
-                    "streaming": False
-                })
+                # Plain user message - skip empty content and system/command-related messages
+                if content and not _is_system_content(content):
+                    msg_counter += 1
+                    messages.append({
+                        "id": uuid,
+                        "role": "user",
+                        "content": content,
+                        "type": None,
+                        "metadata": {"timestamp": timestamp},
+                        "streaming": False
+                    })
             elif isinstance(content, list):
-                # Could be tool results
+                # Array content - could be tool results or text blocks
+                has_text_content = False
+                text_parts = []
+
                 for block in content:
                     if isinstance(block, dict):
                         if block.get("type") == "tool_result":
@@ -169,6 +219,7 @@ def parse_session_history(
                             tool_result = entry.get("toolUseResult")
                             output = block.get("content", "")
                             is_error = block.get("is_error", False)
+                            tool_use_id = block.get("tool_use_id")
 
                             # Get output from toolUseResult if available (has stdout/stderr)
                             if tool_result and isinstance(tool_result, dict):
@@ -179,16 +230,16 @@ def parse_session_history(
                                     output = f"{stdout}\n{stderr}" if stdout else stderr
                                 is_error = is_error or tool_result.get("is_error", False)
                             elif tool_result and isinstance(tool_result, str):
-                                # Sometimes toolUseResult is just a string
+                                # Sometimes toolUseResult is just a string (error messages)
                                 output = tool_result
 
                             messages.append({
-                                "id": f"result-{uuid}",
+                                "id": f"result-{uuid}-{tool_use_id}",
                                 "role": "assistant",  # Display as assistant for UI consistency
                                 "content": output[:2000] if output else "",  # Truncate like streaming
                                 "type": "tool_result",
-                                "toolId": block.get("tool_use_id"),
-                                "toolName": None,  # Will be matched by frontend
+                                "toolId": tool_use_id,
+                                "toolName": tool_names_by_id.get(tool_use_id),  # Match to tool_use
                                 "metadata": {
                                     "timestamp": timestamp,
                                     "is_error": is_error
@@ -196,16 +247,24 @@ def parse_session_history(
                                 "streaming": False
                             })
                         elif block.get("type") == "text":
-                            # Text in user content array (rare)
-                            msg_counter += 1
-                            messages.append({
-                                "id": uuid,
-                                "role": "user",
-                                "content": block.get("text", ""),
-                                "type": None,
-                                "metadata": {"timestamp": timestamp},
-                                "streaming": False
-                            })
+                            # Text block in user content array
+                            text = block.get("text", "")
+                            if text and not _is_system_content(text):
+                                has_text_content = True
+                                text_parts.append(text)
+
+                # If we collected text blocks, create a single user message
+                if has_text_content and text_parts:
+                    combined_text = "\n".join(text_parts)
+                    msg_counter += 1
+                    messages.append({
+                        "id": uuid,
+                        "role": "user",
+                        "content": combined_text,
+                        "type": None,
+                        "metadata": {"timestamp": timestamp},
+                        "streaming": False
+                    })
 
         elif entry_type == "assistant" and role == "assistant":
             # Assistant message - contains text blocks and tool use blocks
@@ -232,13 +291,20 @@ def parse_session_history(
 
                         elif block_type == "tool_use":
                             msg_counter += 1
+                            tool_id = block.get("id")
+                            tool_name = block.get("name")
+
+                            # Track tool name by ID for matching tool results
+                            if tool_id and tool_name:
+                                tool_names_by_id[tool_id] = tool_name
+
                             messages.append({
-                                "id": f"tool-{uuid}-{block.get('id', msg_counter)}",
+                                "id": f"tool-{uuid}-{tool_id or msg_counter}",
                                 "role": "assistant",
                                 "content": "",
                                 "type": "tool_use",
-                                "toolName": block.get("name"),
-                                "toolId": block.get("id"),
+                                "toolName": tool_name,
+                                "toolId": tool_id,
                                 "toolInput": block.get("input", {}),
                                 "metadata": {"timestamp": timestamp},
                                 "streaming": False
