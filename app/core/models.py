@@ -361,3 +361,46 @@ class ApiUser(ApiUserBase):
 class ApiUserWithKey(ApiUser):
     """API user response with newly generated key (only on create)"""
     api_key: str  # Only returned once on creation
+
+
+# ============================================================================
+# Rewind Models
+# ============================================================================
+
+class RewindCheckpoint(BaseModel):
+    """A checkpoint that can be rewound to"""
+    index: int
+    message: str  # Truncated message for display
+    full_message: Optional[str] = None
+    timestamp: Optional[str] = None
+    is_current: bool = False
+
+
+class RewindRequest(BaseModel):
+    """Request to execute a rewind operation"""
+    checkpoint_index: int = Field(..., ge=0, description="Index of checkpoint to rewind to")
+    restore_option: int = Field(..., ge=1, le=4, description="1=code+conversation, 2=conversation, 3=code, 4=cancel")
+    checkpoint_message: Optional[str] = None
+
+
+class RewindCheckpointsResponse(BaseModel):
+    """Response containing available checkpoints"""
+    success: bool
+    session_id: str
+    checkpoints: List[RewindCheckpoint] = []
+    error: Optional[str] = None
+
+
+class RewindExecuteResponse(BaseModel):
+    """Response from executing a rewind"""
+    success: bool
+    message: str
+    checkpoint_index: Optional[int] = None
+    restore_option: Optional[int] = None
+    error: Optional[str] = None
+
+
+class RewindStatus(BaseModel):
+    """Current rewind status"""
+    has_pending: bool
+    pending_rewind: Optional[Dict[str, Any]] = None

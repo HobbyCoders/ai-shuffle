@@ -269,14 +269,21 @@ def parse_command_input(text: str) -> tuple[str, str]:
 
 
 # Built-in interactive commands that require CLI bridge
+# Note: "rewind" has been moved to settings-based non-interactive approach
+# and is now handled via REST API endpoints instead of PTY/CLI bridge
 INTERACTIVE_COMMANDS = {
-    "rewind": {
-        "description": "Rewind conversation and/or code to a previous point",
-        "requires_cli": True
-    },
     "resume": {
         "description": "Resume a previous conversation",
         "requires_cli": True
+    }
+}
+
+# Built-in commands that use REST API instead of interactive CLI
+REST_API_COMMANDS = {
+    "rewind": {
+        "description": "Rewind conversation and/or code to a previous point",
+        "api_endpoint": "/api/v1/commands/rewind/checkpoints/{session_id}",
+        "requires_session": True
     }
 }
 
@@ -293,9 +300,21 @@ def get_interactive_command_info(command_name: str) -> Optional[Dict[str, Any]]:
     return INTERACTIVE_COMMANDS.get(name)
 
 
+def is_rest_api_command(command_name: str) -> bool:
+    """Check if a command is handled via REST API (non-interactive)"""
+    name = command_name.lstrip("/")
+    return name in REST_API_COMMANDS
+
+
+def get_rest_api_command_info(command_name: str) -> Optional[Dict[str, Any]]:
+    """Get information about a REST API command"""
+    name = command_name.lstrip("/")
+    return REST_API_COMMANDS.get(name)
+
+
 def get_all_commands(working_dir: str) -> List[Dict[str, Any]]:
     """
-    Get all available commands (custom + interactive built-ins).
+    Get all available commands (custom + interactive + REST API built-ins).
 
     Returns list of command info dicts for autocomplete.
     """
@@ -319,6 +338,16 @@ def get_all_commands(working_dir: str) -> List[Dict[str, Any]]:
             "description": info["description"],
             "argument_hint": None,
             "type": "interactive"
+        })
+
+    # Add REST API built-in commands (like rewind)
+    for name, info in REST_API_COMMANDS.items():
+        commands.append({
+            "name": name,
+            "display": f"/{name}",
+            "description": info["description"],
+            "argument_hint": None,
+            "type": "rest_api"
         })
 
     # Sort by name
