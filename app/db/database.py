@@ -564,6 +564,7 @@ def get_sessions(
     profile_id: Optional[str] = None,
     status: Optional[str] = None,
     api_user_id: Optional[str] = None,
+    api_users_only: bool = False,
     limit: int = 50,
     offset: int = 0
 ) -> List[Dict[str, Any]]:
@@ -580,7 +581,10 @@ def get_sessions(
     if status:
         query += " AND status = ?"
         params.append(status)
-    if api_user_id is not None:
+    if api_users_only:
+        # Filter for sessions that have an API user (exclude admin sessions)
+        query += " AND api_user_id IS NOT NULL"
+    elif api_user_id is not None:
         if api_user_id:
             query += " AND api_user_id = ?"
             params.append(api_user_id)

@@ -579,9 +579,12 @@ function createTabsStore() {
 		try {
 			let url = '/sessions?limit=50';
 			if (apiUserId) {
+				// Filter by specific API user
 				url += `&api_user_id=${encodeURIComponent(apiUserId)}`;
+			} else {
+				// Show all API user sessions (exclude admin's own sessions)
+				url += '&api_users_only=true';
 			}
-			// Don't add admin_only - we want API user sessions here
 			const adminSessions = await api.get<Session[]>(url);
 			update(s => ({ ...s, adminSessions, adminSessionsFilter: apiUserId ?? null }));
 		} catch (e) {

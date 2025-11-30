@@ -44,6 +44,7 @@ async def list_sessions(
     status_filter: Optional[str] = Query(None, alias="status", description="Filter by status"),
     api_user_id: Optional[str] = Query(None, description="Filter by API user ID (admin only)"),
     admin_only: bool = Query(False, description="Show only admin sessions (no API user)"),
+    api_users_only: bool = Query(False, description="Show only API user sessions (exclude admin sessions)"),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
     token: str = Depends(require_auth)
@@ -60,14 +61,19 @@ async def list_sessions(
         # API users can only see their own sessions
         api_user_id = api_user["id"]
         admin_only = False
+        api_users_only = False
 
     # Determine api_user_id filter value
     # - If admin_only=True, filter for sessions with api_user_id IS NULL
+    # - If api_users_only=True, filter for sessions with api_user_id IS NOT NULL
     # - If api_user_id is specified, filter for that specific user
     # - Otherwise, show all sessions
     filter_api_user_id = None
+    filter_api_users_only = False
     if admin_only:
         filter_api_user_id = ""  # Empty string signals "IS NULL" in database.get_sessions
+    elif api_users_only:
+        filter_api_users_only = True
     elif api_user_id:
         filter_api_user_id = api_user_id
 
@@ -76,6 +82,7 @@ async def list_sessions(
         profile_id=profile_id,
         status=status_filter,
         api_user_id=filter_api_user_id,
+        api_users_only=filter_api_users_only,
         limit=limit,
         offset=offset
     )
