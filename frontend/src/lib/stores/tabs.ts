@@ -391,13 +391,16 @@ function createTabsStore() {
 					tabs: s.tabs.map(tab => {
 						if (tab.id !== tabId) return tab;
 
-						// Mark ALL previous streaming text messages as not streaming
-						// This prevents stuck loading indicators when tool calls come in quickly
-						const messages = tab.messages.map(m =>
-							m.type === 'text' && m.role === 'assistant' && m.streaming
-								? { ...m, streaming: false }
-								: m
+						const messages = [...tab.messages];
+						const streamingIdx = messages.findLastIndex(
+							m => m.type === 'text' && m.role === 'assistant' && m.streaming
 						);
+						if (streamingIdx !== -1 && messages[streamingIdx].content) {
+							messages[streamingIdx] = {
+								...messages[streamingIdx],
+								streaming: false
+							};
+						}
 
 						messages.push({
 							id: `tool-${Date.now()}-${data.id || ''}`,
@@ -422,25 +425,31 @@ function createTabsStore() {
 					tabs: s.tabs.map(tab => {
 						if (tab.id !== tabId) return tab;
 
+						const messages = [...tab.messages];
 						const toolUseId = data.tool_use_id as string;
 
-						// Mark all streaming messages as not streaming, and specifically
-						// match the tool_use by ID. Use .map() for clean immutable updates.
-						const messages = tab.messages.map(m => {
-							// Mark matching tool_use as complete
+						// Find and update the matching tool_use message
+						// First try to match by toolId, then fall back to any streaming tool
+						let foundByToolId = false;
+						for (let i = messages.length - 1; i >= 0; i--) {
+							const m = messages[i];
 							if (m.type === 'tool_use' && m.toolId === toolUseId) {
-								return { ...m, streaming: false };
+								messages[i] = { ...m, streaming: false };
+								foundByToolId = true;
+								break;
 							}
-							// Also mark any other streaming tool_use messages as complete
-							if (m.type === 'tool_use' && m.streaming) {
-								return { ...m, streaming: false };
+						}
+
+						// If not found by toolId, update any streaming tool_use message
+						if (!foundByToolId) {
+							for (let i = messages.length - 1; i >= 0; i--) {
+								const m = messages[i];
+								if (m.type === 'tool_use' && m.streaming) {
+									messages[i] = { ...m, streaming: false };
+									break;
+								}
 							}
-							// Mark any streaming text messages as complete
-							if (m.type === 'text' && m.role === 'assistant' && m.streaming) {
-								return { ...m, streaming: false };
-							}
-							return m;
-						});
+						}
 
 						messages.push({
 							id: `result-${Date.now()}`,
