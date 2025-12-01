@@ -573,16 +573,13 @@ class CheckpointManager:
         Sync our local database after JSONL truncation.
 
         Deletes messages that were removed from the JSONL.
+        This includes ALL message types: user, assistant, tool_use, tool_result.
         """
         try:
             # Get all messages from our database
             messages = database.get_session_messages(session_id)
             if not messages:
                 return
-
-            # Find the target message index
-            # Since our DB doesn't store JSONL UUIDs directly, we need to match by content/timestamp
-            # For now, we'll delete messages after a certain count
 
             session = database.get_session(session_id)
             sdk_session_id = session.get('sdk_session_id') if session else None
@@ -595,19 +592,40 @@ class CheckpointManager:
                 remaining_checkpoints = self.jsonl_service.get_checkpoints(sdk_session_id, working_dir)
                 remaining_count = len(remaining_checkpoints)
 
+                if remaining_count == 0:
+                    # All checkpoints removed - delete all messages
+                    for msg in messages:
+                        database.delete_session_message(session_id, msg['id'])
+                    logger.info(f"Deleted all {len(messages)} messages from database after rewind")
+                    return
+
                 # Count user messages in our DB
                 user_messages = [m for m in messages if m.get('role') == 'user']
 
                 # Delete messages beyond the remaining checkpoint count
-                # This is approximate but should work for most cases
                 if len(user_messages) > remaining_count:
-                    # Find the ID of the message at the cutoff point
-                    cutoff_msg = user_messages[remaining_count - 1] if include_response else user_messages[remaining_count]
-                    cutoff_id = cutoff_msg.get('id')
-
-                    if cutoff_id:
-                        deleted = database.delete_session_messages_after(session_id, cutoff_id)
-                        logger.info(f"Deleted {deleted} messages from database after rewind")
+                    if include_response:
+                        # Find the next user message after the ones we're keeping
+                        # Everything before that next user message should be kept
+                        # (this preserves the assistant response to the last kept user message)
+                        next_user_idx = remaining_count
+                        if next_user_idx < len(user_messages):
+                            # Delete from the next user message onwards (and everything after)
+                            next_user_id = user_messages[next_user_idx].get('id')
+                            # Delete this message and all messages with id >= next_user_id
+                            deleted = 0
+                            for msg in messages:
+                                if msg['id'] >= next_user_id:
+                                    database.delete_session_message(session_id, msg['id'])
+                                    deleted += 1
+                            logger.info(f"Deleted {deleted} messages from database after rewind (kept response)")
+                    else:
+                        # Delete everything after the last kept user message (including its response)
+                        last_kept_user_msg = user_messages[remaining_count - 1]
+                        last_kept_user_id = last_kept_user_msg.get('id')
+                        if last_kept_user_id:
+                            deleted = database.delete_session_messages_after(session_id, last_kept_user_id)
+                            logger.info(f"Deleted {deleted} messages from database after rewind")
 
         except Exception as e:
             logger.error(f"Failed to sync database after rewind: {e}")
