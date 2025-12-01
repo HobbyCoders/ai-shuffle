@@ -55,7 +55,6 @@ export interface ChatTab {
 	error: string | null;
 	profile: string;
 	project: string;
-	projectLocked: boolean;  // True when session has been created - project can't be changed
 }
 
 interface TabsState {
@@ -115,8 +114,7 @@ function createTabsStore() {
 			wsConnected: false,
 			error: null,
 			profile: getPersistedProfile(),
-			project: getPersistedProject(),
-			projectLocked: false
+			project: getPersistedProject()
 		}],
 		activeTabId: initialTabId,
 		profiles: [],
@@ -342,7 +340,6 @@ function createTabsStore() {
 							...tab,
 							sessionId,
 							isStreaming: true,
-							projectLocked: true,  // Lock project once session starts
 							messages: [...tab.messages, {
 								id: assistantMsgId,
 								role: 'assistant' as const,
@@ -426,17 +423,15 @@ function createTabsStore() {
 						if (tab.id !== tabId) return tab;
 
 						const toolUseId = data.tool_use_id as string;
-						const toolName = data.name as string;
 
 						// Mark all streaming messages as not streaming, and specifically
-						// match the tool_use by ID or name. Use .map() for clean immutable updates.
+						// match the tool_use by ID. Use .map() for clean immutable updates.
 						const messages = tab.messages.map(m => {
-							// Mark matching tool_use as complete (by ID or by name if ID doesn't match)
-							if (m.type === 'tool_use' && (m.toolId === toolUseId || (m.streaming && m.toolName === toolName))) {
+							// Mark matching tool_use as complete
+							if (m.type === 'tool_use' && m.toolId === toolUseId) {
 								return { ...m, streaming: false };
 							}
 							// Also mark any other streaming tool_use messages as complete
-							// This ensures no tool_use gets stuck streaming
 							if (m.type === 'tool_use' && m.streaming) {
 								return { ...m, streaming: false };
 							}
@@ -682,8 +677,7 @@ function createTabsStore() {
 				wsConnected: false,
 				error: null,
 				profile: state.defaultProfile,
-				project: state.defaultProject,
-				projectLocked: false  // Will be set to true when session is loaded
+				project: state.defaultProject
 			};
 
 			update(s => ({
@@ -847,17 +841,11 @@ function createTabsStore() {
 					title = firstUserMsg.content.substring(0, 30) + (firstUserMsg.content.length > 30 ? '...' : '');
 				}
 
-				// Lock the project to what the session was created with
-				// If session has a project_id, use it; otherwise use empty string (default)
-				const sessionProject = session.project_id || '';
-
 				updateTab(tabId, {
 					sessionId: session.id,
 					messages,
 					title,
-					error: null,
-					project: sessionProject,
-					projectLocked: true  // Lock project - this session is tied to this project
+					error: null
 				});
 
 				return true;
@@ -920,8 +908,7 @@ function createTabsStore() {
 				messages: [],
 				isStreaming: false,
 				error: null,
-				title: 'New Chat',
-				projectLocked: false  // Unlock project for new session
+				title: 'New Chat'
 			});
 			connectTab(tabId);
 		},
