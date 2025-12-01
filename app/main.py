@@ -15,7 +15,6 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.core.config import settings, ensure_directories
 from app.db.database import init_database
-from app.core.profiles import seed_builtin_profiles
 from app.core.auth import auth_service
 
 # Import API routers
@@ -72,9 +71,6 @@ async def lifespan(app: FastAPI):
 
     # Initialize database
     init_database()
-
-    # Seed built-in profiles
-    seed_builtin_profiles()
 
     # Check Claude CLI authentication
     if auth_service.is_claude_authenticated():

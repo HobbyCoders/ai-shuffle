@@ -1091,12 +1091,14 @@
 						disabled={currentTab.projectLocked}
 						title={currentTab.projectLocked ? 'Project is locked for this session' : 'Select project'}
 					>
-						<option value="">Default</option>
 						{#each $projects as project}
 							<option value={project.id}>{project.name}</option>
 						{/each}
 						{#if currentTab.project && !isProjectAvailable(currentTab)}
 							<option value={currentTab.project} disabled>{currentTab.project} (unavailable)</option>
+						{/if}
+						{#if $projects.length === 0}
+							<option value="" disabled>No projects available</option>
 						{/if}
 					</select>
 					{#if currentTab.projectLocked}
