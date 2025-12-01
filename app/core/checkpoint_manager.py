@@ -439,8 +439,6 @@ class CheckpointManager:
         # Get stored checkpoints from database for git_ref lookup
         stored_checkpoints = database.get_session_checkpoints(session_id)
         stored_by_uuid = {cp['message_uuid']: cp for cp in stored_checkpoints}
-        logger.info(f"get_checkpoints: session={session_id}, chat_checkpoints={len(chat_checkpoints)}, stored_checkpoints={len(stored_checkpoints)}")
-        logger.info(f"get_checkpoints: stored_uuids={list(stored_by_uuid.keys())}")
 
         # Convert to full checkpoints
         checkpoints = []
@@ -500,7 +498,6 @@ class CheckpointManager:
 
         # Get the last message UUID from JSONL
         last_uuid = self.jsonl_service.get_last_message_uuid(sdk_session_id, working_dir)
-        logger.info(f"create_checkpoint: session={session_id}, sdk_session={sdk_session_id}, working_dir={working_dir}, last_uuid={last_uuid}")
         if not last_uuid:
             logger.debug(f"No messages in JSONL for session {session_id}")
             return None
@@ -524,15 +521,12 @@ class CheckpointManager:
         # Create git snapshot if requested
         git_ref = None
         git_available = False
-        is_git_repo = self.git_service.is_git_repo(working_dir)
-        logger.info(f"create_checkpoint: create_git_snapshot={create_git_snapshot}, is_git_repo={is_git_repo}, working_dir={working_dir}")
-        if create_git_snapshot and is_git_repo:
+        if create_git_snapshot and self.git_service.is_git_repo(working_dir):
             git_ref = self.git_service.create_snapshot(
                 working_dir,
                 description or f"Checkpoint for session {session_id}"
             )
             git_available = git_ref is not None
-            logger.info(f"create_checkpoint: git_ref={git_ref}, git_available={git_available}")
 
         # Get message preview and index
         checkpoints = self.jsonl_service.get_checkpoints(sdk_session_id, working_dir)
