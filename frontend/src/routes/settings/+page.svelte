@@ -630,7 +630,7 @@
 						<div>
 							<label class="block text-sm text-gray-400 mb-1">Project</label>
 							<select bind:value={formData.project_id} class="input">
-								<option value="">Any Project</option>
+								<option value="">Default Workspace</option>
 								{#each projects as project}
 									<option value={project.id}>{project.name}</option>
 								{/each}

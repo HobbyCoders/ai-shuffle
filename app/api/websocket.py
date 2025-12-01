@@ -23,7 +23,7 @@ from fastapi.websockets import WebSocketState
 from app.core.sync_engine import sync_engine, SyncEvent
 from app.db import database
 from app.core.auth import auth_service
-from app.core.profiles import get_profile_or_none
+from app.core.profiles import get_profile_or_builtin
 from app.core.cli_bridge import CLIBridge, RewindParser
 from app.core.slash_commands import (
     discover_commands, get_command_by_name, is_slash_command,

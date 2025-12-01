@@ -55,9 +55,9 @@ interface ChatState {
 // Load persisted values from localStorage
 function getPersistedProfile(): string {
 	if (typeof window !== 'undefined') {
-		return localStorage.getItem('aihub_selectedProfile') || '';
+		return localStorage.getItem('aihub_selectedProfile') || 'claude-code';
 	}
-	return '';
+	return 'claude-code';
 }
 
 function getPersistedProject(): string {

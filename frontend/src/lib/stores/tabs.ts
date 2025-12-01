@@ -86,9 +86,9 @@ const tabReconnectTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
 // Load persisted values
 function getPersistedProfile(): string {
 	if (typeof window !== 'undefined') {
-		return localStorage.getItem('aihub_selectedProfile') || '';
+		return localStorage.getItem('aihub_selectedProfile') || 'claude-code';
 	}
-	return '';
+	return 'claude-code';
 }
 
 function getPersistedProject(): string {
@@ -930,24 +930,7 @@ function createTabsStore() {
 		async loadProfiles() {
 			try {
 				const profiles = await api.get<Profile[]>('/profiles');
-				update(s => {
-					// Auto-select first profile if none selected and profiles exist
-					let newDefaultProfile = s.defaultProfile;
-					if (!newDefaultProfile && profiles.length > 0) {
-						newDefaultProfile = profiles[0].id;
-						if (typeof window !== 'undefined') {
-							localStorage.setItem('aihub_selectedProfile', newDefaultProfile);
-						}
-					}
-					// Update tabs that have no profile set
-					const updatedTabs = s.tabs.map(tab => {
-						if (!tab.profile && profiles.length > 0) {
-							return { ...tab, profile: newDefaultProfile };
-						}
-						return tab;
-					});
-					return { ...s, profiles, defaultProfile: newDefaultProfile, tabs: updatedTabs };
-				});
+				update(s => ({ ...s, profiles }));
 			} catch (e) {
 				console.error('Failed to load profiles:', e);
 			}
@@ -956,24 +939,7 @@ function createTabsStore() {
 		async loadProjects() {
 			try {
 				const projects = await api.get<Project[]>('/projects');
-				update(s => {
-					// Auto-select first project if none selected and projects exist
-					let newDefaultProject = s.defaultProject;
-					if (!newDefaultProject && projects.length > 0) {
-						newDefaultProject = projects[0].id;
-						if (typeof window !== 'undefined') {
-							localStorage.setItem('aihub_selectedProject', newDefaultProject);
-						}
-					}
-					// Update tabs that have no project set
-					const updatedTabs = s.tabs.map(tab => {
-						if (!tab.project && projects.length > 0) {
-							return { ...tab, project: newDefaultProject };
-						}
-						return tab;
-					});
-					return { ...s, projects, defaultProject: newDefaultProject, tabs: updatedTabs };
-				});
+				update(s => ({ ...s, projects }));
 			} catch (e) {
 				console.error('Failed to load projects:', e);
 			}
