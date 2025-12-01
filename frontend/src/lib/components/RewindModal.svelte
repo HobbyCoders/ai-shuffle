@@ -271,6 +271,8 @@
 								<p class="text-xs text-muted-foreground">
 									{#if selectedCheckpoint?.git_ref}
 										Revert files to checkpoint state (git snapshot available)
+									{:else if !selectedCheckpoint?.git_available}
+										Not available - project is not a git repository
 									{:else}
 										No git snapshot for this checkpoint
 									{/if}
