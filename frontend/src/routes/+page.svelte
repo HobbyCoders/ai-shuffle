@@ -1183,7 +1183,7 @@
 				{:else}
 					<!-- Messages -->
 					<div class="max-w-5xl mx-auto px-4 sm:px-8 py-4 space-y-4">
-						{#each currentTab.messages as message}
+						{#each currentTab.messages as message (message.id)}
 							{#if message.role === 'user'}
 								<!-- User Message - Anvil Style -->
 								<div class="flex gap-3 w-full">
