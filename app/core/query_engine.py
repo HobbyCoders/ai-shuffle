@@ -16,7 +16,7 @@ from datetime import datetime
 
 from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient
 from claude_agent_sdk import (
-    AssistantMessage, TextBlock, ToolUseBlock, ToolResultBlock,
+    AssistantMessage, UserMessage, TextBlock, ToolUseBlock, ToolResultBlock,
     ResultMessage, SystemMessage
 )
 
@@ -283,6 +283,18 @@ async def execute_query(
                             "output": output
                         })
                 metadata["model"] = message.model
+
+            elif isinstance(message, UserMessage):
+                # UserMessage contains tool results from Claude's tool executions
+                for block in message.content:
+                    if isinstance(block, ToolResultBlock):
+                        output = str(block.content)[:2000] if block.content else ""
+                        tool_messages.append({
+                            "type": "tool_result",
+                            "name": "unknown",
+                            "tool_id": block.tool_use_id,
+                            "output": output
+                        })
 
             elif isinstance(message, ResultMessage):
                 metadata["duration_ms"] = message.duration_ms
@@ -586,6 +598,37 @@ async def stream_query(
 
                 metadata["model"] = message.model
 
+            elif isinstance(message, UserMessage):
+                # UserMessage contains tool results from Claude's tool executions
+                for block in message.content:
+                    if isinstance(block, ToolResultBlock):
+                        output = str(block.content)[:2000] if block.content else ""
+                        logger.debug(f"UserMessage ToolResultBlock - tool_use_id: {block.tool_use_id}, content length: {len(str(block.content) if block.content else '')}")
+
+                        yield {
+                            "type": "tool_result",
+                            "name": "unknown",
+                            "tool_use_id": block.tool_use_id,
+                            "output": output
+                        }
+
+                        # Collect tool result for storage
+                        tool_messages.append({
+                            "type": "tool_result",
+                            "name": "unknown",
+                            "tool_id": block.tool_use_id,
+                            "output": output
+                        })
+
+                        # Broadcast tool result to other devices
+                        await sync_engine.broadcast_stream_chunk(
+                            session_id=session_id,
+                            message_id=assistant_msg_id,
+                            chunk_type="tool_result",
+                            chunk_data={"name": "unknown", "output": output, "tool_use_id": block.tool_use_id},
+                            source_device_id=device_id
+                        )
+
             elif isinstance(message, ResultMessage):
                 metadata["duration_ms"] = message.duration_ms
                 metadata["num_turns"] = message.num_turns
@@ -882,6 +925,33 @@ async def _run_background_query(
                         )
 
                 metadata["model"] = message.model
+
+            elif isinstance(message, UserMessage):
+                # UserMessage contains tool results from Claude's tool executions
+                for block in message.content:
+                    if isinstance(block, ToolResultBlock):
+                        output = str(block.content)[:2000] if block.content else ""
+                        logger.debug(f"[Background] UserMessage ToolResultBlock - tool_use_id: {block.tool_use_id}, content length: {len(str(block.content) if block.content else '')}")
+
+                        # Collect tool result for storage
+                        tool_messages.append({
+                            "type": "tool_result",
+                            "name": "unknown",
+                            "tool_id": block.tool_use_id,
+                            "output": output
+                        })
+
+                        await sync_engine.broadcast_stream_chunk(
+                            session_id=session_id,
+                            message_id=assistant_msg_id,
+                            chunk_type="tool_result",
+                            chunk_data={
+                                "name": "unknown",
+                                "tool_use_id": block.tool_use_id,
+                                "output": output
+                            },
+                            source_device_id=None
+                        )
 
             elif isinstance(message, ResultMessage):
                 metadata["duration_ms"] = message.duration_ms
@@ -1283,6 +1353,29 @@ async def stream_to_websocket(
                         }
 
                 metadata["model"] = message.model
+
+            elif isinstance(message, UserMessage):
+                # UserMessage contains tool results from Claude's tool executions
+                # The SDK sends tool results back as UserMessage with ToolResultBlock content
+                for block in message.content:
+                    if isinstance(block, ToolResultBlock):
+                        output = str(block.content)[:2000] if block.content else ""
+                        logger.debug(f"[WS] UserMessage ToolResultBlock - tool_use_id: {block.tool_use_id}, content length: {len(str(block.content) if block.content else '')}, is_error: {block.is_error}")
+
+                        # Collect tool result for storage
+                        tool_messages.append({
+                            "type": "tool_result",
+                            "name": "unknown",  # UserMessage ToolResultBlock doesn't have name
+                            "tool_id": block.tool_use_id,
+                            "output": output
+                        })
+
+                        yield {
+                            "type": "tool_result",
+                            "name": "unknown",
+                            "tool_use_id": block.tool_use_id,
+                            "output": output
+                        }
 
             elif isinstance(message, ResultMessage):
                 metadata["duration_ms"] = message.duration_ms
