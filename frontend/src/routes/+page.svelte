@@ -510,9 +510,14 @@
 		sidebarOpen = false;
 
 		// Reset auto-scroll state and scroll to bottom after session loads
+		// Use multiple attempts since session loads async from API
 		if (tabId) {
 			autoScrollPaused[tabId] = false;
-			setTimeout(() => scrollToBottom(tabId), 100);
+			// Try scrolling multiple times as messages load
+			setTimeout(() => scrollToBottom(tabId), 50);
+			setTimeout(() => scrollToBottom(tabId), 200);
+			setTimeout(() => scrollToBottom(tabId), 500);
+			setTimeout(() => scrollToBottom(tabId), 1000);
 		}
 	}
 
