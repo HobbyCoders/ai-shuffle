@@ -85,7 +85,16 @@
 
 	function scrollToBottom(tabId: string) {
 		const container = messagesContainers[tabId];
-		if (!container) return;
+		if (!container) {
+			console.log('[Scroll] No container for tab:', tabId);
+			return;
+		}
+		console.log('[Scroll] scrollToBottom called:', {
+			tabId,
+			scrollHeight: container.scrollHeight,
+			scrollTop: container.scrollTop,
+			clientHeight: container.clientHeight
+		});
 		container.scrollTop = container.scrollHeight;
 	}
 
@@ -113,9 +122,13 @@
 	// Scroll when switching tabs (always scroll to show current state)
 	let previousTabId: string | null = null;
 	$: if ($activeTabId && $activeTabId !== previousTabId) {
+		console.log('[Scroll] Tab switch detected:', { from: previousTabId, to: $activeTabId });
 		previousTabId = $activeTabId;
 		autoScrollEnabled[$activeTabId] = true; // Reset to enabled on tab switch
-		tick().then(() => scrollToBottom($activeTabId!));
+		tick().then(() => {
+			console.log('[Scroll] After tick, calling scrollToBottom');
+			scrollToBottom($activeTabId!);
+		});
 	}
 
 	let showProfileModal = false;
