@@ -225,6 +225,8 @@ class Session(SessionBase):
     total_tokens_out: int = 0
     cache_creation_tokens: int = 0  # Tokens used to create cache (counts toward context)
     cache_read_tokens: int = 0  # Tokens read from cache (doesn't count toward context)
+    # Context window tokens = last_input + cache_creation + cache_read (current context size)
+    context_tokens: int = 0
     turn_count: int = 0
     created_at: datetime
     updated_at: datetime

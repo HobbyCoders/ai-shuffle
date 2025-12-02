@@ -154,6 +154,7 @@ export interface Session {
 	total_tokens_out: number;
 	cache_creation_tokens: number;  // Tokens used to create cache (counts toward context)
 	cache_read_tokens: number;  // Tokens read from cache (doesn't count toward context)
+	context_tokens: number;  // Current context window size (input + cache_creation + cache_read)
 	turn_count: number;
 	created_at: string;
 	updated_at: string;

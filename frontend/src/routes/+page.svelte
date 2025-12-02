@@ -1367,7 +1367,7 @@
 				<div class="flex items-center gap-2 sm:gap-3">
 					<!-- Context usage dropdown (only show if any tokens > 0) -->
 					{#if currentTab.totalTokensIn > 0 || currentTab.totalTokensOut > 0 || currentTab.totalCacheCreationTokens > 0 || currentTab.totalCacheReadTokens > 0}
-						{@const contextUsed = currentTab.totalTokensIn + currentTab.totalTokensOut + currentTab.totalCacheCreationTokens + currentTab.totalCacheReadTokens}
+						{@const contextUsed = currentTab.contextUsed ?? (currentTab.totalTokensIn + currentTab.totalCacheCreationTokens + currentTab.totalCacheReadTokens)}
 						{@const contextMax = 200000}
 						{@const contextPercent = Math.min((contextUsed / contextMax) * 100, 100)}
 						<div class="relative group">

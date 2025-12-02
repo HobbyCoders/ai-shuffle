@@ -698,11 +698,14 @@ def get_session_cost_from_jsonl(
     # Cache tokens from final message represent current cache state
     # - cache_creation_input_tokens: take from last message (represents final cache size)
     # - cache_read_input_tokens: take from last message (represents what was read last)
+    # For context window calculation, we need last turn's input tokens (not cumulative)
     return {
         "total_tokens_in": total_input_tokens,
         "total_tokens_out": total_output_tokens,
         "cache_creation_tokens": last_usage.get("cache_creation_input_tokens", 0),
         "cache_read_tokens": last_usage.get("cache_read_input_tokens", 0),
+        # Last turn's input tokens for context calculation
+        "last_input_tokens": last_usage.get("input_tokens", 0),
         "model": model
     }
 

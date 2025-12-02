@@ -82,6 +82,9 @@ export interface ChatTab {
 	totalTokensOut: number;
 	totalCacheCreationTokens: number;
 	totalCacheReadTokens: number;
+	// Actual context window usage from /context command (source of truth)
+	contextUsed: number | null;
+	contextMax: number;
 }
 
 interface TabsState {
@@ -219,7 +222,9 @@ function createTabsStore() {
 			totalTokensIn: 0,
 			totalTokensOut: 0,
 			totalCacheCreationTokens: 0,
-			totalCacheReadTokens: 0
+			totalCacheReadTokens: 0,
+			contextUsed: null,
+			contextMax: 200000
 		}],
 		activeTabId: initialTabId,
 		profiles: [],
@@ -672,13 +677,15 @@ function createTabsStore() {
 							total_tokens_in: session.total_tokens_in,
 							total_tokens_out: session.total_tokens_out,
 							cache_creation_tokens: session.cache_creation_tokens,
-							cache_read_tokens: session.cache_read_tokens
+							cache_read_tokens: session.cache_read_tokens,
+							context_tokens: session.context_tokens
 						});
 						updateTab(tabId, {
 							totalTokensIn: session.total_tokens_in || 0,
 							totalTokensOut: session.total_tokens_out || 0,
 							totalCacheCreationTokens: session.cache_creation_tokens || 0,
-							totalCacheReadTokens: session.cache_read_tokens || 0
+							totalCacheReadTokens: session.cache_read_tokens || 0,
+							contextUsed: session.context_tokens || 0
 						});
 					}).catch(err => {
 						console.error('[Tab] Failed to load session token counts:', err);
@@ -1105,7 +1112,9 @@ function createTabsStore() {
 						totalTokensIn: 0,
 						totalTokensOut: 0,
 						totalCacheCreationTokens: 0,
-						totalCacheReadTokens: 0
+						totalCacheReadTokens: 0,
+						contextUsed: null,
+						contextMax: 200000
 					}));
 
 					update(s => ({
@@ -1173,7 +1182,9 @@ function createTabsStore() {
 				totalTokensIn: 0,
 				totalTokensOut: 0,
 				totalCacheCreationTokens: 0,
-				totalCacheReadTokens: 0
+				totalCacheReadTokens: 0,
+				contextUsed: null,
+				contextMax: 200000
 			};
 
 			update(s => ({
@@ -1486,7 +1497,9 @@ function createTabsStore() {
 				totalTokensIn: 0,
 				totalTokensOut: 0,
 				totalCacheCreationTokens: 0,
-				totalCacheReadTokens: 0
+				totalCacheReadTokens: 0,
+				contextUsed: null,
+				contextMax: 200000
 			});
 			connectTab(tabId);
 			// Save tabs state (debounced)
