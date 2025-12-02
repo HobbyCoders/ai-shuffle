@@ -1397,10 +1397,22 @@ async def stream_to_websocket(
                     interrupted = True
                     break
 
+                # Check if this message is from a subagent using parent_tool_use_id
+                parent_tool_id = message.parent_tool_use_id
+
                 for block in message.content:
                     if isinstance(block, TextBlock):
-                        response_text.append(block.text)
-                        yield {"type": "chunk", "content": block.text}
+                        # Check if this text is from a subagent
+                        if parent_tool_id and parent_tool_id in task_tool_uses:
+                            # Text from subagent - send as subagent_chunk
+                            yield {
+                                "type": "subagent_chunk",
+                                "agent_id": parent_tool_id,
+                                "content": block.text
+                            }
+                        else:
+                            response_text.append(block.text)
+                            yield {"type": "chunk", "content": block.text}
 
                     elif isinstance(block, ToolUseBlock):
                         tool_id = getattr(block, 'id', None)
@@ -1429,7 +1441,17 @@ async def stream_to_websocket(
                                 "tool_id": tool_id,
                                 "agent_type": tool_input.get("subagent_type", "unknown"),
                                 "description": tool_input.get("description", ""),
-                                "agent_id": ""  # SDK doesn't provide agent_id until result
+                                "agent_id": tool_id  # Use tool_id as agent_id for tracking
+                            }
+                        # Check if this tool use is from a subagent
+                        elif parent_tool_id and parent_tool_id in task_tool_uses:
+                            # Tool use from subagent - send as subagent_tool_use
+                            yield {
+                                "type": "subagent_tool_use",
+                                "agent_id": parent_tool_id,
+                                "name": block.name,
+                                "id": tool_id,
+                                "input": tool_input
                             }
                         else:
                             yield {
@@ -1458,13 +1480,23 @@ async def stream_to_websocket(
                             yield {
                                 "type": "subagent_done",
                                 "tool_id": tool_use_id,
-                                "agent_id": "",  # Not available from SDK
+                                "agent_id": tool_use_id,  # Use tool_id as agent_id
                                 "agent_type": task_info.get("agent_type", "unknown"),
                                 "result": output,
                                 "is_error": getattr(block, 'is_error', False)
                             }
                             # Clean up tracking
                             del task_tool_uses[tool_use_id]
+                        # Check if this tool result is from a subagent
+                        elif parent_tool_id and parent_tool_id in task_tool_uses:
+                            # Tool result from subagent - send as subagent_tool_result
+                            yield {
+                                "type": "subagent_tool_result",
+                                "agent_id": parent_tool_id,
+                                "name": tool_name,
+                                "tool_use_id": tool_use_id,
+                                "output": output
+                            }
                         else:
                             yield {
                                 "type": "tool_result",
@@ -1478,11 +1510,14 @@ async def stream_to_websocket(
             elif isinstance(message, UserMessage):
                 # UserMessage contains tool results from Claude's tool executions
                 # The SDK sends tool results back as UserMessage with ToolResultBlock content
+                # Check if this message is from a subagent using parent_tool_use_id
+                parent_tool_id = message.parent_tool_use_id
+
                 for block in message.content:
                     if isinstance(block, ToolResultBlock):
                         output = str(block.content)[:2000] if block.content else ""
                         tool_use_id = block.tool_use_id
-                        logger.debug(f"[WS] UserMessage ToolResultBlock - tool_use_id: {tool_use_id}, content length: {len(str(block.content) if block.content else '')}, is_error: {block.is_error}")
+                        logger.debug(f"[WS] UserMessage ToolResultBlock - tool_use_id: {tool_use_id}, parent_tool_id: {parent_tool_id}, content length: {len(str(block.content) if block.content else '')}, is_error: {block.is_error}")
 
                         # Collect tool result for storage
                         tool_messages.append({
@@ -1498,13 +1533,23 @@ async def stream_to_websocket(
                             yield {
                                 "type": "subagent_done",
                                 "tool_id": tool_use_id,
-                                "agent_id": "",  # Not available from SDK
+                                "agent_id": tool_use_id,  # Use tool_id as agent_id
                                 "agent_type": task_info.get("agent_type", "unknown"),
                                 "result": output,
                                 "is_error": block.is_error
                             }
                             # Clean up tracking
                             del task_tool_uses[tool_use_id]
+                        # Check if this tool result is from a subagent
+                        elif parent_tool_id and parent_tool_id in task_tool_uses:
+                            # Tool result from subagent - send as subagent_tool_result
+                            yield {
+                                "type": "subagent_tool_result",
+                                "agent_id": parent_tool_id,
+                                "name": "unknown",
+                                "tool_use_id": tool_use_id,
+                                "output": output
+                            }
                         else:
                             yield {
                                 "type": "tool_result",
