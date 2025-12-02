@@ -71,10 +71,12 @@
 		sidebarPinned = !sidebarPinned;
 	}
 
-	// Simple auto-scroll: always scroll unless user is touching/interacting
-	let userTouching = false;
-	let touchEndTimer: ReturnType<typeof setTimeout> | null = null;
-	const TOUCH_END_DELAY = 5000; // Resume auto-scroll 5s after user stops touching
+	// Auto-scroll state: scroll to bottom unless user scrolled away
+	let userScrolledAway = false; // True when user has scrolled up from bottom
+	let isUserInteracting = false; // True during active touch/wheel interaction
+	let scrollResumeTimer: ReturnType<typeof setTimeout> | null = null;
+	const SCROLL_RESUME_DELAY = 3000; // Resume auto-scroll after 3s of inactivity
+	const NEAR_BOTTOM_THRESHOLD = 100; // Pixels from bottom to consider "at bottom"
 	let showProfileModal = false;
 	let showProjectModal = false;
 	let showNewProfileForm = false;
@@ -236,51 +238,107 @@
 		requestAnimationFrame(doScroll);
 	}
 
-	// Auto-scroll after every DOM update - always scroll unless user is touching
+	// Check if a scroll container is near the bottom
+	function isNearBottom(tabId: string): boolean {
+		const container = messagesContainers[tabId];
+		if (!container) return true;
+		const { scrollTop, scrollHeight, clientHeight } = container;
+		return scrollHeight - scrollTop - clientHeight < NEAR_BOTTOM_THRESHOLD;
+	}
+
+	// Auto-scroll after every DOM update - scroll unless user has scrolled away
 	afterUpdate(() => {
-		if ($activeTabId && !userTouching) {
+		if ($activeTabId && !userScrolledAway && !isUserInteracting) {
 			scrollToBottom($activeTabId);
 		}
 	});
 
 	// Also scroll when active tab changes
 	$: if ($activeTabId) {
-		userTouching = false; // Reset touch state on tab switch
+		userScrolledAway = false; // Reset scroll state on tab switch
+		isUserInteracting = false;
 		setTimeout(() => scrollToBottom($activeTabId!), 0);
 		setTimeout(() => scrollToBottom($activeTabId!), 100);
 	}
 
-	// Pause auto-scroll while user is touching/scrolling
-	function handleTouchStart() {
-		userTouching = true;
-		if (touchEndTimer) {
-			clearTimeout(touchEndTimer);
-			touchEndTimer = null;
+	// Handle scroll events to detect when user scrolls away from bottom
+	function handleScroll(tabId: string) {
+		// Don't update state during programmatic scrolls (when not interacting)
+		if (!isUserInteracting) return;
+
+		// User is interacting - check if they're near bottom
+		userScrolledAway = !isNearBottom(tabId);
+	}
+
+	// Start user interaction (touch or wheel)
+	function startInteraction() {
+		isUserInteracting = true;
+		if (scrollResumeTimer) {
+			clearTimeout(scrollResumeTimer);
+			scrollResumeTimer = null;
 		}
+	}
+
+	// End user interaction and schedule resume
+	function endInteraction() {
+		isUserInteracting = false;
+
+		// If user is near bottom after interaction ends, resume auto-scroll immediately
+		if ($activeTabId && isNearBottom($activeTabId)) {
+			userScrolledAway = false;
+			return;
+		}
+
+		// Otherwise, schedule auto-scroll resume after delay
+		if (scrollResumeTimer) {
+			clearTimeout(scrollResumeTimer);
+		}
+		scrollResumeTimer = setTimeout(() => {
+			userScrolledAway = false;
+			if ($activeTabId) {
+				scrollToBottom($activeTabId);
+			}
+		}, SCROLL_RESUME_DELAY);
+	}
+
+	// Touch event handlers for mobile
+	function handleTouchStart() {
+		startInteraction();
 	}
 
 	function handleTouchEnd() {
-		// Resume auto-scroll after delay
-		touchEndTimer = setTimeout(() => {
-			userTouching = false;
-			if ($activeTabId) {
-				scrollToBottom($activeTabId);
+		// Delay ending interaction to account for momentum scrolling
+		// Check position multiple times as momentum scrolling settles
+		setTimeout(() => {
+			if ($activeTabId && isNearBottom($activeTabId)) {
+				userScrolledAway = false;
 			}
-		}, TOUCH_END_DELAY);
+		}, 100);
+		setTimeout(() => {
+			if ($activeTabId && isNearBottom($activeTabId)) {
+				userScrolledAway = false;
+			}
+		}, 300);
+		setTimeout(() => {
+			endInteraction();
+		}, 500);
 	}
 
-	// Also pause on mouse wheel for desktop
+	function handleTouchCancel() {
+		// Touch was interrupted - end interaction immediately
+		endInteraction();
+	}
+
+	// Mouse wheel handler for desktop
 	function handleWheel() {
-		userTouching = true;
-		if (touchEndTimer) {
-			clearTimeout(touchEndTimer);
+		startInteraction();
+		// End interaction after wheel stops
+		if (scrollResumeTimer) {
+			clearTimeout(scrollResumeTimer);
 		}
-		touchEndTimer = setTimeout(() => {
-			userTouching = false;
-			if ($activeTabId) {
-				scrollToBottom($activeTabId);
-			}
-		}, TOUCH_END_DELAY);
+		scrollResumeTimer = setTimeout(() => {
+			endInteraction();
+		}, 150);
 	}
 
 	async function handleSubmit(tabId: string) {
@@ -533,7 +591,8 @@
 
 		// Ensure auto-scroll is enabled and scroll after session loads
 		if (tabId) {
-			userTouching = false;
+			userScrolledAway = false;
+			isUserInteracting = false;
 			// Try scrolling multiple times as messages load async from API
 			setTimeout(() => scrollToBottom(tabId), 50);
 			setTimeout(() => scrollToBottom(tabId), 200);
@@ -1516,8 +1575,10 @@
 			<!-- Messages Area -->
 			<div
 				bind:this={messagesContainers[tabId]}
+				on:scroll={() => handleScroll(tabId)}
 				on:touchstart={handleTouchStart}
 				on:touchend={handleTouchEnd}
+				on:touchcancel={handleTouchCancel}
 				on:wheel={handleWheel}
 				class="flex-1 overflow-y-auto"
 			>

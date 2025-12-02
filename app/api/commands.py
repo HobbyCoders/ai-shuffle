@@ -350,6 +350,7 @@ class CheckpointV2(BaseModel):
     timestamp: Optional[str] = None
     git_available: bool = False
     git_ref: Optional[str] = None
+    has_changes_after: bool = False  # Whether there are git snapshots after this checkpoint
 
 
 class CheckpointsResponseV2(BaseModel):
@@ -421,7 +422,8 @@ async def get_rewind_checkpoints(session_id: str):
             full_message=cp.get('full_message', cp['message_preview']),
             timestamp=cp.get('timestamp'),
             git_available=cp.get('git_available', False),
-            git_ref=cp.get('git_ref')
+            git_ref=cp.get('git_ref'),
+            has_changes_after=cp.get('has_changes_after', False)
         )
         for cp in checkpoints
     ]

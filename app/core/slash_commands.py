@@ -270,6 +270,7 @@ def parse_command_input(text: str) -> tuple[str, str]:
 
 # Built-in interactive commands that require CLI bridge (PTY-based)
 # These commands genuinely need terminal interaction and cannot be handled via REST API
+# Note: These are NOT shown in the popup autocomplete
 INTERACTIVE_COMMANDS = {
     "resume": {
         "description": "Resume a previous conversation",
@@ -279,6 +280,7 @@ INTERACTIVE_COMMANDS = {
 
 # Built-in commands that use REST API instead of interactive CLI
 # V2: /rewind now uses direct JSONL manipulation - bulletproof, no PTY needed
+# Note: These are NOT shown in the popup autocomplete
 REST_API_COMMANDS = {
     "rewind": {
         "description": "Rewind conversation and/or code to a previous point",
@@ -286,6 +288,15 @@ REST_API_COMMANDS = {
         "requires_session": True,
         "method": "direct_jsonl",  # V2: No CLI interaction, direct file manipulation
         "note": "V2 implementation uses direct JSONL truncation for bulletproof rewind"
+    }
+}
+
+# SDK built-in commands that are shown in the popup autocomplete
+# These are passed directly to the SDK and handled internally
+SDK_BUILTIN_COMMANDS = {
+    "context": {
+        "description": "View current context including system prompt and files",
+        "type": "sdk_builtin"
     }
 }
 
@@ -314,15 +325,28 @@ def get_rest_api_command_info(command_name: str) -> Optional[Dict[str, Any]]:
     return REST_API_COMMANDS.get(name)
 
 
+def is_sdk_builtin_command(command_name: str) -> bool:
+    """Check if a command is an SDK built-in command"""
+    name = command_name.lstrip("/")
+    return name in SDK_BUILTIN_COMMANDS
+
+
+def get_sdk_builtin_command_info(command_name: str) -> Optional[Dict[str, Any]]:
+    """Get information about an SDK built-in command"""
+    name = command_name.lstrip("/")
+    return SDK_BUILTIN_COMMANDS.get(name)
+
+
 def get_all_commands(working_dir: str) -> List[Dict[str, Any]]:
     """
-    Get all available commands (custom + interactive + REST API built-ins).
+    Get all available commands for the popup autocomplete.
 
     Returns list of command info dicts for autocomplete.
+    Note: /resume and /rewind are excluded as they are handled separately.
     """
     commands = []
 
-    # Add custom commands
+    # Add custom commands from .claude/commands/
     for cmd in discover_commands(working_dir):
         commands.append({
             "name": cmd.name,
@@ -332,25 +356,18 @@ def get_all_commands(working_dir: str) -> List[Dict[str, Any]]:
             "type": "custom"
         })
 
-    # Add interactive built-in commands
-    for name, info in INTERACTIVE_COMMANDS.items():
+    # Add SDK built-in commands (like /context)
+    for name, info in SDK_BUILTIN_COMMANDS.items():
         commands.append({
             "name": name,
             "display": f"/{name}",
             "description": info["description"],
             "argument_hint": None,
-            "type": "interactive"
+            "type": "sdk_builtin"
         })
 
-    # Add REST API built-in commands (like rewind)
-    for name, info in REST_API_COMMANDS.items():
-        commands.append({
-            "name": name,
-            "display": f"/{name}",
-            "description": info["description"],
-            "argument_hint": None,
-            "type": "rest_api"
-        })
+    # Note: INTERACTIVE_COMMANDS (/resume) and REST_API_COMMANDS (/rewind)
+    # are intentionally excluded from the popup as they are handled separately
 
     # Sort by name
     commands.sort(key=lambda x: x["name"])

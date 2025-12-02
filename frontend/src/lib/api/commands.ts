@@ -7,7 +7,7 @@ export interface Command {
   display: string;
   description: string;
   argument_hint?: string;
-  type: 'custom' | 'interactive';
+  type: 'custom' | 'interactive' | 'sdk_builtin';
   source?: string;
   namespace?: string;
 }

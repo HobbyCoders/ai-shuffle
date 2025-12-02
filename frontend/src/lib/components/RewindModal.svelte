@@ -15,6 +15,7 @@
 		timestamp?: string;
 		git_available: boolean;
 		git_ref?: string | null;
+		has_changes_after?: boolean;  // Whether there are git snapshots after this checkpoint
 	}
 
 	interface CheckpointsResponse {
@@ -223,8 +224,8 @@
 												{#if i === checkpoints.length - 1}
 													<span class="text-xs bg-primary/20 text-primary px-1.5 py-0.5 rounded">Current</span>
 												{/if}
-												{#if checkpoint.git_ref}
-													<span class="text-xs bg-green-500/20 text-green-600 dark:text-green-400 px-1.5 py-0.5 rounded" title="Git snapshot available">Git</span>
+												{#if checkpoint.has_changes_after}
+													<span class="text-xs bg-amber-500/20 text-amber-600 dark:text-amber-400 px-1.5 py-0.5 rounded" title="Code changes made after this point can be reverted">Revertable</span>
 												{/if}
 											</div>
 											<p class="text-sm mt-1 truncate">{truncateMessage(checkpoint.message_preview)}</p>
@@ -259,20 +260,20 @@
 							</div>
 						</label>
 
-						<label class="flex items-center gap-3 cursor-pointer {!selectedCheckpoint?.git_ref ? 'opacity-50' : ''}">
+						<label class="flex items-center gap-3 cursor-pointer {!selectedCheckpoint?.git_available ? 'opacity-50' : ''}">
 							<input
 								type="checkbox"
 								bind:checked={restoreCode}
-								disabled={!selectedCheckpoint?.git_ref}
+								disabled={!selectedCheckpoint?.git_available}
 								class="w-4 h-4 rounded border-border"
 							/>
 							<div>
 								<span class="text-sm font-medium">Restore code changes</span>
 								<p class="text-xs text-muted-foreground">
-									{#if selectedCheckpoint?.git_ref}
-										Revert files to checkpoint state (git snapshot available)
+									{#if selectedCheckpoint?.git_available}
+										Revert all code changes made after this point
 									{:else}
-										No git snapshot for this checkpoint
+										No code changes to revert after this checkpoint
 									{/if}
 								</p>
 							</div>
