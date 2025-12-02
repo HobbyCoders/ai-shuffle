@@ -71,11 +71,10 @@
 		sidebarPinned = !sidebarPinned;
 	}
 
-	// Simple auto-scroll: always scroll unless user scrolled up recently
-	let autoScrollPaused: Record<string, boolean> = {};
-	let scrollPauseTimers: Record<string, ReturnType<typeof setTimeout>> = {};
-	let isAutoScrolling = false; // Prevent scroll handler from triggering during auto-scroll
-	const SCROLL_RESUME_DELAY = 5000; // Resume auto-scroll after 5s of no user scroll
+	// Simple auto-scroll: always scroll unless user is touching/interacting
+	let userTouching = false;
+	let touchEndTimer: ReturnType<typeof setTimeout> | null = null;
+	const TOUCH_END_DELAY = 5000; // Resume auto-scroll 5s after user stops touching
 	let showProfileModal = false;
 	let showProjectModal = false;
 	let showNewProfileForm = false;
@@ -227,54 +226,48 @@
 	function scrollToBottom(tabId: string) {
 		const container = messagesContainers[tabId];
 		if (container) {
-			isAutoScrolling = true;
 			container.scrollTop = container.scrollHeight;
-			// Reset flag after scroll completes
-			requestAnimationFrame(() => {
-				isAutoScrolling = false;
-			});
 		}
 	}
 
-	// Auto-scroll after every DOM update (new messages, content changes, etc.)
+	// Auto-scroll after every DOM update - always scroll unless user is touching
 	afterUpdate(() => {
-		if ($activeTabId && !autoScrollPaused[$activeTabId]) {
+		if ($activeTabId && !userTouching) {
 			scrollToBottom($activeTabId);
 		}
 	});
 
-	// Handle user scroll - pause auto-scroll temporarily when scrolling up
-	function handleScroll(tabId: string) {
-		// Ignore scroll events triggered by auto-scroll
-		if (isAutoScrolling) return;
-
-		const container = messagesContainers[tabId];
-		if (!container) return;
-
-		const { scrollTop, scrollHeight, clientHeight } = container;
-		const isAtBottom = scrollHeight - scrollTop - clientHeight < 50;
-
-		if (isAtBottom) {
-			// User scrolled to bottom - resume immediately
-			autoScrollPaused[tabId] = false;
-			if (scrollPauseTimers[tabId]) {
-				clearTimeout(scrollPauseTimers[tabId]);
-			}
-		} else {
-			// User scrolled up - pause auto-scroll
-			autoScrollPaused[tabId] = true;
-
-			// Clear existing timer
-			if (scrollPauseTimers[tabId]) {
-				clearTimeout(scrollPauseTimers[tabId]);
-			}
-
-			// Resume auto-scroll after inactivity
-			scrollPauseTimers[tabId] = setTimeout(() => {
-				autoScrollPaused[tabId] = false;
-				scrollToBottom(tabId);
-			}, SCROLL_RESUME_DELAY);
+	// Pause auto-scroll while user is touching/scrolling
+	function handleTouchStart() {
+		userTouching = true;
+		if (touchEndTimer) {
+			clearTimeout(touchEndTimer);
+			touchEndTimer = null;
 		}
+	}
+
+	function handleTouchEnd() {
+		// Resume auto-scroll after delay
+		touchEndTimer = setTimeout(() => {
+			userTouching = false;
+			if ($activeTabId) {
+				scrollToBottom($activeTabId);
+			}
+		}, TOUCH_END_DELAY);
+	}
+
+	// Also pause on mouse wheel for desktop
+	function handleWheel() {
+		userTouching = true;
+		if (touchEndTimer) {
+			clearTimeout(touchEndTimer);
+		}
+		touchEndTimer = setTimeout(() => {
+			userTouching = false;
+			if ($activeTabId) {
+				scrollToBottom($activeTabId);
+			}
+		}, TOUCH_END_DELAY);
 	}
 
 	async function handleSubmit(tabId: string) {
@@ -525,11 +518,10 @@
 		const tabId = tabs.openSession(sessionId);
 		sidebarOpen = false;
 
-		// Reset auto-scroll state and scroll to bottom after session loads
-		// Use multiple attempts since session loads async from API
+		// Ensure auto-scroll is enabled and scroll after session loads
 		if (tabId) {
-			autoScrollPaused[tabId] = false;
-			// Try scrolling multiple times as messages load
+			userTouching = false;
+			// Try scrolling multiple times as messages load async from API
 			setTimeout(() => scrollToBottom(tabId), 50);
 			setTimeout(() => scrollToBottom(tabId), 200);
 			setTimeout(() => scrollToBottom(tabId), 500);
@@ -1511,7 +1503,9 @@
 			<!-- Messages Area -->
 			<div
 				bind:this={messagesContainers[tabId]}
-				on:scroll={() => handleScroll(tabId)}
+				on:touchstart={handleTouchStart}
+				on:touchend={handleTouchEnd}
+				on:wheel={handleWheel}
 				class="flex-1 overflow-y-auto"
 			>
 				{#if currentTab.messages.length === 0}
