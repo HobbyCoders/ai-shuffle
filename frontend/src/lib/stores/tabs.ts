@@ -1041,9 +1041,9 @@ function createTabsStore() {
 					error: null,
 					totalTokensIn: session.total_tokens_in || 0,
 					totalTokensOut: session.total_tokens_out || 0,
-					// Cache tokens are not persisted in database, reset for session
-					totalCacheCreationTokens: 0,
-					totalCacheReadTokens: 0
+					// Cache tokens from JSONL file (if available)
+					totalCacheCreationTokens: session.cache_creation_tokens || 0,
+					totalCacheReadTokens: session.cache_read_tokens || 0
 				});
 
 				// Save tabs state (debounced)

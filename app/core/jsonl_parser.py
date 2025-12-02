@@ -382,7 +382,12 @@ def get_session_cost_from_jsonl(
     Note: JSONL files don't contain total cost, only per-message usage.
     This extracts what we can find.
 
-    Returns dict with: total_tokens_in, total_tokens_out, model, etc.
+    Returns dict with:
+    - total_tokens_in: Input tokens (not including cache tokens)
+    - total_tokens_out: Output tokens
+    - cache_creation_tokens: Tokens used to create cache entries
+    - cache_read_tokens: Tokens read from cache (doesn't count toward context)
+    - model: The model used
     """
     jsonl_path = get_session_jsonl_path(sdk_session_id, working_dir)
     if not jsonl_path:
@@ -390,6 +395,8 @@ def get_session_cost_from_jsonl(
 
     total_input_tokens = 0
     total_output_tokens = 0
+    cache_creation_tokens = 0
+    cache_read_tokens = 0
     model = None
 
     for entry in parse_jsonl_file(jsonl_path):
@@ -401,15 +408,17 @@ def get_session_cost_from_jsonl(
             if not model:
                 model = message_data.get("model")
 
-            # Sum up tokens
+            # Sum up tokens - keep cache tokens separate
             total_input_tokens += usage.get("input_tokens", 0)
-            total_input_tokens += usage.get("cache_creation_input_tokens", 0)
-            total_input_tokens += usage.get("cache_read_input_tokens", 0)
             total_output_tokens += usage.get("output_tokens", 0)
+            cache_creation_tokens += usage.get("cache_creation_input_tokens", 0)
+            cache_read_tokens += usage.get("cache_read_input_tokens", 0)
 
     return {
         "total_tokens_in": total_input_tokens,
         "total_tokens_out": total_output_tokens,
+        "cache_creation_tokens": cache_creation_tokens,
+        "cache_read_tokens": cache_read_tokens,
         "model": model
     }
 

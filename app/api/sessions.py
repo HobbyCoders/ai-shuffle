@@ -117,14 +117,14 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
     # Try to load messages from JSONL file first (source of truth for consistency)
     sdk_session_id = session.get("sdk_session_id")
     messages = []
+    working_dir = "/workspace"
 
     if sdk_session_id:
         try:
-            from app.core.jsonl_parser import parse_session_history
+            from app.core.jsonl_parser import parse_session_history, get_session_cost_from_jsonl
             from app.core.config import settings
 
             # Get working dir from project if available
-            working_dir = "/workspace"
             project_id = session.get("project_id")
             if project_id:
                 project = database.get_project(project_id)
@@ -153,6 +153,15 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                         "metadata": m.get("metadata"),
                         "created_at": None  # Let Pydantic use default; timestamp is in metadata
                     })
+
+            # Get token usage from JSONL if database doesn't have it
+            if session.get("total_tokens_in", 0) == 0 and session.get("total_tokens_out", 0) == 0:
+                usage_data = get_session_cost_from_jsonl(sdk_session_id, working_dir)
+                if usage_data:
+                    session["total_tokens_in"] = usage_data.get("total_tokens_in", 0)
+                    session["total_tokens_out"] = usage_data.get("total_tokens_out", 0)
+                    session["cache_creation_tokens"] = usage_data.get("cache_creation_tokens", 0)
+                    session["cache_read_tokens"] = usage_data.get("cache_read_tokens", 0)
         except Exception as e:
             # Log the error but don't fail - fall back to database
             logger.error(f"Failed to parse JSONL for session {session_id}: {e}")

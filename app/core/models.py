@@ -201,6 +201,8 @@ class Session(SessionBase):
     total_cost_usd: float = 0.0
     total_tokens_in: int = 0
     total_tokens_out: int = 0
+    cache_creation_tokens: int = 0  # Tokens used to create cache (counts toward context)
+    cache_read_tokens: int = 0  # Tokens read from cache (doesn't count toward context)
     turn_count: int = 0
     created_at: datetime
     updated_at: datetime
