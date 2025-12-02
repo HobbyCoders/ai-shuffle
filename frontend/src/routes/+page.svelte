@@ -28,6 +28,7 @@
 	import { marked } from 'marked';
 	import TerminalModal from '$lib/components/TerminalModal.svelte';
 	import RewindModal from '$lib/components/RewindModal.svelte';
+	import SystemMessage from '$lib/components/SystemMessage.svelte';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import SubagentMessage from '$lib/components/SubagentMessage.svelte';
@@ -1756,7 +1757,7 @@
 									</div>
 								</div>
 							{:else if message.type === 'system'}
-								<!-- System Message (e.g., /context output) -->
+								<!-- System Message (e.g., /context output, status updates) -->
 								<div class="flex gap-3 w-full">
 									<div class="flex-shrink-0 w-8 h-8 rounded-full bg-purple-500/10 flex items-center justify-center shadow-s">
 										<svg class="w-4 h-4 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1764,17 +1765,7 @@
 										</svg>
 									</div>
 									<div class="flex-1 min-w-0">
-										<div class="w-full border border-border rounded-lg overflow-hidden shadow-s bg-card">
-											<div class="px-4 py-2 bg-muted/30 flex items-center gap-2">
-												<svg class="w-4 h-4 text-purple-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-												</svg>
-												<span class="text-sm font-medium text-foreground capitalize">{message.systemSubtype || 'System'}</span>
-											</div>
-											<div class="px-4 py-3 bg-card">
-												<pre class="text-xs text-muted-foreground overflow-x-auto whitespace-pre-wrap break-words font-mono">{message.content}</pre>
-											</div>
-										</div>
+										<SystemMessage {message} />
 									</div>
 								</div>
 							{:else if message.type === 'subagent'}
