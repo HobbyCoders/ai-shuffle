@@ -1365,29 +1365,19 @@
 
 				<!-- Right side: Token counts, rewind, connection status -->
 				<div class="flex items-center gap-2 sm:gap-3">
-					<!-- Context usage dropdown (only show if any tokens > 0) -->
+					<!-- Token usage dropdown (only show if any tokens > 0) -->
 					{#if currentTab.totalTokensIn > 0 || currentTab.totalTokensOut > 0}
-						{@const contextUsed = currentTab.totalTokensIn + currentTab.totalTokensOut + currentTab.totalCacheCreationTokens}
-						{@const contextMax = 200000}
-						{@const contextPercent = Math.min((contextUsed / contextMax) * 100, 100)}
+						{@const totalTokens = currentTab.totalTokensIn + currentTab.totalTokensOut + currentTab.totalCacheCreationTokens + currentTab.totalCacheReadTokens}
 						<div class="relative group">
 							<button
 								class="flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors"
-								title="Context usage: {formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}"
+								title="Total tokens: {formatTokenCount(totalTokens)}"
 							>
-								<!-- Circular progress indicator -->
-								<svg class="w-4 h-4 -rotate-90" viewBox="0 0 20 20">
-									<circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="2" opacity="0.2" />
-									<circle
-										cx="10" cy="10" r="8" fill="none"
-										stroke={contextPercent > 80 ? '#ef4444' : contextPercent > 60 ? '#f59e0b' : '#22c55e'}
-										stroke-width="2"
-										stroke-dasharray={2 * Math.PI * 8}
-										stroke-dashoffset={2 * Math.PI * 8 * (1 - contextPercent / 100)}
-										stroke-linecap="round"
-									/>
+								<!-- Token icon -->
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01" />
 								</svg>
-								<span>{Math.round(contextPercent)}%</span>
+								<span>{formatTokenCount(totalTokens)}</span>
 								<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 								</svg>
@@ -1395,10 +1385,10 @@
 							<!-- Token dropdown -->
 							<div class="absolute right-0 top-full mt-1 w-52 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
 								<div class="py-2 px-3 space-y-2">
-									<!-- Context header -->
+									<!-- Token header -->
 									<div class="flex items-center justify-between text-xs pb-1 border-b border-border">
-										<span class="text-muted-foreground">Context</span>
-										<span class="text-foreground font-medium">{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}</span>
+										<span class="text-muted-foreground">Total Tokens</span>
+										<span class="text-foreground font-medium">{formatTokenCount(totalTokens)}</span>
 									</div>
 									<div class="flex items-center justify-between text-xs">
 										<span class="flex items-center gap-1.5 text-muted-foreground">

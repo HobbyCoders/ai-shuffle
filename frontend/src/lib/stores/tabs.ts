@@ -632,6 +632,8 @@ function createTabsStore() {
 				const turnTokensIn = (metadata?.tokens_in as number) || 0;
 				const turnTokensOut = (metadata?.tokens_out as number) || 0;
 				// Cache tokens represent current context window state, not incremental
+				// Note: These may be undefined for system commands like /context that don't use the model
+				const hasCacheData = metadata?.cache_creation_tokens !== undefined || metadata?.cache_read_tokens !== undefined;
 				const cacheCreationTokens = (metadata?.cache_creation_tokens as number) || 0;
 				const cacheReadTokens = (metadata?.cache_read_tokens as number) || 0;
 
@@ -684,9 +686,10 @@ function createTabsStore() {
 							// Update baseline to include this turn's tokens for next turn
 							baselineTokensIn: newTotalTokensIn,
 							baselineTokensOut: newTotalTokensOut,
-							// Cache tokens represent current state, not incremental - use latest values
-							totalCacheCreationTokens: cacheCreationTokens,
-							totalCacheReadTokens: cacheReadTokens
+							// Cache tokens represent current state - only update if present in metadata
+							// System commands like /context don't include cache data, so preserve existing values
+							totalCacheCreationTokens: hasCacheData ? cacheCreationTokens : tab.totalCacheCreationTokens,
+							totalCacheReadTokens: hasCacheData ? cacheReadTokens : tab.totalCacheReadTokens
 						};
 					})
 				}));
