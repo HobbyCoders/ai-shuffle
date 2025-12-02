@@ -635,13 +635,10 @@ function createTabsStore() {
 				const cacheCreationTokens = (metadata?.cache_creation_tokens as number) || 0;
 				const cacheReadTokens = (metadata?.cache_read_tokens as number) || 0;
 
-				// Check if this response has no token data at all
-				// This happens for local commands like /context that don't use the model
-				// Note: /compact DOES use the model and will have tokens
-				// We check if metadata exists but has no token fields, vs first message which may have all zeros
-				const hasNoTokenData = metadata &&
-					metadata.tokens_in === undefined &&
-					metadata.tokens_out === undefined;
+				// Check if this is a slash command response (no token data)
+				// Slash commands like /context, /compact don't use the model and have no tokens
+				const isSlashCommand = turnTokensIn === 0 && turnTokensOut === 0 &&
+					cacheCreationTokens === 0 && cacheReadTokens === 0;
 
 				update(s => ({
 					...s,
@@ -674,9 +671,8 @@ function createTabsStore() {
 							}
 						}
 
-						// Skip token updates for local commands (like /context) that don't use the model
-						// These have no token data in metadata at all
-						if (hasNoTokenData) {
+						// Skip token updates for slash commands - they don't use the model
+						if (isSlashCommand) {
 							return {
 								...tab,
 								messages,
