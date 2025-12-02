@@ -426,23 +426,22 @@ def parse_session_history(
                                 # This is a subagent result - update the existing subagent message
                                 task_info = task_tool_uses[tool_use_id]
 
+                                # Extract agentId from toolUseResult if available
+                                tool_use_result = entry.get("toolUseResult", {})
+                                agent_id = tool_use_result.get("agentId") if isinstance(tool_use_result, dict) else None
+
                                 # Find and update the subagent message
                                 for msg in messages:
                                     if msg.get("type") == "subagent" and msg.get("toolId") == tool_use_id:
                                         msg["content"] = output[:2000] if output else ""
                                         msg["agentStatus"] = "error" if is_error else "completed"
 
-                                        # Try to find agent children from cache
-                                        # We need to match agent files - look through all cached agents
-                                        # for one that might match this task (by timing or content)
-                                        for agent_id, children in agent_children_cache.items():
-                                            # If we have children and haven't assigned them yet
-                                            if children and not msg.get("agentChildren"):
-                                                msg["agentId"] = agent_id
-                                                msg["agentChildren"] = children
-                                                # Remove from cache so we don't double-assign
-                                                agent_children_cache[agent_id] = []
-                                                break
+                                        # Use agentId from toolUseResult to find the right agent children
+                                        if agent_id and agent_id in agent_children_cache:
+                                            msg["agentId"] = agent_id
+                                            msg["agentChildren"] = agent_children_cache[agent_id]
+                                            # Clear from cache to avoid double-assignment
+                                            agent_children_cache[agent_id] = []
                                         break
 
                                 # Don't add a separate tool_result message for Task tools
