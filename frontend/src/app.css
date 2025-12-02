@@ -297,11 +297,21 @@ code {
 	margin-bottom: 1rem;
 }
 
+/* Table wrapper for horizontal scrolling on mobile */
 .prose :where(table):not(:where([class~="not-prose"] *)) {
+	display: block;
 	width: 100%;
-	border-collapse: collapse;
+	overflow-x: auto;
+	-webkit-overflow-scrolling: touch;
 	margin-top: 1rem;
 	margin-bottom: 1rem;
+}
+
+.prose :where(table):not(:where([class~="not-prose"] *)) tbody,
+.prose :where(table):not(:where([class~="not-prose"] *)) thead {
+	display: table;
+	width: 100%;
+	border-collapse: collapse;
 }
 
 .prose :where(th):not(:where([class~="not-prose"] *)) {
@@ -310,6 +320,7 @@ code {
 	background-color: var(--muted);
 	text-align: left;
 	font-weight: 600;
+	white-space: nowrap;
 }
 
 .prose :where(td):not(:where([class~="not-prose"] *)) {

@@ -1438,8 +1438,8 @@
 												</span>
 											{/if}
 										</div>
-										<div class="bg-card border border-border rounded-lg p-4 shadow-s">
-											<div class="prose prose-sm max-w-none break-words">
+										<div class="bg-card border border-border rounded-lg p-4 shadow-s overflow-hidden">
+											<div class="prose prose-sm max-w-none break-words overflow-x-auto">
 												{#if message.content}
 													{@html renderMarkdown(message.content)}
 													{#if message.streaming}
