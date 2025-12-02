@@ -1361,10 +1361,25 @@
 					</div>
 				</div>
 
+				<!-- Rewind Button (after breadcrumb, only when session is active) -->
+				{#if currentTab.sessionId}
+					<button
+						on:click={() => openRewindModal(tabId)}
+						class="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors disabled:opacity-50 ml-2"
+						title="Rewind conversation"
+						disabled={currentTab.isStreaming}
+					>
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0019 16V8a1 1 0 00-1.6-.8l-5.333 4zM4.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0011 16V8a1 1 0 00-1.6-.8l-5.334 4z" />
+						</svg>
+						<span class="hidden sm:inline">Rewind</span>
+					</button>
+				{/if}
+
 				<!-- Spacer -->
 				<div class="flex-1"></div>
 
-				<!-- Right side: Token counts, rewind, connection status -->
+				<!-- Right side: Token counts, connection status -->
 				<div class="flex items-center gap-2 sm:gap-3">
 					<!-- Context usage dropdown (only show if any tokens > 0) -->
 					{#if currentTab.totalTokensIn > 0 || currentTab.totalTokensOut > 0 || currentTab.totalCacheCreationTokens > 0 || currentTab.totalCacheReadTokens > 0}
@@ -1445,21 +1460,6 @@
 								</div>
 							</div>
 						</div>
-					{/if}
-
-					<!-- Rewind Button (only when session is active) -->
-					{#if currentTab.sessionId}
-						<button
-							on:click={() => openRewindModal(tabId)}
-							class="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors disabled:opacity-50"
-							title="Rewind conversation"
-							disabled={currentTab.isStreaming}
-						>
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0019 16V8a1 1 0 00-1.6-.8l-5.333 4zM4.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0011 16V8a1 1 0 00-1.6-.8l-5.334 4z" />
-							</svg>
-							<span class="hidden sm:inline">Rewind</span>
-						</button>
 					{/if}
 
 					<!-- Connection Status (always far right) -->
