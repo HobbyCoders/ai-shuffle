@@ -94,12 +94,6 @@ async def chat_websocket(
 
     Message types TO server:
     - query: Start a new query
-        - prompt: string (required) - The text prompt
-        - session_id: string (optional) - Continue existing session
-        - profile: string (optional) - Profile ID, default "claude-code"
-        - project: string (optional) - Project ID
-        - images: array (optional) - Image attachments for streaming input
-            Each image: {"media_type": "image/png|jpeg|gif|webp", "data": "base64..."}
     - stop: Interrupt current query
     - load_session: Load/switch to a session
     - pong: Response to ping
@@ -126,14 +120,14 @@ async def chat_websocket(
             except Exception as e:
                 logger.warning(f"Failed to send WebSocket message: {e}")
 
-    async def run_query(prompt: str, session_id: str, profile_id: str, project_id: Optional[str], images: Optional[list] = None):
+    async def run_query(prompt: str, session_id: str, profile_id: str, project_id: Optional[str]):
         """Execute query and stream results directly to WebSocket"""
         nonlocal current_session_id
 
         from app.core.query_engine import stream_to_websocket
 
         try:
-            logger.info(f"Starting query for session {session_id}, profile={profile_id}, project={project_id}, images={len(images) if images else 0}")
+            logger.info(f"Starting query for session {session_id}, profile={profile_id}, project={project_id}")
             await send_json({"type": "start", "session_id": session_id})
 
             logger.info(f"Calling stream_to_websocket for session {session_id}")
@@ -141,8 +135,7 @@ async def chat_websocket(
                 prompt=prompt,
                 session_id=session_id,
                 profile_id=profile_id,
-                project_id=project_id,
-                images=images
+                project_id=project_id
             ):
                 logger.debug(f"Streaming event for session {session_id}: {event.get('type')}")
                 await send_json(event)
@@ -182,26 +175,10 @@ async def chat_websocket(
                         session_id = data.get("session_id")
                         profile_id = data.get("profile", "claude-code")
                         project_id = data.get("project")
-                        images = data.get("images")  # Optional image attachments
 
                         if not prompt:
                             await send_json({"type": "error", "message": "Empty prompt"})
                             continue
-
-                        # Validate images if provided
-                        if images:
-                            valid_media_types = {"image/png", "image/jpeg", "image/gif", "image/webp"}
-                            for i, img in enumerate(images):
-                                if not isinstance(img, dict):
-                                    await send_json({"type": "error", "message": f"Invalid image format at index {i}"})
-                                    continue
-                                media_type = img.get("media_type", "")
-                                if media_type not in valid_media_types:
-                                    await send_json({"type": "error", "message": f"Invalid media type '{media_type}' at index {i}. Must be one of: {valid_media_types}"})
-                                    continue
-                                if not img.get("data"):
-                                    await send_json({"type": "error", "message": f"Missing image data at index {i}"})
-                                    continue
 
                         # Create or get session
                         if not session_id:
@@ -215,14 +192,11 @@ async def chat_websocket(
 
                         current_session_id = session_id
 
-                        # Store user message (note: images are not stored in DB, only the text prompt)
-                        user_content = prompt
-                        if images:
-                            user_content = f"{prompt}\n\n[{len(images)} image(s) attached]"
+                        # Store user message
                         database.add_session_message(
                             session_id=session_id,
                             role="user",
-                            content=user_content
+                            content=prompt
                         )
 
                         # Cancel any existing query for this session
@@ -233,9 +207,9 @@ async def chat_websocket(
                             except asyncio.CancelledError:
                                 pass
 
-                        # Start new query task with images
+                        # Start new query task
                         query_task = asyncio.create_task(
-                            run_query(prompt, session_id, profile_id, project_id, images)
+                            run_query(prompt, session_id, profile_id, project_id)
                         )
                         _active_chat_sessions[session_id] = query_task
 

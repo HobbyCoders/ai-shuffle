@@ -10,7 +10,7 @@ Based on patterns from Anvil's SessionManager:
 import logging
 import uuid
 import asyncio
-from typing import Optional, Dict, Any, AsyncGenerator, List
+from typing import Optional, Dict, Any, AsyncGenerator
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -1231,27 +1231,13 @@ async def stream_to_websocket(
     session_id: str,
     profile_id: str,
     project_id: Optional[str] = None,
-    overrides: Optional[Dict[str, Any]] = None,
-    images: Optional[List[Dict[str, Any]]] = None
+    overrides: Optional[Dict[str, Any]] = None
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Stream Claude response directly to WebSocket.
 
     This is the simplified streaming function for the WebSocket-first architecture.
     No sync engine, no background tasks - just direct streaming.
-
-    Supports streaming input mode when images are provided, allowing:
-    - Image attachments in messages
-    - Rich multimodal interactions
-
-    Args:
-        prompt: The text prompt
-        session_id: Session ID
-        profile_id: Profile ID
-        project_id: Optional project ID
-        overrides: Optional query overrides
-        images: Optional list of image attachments with format:
-                [{"media_type": "image/png", "data": "base64..."}]
 
     Yields events:
     - {"type": "chunk", "content": "..."}
@@ -1328,33 +1314,7 @@ async def stream_to_websocket(
     interrupted = False
 
     try:
-        # Build message content - use multimodal format if images provided
-        if images:
-            # Build content array with text and images for streaming input
-            content = [{"type": "text", "text": prompt}]
-            for img in images:
-                content.append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": img.get("media_type", "image/png"),
-                        "data": img.get("data", "")
-                    }
-                })
-
-            # Use streaming input with message dict
-            message_payload = {
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": content
-                }
-            }
-            logger.info(f"[WS] Sending multimodal message with {len(images)} image(s) for session {session_id}")
-            await state.client.query(message_payload)
-        else:
-            # Simple text prompt
-            await state.client.query(prompt)
+        await state.client.query(prompt)
 
         async for message in state.client.receive_response():
             # Check for interrupt request as a failsafe

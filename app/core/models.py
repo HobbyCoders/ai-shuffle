@@ -215,13 +215,6 @@ class SessionWithMessages(Session):
 # Query Models
 # ============================================================================
 
-class ImageAttachment(BaseModel):
-    """Image attachment for streaming input"""
-    type: str = "image"
-    media_type: str = Field(..., description="MIME type: image/png, image/jpeg, image/gif, image/webp")
-    data: str = Field(..., description="Base64 encoded image data")
-
-
 class QueryOverrides(BaseModel):
     """Optional overrides for a query"""
     model: Optional[str] = None
@@ -235,7 +228,6 @@ class QueryRequest(BaseModel):
     profile: str = "claude-code"
     project: Optional[str] = None
     overrides: Optional[QueryOverrides] = None
-    images: Optional[List[ImageAttachment]] = None  # Image attachments for streaming input
 
 
 class ConversationRequest(BaseModel):
@@ -246,7 +238,6 @@ class ConversationRequest(BaseModel):
     project: Optional[str] = None  # Used only for new sessions
     overrides: Optional[QueryOverrides] = None
     device_id: Optional[str] = None  # Device identifier for cross-device sync
-    images: Optional[List[ImageAttachment]] = None  # Image attachments for streaming input
 
 
 class QueryMetadata(BaseModel):
