@@ -84,6 +84,80 @@ const tabConnections: Map<string, WebSocket> = new Map();
 const tabPingTimers: Map<string, ReturnType<typeof setInterval>> = new Map();
 const tabReconnectTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
+// Interface for persisted tab state (only what we need to restore tabs)
+interface PersistedTab {
+	id: string;
+	title: string;
+	sessionId: string | null;
+	profile: string;
+	project: string;
+}
+
+interface PersistedTabsState {
+	tabs: PersistedTab[];
+	activeTabId: string | null;
+}
+
+// Debounce timer for saving tabs
+let saveTabsTimer: ReturnType<typeof setTimeout> | null = null;
+const SAVE_DEBOUNCE_MS = 1000;
+
+// Flag to prevent saving during initial load
+let isInitializing = false;
+
+/**
+ * Save tabs state to backend (debounced)
+ */
+async function saveTabsToServer(state: TabsState) {
+	// Don't save during initialization
+	if (isInitializing) return;
+
+	// Clear existing timer
+	if (saveTabsTimer) {
+		clearTimeout(saveTabsTimer);
+	}
+
+	// Debounce the save
+	saveTabsTimer = setTimeout(async () => {
+		try {
+			const persistedState: PersistedTabsState = {
+				tabs: state.tabs.map(tab => ({
+					id: tab.id,
+					title: tab.title,
+					sessionId: tab.sessionId,
+					profile: tab.profile,
+					project: tab.project
+				})),
+				activeTabId: state.activeTabId
+			};
+
+			await api.put('/preferences/open_tabs', {
+				key: 'open_tabs',
+				value: persistedState
+			});
+			console.log('[Tabs] Saved tabs state to server');
+		} catch (error) {
+			console.error('[Tabs] Failed to save tabs state:', error);
+		}
+	}, SAVE_DEBOUNCE_MS);
+}
+
+/**
+ * Load tabs state from backend
+ */
+async function loadTabsFromServer(): Promise<PersistedTabsState | null> {
+	try {
+		const response = await api.get<{ key: string; value: PersistedTabsState } | null>('/preferences/open_tabs');
+		if (response && response.value) {
+			console.log('[Tabs] Loaded tabs state from server:', response.value);
+			return response.value;
+		}
+	} catch (error) {
+		console.error('[Tabs] Failed to load tabs state:', error);
+	}
+	return null;
+}
+
 // Load persisted values
 function getPersistedProfile(): string {
 	if (typeof window !== 'undefined') {
@@ -537,6 +611,9 @@ function createTabsStore() {
 
 				// Refresh sessions list
 				loadSessionsInternal();
+
+				// Save tabs state since sessionId may have changed (debounced)
+				saveTabsToServer(get({ subscribe }));
 				break;
 			}
 
@@ -661,12 +738,63 @@ function createTabsStore() {
 		subscribe,
 
 		/**
-		 * Initialize - connect WebSocket for all existing tabs
+		 * Initialize - load tabs from server and connect WebSockets
 		 */
-		init() {
-			const state = get({ subscribe });
-			for (const tab of state.tabs) {
-				connectTab(tab.id);
+		async init() {
+			isInitializing = true;
+
+			try {
+				// Try to load persisted tabs from server
+				const persistedState = await loadTabsFromServer();
+
+				if (persistedState && persistedState.tabs && persistedState.tabs.length > 0) {
+					// Restore tabs from server
+					const restoredTabs: ChatTab[] = persistedState.tabs.map(pt => ({
+						id: pt.id,
+						title: pt.title,
+						sessionId: pt.sessionId,
+						messages: [],
+						isStreaming: false,
+						wsConnected: false,
+						error: null,
+						profile: pt.profile,
+						project: pt.project,
+						totalTokensIn: 0,
+						totalTokensOut: 0
+					}));
+
+					update(s => ({
+						...s,
+						tabs: restoredTabs,
+						activeTabId: persistedState.activeTabId || restoredTabs[0]?.id || null
+					}));
+
+					// Connect WebSockets and load session messages for each tab
+					for (const tab of restoredTabs) {
+						connectTab(tab.id);
+						// Load session messages if tab has a session
+						if (tab.sessionId) {
+							this.loadSessionInTab(tab.id, tab.sessionId);
+						}
+					}
+
+					console.log('[Tabs] Restored', restoredTabs.length, 'tabs from server');
+				} else {
+					// No persisted state - connect default tab
+					const state = get({ subscribe });
+					for (const tab of state.tabs) {
+						connectTab(tab.id);
+					}
+				}
+			} catch (error) {
+				console.error('[Tabs] Failed to initialize from server:', error);
+				// Fall back to default behavior
+				const state = get({ subscribe });
+				for (const tab of state.tabs) {
+					connectTab(tab.id);
+				}
+			} finally {
+				isInitializing = false;
 			}
 		},
 
@@ -713,6 +841,9 @@ function createTabsStore() {
 			// If sessionId provided, load that session
 			if (sessionId) {
 				this.loadSessionInTab(newTabId, sessionId);
+			} else {
+				// Save tabs state (debounced)
+				saveTabsToServer(get({ subscribe }));
 			}
 
 			return newTabId;
@@ -749,6 +880,9 @@ function createTabsStore() {
 					activeTabId: newActiveId
 				};
 			});
+
+			// Save tabs state (debounced)
+			saveTabsToServer(get({ subscribe }));
 		},
 
 		/**
@@ -756,6 +890,8 @@ function createTabsStore() {
 		 */
 		setActiveTab(tabId: string) {
 			update(s => ({ ...s, activeTabId: tabId }));
+			// Save tabs state (debounced)
+			saveTabsToServer(get({ subscribe }));
 		},
 
 		/**
@@ -895,6 +1031,9 @@ function createTabsStore() {
 					totalTokensOut: session.total_tokens_out || 0
 				});
 
+				// Save tabs state (debounced)
+				saveTabsToServer(get({ subscribe }));
+
 				return true;
 			} catch (e: unknown) {
 				const error = e as { detail?: string };
@@ -960,6 +1099,8 @@ function createTabsStore() {
 				totalTokensOut: 0
 			});
 			connectTab(tabId);
+			// Save tabs state (debounced)
+			saveTabsToServer(get({ subscribe }));
 		},
 
 		// Data loading functions

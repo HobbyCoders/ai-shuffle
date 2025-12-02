@@ -19,7 +19,7 @@ from app.core.profiles import seed_builtin_profiles
 from app.core.auth import auth_service
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands
+from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -128,6 +128,7 @@ app.include_router(query.router)
 app.include_router(api_users.router)
 app.include_router(websocket.router)
 app.include_router(commands.router)
+app.include_router(preferences.router)
 
 # Serve static files (Svelte build) if they exist
 static_dir = Path(__file__).parent / "static"
