@@ -416,6 +416,8 @@ function createTabsStore() {
 						toolName: (m.toolName || m.tool_name) as string | undefined,
 						toolId: m.toolId as string | undefined,
 						toolInput: (m.toolInput || m.tool_input) as Record<string, unknown> | undefined,
+						toolResult: m.toolResult as string | undefined,
+						toolStatus: m.toolStatus as 'running' | 'complete' | 'error' | undefined,
 						metadata: m.metadata as Record<string, unknown>,
 						streaming: false
 					};
@@ -1332,6 +1334,8 @@ function createTabsStore() {
 						toolName: (m.toolName || m.tool_name) as string | undefined,
 						toolId: m.toolId as string | undefined,
 						toolInput: (m.toolInput || m.tool_input) as Record<string, unknown> | undefined,
+						toolResult: m.toolResult as string | undefined,
+						toolStatus: m.toolStatus as 'running' | 'complete' | 'error' | undefined,
 						metadata: m.metadata as Record<string, unknown>,
 						streaming: false
 					};
