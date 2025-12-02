@@ -48,6 +48,8 @@
 	let lastMessageCounts: Record<string, number> = {};
 	let lastContentLengths: Record<string, number> = {};
 	let previousActiveTabId: string | null = null;
+	let programmaticScroll: Record<string, boolean> = {}; // Track when we scroll vs user scrolls
+	let wasStreaming: Record<string, boolean> = {}; // Track streaming state changes
 	let showProfileModal = false;
 	let showProjectModal = false;
 	let showNewProfileForm = false;
@@ -186,6 +188,13 @@
 		const tabId = $activeTab.id;
 		const container = messagesContainers[tabId];
 		const messages = $activeTab.messages;
+		const isStreaming = $activeTab.isStreaming;
+
+		// Reset auto-scroll when streaming starts
+		if (isStreaming && !wasStreaming[tabId]) {
+			shouldAutoScroll[tabId] = true;
+		}
+		wasStreaming[tabId] = isStreaming;
 
 		if (messages.length > 0) {
 			const newMessageArrived = messages.length > (lastMessageCounts[tabId] || 0);
@@ -195,16 +204,19 @@
 			const contentUpdated = totalContentLength > (lastContentLengths[tabId] || 0);
 			lastContentLengths[tabId] = totalContentLength;
 
-			// Check if we should auto-scroll BEFORE the setTimeout
-			// Default to true for new tabs, and check current position
-			const isCurrentlyNearBottom = isNearBottom(container, 150);
-			const autoScroll = shouldAutoScroll[tabId] !== false && isCurrentlyNearBottom;
+			// Auto-scroll if enabled for this tab (default true)
+			const autoScroll = shouldAutoScroll[tabId] !== false;
 
-			if ((newMessageArrived || (contentUpdated && $activeTab.isStreaming)) && autoScroll) {
-				// Use requestAnimationFrame for smoother scrolling
+			if ((newMessageArrived || (contentUpdated && isStreaming)) && autoScroll) {
+				// Mark as programmatic scroll so handleScroll ignores it
+				programmaticScroll[tabId] = true;
 				requestAnimationFrame(() => {
 					if (container) {
 						container.scrollTop = container.scrollHeight;
+						// Clear programmatic flag after a short delay
+						setTimeout(() => {
+							programmaticScroll[tabId] = false;
+						}, 50);
 					}
 				});
 			}
@@ -232,7 +244,19 @@
 	function handleScroll(tabId: string) {
 		const container = messagesContainers[tabId];
 		if (!container) return;
-		shouldAutoScroll[tabId] = isNearBottom(container, 100);
+
+		// Ignore programmatic scrolls - only respond to user scrolls
+		if (programmaticScroll[tabId]) return;
+
+		// Only disable auto-scroll if user scrolls away from bottom
+		// Use a larger threshold to be more forgiving
+		const nearBottom = isNearBottom(container, 150);
+		if (!nearBottom) {
+			shouldAutoScroll[tabId] = false;
+		} else {
+			// Re-enable if user scrolls back to bottom
+			shouldAutoScroll[tabId] = true;
+		}
 	}
 
 	async function handleSubmit(tabId: string) {
