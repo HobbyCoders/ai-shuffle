@@ -289,17 +289,23 @@ function createChatStore() {
 			case 'tool_use': {
 				// Tool being used
 				update(s => {
-					const messages = [...s.messages];
+					let messages = [...s.messages];
 
-					// Mark current streaming text as not streaming (but keep content)
+					// Handle current streaming text message
 					const streamingIdx = messages.findLastIndex(
 						m => m.type === 'text' && m.role === 'assistant' && m.streaming
 					);
-					if (streamingIdx !== -1 && messages[streamingIdx].content) {
-						messages[streamingIdx] = {
-							...messages[streamingIdx],
-							streaming: false
-						};
+					if (streamingIdx !== -1) {
+						if (messages[streamingIdx].content) {
+							// Mark text message as complete if it has content
+							messages[streamingIdx] = {
+								...messages[streamingIdx],
+								streaming: false
+							};
+						} else {
+							// Remove empty streaming text messages to avoid leaving empty cards
+							messages = messages.filter((_, i) => i !== streamingIdx);
+						}
 					}
 
 					// Add tool use message
