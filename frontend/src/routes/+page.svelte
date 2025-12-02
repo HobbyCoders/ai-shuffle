@@ -222,12 +222,18 @@
 		}
 	}
 
-	// Scroll to bottom helper
+	// Scroll to bottom helper - tries immediately and with RAF for reliability
 	function scrollToBottom(tabId: string) {
-		const container = messagesContainers[tabId];
-		if (container) {
-			container.scrollTop = container.scrollHeight;
-		}
+		const doScroll = () => {
+			const container = messagesContainers[tabId];
+			if (container) {
+				container.scrollTop = container.scrollHeight;
+			}
+		};
+		// Try immediately
+		doScroll();
+		// Also try after next frame in case DOM isn't ready
+		requestAnimationFrame(doScroll);
 	}
 
 	// Auto-scroll after every DOM update - always scroll unless user is touching
@@ -236,6 +242,13 @@
 			scrollToBottom($activeTabId);
 		}
 	});
+
+	// Also scroll when active tab changes
+	$: if ($activeTabId) {
+		userTouching = false; // Reset touch state on tab switch
+		setTimeout(() => scrollToBottom($activeTabId!), 0);
+		setTimeout(() => scrollToBottom($activeTabId!), 100);
+	}
 
 	// Pause auto-scroll while user is touching/scrolling
 	function handleTouchStart() {
