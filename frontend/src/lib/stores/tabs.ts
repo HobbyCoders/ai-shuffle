@@ -667,6 +667,13 @@ function createTabsStore() {
 				// This is more reliable than tracking incremental tokens during streaming
 				if (sessionId) {
 					api.get<Session>(`/sessions/${sessionId}`).then(session => {
+						console.log('[Tab] Loaded session token counts:', {
+							sessionId,
+							total_tokens_in: session.total_tokens_in,
+							total_tokens_out: session.total_tokens_out,
+							cache_creation_tokens: session.cache_creation_tokens,
+							cache_read_tokens: session.cache_read_tokens
+						});
 						updateTab(tabId, {
 							totalTokensIn: session.total_tokens_in || 0,
 							totalTokensOut: session.total_tokens_out || 0,

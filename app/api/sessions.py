@@ -168,6 +168,7 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
             # Get token usage from JSONL - always load cache tokens since they're not in DB
             # Also load input/output tokens if database doesn't have them
             usage_data = get_session_cost_from_jsonl(sdk_session_id, working_dir)
+            logger.info(f"[Session API] JSONL usage_data for {session_id}: {usage_data}")
             if usage_data:
                 # Cache tokens are only in JSONL, always use those
                 session["cache_creation_tokens"] = usage_data.get("cache_creation_tokens", 0)
@@ -176,6 +177,7 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                 if session.get("total_tokens_in", 0) == 0 and session.get("total_tokens_out", 0) == 0:
                     session["total_tokens_in"] = usage_data.get("total_tokens_in", 0)
                     session["total_tokens_out"] = usage_data.get("total_tokens_out", 0)
+            logger.info(f"[Session API] Final token values: tokens_in={session.get('total_tokens_in')}, tokens_out={session.get('total_tokens_out')}, cache_creation={session.get('cache_creation_tokens')}, cache_read={session.get('cache_read_tokens')}")
         except Exception as e:
             # Log the error but don't fail - fall back to database
             logger.error(f"Failed to parse JSONL for session {session_id}: {e}")
