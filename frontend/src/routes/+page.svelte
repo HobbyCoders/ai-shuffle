@@ -1366,38 +1366,67 @@
 
 				<!-- Right side: Token counts, rewind, connection status -->
 				<div class="flex items-center gap-2 sm:gap-3">
-					<!-- Token counts (only show if > 0) -->
-					{#if currentTab.totalTokensIn > 0}
-						<span class="flex items-center gap-1 text-xs text-muted-foreground" title="Input tokens">
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4" />
-							</svg>
-							<span>{formatTokenCount(currentTab.totalTokensIn)}</span>
-						</span>
-					{/if}
-					{#if currentTab.totalTokensOut > 0}
-						<span class="flex items-center gap-1 text-xs text-muted-foreground" title="Output tokens">
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8v12m0 0l4-4m-4 4l-4-4" />
-							</svg>
-							<span>{formatTokenCount(currentTab.totalTokensOut)}</span>
-						</span>
-					{/if}
-					{#if currentTab.totalCacheCreationTokens > 0}
-						<span class="flex items-center gap-1 text-xs text-muted-foreground" title="Cache creation tokens">
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-							</svg>
-							<span>{formatTokenCount(currentTab.totalCacheCreationTokens)}</span>
-						</span>
-					{/if}
-					{#if currentTab.totalCacheReadTokens > 0}
-						<span class="flex items-center gap-1 text-xs text-blue-400" title="Cache read tokens (saved)">
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-							</svg>
-							<span>{formatTokenCount(currentTab.totalCacheReadTokens)}</span>
-						</span>
+					<!-- Token counts dropdown (only show if any tokens > 0) -->
+					{#if currentTab.totalTokensIn > 0 || currentTab.totalTokensOut > 0}
+						<div class="relative group">
+							<button
+								class="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors"
+								title="Token usage"
+							>
+								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+								</svg>
+								<span>{formatTokenCount(currentTab.totalTokensIn + currentTab.totalTokensOut)}</span>
+								<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+								</svg>
+							</button>
+							<!-- Token dropdown -->
+							<div class="absolute right-0 top-full mt-1 w-48 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+								<div class="py-2 px-3 space-y-2">
+									<div class="flex items-center justify-between text-xs">
+										<span class="flex items-center gap-1.5 text-muted-foreground">
+											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4" />
+											</svg>
+											Input
+										</span>
+										<span class="text-foreground font-medium">{formatTokenCount(currentTab.totalTokensIn)}</span>
+									</div>
+									<div class="flex items-center justify-between text-xs">
+										<span class="flex items-center gap-1.5 text-muted-foreground">
+											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8v12m0 0l4-4m-4 4l-4-4" />
+											</svg>
+											Output
+										</span>
+										<span class="text-foreground font-medium">{formatTokenCount(currentTab.totalTokensOut)}</span>
+									</div>
+									{#if currentTab.totalCacheCreationTokens > 0}
+										<div class="flex items-center justify-between text-xs">
+											<span class="flex items-center gap-1.5 text-muted-foreground">
+												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+												</svg>
+												Cache Write
+											</span>
+											<span class="text-foreground font-medium">{formatTokenCount(currentTab.totalCacheCreationTokens)}</span>
+										</div>
+									{/if}
+									{#if currentTab.totalCacheReadTokens > 0}
+										<div class="flex items-center justify-between text-xs">
+											<span class="flex items-center gap-1.5 text-blue-400">
+												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+												</svg>
+												Cache Read
+											</span>
+											<span class="text-blue-400 font-medium">{formatTokenCount(currentTab.totalCacheReadTokens)}</span>
+										</div>
+									{/if}
+								</div>
+							</div>
+						</div>
 					{/if}
 
 					<!-- Rewind Button (only when session is active) -->
