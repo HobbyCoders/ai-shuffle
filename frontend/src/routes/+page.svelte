@@ -1203,7 +1203,7 @@
 	</nav>
 
 	<!-- Main Content -->
-	<main class="flex-1 flex flex-col min-w-0 bg-background pb-14 lg:pb-0">
+	<main class="flex-1 flex flex-col min-w-0 bg-background">
 		<!-- Context Bar -->
 		{#if $activeTab}
 			{@const currentTab = $activeTab}
@@ -1372,7 +1372,7 @@
 			>
 				{#if currentTab.messages.length === 0}
 					<!-- Empty State -->
-					<div class="h-full flex items-center justify-center">
+					<div class="h-full flex items-center justify-center pb-14 lg:pb-0">
 						<div class="text-center max-w-md px-6">
 							<div class="w-16 h-16 mx-auto mb-6 rounded-2xl bg-primary/10 flex items-center justify-center shadow-s">
 								<svg class="w-8 h-8 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1557,7 +1557,7 @@
 			</div>
 
 			<!-- Input Area -->
-			<div class="border-t border-border bg-background p-4">
+			<div class="border-t border-border bg-background p-4 pb-[4.5rem] lg:pb-4">
 				<div class="max-w-5xl mx-auto">
 					<!-- Uploaded Files -->
 					{#if (tabUploadedFiles[tabId] || []).length > 0}
