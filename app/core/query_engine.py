@@ -8,6 +8,7 @@ Based on patterns from Anvil's SessionManager:
 """
 
 import logging
+import re
 import uuid
 import asyncio
 from typing import Optional, Dict, Any, AsyncGenerator
@@ -1483,13 +1484,42 @@ async def stream_to_websocket(
                 metadata["model"] = message.model
 
             elif isinstance(message, UserMessage):
-                # UserMessage contains tool results from Claude's tool executions
-                # The SDK sends tool results back as UserMessage with ToolResultBlock content
+                # UserMessage can contain:
+                # 1. Tool results from Claude's tool executions (ToolResultBlock)
+                # 2. Local command output like /context, /compact (TextBlock with <local-command-stdout>)
                 # Check if this message is from a subagent using parent_tool_use_id
                 parent_tool_id = message.parent_tool_use_id
 
+                # Handle string content (rare but possible)
+                if isinstance(message.content, str):
+                    content = message.content
+                    # Check for local command output
+                    if "<local-command-stdout>" in content:
+                        match = re.search(r'<local-command-stdout>(.*?)</local-command-stdout>', content, re.DOTALL)
+                        if match:
+                            yield {
+                                "type": "system",
+                                "subtype": "local_command",
+                                "data": {"content": match.group(1).strip()}
+                            }
+                    continue
+
                 for block in message.content:
-                    if isinstance(block, ToolResultBlock):
+                    # Handle TextBlock - may contain local command output
+                    if isinstance(block, TextBlock):
+                        text = block.text
+                        # Check for local command output (e.g., /context, /compact)
+                        if "<local-command-stdout>" in text:
+                            match = re.search(r'<local-command-stdout>(.*?)</local-command-stdout>', text, re.DOTALL)
+                            if match:
+                                yield {
+                                    "type": "system",
+                                    "subtype": "local_command",
+                                    "data": {"content": match.group(1).strip()}
+                                }
+                        # Don't yield regular text from UserMessage - it's usually meta/system info
+
+                    elif isinstance(block, ToolResultBlock):
                         output = str(block.content)[:2000] if block.content else ""
                         tool_use_id = block.tool_use_id
                         logger.debug(f"[WS] UserMessage ToolResultBlock - tool_use_id: {tool_use_id}, parent_tool_id: {parent_tool_id}, content length: {len(str(block.content) if block.content else '')}, is_error: {block.is_error}")
