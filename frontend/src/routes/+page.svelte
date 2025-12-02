@@ -29,7 +29,8 @@
 	import TerminalModal from '$lib/components/TerminalModal.svelte';
 	import RewindModal from '$lib/components/RewindModal.svelte';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
-	import { executeCommand, isSlashCommand, syncAfterRewind, type Command } from '$lib/api/commands';
+	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
+	import { executeCommand, isSlashCommand, syncAfterRewind, listCommands, type Command } from '$lib/api/commands';
 
 	// Configure marked for better code highlighting
 	marked.setOptions({
@@ -44,6 +45,32 @@
 	let messagesContainers: Record<string, HTMLElement> = {};
 	let sidebarOpen = false;
 	let sidebarTab: 'my-chats' | 'admin' = 'my-chats';
+
+	// Icon Rail state
+	type SidebarSection = 'none' | 'sessions' | 'projects';
+	let activeSidebarSection: SidebarSection = 'none';
+	let sidebarPinned = false;
+
+	function toggleSidebarSection(section: SidebarSection) {
+		if (activeSidebarSection === section) {
+			if (!sidebarPinned) {
+				activeSidebarSection = 'none';
+			}
+		} else {
+			activeSidebarSection = section;
+		}
+	}
+
+	function closeSidebar() {
+		if (!sidebarPinned) {
+			activeSidebarSection = 'none';
+		}
+	}
+
+	function toggleSidebarPin() {
+		sidebarPinned = !sidebarPinned;
+	}
+
 	let userScrolledUp: Record<string, boolean> = {}; // Track if user has scrolled up
 	let lastMessageCounts: Record<string, number> = {};
 	let lastContentLengths: Record<string, number> = {};
@@ -66,6 +93,9 @@
 	// Rewind modal state (V2 - direct JSONL manipulation)
 	let showRewindModal = false;
 	let rewindSessionId = '';
+
+	// Spotlight search state (Cmd+K)
+	let showSpotlight = false;
 
 	// Command autocomplete state
 	let showCommandAutocomplete: Record<string, boolean> = {};
@@ -164,8 +194,19 @@
 
 		window.addEventListener('pageshow', handlePageShow);
 
+		// Spotlight search keyboard shortcut (Cmd+K / Ctrl+K)
+		const handleSpotlightKeydown = (event: KeyboardEvent) => {
+			if ((event.metaKey || event.ctrlKey) && event.key === 'k') {
+				event.preventDefault();
+				showSpotlight = !showSpotlight;
+			}
+		};
+
+		window.addEventListener('keydown', handleSpotlightKeydown);
+
 		return () => {
 			window.removeEventListener('pageshow', handlePageShow);
+			window.removeEventListener('keydown', handleSpotlightKeydown);
 		};
 	});
 
@@ -386,6 +427,45 @@
 	function closeTerminalModal() {
 		showTerminalModal = false;
 		terminalSessionId = '';
+	}
+
+	// Spotlight search handlers
+	function handleSpotlightSelectSession(session: { id: string }) {
+		if ($activeTabId) {
+			tabs.loadSessionInTab($activeTabId, session.id);
+		}
+		showSpotlight = false;
+	}
+
+	function handleSpotlightSelectCommand(command: Command) {
+		if (!$activeTabId) return;
+
+		if (command.type === 'interactive') {
+			openTerminalModal($activeTabId, `/${command.name}`);
+		} else {
+			// Fill in the command in the input
+			tabInputs[$activeTabId] = `/${command.name} `;
+			tabInputs = tabInputs;
+			// Focus the textarea
+			setTimeout(() => {
+				const textarea = textareas[$activeTabId!];
+				if (textarea) {
+					textarea.focus();
+					textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+				}
+			}, 0);
+		}
+		showSpotlight = false;
+	}
+
+	function handleSpotlightNewChat() {
+		tabs.addTab();
+		showSpotlight = false;
+	}
+
+	function handleSpotlightOpenSettings() {
+		showProfileModal = true;
+		showSpotlight = false;
 	}
 
 	async function handleLogout() {
@@ -728,69 +808,77 @@
 </svelte:head>
 
 <div class="h-screen flex bg-background text-foreground">
-	<!-- Sidebar -->
-	<aside
-		class="fixed inset-y-0 left-0 z-40 w-72 bg-card border-r border-border transform transition-transform duration-200 lg:relative lg:translate-x-0 {sidebarOpen
-			? 'translate-x-0'
-			: '-translate-x-full'}"
-	>
-		<div class="h-full flex flex-col">
-			<!-- Sidebar Header -->
+	<!-- Icon Rail (Desktop) - 48px wide -->
+	<nav class="hidden lg:flex flex-col w-12 bg-card border-r border-border z-50 flex-shrink-0">
+		<div class="flex flex-col items-center pt-3 gap-1">
+			<button on:click={handleNewTab} class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors hover:bg-accent group" title="New Chat">
+				<svg class="w-5 h-5 text-primary group-hover:scale-110 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+				</svg>
+			</button>
+			<div class="w-6 h-px bg-border my-2"></div>
+			<button on:click={() => toggleSidebarSection('sessions')} class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors {activeSidebarSection === 'sessions' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}" title="Sessions">
+				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+				</svg>
+			</button>
+			<button on:click={() => toggleSidebarSection('projects')} class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors {activeSidebarSection === 'projects' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}" title="Projects">
+				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+				</svg>
+			</button>
+		</div>
+		<div class="mt-auto flex flex-col items-center pb-3 gap-1">
+			<a href="/settings" class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors hover:bg-accent text-muted-foreground hover:text-foreground" title="Settings">
+				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+				</svg>
+			</a>
+			<button on:click={handleLogout} class="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center hover:bg-primary/30 transition-colors" title="Logout ({$username})">
+				<span class="text-sm font-medium text-primary">{$username?.[0]?.toUpperCase() || 'U'}</span>
+			</button>
+		</div>
+	</nav>
+
+	<!-- Expandable Sidebar Panel (Desktop) -->
+	{#if activeSidebarSection !== 'none'}
+		<button class="hidden lg:block fixed inset-0 z-30 bg-black/20" on:click={closeSidebar} aria-label="Close sidebar"></button>
+		<aside class="hidden lg:flex fixed inset-y-0 left-12 z-40 w-72 bg-card border-r border-border flex-col shadow-l sidebar-slide-in">
 			<div class="p-4 border-b border-border flex items-center justify-between">
-				<div class="flex items-center gap-2">
-					<div class="w-8 h-8 rounded-lg bg-primary flex items-center justify-center shadow-s">
-						<svg class="w-5 h-5 text-primary-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+				<span class="font-semibold text-foreground">{activeSidebarSection === 'sessions' ? 'Sessions' : 'Projects'}</span>
+				<div class="flex items-center gap-1">
+					<button on:click={toggleSidebarPin} class="p-1.5 rounded-md transition-colors {sidebarPinned ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}" title={sidebarPinned ? 'Unpin sidebar' : 'Pin sidebar open'}>
+						<svg class="w-4 h-4" fill={sidebarPinned ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
 						</svg>
-					</div>
-					<span class="font-semibold text-foreground">AI Hub</span>
+					</button>
+					<button on:click={() => { activeSidebarSection = 'none'; sidebarPinned = false; }} class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors" title="Close">
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+						</svg>
+					</button>
 				</div>
-				<button class="lg:hidden text-muted-foreground hover:text-foreground p-1" on:click={() => (sidebarOpen = false)}>
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-					</svg>
-				</button>
 			</div>
 
-			<!-- New Chat Button -->
-			<div class="p-3">
-				<button
-					on:click={handleNewTab}
-					class="w-full flex items-center gap-2 px-4 py-2.5 bg-primary hover:opacity-90 text-primary-foreground rounded-lg transition-colors shadow-s"
-				>
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-					</svg>
-					<span class="font-medium">New Tab</span>
-				</button>
-			</div>
-
-			<!-- Session History with Tabs -->
-			<div class="flex-1 overflow-hidden flex flex-col">
-				<!-- Sidebar Tab Selector (only show for admins) -->
-				{#if $isAdmin}
-					<div class="px-3 pt-2 flex gap-1">
-						<button
-							on:click={() => sidebarTab = 'my-chats'}
-							class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'my-chats'
-								? 'bg-primary text-primary-foreground'
-								: 'text-muted-foreground hover:text-foreground hover:bg-accent'}"
-						>
-							My Chats
-						</button>
-						<button
-							on:click={() => sidebarTab = 'admin'}
-							class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'admin'
-								? 'bg-primary text-primary-foreground'
-								: 'text-muted-foreground hover:text-foreground hover:bg-accent'}"
-						>
-							Admin
+			<!-- Sessions Panel Content -->
+			{#if activeSidebarSection === 'sessions'}
+				<div class="flex-1 overflow-hidden flex flex-col">
+					<div class="p-3">
+						<button on:click={() => { handleNewTab(); closeSidebar(); }} class="w-full flex items-center gap-2 px-4 py-2.5 bg-primary hover:opacity-90 text-primary-foreground rounded-lg transition-colors shadow-s">
+							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+							</svg>
+							<span class="font-medium">New Chat</span>
 						</button>
 					</div>
-				{/if}
-
-				<!-- My Chats Tab Content -->
-				{#if sidebarTab === 'my-chats'}
+					{#if $isAdmin}
+						<div class="px-3 flex gap-1">
+							<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}">My Chats</button>
+							<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}">Admin</button>
+						</div>
+					{/if}
+					{#if sidebarTab === 'my-chats'}
 					<div class="flex-1 overflow-y-auto px-3 pb-3 pt-2">
 						<!-- Header with History label and selection toggle -->
 						<div class="flex items-center justify-between px-2 mb-2">
@@ -985,9 +1073,85 @@
 						</div>
 					</div>
 				{/if}
-			</div>
+				</div>
+			{/if}
 
-			<!-- Sidebar Footer -->
+			<!-- Projects Panel Content -->
+			{#if activeSidebarSection === 'projects'}
+				<div class="flex-1 overflow-y-auto p-3">
+					<div class="space-y-2 mb-4">
+						{#each $projects as project}
+							<button
+								class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg hover:bg-accent/80 transition-colors text-left {$activeTab?.project === project.id ? 'ring-2 ring-primary' : ''}"
+								on:click={() => { if ($activeTabId) setTabProject($activeTabId, project.id); closeSidebar(); }}
+							>
+								<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+								</svg>
+								<div class="flex-1 min-w-0">
+									<p class="text-sm text-foreground font-medium truncate">{project.name}</p>
+									<p class="text-xs text-muted-foreground truncate">/workspace/{project.path}/</p>
+								</div>
+							</button>
+						{/each}
+						{#if $projects.length === 0}
+							<p class="text-xs text-muted-foreground px-2">No projects yet</p>
+						{/if}
+					</div>
+					<button on:click={() => showProjectModal = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">+ New Project</button>
+				</div>
+			{/if}
+		</aside>
+	{/if}
+
+	<!-- Mobile Sidebar (full width overlay) -->
+	<aside class="lg:hidden fixed inset-y-0 left-0 z-50 w-72 bg-card border-r border-border transform transition-transform duration-200 {sidebarOpen ? 'translate-x-0' : '-translate-x-full'}">
+		<div class="h-full flex flex-col">
+			<div class="p-4 border-b border-border flex items-center justify-between">
+				<div class="flex items-center gap-2">
+					<div class="w-8 h-8 rounded-lg bg-primary flex items-center justify-center shadow-s">
+						<svg class="w-5 h-5 text-primary-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+						</svg>
+					</div>
+					<span class="font-semibold text-foreground">AI Hub</span>
+				</div>
+				<button class="text-muted-foreground hover:text-foreground p-1" on:click={() => (sidebarOpen = false)}>
+					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+					</svg>
+				</button>
+			</div>
+			<div class="p-3">
+				<button on:click={() => { handleNewTab(); sidebarOpen = false; }} class="w-full flex items-center gap-2 px-4 py-2.5 bg-primary hover:opacity-90 text-primary-foreground rounded-lg transition-colors shadow-s">
+					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+					</svg>
+					<span class="font-medium">New Chat</span>
+				</button>
+			</div>
+			<div class="flex-1 overflow-y-auto px-3 pb-3">
+				<div class="text-xs text-muted-foreground uppercase tracking-wider px-2 mb-2">History</div>
+				<div class="space-y-1">
+					{#each $sessions as session}
+						<div
+							class="group flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-accent cursor-pointer transition-colors"
+							on:click={() => { openSessionInNewTab(session.id); sidebarOpen = false; }}
+							on:keypress={(e) => e.key === 'Enter' && openSessionInNewTab(session.id)}
+							role="button"
+							tabindex="0"
+						>
+							<div class="flex-1 min-w-0">
+								<p class="text-sm text-foreground truncate">{truncateTitle(session.title)}</p>
+								<p class="text-xs text-muted-foreground">{formatDate(session.updated_at)}</p>
+							</div>
+						</div>
+					{/each}
+					{#if $sessions.length === 0}
+						<p class="text-xs text-muted-foreground px-2">No chat history yet</p>
+					{/if}
+				</div>
+			</div>
 			<div class="p-3 border-t border-border">
 				<div class="flex items-center justify-between">
 					<div class="flex items-center gap-2">
@@ -996,185 +1160,209 @@
 						</div>
 						<span class="text-sm text-muted-foreground">{$username}</span>
 					</div>
-					<div class="flex items-center gap-2">
-						<a href="/settings" class="text-muted-foreground hover:text-foreground p-1">
-							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path
-									stroke-linecap="round"
-									stroke-linejoin="round"
-									stroke-width="2"
-									d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
-								/>
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-							</svg>
-						</a>
-						<button on:click={handleLogout} class="text-muted-foreground hover:text-foreground text-sm">Logout</button>
-					</div>
+					<button on:click={handleLogout} class="text-muted-foreground hover:text-foreground text-sm">Logout</button>
 				</div>
 			</div>
 		</div>
 	</aside>
 
-	<!-- Main Content -->
-	<main class="flex-1 flex flex-col min-w-0 bg-background">
-		<!-- Tab Bar -->
-		<div class="bg-card border-b border-border flex items-center">
-			<!-- Mobile Menu Button -->
-			<button class="lg:hidden p-3 text-muted-foreground hover:text-foreground" on:click={() => (sidebarOpen = true)}>
-				<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
-				</svg>
-			</button>
+	<!-- Mobile Sidebar Backdrop -->
+	{#if sidebarOpen}
+		<button class="lg:hidden fixed inset-0 z-40 bg-black/50" on:click={() => (sidebarOpen = false)} aria-label="Close sidebar"></button>
+	{/if}
 
-			<!-- Tabs -->
-			<div class="flex-1 flex items-center overflow-x-auto scrollbar-hide" role="tablist">
-				{#each $allTabs as tab}
-					<div
-						class="group flex items-center gap-2 px-3 sm:px-4 py-2.5 border-r border-border min-w-[100px] sm:min-w-[120px] max-w-[160px] sm:max-w-[200px] transition-colors cursor-pointer {tab.id === $activeTabId
-							? 'bg-background text-foreground'
-							: 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
-						on:click={() => tabs.setActiveTab(tab.id)}
-						on:keypress={(e) => e.key === 'Enter' && tabs.setActiveTab(tab.id)}
-						role="tab"
-						tabindex="0"
-						aria-selected={tab.id === $activeTabId}
-					>
-						<span class="flex-1 truncate text-xs sm:text-sm text-left">{tab.title}</span>
-						{#if tab.isStreaming}
-							<span class="w-2 h-2 bg-primary rounded-full animate-pulse flex-shrink-0"></span>
-						{:else if !tab.wsConnected}
-							<span class="w-2 h-2 bg-yellow-500 rounded-full flex-shrink-0" title="Disconnected"></span>
-						{/if}
-						{#if $allTabs.length > 1}
-							<button
-								on:click|stopPropagation={(e) => handleCloseTab(e, tab.id)}
-								class="opacity-0 group-hover:opacity-100 p-0.5 hover:bg-accent rounded transition-opacity flex-shrink-0"
-								title="Close tab"
-								aria-label="Close tab"
-							>
-								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-								</svg>
-							</button>
-						{/if}
-					</div>
-				{/each}
-			</div>
-
-			<!-- Add Tab Button -->
-			<button
-				on:click={handleNewTab}
-				class="p-3 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-				title="New tab"
-			>
+	<!-- Mobile Bottom Navigation -->
+	<nav class="lg:hidden fixed bottom-0 left-0 right-0 z-50 bg-card border-t border-border safe-bottom">
+		<div class="flex items-center justify-around h-14">
+			<button on:click={handleNewTab} class="flex flex-col items-center justify-center w-16 h-full text-muted-foreground hover:text-foreground transition-colors">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
 				</svg>
+				<span class="text-xs mt-0.5">New</span>
 			</button>
+			<button on:click={() => sidebarOpen = true} class="flex flex-col items-center justify-center w-16 h-full text-muted-foreground hover:text-foreground transition-colors">
+				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+				</svg>
+				<span class="text-xs mt-0.5">Chats</span>
+			</button>
+			<button on:click={() => showProjectModal = true} class="flex flex-col items-center justify-center w-16 h-full text-muted-foreground hover:text-foreground transition-colors">
+				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+				</svg>
+				<span class="text-xs mt-0.5">Projects</span>
+			</button>
+			<a href="/settings" class="flex flex-col items-center justify-center w-16 h-full text-muted-foreground hover:text-foreground transition-colors">
+				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+				</svg>
+				<span class="text-xs mt-0.5">Settings</span>
+			</a>
 		</div>
+	</nav>
+
+	<!-- Main Content -->
+	<main class="flex-1 flex flex-col min-w-0 bg-background pb-14 lg:pb-0">
+		<!-- Context Bar -->
+		{#if $activeTab}
+			{@const currentTab = $activeTab}
+			{@const tabId = currentTab.id}
+			<div class="bg-card border-b border-border h-12 flex items-center px-2 sm:px-4">
+				<!-- Mobile Menu Button -->
+				<button class="lg:hidden p-2 mr-2 text-muted-foreground hover:text-foreground rounded-md hover:bg-accent transition-colors" on:click={() => (sidebarOpen = true)}>
+					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+					</svg>
+				</button>
+
+				<!-- Profile Selector (clickable text style with dropdown) -->
+				<div class="relative group">
+					<button
+						class="flex items-center gap-1 px-2 py-1 text-sm text-foreground hover:bg-accent rounded-md transition-colors"
+					>
+						<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+						</svg>
+						<span class="hidden sm:inline max-w-[120px] truncate">{$profiles.find((p) => p.id === currentTab.profile)?.name || 'Profile'}</span>
+						<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+						</svg>
+					</button>
+					<!-- Profile dropdown -->
+					<div class="absolute left-0 top-full mt-1 w-48 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+						<div class="py-1">
+							{#each $profiles as profile}
+								<button
+									on:click={() => setTabProfile(tabId, profile.id)}
+									class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.profile === profile.id ? 'text-primary' : 'text-foreground'}"
+								>
+									{profile.name}
+								</button>
+							{/each}
+							<div class="border-t border-border my-1"></div>
+							<button
+								on:click={() => (showProfileModal = true)}
+								class="w-full px-3 py-2 text-left text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+							>
+								Manage Profiles...
+							</button>
+						</div>
+					</div>
+				</div>
+
+				<!-- Breadcrumb separator -->
+				<span class="text-muted-foreground/50 mx-1 hidden sm:inline">/</span>
+
+				<!-- Project Selector (clickable text style with dropdown) -->
+				<div class="relative group">
+					<button
+						class="flex items-center gap-1 px-2 py-1 text-sm text-foreground hover:bg-accent rounded-md transition-colors"
+					>
+						<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+						</svg>
+						<span class="hidden sm:inline max-w-[120px] truncate">{$projects.find((p) => p.id === currentTab.project)?.name || 'Default'}</span>
+						<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+						</svg>
+					</button>
+					<!-- Project dropdown -->
+					<div class="absolute left-0 top-full mt-1 w-48 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+						<div class="py-1">
+							<button
+								on:click={() => setTabProject(tabId, '')}
+								class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {!currentTab.project ? 'text-primary' : 'text-foreground'}"
+							>
+								Default
+							</button>
+							{#each $projects as project}
+								<button
+									on:click={() => setTabProject(tabId, project.id)}
+									class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.project === project.id ? 'text-primary' : 'text-foreground'}"
+								>
+									{project.name}
+								</button>
+							{/each}
+							<div class="border-t border-border my-1"></div>
+							<button
+								on:click={() => (showProjectModal = true)}
+								class="w-full px-3 py-2 text-left text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+							>
+								Manage Projects...
+							</button>
+						</div>
+					</div>
+				</div>
+
+				<!-- Spacer -->
+				<div class="flex-1"></div>
+
+				<!-- Right side: Connection status, token counts, rewind -->
+				<div class="flex items-center gap-2 sm:gap-3">
+					<!-- Connection Status -->
+					{#if currentTab.wsConnected}
+						<span class="flex items-center gap-1.5 text-xs text-green-500" title="Connected">
+							<span class="w-2 h-2 bg-green-500 rounded-full"></span>
+							<span class="hidden sm:inline">Connected</span>
+						</span>
+					{:else}
+						<span class="flex items-center gap-1.5 text-xs text-yellow-500" title="Connecting...">
+							<span class="w-2 h-2 bg-yellow-500 rounded-full animate-pulse"></span>
+							<span class="hidden sm:inline">Connecting</span>
+						</span>
+					{/if}
+
+					<!-- Token counts (only show if > 0) -->
+					{#if currentTab.totalTokensIn > 0}
+						<span class="flex items-center gap-1 text-xs text-muted-foreground" title="Input tokens">
+							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4" />
+							</svg>
+							<span>{formatTokenCount(currentTab.totalTokensIn)}</span>
+						</span>
+					{/if}
+					{#if currentTab.totalTokensOut > 0}
+						<span class="flex items-center gap-1 text-xs text-muted-foreground" title="Output tokens">
+							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8v12m0 0l4-4m-4 4l-4-4" />
+							</svg>
+							<span>{formatTokenCount(currentTab.totalTokensOut)}</span>
+						</span>
+					{/if}
+
+					<!-- Rewind Button (only when session is active) -->
+					{#if currentTab.sessionId}
+						<button
+							on:click={() => openRewindModal(tabId)}
+							class="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors disabled:opacity-50"
+							title="Rewind conversation"
+							disabled={currentTab.isStreaming}
+						>
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0019 16V8a1 1 0 00-1.6-.8l-5.333 4zM4.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0011 16V8a1 1 0 00-1.6-.8l-5.334 4z" />
+							</svg>
+							<span class="hidden sm:inline">Rewind</span>
+						</button>
+					{/if}
+				</div>
+			</div>
+		{:else}
+			<!-- Empty state context bar (no active tab) -->
+			<div class="bg-card border-b border-border h-12 flex items-center px-2 sm:px-4">
+				<button class="lg:hidden p-2 mr-2 text-muted-foreground hover:text-foreground rounded-md hover:bg-accent transition-colors" on:click={() => (sidebarOpen = true)}>
+					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+					</svg>
+				</button>
+				<span class="text-sm text-muted-foreground">Select a session from the sidebar to start</span>
+			</div>
+		{/if}
 
 		<!-- Active Tab Content -->
 		{#if $activeTab}
 			{@const currentTab = $activeTab}
 			{@const tabId = currentTab.id}
-
-			<!-- Profile/Project Selector Bar -->
-			<div class="bg-card border-b border-border px-2 sm:px-4 py-2 flex flex-wrap sm:flex-nowrap items-center gap-2 sm:gap-4">
-				<!-- Profile Selector -->
-				<div class="flex items-center gap-1 sm:gap-2">
-					<span class="text-xs text-muted-foreground hidden sm:inline">Profile:</span>
-					<select
-						value={currentTab.profile}
-						on:change={(e) => setTabProfile(tabId, e.currentTarget.value)}
-						class="bg-muted text-xs sm:text-sm text-foreground border-0 rounded px-2 py-1 focus:ring-2 focus:ring-ring max-w-[100px] sm:max-w-none"
-						aria-label="Profile"
-					>
-						{#each $profiles as profile}
-							<option value={profile.id}>{profile.name}</option>
-						{/each}
-					</select>
-					<button on:click={() => (showProfileModal = true)} class="text-muted-foreground hover:text-foreground p-1" aria-label="Profile settings">
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path
-								stroke-linecap="round"
-								stroke-linejoin="round"
-								stroke-width="2"
-								d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
-							/>
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-						</svg>
-					</button>
-				</div>
-
-				<!-- Project Selector -->
-				<div class="flex items-center gap-1 sm:gap-2">
-					<span class="text-xs text-muted-foreground hidden sm:inline">Project:</span>
-					<select
-						value={currentTab.project}
-						on:change={(e) => setTabProject(tabId, e.currentTarget.value)}
-						class="bg-muted text-xs sm:text-sm text-foreground border-0 rounded px-2 py-1 focus:ring-2 focus:ring-ring max-w-[100px] sm:max-w-none"
-						aria-label="Project"
-					>
-						<option value="">Default</option>
-						{#each $projects as project}
-							<option value={project.id}>{project.name}</option>
-						{/each}
-					</select>
-					<button on:click={() => (showProjectModal = true)} class="text-muted-foreground hover:text-foreground p-1" aria-label="Project settings">
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path
-								stroke-linecap="round"
-								stroke-linejoin="round"
-								stroke-width="2"
-								d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"
-							/>
-						</svg>
-					</button>
-				</div>
-
-				<!-- Rewind Button (V2 - direct JSONL manipulation) -->
-				{#if currentTab.sessionId}
-					<button
-						on:click={() => openRewindModal(tabId)}
-						class="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
-						title="Rewind conversation and/or code"
-						disabled={currentTab.isStreaming}
-					>
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0019 16V8a1 1 0 00-1.6-.8l-5.333 4zM4.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0011 16V8a1 1 0 00-1.6-.8l-5.334 4z" />
-						</svg>
-						<span class="hidden sm:inline">Rewind</span>
-					</button>
-				{/if}
-
-				<!-- Token Usage Display -->
-				<div class="flex-1"></div>
-				<div class="flex items-center gap-2 sm:gap-3 text-xs">
-					{#if currentTab.totalTokensIn > 0 || currentTab.totalTokensOut > 0}
-						<span class="flex items-center gap-1 text-muted-foreground" title="Input tokens / Output tokens">
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" />
-							</svg>
-							<span>{formatTokenCount(currentTab.totalTokensIn)}</span>
-							<span class="text-muted-foreground/50">/</span>
-							<span>{formatTokenCount(currentTab.totalTokensOut)}</span>
-						</span>
-						<span class="text-muted-foreground/30">|</span>
-					{/if}
-					<!-- Connection Status -->
-					{#if currentTab.wsConnected}
-						<span class="flex items-center gap-1 text-green-500">
-							<span class="w-2 h-2 bg-green-500 rounded-full"></span>
-							<span class="hidden sm:inline">Connected</span>
-						</span>
-					{:else}
-						<span class="flex items-center gap-1 text-yellow-500">
-							<span class="w-2 h-2 bg-yellow-500 rounded-full animate-pulse"></span>
-							<span class="hidden sm:inline">Connecting...</span>
-						</span>
-					{/if}
-				</div>
-			</div>
 
 			<!-- Messages Area -->
 			<div
@@ -1471,6 +1659,18 @@
 		{/if}
 	</main>
 </div>
+
+<!-- Spotlight Search (Cmd+K) -->
+<SpotlightSearch
+	visible={showSpotlight}
+	sessions={$sessions}
+	currentProjectId={$activeTab?.project}
+	onClose={() => showSpotlight = false}
+	onSelectSession={handleSpotlightSelectSession}
+	onSelectCommand={handleSpotlightSelectCommand}
+	onNewChat={handleSpotlightNewChat}
+	onOpenSettings={handleSpotlightOpenSettings}
+/>
 
 <!-- Profile Modal -->
 {#if showProfileModal}
@@ -1856,5 +2056,18 @@
 	.scrollbar-hide {
 		-ms-overflow-style: none;
 		scrollbar-width: none;
+	}
+	.sidebar-slide-in {
+		animation: slideInFromLeft 0.2s ease-out;
+	}
+	@keyframes slideInFromLeft {
+		from {
+			transform: translateX(-100%);
+			opacity: 0;
+		}
+		to {
+			transform: translateX(0);
+			opacity: 1;
+		}
 	}
 </style>

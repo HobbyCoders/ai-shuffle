@@ -4,36 +4,61 @@
 
 @layer base {
 	:root {
-		/* Anvil-style OKLCH color system - Dark theme */
-		--background: oklch(0.2 0 264);
-		--foreground: oklch(0.96 0 264);
-		--card: oklch(0.3 0 264);
-		--card-foreground: oklch(0.96 0 264);
-		--popover: oklch(0.3 0 264);
-		--popover-foreground: oklch(0.96 0 264);
-		--primary: oklch(0.65 0.15 264);
-		--primary-foreground: oklch(1 0 264);
-		--secondary: oklch(0.3 0 264);
-		--secondary-foreground: oklch(0.96 0 264);
-		--muted: oklch(0.3 0 264);
-		--muted-foreground: oklch(0.76 0 264);
-		--accent: oklch(0.35 0 264);
-		--accent-foreground: oklch(0.96 0 264);
-		--destructive: oklch(0.5 0.22 25);
-		--destructive-foreground: oklch(0.96 0 264);
-		--border: oklch(0.35 0 264);
-		--input: oklch(0.3 0 264);
-		--ring: oklch(0.65 0.15 264);
-		--radius: 0.5rem;
+		/* Warmer dark background with subtle blue undertone */
+		--background: oklch(0.14 0.008 260);
+		--foreground: oklch(0.95 0.01 260);
 
-		/* Layered shadow system */
-		--shadow-s: inset 0 1px 2px #ffffff10, 0 1px 2px #00000030, 0 2px 4px #00000015;
-		--shadow-m: inset 0 1px 2px #ffffff15, 0 2px 4px #00000030, 0 4px 8px #00000015;
-		--shadow-l: inset 0 1px 2px #ffffff20, 0 4px 6px #00000030, 0 6px 10px #00000015;
+		/* Elevated surfaces */
+		--card: oklch(0.18 0.008 260);
+		--card-foreground: oklch(0.95 0.01 260);
+		--popover: oklch(0.20 0.01 260);
+		--popover-foreground: oklch(0.95 0.01 260);
+
+		/* Primary: Teal accent (distinctive from Claude purple) */
+		--primary: oklch(0.72 0.14 180);
+		--primary-foreground: oklch(0.15 0.02 180);
+
+		/* Secondary/Muted */
+		--secondary: oklch(0.22 0.008 260);
+		--secondary-foreground: oklch(0.90 0.01 260);
+		--muted: oklch(0.22 0.01 260);
+		--muted-foreground: oklch(0.65 0.02 260);
+
+		/* Accent for hover states */
+		--accent: oklch(0.25 0.015 260);
+		--accent-foreground: oklch(0.95 0.01 260);
+
+		/* Semantic colors */
+		--destructive: oklch(0.55 0.22 25);
+		--destructive-foreground: oklch(0.95 0 0);
+		--success: oklch(0.65 0.18 145);
+		--warning: oklch(0.75 0.15 85);
+
+		/* Borders and inputs */
+		--border: oklch(0.28 0.01 260);
+		--input: oklch(0.20 0.01 260);
+		--ring: oklch(0.72 0.14 180);
+
+		/* Refined shadow system */
+		--shadow-s: 0 1px 2px rgba(0,0,0,0.3), 0 1px 3px rgba(0,0,0,0.15);
+		--shadow-m: 0 4px 6px rgba(0,0,0,0.25), 0 2px 4px rgba(0,0,0,0.15);
+		--shadow-l: 0 10px 15px rgba(0,0,0,0.2), 0 4px 6px rgba(0,0,0,0.1);
+
+		--radius: 0.75rem;
 	}
 
+	/* Smoother transitions */
 	* {
 		border-color: var(--border);
+		transition-property: background-color, border-color, color, fill, stroke, opacity, box-shadow, transform;
+		transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+		transition-duration: 150ms;
+	}
+
+	/* Better focus states */
+	:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	body {
@@ -51,34 +76,37 @@
 /* Scrollbar styling */
 * {
 	scrollbar-width: thin;
-	scrollbar-color: var(--muted-foreground) transparent;
+	scrollbar-color: oklch(0.35 0.01 260) transparent;
 }
 
 *::-webkit-scrollbar {
-	width: 10px;
-	height: 10px;
+	width: 8px;
+	height: 8px;
 }
 
 *::-webkit-scrollbar-track {
 	background: transparent;
-	border-radius: 5px;
+	border-radius: 4px;
 }
 
 *::-webkit-scrollbar-thumb {
-	background: var(--muted-foreground);
-	border-radius: 5px;
-	border: 2px solid transparent;
-	background-clip: padding-box;
+	background: oklch(0.35 0.01 260);
+	border-radius: 4px;
 }
 
 *::-webkit-scrollbar-thumb:hover {
-	background: var(--foreground);
-	border: 2px solid transparent;
-	background-clip: padding-box;
+	background: oklch(0.45 0.01 260);
 }
 
 *::-webkit-scrollbar-corner {
 	background: transparent;
+}
+
+/* Glass effect for modals/popovers */
+.glass {
+	background: oklch(0.18 0.01 260 / 0.8);
+	backdrop-filter: blur(12px);
+	-webkit-backdrop-filter: blur(12px);
 }
 
 /* Code blocks */
@@ -97,16 +125,23 @@ code {
 
 /* Button base styles */
 .btn {
-	@apply px-4 py-2 rounded-lg font-medium transition-colors duration-200;
+	@apply px-4 py-2 rounded-lg font-medium;
+	transition: all 150ms ease;
+}
+
+.btn:active {
+	transform: scale(0.98);
 }
 
 .btn-primary {
-	background-color: var(--primary);
+	background: linear-gradient(135deg, var(--primary), oklch(0.68 0.16 175));
 	color: var(--primary-foreground);
+	box-shadow: var(--shadow-s);
 }
 
 .btn-primary:hover {
-	opacity: 0.9;
+	box-shadow: var(--shadow-m);
+	filter: brightness(1.1);
 }
 
 .btn-secondary {
@@ -153,6 +188,19 @@ code {
 	background-color: var(--card);
 	border: 1px solid var(--border);
 	border-radius: 0.5rem;
+	transition: box-shadow 200ms ease, transform 200ms ease;
+}
+
+.card:hover {
+	box-shadow: var(--shadow-m);
+}
+
+/* Subtle text gradient for headings */
+.text-gradient {
+	background: linear-gradient(135deg, var(--foreground), var(--muted-foreground));
+	-webkit-background-clip: text;
+	-webkit-text-fill-color: transparent;
+	background-clip: text;
 }
 
 /* Markdown prose styling */
