@@ -31,6 +31,8 @@ export interface SubagentChildMessage {
 	toolName?: string;
 	toolId?: string;
 	toolInput?: Record<string, unknown>;
+	toolResult?: string; // Result content for tool_use (grouped with tool call)
+	toolStatus?: 'running' | 'complete' | 'error'; // Status of tool execution
 	timestamp?: string;
 }
 
@@ -42,6 +44,8 @@ export interface ChatMessage {
 	toolName?: string;
 	toolId?: string;
 	toolInput?: Record<string, unknown>;
+	toolResult?: string; // Result content for tool_use messages (grouped with tool call)
+	toolStatus?: 'running' | 'complete' | 'error'; // Status of tool execution
 	metadata?: Record<string, unknown>;
 	streaming?: boolean;
 	systemSubtype?: string; // For system messages (e.g., 'context' for /context command)
@@ -529,6 +533,7 @@ function createTabsStore() {
 							toolName: data.name as string,
 							toolId: data.id as string,
 							toolInput: data.input as Record<string, unknown>,
+							toolStatus: 'running',
 							streaming: true
 						});
 
@@ -539,47 +544,50 @@ function createTabsStore() {
 			}
 
 			case 'tool_result': {
+				// Group tool result with its corresponding tool_use message
+				const toolUseId = data.tool_use_id as string;
+				const output = data.output as string;
+
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
 						if (tab.id !== tabId) return tab;
 
-						const messages = [...tab.messages];
-						const toolUseId = data.tool_use_id as string;
+						let messages = [...tab.messages];
 
-						// Find and update the matching tool_use message
-						// First try to match by toolId, then fall back to any streaming tool
-						let foundByToolId = false;
+						// Find the matching tool_use message and embed the result
+						let found = false;
 						for (let i = messages.length - 1; i >= 0; i--) {
 							const m = messages[i];
 							if (m.type === 'tool_use' && m.toolId === toolUseId) {
-								messages[i] = { ...m, streaming: false };
-								foundByToolId = true;
+								messages[i] = {
+									...m,
+									toolResult: output,
+									toolStatus: 'complete',
+									streaming: false
+								};
+								found = true;
 								break;
 							}
 						}
 
-						// If not found by toolId, update any streaming tool_use message
-						if (!foundByToolId) {
+						// Fallback: if not found by toolId, try any running tool_use
+						if (!found) {
 							for (let i = messages.length - 1; i >= 0; i--) {
 								const m = messages[i];
-								if (m.type === 'tool_use' && m.streaming) {
-									messages[i] = { ...m, streaming: false };
+								if (m.type === 'tool_use' && m.toolStatus === 'running') {
+									messages[i] = {
+										...m,
+										toolResult: output,
+										toolStatus: 'complete',
+										streaming: false
+									};
 									break;
 								}
 							}
 						}
 
-						messages.push({
-							id: `result-${Date.now()}`,
-							role: 'assistant',
-							content: data.output as string,
-							type: 'tool_result',
-							toolName: data.name as string,
-							toolId: toolUseId,
-							streaming: false
-						});
-
+						// Add streaming text placeholder for continuation
 						messages.push({
 							id: `text-${Date.now()}-cont`,
 							role: 'assistant',
@@ -836,7 +844,8 @@ function createTabsStore() {
 									content: '',
 									toolName: toolName,
 									toolId: toolId,
-									toolInput: toolInput
+									toolInput: toolInput,
+									toolStatus: 'running'
 								});
 								return { ...m, agentChildren: children };
 							}
@@ -850,11 +859,10 @@ function createTabsStore() {
 			}
 
 			case 'subagent_tool_result': {
-				// Tool result within a subagent - add to the subagent's children
+				// Tool result within a subagent - embed in matching tool_use child
 				const agentId = data.agent_id as string;
 				const toolUseId = data.tool_use_id as string;
 				const output = data.output as string;
-				const toolName = data.name as string;
 
 				update(s => ({
 					...s,
@@ -864,13 +872,32 @@ function createTabsStore() {
 						const messages = tab.messages.map(m => {
 							if (m.type === 'subagent' && m.agentId === agentId) {
 								const children = [...(m.agentChildren || [])];
-								children.push({
-									id: `${agentId}-result-${toolUseId}`,
-									type: 'tool_result',
-									content: output,
-									toolName: toolName,
-									toolId: toolUseId
-								});
+								// Find matching tool_use and embed result
+								let found = false;
+								for (let i = children.length - 1; i >= 0; i--) {
+									if (children[i].type === 'tool_use' && children[i].toolId === toolUseId) {
+										children[i] = {
+											...children[i],
+											toolResult: output,
+											toolStatus: 'complete'
+										};
+										found = true;
+										break;
+									}
+								}
+								// Fallback: try any running tool_use
+								if (!found) {
+									for (let i = children.length - 1; i >= 0; i--) {
+										if (children[i].type === 'tool_use' && children[i].toolStatus === 'running') {
+											children[i] = {
+												...children[i],
+												toolResult: output,
+												toolStatus: 'complete'
+											};
+											break;
+										}
+									}
+								}
 								return { ...m, agentChildren: children };
 							}
 							return m;
@@ -1275,6 +1302,16 @@ function createTabsStore() {
 		async loadSessionInTab(tabId: string, sessionId: string) {
 			try {
 				const session = await api.get<Session & { messages: Array<Record<string, unknown>> }>(`/sessions/${sessionId}`);
+				// Debug: log subagent messages from API response
+				const subagentMsgs = session.messages.filter(m => m.type === 'subagent');
+				if (subagentMsgs.length > 0) {
+					console.log('[tabs] Subagent messages from API:', subagentMsgs.map(m => ({
+						type: m.type,
+						agentId: m.agentId,
+						agentStatus: m.agentStatus,
+						agentChildrenCount: (m.agentChildren as unknown[])?.length || 0
+					})));
+				}
 				const messages: ChatMessage[] = session.messages.map((m, i) => {
 					// Determine message type - JSONL messages have explicit 'type' field
 					let msgType: MessageType | undefined = m.type as MessageType | undefined;

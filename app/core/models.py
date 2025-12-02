@@ -174,6 +174,8 @@ class SubagentChildMessage(BaseModel):
     toolName: Optional[str] = None
     toolId: Optional[str] = None
     toolInput: Optional[Dict[str, Any]] = None
+    toolResult: Optional[str] = None  # Result content for tool_use (grouped with tool call)
+    toolStatus: Optional[str] = None  # 'running', 'complete', 'error'
     timestamp: Optional[str] = None
 
 
@@ -188,6 +190,8 @@ class SessionMessage(BaseModel):
     toolName: Optional[str] = None  # camelCase for frontend compatibility
     toolInput: Optional[Dict[str, Any]] = None  # camelCase for frontend compatibility
     toolId: Optional[str] = None  # Tool ID for matching tool_use to tool_result
+    toolResult: Optional[str] = None  # Result content for tool_use (grouped with tool call)
+    toolStatus: Optional[str] = None  # 'running', 'complete', 'error'
     metadata: Optional[Dict[str, Any]] = None
     created_at: Optional[datetime] = None  # Optional for JSONL messages without timestamp
     # Subagent-specific fields (for type='subagent')

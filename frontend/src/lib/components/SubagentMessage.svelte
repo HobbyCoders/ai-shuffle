@@ -130,9 +130,23 @@
 					{#each message.agentChildren as child (child.id)}
 						<div class="px-4 py-2 border-b border-border/50 last:border-b-0">
 							{#if child.type === 'tool_use'}
-								<!-- Tool use child -->
+								<!-- Tool use with grouped result -->
 								<details class="group">
 									<summary class="flex items-center gap-2 cursor-pointer list-none hover:bg-muted/30 -mx-1 px-1 py-1 rounded">
+										{#if child.toolStatus === 'running'}
+											<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" viewBox="0 0 24 24">
+												<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+												<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+											</svg>
+										{:else if child.toolStatus === 'error'}
+											<svg class="w-4 h-4 text-red-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+												<path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
+											</svg>
+										{:else}
+											<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+												<path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
+											</svg>
+										{/if}
 										<svg class="w-4 h-4 text-blue-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -142,12 +156,23 @@
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 										</svg>
 									</summary>
-									{#if child.toolInput}
-										<pre class="mt-2 p-2 bg-muted/50 rounded text-xs text-muted-foreground overflow-x-auto max-h-48">{formatToolInput(child.toolInput)}</pre>
-									{/if}
+									<div class="mt-2 space-y-2">
+										{#if child.toolInput}
+											<div class="p-2 bg-muted/50 rounded">
+												<div class="text-xs text-muted-foreground/70 mb-1 font-medium">Input</div>
+												<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32">{formatToolInput(child.toolInput)}</pre>
+											</div>
+										{/if}
+										{#if child.toolResult}
+											<div class="p-2 bg-muted/50 rounded">
+												<div class="text-xs text-muted-foreground/70 mb-1 font-medium">Result</div>
+												<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap">{truncateContent(child.toolResult)}</pre>
+											</div>
+										{/if}
+									</div>
 								</details>
 							{:else if child.type === 'tool_result'}
-								<!-- Tool result child -->
+								<!-- Standalone tool result (fallback for ungrouped results) -->
 								<details class="group">
 									<summary class="flex items-center gap-2 cursor-pointer list-none hover:bg-muted/30 -mx-1 px-1 py-1 rounded">
 										<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">

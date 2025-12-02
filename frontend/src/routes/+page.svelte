@@ -1584,7 +1584,7 @@
 									</div>
 								</div>
 							{:else if message.type === 'tool_use'}
-								<!-- Tool Use - Anvil Style Expandable Card -->
+								<!-- Tool Use with grouped Result - Expandable Card -->
 								<div class="flex gap-3 w-full">
 									<div class="flex-shrink-0 w-8 h-8 rounded-full bg-yellow-500/10 flex items-center justify-center shadow-s">
 										<svg class="w-4 h-4 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1595,7 +1595,7 @@
 									<div class="flex-1 min-w-0">
 										<details class="w-full border border-border rounded-lg overflow-hidden shadow-s group">
 											<summary class="w-full px-4 py-2 bg-muted/30 hover:bg-muted/50 flex items-center gap-2 cursor-pointer list-none transition-colors">
-												{#if message.streaming}
+												{#if message.toolStatus === 'running' || message.streaming}
 													<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
 													</svg>
@@ -1610,8 +1610,10 @@
 												</svg>
 												<span class="text-sm font-medium text-foreground">{message.toolName}</span>
 												<span class="text-muted-foreground">•</span>
-												{#if message.streaming}
+												{#if message.toolStatus === 'running' || message.streaming}
 													<span class="text-primary text-sm">Executing...</span>
+												{:else if message.toolStatus === 'error'}
+													<span class="text-red-500 text-sm">Error</span>
 												{:else}
 													<span class="text-green-500 text-sm">Complete</span>
 												{/if}
@@ -1619,16 +1621,25 @@
 													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 												</svg>
 											</summary>
-											{#if message.toolInput}
-												<div class="px-4 py-3 bg-card border-t border-border">
-													<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{JSON.stringify(message.toolInput, null, 2)}</pre>
-												</div>
-											{/if}
+											<div class="bg-card border-t border-border">
+												{#if message.toolInput}
+													<div class="px-4 py-3 border-b border-border/50">
+														<div class="text-xs text-muted-foreground mb-1 font-medium">Input</div>
+														<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32 whitespace-pre-wrap break-words font-mono">{JSON.stringify(message.toolInput, null, 2)}</pre>
+													</div>
+												{/if}
+												{#if message.toolResult}
+													<div class="px-4 py-3">
+														<div class="text-xs text-muted-foreground mb-1 font-medium">Result</div>
+														<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.toolResult}</pre>
+													</div>
+												{/if}
+											</div>
 										</details>
 									</div>
 								</div>
 							{:else if message.type === 'tool_result'}
-								<!-- Tool Result - Anvil Style Expandable Card -->
+								<!-- Standalone Tool Result (fallback for ungrouped results) -->
 								<div class="flex gap-3 w-full">
 									<div class="flex-shrink-0 w-8 h-8 rounded-full bg-blue-500/10 flex items-center justify-center shadow-s">
 										<svg class="w-4 h-4 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">

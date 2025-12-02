@@ -205,7 +205,8 @@ def parse_agent_history(agent_path: Path) -> List[Dict[str, Any]]:
     """
     Parse an agent's JSONL file and return child messages.
 
-    Returns list of child messages with: id, type, content, toolName, toolId, toolInput, timestamp
+    Returns list of child messages with: id, type, content, toolName, toolId, toolInput, toolResult, toolStatus, timestamp
+    Tool results are grouped with their corresponding tool_use entries.
     """
     children: List[Dict[str, Any]] = []
     tool_names_by_id: Dict[str, str] = {}
@@ -247,6 +248,7 @@ def parse_agent_history(agent_path: Path) -> List[Dict[str, Any]]:
                                 "toolName": tool_name,
                                 "toolId": tool_id,
                                 "toolInput": block.get("input", {}),
+                                "toolStatus": "running",  # Will be updated when result arrives
                                 "timestamp": timestamp
                             })
 
@@ -256,6 +258,7 @@ def parse_agent_history(agent_path: Path) -> List[Dict[str, Any]]:
                     if isinstance(block, dict) and block.get("type") == "tool_result":
                         tool_use_id = block.get("tool_use_id")
                         raw_content = block.get("content", "")
+                        is_error = block.get("is_error", False)
 
                         # Extract text from content
                         if isinstance(raw_content, list):
@@ -266,14 +269,25 @@ def parse_agent_history(agent_path: Path) -> List[Dict[str, Any]]:
                         # Truncate for display
                         output = output[:2000] if output else ""
 
-                        children.append({
-                            "id": f"agent-result-{tool_use_id}",
-                            "type": "tool_result",
-                            "content": output,
-                            "toolName": tool_names_by_id.get(tool_use_id),
-                            "toolId": tool_use_id,
-                            "timestamp": timestamp
-                        })
+                        # Group tool result with its corresponding tool_use
+                        found_tool_use = False
+                        for child in children:
+                            if child.get("type") == "tool_use" and child.get("toolId") == tool_use_id:
+                                child["toolResult"] = output
+                                child["toolStatus"] = "error" if is_error else "complete"
+                                found_tool_use = True
+                                break
+
+                        # Only create separate tool_result if no matching tool_use found
+                        if not found_tool_use:
+                            children.append({
+                                "id": f"agent-result-{tool_use_id}",
+                                "type": "tool_result",
+                                "content": output,
+                                "toolName": tool_names_by_id.get(tool_use_id),
+                                "toolId": tool_use_id,
+                                "timestamp": timestamp
+                            })
 
     return children
 
@@ -447,19 +461,31 @@ def parse_session_history(
                                 # Don't add a separate tool_result message for Task tools
                                 continue
 
-                            messages.append({
-                                "id": f"result-{uuid}-{tool_use_id}",
-                                "role": "assistant",  # Display as assistant for UI consistency
-                                "content": output[:2000] if output else "",  # Truncate like streaming
-                                "type": "tool_result",
-                                "toolId": tool_use_id,
-                                "toolName": tool_names_by_id.get(tool_use_id),  # Match to tool_use
-                                "metadata": {
-                                    "timestamp": timestamp,
-                                    "is_error": is_error
-                                },
-                                "streaming": False
-                            })
+                            # Group tool result with its corresponding tool_use message
+                            # Find the matching tool_use and embed the result
+                            found_tool_use = False
+                            for msg in messages:
+                                if msg.get("type") == "tool_use" and msg.get("toolId") == tool_use_id:
+                                    msg["toolResult"] = output[:2000] if output else ""
+                                    msg["toolStatus"] = "error" if is_error else "complete"
+                                    found_tool_use = True
+                                    break
+
+                            # Only create separate tool_result if no matching tool_use found
+                            if not found_tool_use:
+                                messages.append({
+                                    "id": f"result-{uuid}-{tool_use_id}",
+                                    "role": "assistant",  # Display as assistant for UI consistency
+                                    "content": output[:2000] if output else "",  # Truncate like streaming
+                                    "type": "tool_result",
+                                    "toolId": tool_use_id,
+                                    "toolName": tool_names_by_id.get(tool_use_id),  # Match to tool_use
+                                    "metadata": {
+                                        "timestamp": timestamp,
+                                        "is_error": is_error
+                                    },
+                                    "streaming": False
+                                })
                         elif block.get("type") == "text":
                             # Text block in user content array
                             text = block.get("text", "")
@@ -550,6 +576,7 @@ def parse_session_history(
                                     "toolName": tool_name,
                                     "toolId": tool_id,
                                     "toolInput": tool_input,
+                                    "toolStatus": "running",  # Will be updated when result arrives
                                     "metadata": {"timestamp": timestamp},
                                     "streaming": False
                                 })
