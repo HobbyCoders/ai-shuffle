@@ -407,6 +407,20 @@ function createTabsStore() {
 						msgType = m.role as MessageType;
 					}
 
+					// Handle system messages (e.g., /context, /compact output)
+					if (msgType === 'system' || m.role === 'system') {
+						return {
+							id: String(m.id || `msg-${i}`),
+							role: 'system' as const,
+							content: m.content as string,
+							type: 'system' as const,
+							systemSubtype: m.subtype as string | undefined,
+							systemData: { content: m.content } as Record<string, unknown>,
+							metadata: m.metadata as Record<string, unknown>,
+							streaming: false
+						};
+					}
+
 					// Build the chat message with all fields
 					const chatMessage: ChatMessage = {
 						id: String(m.id || `msg-${i}`),
@@ -739,6 +753,14 @@ function createTabsStore() {
 
 				console.log('[WS] System message received:', subtype, systemData);
 
+				// Extract content for display - for local_command, the content is in data.content
+				let displayContent = '';
+				if (systemData?.content && typeof systemData.content === 'string') {
+					displayContent = systemData.content;
+				} else if (typeof systemData === 'object') {
+					displayContent = JSON.stringify(systemData, null, 2);
+				}
+
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
@@ -757,7 +779,7 @@ function createTabsStore() {
 						messages.push({
 							id: `system-${Date.now()}`,
 							role: 'system' as const,
-							content: JSON.stringify(systemData, null, 2),
+							content: displayContent,
 							type: 'system' as const,
 							systemSubtype: subtype,
 							systemData: systemData,
@@ -1323,6 +1345,20 @@ function createTabsStore() {
 						msgType = 'text';
 					} else if (!msgType && (m.role === 'tool_use' || m.role === 'tool_result')) {
 						msgType = m.role as MessageType;
+					}
+
+					// Handle system messages (e.g., /context, /compact output)
+					if (msgType === 'system' || m.role === 'system') {
+						return {
+							id: String(m.id || `msg-${i}`),
+							role: 'system' as const,
+							content: m.content as string,
+							type: 'system' as const,
+							systemSubtype: m.subtype as string | undefined,
+							systemData: { content: m.content } as Record<string, unknown>,
+							metadata: m.metadata as Record<string, unknown>,
+							streaming: false
+						};
 					}
 
 					// Build the chat message with all fields

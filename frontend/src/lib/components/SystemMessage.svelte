@@ -1,11 +1,27 @@
 <script lang="ts">
 	import type { ChatMessage } from '$lib/stores/tabs';
+	import { marked } from 'marked';
+
+	// Configure marked for system message rendering
+	marked.setOptions({
+		breaks: true,
+		gfm: true
+	});
 
 	interface Props {
 		message: ChatMessage;
 	}
 
 	let { message }: Props = $props();
+
+	// Check if content should be rendered as markdown
+	function isMarkdownContent(subtype: string | undefined): boolean {
+		return subtype === 'local_command';
+	}
+
+	function renderMarkdown(content: string): string {
+		return marked(content, { breaks: true }) as string;
+	}
 
 	// Get formatted content based on subtype
 	function getFormattedContent(): { title: string; content: string; badge?: string; badgeColor?: string } {
@@ -90,6 +106,34 @@
 				};
 			}
 
+			case 'local_command': {
+				// Output from SDK slash commands like /context, /compact
+				// The SDK returns markdown-formatted content
+				const content = (data.content as string) || message.content || '';
+
+				// Determine the command type from content
+				let title = 'Command Output';
+				let badge = 'output';
+				let badgeColor = 'blue';
+
+				if (content.includes('Context Usage') || content.includes('**Model:**')) {
+					title = 'Context Usage';
+					badge = '/context';
+					badgeColor = 'purple';
+				} else if (content.includes('Compacted') || content.toLowerCase().includes('compact')) {
+					title = 'Compacted';
+					badge = '/compact';
+					badgeColor = 'green';
+				}
+
+				return {
+					title,
+					content: content || 'Command executed',
+					badge,
+					badgeColor
+				};
+			}
+
 			default: {
 				// For unknown subtypes, show a formatted version of the data
 				return {
@@ -129,6 +173,67 @@
 		{/if}
 	</div>
 	<div class="px-4 py-3 bg-card">
-		<pre class="text-xs text-muted-foreground overflow-x-auto whitespace-pre-wrap break-words font-mono">{formatted.content}</pre>
+		{#if isMarkdownContent(message.systemSubtype)}
+			<div class="prose prose-sm prose-invert max-w-none system-message-content">
+				{@html renderMarkdown(formatted.content)}
+			</div>
+		{:else}
+			<pre class="text-xs text-muted-foreground overflow-x-auto whitespace-pre-wrap break-words font-mono">{formatted.content}</pre>
+		{/if}
 	</div>
 </div>
+
+<style>
+	/* Custom styles for system message markdown content */
+	.system-message-content :global(h2) {
+		font-size: 1rem;
+		font-weight: 600;
+		margin-top: 0;
+		margin-bottom: 0.5rem;
+		color: var(--foreground);
+	}
+	.system-message-content :global(h3) {
+		font-size: 0.875rem;
+		font-weight: 600;
+		margin-top: 0.75rem;
+		margin-bottom: 0.25rem;
+		color: var(--foreground);
+	}
+	.system-message-content :global(p) {
+		font-size: 0.75rem;
+		margin-bottom: 0.5rem;
+		color: var(--muted-foreground);
+	}
+	.system-message-content :global(strong) {
+		color: var(--foreground);
+	}
+	.system-message-content :global(table) {
+		font-size: 0.75rem;
+		width: 100%;
+		border-collapse: collapse;
+		margin: 0.5rem 0;
+	}
+	.system-message-content :global(th),
+	.system-message-content :global(td) {
+		padding: 0.25rem 0.5rem;
+		text-align: left;
+		border-bottom: 1px solid var(--border);
+	}
+	.system-message-content :global(th) {
+		color: var(--foreground);
+		font-weight: 600;
+	}
+	.system-message-content :global(td) {
+		color: var(--muted-foreground);
+	}
+	.system-message-content :global(ul),
+	.system-message-content :global(ol) {
+		font-size: 0.75rem;
+		padding-left: 1.25rem;
+		margin: 0.25rem 0;
+		color: var(--muted-foreground);
+	}
+	.system-message-content :global(li) {
+		margin: 0.125rem 0;
+	}
+</style>
