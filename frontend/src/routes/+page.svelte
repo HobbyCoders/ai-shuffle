@@ -71,11 +71,10 @@
 		sidebarPinned = !sidebarPinned;
 	}
 
-	let userScrolledUp: Record<string, boolean> = {}; // Track if user has scrolled up
-	let lastMessageCounts: Record<string, number> = {};
-	let lastContentLengths: Record<string, number> = {};
-	let previousActiveTabId: string | null = null;
-	let lastScrollTop: Record<string, number> = {}; // Track scroll direction
+	// Simple auto-scroll: always scroll unless user scrolled up recently
+	let autoScrollPaused: Record<string, boolean> = {};
+	let scrollPauseTimers: Record<string, ReturnType<typeof setTimeout>> = {};
+	const SCROLL_RESUME_DELAY = 3000; // Resume auto-scroll after 3s of no user scroll
 	let showProfileModal = false;
 	let showProjectModal = false;
 	let showNewProfileForm = false;
@@ -223,76 +222,65 @@
 		}
 	}
 
-	// Auto-scroll for active tab
+	// Scroll to bottom helper
+	function scrollToBottom(tabId: string) {
+		const container = messagesContainers[tabId];
+		if (container) {
+			container.scrollTop = container.scrollHeight;
+		}
+	}
+
+	// Auto-scroll: always scroll to bottom unless user paused it
 	$: if ($activeTab && messagesContainers[$activeTab.id]) {
 		const tabId = $activeTab.id;
-		const container = messagesContainers[tabId];
 		const messages = $activeTab.messages;
-		const isStreaming = $activeTab.isStreaming;
+		// Trigger on any message change (reactive dependency)
+		if (messages && messages.length >= 0) {
+			const lastMsg = messages[messages.length - 1];
+			const contentLen = lastMsg?.content?.length || 0;
+			// Use void to create dependency without unused variable warning
+			void contentLen;
 
-		if (messages.length > 0) {
-			const newMessageArrived = messages.length > (lastMessageCounts[tabId] || 0);
-			lastMessageCounts[tabId] = messages.length;
-
-			const totalContentLength = messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
-			const contentUpdated = totalContentLength > (lastContentLengths[tabId] || 0);
-			lastContentLengths[tabId] = totalContentLength;
-
-			// Auto-scroll unless user has scrolled up
-			const shouldScroll = !userScrolledUp[tabId];
-
-			if ((newMessageArrived || (contentUpdated && isStreaming)) && shouldScroll) {
-				requestAnimationFrame(() => {
-					if (container) {
-						container.scrollTop = container.scrollHeight;
-						// Update lastScrollTop to prevent false "scrolled up" detection
-						lastScrollTop[tabId] = container.scrollTop;
-					}
-				});
+			if (!autoScrollPaused[tabId]) {
+				requestAnimationFrame(() => scrollToBottom(tabId));
 			}
 		}
-
-		// Reset scroll tracking when streaming ends
-		if (!isStreaming) {
-			userScrolledUp[tabId] = false;
-		}
 	}
 
-	// Scroll to bottom when switching tabs
-	$: if ($activeTabId && $activeTabId !== previousActiveTabId) {
-		previousActiveTabId = $activeTabId;
-		// Use tick() equivalent via setTimeout to ensure DOM is updated
-		setTimeout(() => {
-			const container = messagesContainers[$activeTabId!];
-			if (container) {
-				container.scrollTop = container.scrollHeight;
-			}
-		}, 0);
+	// Also scroll when switching tabs
+	$: if ($activeTabId) {
+		setTimeout(() => scrollToBottom($activeTabId!), 0);
 	}
 
-	function isNearBottom(container: HTMLElement, threshold = 100): boolean {
-		if (!container) return true;
-		const { scrollTop, scrollHeight, clientHeight } = container;
-		return scrollHeight - scrollTop - clientHeight < threshold;
-	}
-
+	// Handle user scroll - pause auto-scroll temporarily when scrolling up
 	function handleScroll(tabId: string) {
 		const container = messagesContainers[tabId];
 		if (!container) return;
 
-		const currentScrollTop = container.scrollTop;
-		const previousScrollTop = lastScrollTop[tabId] ?? currentScrollTop;
+		const { scrollTop, scrollHeight, clientHeight } = container;
+		const isAtBottom = scrollHeight - scrollTop - clientHeight < 50;
 
-		// Detect if user scrolled UP (away from bottom)
-		if (currentScrollTop < previousScrollTop - 10) {
-			// User scrolled up - disable auto-scroll
-			userScrolledUp[tabId] = true;
-		} else if (isNearBottom(container, 50)) {
-			// User scrolled back to bottom - re-enable auto-scroll
-			userScrolledUp[tabId] = false;
+		if (isAtBottom) {
+			// User scrolled to bottom - resume immediately
+			autoScrollPaused[tabId] = false;
+			if (scrollPauseTimers[tabId]) {
+				clearTimeout(scrollPauseTimers[tabId]);
+			}
+		} else {
+			// User scrolled up - pause auto-scroll
+			autoScrollPaused[tabId] = true;
+
+			// Clear existing timer
+			if (scrollPauseTimers[tabId]) {
+				clearTimeout(scrollPauseTimers[tabId]);
+			}
+
+			// Resume auto-scroll after inactivity
+			scrollPauseTimers[tabId] = setTimeout(() => {
+				autoScrollPaused[tabId] = false;
+				scrollToBottom(tabId);
+			}, SCROLL_RESUME_DELAY);
 		}
-
-		lastScrollTop[tabId] = currentScrollTop;
 	}
 
 	async function handleSubmit(tabId: string) {
