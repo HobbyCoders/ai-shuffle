@@ -44,12 +44,11 @@
 	let messagesContainers: Record<string, HTMLElement> = {};
 	let sidebarOpen = false;
 	let sidebarTab: 'my-chats' | 'admin' = 'my-chats';
-	let shouldAutoScroll: Record<string, boolean> = {};
+	let userScrolledUp: Record<string, boolean> = {}; // Track if user has scrolled up
 	let lastMessageCounts: Record<string, number> = {};
 	let lastContentLengths: Record<string, number> = {};
 	let previousActiveTabId: string | null = null;
-	let programmaticScroll: Record<string, boolean> = {}; // Track when we scroll vs user scrolls
-	let wasStreaming: Record<string, boolean> = {}; // Track streaming state changes
+	let lastScrollTop: Record<string, number> = {}; // Track scroll direction
 	let showProfileModal = false;
 	let showProjectModal = false;
 	let showNewProfileForm = false;
@@ -190,12 +189,6 @@
 		const messages = $activeTab.messages;
 		const isStreaming = $activeTab.isStreaming;
 
-		// Reset auto-scroll when streaming starts
-		if (isStreaming && !wasStreaming[tabId]) {
-			shouldAutoScroll[tabId] = true;
-		}
-		wasStreaming[tabId] = isStreaming;
-
 		if (messages.length > 0) {
 			const newMessageArrived = messages.length > (lastMessageCounts[tabId] || 0);
 			lastMessageCounts[tabId] = messages.length;
@@ -204,22 +197,23 @@
 			const contentUpdated = totalContentLength > (lastContentLengths[tabId] || 0);
 			lastContentLengths[tabId] = totalContentLength;
 
-			// Auto-scroll if enabled for this tab (default true)
-			const autoScroll = shouldAutoScroll[tabId] !== false;
+			// Auto-scroll unless user has scrolled up
+			const shouldScroll = !userScrolledUp[tabId];
 
-			if ((newMessageArrived || (contentUpdated && isStreaming)) && autoScroll) {
-				// Mark as programmatic scroll so handleScroll ignores it
-				programmaticScroll[tabId] = true;
+			if ((newMessageArrived || (contentUpdated && isStreaming)) && shouldScroll) {
 				requestAnimationFrame(() => {
 					if (container) {
 						container.scrollTop = container.scrollHeight;
-						// Clear programmatic flag after a short delay
-						setTimeout(() => {
-							programmaticScroll[tabId] = false;
-						}, 50);
+						// Update lastScrollTop to prevent false "scrolled up" detection
+						lastScrollTop[tabId] = container.scrollTop;
 					}
 				});
 			}
+		}
+
+		// Reset scroll tracking when streaming ends
+		if (!isStreaming) {
+			userScrolledUp[tabId] = false;
 		}
 	}
 
@@ -245,18 +239,19 @@
 		const container = messagesContainers[tabId];
 		if (!container) return;
 
-		// Ignore programmatic scrolls - only respond to user scrolls
-		if (programmaticScroll[tabId]) return;
+		const currentScrollTop = container.scrollTop;
+		const previousScrollTop = lastScrollTop[tabId] ?? currentScrollTop;
 
-		// Only disable auto-scroll if user scrolls away from bottom
-		// Use a larger threshold to be more forgiving
-		const nearBottom = isNearBottom(container, 150);
-		if (!nearBottom) {
-			shouldAutoScroll[tabId] = false;
-		} else {
-			// Re-enable if user scrolls back to bottom
-			shouldAutoScroll[tabId] = true;
+		// Detect if user scrolled UP (away from bottom)
+		if (currentScrollTop < previousScrollTop - 10) {
+			// User scrolled up - disable auto-scroll
+			userScrolledUp[tabId] = true;
+		} else if (isNearBottom(container, 50)) {
+			// User scrolled back to bottom - re-enable auto-scroll
+			userScrolledUp[tabId] = false;
 		}
+
+		lastScrollTop[tabId] = currentScrollTop;
 	}
 
 	async function handleSubmit(tabId: string) {
