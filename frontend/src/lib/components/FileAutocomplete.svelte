@@ -25,46 +25,18 @@
   let listElement: HTMLUListElement;
 
   // Extract the @ query from input - finds the last @ and text after it
-  // Supports both @path and @"path with spaces" syntax
-  function extractAtQuery(input: string): { query: string; atIndex: number; quoted: boolean } | null {
-    // First try to match quoted syntax: @"path with spaces"
-    // Match @ followed by " and then anything until end or closing "
-    const quotedMatches = [...input.matchAll(/(?:^|[\s])@"([^"]*)"?/g)];
+  function extractAtQuery(input: string): { query: string; atIndex: number } | null {
+    // Find the last @ that's either at the start or preceded by whitespace
+    const matches = [...input.matchAll(/(?:^|[\s])@([^\s]*)/g)];
+    if (matches.length === 0) return null;
 
-    // Also match unquoted syntax: @path (no spaces)
-    const unquotedMatches = [...input.matchAll(/(?:^|[\s])@([^\s"]*)/g)];
-
-    // Find the last match of either type
-    let lastQuoted = quotedMatches.length > 0 ? quotedMatches[quotedMatches.length - 1] : null;
-    let lastUnquoted = unquotedMatches.length > 0 ? unquotedMatches[unquotedMatches.length - 1] : null;
-
-    // Determine which match is later in the string
-    let useQuoted = false;
-    let lastMatch: RegExpMatchArray | null = null;
-
-    if (lastQuoted && lastUnquoted) {
-      // Use whichever appears later
-      if ((lastQuoted.index ?? 0) >= (lastUnquoted.index ?? 0)) {
-        lastMatch = lastQuoted;
-        useQuoted = true;
-      } else {
-        lastMatch = lastUnquoted;
-      }
-    } else if (lastQuoted) {
-      lastMatch = lastQuoted;
-      useQuoted = true;
-    } else if (lastUnquoted) {
-      lastMatch = lastUnquoted;
-    }
-
-    if (!lastMatch) return null;
-
+    const lastMatch = matches[matches.length - 1];
     const fullMatch = lastMatch[0];
     const query = lastMatch[1] || '';
     // Calculate the actual @ position
     const atIndex = lastMatch.index! + (fullMatch.startsWith('@') ? 0 : 1);
 
-    return { query, atIndex, quoted: useQuoted };
+    return { query, atIndex };
   }
 
   // Get the directory path from query
