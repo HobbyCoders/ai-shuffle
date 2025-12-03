@@ -465,8 +465,10 @@ function createTabsStore() {
 			}
 
 			case 'start': {
+				// Mark streaming as started, but DON'T create empty message yet
+				// Messages will be created when we get actual content (stream_delta for text, stream_block_start for tools)
+				// This prevents empty message boxes from appearing when Claude starts with a tool call
 				const sessionId = data.session_id as string;
-				const assistantMsgId = `assistant-${Date.now()}`;
 
 				update(s => ({
 					...s,
@@ -475,14 +477,8 @@ function createTabsStore() {
 						return {
 							...tab,
 							sessionId,
-							isStreaming: true,
-							messages: [...tab.messages, {
-								id: assistantMsgId,
-								role: 'assistant' as const,
-								content: '',
-								type: 'text' as const,
-								streaming: true
-							}]
+							isStreaming: true
+							// NO empty message added here - wait for actual content
 						};
 					})
 				}));
@@ -532,26 +528,11 @@ function createTabsStore() {
 
 			// StreamEvent handlers for real-time character-by-character streaming
 			case 'stream_start': {
-				// Start of a new streaming message
+				// Start of a new streaming response - just log it
+				// DON'T create empty message here - wait for actual content via stream_delta
+				// This prevents empty message boxes when Claude's response starts with a tool call
 				console.log('[WS] Stream start received');
-				update(s => ({
-					...s,
-					tabs: s.tabs.map(tab => {
-						if (tab.id !== tabId) return tab;
-
-						const messages = [...tab.messages];
-						// Create a new streaming message
-						messages.push({
-							id: `stream-${Date.now()}`,
-							role: 'assistant',
-							content: '',
-							type: 'text',
-							streaming: true
-						});
-
-						return { ...tab, messages };
-					})
-				}));
+				// No message created - stream_delta will create message when text arrives
 				break;
 			}
 
