@@ -489,6 +489,9 @@ function createTabsStore() {
 			}
 
 			case 'chunk': {
+				// 'chunk' is the final complete text from AssistantMessage
+				// When include_partial_messages=True, we already have this text from stream_delta events
+				// So we REPLACE the streaming message content (don't append) to avoid duplication
 				console.log(`[WS] Chunk received: len=${(data.content as string).length}`);
 				update(s => ({
 					...s,
@@ -501,11 +504,16 @@ function createTabsStore() {
 						);
 
 						if (streamingIdx !== -1) {
+							// REPLACE content - this is the final version from AssistantMessage
+							// Don't append, as stream_delta already accumulated the text
 							messages[streamingIdx] = {
 								...messages[streamingIdx],
-								content: messages[streamingIdx].content + (data.content as string)
+								content: data.content as string,
+								streaming: false // Mark as complete
 							};
 						} else {
+							// No streaming message exists - this is the first/only chunk
+							// (happens when include_partial_messages=False)
 							messages.push({
 								id: `text-${Date.now()}`,
 								role: 'assistant',
@@ -682,12 +690,34 @@ function createTabsStore() {
 			}
 
 			case 'tool_use': {
+				// tool_use is the final event from AssistantMessage
+				// When include_partial_messages=True, stream_block_start may have already created this tool
+				const toolId = data.id as string;
+
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
 						if (tab.id !== tabId) return tab;
 
 						let messages = [...tab.messages];
+
+						// Check if this tool already exists (from stream_block_start)
+						const existingToolIdx = messages.findIndex(
+							m => m.type === 'tool_use' && m.toolId === toolId
+						);
+
+						if (existingToolIdx !== -1) {
+							// Update existing tool message with final data
+							messages[existingToolIdx] = {
+								...messages[existingToolIdx],
+								toolName: data.name as string,
+								toolInput: data.input as Record<string, unknown>,
+								toolStatus: 'running'
+							};
+							return { ...tab, messages };
+						}
+
+						// No existing tool - create new one
 						const streamingIdx = messages.findLastIndex(
 							m => m.type === 'text' && m.role === 'assistant' && m.streaming
 						);
@@ -705,12 +735,12 @@ function createTabsStore() {
 						}
 
 						messages.push({
-							id: `tool-${Date.now()}-${data.id || ''}`,
+							id: `tool-${Date.now()}-${toolId || ''}`,
 							role: 'assistant',
 							content: '',
 							type: 'tool_use',
 							toolName: data.name as string,
-							toolId: data.id as string,
+							toolId: toolId,
 							toolInput: data.input as Record<string, unknown>,
 							toolStatus: 'running',
 							streaming: true
