@@ -784,19 +784,9 @@ function createTabsStore() {
 							}
 						}
 
-						// Add streaming text placeholder for continuation (only if not already present)
-						const hasStreamingText = messages.some(
-							m => m.type === 'text' && m.role === 'assistant' && m.streaming
-						);
-						if (!hasStreamingText) {
-							messages.push({
-								id: `text-${Date.now()}-cont`,
-								role: 'assistant',
-								content: '',
-								type: 'text',
-								streaming: true
-							});
-						}
+						// DON'T add empty streaming placeholder here
+						// The stream_delta handler will create a message when text actually arrives
+						// Adding empty placeholders causes lingering empty message boxes
 
 						return { ...tab, messages };
 					})
@@ -1250,19 +1240,9 @@ function createTabsStore() {
 							return m;
 						});
 
-						// Add new streaming text placeholder for main agent to continue (only if not already present)
-						const hasStreamingText = messages.some(
-							m => m.type === 'text' && m.role === 'assistant' && m.streaming
-						);
-						if (!hasStreamingText) {
-							messages.push({
-								id: `text-${Date.now()}-cont`,
-								role: 'assistant' as const,
-								content: '',
-								type: 'text' as const,
-								streaming: true
-							});
-						}
+						// DON'T add empty streaming placeholder here
+						// The stream_delta handler will create a message when text actually arrives
+						// Adding empty placeholders causes lingering empty message boxes
 
 						return { ...tab, messages };
 					})
