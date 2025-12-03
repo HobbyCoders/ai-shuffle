@@ -306,6 +306,26 @@
 		showCommandAutocomplete = showCommandAutocomplete;
 	}
 
+	// Insert newline at cursor position (for mobile users)
+	function insertNewline(tabId: string) {
+		const textarea = textareas[tabId];
+		if (!textarea) return;
+
+		const start = textarea.selectionStart;
+		const end = textarea.selectionEnd;
+		const value = tabInputs[tabId] || '';
+
+		// Insert newline at cursor position
+		tabInputs[tabId] = value.substring(0, start) + '\n' + value.substring(end);
+		tabInputs = tabInputs;
+
+		// Restore cursor position after the newline
+		setTimeout(() => {
+			textarea.focus();
+			textarea.selectionStart = textarea.selectionEnd = start + 1;
+		}, 0);
+	}
+
 	// Handle command selection from autocomplete
 	async function handleCommandSelect(tabId: string, command: Command) {
 		showCommandAutocomplete[tabId] = false;
@@ -1539,8 +1559,8 @@
 											<span class="font-semibold text-sm text-foreground">You</span>
 											<span class="text-xs text-muted-foreground">{formatTime()}</span>
 										</div>
-										<div class="bg-card border border-border rounded-lg p-4 shadow-s">
-											<p class="whitespace-pre-wrap text-foreground">{message.content}</p>
+										<div class="bg-card border border-border rounded-lg p-4 shadow-s overflow-hidden">
+											<p class="whitespace-pre-wrap break-words overflow-wrap-anywhere text-foreground">{message.content}</p>
 										</div>
 									</div>
 								</div>
@@ -1792,6 +1812,19 @@
 								disabled={currentTab.isStreaming || !$claudeAuthenticated}
 							></textarea>
 						</div>
+
+						<!-- Newline Button (mobile only) -->
+						<button
+							type="button"
+							on:click={() => insertNewline(tabId)}
+							class="flex-shrink-0 w-10 h-10 flex sm:hidden items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors"
+							disabled={currentTab.isStreaming || !$claudeAuthenticated}
+							title="Insert new line"
+						>
+							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a4 4 0 014 4v2m0 0l-3-3m3 3l3-3M3 14h4" />
+							</svg>
+						</button>
 
 						<!-- Send/Stop Button -->
 						{#if currentTab.isStreaming}
@@ -2213,6 +2246,10 @@
 {/if}
 
 <style>
+	.overflow-wrap-anywhere {
+		overflow-wrap: anywhere;
+		word-break: break-word;
+	}
 	.scrollbar-hide::-webkit-scrollbar {
 		display: none;
 	}
