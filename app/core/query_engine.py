@@ -1528,6 +1528,7 @@ async def stream_to_websocket(
                                 "tool_id": tool_id,
                                 "agent_type": tool_input.get("subagent_type", "unknown"),
                                 "description": tool_input.get("description", ""),
+                                "prompt": tool_input.get("prompt", ""),
                                 "agent_id": tool_id  # Use tool_id as agent_id for tracking
                             }
                         # Check if this tool use is from a subagent

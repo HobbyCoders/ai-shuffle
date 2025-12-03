@@ -16,8 +16,8 @@
 
 	let { message }: Props = $props();
 
-	// Track expanded state - auto-expand when running
-	let isExpanded = $state(message.agentStatus === 'running');
+	// Track expanded state - always start collapsed
+	let isExpanded = $state(false);
 
 	// Compute status display
 	const statusConfig = $derived(() => {
@@ -192,9 +192,29 @@
 	<!-- Expanded content -->
 	{#if isExpanded}
 		<div class="border-t border-border bg-card">
-			<!-- Agent children -->
-			{#if message.agentChildren && message.agentChildren.length > 0}
-				<div class="max-h-96 overflow-y-auto">
+			<div class="max-h-[32rem] overflow-y-auto">
+				<!-- Initial prompt section -->
+				{#if message.agentPrompt}
+					<div class="px-4 py-3 border-b border-border/50">
+						<details class="group" open>
+							<summary class="flex items-center gap-2 cursor-pointer list-none hover:bg-muted/30 -mx-1 px-1 py-1 rounded">
+								<svg class="w-4 h-4 text-indigo-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+								</svg>
+								<span class="text-sm font-medium text-foreground">Initial Prompt</span>
+								<svg class="w-4 h-4 text-muted-foreground ml-auto transition-transform group-open:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+								</svg>
+							</summary>
+							<div class="mt-2 p-3 bg-indigo-500/5 border border-indigo-500/20 rounded">
+								<pre class="text-sm text-foreground whitespace-pre-wrap overflow-x-auto">{message.agentPrompt}</pre>
+							</div>
+						</details>
+					</div>
+				{/if}
+
+				<!-- Agent children (tool calls and text messages) -->
+				{#if message.agentChildren && message.agentChildren.length > 0}
 					{#each message.agentChildren as child (child.id)}
 						<div class="px-4 py-2 border-b border-border/50 last:border-b-0">
 							{#if child.type === 'tool_use'}
@@ -259,28 +279,56 @@
 									{/if}
 								</details>
 							{:else if child.type === 'text'}
-								<!-- Text child -->
-								<div class="text-sm text-foreground whitespace-pre-wrap">
-									{child.content}
+								<!-- Text child (subagent's text output) -->
+								<div class="flex items-start gap-2">
+									<svg class="w-4 h-4 text-purple-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" />
+									</svg>
+									<div class="text-sm text-foreground whitespace-pre-wrap">
+										{child.content}
+									</div>
 								</div>
 							{/if}
 						</div>
 					{/each}
-				</div>
-			{:else if message.streaming}
-				<div class="px-4 py-3 text-sm text-muted-foreground flex items-center gap-2">
-					<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-						<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-						<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-					</svg>
-					Working...
-				</div>
-			{:else}
-				<div class="px-4 py-3 text-sm text-muted-foreground">
-					No activity recorded
-				</div>
-			{/if}
+				{:else if message.streaming}
+					<div class="px-4 py-3 text-sm text-muted-foreground flex items-center gap-2">
+						<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+							<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+							<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+						</svg>
+						Working...
+					</div>
+				{:else if !message.agentPrompt}
+					<div class="px-4 py-3 text-sm text-muted-foreground">
+						No activity recorded
+					</div>
+				{/if}
 
+				<!-- Final result section -->
+				{#if message.content && message.agentStatus !== 'running'}
+					<div class="px-4 py-3 border-t border-border/50">
+						<details class="group" open>
+							<summary class="flex items-center gap-2 cursor-pointer list-none hover:bg-muted/30 -mx-1 px-1 py-1 rounded">
+								<svg class="w-4 h-4 {message.agentStatus === 'error' ? 'text-red-500' : 'text-green-500'} flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+									{#if message.agentStatus === 'error'}
+										<path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
+									{:else}
+										<path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
+									{/if}
+								</svg>
+								<span class="text-sm font-medium text-foreground">Final Result</span>
+								<svg class="w-4 h-4 text-muted-foreground ml-auto transition-transform group-open:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+								</svg>
+							</summary>
+							<div class="mt-2 p-3 {message.agentStatus === 'error' ? 'bg-red-500/5 border-red-500/20' : 'bg-green-500/5 border-green-500/20'} border rounded">
+								<pre class="text-sm text-foreground whitespace-pre-wrap overflow-x-auto">{message.content}</pre>
+							</div>
+						</details>
+					</div>
+				{/if}
+			</div>
 		</div>
 	{/if}
 </div>

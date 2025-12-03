@@ -55,6 +55,7 @@ export interface ChatMessage {
 	agentId?: string; // The subagent's unique ID (e.g., '00ed8f4d')
 	agentType?: string; // The subagent type (e.g., 'Explore', 'Plan')
 	agentDescription?: string; // Task description from the Task tool
+	agentPrompt?: string; // The initial prompt sent to the subagent
 	agentStatus?: 'pending' | 'running' | 'completed' | 'error'; // Current status
 	agentChildren?: SubagentChildMessage[]; // Nested messages from subagent execution
 }
@@ -1059,6 +1060,7 @@ function createTabsStore() {
 				const agentId = data.agent_id as string;
 				const agentType = data.agent_type as string;
 				const description = data.description as string;
+				const prompt = data.prompt as string;
 				const toolId = data.tool_id as string; // The tool_use ID that launched this subagent
 
 				console.log('[WS] Subagent started:', agentId, agentType, description);
@@ -1098,6 +1100,7 @@ function createTabsStore() {
 							agentId: agentId,
 							agentType: agentType,
 							agentDescription: description,
+							agentPrompt: prompt,
 							agentStatus: 'running',
 							agentChildren: [],
 							streaming: true

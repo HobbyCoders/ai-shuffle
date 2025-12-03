@@ -214,6 +214,7 @@ class SessionMessage(BaseModel):
     agentId: Optional[str] = None  # The subagent's unique ID
     agentType: Optional[str] = None  # The subagent type (e.g., 'Explore', 'Plan')
     agentDescription: Optional[str] = None  # Task description from the Task tool
+    agentPrompt: Optional[str] = None  # The initial prompt sent to the subagent
     agentStatus: Optional[str] = None  # 'pending', 'running', 'completed', 'error'
     agentChildren: Optional[List[SubagentChildMessage]] = None  # Nested messages from subagent
 
