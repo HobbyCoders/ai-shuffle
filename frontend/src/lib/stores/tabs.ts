@@ -48,6 +48,7 @@ export interface ChatMessage {
 	toolStatus?: 'running' | 'complete' | 'error'; // Status of tool execution
 	metadata?: Record<string, unknown>;
 	streaming?: boolean;
+	partialToolInput?: string; // Accumulator for streaming tool input JSON
 	systemSubtype?: string; // For system messages (e.g., 'context' for /context command)
 	systemData?: Record<string, unknown>; // Raw data from system message
 	// Subagent-specific fields
@@ -517,6 +518,166 @@ function createTabsStore() {
 						return { ...tab, messages };
 					})
 				}));
+				break;
+			}
+
+			// StreamEvent handlers for real-time character-by-character streaming
+			case 'stream_start': {
+				// Start of a new streaming message
+				console.log('[WS] Stream start received');
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+
+						const messages = [...tab.messages];
+						// Create a new streaming message
+						messages.push({
+							id: `stream-${Date.now()}`,
+							role: 'assistant',
+							content: '',
+							type: 'text',
+							streaming: true
+						});
+
+						return { ...tab, messages };
+					})
+				}));
+				break;
+			}
+
+			case 'stream_block_start': {
+				// Start of a content block (text, thinking, tool_use)
+				const blockType = data.block_type as string;
+				console.log(`[WS] Stream block start: ${blockType}`);
+
+				if (blockType === 'tool_use') {
+					const contentBlock = data.content_block as { id?: string; name?: string };
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(tab => {
+							if (tab.id !== tabId) return tab;
+
+							const messages = [...tab.messages];
+							// Mark any streaming text as complete
+							const streamingIdx = messages.findLastIndex(
+								m => m.type === 'text' && m.role === 'assistant' && m.streaming
+							);
+							if (streamingIdx !== -1 && messages[streamingIdx].content) {
+								messages[streamingIdx] = { ...messages[streamingIdx], streaming: false };
+							}
+
+							// Add tool use message
+							messages.push({
+								id: `tool-${Date.now()}-${contentBlock.id || ''}`,
+								role: 'assistant',
+								content: '',
+								type: 'tool_use',
+								toolName: contentBlock.name || '',
+								toolId: contentBlock.id || '',
+								toolInput: {},
+								toolStatus: 'running',
+								streaming: true
+							});
+
+							return { ...tab, messages };
+						})
+					}));
+				}
+				break;
+			}
+
+			case 'stream_delta': {
+				const deltaType = data.delta_type as string;
+
+				if (deltaType === 'text') {
+					// Real-time text streaming - character by character!
+					const text = data.content as string;
+					console.log(`[WS] Stream delta text: ${text.length} chars`);
+
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(tab => {
+							if (tab.id !== tabId) return tab;
+
+							const messages = [...tab.messages];
+							const streamingIdx = messages.findLastIndex(
+								m => m.type === 'text' && m.role === 'assistant' && m.streaming
+							);
+
+							if (streamingIdx !== -1) {
+								// Append to existing streaming message
+								messages[streamingIdx] = {
+									...messages[streamingIdx],
+									content: messages[streamingIdx].content + text
+								};
+							} else {
+								// Create new streaming message
+								messages.push({
+									id: `stream-${Date.now()}`,
+									role: 'assistant',
+									content: text,
+									type: 'text',
+									streaming: true
+								});
+							}
+
+							return { ...tab, messages };
+						})
+					}));
+				} else if (deltaType === 'tool_input') {
+					// Tool input streaming (partial JSON)
+					const partialJson = data.content as string;
+					console.log(`[WS] Stream delta tool_input: ${partialJson.length} chars`);
+
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(tab => {
+							if (tab.id !== tabId) return tab;
+
+							const messages = [...tab.messages];
+							const toolIdx = messages.findLastIndex(
+								m => m.type === 'tool_use' && m.streaming
+							);
+
+							if (toolIdx !== -1) {
+								const current = messages[toolIdx];
+								const partialInput = (current.partialToolInput || '') + partialJson;
+
+								// Try to parse accumulated JSON
+								let parsedInput = current.toolInput || {};
+								try {
+									parsedInput = JSON.parse(partialInput);
+								} catch {
+									// Not valid JSON yet, keep accumulating
+								}
+
+								messages[toolIdx] = {
+									...current,
+									partialToolInput: partialInput,
+									toolInput: parsedInput
+								};
+							}
+
+							return { ...tab, messages };
+						})
+					}));
+				}
+				break;
+			}
+
+			case 'stream_block_stop': {
+				// End of a content block
+				console.log(`[WS] Stream block stop: index=${data.index}`);
+				// The block is complete - we don't need to do anything special here
+				// as the full content comes via AssistantMessage afterwards
+				break;
+			}
+
+			case 'stream_message_delta': {
+				// Final message metadata
+				console.log('[WS] Stream message delta received');
+				// Contains stop_reason and usage - we'll get final data from done event
 				break;
 			}
 

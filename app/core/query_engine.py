@@ -18,7 +18,7 @@ from datetime import datetime
 from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient, AgentDefinition
 from claude_agent_sdk import (
     AssistantMessage, UserMessage, TextBlock, ToolUseBlock, ToolResultBlock,
-    ResultMessage, SystemMessage
+    ResultMessage, SystemMessage, StreamEvent
 )
 
 from app.db import database
@@ -1396,6 +1396,78 @@ async def stream_to_websocket(
                         "type": "system",
                         "subtype": message.subtype,
                         "data": message.data
+                    }
+
+            elif isinstance(message, StreamEvent):
+                # StreamEvent is sent when include_partial_messages=True
+                # Contains real-time streaming events for character-by-character display
+                event = message.event
+                event_type = event.get("type") if event else None
+
+                if event_type == "content_block_delta":
+                    delta = event.get("delta", {})
+                    delta_type = delta.get("type")
+
+                    if delta_type == "text_delta" and delta.get("text"):
+                        # Real-time text streaming chunk
+                        text = delta["text"]
+                        logger.debug(f"[WS] StreamEvent text_delta: {len(text)} chars")
+                        yield {
+                            "type": "stream_delta",
+                            "delta_type": "text",
+                            "content": text,
+                            "index": event.get("index", 0)
+                        }
+                    elif delta_type == "thinking_delta" and delta.get("thinking"):
+                        # Thinking block streaming
+                        yield {
+                            "type": "stream_delta",
+                            "delta_type": "thinking",
+                            "content": delta["thinking"],
+                            "index": event.get("index", 0)
+                        }
+                    elif delta_type == "input_json_delta" and delta.get("partial_json"):
+                        # Tool input streaming
+                        yield {
+                            "type": "stream_delta",
+                            "delta_type": "tool_input",
+                            "content": delta["partial_json"],
+                            "index": event.get("index", 0)
+                        }
+
+                elif event_type == "message_start":
+                    # Start of a new streaming message
+                    logger.debug(f"[WS] StreamEvent message_start")
+                    yield {
+                        "type": "stream_start",
+                        "message": event.get("message", {})
+                    }
+
+                elif event_type == "content_block_start":
+                    # Start of a content block (text, thinking, tool_use)
+                    content_block = event.get("content_block", {})
+                    block_type = content_block.get("type")
+                    logger.debug(f"[WS] StreamEvent content_block_start: {block_type}")
+                    yield {
+                        "type": "stream_block_start",
+                        "block_type": block_type,
+                        "index": event.get("index", 0),
+                        "content_block": content_block
+                    }
+
+                elif event_type == "content_block_stop":
+                    # End of a content block
+                    yield {
+                        "type": "stream_block_stop",
+                        "index": event.get("index", 0)
+                    }
+
+                elif event_type == "message_delta":
+                    # Final message metadata (stop_reason, usage)
+                    yield {
+                        "type": "stream_message_delta",
+                        "delta": event.get("delta", {}),
+                        "usage": event.get("usage", {})
                     }
 
             elif isinstance(message, AssistantMessage):
