@@ -5,34 +5,11 @@
 	import { api } from '$lib/api/client';
 	import type { ApiUser, ApiUserWithKey, Profile } from '$lib/api/client';
 	import type { Project } from '$lib/stores/chat';
-	import SubagentManager from '$lib/components/SubagentManager.svelte';
-
-	interface Subagent {
-		id: string;
-		name: string;
-		description: string;
-		prompt: string;
-		tools?: string[];
-		model?: string;
-		is_builtin: boolean;
-		created_at: string;
-		updated_at: string;
-	}
-
 	let apiUsers: ApiUser[] = [];
 	let profiles: Profile[] = [];
 	let projects: Project[] = [];
-	let subagents: Subagent[] = [];
 	let loading = true;
 	let error = '';
-
-	// Profile subagent toggle management
-	let selectedProfileForToggles: string | null = null;
-	let profileEnabledAgents: string[] = [];
-	let togglingAgents = false;
-
-	// Subagent manager panel
-	let showSubagentManager = false;
 
 	// Form state
 	let showCreateForm = false;
@@ -70,16 +47,14 @@
 		loading = true;
 		error = '';
 		try {
-			const [usersRes, profilesRes, projectsRes, subagentsRes] = await Promise.all([
+			const [usersRes, profilesRes, projectsRes] = await Promise.all([
 				api.get<ApiUser[]>('/api-users'),
 				api.get<Profile[]>('/profiles'),
-				api.get<Project[]>('/projects'),
-				api.get<Subagent[]>('/subagents')
+				api.get<Project[]>('/projects')
 			]);
 			apiUsers = usersRes;
 			profiles = profilesRes;
 			projects = projectsRes;
-			subagents = subagentsRes;
 		} catch (e: any) {
 			error = e.detail || 'Failed to load data';
 		}
@@ -92,39 +67,6 @@
 			githubUser = ghStatus.user;
 		} catch (e) {
 			console.error('Failed to load GitHub status:', e);
-		}
-	}
-
-	// Open profile subagent toggles
-	async function openProfileToggles(profileId: string) {
-		selectedProfileForToggles = profileId;
-		try {
-			profileEnabledAgents = await api.get<string[]>(`/profiles/${profileId}/enabled-agents`);
-		} catch (e: any) {
-			error = e.detail || 'Failed to load enabled agents';
-			profileEnabledAgents = [];
-		}
-	}
-
-	// Toggle a subagent for a profile
-	async function toggleSubagent(subagentId: string) {
-		if (!selectedProfileForToggles || togglingAgents) return;
-		togglingAgents = true;
-
-		try {
-			if (profileEnabledAgents.includes(subagentId)) {
-				// Disable
-				await api.delete(`/profiles/${selectedProfileForToggles}/enabled-agents/${subagentId}`);
-				profileEnabledAgents = profileEnabledAgents.filter(id => id !== subagentId);
-			} else {
-				// Enable
-				await api.post(`/profiles/${selectedProfileForToggles}/enabled-agents/${subagentId}`);
-				profileEnabledAgents = [...profileEnabledAgents, subagentId];
-			}
-		} catch (e: any) {
-			error = e.detail || 'Failed to toggle subagent';
-		} finally {
-			togglingAgents = false;
 		}
 	}
 
@@ -337,15 +279,6 @@
 		await auth.logout();
 		goto('/login');
 	}
-
-	function getModelDisplay(model?: string): string {
-		switch (model) {
-			case 'haiku': return 'Haiku';
-			case 'sonnet': return 'Sonnet';
-			case 'opus': return 'Opus';
-			default: return 'Inherit';
-		}
-	}
 </script>
 
 <svelte:head>
@@ -509,19 +442,11 @@
 
 			<!-- Profiles Section -->
 			<section class="mb-8">
-				<div class="flex items-center justify-between mb-4">
-					<div>
-						<h2 class="text-xl font-bold text-white">Profiles</h2>
-						<p class="text-sm text-gray-500 mt-1">
-							Configure which subagents are enabled for each profile. Click a profile to manage its subagent access.
-						</p>
-					</div>
-					<button on:click={() => showSubagentManager = true} class="btn btn-secondary flex items-center gap-2">
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-						</svg>
-						Manage Subagents
-					</button>
+				<div class="mb-4">
+					<h2 class="text-xl font-bold text-white">Profiles</h2>
+					<p class="text-sm text-gray-500 mt-1">
+						Agent profiles configured in the system. Manage profiles from the main chat interface.
+					</p>
 				</div>
 
 				{#if loading}
@@ -535,15 +460,11 @@
 				{:else}
 					<div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
 						{#each profiles as profile}
-							<div class="card p-4 hover:border-[var(--color-primary)] transition-colors cursor-pointer"
-								 on:click={() => openProfileToggles(profile.id)}
-								 on:keypress={(e) => e.key === 'Enter' && openProfileToggles(profile.id)}
-								 role="button"
-								 tabindex="0">
+							<div class="card p-4">
 								<div class="flex items-start justify-between mb-2">
 									<h3 class="font-medium text-white">{profile.name}</h3>
 									<span class="text-xs px-2 py-0.5 rounded bg-[var(--color-primary)]/20 text-[var(--color-primary)]">
-										{profile.config?.enabled_agents?.length || 0} enabled
+										{profile.config?.enabled_agents?.length || 0} agents
 									</span>
 								</div>
 								{#if profile.description}
@@ -780,85 +701,4 @@
 		</div>
 	{/if}
 
-	<!-- Profile Subagent Toggles Modal -->
-	{#if selectedProfileForToggles}
-		<div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" on:click={() => { selectedProfileForToggles = null; loadData(); }}>
-			<div class="card w-full max-w-lg max-h-[85vh] overflow-hidden flex flex-col" on:click|stopPropagation>
-				<div class="p-4 border-b border-[var(--color-border)] flex items-center justify-between">
-					<div>
-						<h2 class="text-lg font-bold text-white">
-							{profiles.find(p => p.id === selectedProfileForToggles)?.name || 'Profile'} - Subagents
-						</h2>
-						<p class="text-sm text-gray-500">
-							Toggle which subagents are available for this profile
-						</p>
-					</div>
-					<button
-						class="text-gray-400 hover:text-white p-1"
-						on:click={() => { selectedProfileForToggles = null; loadData(); }}
-					>
-						<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-						</svg>
-					</button>
-				</div>
-				<div class="flex-1 overflow-y-auto p-4">
-					{#if subagents.length === 0}
-						<div class="text-center py-8">
-							<p class="text-gray-400 mb-4">No subagents configured</p>
-							<button on:click={() => { selectedProfileForToggles = null; showSubagentManager = true; }} class="text-[var(--color-primary)] hover:underline">
-								Create subagents first
-							</button>
-						</div>
-					{:else}
-						<div class="space-y-3">
-							{#each subagents as agent (agent.id)}
-								<div class="flex items-start gap-3 p-3 rounded-lg border border-[var(--color-border)] hover:border-[var(--color-primary)]/50 transition-colors">
-									<label class="relative inline-flex items-center cursor-pointer mt-1">
-										<input
-											type="checkbox"
-											checked={profileEnabledAgents.includes(agent.id)}
-											on:change={() => toggleSubagent(agent.id)}
-											disabled={togglingAgents}
-											class="sr-only peer"
-										/>
-										<div class="w-9 h-5 bg-gray-700 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-[var(--color-primary)]/50 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[var(--color-primary)]"></div>
-									</label>
-									<div class="flex-1 min-w-0">
-										<div class="flex items-center gap-2 flex-wrap">
-											<h4 class="font-medium text-white">{agent.name}</h4>
-											<span class="text-xs px-1.5 py-0.5 rounded bg-[var(--color-primary)]/20 text-[var(--color-primary)]">
-												{getModelDisplay(agent.model)}
-											</span>
-										</div>
-										<p class="text-sm text-gray-500 mt-0.5 line-clamp-2">{agent.description}</p>
-										{#if agent.tools && agent.tools.length > 0}
-											<div class="flex flex-wrap gap-1 mt-2">
-												{#each agent.tools.slice(0, 4) as tool}
-													<span class="text-xs px-1.5 py-0.5 bg-gray-800 text-gray-400 rounded">{tool}</span>
-												{/each}
-												{#if agent.tools.length > 4}
-													<span class="text-xs px-1.5 py-0.5 bg-gray-800 text-gray-400 rounded">+{agent.tools.length - 4}</span>
-												{/if}
-											</div>
-										{/if}
-									</div>
-								</div>
-							{/each}
-						</div>
-					{/if}
-				</div>
-				<div class="p-4 border-t border-[var(--color-border)] bg-[var(--color-surface)]">
-					<p class="text-xs text-gray-500 text-center">
-						{profileEnabledAgents.length} of {subagents.length} subagents enabled
-					</p>
-				</div>
-			</div>
-		</div>
-	{/if}
-
-	<!-- Subagent Manager Panel -->
-	{#if showSubagentManager}
-		<SubagentManager onClose={() => { showSubagentManager = false; loadData(); }} />
-	{/if}
 {/if}

@@ -43,6 +43,27 @@
 		gfm: true
 	});
 
+	// Subagent interface for enabled agents management
+	interface Subagent {
+		id: string;
+		name: string;
+		description: string;
+		model?: string;
+	}
+
+	// Subagents list for profile config
+	let allSubagents: Subagent[] = [];
+
+	// Load subagents
+	async function loadSubagents() {
+		try {
+			allSubagents = await api.get<Subagent[]>('/subagents');
+		} catch (e) {
+			console.error('Failed to load subagents:', e);
+			allSubagents = [];
+		}
+	}
+
 	// Per-tab state (we track input per tab)
 	let tabInputs: Record<string, string> = {};
 	let tabUploadedFiles: Record<string, FileUploadResponse[]> = {};
@@ -163,6 +184,7 @@
 	let expandedSections: Record<string, boolean> = {
 		toolConfig: false,
 		behavior: false,
+		enabledAgents: false,
 		systemPrompt: false,
 		settingSources: false,
 		advanced: false
@@ -183,6 +205,7 @@
 		max_turns: null as number | null,
 		allowed_tools: '',
 		disallowed_tools: '',
+		enabled_agents: [] as string[],
 		include_partial_messages: true,
 		continue_conversation: false,
 		fork_session: false,
@@ -196,6 +219,24 @@
 		user: '',
 		max_buffer_size: null as number | null
 	};
+
+	// Toggle agent selection
+	function toggleAgent(agentId: string) {
+		if (profileForm.enabled_agents.includes(agentId)) {
+			profileForm.enabled_agents = profileForm.enabled_agents.filter(id => id !== agentId);
+		} else {
+			profileForm.enabled_agents = [...profileForm.enabled_agents, agentId];
+		}
+	}
+
+	function getModelDisplay(model?: string): string {
+		switch (model) {
+			case 'haiku': return 'Haiku';
+			case 'sonnet': return 'Sonnet';
+			case 'opus': return 'Opus';
+			default: return 'Inherit';
+		}
+	}
 
 	// Project form
 	let newProjectId = '';
@@ -228,7 +269,8 @@
 			const promises = [
 				tabs.loadProfiles(),
 				tabs.loadSessions(),
-				tabs.loadProjects()
+				tabs.loadProjects(),
+				loadSubagents()
 			];
 			// Load admin-specific data if user is admin
 			if ($isAdmin) {
@@ -679,6 +721,7 @@
 			max_turns: null,
 			allowed_tools: '',
 			disallowed_tools: '',
+			enabled_agents: [],
 			include_partial_messages: true,
 			continue_conversation: false,
 			fork_session: false,
@@ -714,6 +757,7 @@
 			max_turns: config.max_turns || null,
 			allowed_tools: (config.allowed_tools || []).join(', '),
 			disallowed_tools: (config.disallowed_tools || []).join(', '),
+			enabled_agents: config.enabled_agents || [],
 			include_partial_messages: config.include_partial_messages !== false,
 			continue_conversation: config.continue_conversation || false,
 			fork_session: config.fork_session || false,
@@ -747,6 +791,9 @@
 		}
 		if (profileForm.disallowed_tools.trim()) {
 			config.disallowed_tools = profileForm.disallowed_tools.split(',').map((t) => t.trim()).filter(Boolean);
+		}
+		if (profileForm.enabled_agents.length > 0) {
+			config.enabled_agents = profileForm.enabled_agents;
 		}
 		if (profileForm.setting_sources.length > 0) {
 			config.setting_sources = profileForm.setting_sources;
@@ -2115,6 +2162,60 @@
 											<p class="text-xs text-muted-foreground">Create new session ID when resuming</p>
 										</div>
 									</label>
+								</div>
+							{/if}
+						</div>
+
+						<!-- Enabled Subagents Accordion -->
+						<div class="border border-border rounded-lg overflow-hidden">
+							<button
+								type="button"
+								on:click={() => toggleSection('enabledAgents')}
+								class="w-full px-3 py-2 bg-accent flex items-center justify-between text-sm text-foreground hover:bg-muted"
+							>
+								<div class="flex items-center gap-2">
+									<span>Enabled Subagents</span>
+									{#if profileForm.enabled_agents.length > 0}
+										<span class="text-xs px-1.5 py-0.5 bg-primary/20 text-primary rounded">{profileForm.enabled_agents.length}</span>
+									{/if}
+								</div>
+								<svg class="w-4 h-4 transition-transform {expandedSections.enabledAgents ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+								</svg>
+							</button>
+							{#if expandedSections.enabledAgents}
+								<div class="p-3 bg-card">
+									{#if allSubagents.length === 0}
+										<p class="text-sm text-muted-foreground text-center py-2">No subagents configured. Create subagents from the Agents menu.</p>
+									{:else}
+										<p class="text-xs text-muted-foreground mb-3">Select which subagents this profile can use</p>
+										<div class="space-y-2 max-h-48 overflow-y-auto">
+											{#each allSubagents as agent (agent.id)}
+												<label class="flex items-start gap-3 p-2 rounded-lg border border-border hover:border-primary/50 cursor-pointer transition-colors">
+													<input
+														type="checkbox"
+														checked={profileForm.enabled_agents.includes(agent.id)}
+														on:change={() => toggleAgent(agent.id)}
+														class="mt-0.5 w-4 h-4 rounded bg-muted border-0 text-primary focus:ring-ring"
+													/>
+													<div class="flex-1 min-w-0">
+														<div class="flex items-center gap-2">
+															<span class="text-sm font-medium text-foreground">{agent.name}</span>
+															<span class="text-xs px-1.5 py-0.5 rounded bg-primary/10 text-primary">{getModelDisplay(agent.model)}</span>
+														</div>
+														<p class="text-xs text-muted-foreground mt-0.5 line-clamp-1">{agent.description}</p>
+													</div>
+												</label>
+											{/each}
+										</div>
+										<div class="flex items-center justify-between mt-3 pt-2 border-t border-border">
+											<span class="text-xs text-muted-foreground">{profileForm.enabled_agents.length} of {allSubagents.length} enabled</span>
+											<div class="flex gap-2">
+												<button type="button" on:click={() => profileForm.enabled_agents = []} class="text-xs text-primary hover:underline">Clear</button>
+												<button type="button" on:click={() => profileForm.enabled_agents = allSubagents.map(a => a.id)} class="text-xs text-primary hover:underline">All</button>
+											</div>
+										</div>
+									{/if}
 								</div>
 							{/if}
 						</div>
