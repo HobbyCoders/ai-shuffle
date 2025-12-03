@@ -440,47 +440,6 @@
 				</div>
 			</section>
 
-			<!-- Profiles Section -->
-			<section class="mb-8">
-				<div class="mb-4">
-					<h2 class="text-xl font-bold text-white">Profiles</h2>
-					<p class="text-sm text-gray-500 mt-1">
-						Agent profiles configured in the system. Manage profiles from the main chat interface.
-					</p>
-				</div>
-
-				{#if loading}
-					<div class="text-center py-8">
-						<div class="animate-spin w-8 h-8 border-2 border-[var(--color-primary)] border-t-transparent rounded-full mx-auto"></div>
-					</div>
-				{:else if profiles.length === 0}
-					<div class="card p-8 text-center">
-						<p class="text-gray-400 mb-4">No profiles configured</p>
-					</div>
-				{:else}
-					<div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-						{#each profiles as profile}
-							<div class="card p-4">
-								<div class="flex items-start justify-between mb-2">
-									<h3 class="font-medium text-white">{profile.name}</h3>
-									<span class="text-xs px-2 py-0.5 rounded bg-[var(--color-primary)]/20 text-[var(--color-primary)]">
-										{profile.config?.enabled_agents?.length || 0} agents
-									</span>
-								</div>
-								{#if profile.description}
-									<p class="text-sm text-gray-500 mb-3 line-clamp-2">{profile.description}</p>
-								{/if}
-								<div class="flex items-center gap-2 text-xs text-gray-600">
-									<span>Model: {profile.config?.model || 'sonnet'}</span>
-									<span>|</span>
-									<span>Mode: {profile.config?.permission_mode || 'default'}</span>
-								</div>
-							</div>
-						{/each}
-					</div>
-				{/if}
-			</section>
-
 			<!-- API Users Section -->
 			<section class="mb-8">
 				<div class="flex items-center justify-between mb-4">
