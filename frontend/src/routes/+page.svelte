@@ -316,10 +316,15 @@
 	}
 
 	// Check if input contains an active @ mention (at start or after whitespace)
+	// Supports both @path and @"path with spaces" syntax
 	function hasActiveAtMention(input: string): boolean {
-		// Look for @ that's either at start or preceded by whitespace, and not yet completed
-		const match = input.match(/(?:^|[\s])@([^\s]*)$/);
-		return match !== null;
+		// Check for quoted syntax: @" followed by text (not yet closed with ")
+		const quotedMatch = input.match(/(?:^|[\s])@"[^"]*$/);
+		if (quotedMatch) return true;
+
+		// Check for unquoted syntax: @ followed by non-space chars at end
+		const unquotedMatch = input.match(/(?:^|[\s])@[^\s"]*$/);
+		return unquotedMatch !== null;
 	}
 
 	// Handle input changes for command and file autocomplete
@@ -359,11 +364,21 @@
 	}
 
 	// Handle file selection from @ autocomplete
+	// Supports both @path and @"path with spaces" syntax
 	function handleFileSelect(tabId: string, file: FileItem) {
 		const input = tabInputs[tabId] || '';
 
-		// Find the last @ mention to replace
-		const match = input.match(/(?:^|[\s])@([^\s]*)$/);
+		// Check if path needs quotes (contains spaces)
+		const needsQuotes = file.path.includes(' ');
+
+		// Find the last @ mention to replace - check quoted first, then unquoted
+		let match = input.match(/(?:^|[\s])@"[^"]*$/);
+		let isQuoted = !!match;
+
+		if (!match) {
+			match = input.match(/(?:^|[\s])@[^\s"]*$/);
+		}
+
 		if (!match) {
 			showFileAutocomplete[tabId] = false;
 			showFileAutocomplete = showFileAutocomplete;
@@ -373,9 +388,19 @@
 		// Calculate where the @ starts
 		const atStartIndex = match.index! + (match[0].startsWith('@') ? 0 : 1);
 
+		// Format the path reference - use quotes if path has spaces
+		const formatPath = (path: string) => {
+			if (path.includes(' ')) {
+				return `@"${path}"`;
+			}
+			return `@${path}`;
+		};
+
 		// For directories, replace with path and keep autocomplete open
 		if (file.type === 'directory') {
-			const newInput = input.substring(0, atStartIndex) + '@' + file.path;
+			// For directories, don't close the quote yet so user can continue typing
+			const dirPath = file.path.includes(' ') ? `@"${file.path}` : `@${file.path}`;
+			const newInput = input.substring(0, atStartIndex) + dirPath;
 			tabInputs[tabId] = newInput;
 			tabInputs = tabInputs;
 			// Keep autocomplete open for directory navigation
@@ -401,8 +426,8 @@
 		if (!tabUploadedFiles[tabId]) tabUploadedFiles[tabId] = [];
 		tabUploadedFiles[tabId] = [...tabUploadedFiles[tabId], fileRef];
 
-		// Replace @query with the file reference format
-		const newInput = input.substring(0, atStartIndex) + `@${file.path} `;
+		// Replace @query with the file reference format (with quotes if needed)
+		const newInput = input.substring(0, atStartIndex) + formatPath(file.path) + ' ';
 		tabInputs[tabId] = newInput;
 		tabInputs = tabInputs;
 
@@ -819,8 +844,8 @@
 				if (!tabUploadedFiles[tabId]) tabUploadedFiles[tabId] = [];
 				tabUploadedFiles[tabId] = [...tabUploadedFiles[tabId], result];
 
-				// Use @ format for file references
-				const fileRef = `@${result.path}`;
+				// Use @ format for file references (with quotes if path has spaces)
+				const fileRef = result.path.includes(' ') ? `@"${result.path}"` : `@${result.path}`;
 				const currentPrompt = tabInputs[tabId] || '';
 				if (currentPrompt.trim()) {
 					tabInputs[tabId] = currentPrompt + ' ' + fileRef;
@@ -843,11 +868,12 @@
 		const file = files[index];
 		if (!file) return;
 
-		// Remove both @ format and legacy [File: path] format
+		// Remove @ format (both quoted and unquoted) and legacy [File: path] format
 		const atRef = `@${file.path}`;
+		const quotedAtRef = `@"${file.path}"`;
 		const legacyRef = `[File: ${file.path}]`;
 		let prompt = tabInputs[tabId] || '';
-		prompt = prompt.replace(atRef, '').replace(legacyRef, '');
+		prompt = prompt.replace(quotedAtRef, '').replace(atRef, '').replace(legacyRef, '');
 		// Clean up extra spaces and newlines
 		prompt = prompt.replace(/\s+/g, ' ').trim();
 		tabInputs[tabId] = prompt;
