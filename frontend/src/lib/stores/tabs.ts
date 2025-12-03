@@ -96,8 +96,6 @@ interface TabsState {
 	adminSessions: Session[];
 	apiUsers: ApiUser[];
 	adminSessionsFilter: string | null; // null = all, '' = admin only, 'user_id' = specific user
-	defaultProfile: string;
-	defaultProject: string;
 	// Selection state for batch operations
 	selectedSessionIds: Set<string>;
 	selectedAdminSessionIds: Set<string>;
@@ -233,8 +231,6 @@ function createTabsStore() {
 		adminSessions: [],
 		apiUsers: [],
 		adminSessionsFilter: null,
-		defaultProfile: getPersistedProfile(),
-		defaultProject: getPersistedProject(),
 		// Initialize selection state
 		selectedSessionIds: new Set<string>(),
 		selectedAdminSessionIds: new Set<string>(),
@@ -1166,7 +1162,6 @@ function createTabsStore() {
 		 * Create a new tab
 		 */
 		createTab(sessionId?: string) {
-			const state = get({ subscribe });
 			const newTabId = generateTabId();
 
 			const newTab: ChatTab = {
@@ -1177,8 +1172,8 @@ function createTabsStore() {
 				isStreaming: false,
 				wsConnected: false,
 				error: null,
-				profile: state.defaultProfile,
-				project: state.defaultProject,
+				profile: getPersistedProfile(),
+				project: getPersistedProject(),
 				totalTokensIn: 0,
 				totalTokensOut: 0,
 				totalCacheCreationTokens: 0,
@@ -1419,6 +1414,7 @@ function createTabsStore() {
 				}
 
 				// Load token totals from session history - single source of truth
+				// Also restore profile and project from the saved session (they are locked once saved)
 				updateTab(tabId, {
 					sessionId: session.id,
 					messages,
@@ -1427,7 +1423,9 @@ function createTabsStore() {
 					totalTokensIn: session.total_tokens_in || 0,
 					totalTokensOut: session.total_tokens_out || 0,
 					totalCacheCreationTokens: session.cache_creation_tokens || 0,
-					totalCacheReadTokens: session.cache_read_tokens || 0
+					totalCacheReadTokens: session.cache_read_tokens || 0,
+					profile: session.profile_id,
+					project: session.project_id || ''
 				});
 
 				// Save tabs state (debounced)
@@ -1455,25 +1453,6 @@ function createTabsStore() {
 			updateTab(tabId, { project: projectId });
 		},
 
-		/**
-		 * Set default profile (persisted)
-		 */
-		setDefaultProfile(profileId: string) {
-			if (typeof window !== 'undefined') {
-				localStorage.setItem('aihub_selectedProfile', profileId);
-			}
-			update(s => ({ ...s, defaultProfile: profileId }));
-		},
-
-		/**
-		 * Set default project (persisted)
-		 */
-		setDefaultProject(projectId: string) {
-			if (typeof window !== 'undefined') {
-				localStorage.setItem('aihub_selectedProject', projectId);
-			}
-			update(s => ({ ...s, defaultProject: projectId }));
-		},
 
 		/**
 		 * Clear error for a tab
@@ -1706,8 +1685,6 @@ export const sessions = derived(tabs, $tabs => $tabs.sessions);
 export const adminSessions = derived(tabs, $tabs => $tabs.adminSessions);
 export const apiUsers = derived(tabs, $tabs => $tabs.apiUsers);
 export const adminSessionsFilter = derived(tabs, $tabs => $tabs.adminSessionsFilter);
-export const defaultProfile = derived(tabs, $tabs => $tabs.defaultProfile);
-export const defaultProject = derived(tabs, $tabs => $tabs.defaultProject);
 // Selection state derived stores
 export const selectedSessionIds = derived(tabs, $tabs => $tabs.selectedSessionIds);
 export const selectedAdminSessionIds = derived(tabs, $tabs => $tabs.selectedAdminSessionIds);
