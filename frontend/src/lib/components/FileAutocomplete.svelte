@@ -75,7 +75,8 @@
     const atInfo = extractAtQuery(inputValue);
     if (!atInfo) return;
 
-    const query = atInfo.query.toLowerCase();
+    // Don't lowercase the path - file systems can be case-sensitive
+    const query = atInfo.query;
     const targetPath = getPathFromQuery(query);
 
     // Only fetch if path actually changed and we haven't fetched this path yet
@@ -92,8 +93,9 @@
       return;
     }
 
-    const query = atInfo.query.toLowerCase();
-    const filterPart = getFilterFromQuery(query);
+    // Keep original query for path, but use lowercase for filtering
+    const query = atInfo.query;
+    const filterPart = getFilterFromQuery(query).toLowerCase();
 
     // Filter files by name
     let filtered: FileItem[];
