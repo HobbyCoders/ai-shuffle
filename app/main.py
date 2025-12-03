@@ -4,6 +4,7 @@ Main FastAPI application entry point
 """
 
 import os
+import asyncio
 import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -14,9 +15,12 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.core.config import settings, ensure_directories
+from app.db import database
 from app.db.database import init_database
 from app.core.profiles import run_migrations
 from app.core.auth import auth_service
+from app.core.query_engine import cleanup_stale_sessions
+from app.core.sync_engine import sync_engine
 
 # Import API routers
 from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents
@@ -59,6 +63,53 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Background cleanup task reference
+_cleanup_task: asyncio.Task | None = None
+
+
+async def periodic_cleanup():
+    """
+    Background task that periodically cleans up stale resources.
+
+    This prevents CPU usage from orphaned tasks and memory leaks from
+    accumulated sessions/connections that were never properly closed.
+
+    IMPORTANT: Only cleans up inactive sessions - active/streaming sessions are preserved.
+    """
+    logger.info("Background cleanup scheduler started")
+
+    while True:
+        try:
+            # Wait 5 minutes between cleanup cycles
+            await asyncio.sleep(300)
+
+            logger.debug("Running periodic cleanup cycle...")
+
+            # Clean up stale SDK sessions (inactive for >1 hour, not streaming)
+            # This is safe - cleanup_stale_sessions checks is_streaming flag
+            await cleanup_stale_sessions(max_age_seconds=3600)
+
+            # Clean up stale WebSocket/sync connections (inactive for >5 minutes)
+            await sync_engine.cleanup_stale_connections(max_age_seconds=300)
+
+            # Clean up expired database records (these are auth-related, not chat sessions)
+            database.cleanup_expired_sessions()  # Expired auth tokens
+            database.cleanup_expired_lockouts()  # Expired login lockouts
+            database.cleanup_expired_api_key_sessions()  # Expired API sessions
+
+            # Clean up old logs (>24 hours) - these are just log records, safe to remove
+            database.cleanup_old_sync_logs(max_age_hours=24)
+            database.cleanup_old_login_attempts(max_age_hours=24)
+
+            logger.debug("Periodic cleanup cycle completed")
+
+        except asyncio.CancelledError:
+            logger.info("Background cleanup scheduler stopped")
+            raise
+        except Exception as e:
+            # Log error but don't crash the cleanup loop
+            logger.error(f"Error during periodic cleanup: {e}")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -91,9 +142,20 @@ async def lifespan(app: FastAPI):
     logger.info(f"API docs: http://localhost:{settings.port}/docs")
     logger.info("=" * 60)
 
+    # Start background cleanup scheduler
+    global _cleanup_task
+    _cleanup_task = asyncio.create_task(periodic_cleanup())
+
     yield
 
+    # Stop background cleanup scheduler
     logger.info("Shutting down AI Hub...")
+    if _cleanup_task:
+        _cleanup_task.cancel()
+        try:
+            await _cleanup_task
+        except asyncio.CancelledError:
+            pass
 
 
 # Create FastAPI application
