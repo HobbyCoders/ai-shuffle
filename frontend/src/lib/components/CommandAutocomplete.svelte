@@ -33,18 +33,51 @@
     }
   });
 
-  // Filter commands based on input
+  // Filter and sort commands based on input
   $effect(() => {
     if (!inputValue.startsWith('/')) {
       filteredCommands = [];
       return;
     }
 
-    const query = inputValue.slice(1).toLowerCase();
-    filteredCommands = commands.filter(cmd =>
+    // Get the query after the slash, trimming any trailing spaces for matching
+    const query = inputValue.slice(1).toLowerCase().trim();
+
+    // If no query yet, show all commands
+    if (!query) {
+      filteredCommands = [...commands];
+      selectedIndex = 0;
+      return;
+    }
+
+    // Filter commands that match the query
+    const matches = commands.filter(cmd =>
       cmd.name.toLowerCase().includes(query) ||
       cmd.description.toLowerCase().includes(query)
     );
+
+    // Sort by relevance:
+    // 1. Exact match first
+    // 2. Starts with query
+    // 3. Contains query (alphabetically)
+    filteredCommands = matches.sort((a, b) => {
+      const aName = a.name.toLowerCase();
+      const bName = b.name.toLowerCase();
+
+      // Exact match gets highest priority
+      if (aName === query && bName !== query) return -1;
+      if (bName === query && aName !== query) return 1;
+
+      // Prefix match gets second priority
+      const aStartsWith = aName.startsWith(query);
+      const bStartsWith = bName.startsWith(query);
+      if (aStartsWith && !bStartsWith) return -1;
+      if (bStartsWith && !aStartsWith) return 1;
+
+      // Otherwise sort alphabetically
+      return aName.localeCompare(bName);
+    });
+
     selectedIndex = 0;
   });
 
