@@ -567,13 +567,19 @@ function createTabsStore() {
 						tabs: s.tabs.map(tab => {
 							if (tab.id !== tabId) return tab;
 
-							const messages = [...tab.messages];
-							// Mark any streaming text as complete
+							let messages = [...tab.messages];
+							// Handle any existing streaming text message
 							const streamingIdx = messages.findLastIndex(
 								m => m.type === 'text' && m.role === 'assistant' && m.streaming
 							);
-							if (streamingIdx !== -1 && messages[streamingIdx].content) {
-								messages[streamingIdx] = { ...messages[streamingIdx], streaming: false };
+							if (streamingIdx !== -1) {
+								if (messages[streamingIdx].content) {
+									// Mark as complete if it has content
+									messages[streamingIdx] = { ...messages[streamingIdx], streaming: false };
+								} else {
+									// Remove empty streaming text messages to avoid lingering placeholders
+									messages = messages.filter((_, i) => i !== streamingIdx);
+								}
 							}
 
 							// Add tool use message
