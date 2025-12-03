@@ -769,11 +769,60 @@ function createTabsStore() {
 			}
 
 			case 'system': {
-				// Handle system messages from SDK (e.g., /context command output)
+				// Handle system messages from SDK (e.g., /context command output, streaming events)
 				const subtype = data.subtype as string;
 				const systemData = data.data as Record<string, unknown>;
 
 				console.log('[WS] System message received:', subtype, systemData);
+
+				// Check if this is a streaming event (when include_partial_messages=true)
+				const streamEvent = systemData?.event as { type?: string; delta?: { type?: string; text?: string }; index?: number } | undefined;
+				if (streamEvent?.type) {
+					const eventType = streamEvent.type;
+					console.log(`[WS] Streaming event: ${eventType}`);
+
+					// Handle streaming text deltas
+					if (eventType === 'content_block_delta' && streamEvent.delta?.type === 'text_delta' && streamEvent.delta?.text) {
+						const deltaText = streamEvent.delta.text;
+						console.log(`[WS] Text delta received: len=${deltaText.length}`);
+
+						// Append delta text to the current streaming message
+						update(s => ({
+							...s,
+							tabs: s.tabs.map(tab => {
+								if (tab.id !== tabId) return tab;
+
+								const messages = [...tab.messages];
+								const streamingIdx = messages.findLastIndex(
+									m => m.type === 'text' && m.role === 'assistant' && m.streaming
+								);
+
+								if (streamingIdx !== -1) {
+									messages[streamingIdx] = {
+										...messages[streamingIdx],
+										content: messages[streamingIdx].content + deltaText
+									};
+								} else {
+									// Create new streaming message if none exists
+									messages.push({
+										id: `text-${Date.now()}`,
+										role: 'assistant',
+										content: deltaText,
+										type: 'text',
+										streaming: true
+									});
+								}
+
+								return { ...tab, messages };
+							})
+						}));
+						break;
+					}
+
+					// For other streaming events (message_start, content_block_start, etc.), just log
+					// These are informational and the actual text comes via content_block_delta
+					break;
+				}
 
 				// Extract content for display - for local_command, the content is in data.content
 				let displayContent = '';
