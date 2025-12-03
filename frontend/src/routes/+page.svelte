@@ -33,6 +33,7 @@
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import SubagentMessage from '$lib/components/SubagentMessage.svelte';
+	import QuickActions from '$lib/components/QuickActions.svelte';
 	import { executeCommand, isSlashCommand, syncAfterRewind, listCommands, type Command } from '$lib/api/commands';
 
 	// Configure marked for better code highlighting
@@ -1857,6 +1858,16 @@
 
 					<!-- Input Form -->
 					<form on:submit|preventDefault={() => handleSubmit(tabId)} class="flex items-center gap-2">
+						<!-- Quick Actions Button -->
+						<QuickActions
+							profileId={currentTab.profile}
+							onAction={(prompt) => {
+								tabInputs[tabId] = prompt;
+								handleSubmit(tabId);
+							}}
+							disabled={currentTab.isStreaming || !$claudeAuthenticated}
+						/>
+
 						<!-- File Button -->
 						<button
 							type="button"

@@ -142,6 +142,22 @@ def build_options_from_profile(
         if override_append:
             final_system_prompt += "\n\n" + override_append
 
+    # Build agents dict from profile config
+    agents_config = config.get("agents")
+    agents_dict = None
+    if agents_config:
+        # Convert to SDK format - agents_config is Dict[str, SubagentDefinition-like dict]
+        agents_dict = {}
+        for agent_name, agent_def in agents_config.items():
+            agents_dict[agent_name] = {
+                "description": agent_def.get("description", ""),
+                "prompt": agent_def.get("prompt", ""),
+            }
+            if agent_def.get("tools"):
+                agents_dict[agent_name]["tools"] = agent_def["tools"]
+            if agent_def.get("model"):
+                agents_dict[agent_name]["model"] = agent_def["model"]
+
     # Build options with all ClaudeAgentOptions fields
     options = ClaudeAgentOptions(
         # Core settings
@@ -175,6 +191,9 @@ def build_options_from_profile(
 
         # User identification
         user=config.get("user"),
+
+        # Subagents
+        agents=agents_dict,
     )
 
     # Apply working directory - project overrides profile cwd

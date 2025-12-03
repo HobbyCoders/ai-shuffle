@@ -1,9 +1,12 @@
 <script lang="ts">
 	/**
-	 * SubagentMessage - Collapsible display for subagent work
+	 * SubagentMessage - Enhanced display for subagent work
 	 *
-	 * Shows a summary of the subagent's work that can be expanded to see
-	 * all the tool calls and results from the subagent execution.
+	 * Features:
+	 * - Live progress tracking with tool call visualization
+	 * - Model badge showing which model is being used
+	 * - Collapsible with smooth transitions
+	 * - Mobile-responsive design
 	 */
 	import type { ChatMessage, SubagentChildMessage } from '$lib/stores/tabs';
 
@@ -13,41 +16,79 @@
 
 	let { message }: Props = $props();
 
-	// Track expanded state
-	let isExpanded = $state(false);
+	// Track expanded state - auto-expand when running
+	let isExpanded = $state(message.agentStatus === 'running');
 
 	// Compute status display
 	const statusConfig = $derived(() => {
 		switch (message.agentStatus) {
 			case 'running':
-				return { text: 'Running...', color: 'text-primary', bgColor: 'bg-primary/10', icon: 'spinner' };
+				return { text: 'Running...', color: 'text-primary', bgColor: 'bg-primary/10', borderColor: 'border-primary/30', icon: 'spinner' };
 			case 'completed':
-				return { text: 'Completed', color: 'text-green-500', bgColor: 'bg-green-500/10', icon: 'check' };
+				return { text: 'Completed', color: 'text-green-500', bgColor: 'bg-green-500/10', borderColor: 'border-green-500/30', icon: 'check' };
 			case 'error':
-				return { text: 'Error', color: 'text-red-500', bgColor: 'bg-red-500/10', icon: 'error' };
+				return { text: 'Error', color: 'text-red-500', bgColor: 'bg-red-500/10', borderColor: 'border-red-500/30', icon: 'error' };
 			default:
-				return { text: 'Pending', color: 'text-muted-foreground', bgColor: 'bg-muted/30', icon: 'pending' };
+				return { text: 'Pending', color: 'text-muted-foreground', bgColor: 'bg-muted/30', borderColor: 'border-border', icon: 'pending' };
 		}
 	});
 
 	// Count children by type
 	const childCounts = $derived(() => {
 		const children = message.agentChildren || [];
+		const toolUseChildren = children.filter(c => c.type === 'tool_use');
+		const runningTools = toolUseChildren.filter(c => c.toolStatus === 'running').length;
+		const completedTools = toolUseChildren.filter(c => c.toolStatus === 'complete').length;
+
 		return {
 			total: children.length,
-			toolUse: children.filter(c => c.type === 'tool_use').length,
+			toolUse: toolUseChildren.length,
 			toolResult: children.filter(c => c.type === 'tool_result').length,
-			text: children.filter(c => c.type === 'text').length
+			text: children.filter(c => c.type === 'text').length,
+			runningTools,
+			completedTools
 		};
 	});
+
+	// Progress percentage
+	const progressPercent = $derived(() => {
+		if (childCounts().toolUse === 0) return 0;
+		return Math.round((childCounts().completedTools / childCounts().toolUse) * 100);
+	});
+
+	// Get model display name
+	function getModelBadge(agentType?: string): { label: string; color: string } {
+		// Agent types often indicate model in the SDK
+		switch (agentType?.toLowerCase()) {
+			case 'explore':
+			case 'plan':
+				return { label: 'Fast', color: 'bg-blue-500/20 text-blue-500' };
+			default:
+				return { label: agentType || 'Agent', color: 'bg-purple-500/20 text-purple-500' };
+		}
+	}
 
 	function formatToolInput(input: Record<string, unknown> | undefined): string {
 		if (!input) return '';
 		try {
+			// Smart formatting for common tool inputs
+			if (input.file_path) return String(input.file_path);
+			if (input.pattern) return String(input.pattern);
+			if (input.command) return String(input.command).substring(0, 100);
+			if (input.query) return String(input.query).substring(0, 100);
 			return JSON.stringify(input, null, 2);
 		} catch {
 			return String(input);
 		}
+	}
+
+	function getToolInputPreview(input: Record<string, unknown> | undefined): string {
+		if (!input) return '';
+		// Return a short preview for the collapsed view
+		if (input.file_path) return String(input.file_path);
+		if (input.pattern) return String(input.pattern);
+		if (input.command) return String(input.command).substring(0, 50) + (String(input.command).length > 50 ? '...' : '');
+		return '';
 	}
 
 	function truncateContent(content: string, maxLength: number = 500): string {
@@ -57,11 +98,11 @@
 </script>
 
 <!-- Main subagent card -->
-<div class="w-full border border-border rounded-lg overflow-hidden shadow-sm {statusConfig().bgColor}">
+<div class="w-full border {statusConfig().borderColor} rounded-lg overflow-hidden shadow-sm {statusConfig().bgColor}">
 	<!-- Header - always visible -->
 	<button
 		onclick={() => isExpanded = !isExpanded}
-		class="w-full px-4 py-3 flex items-center gap-3 cursor-pointer hover:bg-muted/30 transition-colors text-left"
+		class="w-full px-3 sm:px-4 py-2.5 sm:py-3 flex items-center gap-2 sm:gap-3 cursor-pointer hover:bg-muted/30 transition-colors text-left"
 	>
 		<!-- Status icon -->
 		{#if statusConfig().icon === 'spinner'}
@@ -85,11 +126,12 @@
 
 		<!-- Agent info -->
 		<div class="flex-1 min-w-0">
-			<div class="flex items-center gap-2 flex-wrap">
-				<span class="font-semibold text-foreground">Subagent</span>
+			<div class="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+				<!-- Agent type badge -->
 				{#if message.agentType}
-					<span class="px-2 py-0.5 text-xs font-medium bg-primary/20 text-primary rounded-full">
-						{message.agentType}
+					{@const badge = getModelBadge(message.agentType)}
+					<span class="px-1.5 sm:px-2 py-0.5 text-xs font-medium {badge.color} rounded-full">
+						{badge.label}
 					</span>
 				{/if}
 				<span class="text-sm {statusConfig().color}">
@@ -97,15 +139,26 @@
 				</span>
 			</div>
 			{#if message.agentDescription}
-				<p class="text-sm text-muted-foreground mt-0.5 truncate">
+				<p class="text-xs sm:text-sm text-muted-foreground mt-0.5 line-clamp-1 sm:line-clamp-none sm:truncate">
 					{message.agentDescription}
 				</p>
 			{/if}
 		</div>
 
-		<!-- Stats badge -->
-		{#if childCounts().total > 0}
-			<div class="flex items-center gap-2 text-xs text-muted-foreground">
+		<!-- Progress indicator (when running) -->
+		{#if message.agentStatus === 'running' && childCounts().toolUse > 0}
+			<div class="hidden sm:flex items-center gap-2 text-xs text-muted-foreground">
+				<div class="w-16 h-1.5 bg-muted rounded-full overflow-hidden">
+					<div
+						class="h-full bg-primary transition-all duration-300"
+						style="width: {progressPercent()}%"
+					></div>
+				</div>
+				<span>{childCounts().completedTools}/{childCounts().toolUse}</span>
+			</div>
+		{:else if childCounts().toolUse > 0}
+			<!-- Stats badge (when not running) -->
+			<div class="hidden sm:flex items-center gap-2 text-xs text-muted-foreground">
 				<span>{childCounts().toolUse} tool{childCounts().toolUse !== 1 ? 's' : ''}</span>
 			</div>
 		{/if}
@@ -120,6 +173,21 @@
 			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 		</svg>
 	</button>
+
+	<!-- Mobile progress bar (shown below header when running) -->
+	{#if message.agentStatus === 'running' && childCounts().toolUse > 0}
+		<div class="sm:hidden px-3 pb-2">
+			<div class="flex items-center gap-2 text-xs text-muted-foreground">
+				<div class="flex-1 h-1 bg-muted rounded-full overflow-hidden">
+					<div
+						class="h-full bg-primary transition-all duration-300"
+						style="width: {progressPercent()}%"
+					></div>
+				</div>
+				<span>{childCounts().completedTools}/{childCounts().toolUse}</span>
+			</div>
+		</div>
+	{/if}
 
 	<!-- Expanded content -->
 	{#if isExpanded}

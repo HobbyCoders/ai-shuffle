@@ -477,14 +477,25 @@ def update_profile(
 
 
 def delete_profile(profile_id: str) -> bool:
-    """Delete a profile (only non-builtin)"""
+    """Delete a profile"""
     existing = get_profile(profile_id)
-    if not existing or existing["is_builtin"]:
+    if not existing:
         return False
 
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM profiles WHERE id = ? AND is_builtin = FALSE", (profile_id,))
+        cursor.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+        return cursor.rowcount > 0
+
+
+def set_profile_builtin(profile_id: str, is_builtin: bool) -> bool:
+    """Set the is_builtin flag for a profile"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE profiles SET is_builtin = ?, updated_at = ? WHERE id = ?",
+            (is_builtin, datetime.utcnow().isoformat(), profile_id)
+        )
         return cursor.rowcount > 0
 
 
