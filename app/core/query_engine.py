@@ -15,7 +15,7 @@ from typing import Optional, Dict, Any, AsyncGenerator
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient
+from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient, AgentDefinition
 from claude_agent_sdk import (
     AssistantMessage, UserMessage, TextBlock, ToolUseBlock, ToolResultBlock,
     ResultMessage, SystemMessage
@@ -152,6 +152,7 @@ def build_options_from_profile(
 
     # Build agents dict from profile's enabled_agents
     # Profile stores a list of subagent IDs that reference global subagents in the database
+    # The SDK expects AgentDefinition dataclass instances, not raw dicts
     enabled_agent_ids = config.get("enabled_agents", [])
     agents_dict = None
     if enabled_agent_ids:
@@ -160,14 +161,13 @@ def build_options_from_profile(
             # Look up subagent from global database
             subagent = database.get_subagent(agent_id)
             if subagent:
-                agents_dict[agent_id] = {
-                    "description": subagent.get("description", ""),
-                    "prompt": subagent.get("prompt", ""),
-                }
-                if subagent.get("tools"):
-                    agents_dict[agent_id]["tools"] = subagent["tools"]
-                if subagent.get("model"):
-                    agents_dict[agent_id]["model"] = subagent["model"]
+                # Create AgentDefinition dataclass instance
+                agents_dict[agent_id] = AgentDefinition(
+                    description=subagent.get("description", ""),
+                    prompt=subagent.get("prompt", ""),
+                    tools=subagent.get("tools"),
+                    model=subagent.get("model")
+                )
             else:
                 logger.warning(f"Subagent not found: {agent_id}")
 
