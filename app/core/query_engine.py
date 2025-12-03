@@ -18,8 +18,9 @@ from datetime import datetime
 from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient, AgentDefinition
 from claude_agent_sdk import (
     AssistantMessage, UserMessage, TextBlock, ToolUseBlock, ToolResultBlock,
-    ResultMessage, SystemMessage, StreamEvent
+    ResultMessage, SystemMessage
 )
+from claude_agent_sdk.types import StreamEvent
 
 from app.db import database
 from app.core.config import settings
