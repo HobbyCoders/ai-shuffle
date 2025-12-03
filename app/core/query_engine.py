@@ -1374,6 +1374,7 @@ async def stream_to_websocket(
     task_tool_uses = {}  # Track Task (subagent) tool uses by tool_id
     metadata = {}
     interrupted = False
+    include_partial = options.include_partial_messages  # Track if streaming events are enabled
 
     try:
         await state.client.query(prompt)
@@ -1493,9 +1494,12 @@ async def stream_to_websocket(
                                 "content": block.text
                             }
                         else:
-                            logger.debug(f"[WS] Text chunk len={len(block.text)} for session={session_id}")
+                            # When include_partial_messages=True, text was already streamed via stream_delta
+                            # Only send chunk when partial messages is disabled
                             response_text.append(block.text)
-                            yield {"type": "chunk", "content": block.text}
+                            if not include_partial:
+                                logger.debug(f"[WS] Text chunk len={len(block.text)} for session={session_id}")
+                                yield {"type": "chunk", "content": block.text}
 
                     elif isinstance(block, ToolUseBlock):
                         tool_id = getattr(block, 'id', None)
