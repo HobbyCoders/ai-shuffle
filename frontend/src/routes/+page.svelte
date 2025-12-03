@@ -1720,6 +1720,8 @@
 								</div>
 							{:else if message.type === 'text' || !message.type}
 								<!-- Assistant Message - Anvil Style -->
+								{@const currentProfile = $profiles.find(p => p.id === currentTab.profile)}
+								{@const hasPartialMessages = currentProfile?.config?.include_partial_messages !== false}
 								<div class="flex gap-3 w-full">
 									<!-- Avatar -->
 									<div class="flex-shrink-0 w-8 h-8 rounded-full bg-accent flex items-center justify-center shadow-s">
@@ -1747,7 +1749,8 @@
 													{#if message.streaming}
 														<span class="inline-block w-2 h-4 ml-0.5 bg-primary animate-pulse"></span>
 													{/if}
-												{:else if message.streaming}
+												{:else if message.streaming && !hasPartialMessages}
+													<!-- Only show placeholder dots when partial messages is disabled -->
 													<div class="flex gap-1 py-2">
 														<span class="w-2 h-2 bg-muted-foreground rounded-full animate-pulse"></span>
 														<span class="w-2 h-2 bg-muted-foreground rounded-full animate-pulse" style="animation-delay: 200ms"></span>
