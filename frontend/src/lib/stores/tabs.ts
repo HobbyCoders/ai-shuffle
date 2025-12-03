@@ -488,6 +488,7 @@ function createTabsStore() {
 			}
 
 			case 'chunk': {
+				console.log(`[WS] Chunk received: len=${(data.content as string).length}`);
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
@@ -604,14 +605,19 @@ function createTabsStore() {
 							}
 						}
 
-						// Add streaming text placeholder for continuation
-						messages.push({
-							id: `text-${Date.now()}-cont`,
-							role: 'assistant',
-							content: '',
-							type: 'text',
-							streaming: true
-						});
+						// Add streaming text placeholder for continuation (only if not already present)
+						const hasStreamingText = messages.some(
+							m => m.type === 'text' && m.role === 'assistant' && m.streaming
+						);
+						if (!hasStreamingText) {
+							messages.push({
+								id: `text-${Date.now()}-cont`,
+								role: 'assistant',
+								content: '',
+								type: 'text',
+								streaming: true
+							});
+						}
 
 						return { ...tab, messages };
 					})
@@ -622,6 +628,7 @@ function createTabsStore() {
 			case 'done': {
 				const metadata = data.metadata as Record<string, unknown>;
 				const sessionId = data.session_id as string;
+				console.log('[WS] Done event received, cleaning up streaming messages');
 
 				update(s => ({
 					...s,
@@ -1013,14 +1020,19 @@ function createTabsStore() {
 							return m;
 						});
 
-						// Add new streaming text placeholder for main agent to continue
-						messages.push({
-							id: `text-${Date.now()}-cont`,
-							role: 'assistant' as const,
-							content: '',
-							type: 'text' as const,
-							streaming: true
-						});
+						// Add new streaming text placeholder for main agent to continue (only if not already present)
+						const hasStreamingText = messages.some(
+							m => m.type === 'text' && m.role === 'assistant' && m.streaming
+						);
+						if (!hasStreamingText) {
+							messages.push({
+								id: `text-${Date.now()}-cont`,
+								role: 'assistant' as const,
+								content: '',
+								type: 'text' as const,
+								streaming: true
+							});
+						}
 
 						return { ...tab, messages };
 					})

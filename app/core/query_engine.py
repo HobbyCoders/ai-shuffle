@@ -1340,7 +1340,7 @@ async def stream_to_websocket(
         del _active_sessions[session_id]
 
     # Create new client
-    logger.info(f"[WS] Creating ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
+    logger.info(f"[WS] Creating ClaudeSDKClient for session {session_id} (resume={resume_id is not None}, include_partial={options.include_partial_messages})")
     client = ClaudeSDKClient(options=options)
 
     # Connect
@@ -1413,12 +1413,14 @@ async def stream_to_websocket(
                         # Check if this text is from a subagent
                         if parent_tool_id and parent_tool_id in task_tool_uses:
                             # Text from subagent - send as subagent_chunk
+                            logger.debug(f"[WS] Subagent chunk len={len(block.text)} for agent={parent_tool_id}")
                             yield {
                                 "type": "subagent_chunk",
                                 "agent_id": parent_tool_id,
                                 "content": block.text
                             }
                         else:
+                            logger.debug(f"[WS] Text chunk len={len(block.text)} for session={session_id}")
                             response_text.append(block.text)
                             yield {"type": "chunk", "content": block.text}
 
