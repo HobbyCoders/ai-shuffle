@@ -2362,8 +2362,8 @@
 					<!-- Hidden file input -->
 					<input type="file" bind:this={fileInput} on:change={handleFileUpload} class="hidden" multiple />
 
-					<!-- Session Overrides (Model & Permission Mode) -->
-					{#if currentTab}
+					<!-- Session Overrides (Model & Permission Mode) - Admin only -->
+					{#if currentTab && $isAdmin}
 					{@const currentProfile = $profiles.find(p => p.id === currentTab.profile)}
 					{@const profileModel = currentProfile?.config?.model || 'sonnet'}
 					{@const profilePermissionMode = currentProfile?.config?.permission_mode || 'default'}
