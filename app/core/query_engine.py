@@ -234,7 +234,8 @@ async def execute_query(
     profile_id: str,
     project_id: Optional[str] = None,
     overrides: Optional[Dict[str, Any]] = None,
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None,
+    api_user_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """Execute a non-streaming query"""
 
@@ -266,7 +267,8 @@ async def execute_query(
             session_id=session_id,
             profile_id=profile_id,
             project_id=project_id,
-            title=title
+            title=title,
+            api_user_id=api_user_id
         )
         resume_id = None
 

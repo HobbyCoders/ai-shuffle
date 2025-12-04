@@ -60,7 +60,8 @@ async def one_shot_query(
             prompt=request.prompt,
             profile_id=profile_id,
             project_id=project_id,
-            overrides=overrides
+            overrides=overrides,
+            api_user_id=api_user.get("id")
         )
 
         return {
@@ -112,7 +113,8 @@ async def stream_one_shot_query(
                 prompt=request.prompt,
                 profile_id=profile_id,
                 project_id=project_id,
-                overrides=overrides
+                overrides=overrides,
+                api_user_id=api_user.get("id")
             ):
                 event_type = event.get("type", "message")
                 data = json.dumps(event)
@@ -166,7 +168,8 @@ async def conversation(
             profile_id=profile_id,
             project_id=project_id,
             overrides=overrides,
-            session_id=request.session_id
+            session_id=request.session_id,
+            api_user_id=api_user.get("id")
         )
 
         return {
