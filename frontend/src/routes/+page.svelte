@@ -1116,7 +1116,8 @@
 								</div>
 								<div class="space-y-1">
 									{#each $allTabs as tab}
-										{@const tabSession = { id: tab.sessionId || tab.id, title: tab.title, status: 'active', total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
+										{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
+										{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
 										<SessionCard
 											session={tabSession}
 											isOpen={true}
@@ -1497,7 +1498,8 @@
 							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium px-2 mb-2">Open ({$allTabs.length})</div>
 							<div class="space-y-1">
 								{#each $allTabs as tab}
-									{@const tabSession = { id: tab.sessionId || tab.id, title: tab.title, status: 'active', total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
+									{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
+									{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
 									<SessionCard
 										session={tabSession}
 										isOpen={true}
