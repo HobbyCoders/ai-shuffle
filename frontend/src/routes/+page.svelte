@@ -1247,6 +1247,30 @@
 				<!-- Admin Tab Content -->
 				{#if sidebarTab === 'admin' && $isAdmin}
 					<div class="flex-1 overflow-y-auto px-3 pb-3 pt-2">
+						<!-- Open Tabs Section (Admin) -->
+						{#if $allTabs.length > 0}
+							<div class="mb-4">
+								<div class="flex items-center justify-between px-2 mb-2">
+									<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">Open ({$allTabs.length})</div>
+								</div>
+								<div class="space-y-1">
+									{#each $allTabs as tab}
+										{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
+										{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
+										<SessionCard
+											session={tabSession}
+											isOpen={true}
+											isActive={tab.id === $activeTabId}
+											isStreaming={tab.isStreaming}
+											showCloseButton={$allTabs.length > 1}
+											on:click={() => { tabs.setActiveTab(tab.id); closeSidebar(); }}
+											on:close={(e) => handleCloseTab(e, tab.id)}
+										/>
+									{/each}
+								</div>
+							</div>
+						{/if}
+
 						<!-- API User Filter -->
 						<div class="mb-3">
 							<label class="text-xs text-muted-foreground uppercase tracking-wider px-2 block mb-1">Filter by User</label>
@@ -1615,7 +1639,47 @@
 					</div>
 				{:else if sidebarTab === 'admin'}
 					<!-- Admin Tab Content (Mobile) -->
+					<!-- Open Tabs Section (Mobile Admin) -->
+					{#if $allTabs.length > 0}
+						<div class="mb-4">
+							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium px-2 mb-2">Open ({$allTabs.length})</div>
+							<div class="space-y-1">
+								{#each $allTabs as tab}
+									{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
+									{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
+									<SessionCard
+										session={tabSession}
+										isOpen={true}
+										isActive={tab.id === $activeTabId}
+										isStreaming={tab.isStreaming}
+										showCloseButton={$allTabs.length > 1}
+										abbreviated={true}
+										on:click={() => { tabs.setActiveTab(tab.id); sidebarOpen = false; }}
+										on:close={(e) => handleCloseTab(e, tab.id)}
+									/>
+								{/each}
+							</div>
+						</div>
+					{/if}
+
 					<!-- API User Filter -->
+					<div class="flex items-center justify-between px-2 mb-2">
+						<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">API User Sessions</div>
+						<button
+							on:click={() => tabs.loadAdminSessions($adminSessionsFilter)}
+							class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+							title="Refresh sessions"
+						>
+							<svg
+								class="w-3.5 h-3.5"
+								fill="none"
+								stroke="currentColor"
+								viewBox="0 0 24 24"
+							>
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+							</svg>
+						</button>
+					</div>
 					<div class="mb-3">
 						<label class="text-xs text-muted-foreground uppercase tracking-wider px-2 block mb-1">Filter by User</label>
 						<select
