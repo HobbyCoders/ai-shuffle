@@ -316,19 +316,19 @@ function createTabsStore() {
 			console.log(`[Tab ${tabId}] WebSocket connected`);
 			updateTab(tabId, { wsConnected: true, error: null });
 
-			// If reconnecting and tab has a session, reload it to get latest messages
-			// But only if not currently streaming (don't interrupt active streams)
+			// If reconnecting and tab has a session, always reload to get latest messages
+			// The backend will tell us if streaming is still in progress and send the buffer
 			if (isReconnect) {
 				const tab = getTab(tabId);
-				if (tab?.sessionId && !tab.isStreaming) {
+				if (tab?.sessionId) {
 					console.log(`[Tab ${tabId}] Reloading session after reconnect:`, tab.sessionId);
 					// Use the WebSocket to request session reload
+					// The backend will return isStreaming=true with buffer if still active,
+					// or isStreaming=false with complete history if finished
 					ws.send(JSON.stringify({
 						type: 'load_session',
 						session_id: tab.sessionId
 					}));
-				} else if (tab?.isStreaming) {
-					console.log(`[Tab ${tabId}] Skipping session reload - streaming in progress`);
 				}
 			}
 
@@ -472,14 +472,36 @@ function createTabsStore() {
 					return chatMessage;
 				}) || [];
 
+				// Handle streaming state from backend
+				const isStreaming = data.isStreaming as boolean || false;
+				const streamingBuffer = data.streamingBuffer as Array<Record<string, unknown>> | undefined;
+
+				// If session is actively streaming and has buffered content, merge it
+				let finalMessages = messages;
+				if (isStreaming && streamingBuffer && streamingBuffer.length > 0) {
+					console.log(`[Tab ${tabId}] Late-joining streaming session, merging buffer:`, streamingBuffer.length, 'messages');
+					const bufferMessages: ChatMessage[] = streamingBuffer.map((m) => ({
+						id: `buffer-${Date.now()}-${Math.random()}`,
+						role: 'assistant' as const,
+						content: (m.content as string) || '',
+						type: (m.type || m.chunk_type) as MessageType,
+						toolName: m.tool_name as string | undefined,
+						toolId: m.tool_id as string | undefined,
+						toolInput: m.tool_input as Record<string, unknown> | undefined,
+						streaming: (m.streaming as boolean) ?? true
+					}));
+					finalMessages = [...messages, ...bufferMessages];
+				}
+
 				updateTab(tabId, {
 					sessionId: data.session_id as string,
-					messages
+					messages: finalMessages,
+					isStreaming: isStreaming
 				});
 
 				// Update tab title based on first message
-				if (messages.length > 0 && messages[0].role === 'user') {
-					const title = messages[0].content.substring(0, 30) + (messages[0].content.length > 30 ? '...' : '');
+				if (finalMessages.length > 0 && finalMessages[0].role === 'user') {
+					const title = finalMessages[0].content.substring(0, 30) + (finalMessages[0].content.length > 30 ? '...' : '');
 					updateTab(tabId, { title });
 				}
 				break;
