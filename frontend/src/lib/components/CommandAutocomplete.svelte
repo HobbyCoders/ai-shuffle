@@ -160,9 +160,9 @@
 </script>
 
 {#if visible && filteredCommands.length > 0}
-  <div class="absolute bottom-full left-0 right-0 mb-2 bg-gray-800 border border-gray-700 rounded-lg shadow-xl max-h-64 overflow-hidden z-50">
-    <div class="px-3 py-2 border-b border-gray-700 bg-gray-750">
-      <span class="text-xs text-gray-400">
+  <div class="absolute bottom-full left-0 right-0 mb-2 bg-popover border border-border rounded-lg shadow-lg max-h-64 overflow-hidden z-50">
+    <div class="px-3 py-2 border-b border-border bg-muted/30">
+      <span class="text-xs text-muted-foreground">
         {filteredCommands.length} command{filteredCommands.length !== 1 ? 's' : ''} available
       </span>
     </div>
@@ -172,30 +172,30 @@
         <li>
           <button
             type="button"
-            class="w-full px-3 py-2 flex items-start gap-3 text-left hover:bg-gray-700 transition-colors {index === selectedIndex ? 'bg-gray-700' : ''}"
+            class="w-full px-3 py-2 flex items-start gap-3 text-left hover:bg-accent transition-colors {index === selectedIndex ? 'bg-accent' : ''}"
             onclick={() => handleSelect(command)}
             onmouseenter={() => selectedIndex = index}
           >
             <div class="flex-shrink-0">
-              <span class="text-blue-400 font-mono text-sm">{command.display}</span>
+              <span class="text-primary font-mono text-sm">{command.display}</span>
               {#if command.argument_hint}
-                <span class="text-gray-500 font-mono text-xs ml-1">{command.argument_hint}</span>
+                <span class="text-muted-foreground font-mono text-xs ml-1">{command.argument_hint}</span>
               {/if}
             </div>
             <div class="flex-1 min-w-0">
-              <p class="text-sm text-gray-300 truncate">{command.description}</p>
+              <p class="text-sm text-foreground/80 truncate">{command.description}</p>
             </div>
             <div class="flex-shrink-0">
               {#if command.type === 'interactive'}
-                <span class="px-1.5 py-0.5 text-xs bg-purple-900/50 text-purple-300 rounded">
+                <span class="px-1.5 py-0.5 text-xs bg-purple-500/20 text-purple-400 rounded">
                   interactive
                 </span>
               {:else if command.type === 'sdk_builtin'}
-                <span class="px-1.5 py-0.5 text-xs bg-green-900/50 text-green-300 rounded">
+                <span class="px-1.5 py-0.5 text-xs bg-success/20 text-success rounded">
                   builtin
                 </span>
               {:else}
-                <span class="px-1.5 py-0.5 text-xs bg-blue-900/50 text-blue-300 rounded">
+                <span class="px-1.5 py-0.5 text-xs bg-primary/20 text-primary rounded">
                   custom
                 </span>
               {/if}
@@ -205,16 +205,10 @@
       {/each}
     </ul>
 
-    <div class="px-3 py-1.5 border-t border-gray-700 bg-gray-750 text-xs text-gray-500">
-      <kbd class="px-1 py-0.5 bg-gray-700 rounded mr-1">Tab</kbd> or
-      <kbd class="px-1 py-0.5 bg-gray-700 rounded mx-1">Enter</kbd> to select
-      <kbd class="px-1 py-0.5 bg-gray-700 rounded mx-1">Esc</kbd> to close
+    <div class="px-3 py-1.5 border-t border-border bg-muted/30 text-xs text-muted-foreground">
+      <kbd class="px-1 py-0.5 bg-muted rounded mr-1">Tab</kbd> or
+      <kbd class="px-1 py-0.5 bg-muted rounded mx-1">Enter</kbd> to select
+      <kbd class="px-1 py-0.5 bg-muted rounded mx-1">Esc</kbd> to close
     </div>
   </div>
 {/if}
-
-<style>
-  .bg-gray-750 {
-    background-color: rgb(42, 42, 54);
-  }
-</style>

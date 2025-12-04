@@ -32,6 +32,7 @@
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import SubagentMessage from '$lib/components/SubagentMessage.svelte';
 	import QuickActions from '$lib/components/QuickActions.svelte';
+	import ChatBar from '$lib/components/ChatBar.svelte';
 	import SubagentManager from '$lib/components/SubagentManager.svelte';
 	import SessionCard from '$lib/components/SessionCard.svelte';
 	import { executeCommand, isSlashCommand, syncAfterRewind, listCommands, type Command } from '$lib/api/commands';
@@ -191,6 +192,7 @@
 	let fileInput: HTMLInputElement;
 	let isUploading = false;
 	let textareas: Record<string, HTMLTextAreaElement> = {};
+	let chatBarRefs: Record<string, ChatBar> = {};
 
 	// Terminal modal state for /resume and other interactive commands
 	let showTerminalModal = false;
@@ -2185,248 +2187,44 @@
 				{/if}
 			</div>
 
-			<!-- Input Area -->
-			<div class="border-t border-border bg-background p-4 pb-[4.5rem] lg:pb-4">
-				<div class="max-w-5xl mx-auto">
-					<!-- Uploaded Files -->
-					{#if (tabUploadedFiles[tabId] || []).length > 0}
-						<div class="mb-3 flex flex-wrap gap-2">
-							{#each tabUploadedFiles[tabId] as file, index}
-								<div class="flex items-center gap-1.5 bg-card border border-border text-sm px-2.5 py-1 rounded-lg shadow-s">
-									<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-									</svg>
-									<span class="text-foreground truncate max-w-[120px]" title={file.path}>{file.filename}</span>
-									<button on:click={() => removeUploadedFile(tabId, index)} class="text-muted-foreground hover:text-destructive">
-										<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-										</svg>
-									</button>
-								</div>
-							{/each}
-						</div>
-					{/if}
+			<!-- Hidden file input -->
+			<input type="file" bind:this={fileInput} on:change={handleFileUpload} class="hidden" multiple />
 
-					<!-- Hidden file input -->
-					<input type="file" bind:this={fileInput} on:change={handleFileUpload} class="hidden" multiple />
-
-					<!-- Session Overrides (Model & Permission Mode) -->
-					{#if currentTab}
-					{@const currentProfile = $profiles.find(p => p.id === currentTab.profile)}
-					{@const profileModel = currentProfile?.config?.model || 'sonnet'}
-					{@const profilePermissionMode = currentProfile?.config?.permission_mode || 'default'}
-					{@const effectiveModel = currentTab.modelOverride || profileModel}
-					{@const effectiveMode = currentTab.permissionModeOverride || profilePermissionMode}
-					{@const modelLabels = { sonnet: 'Sonnet', opus: 'Opus', haiku: 'Haiku' } as Record<string, string>}
-					{@const modeLabels = { default: 'Ask', acceptEdits: 'Auto-Accept', plan: 'Plan', bypassPermissions: 'Bypass' } as Record<string, string>}
-					<div class="mb-2 flex flex-wrap items-center justify-center gap-2">
-						<!-- Model Selector (Popup) -->
-						<div class="relative inline-block">
-							<button
-								type="button"
-								on:click={() => { showModelPopup = !showModelPopup; showModePopup = false; }}
-								class="flex items-center gap-1.5 bg-card border border-border rounded-lg px-2.5 py-1.5 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer hover:bg-accent transition-colors {currentTab.modelOverride ? 'border-primary bg-primary/10 font-medium' : ''}"
-								disabled={currentTab.isStreaming}
-								title="Select model for next message"
-							>
-								<span>{modelLabels[effectiveModel] || effectiveModel}</span>
-								<svg class="w-3 h-3 text-muted-foreground transition-transform {showModelPopup ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7" />
-								</svg>
-							</button>
-							<!-- Popup Menu (appears above) -->
-							{#if showModelPopup}
-								<!-- Invisible backdrop to catch outside clicks -->
-								<div class="fixed inset-0 z-40" on:click={() => showModelPopup = false}></div>
-								<div class="absolute bottom-full left-0 mb-1 bg-card border border-border rounded-lg shadow-lg overflow-hidden z-50 min-w-[100px]">
-									{#each [['sonnet', 'Sonnet'], ['opus', 'Opus'], ['haiku', 'Haiku']] as [value, label]}
-										<button
-											type="button"
-											on:click={() => {
-												if (value === profileModel) {
-													tabs.setTabModelOverride(tabId, null);
-												} else {
-													tabs.setTabModelOverride(tabId, value);
-												}
-												showModelPopup = false;
-											}}
-											class="w-full px-3 py-2 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-2 {effectiveModel === value ? 'bg-accent text-foreground font-medium' : 'text-muted-foreground'}"
-										>
-											<span>{label}</span>
-											{#if effectiveModel === value}
-												<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-												</svg>
-											{/if}
-										</button>
-									{/each}
-								</div>
-							{/if}
-						</div>
-
-						<!-- Permission Mode Selector (Popup) -->
-						<div class="relative inline-block">
-							<button
-								type="button"
-								on:click={() => { showModePopup = !showModePopup; showModelPopup = false; }}
-								class="flex items-center gap-1.5 bg-card border border-border rounded-lg px-2.5 py-1.5 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer hover:bg-accent transition-colors {currentTab.permissionModeOverride ? 'border-primary bg-primary/10 font-medium' : ''}"
-								disabled={currentTab.isStreaming}
-								title="Select permission mode for next message"
-							>
-								<span>{modeLabels[effectiveMode] || effectiveMode}</span>
-								<svg class="w-3 h-3 text-muted-foreground transition-transform {showModePopup ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7" />
-								</svg>
-							</button>
-							<!-- Popup Menu (appears above) -->
-							{#if showModePopup}
-								<!-- Invisible backdrop to catch outside clicks -->
-								<div class="fixed inset-0 z-40" on:click={() => showModePopup = false}></div>
-								<div class="absolute bottom-full left-0 mb-1 bg-card border border-border rounded-lg shadow-lg overflow-hidden z-50 min-w-[120px]">
-									{#each [['default', 'Ask'], ['acceptEdits', 'Auto-Accept'], ['plan', 'Plan'], ['bypassPermissions', 'Bypass']] as [value, label]}
-										<button
-											type="button"
-											on:click={() => {
-												if (value === profilePermissionMode) {
-													tabs.setTabPermissionModeOverride(tabId, null);
-												} else {
-													tabs.setTabPermissionModeOverride(tabId, value);
-												}
-												showModePopup = false;
-											}}
-											class="w-full px-3 py-2 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-2 {effectiveMode === value ? 'bg-accent text-foreground font-medium' : 'text-muted-foreground'}"
-										>
-											<span>{label}</span>
-											{#if effectiveMode === value}
-												<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-												</svg>
-											{/if}
-										</button>
-									{/each}
-								</div>
-							{/if}
-						</div>
-
-						<!-- Reset to defaults button (only show if any override is set) -->
-						{#if currentTab.modelOverride || currentTab.permissionModeOverride}
-							<button
-								type="button"
-								on:click={() => {
-									tabs.setTabModelOverride(tabId, null);
-									tabs.setTabPermissionModeOverride(tabId, null);
-								}}
-								class="text-xs text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1 px-1.5 py-1 rounded hover:bg-accent"
-								title="Reset to profile defaults"
-								disabled={currentTab.isStreaming}
-							>
-								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-								</svg>
-								<span class="hidden sm:inline">Reset</span>
-							</button>
-						{/if}
-					</div>
-					{/if}
-
-					<!-- Input Form -->
-					<form on:submit|preventDefault={() => handleSubmit(tabId)} class="flex items-center gap-2">
-						<!-- Quick Actions Button -->
-						<QuickActions
-							profileId={currentTab.profile}
-							onAction={(prompt) => {
-								tabInputs[tabId] = prompt;
-								handleSubmit(tabId);
-							}}
-							disabled={currentTab.isStreaming || !$claudeAuthenticated}
-						/>
-
-						<!-- File Button -->
-						<button
-							type="button"
-							on:click={triggerFileUpload}
-							class="flex-shrink-0 w-10 h-10 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors disabled:opacity-50"
-							disabled={currentTab.isStreaming || !$claudeAuthenticated || isUploading}
-							title={currentTab.project ? 'Upload file' : 'Select a project to upload files'}
-						>
-							{#if isUploading}
-								<svg class="w-5 h-5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-									<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-								</svg>
-							{:else}
-								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-								</svg>
-							{/if}
-						</button>
-
-						<!-- Textarea with Command and File Autocomplete -->
-						<div class="flex-1 relative">
-							<!-- Command Autocomplete -->
-							<CommandAutocomplete
-								bind:this={commandAutocompleteRefs[tabId]}
-								inputValue={tabInputs[tabId] || ''}
-								projectId={currentTab.project}
-								visible={showCommandAutocomplete[tabId] || false}
-								onSelect={(cmd) => handleCommandSelect(tabId, cmd)}
-								onClose={() => {
-									showCommandAutocomplete[tabId] = false;
-									showCommandAutocomplete = showCommandAutocomplete;
-								}}
-							/>
-
-							<!-- File Autocomplete (@ mentions) -->
-							<FileAutocomplete
-								bind:this={fileAutocompleteRefs[tabId]}
-								inputValue={tabInputs[tabId] || ''}
-								projectId={currentTab.project}
-								visible={showFileAutocomplete[tabId] || false}
-								onSelect={(file) => handleFileSelect(tabId, file)}
-								onClose={() => {
-									showFileAutocomplete[tabId] = false;
-									showFileAutocomplete = showFileAutocomplete;
-								}}
-							/>
-
-							<textarea
-								bind:this={textareas[tabId]}
-								bind:value={tabInputs[tabId]}
-								on:input={() => handleInputChange(tabId)}
-								on:keydown={(e) => handleKeyDown(e, tabId)}
-								placeholder="Message Claude... (/ commands, @ files)"
-								class="w-full bg-card border border-border rounded-lg px-4 py-3 sm:py-2.5 text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:ring-2 focus:ring-ring h-[80px] sm:h-[44px] leading-normal shadow-s overflow-y-auto"
-								rows="1"
-								disabled={currentTab.isStreaming || !$claudeAuthenticated}
-							></textarea>
-						</div>
-
-						<!-- Send/Stop Button -->
-						{#if currentTab.isStreaming}
-							<button
-								type="button"
-								on:click={() => tabs.stopGeneration(tabId)}
-								class="flex-shrink-0 w-10 h-10 flex items-center justify-center bg-destructive/20 text-destructive hover:bg-destructive/30 rounded-lg transition-colors shadow-s"
-							>
-								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
-								</svg>
-							</button>
-						{:else}
-							<button
-								type="submit"
-								class="flex-shrink-0 w-10 h-10 flex items-center justify-center bg-primary hover:opacity-90 text-primary-foreground rounded-lg transition-colors disabled:opacity-50 shadow-s"
-								disabled={!(tabInputs[tabId] || '').trim() || !$claudeAuthenticated}
-							>
-								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-								</svg>
-							</button>
-						{/if}
-					</form>
-				</div>
-			</div>
+			<!-- Chat Input Bar -->
+			{@const currentProfile = $profiles.find(p => p.id === currentTab.profile)}
+			{@const profileModel = currentProfile?.config?.model || 'sonnet'}
+			{@const profilePermissionMode = currentProfile?.config?.permission_mode || 'default'}
+			<ChatBar
+				bind:this={chatBarRefs[tabId]}
+				{tabId}
+				profileId={currentTab.profile}
+				projectId={currentTab.project}
+				bind:inputValue={tabInputs[tabId]}
+				uploadedFiles={tabUploadedFiles[tabId] || []}
+				isStreaming={currentTab.isStreaming}
+				isAuthenticated={$claudeAuthenticated}
+				{isUploading}
+				modelOverride={currentTab.modelOverride}
+				permissionModeOverride={currentTab.permissionModeOverride}
+				{profileModel}
+				{profilePermissionMode}
+				onSubmit={() => handleSubmit(tabId)}
+				onStop={() => tabs.stopGeneration(tabId)}
+				onInputChange={(value) => {
+					tabInputs[tabId] = value;
+					handleInputChange(tabId);
+				}}
+				onFileUpload={triggerFileUpload}
+				onRemoveFile={(index) => removeUploadedFile(tabId, index)}
+				onCommandSelect={(cmd) => handleCommandSelect(tabId, cmd)}
+				onFileSelect={(file) => handleFileSelect(tabId, file)}
+				onModelChange={(model) => tabs.setTabModelOverride(tabId, model)}
+				onModeChange={(mode) => tabs.setTabPermissionModeOverride(tabId, mode)}
+				onQuickAction={(prompt) => {
+					tabInputs[tabId] = prompt;
+					handleSubmit(tabId);
+				}}
+			/>
 		{/if}
 	</main>
 </div>
