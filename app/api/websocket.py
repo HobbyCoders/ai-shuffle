@@ -38,26 +38,37 @@ router = APIRouter(prefix="/api/v1", tags=["WebSocket"])
 _active_chat_sessions: dict[str, asyncio.Task] = {}
 
 
-async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> bool:
-    """Validate authentication token for WebSocket connection"""
+async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> tuple[bool, Optional[dict]]:
+    """
+    Validate authentication token for WebSocket connection.
+
+    Returns:
+        tuple[bool, Optional[dict]]: (is_authenticated, api_user_or_none)
+        - For admin sessions: (True, None)
+        - For API user sessions: (True, api_user_dict)
+        - For failed auth: (False, None)
+    """
+    import hashlib
+
     # First try the token from query parameter
     if token:
         # Check admin session token
         session = database.get_auth_session(token)
         if session:
-            return True
+            return (True, None)  # Admin user
 
         # Check API key web session token
         api_key_session = database.get_api_key_session(token)
         if api_key_session:
-            return True
+            api_user = database.get_api_user(api_key_session["api_user_id"])
+            if api_user and api_user.get("is_active", True):
+                return (True, api_user)
 
         # Check raw API key (hashed)
-        import hashlib
         key_hash = hashlib.sha256(token.encode()).hexdigest()
         api_user = database.get_api_user_by_key_hash(key_hash)
-        if api_user:
-            return True
+        if api_user and api_user.get("is_active", True):
+            return (True, api_user)
 
     # Also check the cookie directly (for httpOnly cookies that JS can't read)
     cookie_token = websocket.cookies.get("session")
@@ -65,14 +76,16 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
         # Check admin session
         session = database.get_auth_session(cookie_token)
         if session:
-            return True
+            return (True, None)  # Admin user
 
         # Check API key web session
         api_key_session = database.get_api_key_session(cookie_token)
         if api_key_session:
-            return True
+            api_user = database.get_api_user(api_key_session["api_user_id"])
+            if api_user and api_user.get("is_active", True):
+                return (True, api_user)
 
-    return False
+    return (False, None)
 
 
 # =============================================================================
@@ -127,12 +140,15 @@ async def chat_websocket(
     await websocket.accept()
 
     # Now authenticate
-    if not await authenticate_websocket(websocket, token):
+    is_authenticated, api_user = await authenticate_websocket(websocket, token)
+    if not is_authenticated:
         logger.warning(f"Chat WebSocket auth failed - token provided: {token is not None}, cookie: {websocket.cookies.get('session') is not None}")
         await websocket.close(code=4001, reason="Authentication failed")
         return
 
-    logger.info("Chat WebSocket connected and authenticated")
+    # Extract api_user_id if authenticated as an API user
+    api_user_id: Optional[str] = api_user["id"] if api_user else None
+    logger.info(f"Chat WebSocket connected and authenticated (api_user_id={api_user_id})")
 
     # Generate device_id if not provided
     if not device_id:
@@ -336,7 +352,8 @@ async def chat_websocket(
                             database.create_session(
                                 session_id=session_id,
                                 profile_id=profile_id,
-                                project_id=project_id
+                                project_id=project_id,
+                                api_user_id=api_user_id
                             )
 
                         # Register device with session if switching sessions
@@ -767,7 +784,8 @@ async def cli_websocket(
     """
     await websocket.accept()
 
-    if not await authenticate_websocket(websocket, token):
+    is_authenticated, _ = await authenticate_websocket(websocket, token)
+    if not is_authenticated:
         await websocket.close(code=4001, reason="Authentication failed")
         return
 
