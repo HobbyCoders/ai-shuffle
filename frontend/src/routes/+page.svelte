@@ -1476,72 +1476,141 @@
 					</button>
 				{/if}
 			</div>
+			<!-- Mobile Tab Toggle (My Chats / Admin) -->
+			{#if $isAdmin}
+				<div class="px-3 pb-2">
+					<div class="flex bg-muted rounded-lg p-0.5">
+						<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}">My Chats</button>
+						<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}">Admin</button>
+					</div>
+				</div>
+			{/if}
+
 			<div class="flex-1 overflow-y-auto px-3 pb-3">
-				<!-- Open Tabs Section (Mobile) -->
-				{#if $allTabs.length > 0}
-					<div class="mb-4">
-						<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium px-2 mb-2">Open ({$allTabs.length})</div>
-						<div class="space-y-1">
-							{#each $allTabs as tab}
-								{@const tabSession = { id: tab.sessionId || tab.id, title: tab.title, status: 'active', total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
-								<SessionCard
-									session={tabSession}
-									isOpen={true}
-									isActive={tab.id === $activeTabId}
-									isStreaming={tab.isStreaming}
-									showCloseButton={$allTabs.length > 1}
-									abbreviated={true}
-									on:click={() => { tabs.setActiveTab(tab.id); sidebarOpen = false; }}
-									on:close={(e) => handleCloseTab(e, tab.id)}
-								/>
-							{/each}
+				{#if sidebarTab === 'my-chats'}
+					<!-- Open Tabs Section (Mobile) -->
+					{#if $allTabs.length > 0}
+						<div class="mb-4">
+							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium px-2 mb-2">Open ({$allTabs.length})</div>
+							<div class="space-y-1">
+								{#each $allTabs as tab}
+									{@const tabSession = { id: tab.sessionId || tab.id, title: tab.title, status: 'active', total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
+									<SessionCard
+										session={tabSession}
+										isOpen={true}
+										isActive={tab.id === $activeTabId}
+										isStreaming={tab.isStreaming}
+										showCloseButton={$allTabs.length > 1}
+										abbreviated={true}
+										on:click={() => { tabs.setActiveTab(tab.id); sidebarOpen = false; }}
+										on:close={(e) => handleCloseTab(e, tab.id)}
+									/>
+								{/each}
+							</div>
 						</div>
+					{/if}
+
+					<!-- History Header (Mobile) -->
+					<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium px-2 mb-2">History</div>
+
+					<!-- Grouped Sessions (Mobile) -->
+					<div class="space-y-3">
+						{#each groupedSessions as group}
+							<div>
+								<!-- Group Header -->
+								<button
+									on:click={() => toggleGroupCollapse(group.key)}
+									class="flex items-center gap-2 px-2 py-1.5 w-full text-left active:bg-accent/50 rounded transition-colors"
+								>
+									<svg
+										class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
+										fill="none"
+										stroke="currentColor"
+										viewBox="0 0 24 24"
+									>
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+									</svg>
+									<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
+									<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
+								</button>
+
+								<!-- Group Content -->
+								{#if !collapsedGroups.has(group.key)}
+									<div class="mt-1 space-y-1">
+										{#each group.sessions as session}
+											<SessionCard
+												{session}
+												abbreviated={true}
+												on:click={() => { openSession(session.id); sidebarOpen = false; }}
+												on:delete={() => deleteSession(null, session.id)}
+											/>
+										{/each}
+									</div>
+								{/if}
+							</div>
+						{/each}
+						{#if filteredSessions.length === 0}
+							<p class="text-xs text-muted-foreground px-2">{sessionSearchQuery ? 'No matching sessions' : 'No chat history yet'}</p>
+						{/if}
+					</div>
+				{:else if sidebarTab === 'admin'}
+					<!-- Admin Tab Content (Mobile) -->
+					<!-- API User Filter -->
+					<div class="mb-3">
+						<label class="text-xs text-muted-foreground uppercase tracking-wider px-2 block mb-1">Filter by User</label>
+						<select
+							class="w-full bg-accent border border-border rounded-md px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+							value={$adminSessionsFilter ?? ''}
+							on:change={(e) => tabs.setAdminSessionsFilter(e.currentTarget.value || null)}
+						>
+							<option value="">All API Users</option>
+							{#each $apiUsers as user}
+								<option value={user.id}>{user.name}</option>
+							{/each}
+						</select>
+					</div>
+
+					<!-- Grouped Admin Sessions (Mobile) -->
+					<div class="space-y-3">
+						{#each groupedAdminSessions as group}
+							<div>
+								<!-- Group Header -->
+								<button
+									on:click={() => toggleGroupCollapse(group.key)}
+									class="flex items-center gap-2 px-2 py-1.5 w-full text-left active:bg-accent/50 rounded transition-colors"
+								>
+									<svg
+										class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
+										fill="none"
+										stroke="currentColor"
+										viewBox="0 0 24 24"
+									>
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+									</svg>
+									<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
+									<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
+								</button>
+
+								<!-- Group Content -->
+								{#if !collapsedGroups.has(group.key)}
+									<div class="mt-1 space-y-1">
+										{#each group.sessions as session}
+											<SessionCard
+												{session}
+												abbreviated={true}
+												on:click={() => { openSession(session.id); sidebarOpen = false; }}
+												on:delete={() => deleteSession(null, session.id)}
+											/>
+										{/each}
+									</div>
+								{/if}
+							</div>
+						{/each}
+						{#if filteredAdminSessions.length === 0}
+							<p class="text-xs text-muted-foreground px-2">{sessionSearchQuery ? 'No matching sessions' : 'No API user sessions found'}</p>
+						{/if}
 					</div>
 				{/if}
-
-				<!-- History Header (Mobile) -->
-				<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium px-2 mb-2">History</div>
-
-				<!-- Grouped Sessions (Mobile) -->
-				<div class="space-y-3">
-					{#each groupedSessions as group}
-						<div>
-							<!-- Group Header -->
-							<button
-								on:click={() => toggleGroupCollapse(group.key)}
-								class="flex items-center gap-2 px-2 py-1.5 w-full text-left active:bg-accent/50 rounded transition-colors"
-							>
-								<svg
-									class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
-									fill="none"
-									stroke="currentColor"
-									viewBox="0 0 24 24"
-								>
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-								</svg>
-								<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
-								<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
-							</button>
-
-							<!-- Group Content -->
-							{#if !collapsedGroups.has(group.key)}
-								<div class="mt-1 space-y-1">
-									{#each group.sessions as session}
-										<SessionCard
-											{session}
-											abbreviated={true}
-											on:click={() => { openSession(session.id); sidebarOpen = false; }}
-											on:delete={() => deleteSession(null, session.id)}
-										/>
-									{/each}
-								</div>
-							{/if}
-						</div>
-					{/each}
-					{#if filteredSessions.length === 0}
-						<p class="text-xs text-muted-foreground px-2">{sessionSearchQuery ? 'No matching sessions' : 'No chat history yet'}</p>
-					{/if}
-				</div>
 			</div>
 			<div class="p-3 border-t border-border">
 				<div class="flex items-center justify-between">
