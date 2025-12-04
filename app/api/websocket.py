@@ -42,12 +42,17 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
     """Validate authentication token for WebSocket connection"""
     # First try the token from query parameter
     if token:
-        # Check session token
+        # Check admin session token
         session = database.get_auth_session(token)
         if session:
             return True
 
-        # Check API key (hashed)
+        # Check API key web session token
+        api_key_session = database.get_api_key_session(token)
+        if api_key_session:
+            return True
+
+        # Check raw API key (hashed)
         import hashlib
         key_hash = hashlib.sha256(token.encode()).hexdigest()
         api_user = database.get_api_user_by_key_hash(key_hash)
@@ -57,8 +62,14 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
     # Also check the cookie directly (for httpOnly cookies that JS can't read)
     cookie_token = websocket.cookies.get("session")
     if cookie_token:
+        # Check admin session
         session = database.get_auth_session(cookie_token)
         if session:
+            return True
+
+        # Check API key web session
+        api_key_session = database.get_api_key_session(cookie_token)
+        if api_key_session:
             return True
 
     return False
