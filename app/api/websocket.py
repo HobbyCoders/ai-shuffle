@@ -71,32 +71,46 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
 @router.websocket("/ws/chat")
 async def chat_websocket(
     websocket: WebSocket,
-    token: Optional[str] = Query(None, description="Authentication token (optional if cookie auth)")
+    token: Optional[str] = Query(None, description="Authentication token (optional if cookie auth)"),
+    device_id: Optional[str] = Query(None, description="Unique device identifier for multi-device sync")
 ):
     """
-    Primary WebSocket endpoint for chat.
+    Primary WebSocket endpoint for chat with multi-device sync support.
 
     This is the ONLY streaming mechanism needed. Simple flow:
-    1. Client connects
+    1. Client connects (optionally provides device_id for multi-device sync)
     2. Client sends: {"type": "query", "prompt": "...", "session_id": "...", "profile": "..."}
     3. Server streams response chunks directly
     4. Server sends: {"type": "done", ...} when complete
+    5. Server broadcasts streaming events to other connected devices via SyncEngine
 
     Message types FROM server:
     - history: Full message history for session (on connect or session switch)
+      - Includes isStreaming and streamingBuffer for late-joining devices
     - start: Query started, streaming will begin
     - chunk: Text content chunk
+    - stream_delta: Real-time streaming delta (when include_partial_messages=True)
     - tool_use: Tool being used
     - tool_result: Tool result
     - done: Query complete with metadata
     - error: Error occurred
     - ping: Keep-alive
+    - Sync events (from SyncEngine for other devices):
+      - stream_start: Another device started streaming
+      - stream_chunk: Streaming chunk from another device
+      - stream_end: Another device finished streaming
 
     Message types TO server:
     - query: Start a new query
     - stop: Interrupt current query
     - load_session: Load/switch to a session
     - pong: Response to ping
+
+    Multi-device sync features:
+    - Automatic device registration with SyncEngine when session is used
+    - Broadcasts all streaming events to other devices watching same session
+    - Late-joining devices receive buffered streaming content
+    - Devices are automatically unregistered on disconnect or session switch
     """
     # Must accept connection first before we can send close with reason
     await websocket.accept()
@@ -108,6 +122,11 @@ async def chat_websocket(
         return
 
     logger.info("Chat WebSocket connected and authenticated")
+
+    # Generate device_id if not provided
+    if not device_id:
+        device_id = str(uuid.uuid4())
+        logger.info(f"Generated device_id: {device_id}")
 
     current_session_id: Optional[str] = None
     query_task: Optional[asyncio.Task] = None
@@ -126,9 +145,13 @@ async def chat_websocket(
 
         from app.core.query_engine import stream_to_websocket
 
+        # Generate a message ID for this streaming session
+        message_id = str(uuid.uuid4())
+        stream_started = False
+
         try:
             logger.info(f"Starting query for session {session_id}, profile={profile_id}, project={project_id}, overrides={overrides}")
-            await send_json({"type": "start", "session_id": session_id})
+            await send_json({"type": "start", "session_id": session_id, "message_id": message_id})
 
             logger.info(f"Calling stream_to_websocket for session {session_id}")
             async for event in stream_to_websocket(
@@ -138,18 +161,116 @@ async def chat_websocket(
                 project_id=project_id,
                 overrides=overrides
             ):
-                logger.debug(f"Streaming event for session {session_id}: {event.get('type')}")
+                event_type = event.get('type')
+                logger.debug(f"Streaming event for session {session_id}: {event_type}")
+
+                # Send to this websocket
                 await send_json(event)
+
+                # Broadcast to other devices via SyncEngine
+                # Start streaming on first content event
+                if not stream_started and event_type in ('stream_start', 'stream_delta', 'chunk', 'tool_use'):
+                    await sync_engine.broadcast_stream_start(
+                        session_id=session_id,
+                        message_id=message_id,
+                        source_device_id=device_id
+                    )
+                    stream_started = True
+
+                # Broadcast stream chunks
+                if event_type == 'stream_delta':
+                    # Real-time streaming delta
+                    delta_type = event.get('delta_type', 'text')
+                    chunk_data = {
+                        'content': event.get('content', ''),
+                        'delta_type': delta_type,
+                        'index': event.get('index', 0)
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='text',
+                        chunk_data=chunk_data,
+                        source_device_id=device_id
+                    )
+                elif event_type == 'chunk':
+                    # Legacy chunk event (when include_partial_messages=False)
+                    chunk_data = {
+                        'content': event.get('content', '')
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='text',
+                        chunk_data=chunk_data,
+                        source_device_id=device_id
+                    )
+                elif event_type == 'tool_use':
+                    # Tool use event
+                    chunk_data = {
+                        'content': '',
+                        'tool_name': event.get('name'),
+                        'tool_id': event.get('id'),
+                        'tool_input': event.get('input')
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='tool_use',
+                        chunk_data=chunk_data,
+                        source_device_id=device_id
+                    )
+                elif event_type == 'tool_result':
+                    # Tool result event
+                    chunk_data = {
+                        'content': event.get('output', ''),
+                        'tool_id': event.get('tool_use_id')
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='tool_result',
+                        chunk_data=chunk_data,
+                        source_device_id=device_id
+                    )
+                elif event_type == 'done':
+                    # Stream completed - broadcast end
+                    if stream_started:
+                        await sync_engine.broadcast_stream_end(
+                            session_id=session_id,
+                            message_id=message_id,
+                            metadata=event.get('metadata', {}),
+                            interrupted=False,
+                            source_device_id=device_id
+                        )
 
             logger.info(f"Query completed for session {session_id}")
 
         except asyncio.CancelledError:
             await send_json({"type": "stopped", "session_id": session_id})
             logger.info(f"Query cancelled for session {session_id}")
+            # Broadcast stream end with interrupted flag
+            if stream_started:
+                await sync_engine.broadcast_stream_end(
+                    session_id=session_id,
+                    message_id=message_id,
+                    metadata={},
+                    interrupted=True,
+                    source_device_id=device_id
+                )
 
         except Exception as e:
             logger.error(f"Query error for session {session_id}: {e}", exc_info=True)
             await send_json({"type": "error", "message": str(e)})
+            # Broadcast stream end on error
+            if stream_started:
+                await sync_engine.broadcast_stream_end(
+                    session_id=session_id,
+                    message_id=message_id,
+                    metadata={"error": str(e)},
+                    interrupted=True,
+                    source_device_id=device_id
+                )
 
         finally:
             # Clean up task reference
@@ -192,7 +313,15 @@ async def chat_websocket(
                                 project_id=project_id
                             )
 
-                        current_session_id = session_id
+                        # Register device with session if switching sessions
+                        if session_id != current_session_id:
+                            # Unregister from old session if any
+                            if current_session_id:
+                                await sync_engine.unregister_device(device_id, current_session_id)
+
+                            # Register to new session
+                            await sync_engine.register_device(device_id, session_id, websocket)
+                            current_session_id = session_id
 
                         # Store user message
                         database.add_session_message(
@@ -240,6 +369,14 @@ async def chat_websocket(
                         if session_id:
                             session = database.get_session(session_id)
                             if session:
+                                # Unregister from old session if switching
+                                if current_session_id and current_session_id != session_id:
+                                    await sync_engine.unregister_device(device_id, current_session_id)
+
+                                # Register to new session
+                                await sync_engine.register_device(device_id, session_id, websocket)
+                                current_session_id = session_id
+
                                 # Try to load from JSONL file first (source of truth)
                                 sdk_session_id = session.get("sdk_session_id")
                                 messages = []
@@ -288,12 +425,20 @@ async def chat_websocket(
                                         })
                                     logger.info(f"Loaded {len(messages)} messages from DB for session {session_id}")
 
-                                current_session_id = session_id
+                                # Check if session is currently streaming (late-joining device)
+                                is_streaming = sync_engine.is_session_streaming(session_id)
+                                streaming_buffer = None
+                                if is_streaming:
+                                    streaming_buffer = sync_engine.get_streaming_buffer(session_id)
+                                    logger.info(f"Session {session_id} is streaming, sending buffer to late-joining device")
+
                                 await send_json({
                                     "type": "history",
                                     "session_id": session_id,
                                     "session": session,
-                                    "messages": messages
+                                    "messages": messages,
+                                    "isStreaming": is_streaming,
+                                    "streamingBuffer": streaming_buffer
                                 })
                             else:
                                 await send_json({"type": "error", "message": "Session not found"})
@@ -320,6 +465,11 @@ async def chat_websocket(
                     await query_task
                 except asyncio.CancelledError:
                     pass
+
+            # Unregister device from sync engine
+            if current_session_id:
+                await sync_engine.unregister_device(device_id, current_session_id)
+                logger.info(f"Unregistered device {device_id} from session {current_session_id}")
 
     except WebSocketDisconnect:
         logger.info("Chat WebSocket disconnected")

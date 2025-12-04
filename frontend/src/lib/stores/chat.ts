@@ -50,6 +50,9 @@ interface ChatState {
 	isStreaming: boolean;
 	error: string | null;
 	wsConnected: boolean;
+	connectionState: 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
+	deviceId: string;
+	connectedDevices: number;
 }
 
 // Load persisted values from localStorage - empty string means no selection
@@ -67,6 +70,22 @@ function getPersistedProject(): string {
 	return '';
 }
 
+/**
+ * Get or create persistent device ID
+ */
+function getOrCreateDeviceId(): string {
+	const key = 'ai-hub-device-id';
+	if (typeof window === 'undefined') {
+		return 'server-' + Math.random().toString(36).substr(2, 9);
+	}
+	let deviceId = localStorage.getItem(key);
+	if (!deviceId) {
+		deviceId = crypto.randomUUID();
+		localStorage.setItem(key, deviceId);
+	}
+	return deviceId;
+}
+
 function createChatStore() {
 	const { subscribe, set, update } = writable<ChatState>({
 		sessionId: null,
@@ -78,12 +97,26 @@ function createChatStore() {
 		sessions: [],
 		isStreaming: false,
 		error: null,
-		wsConnected: false
+		wsConnected: false,
+		connectionState: 'disconnected',
+		deviceId: getOrCreateDeviceId(),
+		connectedDevices: 0
 	});
 
 	let ws: WebSocket | null = null;
 	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	let pingTimer: ReturnType<typeof setInterval> | null = null;
+	let reconnectAttempts = 0;
+	const maxReconnectDelay = 30000;
+
+	/**
+	 * Calculate exponential backoff delay with jitter
+	 */
+	function getReconnectDelay(): number {
+		const baseDelay = Math.min(1000 * Math.pow(2, reconnectAttempts), maxReconnectDelay);
+		const jitter = Math.random() * 1000;
+		return baseDelay + jitter;
+	}
 
 	/**
 	 * Get WebSocket URL for chat
@@ -111,7 +144,7 @@ function createChatStore() {
 	/**
 	 * Connect to WebSocket
 	 */
-	function connect() {
+	function connect(isReconnect = false) {
 		if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
 			return;
 		}
@@ -119,18 +152,34 @@ function createChatStore() {
 		const token = getAuthToken();
 		if (!token) {
 			console.error('[Chat] No auth token available');
-			update(s => ({ ...s, error: 'Not authenticated' }));
+			update(s => ({ ...s, error: 'Not authenticated', connectionState: 'disconnected' }));
 			return;
 		}
 
-		const url = `${getWsUrl()}?token=${encodeURIComponent(token)}`;
-		console.log('[Chat] Connecting to WebSocket...');
+		const deviceId = getOrCreateDeviceId();
+		const url = `${getWsUrl()}?token=${encodeURIComponent(token)}&device_id=${encodeURIComponent(deviceId)}`;
+
+		if (isReconnect) {
+			console.log(`[Chat] Reconnecting (attempt ${reconnectAttempts + 1})...`);
+			update(s => ({ ...s, connectionState: 'reconnecting' }));
+		} else {
+			console.log('[Chat] Connecting to WebSocket...');
+			update(s => ({ ...s, connectionState: 'connecting' }));
+		}
 
 		ws = new WebSocket(url);
 
 		ws.onopen = () => {
 			console.log('[Chat] WebSocket connected');
-			update(s => ({ ...s, wsConnected: true, error: null }));
+			reconnectAttempts = 0; // Reset on successful connection
+			update(s => ({ ...s, wsConnected: true, connectionState: 'connected', error: null }));
+
+			// If reconnecting and we have a current session, reload it to get latest state
+			const state = get({ subscribe });
+			if (isReconnect && state.sessionId) {
+				console.log('[Chat] Reloading session after reconnect:', state.sessionId);
+				loadSession(state.sessionId);
+			}
 
 			// Start ping timer
 			if (pingTimer) clearInterval(pingTimer);
@@ -143,20 +192,22 @@ function createChatStore() {
 
 		ws.onclose = (event) => {
 			console.log('[Chat] WebSocket closed:', event.code, event.reason);
-			update(s => ({ ...s, wsConnected: false }));
+			update(s => ({ ...s, wsConnected: false, connectionState: 'disconnected' }));
 
 			if (pingTimer) {
 				clearInterval(pingTimer);
 				pingTimer = null;
 			}
 
-			// Reconnect after delay (unless intentionally closed)
+			// Reconnect after delay with exponential backoff (unless intentionally closed)
 			if (event.code !== 1000) {
 				if (reconnectTimer) clearTimeout(reconnectTimer);
+				const delay = getReconnectDelay();
+				console.log(`[Chat] Scheduling reconnect in ${Math.round(delay / 1000)}s...`);
+				reconnectAttempts++;
 				reconnectTimer = setTimeout(() => {
-					console.log('[Chat] Attempting reconnect...');
-					connect();
-				}, 3000);
+					connect(true);
+				}, delay);
 			}
 		};
 
@@ -194,11 +245,204 @@ function createChatStore() {
 	}
 
 	/**
+	 * Handle sync events from other devices
+	 */
+	function handleSyncEvent(data: Record<string, unknown>) {
+		const eventType = data.event_type as string;
+		const sessionId = data.session_id as string;
+		const eventData = data.data as Record<string, unknown>;
+
+		console.log('[Chat] Sync event:', eventType, eventData);
+
+		// Only process events for the current session
+		const state = get({ subscribe });
+		if (state.sessionId !== sessionId) {
+			console.log('[Chat] Ignoring sync event for different session:', sessionId);
+			return;
+		}
+
+		switch (eventType) {
+			case 'stream_start': {
+				// Another device started streaming
+				console.log('[Chat] Another device started streaming');
+				const messageId = eventData.message_id as string;
+
+				update(s => ({
+					...s,
+					isStreaming: true,
+					messages: [...s.messages, {
+						id: messageId || `assistant-${Date.now()}`,
+						role: 'assistant',
+						content: '',
+						type: 'text',
+						streaming: true
+					}]
+				}));
+				break;
+			}
+
+			case 'stream_chunk': {
+				// Content chunk from another device
+				const chunkType = eventData.chunk_type as string;
+				const content = eventData.content as string;
+
+				if (chunkType === 'text') {
+					// Append text to last streaming message
+					update(s => {
+						const messages = [...s.messages];
+						const streamingIdx = messages.findLastIndex(
+							m => m.type === 'text' && m.role === 'assistant' && m.streaming
+						);
+
+						if (streamingIdx !== -1) {
+							messages[streamingIdx] = {
+								...messages[streamingIdx],
+								content: messages[streamingIdx].content + (content || '')
+							};
+						} else {
+							// No streaming message found, create one
+							messages.push({
+								id: `text-sync-${Date.now()}`,
+								role: 'assistant',
+								content: content || '',
+								type: 'text',
+								streaming: true
+							});
+						}
+
+						return { ...s, messages };
+					});
+				} else if (chunkType === 'tool_use') {
+					// Tool use event
+					update(s => {
+						let messages = [...s.messages];
+
+						// Handle current streaming text message
+						const streamingIdx = messages.findLastIndex(
+							m => m.type === 'text' && m.role === 'assistant' && m.streaming
+						);
+						if (streamingIdx !== -1) {
+							if (messages[streamingIdx].content) {
+								messages[streamingIdx] = {
+									...messages[streamingIdx],
+									streaming: false
+								};
+							} else {
+								messages = messages.filter((_, i) => i !== streamingIdx);
+							}
+						}
+
+						// Add tool use message
+						messages.push({
+							id: `tool-sync-${Date.now()}-${eventData.tool_id || ''}`,
+							role: 'assistant',
+							content: '',
+							type: 'tool_use',
+							toolName: eventData.tool_name as string,
+							toolId: eventData.tool_id as string,
+							toolInput: eventData.tool_input as Record<string, unknown>,
+							streaming: true
+						});
+
+						return { ...s, messages };
+					});
+				} else if (chunkType === 'tool_result') {
+					// Tool result event
+					update(s => {
+						const messages = [...s.messages];
+
+						// Mark the matching tool_use as complete
+						const toolUseId = eventData.tool_use_id as string;
+						const toolUseIdx = messages.findLastIndex(
+							m => m.type === 'tool_use' && (m.toolId === toolUseId || m.streaming)
+						);
+						if (toolUseIdx !== -1) {
+							messages[toolUseIdx] = {
+								...messages[toolUseIdx],
+								streaming: false
+							};
+						}
+
+						// Add tool result message
+						messages.push({
+							id: `result-sync-${Date.now()}`,
+							role: 'assistant',
+							content: eventData.output as string,
+							type: 'tool_result',
+							toolName: eventData.tool_name as string,
+							toolId: toolUseId,
+							streaming: false
+						});
+
+						// Add new text placeholder for continuation
+						messages.push({
+							id: `text-sync-${Date.now()}-cont`,
+							role: 'assistant',
+							content: '',
+							type: 'text',
+							streaming: true
+						});
+
+						return { ...s, messages };
+					});
+				}
+				break;
+			}
+
+			case 'stream_end': {
+				// Another device finished streaming
+				console.log('[Chat] Another device finished streaming');
+				const metadata = eventData.metadata as Record<string, unknown>;
+				const interrupted = eventData.interrupted as boolean;
+
+				update(s => {
+					// Mark all streaming messages as complete
+					let messages = s.messages.map(m =>
+						m.streaming ? { ...m, streaming: false } : m
+					);
+
+					// Remove empty text messages
+					messages = messages.filter(
+						m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
+					);
+
+					// Add metadata to last assistant message
+					if (messages.length > 0) {
+						const lastIdx = messages.findLastIndex(m => m.role === 'assistant');
+						if (lastIdx !== -1) {
+							messages[lastIdx] = {
+								...messages[lastIdx],
+								metadata,
+								content: interrupted
+									? messages[lastIdx].content + '\n\n[Stopped]'
+									: messages[lastIdx].content
+							};
+						}
+					}
+
+					return { ...s, messages, isStreaming: false };
+				});
+
+				// Refresh sessions list
+				loadSessionsInternal();
+				break;
+			}
+		}
+	}
+
+	/**
 	 * Handle incoming WebSocket message
 	 */
 	function handleMessage(data: Record<string, unknown>) {
 		const msgType = data.type as string;
-		// console.log('[Chat] Received:', msgType, data);
+		const eventType = data.event_type as string;
+		// console.log('[Chat] Received:', msgType || eventType, data);
+
+		// Handle sync events from other devices
+		if (eventType) {
+			handleSyncEvent(data);
+			return;
+		}
 
 		switch (msgType) {
 			case 'history': {
@@ -227,11 +471,37 @@ function createChatStore() {
 					};
 				}) || [];
 
-				update(s => ({
-					...s,
-					sessionId: data.session_id as string,
-					messages
-				}));
+				// Handle late-joining to streaming session
+				const isStreaming = data.isStreaming as boolean;
+				const streamingBuffer = data.streamingBuffer as Array<Record<string, unknown>> | undefined;
+
+				if (isStreaming && streamingBuffer && streamingBuffer.length > 0) {
+					console.log('[Chat] Late-joining streaming session, merging buffer:', streamingBuffer.length, 'messages');
+					const bufferMessages: ChatMessage[] = streamingBuffer.map((m) => ({
+						id: `buffer-${Date.now()}-${Math.random()}`,
+						role: 'assistant',
+						content: (m.content as string) || '',
+						type: (m.type || m.chunk_type) as MessageType,
+						toolName: m.tool_name as string | undefined,
+						toolId: m.tool_id as string | undefined,
+						toolInput: m.tool_input as Record<string, unknown> | undefined,
+						streaming: m.streaming as boolean || true
+					}));
+
+					update(s => ({
+						...s,
+						sessionId: data.session_id as string,
+						messages: [...messages, ...bufferMessages],
+						isStreaming: true
+					}));
+				} else {
+					update(s => ({
+						...s,
+						sessionId: data.session_id as string,
+						messages,
+						isStreaming: isStreaming || false
+					}));
+				}
 				break;
 			}
 
@@ -728,3 +998,6 @@ export const selectedProject = derived(chat, $chat => $chat.selectedProject);
 export const sessions = derived(chat, $chat => $chat.sessions);
 export const currentSessionId = derived(chat, $chat => $chat.sessionId);
 export const wsConnected = derived(chat, $chat => $chat.wsConnected);
+export const connectionState = derived(chat, $chat => $chat.connectionState);
+export const deviceId = derived(chat, $chat => $chat.deviceId);
+export const connectedDevices = derived(chat, $chat => $chat.connectedDevices);
