@@ -429,6 +429,20 @@ async def claude_auth_status():
     return auth_service.get_claude_auth_info()
 
 
+@router.get("/claude/validate")
+async def validate_claude_credentials(token: str = Depends(require_admin)):
+    """
+    Validate Claude credentials by testing the CLI.
+    Use this to check if OAuth token is still valid (not just if file exists).
+
+    Returns:
+        - valid: boolean - True if credentials work
+        - authenticated: boolean - True if credentials file exists
+        - error: string - Error message if validation failed
+    """
+    return auth_service.validate_claude_credentials()
+
+
 @router.get("/claude/login-instructions")
 async def claude_login_instructions():
     """Get Claude CLI login instructions"""
@@ -436,12 +450,23 @@ async def claude_login_instructions():
 
 
 @router.post("/claude/login")
-async def claude_login(token: str = Depends(require_admin)):
+async def claude_login(request: Request, token: str = Depends(require_admin)):
     """
     Start Claude Code OAuth login process.
     Returns an OAuth URL that the user should open in their browser.
+
+    Accepts optional JSON body with:
+    - force_reauth: boolean - If true, delete existing credentials and force re-authentication.
+                             Use when OAuth token has expired or user wants to reconnect.
     """
-    return auth_service.start_claude_oauth_login()
+    force_reauth = False
+    try:
+        body = await request.json()
+        force_reauth = body.get("force_reauth", False)
+    except Exception:
+        pass  # No body or invalid JSON, use defaults
+
+    return auth_service.start_claude_oauth_login(force_reauth=force_reauth)
 
 
 @router.get("/claude/login/poll")

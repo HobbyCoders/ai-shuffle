@@ -181,6 +181,87 @@ class AuthService:
         self._ensure_onboarding_complete()
         return True
 
+    def validate_claude_credentials(self) -> Dict[str, Any]:
+        """
+        Validate Claude credentials by running a simple CLI command.
+        This checks if the OAuth token is still valid (not just if the file exists).
+
+        Returns:
+            Dict with 'valid' boolean and 'error' message if invalid.
+        """
+        creds_file = self.config_dir / '.credentials.json'
+
+        # First check if credentials file exists
+        if not creds_file.exists() or creds_file.stat().st_size == 0:
+            return {
+                "valid": False,
+                "authenticated": False,
+                "error": "No credentials file found"
+            }
+
+        try:
+            home_env = os.environ.get('HOME', str(Path.home()))
+
+            # Find claude executable
+            claude_cmd = find_claude_executable()
+            if not claude_cmd:
+                return {
+                    "valid": False,
+                    "authenticated": True,  # File exists but can't validate
+                    "error": "Claude CLI not found"
+                }
+
+            use_shell = sys.platform == 'win32' and claude_cmd.endswith('.cmd')
+
+            # Run 'claude --version' or a simple non-interactive command
+            # to check if credentials are valid
+            result = subprocess.run(
+                [claude_cmd, '--version'] if not use_shell else f'"{claude_cmd}" --version',
+                capture_output=True,
+                text=True,
+                timeout=10,
+                shell=use_shell,
+                env={**os.environ, 'HOME': home_env}
+            )
+
+            # If this works, credentials are likely valid
+            # Note: --version doesn't actually validate OAuth, but if the CLI
+            # is configured and works, that's a good sign
+            if result.returncode == 0:
+                return {
+                    "valid": True,
+                    "authenticated": True,
+                    "version": result.stdout.strip() if result.stdout else None
+                }
+            else:
+                # Check if error indicates auth issue
+                error_output = result.stderr.lower() if result.stderr else ''
+                if 'unauthorized' in error_output or 'auth' in error_output or 'expired' in error_output:
+                    return {
+                        "valid": False,
+                        "authenticated": True,  # File exists but token expired
+                        "error": "Credentials may be expired",
+                        "details": result.stderr
+                    }
+                return {
+                    "valid": True,  # Assume valid if not auth error
+                    "authenticated": True
+                }
+
+        except subprocess.TimeoutExpired:
+            return {
+                "valid": False,
+                "authenticated": True,
+                "error": "CLI command timed out"
+            }
+        except Exception as e:
+            logger.error(f"Error validating Claude credentials: {e}")
+            return {
+                "valid": False,
+                "authenticated": True,
+                "error": str(e)
+            }
+
     def _ensure_onboarding_complete(self):
         """
         Ensure settings.json has hasCompletedOnboarding=true.
@@ -243,46 +324,65 @@ class AuthService:
 
     def claude_logout(self) -> Dict[str, Any]:
         """Logout from Claude CLI"""
+        creds_file = self.config_dir / '.credentials.json'
+        cli_success = False
+        cli_error = None
+
         try:
             home_env = os.environ.get('HOME', str(Path.home()))
 
             # Find claude executable
             claude_cmd = find_claude_executable()
-            if not claude_cmd:
-                return {
-                    "success": False,
-                    "message": "Claude CLI not found",
-                    "error": "Could not find 'claude' command."
-                }
+            if claude_cmd:
+                use_shell = sys.platform == 'win32' and claude_cmd.endswith('.cmd')
 
-            use_shell = sys.platform == 'win32' and claude_cmd.endswith('.cmd')
+                result = subprocess.run(
+                    [claude_cmd, 'logout'] if not use_shell else f'"{claude_cmd}" logout',
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    shell=use_shell,
+                    env={**os.environ, 'HOME': home_env}
+                )
 
-            result = subprocess.run(
-                [claude_cmd, 'logout'] if not use_shell else f'"{claude_cmd}" logout',
-                capture_output=True,
-                text=True,
-                timeout=30,
-                shell=use_shell,
-                env={**os.environ, 'HOME': home_env}
-            )
-
-            if result.returncode == 0:
-                return {
-                    "success": True,
-                    "message": "Logged out from Claude Code"
-                }
+                if result.returncode == 0:
+                    cli_success = True
+                else:
+                    cli_error = result.stderr
             else:
-                return {
-                    "success": False,
-                    "message": "Logout failed",
-                    "error": result.stderr
-                }
+                cli_error = "Claude CLI not found"
+
         except Exception as e:
-            logger.error(f"Claude logout error: {e}")
+            logger.error(f"Claude logout CLI error: {e}")
+            cli_error = str(e)
+
+        # Fallback: directly delete credentials file if it still exists
+        file_deleted = False
+        if creds_file.exists():
+            try:
+                creds_file.unlink()
+                file_deleted = True
+                logger.info(f"Deleted credentials file: {creds_file}")
+            except Exception as e:
+                logger.error(f"Failed to delete credentials file: {e}")
+                if not cli_success:
+                    return {
+                        "success": False,
+                        "message": "Logout failed",
+                        "error": f"CLI error: {cli_error}. File deletion error: {e}"
+                    }
+
+        # Success if either CLI succeeded or file was deleted/doesn't exist
+        if cli_success or file_deleted or not creds_file.exists():
+            return {
+                "success": True,
+                "message": "Logged out from Claude Code"
+            }
+        else:
             return {
                 "success": False,
                 "message": "Logout failed",
-                "error": str(e)
+                "error": cli_error or "Unknown error"
             }
 
     # =========================================================================
@@ -527,7 +627,7 @@ class AuthService:
         logger.warning("No PTY master fd available for writing")
         return False
 
-    def start_claude_oauth_login(self) -> Dict[str, Any]:
+    def start_claude_oauth_login(self, force_reauth: bool = False) -> Dict[str, Any]:
         """
         Start Claude Code OAuth login process.
 
@@ -546,10 +646,24 @@ class AuthService:
 
         For Docker: We run this in the container and manage the process
         For Windows/native: User should run 'claude' in their terminal
+
+        Args:
+            force_reauth: If True, delete existing credentials and force re-authentication.
+                         Use this when OAuth token has expired or user wants to re-login.
         """
         try:
-            # Check if already authenticated
-            if self.is_claude_authenticated():
+            # If force_reauth, delete existing credentials first
+            if force_reauth:
+                creds_file = self.config_dir / '.credentials.json'
+                if creds_file.exists():
+                    try:
+                        creds_file.unlink()
+                        logger.info(f"Force reauth: deleted credentials file {creds_file}")
+                    except Exception as e:
+                        logger.warning(f"Failed to delete credentials for force reauth: {e}")
+
+            # Check if already authenticated (skip if force_reauth)
+            if not force_reauth and self.is_claude_authenticated():
                 return {
                     "success": True,
                     "already_authenticated": True,

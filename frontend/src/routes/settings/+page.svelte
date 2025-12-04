@@ -104,13 +104,13 @@
 	}
 
 	// Claude Code Authentication
-	async function handleClaudeLogin() {
+	async function handleClaudeLogin(forceReauth: boolean = false) {
 		claudeLoginLoading = true;
 		claudeOAuthUrl = null;
 		claudeAuthCode = '';
 		error = '';
 		try {
-			const result = await api.post<{success: boolean, oauth_url?: string, already_authenticated?: boolean, message: string, error?: string}>('/auth/claude/login');
+			const result = await api.post<{success: boolean, oauth_url?: string, already_authenticated?: boolean, message: string, error?: string}>('/auth/claude/login', { force_reauth: forceReauth });
 			if (result.already_authenticated) {
 				await auth.checkAuth();
 				claudeLoginLoading = false;
@@ -125,6 +125,11 @@
 			error = e.detail || 'Claude login failed';
 		}
 		claudeLoginLoading = false;
+	}
+
+	async function handleClaudeReconnect() {
+		// Force re-authentication by deleting credentials and starting fresh
+		await handleClaudeLogin(true);
 	}
 
 	async function completeClaudeLogin() {
@@ -346,9 +351,18 @@
 
 						{#if $claudeAuthenticated}
 							<p class="text-sm text-gray-400 mb-3">Claude Code is authenticated and ready to use.</p>
-							<button on:click={handleClaudeLogout} class="btn btn-secondary text-sm w-full">
-								Disconnect
-							</button>
+							<div class="flex gap-2">
+								<button on:click={handleClaudeReconnect} disabled={claudeLoginLoading} class="btn btn-primary text-sm flex-1">
+									{#if claudeLoginLoading}
+										<span class="animate-spin inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full mr-2"></span>
+									{/if}
+									Reconnect
+								</button>
+								<button on:click={handleClaudeLogout} class="btn btn-secondary text-sm flex-1">
+									Disconnect
+								</button>
+							</div>
+							<p class="text-xs text-gray-500 mt-2">Use Reconnect if your session has expired.</p>
 						{:else if claudeOAuthUrl}
 							<div class="space-y-3">
 								<p class="text-sm text-gray-400">Step 1: Open the login page in your browser:</p>
