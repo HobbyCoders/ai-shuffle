@@ -79,7 +79,7 @@
 	// Session sidebar state
 	let sessionSearchQuery = '';
 	let sessionSearchExpanded = false;
-	let collapsedGroups: Set<string> = new Set(['week', 'month', 'older']); // Collapse older groups by default
+	let collapsedGroups: Set<string> = new Set(['yesterday', 'week', 'month', 'older']); // Only 'today' expanded by default
 
 	// Computed: filtered and grouped sessions
 	$: filteredSessions = sessionSearchQuery

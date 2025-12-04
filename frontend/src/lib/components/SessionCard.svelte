@@ -21,47 +21,57 @@
 
 	// Swipe gesture state
 	let touchStartX = 0;
-	let touchCurrentX = 0;
-	let isSwiping = false;
+	let touchStartY = 0;
 	let swipeOffset = 0;
-	let showDeleteAction = false;
+	let isHorizontalSwipe: boolean | null = null; // null = undetermined, true = horizontal, false = vertical
+	let swipeConfirmed = false; // Whether swipe reached delete threshold
 
-	const SWIPE_THRESHOLD = 80;
+	const SWIPE_THRESHOLD = 80; // Distance to trigger delete
 	const MAX_SWIPE = 100;
+	const DIRECTION_LOCK_THRESHOLD = 10; // Pixels to determine swipe direction
 
 	function handleTouchStart(e: TouchEvent) {
 		if (selectionMode) return;
 		touchStartX = e.touches[0].clientX;
-		touchCurrentX = touchStartX;
-		isSwiping = true;
+		touchStartY = e.touches[0].clientY;
+		isHorizontalSwipe = null;
+		swipeConfirmed = false;
 	}
 
 	function handleTouchMove(e: TouchEvent) {
-		if (!isSwiping || selectionMode) return;
-		touchCurrentX = e.touches[0].clientX;
-		const diff = touchStartX - touchCurrentX;
+		if (selectionMode) return;
 
-		// Only allow left swipe (positive diff)
-		if (diff > 0) {
-			swipeOffset = Math.min(diff, MAX_SWIPE);
-			showDeleteAction = diff > SWIPE_THRESHOLD;
+		const currentX = e.touches[0].clientX;
+		const currentY = e.touches[0].clientY;
+		const diffX = touchStartX - currentX;
+		const diffY = Math.abs(currentY - touchStartY);
+
+		// Determine swipe direction if not yet locked
+		if (isHorizontalSwipe === null) {
+			if (Math.abs(diffX) > DIRECTION_LOCK_THRESHOLD || diffY > DIRECTION_LOCK_THRESHOLD) {
+				// Lock direction based on which axis has more movement
+				isHorizontalSwipe = Math.abs(diffX) > diffY;
+			}
+		}
+
+		// Only process horizontal swipes (left swipe = positive diffX)
+		if (isHorizontalSwipe && diffX > 0) {
+			swipeOffset = Math.min(diffX, MAX_SWIPE);
+			swipeConfirmed = diffX > SWIPE_THRESHOLD;
 		} else {
 			swipeOffset = 0;
-			showDeleteAction = false;
 		}
 	}
 
 	function handleTouchEnd() {
-		if (!isSwiping) return;
-		isSwiping = false;
-
-		if (showDeleteAction) {
+		if (swipeConfirmed) {
 			dispatch('delete');
 		}
 
-		// Reset swipe
+		// Reset swipe state
 		swipeOffset = 0;
-		showDeleteAction = false;
+		isHorizontalSwipe = null;
+		swipeConfirmed = false;
 	}
 
 	function truncateTitle(title: string | null, maxLength: number = 40): string {
