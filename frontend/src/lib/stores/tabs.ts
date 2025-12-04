@@ -294,7 +294,7 @@ function createTabsStore() {
 	/**
 	 * Connect WebSocket for a specific tab
 	 */
-	function connectTab(tabId: string) {
+	function connectTab(tabId: string, isReconnect = false) {
 		const existingWs = tabConnections.get(tabId);
 		if (existingWs && (existingWs.readyState === WebSocket.OPEN || existingWs.readyState === WebSocket.CONNECTING)) {
 			return;
@@ -307,7 +307,7 @@ function createTabsStore() {
 		if (token) {
 			url = `${url}?token=${encodeURIComponent(token)}`;
 		}
-		console.log(`[Tab ${tabId}] Connecting to WebSocket...`);
+		console.log(`[Tab ${tabId}] ${isReconnect ? 'Reconnecting' : 'Connecting'} to WebSocket...`);
 
 		const ws = new WebSocket(url);
 		tabConnections.set(tabId, ws);
@@ -315,6 +315,19 @@ function createTabsStore() {
 		ws.onopen = () => {
 			console.log(`[Tab ${tabId}] WebSocket connected`);
 			updateTab(tabId, { wsConnected: true, error: null });
+
+			// If reconnecting and tab has a session, reload it to get latest messages
+			if (isReconnect) {
+				const tab = getTab(tabId);
+				if (tab?.sessionId) {
+					console.log(`[Tab ${tabId}] Reloading session after reconnect:`, tab.sessionId);
+					// Use the WebSocket to request session reload
+					ws.send(JSON.stringify({
+						type: 'load_session',
+						session_id: tab.sessionId
+					}));
+				}
+			}
 
 			// Start ping timer
 			const existingPing = tabPingTimers.get(tabId);
@@ -349,7 +362,7 @@ function createTabsStore() {
 					const tab = getTab(tabId);
 					if (tab) {
 						console.log(`[Tab ${tabId}] Attempting reconnect...`);
-						connectTab(tabId);
+						connectTab(tabId, true); // Pass isReconnect flag
 					}
 				}, 3000);
 				tabReconnectTimers.set(tabId, reconnectTimer);
