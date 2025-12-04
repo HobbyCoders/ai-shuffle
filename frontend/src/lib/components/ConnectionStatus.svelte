@@ -5,10 +5,19 @@
 		wsConnected?: boolean; // Per-tab connection status (for tabs-based UI)
 	}
 
-	let { wsConnected = true }: Props = $props();
+	let { wsConnected }: Props = $props();
 
-	// Use global connection state from chat store if available, otherwise fall back to wsConnected prop
-	let connectionStatus = $derived($connectionState || (wsConnected ? 'connected' : 'disconnected'));
+	// Determine connection status:
+	// 1. If wsConnected prop is explicitly provided (tabs-based UI), use it
+	// 2. Otherwise fall back to global connectionState from chat store
+	let connectionStatus = $derived.by(() => {
+		// If wsConnected prop is provided, derive status from it
+		if (wsConnected !== undefined) {
+			return wsConnected ? 'connected' : 'disconnected';
+		}
+		// Fall back to global connection state
+		return $connectionState || 'disconnected';
+	});
 	let devices = $derived($connectedDevices || 1);
 	let shortDeviceId = $derived($deviceId ? $deviceId.substring(0, 8) : '');
 
