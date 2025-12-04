@@ -87,6 +87,9 @@ export interface ChatTab {
 	// Actual context window usage from /context command (source of truth)
 	contextUsed: number | null;
 	contextMax: number;
+	// Session overrides (override profile settings for this session)
+	modelOverride: string | null;  // null = use profile default
+	permissionModeOverride: string | null;  // null = use profile default
 }
 
 interface TabsState {
@@ -224,7 +227,9 @@ function createTabsStore() {
 			totalCacheCreationTokens: 0,
 			totalCacheReadTokens: 0,
 			contextUsed: null,
-			contextMax: 200000
+			contextMax: 200000,
+			modelOverride: null,
+			permissionModeOverride: null
 		}],
 		activeTabId: initialTabId,
 		profiles: [],
@@ -1345,7 +1350,9 @@ function createTabsStore() {
 						totalCacheCreationTokens: 0,
 						totalCacheReadTokens: 0,
 						contextUsed: null,
-						contextMax: 200000
+						contextMax: 200000,
+						modelOverride: null,
+						permissionModeOverride: null
 					}));
 
 					update(s => ({
@@ -1414,7 +1421,9 @@ function createTabsStore() {
 				totalCacheCreationTokens: 0,
 				totalCacheReadTokens: 0,
 				contextUsed: null,
-				contextMax: 200000
+				contextMax: 200000,
+				modelOverride: null,
+				permissionModeOverride: null
 			};
 
 			update(s => ({
@@ -1539,13 +1548,23 @@ function createTabsStore() {
 				})
 			}));
 
+			// Build overrides object only if there are actual overrides
+			const overrides: Record<string, string> = {};
+			if (tab.modelOverride) {
+				overrides.model = tab.modelOverride;
+			}
+			if (tab.permissionModeOverride) {
+				overrides.permission_mode = tab.permissionModeOverride;
+			}
+
 			// Send query
 			ws.send(JSON.stringify({
 				type: 'query',
 				prompt,
 				session_id: tab.sessionId,
 				profile: tab.profile,
-				project: tab.project || undefined
+				project: tab.project || undefined,
+				overrides: Object.keys(overrides).length > 0 ? overrides : undefined
 			}));
 		},
 
@@ -1688,6 +1707,19 @@ function createTabsStore() {
 			updateTab(tabId, { project: projectId });
 		},
 
+		/**
+		 * Set model override for a tab (null = use profile default)
+		 */
+		setTabModelOverride(tabId: string, model: string | null) {
+			updateTab(tabId, { modelOverride: model });
+		},
+
+		/**
+		 * Set permission mode override for a tab (null = use profile default)
+		 */
+		setTabPermissionModeOverride(tabId: string, permissionMode: string | null) {
+			updateTab(tabId, { permissionModeOverride: permissionMode });
+		},
 
 		/**
 		 * Set error for a tab
@@ -1720,7 +1752,9 @@ function createTabsStore() {
 				totalCacheCreationTokens: 0,
 				totalCacheReadTokens: 0,
 				contextUsed: null,
-				contextMax: 200000
+				contextMax: 200000,
+				modelOverride: null,
+				permissionModeOverride: null
 			});
 			connectTab(tabId);
 			// Save tabs state (debounced)

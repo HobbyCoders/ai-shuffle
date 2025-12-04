@@ -120,14 +120,14 @@ async def chat_websocket(
             except Exception as e:
                 logger.warning(f"Failed to send WebSocket message: {e}")
 
-    async def run_query(prompt: str, session_id: str, profile_id: str, project_id: Optional[str]):
+    async def run_query(prompt: str, session_id: str, profile_id: str, project_id: Optional[str], overrides: Optional[Dict[str, Any]] = None):
         """Execute query and stream results directly to WebSocket"""
         nonlocal current_session_id
 
         from app.core.query_engine import stream_to_websocket
 
         try:
-            logger.info(f"Starting query for session {session_id}, profile={profile_id}, project={project_id}")
+            logger.info(f"Starting query for session {session_id}, profile={profile_id}, project={project_id}, overrides={overrides}")
             await send_json({"type": "start", "session_id": session_id})
 
             logger.info(f"Calling stream_to_websocket for session {session_id}")
@@ -135,7 +135,8 @@ async def chat_websocket(
                 prompt=prompt,
                 session_id=session_id,
                 profile_id=profile_id,
-                project_id=project_id
+                project_id=project_id,
+                overrides=overrides
             ):
                 logger.debug(f"Streaming event for session {session_id}: {event.get('type')}")
                 await send_json(event)
@@ -175,6 +176,7 @@ async def chat_websocket(
                         session_id = data.get("session_id")
                         profile_id = data.get("profile", "claude-code")
                         project_id = data.get("project")
+                        overrides = data.get("overrides")  # Optional: {model, permission_mode}
 
                         if not prompt:
                             await send_json({"type": "error", "message": "Empty prompt"})
@@ -209,7 +211,7 @@ async def chat_websocket(
 
                         # Start new query task
                         query_task = asyncio.create_task(
-                            run_query(prompt, session_id, profile_id, project_id)
+                            run_query(prompt, session_id, profile_id, project_id, overrides)
                         )
                         _active_chat_sessions[session_id] = query_task
 

@@ -176,7 +176,7 @@ def build_options_from_profile(
     options = ClaudeAgentOptions(
         # Core settings
         model=overrides.get("model") or config.get("model"),
-        permission_mode=config.get("permission_mode", "default"),
+        permission_mode=overrides.get("permission_mode") or config.get("permission_mode", "default"),
         max_turns=overrides.get("max_turns") or config.get("max_turns"),
 
         # Tool configuration
