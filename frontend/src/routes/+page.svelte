@@ -1168,15 +1168,32 @@
 						<!-- History Header -->
 						<div class="flex items-center justify-between px-2 mb-2">
 							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">History</div>
-							{#if filteredSessions.length > 0}
+							<div class="flex items-center gap-2">
 								<button
-									on:click={() => tabs.toggleSelectionMode(false)}
-									class="text-xs text-muted-foreground hover:text-foreground transition-colors"
-									title={$selectionMode ? 'Exit selection mode' : 'Select multiple'}
+									on:click={() => tabs.loadSessions()}
+									class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+									title="Refresh sessions"
+									disabled={$sessionsLoading}
 								>
-									{$selectionMode ? 'Cancel' : 'Select'}
+									<svg
+										class="w-3.5 h-3.5 {$sessionsLoading ? 'animate-spin' : ''}"
+										fill="none"
+										stroke="currentColor"
+										viewBox="0 0 24 24"
+									>
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+									</svg>
 								</button>
-							{/if}
+								{#if filteredSessions.length > 0}
+									<button
+										on:click={() => tabs.toggleSelectionMode(false)}
+										class="text-xs text-muted-foreground hover:text-foreground transition-colors"
+										title={$selectionMode ? 'Exit selection mode' : 'Select multiple'}
+									>
+										{$selectionMode ? 'Cancel' : 'Select'}
+									</button>
+								{/if}
+							</div>
 						</div>
 
 						<!-- Grouped Sessions -->
@@ -1520,7 +1537,24 @@
 					{/if}
 
 					<!-- History Header (Mobile) -->
-					<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium px-2 mb-2">History</div>
+					<div class="flex items-center justify-between px-2 mb-2">
+						<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">History</div>
+						<button
+							on:click={() => tabs.loadSessions()}
+							class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+							title="Refresh sessions"
+							disabled={$sessionsLoading}
+						>
+							<svg
+								class="w-3.5 h-3.5 {$sessionsLoading ? 'animate-spin' : ''}"
+								fill="none"
+								stroke="currentColor"
+								viewBox="0 0 24 24"
+							>
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+							</svg>
+						</button>
+					</div>
 
 					<!-- Grouped Sessions (Mobile) -->
 					<div class="space-y-3">
