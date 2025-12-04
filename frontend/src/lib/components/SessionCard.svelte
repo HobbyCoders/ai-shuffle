@@ -19,23 +19,26 @@
 		select: void;
 	}>();
 
-	// Swipe gesture state
+	// Swipe state - "snap open" approach
+	let isSwipedOpen = false;
 	let touchStartX = 0;
 	let touchStartY = 0;
-	let swipeOffset = 0;
-	let isHorizontalSwipe: boolean | null = null; // null = undetermined, true = horizontal, false = vertical
-	let swipeConfirmed = false; // Whether swipe reached delete threshold
+	let currentSwipeX = 0;
+	let directionLocked: 'horizontal' | 'vertical' | null = null;
 
-	const SWIPE_THRESHOLD = 80; // Distance to trigger delete
-	const MAX_SWIPE = 100;
-	const DIRECTION_LOCK_THRESHOLD = 10; // Pixels to determine swipe direction
+	const DELETE_BUTTON_WIDTH = 72; // Width of delete button area
+	const DIRECTION_THRESHOLD = 8; // Pixels before locking direction
 
 	function handleTouchStart(e: TouchEvent) {
 		if (selectionMode) return;
 		touchStartX = e.touches[0].clientX;
 		touchStartY = e.touches[0].clientY;
-		isHorizontalSwipe = null;
-		swipeConfirmed = false;
+		directionLocked = null;
+
+		// If swiped open, adjust start position
+		if (isSwipedOpen) {
+			touchStartX += DELETE_BUTTON_WIDTH;
+		}
 	}
 
 	function handleTouchMove(e: TouchEvent) {
@@ -44,35 +47,54 @@
 		const currentX = e.touches[0].clientX;
 		const currentY = e.touches[0].clientY;
 		const diffX = touchStartX - currentX;
-		const diffY = Math.abs(currentY - touchStartY);
+		const diffY = currentY - touchStartY;
 
-		// Determine swipe direction if not yet locked
-		if (isHorizontalSwipe === null) {
-			if (Math.abs(diffX) > DIRECTION_LOCK_THRESHOLD || diffY > DIRECTION_LOCK_THRESHOLD) {
-				// Lock direction based on which axis has more movement
-				isHorizontalSwipe = Math.abs(diffX) > diffY;
+		// Lock direction on first significant movement
+		if (directionLocked === null) {
+			if (Math.abs(diffX) > DIRECTION_THRESHOLD || Math.abs(diffY) > DIRECTION_THRESHOLD) {
+				directionLocked = Math.abs(diffX) > Math.abs(diffY) ? 'horizontal' : 'vertical';
 			}
 		}
 
-		// Only process horizontal swipes (left swipe = positive diffX)
-		if (isHorizontalSwipe && diffX > 0) {
-			swipeOffset = Math.min(diffX, MAX_SWIPE);
-			swipeConfirmed = diffX > SWIPE_THRESHOLD;
-		} else {
-			swipeOffset = 0;
+		// Only handle horizontal swipes
+		if (directionLocked === 'horizontal') {
+			// Clamp between 0 and DELETE_BUTTON_WIDTH
+			currentSwipeX = Math.max(0, Math.min(diffX, DELETE_BUTTON_WIDTH));
 		}
 	}
 
 	function handleTouchEnd() {
-		if (swipeConfirmed) {
-			dispatch('delete');
+		if (directionLocked === 'horizontal') {
+			// Snap open if swiped more than halfway, otherwise snap closed
+			if (currentSwipeX > DELETE_BUTTON_WIDTH / 2) {
+				isSwipedOpen = true;
+			} else {
+				isSwipedOpen = false;
+			}
 		}
 
-		// Reset swipe state
-		swipeOffset = 0;
-		isHorizontalSwipe = null;
-		swipeConfirmed = false;
+		currentSwipeX = 0;
+		directionLocked = null;
 	}
+
+	function handleDelete() {
+		isSwipedOpen = false;
+		dispatch('delete');
+	}
+
+	function handleCardClick() {
+		if (isSwipedOpen) {
+			// Close swipe if open
+			isSwipedOpen = false;
+		} else if (selectionMode) {
+			dispatch('select');
+		} else {
+			dispatch('click');
+		}
+	}
+
+	// Calculate transform based on state
+	$: swipeTransform = isSwipedOpen ? DELETE_BUTTON_WIDTH : currentSwipeX;
 
 	function truncateTitle(title: string | null, maxLength: number = 40): string {
 		if (!title) return 'New Chat';
@@ -93,23 +115,26 @@
 </script>
 
 <div class="relative overflow-hidden rounded-lg">
-	<!-- Delete action background (revealed on swipe) -->
-	<div
-		class="absolute inset-y-0 right-0 w-24 bg-destructive flex items-center justify-end pr-4 transition-opacity"
-		class:opacity-100={swipeOffset > 0}
-		class:opacity-0={swipeOffset === 0}
+	<!-- Delete button (revealed on swipe) -->
+	<button
+		class="absolute inset-y-0 right-0 w-[72px] bg-destructive flex items-center justify-center transition-opacity active:bg-destructive/80"
+		class:opacity-100={swipeTransform > 0}
+		class:opacity-0={swipeTransform === 0}
+		on:click|stopPropagation={handleDelete}
+		aria-label="Delete session"
 	>
 		<svg class="w-5 h-5 text-destructive-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
 		</svg>
-	</div>
+	</button>
 
 	<!-- Main card content -->
 	<div
-		class="group relative flex items-start gap-3 px-3 py-2.5 rounded-lg cursor-pointer transition-all touch-pan-y select-none {isActive ? 'bg-primary/20 border border-primary/30' : 'hover:bg-accent'} {selectionMode && isSelected ? 'bg-accent/50' : ''}"
-		style="transform: translateX(-{swipeOffset}px)"
-		on:click={() => selectionMode ? dispatch('select') : dispatch('click')}
-		on:keypress={(e) => e.key === 'Enter' && (selectionMode ? dispatch('select') : dispatch('click'))}
+		class="group relative flex items-start gap-3 px-3 py-2.5 rounded-lg cursor-pointer select-none bg-card {isActive ? 'bg-primary/20 border border-primary/30' : 'hover:bg-accent'} {selectionMode && isSelected ? 'bg-accent/50' : ''}"
+		class:transition-transform={!directionLocked}
+		style="transform: translateX(-{swipeTransform}px)"
+		on:click={handleCardClick}
+		on:keypress={(e) => e.key === 'Enter' && handleCardClick()}
 		on:touchstart={handleTouchStart}
 		on:touchmove={handleTouchMove}
 		on:touchend={handleTouchEnd}
