@@ -395,30 +395,6 @@
 		const prompt = tabInputs[tabId] || '';
 		if (!prompt.trim() || !$activeTab || $activeTab.isStreaming || isUploading) return;
 
-		// Debug command: /testtodos - inject sample todos to test the UI
-		if (prompt.trim() === '/testtodos') {
-			tabInputs[tabId] = '';
-			tabInputs = tabInputs;
-			tabs.updateTab(tabId, {
-				todos: [
-					{ content: 'Research the codebase structure', status: 'completed', activeForm: 'Researching the codebase structure' },
-					{ content: 'Implement the new feature', status: 'completed', activeForm: 'Implementing the new feature' },
-					{ content: 'Write unit tests', status: 'in_progress', activeForm: 'Writing unit tests' },
-					{ content: 'Update documentation', status: 'pending', activeForm: 'Updating documentation' },
-					{ content: 'Run final build and deploy', status: 'pending', activeForm: 'Running final build and deploying' }
-				]
-			});
-			return;
-		}
-
-		// Debug command: /cleartodos - clear the todo list
-		if (prompt.trim() === '/cleartodos') {
-			tabInputs[tabId] = '';
-			tabInputs = tabInputs;
-			tabs.updateTab(tabId, { todos: [] });
-			return;
-		}
-
 		// API users use their API key restrictions - skip profile/project validation if they have restrictions
 		const isApiUserWithRestrictions = $apiUser && ($apiUser.profile_id || $apiUser.project_id);
 
