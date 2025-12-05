@@ -257,10 +257,15 @@ class SyncEngine:
         message_id: str,
         source_device_id: Optional[str] = None
     ):
-        """Notify all devices that streaming has started for a session"""
-        self._streaming_sessions.add(session_id)
-        # Create a new streaming buffer for this session
-        self._streaming_buffers[session_id] = StreamingBuffer(session_id=session_id)
+        """Notify all devices that streaming has started for a session.
+
+        This method is idempotent - calling it multiple times for the same session
+        is safe and won't clear the streaming buffer.
+        """
+        # Only create buffer if not already streaming (idempotent)
+        if session_id not in self._streaming_sessions:
+            self._streaming_sessions.add(session_id)
+            self._streaming_buffers[session_id] = StreamingBuffer(session_id=session_id)
 
         event = SyncEvent(
             event_type="stream_start",

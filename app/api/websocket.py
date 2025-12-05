@@ -525,6 +525,16 @@ async def chat_websocket(
                             except asyncio.CancelledError:
                                 pass
 
+                        # Pre-mark session as streaming so other devices know immediately
+                        # This prevents race conditions where a device loads the session
+                        # before broadcast_stream_start is called inside run_query
+                        message_id = str(uuid.uuid4())
+                        await sync_engine.broadcast_stream_start(
+                            session_id=session_id,
+                            message_id=message_id,
+                            source_device_id=device_id  # Exclude sender - they get direct events
+                        )
+
                         # Start new query task
                         query_task = asyncio.create_task(
                             run_query(prompt, session_id, profile_id, project_id, overrides)
@@ -666,13 +676,13 @@ async def chat_websocket(
             except asyncio.CancelledError:
                 pass
 
-            # Cancel any running query
+            # NOTE: We intentionally do NOT cancel the query task when the websocket closes.
+            # This allows streaming to continue for other devices even if the originating
+            # device disconnects (e.g., page refresh, phone locked, network issue).
+            # The query will complete naturally and broadcast stream_end to all devices.
+            # If the user wants to stop the query, they should use the "stop" message explicitly.
             if query_task and not query_task.done():
-                query_task.cancel()
-                try:
-                    await query_task
-                except asyncio.CancelledError:
-                    pass
+                logger.info(f"WebSocket closed but query task still running for session - letting it continue for other devices")
 
             # Unregister device from sync engine, but only if still using this websocket
             # This prevents race conditions where a new connection was established
