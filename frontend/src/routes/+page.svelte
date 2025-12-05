@@ -2443,11 +2443,11 @@
 
 						<!-- Bottom Controls Row (Pills + Attach) -->
 						<div class="mt-2 flex flex-wrap items-center justify-center gap-1.5">
-							<!-- Attach File Button (Desktop only - mobile uses FAB) -->
+							<!-- Attach File Button -->
 							<button
 								type="button"
 								on:click={triggerFileUpload}
-								class="hidden sm:inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-full bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50 transition-all disabled:opacity-40"
+								class="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-full bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50 transition-all disabled:opacity-40"
 								disabled={currentTab.isStreaming || !$claudeAuthenticated || isUploading}
 								title={currentTab.project ? 'Attach file' : 'Select a project to attach files'}
 							>
