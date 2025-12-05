@@ -627,8 +627,29 @@ async def chat_websocket(
                                     "isStreaming": is_streaming,
                                     "streamingBuffer": streaming_buffer
                                 })
+
+                                # Broadcast to other devices that this session was opened
+                                await sync_engine.broadcast_session_opened(
+                                    session_id=session_id,
+                                    device_id=device_id,
+                                    is_new=False  # Resuming existing session
+                                )
                             else:
                                 await send_json({"type": "error", "message": "Session not found"})
+
+                    elif msg_type == "close_session":
+                        # Close/unload the current session
+                        old_session_id = current_session_id
+                        if old_session_id:
+                            await sync_engine.unregister_device(device_id, old_session_id)
+                            # Broadcast to other devices that this session was closed
+                            await sync_engine.broadcast_session_closed(
+                                session_id=old_session_id,
+                                device_id=device_id
+                            )
+                            current_session_id = None
+                            logger.info(f"Device {device_id} closed session {old_session_id}")
+                            await send_json({"type": "session_closed", "session_id": old_session_id})
 
                     elif msg_type == "pong":
                         pass  # Keep-alive response

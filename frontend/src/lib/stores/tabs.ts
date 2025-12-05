@@ -932,6 +932,23 @@ function createTabsStore() {
 				}
 				break;
 			}
+
+			case 'session_opened': {
+				// Another device opened/resumed this session
+				const deviceId = eventData.device_id as string;
+				const isNew = eventData.is_new as boolean;
+				console.log(`[Tab ${tabId}] Session opened by another device:`, { deviceId, isNew });
+				// Just log for now - could show a notification or indicator
+				break;
+			}
+
+			case 'session_closed': {
+				// Another device closed this session
+				const deviceId = eventData.device_id as string;
+				console.log(`[Tab ${tabId}] Session closed by another device:`, { deviceId });
+				// Just log for now - could show a notification or indicator
+				break;
+			}
 		}
 	}
 
@@ -2024,6 +2041,15 @@ function createTabsStore() {
 			// Don't close if it's the last tab
 			if (state.tabs.length <= 1) {
 				return;
+			}
+
+			// Send close_session message before disconnecting (so other devices know)
+			const tab = state.tabs.find(t => t.id === tabId);
+			if (tab?.sessionId) {
+				const ws = tabConnections.get(tabId);
+				if (ws && ws.readyState === WebSocket.OPEN) {
+					ws.send(JSON.stringify({ type: 'close_session' }));
+				}
 			}
 
 			// Disconnect WebSocket

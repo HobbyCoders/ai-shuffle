@@ -369,6 +369,42 @@ class SyncEngine:
         # Don't exclude any device - all devices need to know about rewind
         await self.broadcast_event(event, exclude_device_id=None)
 
+    async def broadcast_session_opened(
+        self,
+        session_id: str,
+        device_id: str,
+        is_new: bool = False
+    ):
+        """Broadcast that a device opened/resumed a session"""
+        event = SyncEvent(
+            event_type="session_opened",
+            session_id=session_id,
+            data={
+                "device_id": device_id,
+                "is_new": is_new
+            },
+            source_device_id=device_id
+        )
+        # Notify all devices in session except the one that opened it
+        await self.broadcast_event(event, exclude_device_id=device_id)
+
+    async def broadcast_session_closed(
+        self,
+        session_id: str,
+        device_id: str
+    ):
+        """Broadcast that a device closed a session"""
+        event = SyncEvent(
+            event_type="session_closed",
+            session_id=session_id,
+            data={
+                "device_id": device_id
+            },
+            source_device_id=device_id
+        )
+        # Notify all devices in session except the one that closed it
+        await self.broadcast_event(event, exclude_device_id=device_id)
+
     async def get_session_state(self, session_id: str) -> Dict[str, Any]:
         """Get current state of a session for new device joining"""
         state = {
