@@ -1,5 +1,8 @@
 # AI Hub
 
+## Disclaimer
+This application is intended for personal use and development only. Deploying it as a production application using Anthropic OAuth violates Anthropic's Terms of Service. If you wish to deploy a production application, you must use an Anthropic API key instead.
+
 A full-featured web interface and API server for Claude Code, providing a Claude.ai-like chat experience with multi-user support, API access, and advanced AI agent management.
 
 ![Version](https://img.shields.io/badge/version-4.0.0-blue)
@@ -7,7 +10,7 @@ A full-featured web interface and API server for Claude Code, providing a Claude
 
 ## Overview
 
-AI Hub acts as a bridge between Claude Code CLI (OAuth authentication) and users/applications, exposing Claude's capabilities through:
+AI Hub lets you self-host a Claude Code web interface and access Claude's capabilities without the cost of API keys. It acts as a bridge between Claude Code CLI (using OAuth authentication) and your applications, exposing Claude through:
 
 - **Web UI** - Modern chat interface similar to Claude.ai
 - **REST API** - OpenAI-compatible endpoints for programmatic access
@@ -30,7 +33,7 @@ No API keys required - uses Claude Code's OAuth authentication.
 ### Agent System
 - **Profiles** - Configure tool access, models, and system prompts
 - **Subagents** - Delegate tasks to specialized Claude instances
-- **Slash Commands** - Built-in (`/rewind`, `/help`) and custom commands
+- **Slash Commands** - Built-in (`/compact`, `/context`) and custom commands
 - **Checkpoints** - Save and rewind conversation state
 - **Model Selection** - Choose between Sonnet, Opus, and Haiku
 
@@ -54,23 +57,15 @@ No API keys required - uses Claude Code's OAuth authentication.
 
 ### Docker Compose (Recommended)
 
-```bash
-# Clone and start
-git clone https://github.com/your-username/ai-hub.git
-cd ai-hub
-docker-compose up -d
-
-# Authenticate with Claude
-docker exec -it ai-hub claude login
-
-# Open http://localhost:8000
-```
+# Pull and run
+docker pull ghcr.io/quickkill0/ai-hub:latest
+docker run -d -p 8000:8000 -v ai-hub-data:/data ghcr.io/quickkill0/ai-hub:latest
 
 ### First-Time Setup
 
 1. Open http://localhost:8000
 2. Create your admin account
-3. Authenticate Claude in the container (see above)
+3. Authenticate Claude in app on settings page.
 4. Start chatting
 
 ## Configuration
@@ -232,9 +227,7 @@ ai-hub/
 ## Troubleshooting
 
 ### Claude Not Authenticated
-```bash
-docker exec -it ai-hub claude login
-```
+- Authenticate in app on settings page.
 
 ### Check Diagnostics
 ```bash
