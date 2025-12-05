@@ -1,9 +1,8 @@
 # AI Hub
+A full-featured web interface and API server for Claude Code, providing a Claude.ai-like chat experience with multi-user support, API access, and advanced AI agent management.
 
 ## Disclaimer
 This application is intended for personal use and development only. Deploying it as a production application using Anthropic OAuth violates Anthropic's Terms of Service. If you wish to deploy a production application, you must use an Anthropic API key instead.
-
-A full-featured web interface and API server for Claude Code, providing a Claude.ai-like chat experience with multi-user support, API access, and advanced AI agent management.
 
 ![Version](https://img.shields.io/badge/version-4.0.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
