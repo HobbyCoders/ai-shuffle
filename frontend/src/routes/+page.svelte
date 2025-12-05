@@ -520,7 +520,7 @@
 			return;
 		}
 
-		// For files, add to the uploaded files list and replace @ mention with chip reference
+		// For files, add to the uploaded files list as a chip (no text in input)
 		const fileRef: FileUploadResponse = {
 			filename: file.name,
 			path: file.path,
@@ -532,8 +532,8 @@
 		if (!tabUploadedFiles[tabId]) tabUploadedFiles[tabId] = [];
 		tabUploadedFiles[tabId] = [...tabUploadedFiles[tabId], fileRef];
 
-		// Replace @query with the file reference format
-		const newInput = input.substring(0, atStartIndex) + `@${file.path} `;
+		// Remove the @query from input (file reference shown as chip only)
+		const newInput = input.substring(0, atStartIndex).trimEnd();
 		tabInputs[tabId] = newInput;
 		tabInputs = tabInputs;
 
@@ -2371,40 +2371,7 @@
 							{/if}
 
 							<!-- Main Input Row -->
-							<div class="flex items-end gap-1 p-2 sm:p-2.5">
-								<!-- Left Actions (Desktop: inline, Mobile: uses existing bottom sheet) -->
-								<div class="hidden sm:flex items-center gap-0.5 pb-1">
-									<!-- Quick Actions Button -->
-									<QuickActions
-										profileId={currentTab.profile}
-										onAction={(prompt) => {
-											tabInputs[tabId] = prompt;
-											handleSubmit(tabId);
-										}}
-										disabled={currentTab.isStreaming || !$claudeAuthenticated}
-									/>
-
-									<!-- File Attach Button -->
-									<button
-										type="button"
-										on:click={triggerFileUpload}
-										class="w-8 h-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent/50 rounded-xl transition-all disabled:opacity-40"
-										disabled={currentTab.isStreaming || !$claudeAuthenticated || isUploading}
-										title={currentTab.project ? 'Attach file' : 'Select a project to attach files'}
-									>
-										{#if isUploading}
-											<svg class="w-4.5 h-4.5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-												<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-											</svg>
-										{:else}
-											<svg class="w-4.5 h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-											</svg>
-										{/if}
-									</button>
-								</div>
-
+							<div class="flex items-center gap-1 p-2 sm:p-2.5">
 								<!-- Textarea Container -->
 								<div class="flex-1 relative min-w-0">
 									<!-- Command Autocomplete -->
@@ -2446,7 +2413,7 @@
 								</div>
 
 								<!-- Send/Stop Button -->
-								<div class="pb-1">
+								<div>
 									{#if currentTab.isStreaming}
 										<button
 											type="button"
@@ -2474,17 +2441,38 @@
 							</div>
 						</div>
 
-						<!-- Model/Mode Pills (Below input - Admin only) -->
-						{#if currentTab && $isAdmin}
-							{@const currentProfile = $profiles.find(p => p.id === currentTab.profile)}
-							{@const profileModel = currentProfile?.config?.model || 'sonnet'}
-							{@const profilePermissionMode = currentProfile?.config?.permission_mode || 'default'}
-							{@const effectiveModel = currentTab.modelOverride || profileModel}
-							{@const effectiveMode = currentTab.permissionModeOverride || profilePermissionMode}
-							{@const modelLabels = { sonnet: 'Sonnet', opus: 'Opus', haiku: 'Haiku' } as Record<string, string>}
-							{@const modeLabels = { default: 'Ask', acceptEdits: 'Auto-Accept', plan: 'Plan', bypassPermissions: 'Bypass' } as Record<string, string>}
+						<!-- Bottom Controls Row (Pills + Attach) -->
+						<div class="mt-2 flex flex-wrap items-center justify-center gap-1.5">
+							<!-- Attach File Button (Desktop only - mobile uses FAB) -->
+							<button
+								type="button"
+								on:click={triggerFileUpload}
+								class="hidden sm:inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-full bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50 transition-all disabled:opacity-40"
+								disabled={currentTab.isStreaming || !$claudeAuthenticated || isUploading}
+								title={currentTab.project ? 'Attach file' : 'Select a project to attach files'}
+							>
+								{#if isUploading}
+									<svg class="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+										<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+									</svg>
+								{:else}
+									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+									</svg>
+								{/if}
+								<span>Attach</span>
+							</button>
 
-							<div class="mt-2 flex flex-wrap items-center justify-center gap-1.5">
+							<!-- Model/Mode Pills (Admin only) -->
+							{#if currentTab && $isAdmin}
+								{@const currentProfile = $profiles.find(p => p.id === currentTab.profile)}
+								{@const profileModel = currentProfile?.config?.model || 'sonnet'}
+								{@const profilePermissionMode = currentProfile?.config?.permission_mode || 'default'}
+								{@const effectiveModel = currentTab.modelOverride || profileModel}
+								{@const effectiveMode = currentTab.permissionModeOverride || profilePermissionMode}
+								{@const modelLabels = { sonnet: 'Sonnet', opus: 'Opus', haiku: 'Haiku' } as Record<string, string>}
+								{@const modeLabels = { default: 'Ask', acceptEdits: 'Auto-Accept', plan: 'Plan', bypassPermissions: 'Bypass' } as Record<string, string>}
 								<!-- Model Selector Pill -->
 								<div class="relative">
 									<button
@@ -2585,8 +2573,8 @@
 										<span class="hidden sm:inline">Reset</span>
 									</button>
 								{/if}
-							</div>
-						{/if}
+							{/if}
+						</div>
 					</form>
 				</div>
 			</div>
