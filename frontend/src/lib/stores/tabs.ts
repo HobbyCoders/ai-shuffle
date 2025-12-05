@@ -126,6 +126,8 @@ interface PersistedTab {
 	sessionId: string | null;
 	profile: string;
 	project: string;
+	modelOverride: string | null;
+	permissionModeOverride: string | null;
 }
 
 interface PersistedTabsState {
@@ -177,7 +179,9 @@ async function saveTabsToServer(state: TabsState) {
 					title: tab.title,
 					sessionId: tab.sessionId,
 					profile: tab.profile,
-					project: tab.project
+					project: tab.project,
+					modelOverride: tab.modelOverride,
+					permissionModeOverride: tab.permissionModeOverride
 				})),
 				activeTabId: state.activeTabId
 			};
@@ -1503,6 +1507,7 @@ function createTabsStore() {
 				// Group tool result with its corresponding tool_use message
 				const toolUseId = data.tool_use_id as string;
 				const output = data.output as string;
+				const isError = data.is_error as boolean;
 
 				update(s => ({
 					...s,
@@ -1519,7 +1524,7 @@ function createTabsStore() {
 								messages[i] = {
 									...m,
 									toolResult: output,
-									toolStatus: 'complete',
+									toolStatus: isError ? 'error' : 'complete',
 									streaming: false
 								};
 								found = true;
@@ -1535,7 +1540,7 @@ function createTabsStore() {
 									messages[i] = {
 										...m,
 										toolResult: output,
-										toolStatus: 'complete',
+										toolStatus: isError ? 'error' : 'complete',
 										streaming: false
 									};
 									break;
@@ -1888,6 +1893,7 @@ function createTabsStore() {
 				const agentId = data.agent_id as string;
 				const toolUseId = data.tool_use_id as string;
 				const output = data.output as string;
+				const isError = data.is_error as boolean;
 
 				update(s => ({
 					...s,
@@ -1904,7 +1910,7 @@ function createTabsStore() {
 										children[i] = {
 											...children[i],
 											toolResult: output,
-											toolStatus: 'complete'
+											toolStatus: isError ? 'error' : 'complete'
 										};
 										found = true;
 										break;
@@ -1917,7 +1923,7 @@ function createTabsStore() {
 											children[i] = {
 												...children[i],
 												toolResult: output,
-												toolStatus: 'complete'
+												toolStatus: isError ? 'error' : 'complete'
 											};
 											break;
 										}
@@ -2187,8 +2193,8 @@ function createTabsStore() {
 						totalCacheReadTokens: 0,
 						contextUsed: null,
 						contextMax: 200000,
-						modelOverride: null,
-						permissionModeOverride: null,
+						modelOverride: pt.modelOverride ?? null,
+						permissionModeOverride: pt.permissionModeOverride ?? null,
 			pendingPermissions: []
 					}));
 
@@ -2558,6 +2564,8 @@ function createTabsStore() {
 		 */
 		setTabModelOverride(tabId: string, model: string | null) {
 			updateTab(tabId, { modelOverride: model });
+			// Save tabs state (debounced) to persist the override
+			saveTabsToServer(get({ subscribe }));
 		},
 
 		/**
@@ -2565,6 +2573,8 @@ function createTabsStore() {
 		 */
 		setTabPermissionModeOverride(tabId: string, permissionMode: string | null) {
 			updateTab(tabId, { permissionModeOverride: permissionMode });
+			// Save tabs state (debounced) to persist the override
+			saveTabsToServer(get({ subscribe }));
 		},
 
 		/**

@@ -1646,14 +1646,16 @@ async def stream_to_websocket(
                                 "agent_id": parent_tool_id,
                                 "name": tool_name,
                                 "tool_use_id": tool_use_id,
-                                "output": output
+                                "output": output,
+                                "is_error": getattr(block, 'is_error', False)
                             }
                         else:
                             yield {
                                 "type": "tool_result",
                                 "name": tool_name,
                                 "tool_use_id": tool_use_id,
-                                "output": output
+                                "output": output,
+                                "is_error": getattr(block, 'is_error', False)
                             }
 
                 metadata["model"] = message.model
@@ -1728,14 +1730,16 @@ async def stream_to_websocket(
                                 "agent_id": parent_tool_id,
                                 "name": "unknown",
                                 "tool_use_id": tool_use_id,
-                                "output": output
+                                "output": output,
+                                "is_error": block.is_error
                             }
                         else:
                             yield {
                                 "type": "tool_result",
                                 "name": "unknown",
                                 "tool_use_id": tool_use_id,
-                                "output": output
+                                "output": output,
+                                "is_error": block.is_error
                             }
 
             elif isinstance(message, ResultMessage):

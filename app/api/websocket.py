@@ -280,7 +280,8 @@ async def chat_websocket(
                     # Tool result event
                     chunk_data = {
                         'content': event.get('output', ''),
-                        'tool_id': event.get('tool_use_id')
+                        'tool_id': event.get('tool_use_id'),
+                        'is_error': event.get('is_error', False)
                     }
                     await sync_engine.broadcast_stream_chunk(
                         session_id=session_id,
@@ -352,7 +353,8 @@ async def chat_websocket(
                     chunk_data = {
                         'agent_id': event.get('agent_id'),
                         'tool_use_id': event.get('tool_use_id'),
-                        'output': event.get('output', '')
+                        'output': event.get('output', ''),
+                        'is_error': event.get('is_error', False)
                     }
                     await sync_engine.broadcast_stream_chunk(
                         session_id=session_id,

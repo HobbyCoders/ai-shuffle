@@ -706,6 +706,20 @@
 		return marked(content, { breaks: true }) as string;
 	}
 
+	// Copy text to clipboard with feedback
+	let copiedMessageId: string | null = null;
+	async function copyToClipboard(text: string, messageId: string) {
+		try {
+			await navigator.clipboard.writeText(text);
+			copiedMessageId = messageId;
+			setTimeout(() => {
+				copiedMessageId = null;
+			}, 2000);
+		} catch (e) {
+			console.error('Failed to copy to clipboard:', e);
+		}
+	}
+
 	function formatTime(date?: Date): string {
 		const d = date || new Date();
 		return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
@@ -2192,16 +2206,35 @@
 												{/if}
 											</div>
 										</div>
-										{#if message.metadata && !message.streaming}
-											<div class="mt-2 text-xs text-muted-foreground flex items-center gap-3">
+										<div class="mt-2 text-xs text-muted-foreground flex items-center gap-3">
+											{#if message.metadata && !message.streaming}
 												{#if message.metadata.total_cost_usd}
 													<span>{formatCost(message.metadata.total_cost_usd as number)}</span>
 												{/if}
 												{#if message.metadata.duration_ms}
 													<span>{((message.metadata.duration_ms as number) / 1000).toFixed(1)}s</span>
 												{/if}
-											</div>
-										{/if}
+											{/if}
+											{#if message.content && !message.streaming}
+												<button
+													class="ml-auto flex items-center gap-1 px-2 py-1 rounded hover:bg-muted/50 transition-colors"
+													on:click={() => copyToClipboard(message.content, message.id)}
+													title="Copy response"
+												>
+													{#if copiedMessageId === message.id}
+														<svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+														</svg>
+														<span class="text-green-500">Copied</span>
+													{:else}
+														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+														</svg>
+														<span>Copy</span>
+													{/if}
+												</button>
+											{/if}
+										</div>
 									</div>
 								</div>
 							{:else if message.type === 'tool_use'}
@@ -2219,6 +2252,10 @@
 												{#if message.toolStatus === 'running' || message.streaming}
 													<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+													</svg>
+												{:else if message.toolStatus === 'error'}
+													<svg class="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 													</svg>
 												{:else}
 													<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
