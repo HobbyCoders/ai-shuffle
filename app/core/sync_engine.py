@@ -208,20 +208,26 @@ class SyncEngine:
         session_id = event.session_id
 
         if session_id not in self._connections:
+            logger.debug(f"No connections for session {session_id}, skipping broadcast")
             return
 
         # Get connections to broadcast to
         connections = list(self._connections[session_id].values())
+        logger.info(f"Broadcasting {event.event_type} to {len(connections)} devices for session {session_id[:8]}...")
 
         # Send to all devices except the excluded one
         failed_devices = []
         for conn in connections:
             if exclude_device_id and conn.device_id == exclude_device_id:
+                logger.debug(f"Skipping source device {conn.device_id[:8]}")
                 continue
 
+            logger.debug(f"Sending {event.event_type} to device {conn.device_id[:8]}")
             success = await conn.send_event(event)
             if not success:
                 failed_devices.append(conn.device_id)
+            else:
+                logger.debug(f"Successfully sent {event.event_type} to device {conn.device_id[:8]}")
 
         # Clean up failed connections
         if failed_devices:

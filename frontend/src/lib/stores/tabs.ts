@@ -136,6 +136,22 @@ const SAVE_DEBOUNCE_MS = 1000;
 // Flag to prevent saving during initial load
 let isInitializing = false;
 
+// Persistent device ID for multi-device sync
+// This ensures the same browser/device keeps the same ID across reconnections
+function getOrCreateDeviceId(): string {
+	if (typeof window === 'undefined') {
+		return `device-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+	}
+
+	let deviceId = localStorage.getItem('aihub_device_id');
+	if (!deviceId) {
+		deviceId = `device-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+		localStorage.setItem('aihub_device_id', deviceId);
+		console.log('[Tabs] Generated new device ID:', deviceId);
+	}
+	return deviceId;
+}
+
 /**
  * Save tabs state to backend (debounced)
  */
@@ -248,12 +264,13 @@ function createTabsStore() {
 	});
 
 	/**
-	 * Get WebSocket URL
+	 * Get WebSocket URL with device_id for multi-device sync
 	 */
 	function getWsUrl(): string {
 		const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 		const host = window.location.host;
-		return `${protocol}//${host}/api/v1/ws/chat`;
+		const deviceId = getOrCreateDeviceId();
+		return `${protocol}//${host}/api/v1/ws/chat?device_id=${encodeURIComponent(deviceId)}`;
 	}
 
 	/**
@@ -303,9 +320,9 @@ function createTabsStore() {
 		// Try to get token from cookie (may be null if httpOnly)
 		// Server will also check cookie directly for httpOnly cookies
 		const token = getAuthToken();
-		let url = getWsUrl();
+		let url = getWsUrl(); // Already includes device_id
 		if (token) {
-			url = `${url}?token=${encodeURIComponent(token)}`;
+			url = `${url}&token=${encodeURIComponent(token)}`;
 		}
 		console.log(`[Tab ${tabId}] ${isReconnect ? 'Reconnecting' : 'Connecting'} to WebSocket...`);
 
@@ -316,20 +333,18 @@ function createTabsStore() {
 			console.log(`[Tab ${tabId}] WebSocket connected`);
 			updateTab(tabId, { wsConnected: true, error: null });
 
-			// If reconnecting and tab has a session, always reload to get latest messages
-			// The backend will tell us if streaming is still in progress and send the buffer
-			if (isReconnect) {
-				const tab = getTab(tabId);
-				if (tab?.sessionId) {
-					console.log(`[Tab ${tabId}] Reloading session after reconnect:`, tab.sessionId);
-					// Use the WebSocket to request session reload
-					// The backend will return isStreaming=true with buffer if still active,
-					// or isStreaming=false with complete history if finished
-					ws.send(JSON.stringify({
-						type: 'load_session',
-						session_id: tab.sessionId
-					}));
-				}
+			// Always register with SyncEngine by sending load_session if tab has a session
+			// This is critical for multi-device sync - devices must be registered to receive events
+			const tab = getTab(tabId);
+			if (tab?.sessionId) {
+				console.log(`[Tab ${tabId}] Registering with session via load_session:`, tab.sessionId);
+				// Use the WebSocket to register with SyncEngine and get latest messages
+				// The backend will return isStreaming=true with buffer if still active,
+				// or isStreaming=false with complete history if finished
+				ws.send(JSON.stringify({
+					type: 'load_session',
+					session_id: tab.sessionId
+				}));
 			}
 
 			// Start ping timer

@@ -310,10 +310,15 @@ async def chat_websocket(
                 )
 
         finally:
-            # Re-register device with SyncEngine now that streaming is complete
-            # This allows the device to receive sync events for future activity
-            await sync_engine.register_device(device_id, session_id, websocket)
-            logger.info(f"Re-registered device {device_id} after streaming complete")
+            # Re-register device with SyncEngine now that streaming is complete,
+            # but ONLY if the websocket is still connected.
+            # If the user disconnected during streaming (phone locked, etc.),
+            # they will re-register when they reconnect via load_session.
+            if websocket.client_state == WebSocketState.CONNECTED:
+                await sync_engine.register_device(device_id, session_id, websocket)
+                logger.info(f"Re-registered device {device_id} after streaming complete")
+            else:
+                logger.info(f"Skipping re-register for device {device_id} - websocket disconnected during streaming")
 
             # Clean up task reference
             if session_id in _active_chat_sessions:
