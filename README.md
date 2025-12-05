@@ -26,6 +26,20 @@ This application uses Claude Code CLI with OAuth authentication, which is govern
 
 ---
 
+## ⚠️ Experimental Software Notice
+
+**This application is highly experimental and under active development.**
+
+- **Expect Bugs**: This software is in early development and will have bugs. Please report issues, but understand they may not be fixed immediately.
+- **Solo Developer**: This is a personal project maintained by a single developer in my spare time. There is no team or organization behind it.
+- **No Guarantees**: Don't expect regular updates, quick bug fixes, or timely feature requests. Updates happen when I have time and motivation.
+- **Breaking Changes**: The application may update frequently with breaking changes as development continues. Database schemas, APIs, and configurations may change without migration paths.
+- **Use at Your Own Risk**: This software is provided as-is for educational and experimental purposes.
+
+If you need a stable, production-ready solution, consider using [Anthropic's official API](https://www.anthropic.com/api) directly.
+
+---
+
 ## Overview
 
 AI Hub lets you self-host a Claude Code web interface and access Claude's capabilities without the cost of API keys. It acts as a bridge between Claude Code CLI (using OAuth authentication) and your applications, exposing Claude through:
