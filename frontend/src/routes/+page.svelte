@@ -2194,6 +2194,25 @@
 													<span class="w-1.5 h-1.5 bg-primary rounded-full animate-bounce" style="animation-delay: 300ms"></span>
 												</span>
 											{/if}
+											{#if message.content && !message.streaming}
+												<button
+													class="ml-auto flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
+													on:click={() => copyToClipboard(message.content, message.id)}
+													title="Copy response"
+												>
+													{#if copiedMessageId === message.id}
+														<svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+														</svg>
+														<span class="text-green-500">Copied</span>
+													{:else}
+														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+														</svg>
+														<span>Copy</span>
+													{/if}
+												</button>
+											{/if}
 										</div>
 										<div class="bg-card border border-border rounded-lg p-4 shadow-s overflow-hidden">
 											<div class="prose prose-sm max-w-none break-words overflow-x-auto">
@@ -2212,35 +2231,16 @@
 												{/if}
 											</div>
 										</div>
-										<div class="mt-2 text-xs text-muted-foreground flex items-center gap-3">
-											{#if message.metadata && !message.streaming}
+										{#if message.metadata && !message.streaming}
+											<div class="mt-2 text-xs text-muted-foreground flex items-center gap-3">
 												{#if message.metadata.total_cost_usd}
 													<span>{formatCost(message.metadata.total_cost_usd as number)}</span>
 												{/if}
 												{#if message.metadata.duration_ms}
 													<span>{((message.metadata.duration_ms as number) / 1000).toFixed(1)}s</span>
 												{/if}
-											{/if}
-											{#if message.content && !message.streaming}
-												<button
-													class="ml-auto flex items-center gap-1 px-2 py-1 rounded hover:bg-muted/50 transition-colors"
-													on:click={() => copyToClipboard(message.content, message.id)}
-													title="Copy response"
-												>
-													{#if copiedMessageId === message.id}
-														<svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-														</svg>
-														<span class="text-green-500">Copied</span>
-													{:else}
-														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-														</svg>
-														<span>Copy</span>
-													{/if}
-												</button>
-											{/if}
-										</div>
+											</div>
+										{/if}
 									</div>
 								</div>
 							{:else if message.type === 'tool_use'}
