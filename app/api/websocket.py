@@ -630,9 +630,10 @@ async def chat_websocket(
                                 # Check if session is currently streaming (late-joining device)
                                 is_streaming = sync_engine.is_session_streaming(session_id)
                                 streaming_buffer = None
+                                logger.info(f"Session {session_id} streaming status: {is_streaming}")
                                 if is_streaming:
                                     streaming_buffer = sync_engine.get_streaming_buffer(session_id)
-                                    logger.info(f"Session {session_id} is streaming, sending buffer to late-joining device")
+                                    logger.info(f"Session {session_id} is streaming, sending buffer with {len(streaming_buffer) if streaming_buffer else 0} messages")
 
                                 await send_json({
                                     "type": "history",

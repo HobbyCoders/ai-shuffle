@@ -1023,6 +1023,7 @@ function createTabsStore() {
 				// Handle streaming state from backend
 				const isStreaming = data.isStreaming as boolean || false;
 				const streamingBuffer = data.streamingBuffer as Array<Record<string, unknown>> | undefined;
+				console.log(`[Tab ${tabId}] History response - isStreaming:`, isStreaming, 'bufferLen:', streamingBuffer?.length || 0);
 
 				// If session is actively streaming and has buffered content, merge it
 				let finalMessages = messages;
@@ -1041,10 +1042,12 @@ function createTabsStore() {
 					finalMessages = [...messages, ...bufferMessages];
 				}
 
+				console.log(`[Tab ${tabId}] Updating tab state - isStreaming:`, isStreaming, 'messageCount:', finalMessages.length);
 				updateTab(tabId, {
 					sessionId: data.session_id as string,
 					messages: finalMessages,
-					isStreaming: isStreaming
+					isStreaming: isStreaming,
+					error: null  // Clear any previous error
 				});
 
 				// Update tab title based on first message
