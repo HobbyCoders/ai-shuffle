@@ -2238,8 +2238,8 @@
 										{/if}
 									</div>
 								</div>
-							{:else if message.type === 'tool_use'}
-								<!-- Tool Use with grouped Result - Expandable Card -->
+							{:else if message.type === 'tool_use' && message.toolName !== 'TodoWrite'}
+								<!-- Tool Use with grouped Result - Expandable Card (hide TodoWrite since it shows in TodoList widget) -->
 								<div class="flex gap-3 w-full">
 									<div class="flex-shrink-0 w-8 h-8 rounded-full bg-yellow-500/10 flex items-center justify-center shadow-s">
 										<svg class="w-4 h-4 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
