@@ -216,20 +216,37 @@ async def chat_websocket(
 
                 # Broadcast stream chunks (source_device_id=None to not exclude any device)
                 if event_type == 'stream_delta':
-                    # Real-time streaming delta
+                    # Real-time streaming delta - handle different delta types
                     delta_type = event.get('delta_type', 'text')
-                    chunk_data = {
-                        'content': event.get('content', ''),
-                        'delta_type': delta_type,
-                        'index': event.get('index', 0)
-                    }
-                    await sync_engine.broadcast_stream_chunk(
-                        session_id=session_id,
-                        message_id=message_id,
-                        chunk_type='text',
-                        chunk_data=chunk_data,
-                        source_device_id=None
-                    )
+
+                    if delta_type == 'tool_input':
+                        # Tool input streaming - broadcast as tool_input type
+                        chunk_data = {
+                            'content': event.get('content', ''),
+                            'delta_type': delta_type,
+                            'index': event.get('index', 0)
+                        }
+                        await sync_engine.broadcast_stream_chunk(
+                            session_id=session_id,
+                            message_id=message_id,
+                            chunk_type='tool_input',
+                            chunk_data=chunk_data,
+                            source_device_id=None
+                        )
+                    else:
+                        # Text or other delta - broadcast as text
+                        chunk_data = {
+                            'content': event.get('content', ''),
+                            'delta_type': delta_type,
+                            'index': event.get('index', 0)
+                        }
+                        await sync_engine.broadcast_stream_chunk(
+                            session_id=session_id,
+                            message_id=message_id,
+                            chunk_type='text',
+                            chunk_data=chunk_data,
+                            source_device_id=None
+                        )
                 elif event_type == 'chunk':
                     # Legacy chunk event (when include_partial_messages=False)
                     chunk_data = {

@@ -527,6 +527,43 @@ function createTabsStore() {
 							return { ...t, messages };
 						})
 					}));
+				} else if (chunkType === 'tool_input') {
+					// Tool input streaming - accumulate JSON in the current tool_use message
+					const partialJson = content;
+					console.log(`[Tab ${tabId}] tool_input sync: ${partialJson?.length} chars`);
+
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(t => {
+							if (t.id !== tabId) return t;
+
+							const messages = [...t.messages];
+							const toolIdx = messages.findLastIndex(
+								m => m.type === 'tool_use' && m.streaming
+							);
+
+							if (toolIdx !== -1) {
+								const current = messages[toolIdx];
+								const partialInput = (current.partialToolInput || '') + partialJson;
+
+								// Try to parse accumulated JSON
+								let parsedInput = current.toolInput || {};
+								try {
+									parsedInput = JSON.parse(partialInput);
+								} catch {
+									// Not valid JSON yet, keep accumulating
+								}
+
+								messages[toolIdx] = {
+									...current,
+									partialToolInput: partialInput,
+									toolInput: parsedInput
+								};
+							}
+
+							return { ...t, messages };
+						})
+					}));
 				} else if (chunkType === 'tool_use') {
 					console.log(`[Tab ${tabId}] tool_use sync:`, {
 						tool_name: eventData.tool_name,
