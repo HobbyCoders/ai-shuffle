@@ -36,6 +36,7 @@
 	import SessionCard from '$lib/components/SessionCard.svelte';
 	import ConnectionStatus from '$lib/components/ConnectionStatus.svelte';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
+	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import TodoList from '$lib/components/TodoList.svelte';
 	import { executeCommand, isSlashCommand, syncAfterRewind, listCommands, type Command } from '$lib/api/commands';
 	import { groupSessionsByDate, type DateGroup } from '$lib/utils/dateGroups';
@@ -389,6 +390,16 @@
 	}>) {
 		const { request_id, decision, remember, pattern } = event.detail;
 		tabs.sendPermissionResponse(tabId, request_id, decision, remember, pattern);
+	}
+
+	// Handle user question response from UserQuestion component
+	function handleUserQuestionRespond(tabId: string, event: CustomEvent<{
+		request_id: string;
+		tool_use_id: string;
+		answers: Record<string, string | string[]>;
+	}>) {
+		const { request_id, tool_use_id, answers } = event.detail;
+		tabs.sendUserQuestionResponse(tabId, request_id, tool_use_id, answers);
 	}
 
 	async function handleSubmit(tabId: string) {
@@ -2391,6 +2402,20 @@
 							requests={currentTab.pendingPermissions}
 							on:respond={(e) => handlePermissionRespond(tabId, e)}
 						/>
+					</div>
+				</div>
+			{/if}
+
+			<!-- User Question Queue (shown when there are pending questions from AskUserQuestion tool) -->
+			{#if currentTab.pendingQuestions && currentTab.pendingQuestions.length > 0}
+				<div class="border-t border-blue-500/30 bg-blue-900/5 p-3 sm:p-4">
+					<div class="max-w-5xl mx-auto">
+						{#each currentTab.pendingQuestions as question (question.request_id)}
+							<UserQuestion
+								data={question}
+								on:respond={(e) => handleUserQuestionRespond(tabId, e)}
+							/>
+						{/each}
 					</div>
 				</div>
 			{/if}

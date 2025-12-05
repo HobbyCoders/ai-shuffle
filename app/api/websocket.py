@@ -30,6 +30,7 @@ from app.core.slash_commands import (
     parse_command_input, is_interactive_command, get_all_commands
 )
 from app.core.permission_handler import permission_handler
+from app.core.user_question_handler import user_question_handler
 
 logger = logging.getLogger(__name__)
 
@@ -730,6 +731,40 @@ async def chat_websocket(
                                 "type": "pending_permissions",
                                 "session_id": current_session_id,
                                 "requests": pending
+                            })
+
+                    elif msg_type == "user_question_response":
+                        # Handle user question response from frontend
+                        request_id = data.get("request_id")
+                        answers = data.get("answers", {})
+
+                        if current_session_id and request_id and answers:
+                            result = await user_question_handler.respond(
+                                request_id=request_id,
+                                session_id=current_session_id,
+                                answers=answers
+                            )
+                            logger.info(f"User question response processed: {request_id} -> {result}")
+
+                            await send_json({
+                                "type": "user_question_response_ack",
+                                "request_id": request_id,
+                                "success": result
+                            })
+                        else:
+                            await send_json({
+                                "type": "error",
+                                "message": "Invalid user question response"
+                            })
+
+                    elif msg_type == "get_pending_questions":
+                        # Get pending user questions for current session
+                        if current_session_id:
+                            pending = user_question_handler.get_pending_questions(current_session_id)
+                            await send_json({
+                                "type": "pending_questions",
+                                "session_id": current_session_id,
+                                "questions": pending
                             })
 
                     elif msg_type == "pong":

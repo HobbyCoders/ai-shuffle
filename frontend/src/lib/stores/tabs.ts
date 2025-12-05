@@ -6,7 +6,7 @@
  */
 
 import { writable, derived, get } from 'svelte/store';
-import type { Session, Profile, PermissionRequest as PermissionRequestType } from '$lib/api/client';
+import type { Session, Profile, PermissionRequest as PermissionRequestType, UserQuestionRequest } from '$lib/api/client';
 import { api } from '$lib/api/client';
 
 export interface ApiUser {
@@ -99,6 +99,8 @@ export interface ChatTab {
 	permissionModeOverride: string | null;  // null = use profile default
 	// Permission requests queue
 	pendingPermissions: PermissionRequestType[];
+	// User questions queue (for AskUserQuestion tool)
+	pendingQuestions: UserQuestionRequest[];
 	// Todo list for task tracking
 	todos: TodoItem[];
 }
@@ -264,6 +266,7 @@ function createTabsStore() {
 			modelOverride: null,
 			permissionModeOverride: null,
 			pendingPermissions: [],
+			pendingQuestions: [],
 			todos: []
 		}],
 		activeTabId: initialTabId,
@@ -2157,6 +2160,65 @@ function createTabsStore() {
 				}));
 				break;
 			}
+
+			case 'user_question': {
+				// User question request from backend (AskUserQuestion tool) - add to queue
+				const request: UserQuestionRequest = {
+					request_id: data.request_id as string,
+					tool_use_id: data.tool_use_id as string,
+					questions: data.questions as UserQuestionRequest['questions']
+				};
+
+				console.log('[WS] User question request:', request.request_id, request.questions.length, 'questions');
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+						// Add to pending questions queue
+						const pendingQuestions = [...tab.pendingQuestions, request];
+						return { ...tab, pendingQuestions };
+					})
+				}));
+				break;
+			}
+
+			case 'user_question_response_ack': {
+				// Acknowledgement that user question response was processed
+				const requestId = data.request_id as string;
+				const success = data.success as boolean;
+
+				console.log('[WS] User question response acknowledged:', requestId, success);
+
+				// Remove this question from the queue
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+						const pendingQuestions = tab.pendingQuestions.filter(
+							q => q.request_id !== requestId
+						);
+						return { ...tab, pendingQuestions };
+					})
+				}));
+				break;
+			}
+
+			case 'pending_questions': {
+				// Response to get_pending_questions request - sync queue state
+				const questions = data.questions as UserQuestionRequest[];
+
+				console.log('[WS] Pending questions sync:', questions.length, 'questions');
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+						return { ...tab, pendingQuestions: questions };
+					})
+				}));
+				break;
+			}
 		}
 	}
 
@@ -2244,6 +2306,7 @@ function createTabsStore() {
 						modelOverride: pt.modelOverride ?? null,
 						permissionModeOverride: pt.permissionModeOverride ?? null,
 						pendingPermissions: [],
+						pendingQuestions: [],
 						todos: []
 					}));
 
@@ -2316,6 +2379,7 @@ function createTabsStore() {
 				modelOverride: null,
 				permissionModeOverride: null,
 				pendingPermissions: [],
+				pendingQuestions: [],
 				todos: []
 			};
 
@@ -2668,7 +2732,9 @@ function createTabsStore() {
 				contextMax: 200000,
 				modelOverride: null,
 				permissionModeOverride: null,
-			pendingPermissions: []
+				pendingPermissions: [],
+				pendingQuestions: [],
+				todos: []
 			});
 			connectTab(tabId);
 			// Save tabs state (debounced)
@@ -2902,6 +2968,48 @@ function createTabsStore() {
 			const ws = tabConnections.get(tabId);
 			if (ws?.readyState === WebSocket.OPEN) {
 				ws.send(JSON.stringify({ type: 'get_pending_permissions' }));
+			}
+		},
+
+		/**
+		 * Send user question response for an AskUserQuestion tool call
+		 */
+		sendUserQuestionResponse(
+			tabId: string,
+			requestId: string,
+			toolUseId: string,
+			answers: Record<string, string | string[]>
+		) {
+			const ws = tabConnections.get(tabId);
+			if (ws?.readyState === WebSocket.OPEN) {
+				ws.send(JSON.stringify({
+					type: 'user_question_response',
+					request_id: requestId,
+					tool_use_id: toolUseId,
+					answers
+				}));
+				console.log(`[Tab ${tabId}] Sent user question response for ${requestId}`);
+			} else {
+				console.error(`[Tab ${tabId}] Cannot send user question response: WebSocket not connected`);
+			}
+		},
+
+		/**
+		 * Get pending user questions for a tab
+		 */
+		getPendingQuestions(tabId: string): UserQuestionRequest[] {
+			const state = get({ subscribe });
+			const tab = state.tabs.find(t => t.id === tabId);
+			return tab?.pendingQuestions || [];
+		},
+
+		/**
+		 * Request sync of pending questions from server
+		 */
+		syncPendingQuestions(tabId: string) {
+			const ws = tabConnections.get(tabId);
+			if (ws?.readyState === WebSocket.OPEN) {
+				ws.send(JSON.stringify({ type: 'get_pending_questions' }));
 			}
 		}
 	};

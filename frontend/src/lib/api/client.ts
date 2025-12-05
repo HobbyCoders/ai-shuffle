@@ -274,3 +274,30 @@ export interface PermissionQueueUpdate {
 	resolved_ids: string[];
 	remaining_count: number;
 }
+
+// User Question types (for AskUserQuestion tool)
+export interface UserQuestionOption {
+	label: string;
+	description: string;
+}
+
+export interface UserQuestion {
+	question: string;
+	header: string;
+	options: UserQuestionOption[];
+	multiSelect: boolean;
+}
+
+export interface UserQuestionRequest {
+	request_id: string;
+	tool_use_id: string;
+	questions: UserQuestion[];
+	created_at?: string;
+}
+
+export interface UserQuestionResponse {
+	request_id: string;
+	tool_use_id: string;
+	answers: Record<string, string | string[]>;
+	remaining_count: number;
+}

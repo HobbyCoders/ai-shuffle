@@ -20,7 +20,7 @@ from claude_agent_sdk import (
     AssistantMessage, UserMessage, TextBlock, ToolUseBlock, ToolResultBlock,
     ResultMessage, SystemMessage
 )
-from claude_agent_sdk.types import StreamEvent
+from claude_agent_sdk.types import StreamEvent, HookMatcher, HookContext, HookInput
 
 from app.db import database
 from app.core.config import settings
@@ -28,6 +28,7 @@ from app.core.profiles import get_profile
 from app.core.sync_engine import sync_engine
 from app.core.checkpoint_manager import checkpoint_manager
 from app.core.permission_handler import permission_handler
+from app.core.user_question_handler import user_question_handler
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +111,8 @@ def build_options_from_profile(
     project: Optional[Dict[str, Any]] = None,
     overrides: Optional[Dict[str, Any]] = None,
     resume_session_id: Optional[str] = None,
-    can_use_tool: Optional[callable] = None
+    can_use_tool: Optional[callable] = None,
+    hooks: Optional[Dict[str, list]] = None
 ) -> ClaudeAgentOptions:
     """Convert a profile to ClaudeAgentOptions with all available options"""
     config = profile["config"]
@@ -216,9 +218,12 @@ def build_options_from_profile(
 
         # Permission callback - only set if permission_mode is 'default' and callback provided
         can_use_tool=can_use_tool if permission_mode == "default" and can_use_tool else None,
+
+        # Hooks - for interactive tool handling like AskUserQuestion
+        hooks=hooks,
     )
 
-    logger.info(f"Built options with permission_mode={permission_mode}, can_use_tool={options.can_use_tool is not None}")
+    logger.info(f"Built options with permission_mode={permission_mode}, can_use_tool={options.can_use_tool is not None}, hooks={hooks is not None}")
 
     # Apply working directory - project overrides profile cwd
     if project:
@@ -1384,13 +1389,71 @@ async def stream_to_websocket(
 
             return result
 
-    # Build options with the callback
+    # Create AskUserQuestion hook if we have broadcast_func
+    hooks_config = None
+    if broadcast_func:
+        async def ask_user_question_hook(
+            input_data: HookInput,
+            tool_use_id: str | None,
+            context: HookContext
+        ) -> dict:
+            """
+            PreToolUse hook for AskUserQuestion tool.
+            Intercepts the tool call, sends questions to frontend, waits for answers,
+            and returns the answers to be injected into the tool input.
+            """
+            # Extract tool input from hook input
+            tool_input = input_data.get("tool_input", {})
+            questions = tool_input.get("questions", [])
+
+            if not questions:
+                # No questions, let it proceed normally
+                return {}
+
+            request_id = f"question-{session_id}-{uuid.uuid4().hex[:8]}"
+            logger.info(f"[WS] AskUserQuestion hook triggered: {request_id} with {len(questions)} questions")
+
+            # Get answers from user via WebSocket
+            answers = await user_question_handler.request_answers(
+                request_id=request_id,
+                tool_use_id=tool_use_id or "",
+                session_id=session_id,
+                questions=questions,
+                broadcast_func=broadcast_func
+            )
+
+            logger.info(f"[WS] Got answers for {request_id}: {list(answers.keys())}")
+
+            # Return updated input with answers filled in
+            updated_input = {**tool_input, "answers": answers}
+
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "updatedInput": updated_input
+                }
+            }
+
+        hooks_config = {
+            "PreToolUse": [
+                HookMatcher(
+                    matcher="AskUserQuestion",
+                    hooks=[ask_user_question_hook],
+                    timeout=600.0  # 10 minute timeout for user input
+                )
+            ]
+        }
+        logger.info(f"[WS] Created AskUserQuestion hook for session {session_id}")
+
+    # Build options with the callback and hooks
     options = build_options_from_profile(
         profile=profile,
         project=project,
         overrides=overrides,
         resume_session_id=resume_id,
-        can_use_tool=can_use_tool_callback
+        can_use_tool=can_use_tool_callback,
+        hooks=hooks_config
     )
 
     # Clean up any existing state for this session
