@@ -270,6 +270,20 @@ async def chat_websocket(
                         chunk_data=chunk_data,
                         source_device_id=None
                     )
+                elif event_type == 'system':
+                    # System message (e.g., /context output, local commands)
+                    chunk_data = {
+                        'content': '',
+                        'subtype': event.get('subtype'),
+                        'data': event.get('data')
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='system',
+                        chunk_data=chunk_data,
+                        source_device_id=None
+                    )
                 elif event_type == 'done':
                     # Stream completed - broadcast end
                     if stream_started:

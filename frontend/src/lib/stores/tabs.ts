@@ -528,6 +528,12 @@ function createTabsStore() {
 						})
 					}));
 				} else if (chunkType === 'tool_use') {
+					console.log(`[Tab ${tabId}] tool_use sync:`, {
+						tool_name: eventData.tool_name,
+						tool_id: eventData.tool_id,
+						tool_input: eventData.tool_input,
+						full_eventData: eventData
+					});
 					update(s => ({
 						...s,
 						tabs: s.tabs.map(t => {
@@ -564,6 +570,11 @@ function createTabsStore() {
 						})
 					}));
 				} else if (chunkType === 'tool_result') {
+					console.log(`[Tab ${tabId}] tool_result sync:`, {
+						tool_id: eventData.tool_id,
+						content: content?.substring(0, 100),
+						full_eventData: eventData
+					});
 					update(s => ({
 						...s,
 						tabs: s.tabs.map(t => {
@@ -584,6 +595,48 @@ function createTabsStore() {
 									streaming: false
 								};
 							}
+
+							return { ...t, messages };
+						})
+					}));
+				} else if (chunkType === 'system') {
+					// System message from another device
+					const subtype = eventData.subtype as string;
+					const systemData = eventData.data as Record<string, unknown>;
+					console.log(`[Tab ${tabId}] system sync:`, { subtype, systemData });
+
+					// Extract content for display
+					let displayContent = '';
+					if (systemData?.content && typeof systemData.content === 'string') {
+						displayContent = systemData.content;
+					} else if (typeof systemData === 'object') {
+						displayContent = JSON.stringify(systemData, null, 2);
+					}
+
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(t => {
+							if (t.id !== tabId) return t;
+
+							// Mark any streaming text message as complete
+							let messages = t.messages.map(m =>
+								m.streaming && m.type === 'text' ? { ...m, streaming: false } : m
+							);
+							// Remove empty streaming text messages
+							messages = messages.filter(
+								m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
+							);
+
+							// Add the system message
+							messages.push({
+								id: `system-sync-${Date.now()}`,
+								role: 'system' as const,
+								content: displayContent,
+								type: 'system' as const,
+								systemSubtype: subtype,
+								systemData: systemData,
+								streaming: false
+							});
 
 							return { ...t, messages };
 						})
