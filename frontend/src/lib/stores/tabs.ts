@@ -2628,6 +2628,13 @@ function createTabsStore() {
 		},
 
 		/**
+		 * Update a tab's state (exposed for direct updates like todos)
+		 */
+		updateTab(tabId: string, updates: Partial<ChatTab>) {
+			updateTab(tabId, updates);
+		},
+
+		/**
 		 * Set error for a tab
 		 */
 		setTabError(tabId: string, error: string) {
