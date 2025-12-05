@@ -392,7 +392,7 @@
 
 	async function handleSubmit(tabId: string) {
 		const prompt = tabInputs[tabId] || '';
-		if (!prompt.trim() || !$activeTab || $activeTab.isStreaming) return;
+		if (!prompt.trim() || !$activeTab || $activeTab.isStreaming || isUploading) return;
 
 		// API users use their API key restrictions - skip profile/project validation if they have restrictions
 		const isApiUserWithRestrictions = $apiUser && ($apiUser.profile_id || $apiUser.project_id);
@@ -2442,8 +2442,8 @@
 										<button
 											type="submit"
 											class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-primary hover:bg-primary/90 text-primary-foreground rounded-xl transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-											disabled={!(tabInputs[tabId] || '').trim() || !$claudeAuthenticated}
-											title="Send message"
+											disabled={!(tabInputs[tabId] || '').trim() || !$claudeAuthenticated || isUploading}
+											title={isUploading ? "Uploading files..." : "Send message"}
 										>
 											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
