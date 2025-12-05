@@ -29,6 +29,7 @@ from app.core.slash_commands import (
     discover_commands, get_command_by_name, is_slash_command,
     parse_command_input, is_interactive_command, get_all_commands
 )
+from app.core.permission_handler import permission_handler
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +193,8 @@ async def chat_websocket(
                 session_id=session_id,
                 profile_id=profile_id,
                 project_id=project_id,
-                overrides=overrides
+                overrides=overrides,
+                broadcast_func=send_json  # Pass send_json for permission requests
             ):
                 event_type = event.get('type')
                 logger.debug(f"Streaming event for session {session_id}: {event_type}")
@@ -666,6 +668,46 @@ async def chat_websocket(
                             current_session_id = None
                             logger.info(f"Device {device_id} closed session {old_session_id}")
                             await send_json({"type": "session_closed", "session_id": old_session_id})
+
+                    elif msg_type == "permission_response":
+                        # Handle permission response from frontend
+                        request_id = data.get("request_id")
+                        decision = data.get("decision")  # "allow" or "deny"
+                        remember = data.get("remember")  # "none", "session", or "profile"
+                        pattern = data.get("pattern")  # Optional pattern for the rule
+
+                        if request_id and decision and current_session_id:
+                            result = await permission_handler.respond(
+                                request_id=request_id,
+                                session_id=current_session_id,
+                                decision=decision,
+                                remember=remember,
+                                pattern=pattern,
+                                broadcast_func=send_json
+                            )
+                            logger.info(f"Permission response processed: {result}")
+
+                            # Send confirmation back
+                            await send_json({
+                                "type": "permission_response_ack",
+                                "request_id": request_id,
+                                "result": result
+                            })
+                        else:
+                            await send_json({
+                                "type": "error",
+                                "message": "Invalid permission response"
+                            })
+
+                    elif msg_type == "get_pending_permissions":
+                        # Get pending permission requests for current session
+                        if current_session_id:
+                            pending = permission_handler.get_pending_requests(current_session_id)
+                            await send_json({
+                                "type": "pending_permissions",
+                                "session_id": current_session_id,
+                                "requests": pending
+                            })
 
                     elif msg_type == "pong":
                         pass  # Keep-alive response

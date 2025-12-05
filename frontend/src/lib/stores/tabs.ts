@@ -6,7 +6,7 @@
  */
 
 import { writable, derived, get } from 'svelte/store';
-import type { Session, Profile } from '$lib/api/client';
+import type { Session, Profile, PermissionRequest as PermissionRequestType } from '$lib/api/client';
 import { api } from '$lib/api/client';
 
 export interface ApiUser {
@@ -90,6 +90,8 @@ export interface ChatTab {
 	// Session overrides (override profile settings for this session)
 	modelOverride: string | null;  // null = use profile default
 	permissionModeOverride: string | null;  // null = use profile default
+	// Permission requests queue
+	pendingPermissions: PermissionRequestType[];
 }
 
 interface TabsState {
@@ -247,7 +249,8 @@ function createTabsStore() {
 			contextUsed: null,
 			contextMax: 200000,
 			modelOverride: null,
-			permissionModeOverride: null
+			permissionModeOverride: null,
+			pendingPermissions: []
 		}],
 		activeTabId: initialTabId,
 		profiles: [],
@@ -1986,6 +1989,88 @@ function createTabsStore() {
 				}));
 				break;
 			}
+
+			case 'permission_request': {
+				// Tool permission request from backend - add to queue
+				const request: PermissionRequestType = {
+					request_id: data.request_id as string,
+					tool_name: data.tool_name as string,
+					tool_input: data.tool_input as Record<string, unknown>,
+					queue_position: data.queue_position as number | undefined,
+					queue_total: data.queue_total as number | undefined
+				};
+
+				console.log('[WS] Permission request:', request.tool_name, request.request_id);
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+						// Add to pending permissions queue
+						const pendingPermissions = [...tab.pendingPermissions, request];
+						return { ...tab, pendingPermissions };
+					})
+				}));
+				break;
+			}
+
+			case 'permission_queue_update': {
+				// Some permissions were auto-resolved (e.g., by "Allow Always")
+				const resolvedIds = data.resolved_ids as string[];
+				const remainingCount = data.remaining_count as number;
+
+				console.log('[WS] Permission queue update:', resolvedIds.length, 'resolved,', remainingCount, 'remaining');
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+						// Remove resolved permissions from queue
+						const pendingPermissions = tab.pendingPermissions.filter(
+							p => !resolvedIds.includes(p.request_id)
+						);
+						return { ...tab, pendingPermissions };
+					})
+				}));
+				break;
+			}
+
+			case 'permission_response_ack': {
+				// Acknowledgement that permission response was processed
+				const requestId = data.request_id as string;
+				const result = data.result as Record<string, unknown>;
+
+				console.log('[WS] Permission response acknowledged:', requestId, result);
+
+				// Remove this permission from the queue
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+						const pendingPermissions = tab.pendingPermissions.filter(
+							p => p.request_id !== requestId
+						);
+						return { ...tab, pendingPermissions };
+					})
+				}));
+				break;
+			}
+
+			case 'pending_permissions': {
+				// Response to get_pending_permissions request - sync queue state
+				const requests = data.requests as PermissionRequestType[];
+
+				console.log('[WS] Pending permissions sync:', requests.length, 'requests');
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+						return { ...tab, pendingPermissions: requests };
+					})
+				}));
+				break;
+			}
 		}
 	}
 
@@ -2071,7 +2156,8 @@ function createTabsStore() {
 						contextUsed: null,
 						contextMax: 200000,
 						modelOverride: null,
-						permissionModeOverride: null
+						permissionModeOverride: null,
+			pendingPermissions: []
 					}));
 
 					update(s => ({
@@ -2141,7 +2227,8 @@ function createTabsStore() {
 				contextUsed: null,
 				contextMax: 200000,
 				modelOverride: null,
-				permissionModeOverride: null
+				permissionModeOverride: null,
+			pendingPermissions: []
 			};
 
 			update(s => ({
@@ -2481,7 +2568,8 @@ function createTabsStore() {
 				contextUsed: null,
 				contextMax: 200000,
 				modelOverride: null,
-				permissionModeOverride: null
+				permissionModeOverride: null,
+			pendingPermissions: []
 			});
 			connectTab(tabId);
 			// Save tabs state (debounced)
@@ -2672,6 +2760,50 @@ function createTabsStore() {
 				selectedSessionIds: isAdmin ? s.selectedSessionIds : new Set<string>(),
 				selectedAdminSessionIds: isAdmin ? new Set<string>() : s.selectedAdminSessionIds
 			}));
+		},
+
+		/**
+		 * Send permission response for a tool request
+		 */
+		sendPermissionResponse(
+			tabId: string,
+			requestId: string,
+			decision: 'allow' | 'deny',
+			remember?: 'none' | 'session' | 'profile',
+			pattern?: string
+		) {
+			const ws = tabConnections.get(tabId);
+			if (ws?.readyState === WebSocket.OPEN) {
+				ws.send(JSON.stringify({
+					type: 'permission_response',
+					request_id: requestId,
+					decision,
+					remember: remember || 'none',
+					pattern
+				}));
+				console.log(`[Tab ${tabId}] Sent permission response: ${decision} for ${requestId}`);
+			} else {
+				console.error(`[Tab ${tabId}] Cannot send permission response: WebSocket not connected`);
+			}
+		},
+
+		/**
+		 * Get pending permissions for a tab
+		 */
+		getPendingPermissions(tabId: string): PermissionRequestType[] {
+			const state = get({ subscribe });
+			const tab = state.tabs.find(t => t.id === tabId);
+			return tab?.pendingPermissions || [];
+		},
+
+		/**
+		 * Request sync of pending permissions from server
+		 */
+		syncPendingPermissions(tabId: string) {
+			const ws = tabConnections.get(tabId);
+			if (ws?.readyState === WebSocket.OPEN) {
+				ws.send(JSON.stringify({ type: 'get_pending_permissions' }));
+			}
 		}
 	};
 }

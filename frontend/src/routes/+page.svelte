@@ -35,6 +35,7 @@
 	import SubagentManager from '$lib/components/SubagentManager.svelte';
 	import SessionCard from '$lib/components/SessionCard.svelte';
 	import ConnectionStatus from '$lib/components/ConnectionStatus.svelte';
+	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import { executeCommand, isSlashCommand, syncAfterRewind, listCommands, type Command } from '$lib/api/commands';
 	import { groupSessionsByDate, type DateGroup } from '$lib/utils/dateGroups';
 
@@ -376,6 +377,17 @@
 		if ($apiUser.project_id && $activeTab.project !== $apiUser.project_id) {
 			tabs.setTabProject($activeTabId, $apiUser.project_id);
 		}
+	}
+
+	// Handle permission response from PermissionQueue component
+	function handlePermissionRespond(tabId: string, event: CustomEvent<{
+		request_id: string;
+		decision: 'allow' | 'deny';
+		remember?: 'none' | 'session' | 'profile';
+		pattern?: string;
+	}>) {
+		const { request_id, decision, remember, pattern } = event.detail;
+		tabs.sendPermissionResponse(tabId, request_id, decision, remember, pattern);
 	}
 
 	async function handleSubmit(tabId: string) {
@@ -2336,6 +2348,18 @@
 					</div>
 				{/if}
 			</div>
+
+			<!-- Permission Queue (shown when there are pending permissions) -->
+			{#if currentTab.pendingPermissions && currentTab.pendingPermissions.length > 0}
+				<div class="border-t border-amber-500/30 bg-amber-900/5 p-3 sm:p-4">
+					<div class="max-w-5xl mx-auto">
+						<PermissionQueue
+							requests={currentTab.pendingPermissions}
+							on:respond={(e) => handlePermissionRespond(tabId, e)}
+						/>
+					</div>
+				</div>
+			{/if}
 
 			<!-- Input Area -->
 			<div class="border-t border-border/50 bg-background/80 backdrop-blur-sm p-3 sm:p-4">
