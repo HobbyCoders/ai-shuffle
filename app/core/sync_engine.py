@@ -167,11 +167,26 @@ class SyncEngine:
             logger.info(f"Device {device_id} registered to watch session {session_id}")
             return connection
 
-    async def unregister_device(self, device_id: str, session_id: str):
-        """Unregister a device from watching a session"""
+    async def unregister_device(self, device_id: str, session_id: str, websocket: Optional[WebSocket] = None):
+        """Unregister a device from watching a session.
+
+        Args:
+            device_id: The device ID to unregister
+            session_id: The session ID to unregister from
+            websocket: Optional - if provided, only unregister if the current connection
+                      uses this exact websocket. This prevents race conditions where
+                      a new connection is established before cleanup of the old one.
+        """
         async with self._lock:
             if session_id in self._connections:
                 if device_id in self._connections[session_id]:
+                    # If websocket is provided, only unregister if it matches
+                    if websocket is not None:
+                        current_conn = self._connections[session_id][device_id]
+                        if current_conn.websocket is not websocket:
+                            logger.info(f"Device {device_id} has new connection, skipping unregister for old websocket")
+                            return
+
                     del self._connections[session_id][device_id]
                     logger.info(f"Device {device_id} unregistered from session {session_id}")
 

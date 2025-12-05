@@ -674,10 +674,12 @@ async def chat_websocket(
                 except asyncio.CancelledError:
                     pass
 
-            # Unregister device from sync engine
+            # Unregister device from sync engine, but only if still using this websocket
+            # This prevents race conditions where a new connection was established
+            # before this cleanup runs (e.g., page reload during streaming)
             if current_session_id:
-                await sync_engine.unregister_device(device_id, current_session_id)
-                logger.info(f"Unregistered device {device_id} from session {current_session_id}")
+                await sync_engine.unregister_device(device_id, current_session_id, websocket)
+                logger.info(f"Cleanup: unregister device {device_id} from session {current_session_id}")
 
     except WebSocketDisconnect:
         logger.info("Chat WebSocket disconnected")
