@@ -2345,7 +2345,7 @@
 
 					<!-- Cursor-Style Unified Input Container -->
 					<form on:submit|preventDefault={() => handleSubmit(tabId)} class="relative">
-						<div class="bg-card/80 backdrop-blur border border-border/60 rounded-2xl shadow-lg overflow-hidden transition-all duration-200 focus-within:border-primary/50 focus-within:shadow-primary/5 focus-within:shadow-xl">
+						<div class="bg-card/80 backdrop-blur border border-border/60 rounded-2xl shadow-lg transition-all duration-200 focus-within:border-primary/50 focus-within:shadow-primary/5 focus-within:shadow-xl">
 
 							<!-- Uploaded Files (inside container) -->
 							{#if (tabUploadedFiles[tabId] || []).length > 0}
