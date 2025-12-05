@@ -1,11 +1,30 @@
 # AI Hub
 A full-featured web interface and API server for Claude Code, providing a Claude.ai-like chat experience with multi-user support, API access, and advanced AI agent management.
 
-## Disclaimer
-This application is intended for personal use and development only. Deploying it as a production application using Anthropic OAuth violates Anthropic's Terms of Service. If you wish to deploy a production application, you must use an Anthropic API key instead.
-
 ![Version](https://img.shields.io/badge/version-4.0.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
+
+---
+
+## ⚠️ Important Legal Disclaimer
+
+**This software is provided for personal, educational, and development purposes only.**
+
+This application uses Claude Code CLI with OAuth authentication, which is governed by [Anthropic's Consumer Terms of Service](https://www.anthropic.com/legal/consumer-terms). Please be aware of the following:
+
+1. **Personal Use Only**: Anthropic's Consumer Terms prohibit accessing Claude "through automated or non-human means, whether through a bot, script, or otherwise" except via official API keys. Using this application may fall into a gray area under these terms.
+
+2. **No Production Deployment**: Do NOT deploy this application as a production service, commercial product, or multi-user platform using OAuth authentication. This would violate Anthropic's Terms of Service.
+
+3. **For Production Use**: If you want to build a production application, you MUST use [Anthropic's API](https://www.anthropic.com/api) with proper API keys under their [Commercial Terms](https://www.anthropic.com/legal/commercial-terms).
+
+4. **No Warranty**: This software is provided "as is" without warranty. The authors are not responsible for any ToS violations, account suspensions, or other consequences from using this software.
+
+5. **Your Responsibility**: By using this software, you acknowledge that you have read and understood Anthropic's terms and accept full responsibility for your usage.
+
+**This project is NOT affiliated with, endorsed by, or sponsored by Anthropic.**
+
+---
 
 ## Overview
 
@@ -239,11 +258,36 @@ curl http://localhost:8000/api/v1/auth/diagnostics
 
 ## License
 
-MIT License - See [LICENSE](LICENSE) for details.
+This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
+
+### Third-Party Licenses
+
+This project uses the following open-source dependencies:
+
+| Package | License | Use |
+|---------|---------|-----|
+| [FastAPI](https://fastapi.tiangolo.com/) | MIT | Backend framework |
+| [Uvicorn](https://www.uvicorn.org/) | BSD-3-Clause | ASGI server |
+| [Pydantic](https://pydantic.dev/) | MIT | Data validation |
+| [Svelte](https://svelte.dev/) | MIT | Frontend framework |
+| [SvelteKit](https://kit.svelte.dev/) | MIT | Frontend meta-framework |
+| [Tailwind CSS](https://tailwindcss.com/) | MIT | CSS framework |
+| [bcrypt](https://github.com/pyca/bcrypt) | Apache-2.0 | Password hashing |
+| [httpx](https://www.python-httpx.org/) | BSD-3-Clause | HTTP client |
+| [xterm.js](https://xtermjs.org/) | MIT | Terminal emulator |
+
+### Claude Code CLI
+
+This application interacts with Claude Code CLI, which is provided by Anthropic. Claude Code CLI usage is subject to:
+- [Anthropic's Consumer Terms of Service](https://www.anthropic.com/legal/consumer-terms)
+- [Anthropic's Usage Policy](https://www.anthropic.com/legal/aup)
+- [Anthropic's Privacy Policy](https://www.anthropic.com/legal/privacy)
+
+**Claude Code CLI is NOT bundled with this software** - it is installed separately and authenticated with your own Anthropic account.
 
 ## Acknowledgments
 
-- [FastAPI](https://fastapi.tiangolo.com/) - Backend framework
-- [Svelte](https://svelte.dev/) - Frontend framework
-- [Claude Agent SDK](https://docs.anthropic.com/en/docs/claude-code/sdk) - AI integration
-- [Anthropic](https://www.anthropic.com/) - Claude AI
+- [Anthropic](https://www.anthropic.com/) - Claude AI and Claude Code CLI
+- [FastAPI](https://fastapi.tiangolo.com/) - Excellent Python web framework
+- [Svelte](https://svelte.dev/) - Reactive frontend framework
+- [Claude Agent SDK](https://docs.anthropic.com/en/docs/claude-code/sdk) - Official SDK for Claude Code integration
