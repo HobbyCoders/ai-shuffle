@@ -441,6 +441,20 @@ async def chat_websocket(
                 )
 
         finally:
+            # ALWAYS ensure streaming state is cleared, even if stream_started was never set
+            # This prevents stuck streaming state after errors or early termination
+            if sync_engine.is_session_streaming(session_id):
+                if not stream_started:
+                    # Stream was marked but never actually started - clean up silently
+                    logger.info(f"Cleaning up streaming state for session {session_id} (never started)")
+                    await sync_engine.broadcast_stream_end(
+                        session_id=session_id,
+                        message_id=message_id,
+                        metadata={},
+                        interrupted=True,
+                        source_device_id=None
+                    )
+
             # Re-register device with SyncEngine now that streaming is complete,
             # but ONLY if the websocket is still connected.
             # If the user disconnected during streaming (phone locked, etc.),
@@ -532,17 +546,9 @@ async def chat_websocket(
                             except asyncio.CancelledError:
                                 pass
 
-                        # Pre-mark session as streaming so other devices know immediately
-                        # This prevents race conditions where a device loads the session
-                        # before broadcast_stream_start is called inside run_query
-                        message_id = str(uuid.uuid4())
-                        await sync_engine.broadcast_stream_start(
-                            session_id=session_id,
-                            message_id=message_id,
-                            source_device_id=device_id  # Exclude sender - they get direct events
-                        )
-
                         # Start new query task
+                        # Note: broadcast_stream_start is called inside run_query when actual
+                        # streaming begins. This prevents stuck streaming state if query fails early.
                         query_task = asyncio.create_task(
                             run_query(prompt, session_id, profile_id, project_id, overrides)
                         )
@@ -633,9 +639,24 @@ async def chat_websocket(
                                 is_streaming = sync_engine.is_session_streaming(session_id)
                                 streaming_buffer = None
                                 logger.info(f"Session {session_id} streaming status: {is_streaming}")
+
+                                # Validate streaming state - if marked streaming but no active task, it's stale
                                 if is_streaming:
-                                    streaming_buffer = sync_engine.get_streaming_buffer(session_id)
-                                    logger.info(f"Session {session_id} is streaming, sending buffer with {len(streaming_buffer) if streaming_buffer else 0} messages")
+                                    active_task = _active_chat_sessions.get(session_id)
+                                    if active_task is None or active_task.done():
+                                        # Stale streaming state - clean it up
+                                        logger.warning(f"Session {session_id} marked as streaming but no active task - clearing stale state")
+                                        await sync_engine.broadcast_stream_end(
+                                            session_id=session_id,
+                                            message_id="stale-cleanup",
+                                            metadata={},
+                                            interrupted=True,
+                                            source_device_id=None
+                                        )
+                                        is_streaming = False
+                                    else:
+                                        streaming_buffer = sync_engine.get_streaming_buffer(session_id)
+                                        logger.info(f"Session {session_id} is streaming, sending buffer with {len(streaming_buffer) if streaming_buffer else 0} messages")
 
                                 await send_json({
                                     "type": "history",

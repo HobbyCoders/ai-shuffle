@@ -601,6 +601,23 @@ function createTabsStore() {
 
 							let messages = [...t.messages];
 
+							// Check if this tool_use already exists (from history or buffer)
+							const existingToolIdx = messages.findIndex(
+								m => m.type === 'tool_use' && m.toolId === toolId
+							);
+							if (existingToolIdx !== -1) {
+								// Tool already exists - just update it if needed
+								console.log(`[Tab ${tabId}] tool_use already exists, updating:`, toolId);
+								messages[existingToolIdx] = {
+									...messages[existingToolIdx],
+									toolName: toolName || messages[existingToolIdx].toolName,
+									toolInput: toolInput || messages[existingToolIdx].toolInput,
+									toolStatus: messages[existingToolIdx].toolStatus || 'running',
+									streaming: messages[existingToolIdx].toolStatus !== 'complete'
+								};
+								return { ...t, messages };
+							}
+
 							// Handle current streaming text message - finalize it
 							const streamingIdx = messages.findLastIndex(
 								m => m.type === 'text' && m.role === 'assistant' && m.streaming
@@ -630,10 +647,10 @@ function createTabsStore() {
 						})
 					}));
 				} else if (chunkType === 'tool_result') {
+					const toolId = eventData.tool_id as string;
 					console.log(`[Tab ${tabId}] tool_result sync:`, {
-						tool_id: eventData.tool_id,
-						content: content?.substring(0, 100),
-						full_eventData: eventData
+						tool_id: toolId,
+						content: content?.substring(0, 100)
 					});
 					update(s => ({
 						...s,
@@ -642,18 +659,33 @@ function createTabsStore() {
 
 							const messages = [...t.messages];
 
-							// Mark the matching tool_use as complete
-							const toolId = eventData.tool_id as string;
-							const toolUseIdx = messages.findLastIndex(
-								m => m.type === 'tool_use' && (m.toolId === toolId || m.streaming)
+							// Find the matching tool_use - first try exact match by toolId
+							let toolUseIdx = messages.findIndex(
+								m => m.type === 'tool_use' && m.toolId === toolId
 							);
+
+							// Fallback: find last tool_use without a result
+							if (toolUseIdx === -1) {
+								toolUseIdx = messages.findLastIndex(
+									m => m.type === 'tool_use' && !m.toolResult && (m.streaming || m.toolStatus === 'running')
+								);
+							}
+
 							if (toolUseIdx !== -1) {
-								messages[toolUseIdx] = {
-									...messages[toolUseIdx],
-									toolResult: content,
-									toolStatus: 'complete' as const,
-									streaming: false
-								};
+								// Only update if tool doesn't already have this result
+								if (!messages[toolUseIdx].toolResult) {
+									console.log(`[Tab ${tabId}] Attaching result to tool at index ${toolUseIdx}`);
+									messages[toolUseIdx] = {
+										...messages[toolUseIdx],
+										toolResult: content,
+										toolStatus: 'complete' as const,
+										streaming: false
+									};
+								} else {
+									console.log(`[Tab ${tabId}] Tool already has result, skipping duplicate`);
+								}
+							} else {
+								console.log(`[Tab ${tabId}] No matching tool_use found for result, toolId:`, toolId);
 							}
 
 							return { ...t, messages };
