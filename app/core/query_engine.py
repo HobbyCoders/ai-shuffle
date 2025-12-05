@@ -218,6 +218,8 @@ def build_options_from_profile(
         can_use_tool=can_use_tool if permission_mode == "default" and can_use_tool else None,
     )
 
+    logger.info(f"Built options with permission_mode={permission_mode}, can_use_tool={options.can_use_tool is not None}")
+
     # Apply working directory - project overrides profile cwd
     if project:
         project_path = settings.workspace_dir / project["path"]
@@ -1348,13 +1350,23 @@ async def stream_to_websocket(
     if not permission_mode:
         permission_mode = config.get("permission_mode", "default")
 
+    logger.info(f"[WS] Permission mode for session {session_id}: {permission_mode} (profile config: {config.get('permission_mode')}, override: {overrides.get('permission_mode') if overrides else None})")
+    logger.info(f"[WS] broadcast_func provided: {broadcast_func is not None}")
+
     # Create canUseTool callback if permission mode is 'default' and we have broadcast_func
     can_use_tool_callback = None
     if permission_mode == "default" and broadcast_func:
-        async def can_use_tool_callback(tool_name: str, tool_input: dict):
+        logger.info(f"[WS] Creating canUseTool callback for session {session_id}")
+
+        async def can_use_tool_callback(tool_name: str, tool_input: dict, context):
             """
             Permission callback that routes tool requests through the permission handler.
             This integrates with the frontend UI for user approval.
+
+            Args:
+                tool_name: Name of the tool being requested
+                tool_input: Tool input parameters
+                context: ToolPermissionContext with signal and suggestions
             """
             request_id = f"perm-{session_id}-{uuid.uuid4().hex[:8]}"
             logger.info(f"[WS] Permission request for {tool_name}: {request_id}")

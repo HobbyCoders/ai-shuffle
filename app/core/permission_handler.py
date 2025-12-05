@@ -12,10 +12,12 @@ import asyncio
 import logging
 import re
 import fnmatch
-from typing import Optional, Dict, Any, List, Literal
+from typing import Optional, Dict, Any, List, Literal, Union
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+
+from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
 from app.db import database
 
@@ -129,7 +131,7 @@ class PermissionHandler:
         tool_name: str,
         tool_input: Dict[str, Any],
         broadcast_func: callable
-    ) -> Dict[str, Any]:
+    ) -> Union[PermissionResultAllow, PermissionResultDeny]:
         """
         Request permission for a tool use.
 
@@ -147,17 +149,16 @@ class PermissionHandler:
             broadcast_func: Async function to broadcast to WebSocket
 
         Returns:
-            {"behavior": "allow", "updatedInput": tool_input} or
-            {"behavior": "deny", "message": "..."}
+            PermissionResultAllow or PermissionResultDeny
         """
         # Check saved rules first
         rule = self._check_rules(session_id, profile_id, tool_name, tool_input)
         if rule:
             logger.info(f"Permission for {tool_name} auto-resolved by rule: {rule.decision}")
             if rule.decision == PermissionDecision.ALLOW:
-                return {"behavior": "allow", "updatedInput": tool_input}
+                return PermissionResultAllow(updated_input=tool_input)
             else:
-                return {"behavior": "deny", "message": f"Denied by saved rule"}
+                return PermissionResultDeny(message="Denied by saved rule")
 
         # Create pending request
         request = PermissionRequest(
@@ -196,13 +197,16 @@ class PermissionHandler:
             async with self._lock:
                 if session_id in self._pending_requests:
                     self._pending_requests[session_id].pop(request_id, None)
-            return {"behavior": "deny", "message": "Permission request timed out"}
+            return PermissionResultDeny(message="Permission request timed out")
 
-        # Return the response
+        # Return the response - convert from stored dict to proper type
         if request.response:
-            return request.response
+            if request.response.get("behavior") == "allow":
+                return PermissionResultAllow(updated_input=request.response.get("updatedInput", tool_input))
+            else:
+                return PermissionResultDeny(message=request.response.get("message", "Permission denied"))
         else:
-            return {"behavior": "deny", "message": "No response received"}
+            return PermissionResultDeny(message="No response received")
 
     async def respond(
         self,
