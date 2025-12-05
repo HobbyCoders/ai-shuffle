@@ -284,6 +284,104 @@ async def chat_websocket(
                         chunk_data=chunk_data,
                         source_device_id=None
                     )
+                elif event_type == 'subagent_start':
+                    # Subagent task started
+                    chunk_data = {
+                        'agent_id': event.get('agent_id'),
+                        'agent_type': event.get('agent_type'),
+                        'description': event.get('description'),
+                        'prompt': event.get('prompt'),
+                        'tool_id': event.get('tool_id')
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='subagent_start',
+                        chunk_data=chunk_data,
+                        source_device_id=None
+                    )
+                elif event_type == 'subagent_chunk':
+                    # Text chunk from subagent
+                    chunk_data = {
+                        'agent_id': event.get('agent_id'),
+                        'content': event.get('content', '')
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='subagent_chunk',
+                        chunk_data=chunk_data,
+                        source_device_id=None
+                    )
+                elif event_type == 'subagent_tool_use':
+                    # Tool use within subagent
+                    chunk_data = {
+                        'agent_id': event.get('agent_id'),
+                        'name': event.get('name'),
+                        'id': event.get('id'),
+                        'input': event.get('input')
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='subagent_tool_use',
+                        chunk_data=chunk_data,
+                        source_device_id=None
+                    )
+                elif event_type == 'subagent_tool_result':
+                    # Tool result within subagent
+                    chunk_data = {
+                        'agent_id': event.get('agent_id'),
+                        'tool_use_id': event.get('tool_use_id'),
+                        'output': event.get('output', '')
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='subagent_tool_result',
+                        chunk_data=chunk_data,
+                        source_device_id=None
+                    )
+                elif event_type == 'subagent_done':
+                    # Subagent completed
+                    chunk_data = {
+                        'agent_id': event.get('agent_id'),
+                        'result': event.get('result'),
+                        'is_error': event.get('is_error', False)
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='subagent_done',
+                        chunk_data=chunk_data,
+                        source_device_id=None
+                    )
+                elif event_type == 'stream_block_start':
+                    # Start of a content block (text, tool_use, etc.)
+                    chunk_data = {
+                        'block_type': event.get('block_type'),
+                        'index': event.get('index'),
+                        'content_block': event.get('content_block')
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='stream_block_start',
+                        chunk_data=chunk_data,
+                        source_device_id=None
+                    )
+                elif event_type == 'stream_block_stop':
+                    # End of a content block
+                    chunk_data = {
+                        'index': event.get('index')
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='stream_block_stop',
+                        chunk_data=chunk_data,
+                        source_device_id=None
+                    )
                 elif event_type == 'done':
                     # Stream completed - broadcast end
                     if stream_started:

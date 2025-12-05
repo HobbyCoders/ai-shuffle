@@ -641,6 +641,225 @@ function createTabsStore() {
 							return { ...t, messages };
 						})
 					}));
+				} else if (chunkType === 'subagent_start') {
+					// Subagent task started on another device
+					const agentId = eventData.agent_id as string;
+					const agentType = eventData.agent_type as string;
+					const description = eventData.description as string;
+					const prompt = eventData.prompt as string;
+					const toolId = eventData.tool_id as string;
+					console.log(`[Tab ${tabId}] subagent_start sync:`, { agentId, agentType, description });
+
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(t => {
+							if (t.id !== tabId) return t;
+
+							let messages = [...t.messages];
+
+							// Mark any streaming text message as complete
+							const streamingIdx = messages.findLastIndex(
+								m => m.type === 'text' && m.role === 'assistant' && m.streaming
+							);
+							if (streamingIdx !== -1) {
+								if (messages[streamingIdx].content) {
+									messages[streamingIdx] = { ...messages[streamingIdx], streaming: false };
+								} else {
+									messages = messages.filter((_, i) => i !== streamingIdx);
+								}
+							}
+
+							// Add subagent message group
+							messages.push({
+								id: `subagent-sync-${agentId}`,
+								role: 'assistant' as const,
+								content: '',
+								type: 'subagent' as const,
+								toolId: toolId,
+								agentId: agentId,
+								agentType: agentType,
+								agentDescription: description,
+								agentPrompt: prompt,
+								agentStatus: 'running' as const,
+								agentChildren: [],
+								streaming: true
+							});
+
+							return { ...t, messages };
+						})
+					}));
+				} else if (chunkType === 'subagent_chunk') {
+					// Text chunk from subagent on another device
+					const agentId = eventData.agent_id as string;
+					const content = eventData.content as string;
+
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(t => {
+							if (t.id !== tabId) return t;
+
+							const messages = t.messages.map(m => {
+								if (m.type === 'subagent' && m.agentId === agentId) {
+									const children = [...(m.agentChildren || [])];
+									const lastChild = children[children.length - 1];
+
+									if (lastChild && lastChild.type === 'text') {
+										children[children.length - 1] = {
+											...lastChild,
+											content: lastChild.content + content
+										};
+									} else {
+										children.push({
+											id: `${agentId}-text-sync-${Date.now()}`,
+											type: 'text',
+											content: content
+										});
+									}
+									return { ...m, agentChildren: children };
+								}
+								return m;
+							});
+
+							return { ...t, messages };
+						})
+					}));
+				} else if (chunkType === 'subagent_tool_use') {
+					// Tool use within subagent on another device
+					const agentId = eventData.agent_id as string;
+					const toolName = eventData.name as string;
+					const toolId = eventData.id as string;
+					const toolInput = eventData.input as Record<string, unknown>;
+
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(t => {
+							if (t.id !== tabId) return t;
+
+							const messages = t.messages.map(m => {
+								if (m.type === 'subagent' && m.agentId === agentId) {
+									const children = [...(m.agentChildren || [])];
+									children.push({
+										id: `${agentId}-tool-sync-${toolId}`,
+										type: 'tool_use',
+										content: '',
+										toolName: toolName,
+										toolId: toolId,
+										toolInput: toolInput,
+										toolStatus: 'running'
+									});
+									return { ...m, agentChildren: children };
+								}
+								return m;
+							});
+
+							return { ...t, messages };
+						})
+					}));
+				} else if (chunkType === 'subagent_tool_result') {
+					// Tool result within subagent on another device
+					const agentId = eventData.agent_id as string;
+					const toolUseId = eventData.tool_use_id as string;
+					const output = eventData.output as string;
+
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(t => {
+							if (t.id !== tabId) return t;
+
+							const messages = t.messages.map(m => {
+								if (m.type === 'subagent' && m.agentId === agentId) {
+									const children = [...(m.agentChildren || [])];
+									// Find matching tool_use and embed result
+									for (let i = children.length - 1; i >= 0; i--) {
+										if (children[i].type === 'tool_use' && children[i].toolId === toolUseId) {
+											children[i] = {
+												...children[i],
+												toolResult: output,
+												toolStatus: 'complete'
+											};
+											break;
+										}
+									}
+									return { ...m, agentChildren: children };
+								}
+								return m;
+							});
+
+							return { ...t, messages };
+						})
+					}));
+				} else if (chunkType === 'subagent_done') {
+					// Subagent completed on another device
+					const agentId = eventData.agent_id as string;
+					const result = eventData.result as string | undefined;
+					const isError = eventData.is_error as boolean | undefined;
+					console.log(`[Tab ${tabId}] subagent_done sync:`, { agentId, isError });
+
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(t => {
+							if (t.id !== tabId) return t;
+
+							const messages = t.messages.map(m => {
+								if (m.type === 'subagent' && m.agentId === agentId) {
+									return {
+										...m,
+										content: result || '',
+										agentStatus: isError ? 'error' as const : 'completed' as const,
+										streaming: false
+									};
+								}
+								return m;
+							});
+
+							return { ...t, messages };
+						})
+					}));
+				} else if (chunkType === 'stream_block_start') {
+					// Start of a content block from another device
+					const blockType = eventData.block_type as string;
+					const contentBlock = eventData.content_block as { id?: string; name?: string };
+					console.log(`[Tab ${tabId}] stream_block_start sync:`, { blockType, contentBlock });
+
+					if (blockType === 'tool_use' && contentBlock) {
+						update(s => ({
+							...s,
+							tabs: s.tabs.map(t => {
+								if (t.id !== tabId) return t;
+
+								let messages = [...t.messages];
+								// Handle any existing streaming text message
+								const streamingIdx = messages.findLastIndex(
+									m => m.type === 'text' && m.role === 'assistant' && m.streaming
+								);
+								if (streamingIdx !== -1) {
+									if (messages[streamingIdx].content) {
+										messages[streamingIdx] = { ...messages[streamingIdx], streaming: false };
+									} else {
+										messages = messages.filter((_, i) => i !== streamingIdx);
+									}
+								}
+
+								// Add tool use message
+								messages.push({
+									id: `tool-sync-${Date.now()}-${contentBlock.id || ''}`,
+									role: 'assistant' as const,
+									content: '',
+									type: 'tool_use' as const,
+									toolName: contentBlock.name || '',
+									toolId: contentBlock.id || '',
+									toolInput: {},
+									toolStatus: 'running' as const,
+									streaming: true
+								});
+
+								return { ...t, messages };
+							})
+						}));
+					}
+				} else if (chunkType === 'stream_block_stop') {
+					// End of a content block - just log for now
+					console.log(`[Tab ${tabId}] stream_block_stop sync:`, { index: eventData.index });
 				}
 				break;
 			}
