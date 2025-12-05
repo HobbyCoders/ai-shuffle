@@ -2443,27 +2443,6 @@
 
 						<!-- Bottom Controls Row (Pills + Attach) -->
 						<div class="mt-2 flex flex-wrap items-center justify-center gap-1.5">
-							<!-- Attach File Button -->
-							<button
-								type="button"
-								on:click={triggerFileUpload}
-								class="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-full bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50 transition-all disabled:opacity-40"
-								disabled={currentTab.isStreaming || !$claudeAuthenticated || isUploading}
-								title={currentTab.project ? 'Attach file' : 'Select a project to attach files'}
-							>
-								{#if isUploading}
-									<svg class="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-										<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-									</svg>
-								{:else}
-									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-									</svg>
-								{/if}
-								<span>Attach</span>
-							</button>
-
 							<!-- Model/Mode Pills (Admin only) -->
 							{#if currentTab && $isAdmin}
 								{@const currentProfile = $profiles.find(p => p.id === currentTab.profile)}
@@ -2478,7 +2457,7 @@
 									<button
 										type="button"
 										on:click={() => { showModelPopup = !showModelPopup; showModePopup = false; }}
-										class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all {currentTab.modelOverride ? 'bg-primary/15 text-primary border border-primary/30' : 'bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50'}"
+										class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {currentTab.modelOverride ? 'bg-primary/15 text-primary border border-primary/30' : 'bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50'}"
 										disabled={currentTab.isStreaming}
 									>
 										<span>{modelLabels[effectiveModel] || effectiveModel}</span>
@@ -2519,7 +2498,7 @@
 									<button
 										type="button"
 										on:click={() => { showModePopup = !showModePopup; showModelPopup = false; }}
-										class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all {currentTab.permissionModeOverride ? 'bg-primary/15 text-primary border border-primary/30' : 'bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50'}"
+										class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {currentTab.permissionModeOverride ? 'bg-primary/15 text-primary border border-primary/30' : 'bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50'}"
 										disabled={currentTab.isStreaming}
 									>
 										<span>{modeLabels[effectiveMode] || effectiveMode}</span>
@@ -2554,25 +2533,46 @@
 										</div>
 									{/if}
 								</div>
+							{/if}
 
-								<!-- Reset Button -->
-								{#if currentTab.modelOverride || currentTab.permissionModeOverride}
-									<button
-										type="button"
-										on:click={() => {
-											tabs.setTabModelOverride(tabId, null);
-											tabs.setTabPermissionModeOverride(tabId, null);
-										}}
-										class="inline-flex items-center gap-1 px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground rounded-full hover:bg-accent/50 transition-all"
-										title="Reset to defaults"
-										disabled={currentTab.isStreaming}
-									>
-										<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-										</svg>
-										<span class="hidden sm:inline">Reset</span>
-									</button>
+							<!-- Attach File Button -->
+							<button
+								type="button"
+								on:click={triggerFileUpload}
+								class="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-full bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50 transition-all disabled:opacity-40"
+								disabled={currentTab.isStreaming || !$claudeAuthenticated || isUploading}
+								title={currentTab.project ? 'Attach file' : 'Select a project to attach files'}
+							>
+								{#if isUploading}
+									<svg class="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+										<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+									</svg>
+								{:else}
+									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+									</svg>
 								{/if}
+								<span>Attach</span>
+							</button>
+
+							<!-- Reset Button (Admin only) -->
+							{#if currentTab && $isAdmin && (currentTab.modelOverride || currentTab.permissionModeOverride)}
+								<button
+									type="button"
+									on:click={() => {
+										tabs.setTabModelOverride(tabId, null);
+										tabs.setTabPermissionModeOverride(tabId, null);
+									}}
+									class="inline-flex items-center gap-1 px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground rounded-full hover:bg-accent/50 transition-all disabled:opacity-40"
+									title="Reset to defaults"
+									disabled={currentTab.isStreaming}
+								>
+									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+									</svg>
+									<span class="hidden sm:inline">Reset</span>
+								</button>
 							{/if}
 						</div>
 					</form>
