@@ -489,6 +489,11 @@ async def chat_websocket(
                                 project_id=project_id,
                                 api_user_id=api_user_id
                             )
+                            # Immediately notify frontend of new session_id so it persists on refresh
+                            await send_json({
+                                "type": "session_created",
+                                "session_id": session_id
+                            })
 
                         # Register device with session if switching sessions
                         if session_id != current_session_id:

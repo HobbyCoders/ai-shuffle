@@ -1055,6 +1055,25 @@ function createTabsStore() {
 				break;
 			}
 
+			case 'session_created': {
+				// New session was created - save sessionId immediately so it persists on refresh
+				// This is sent BEFORE streaming starts, ensuring we can reconnect if page refreshes
+				const sessionId = data.session_id as string;
+				console.log(`[Tab ${tabId}] New session created:`, sessionId);
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+						return { ...tab, sessionId };
+					})
+				}));
+
+				// Save immediately - critical for reconnection on refresh
+				saveTabsToServer(get({ subscribe }));
+				break;
+			}
+
 			case 'start': {
 				// Mark streaming as started, but DON'T create empty message yet
 				// Messages will be created when we get actual content (stream_delta for text, stream_block_start for tools)
@@ -1073,6 +1092,9 @@ function createTabsStore() {
 						};
 					})
 				}));
+
+				// Save again in case session_created wasn't received (backwards compat)
+				saveTabsToServer(get({ subscribe }));
 				break;
 			}
 

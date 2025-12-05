@@ -1,111 +1,149 @@
-# AI Hub - Claude Code Web Interface
+# AI Hub
 
-A full-featured web interface and API for Claude Code, providing a Claude.ai-like experience with agent profiles, session management, and streaming conversations.
+A full-featured web interface and API server for Claude Code, providing a Claude.ai-like chat experience with multi-user support, API access, and advanced AI agent management.
+
+![Version](https://img.shields.io/badge/version-4.0.0-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
+## Overview
+
+AI Hub acts as a bridge between Claude Code CLI (OAuth authentication) and users/applications, exposing Claude's capabilities through:
+
+- **Web UI** - Modern chat interface similar to Claude.ai
+- **REST API** - OpenAI-compatible endpoints for programmatic access
+- **WebSocket** - Real-time streaming and multi-device sync
+- **Agent Profiles** - Customizable tool sets and system prompts
+
+No API keys required - uses Claude Code's OAuth authentication.
 
 ## Features
 
-### Web Interface
-- Modern, responsive chat interface built with Svelte
-- Real-time SSE streaming for Claude responses
-- Tool use visualization (file reads, code edits, bash commands)
-- Profile selector for different agent configurations
-- Session history and persistence
+### Chat Interface
+- Real-time SSE streaming responses
+- Tool use visualization (file operations, code edits, bash commands)
+- Markdown rendering with syntax highlighting
+- Multi-tab conversations
 - Dark theme optimized for coding
+- File upload/attachments
+- Spotlight search (Cmd/Ctrl+K)
 
-### Agent Profiles
-Pre-configured agent profiles with different capabilities:
+### Agent System
+- **Profiles** - Configure tool access, models, and system prompts
+- **Subagents** - Delegate tasks to specialized Claude instances
+- **Slash Commands** - Built-in (`/rewind`, `/help`) and custom commands
+- **Checkpoints** - Save and rewind conversation state
+- **Model Selection** - Choose between Sonnet, Opus, and Haiku
 
-| Profile | Description | Tools |
-|---------|-------------|-------|
-| **Simple Chat** | Text-only responses | None |
-| **Code Reader** | Read-only code analysis | Read, Glob, Grep |
-| **Code Writer** | File modifications | Read, Write, Edit, Glob, Grep |
-| **Full Claude** | Complete Claude Code | All tools |
-| **Data Extractor** | JSON output extraction | WebFetch |
-| **Researcher** | Web search and analysis | Read, Glob, Grep, WebFetch, WebSearch |
+### Multi-Device Sync
+- Real-time message synchronization across devices
+- Cross-device session control
+- WebSocket-based event broadcasting
 
-### API Features
-- RESTful API with OpenAPI documentation
-- SSE streaming for real-time responses
-- Session management with conversation history
-- Project/workspace isolation
-- Usage tracking and statistics
-- Legacy API compatibility
+### Session Management
+- Persistent conversation history
+- Resume, fork, or delete conversations
+- Project and profile-based filtering
+
+### API Access
+- REST API with OpenAPI documentation
+- API key authentication (`aih_*` format)
+- Per-user project/profile restrictions
+- One-shot and streaming endpoints
 
 ## Quick Start
 
 ### Docker Compose (Recommended)
 
 ```bash
-# Clone the repository
+# Clone and start
 git clone https://github.com/your-username/ai-hub.git
 cd ai-hub
-
-# Start the container
 docker-compose up -d
 
 # Authenticate with Claude
 docker exec -it ai-hub claude login
 
-# Access the web UI
-open http://localhost:8000
+# Open http://localhost:8000
 ```
 
 ### First-Time Setup
 
 1. Open http://localhost:8000
-2. Create your admin account (first-time only)
-3. Start chatting with Claude!
+2. Create your admin account
+3. Authenticate Claude in the container (see above)
+4. Start chatting
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HOST` | Server bind address | `0.0.0.0` |
+| `PORT` | Server port | `8000` |
+| `WORKSPACE_DIR` | Project workspace path | `./workspace` |
+| `PUID` / `PGID` | Process user/group ID | `1000` / `1000` |
+| `SESSION_EXPIRE_DAYS` | Admin session duration | `30` |
+| `COMMAND_TIMEOUT` | Claude command timeout (seconds) | `300` |
+| `AUTO_UPDATE` | Update Claude/gh CLI on startup | `true` |
+
+### Docker Volumes
+
+| Volume | Container Path | Purpose |
+|--------|----------------|---------|
+| `claude-auth` | `/home/appuser/.claude` | Claude OAuth credentials |
+| `gh-auth` | `/home/appuser/.config/gh` | GitHub CLI authentication |
+| `ai-hub-data` | `/data` | SQLite database |
+| `workspace` | `/workspace` | Project files |
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      Web Browser                             │
-│                    (Svelte SPA)                              │
+│                    Web Browser (Svelte SPA)                  │
 └──────────────────────────┬──────────────────────────────────┘
-                           │ HTTP/SSE
+                           │ HTTP / SSE / WebSocket
 ┌──────────────────────────▼──────────────────────────────────┐
-│                    FastAPI Server                            │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │
-│  │   Auth      │  │   Query     │  │   Session   │         │
-│  │   Service   │  │   Engine    │  │   Manager   │         │
-│  └─────────────┘  └─────────────┘  └─────────────┘         │
-│                           │                                  │
-│  ┌─────────────┐  ┌───────▼─────┐  ┌─────────────┐         │
-│  │   Profile   │  │   Claude    │  │   SQLite    │         │
-│  │   Service   │  │   Agent SDK │  │   Database  │         │
-│  └─────────────┘  └─────────────┘  └─────────────┘         │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│                  Claude Code CLI                             │
-│              (OAuth authenticated)                           │
+│                      FastAPI Server                          │
+│  ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐   │
+│  │   Auth    │ │   Query   │ │  Session  │ │   Sync    │   │
+│  │  Service  │ │  Engine   │ │  Manager  │ │  Engine   │   │
+│  └───────────┘ └───────────┘ └───────────┘ └───────────┘   │
+│                        │                                     │
+│  ┌───────────┐ ┌───────▼───┐ ┌───────────┐ ┌───────────┐   │
+│  │ Profiles  │ │  Claude   │ │  SQLite   │ │ Subagents │   │
+│  │  Service  │ │ Agent SDK │ │    DB     │ │  Manager  │   │
+│  └───────────┘ └───────────┘ └───────────┘ └───────────┘   │
 └──────────────────────────┬──────────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────┐
-│                   Anthropic API                              │
+│               Claude Code CLI (OAuth authenticated)          │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+┌──────────────────────────▼──────────────────────────────────┐
+│                      Anthropic API                           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## API Endpoints
+## API Reference
+
+Full documentation available at `/docs` when running.
 
 ### Authentication
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/v1/auth/status` | Check authentication status |
 | POST | `/api/v1/auth/setup` | Create admin account (first-run) |
 | POST | `/api/v1/auth/login` | Login |
 | POST | `/api/v1/auth/logout` | Logout |
+| GET | `/api/v1/auth/status` | Check auth status |
 
-### Profiles
+### Query
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/v1/profiles` | List all profiles |
-| GET | `/api/v1/profiles/:id` | Get profile details |
-| POST | `/api/v1/profiles` | Create custom profile |
-| PUT | `/api/v1/profiles/:id` | Update profile |
-| DELETE | `/api/v1/profiles/:id` | Delete profile |
+| POST | `/api/v1/query` | One-shot query |
+| POST | `/api/v1/query/stream` | Streaming query (SSE) |
+| POST | `/api/v1/conversation` | Multi-turn conversation |
+| POST | `/api/v1/conversation/stream` | Streaming conversation |
 
 ### Sessions
 | Method | Endpoint | Description |
@@ -114,13 +152,13 @@ open http://localhost:8000
 | GET | `/api/v1/sessions/:id` | Get session with history |
 | DELETE | `/api/v1/sessions/:id` | Delete session |
 
-### Query (AI Interface)
+### Profiles
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/v1/query` | One-shot query |
-| POST | `/api/v1/query/stream` | Streaming query (SSE) |
-| POST | `/api/v1/conversation` | Multi-turn conversation |
-| POST | `/api/v1/conversation/stream` | Streaming conversation (SSE) |
+| GET | `/api/v1/profiles` | List all profiles |
+| POST | `/api/v1/profiles` | Create profile |
+| PUT | `/api/v1/profiles/:id` | Update profile |
+| DELETE | `/api/v1/profiles/:id` | Delete profile |
 
 ### System
 | Method | Endpoint | Description |
@@ -129,65 +167,9 @@ open http://localhost:8000
 | GET | `/api/v1/version` | Version info |
 | GET | `/api/v1/stats` | Usage statistics |
 
-## Configuration
-
-### Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `HOST` | Server host | `0.0.0.0` |
-| `PORT` | Server port | `8000` |
-| `SERVICE_NAME` | Service name | `ai-hub` |
-| `LOG_LEVEL` | Logging level | `info` |
-| `PUID` | Process user ID | `1000` |
-| `PGID` | Process group ID | `1000` |
-| `WORKSPACE_DIR` | Project workspace | `./workspace` |
-
-### Docker Volumes
-
-| Volume | Path | Description |
-|--------|------|-------------|
-| `claude-auth` | `/home/appuser/.claude` | OAuth credentials |
-| `ai-hub-data` | `/data` | SQLite database & sessions |
-| `workspace` | `/workspace` | Project files |
-
 ## Development
 
-### Project Structure
-
-```
-ai-hub/
-├── app/
-│   ├── api/           # FastAPI routes
-│   │   ├── auth.py
-│   │   ├── profiles.py
-│   │   ├── projects.py
-│   │   ├── sessions.py
-│   │   ├── query.py
-│   │   └── system.py
-│   ├── core/          # Business logic
-│   │   ├── auth.py
-│   │   ├── config.py
-│   │   ├── models.py
-│   │   ├── profiles.py
-│   │   └── query_engine.py
-│   ├── db/            # Database
-│   │   └── database.py
-│   ├── static/        # Built frontend
-│   └── main.py        # Application entry
-├── frontend/          # Svelte SPA
-│   ├── src/
-│   │   ├── lib/
-│   │   │   ├── api/
-│   │   │   └── stores/
-│   │   └── routes/
-│   └── package.json
-├── docker-compose.yml
-├── Dockerfile
-└── requirements.txt
-```
-
-### Local Development
+### Local Setup
 
 ```bash
 # Backend
@@ -203,66 +185,73 @@ npm run dev
 ### Building
 
 ```bash
-# Build Docker image
+# Docker image
 docker-compose build
 
-# Build frontend only
+# Frontend only
 cd frontend
 npm run build
 ```
 
+### Project Structure
+
+```
+ai-hub/
+├── app/                    # FastAPI application
+│   ├── main.py             # Entry point
+│   ├── api/                # Route handlers
+│   ├── core/               # Business logic
+│   └── db/                 # Database layer
+├── frontend/               # Svelte SPA
+│   ├── src/
+│   │   ├── routes/         # Pages
+│   │   └── lib/            # Components, stores, API
+│   └── package.json
+├── docker-compose.yml
+├── Dockerfile
+└── requirements.txt
+```
+
+## Tech Stack
+
+**Backend:** Python 3.11, FastAPI, Claude Agent SDK, SQLite
+
+**Frontend:** Svelte 5, SvelteKit, TypeScript, Tailwind CSS
+
+**Container:** Docker, Claude Code CLI, GitHub CLI
+
 ## Unraid Installation
 
-### Using Docker Template
-
-1. Go to **Docker** tab in Unraid
-2. Click **Add Container**
-3. Configure:
-   - **Repository**: `ghcr.io/your-username/ai-hub:latest`
-   - **PUID**: `99`
-   - **PGID**: `100`
-   - **Port**: `8000`
-4. Add volumes for persistence
-
-### Post-Installation
-
-```bash
-# Authenticate with Claude
-docker exec -it ai-hub claude login
-```
+1. Go to **Docker** tab → **Add Container**
+2. Set repository to your image
+3. Configure `PUID=99`, `PGID=100`
+4. Map port `8000`
+5. Add volumes for persistence
+6. Run `docker exec -it ai-hub claude login` after starting
 
 ## Troubleshooting
 
-### Authentication Issues
-
+### Claude Not Authenticated
 ```bash
-# Check diagnostics
-curl http://localhost:8000/api/v1/auth/diagnostics
-
-# Re-authenticate
 docker exec -it ai-hub claude login
 ```
 
-### Common Issues
+### Check Diagnostics
+```bash
+curl http://localhost:8000/api/v1/auth/diagnostics
+```
 
-1. **PUID/PGID Mismatch**: Set `PUID=99` and `PGID=100` for Unraid
-2. **Claude not authenticated**: Run `claude login` in container
-3. **Port in use**: Change `PORT` in `.env`
-
-## Legacy API Support
-
-The following legacy endpoints are maintained for backward compatibility:
-
-- `POST /chat` → maps to `/api/v1/query`
-- `POST /conversation` → maps to `/api/v1/conversation`
-- `GET /auth/status` → maps to `/api/v1/auth/claude/status`
+### PUID/PGID Issues
+- Unraid: `PUID=99`, `PGID=100`
+- Standard: `PUID=1000`, `PGID=1000`
 
 ## License
 
-MIT License - See LICENSE file for details.
+MIT License - See [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
 
-- Built with [FastAPI](https://fastapi.tiangolo.com/) and [Svelte](https://svelte.dev/)
-- Powered by [Anthropic Claude](https://www.anthropic.com/) via Claude Code CLI
-- Uses [Claude Agent SDK](https://docs.anthropic.com/en/docs/claude-code/sdk)
+- [FastAPI](https://fastapi.tiangolo.com/) - Backend framework
+- [Svelte](https://svelte.dev/) - Frontend framework
+- [Claude Agent SDK](https://docs.anthropic.com/en/docs/claude-code/sdk) - AI integration
+- [Anthropic](https://www.anthropic.com/) - Claude AI
