@@ -46,4 +46,7 @@
   <Config Name="Log Level" Target="LOG_LEVEL" Default="info" Mode="" Description="Logging level: debug, info, warning, error" Type="Variable" Display="advanced" Required="false" Mask="false">info</Config>
   <Config Name="Command Timeout" Target="COMMAND_TIMEOUT" Default="300" Mode="" Description="Timeout for Claude commands in seconds" Type="Variable" Display="advanced" Required="false" Mask="false">300</Config>
   <Config Name="Service Name" Target="SERVICE_NAME" Default="claude-code-sdk" Mode="" Description="Service identifier" Type="Variable" Display="advanced" Required="false" Mask="false">claude-code-sdk</Config>
+  <Config Name="CORS Origins" Target="CORS_ORIGINS" Default="*" Mode="" Description="Allowed CORS origins (comma-separated). Use * for local access, or specify exact URLs like http://192.168.1.100:8000 for production" Type="Variable" Display="advanced" Required="false" Mask="false">*</Config>
+  <Config Name="Cookie Secure" Target="COOKIE_SECURE" Default="false" Mode="" Description="Set to true if using HTTPS, false for HTTP" Type="Variable" Display="advanced" Required="false" Mask="false">false</Config>
+  <Config Name="Max Upload Size (MB)" Target="MAX_REQUEST_BODY_MB" Default="50" Mode="" Description="Maximum file upload size in megabytes" Type="Variable" Display="advanced" Required="false" Mask="false">50</Config>
 </Container>
