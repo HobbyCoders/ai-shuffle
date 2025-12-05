@@ -378,6 +378,16 @@ async def chat_websocket(
                             content=prompt
                         )
 
+                        # Broadcast user message to other devices
+                        await sync_engine.broadcast_message_added(
+                            session_id=session_id,
+                            message={
+                                "role": "user",
+                                "content": prompt
+                            },
+                            source_device_id=device_id  # Exclude the sender
+                        )
+
                         # Cancel any existing query for this session
                         if session_id in _active_chat_sessions:
                             _active_chat_sessions[session_id].cancel()

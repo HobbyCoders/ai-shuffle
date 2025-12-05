@@ -443,6 +443,30 @@ function createTabsStore() {
 		console.log(`[Tab ${tabId}] Sync event:`, eventType, eventData);
 
 		switch (eventType) {
+			case 'message_added': {
+				// A new message was added by another device (e.g., user message)
+				const message = eventData.message as Record<string, unknown>;
+				console.log(`[Tab ${tabId}] Message added from another device:`, message);
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(t => {
+						if (t.id !== tabId) return t;
+						return {
+							...t,
+							messages: [...t.messages, {
+								id: `msg-sync-${Date.now()}`,
+								role: message.role as 'user' | 'assistant',
+								content: message.content as string,
+								type: message.role === 'user' ? undefined : 'text' as const,
+								streaming: false
+							}]
+						};
+					})
+				}));
+				break;
+			}
+
 			case 'stream_start': {
 				// Another device started streaming
 				console.log(`[Tab ${tabId}] Another device started streaming`);
@@ -472,6 +496,7 @@ function createTabsStore() {
 				// Content chunk from another device
 				const chunkType = eventData.chunk_type as string;
 				const content = eventData.content as string;
+				console.log(`[Tab ${tabId}] stream_chunk: type=${chunkType}, content="${content?.substring(0, 50)}..."`);
 
 				if (chunkType === 'text') {
 					update(s => ({
