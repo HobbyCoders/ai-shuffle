@@ -2145,15 +2145,6 @@
 				{:else}
 					<!-- Messages -->
 					<div class="max-w-5xl mx-auto px-4 sm:px-8 py-4 space-y-4">
-						<!-- Todo List - Shows task progress when tasks exist -->
-						{#if $activeTab?.todos && $activeTab.todos.length > 0}
-							<TodoList todos={$activeTab.todos} />
-						{:else}
-							<div class="text-xs text-muted-foreground p-2 bg-muted/20 rounded">
-								Debug: todos = {JSON.stringify($activeTab?.todos || 'undefined')}
-							</div>
-						{/if}
-
 						{#each currentTab.messages as message}
 							{#if message.role === 'user'}
 								<!-- User Message - Anvil Style -->
@@ -2393,6 +2384,15 @@
 							requests={currentTab.pendingPermissions}
 							on:respond={(e) => handlePermissionRespond(tabId, e)}
 						/>
+					</div>
+				</div>
+			{/if}
+
+			<!-- Todo List - Shows task progress above input -->
+			{#if $activeTab?.todos && $activeTab.todos.length > 0}
+				<div class="border-t border-border/50 bg-background/80 backdrop-blur-sm px-3 sm:px-4 pt-3">
+					<div class="max-w-5xl mx-auto">
+						<TodoList todos={$activeTab.todos} />
 					</div>
 				</div>
 			{/if}
