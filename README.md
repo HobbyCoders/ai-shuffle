@@ -4,20 +4,6 @@ A full-featured web interface and API server for Claude Code, providing a Claude
 ![Version](https://img.shields.io/badge/version-4.0.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
----
-
-## ⚠️ Important Legal Disclaimer
-
-**This software is provided for personal, educational, and development purposes only.**
-
-This application can use Claude Code CLI with OAuth authentication, which is governed by [Anthropic's Consumer Terms of Service](https://www.anthropic.com/legal/consumer-terms). Please be aware of the following:
-
-1. **Personal Use Only**: Anthropic's Consumer Terms prohibit accessing Claude "through automated or non-human means, whether through a bot, script, or otherwise" except via official API keys.
-
-2. **No Production Deployment**: Do NOT deploy this application as a production service, commercial product, or multi-user platform using OAuth authentication. This would violate Anthropic's Terms of Service.
-
----
-
 ## ⚠️ Experimental Software Notice
 
 **This application is highly experimental and under active development.**
