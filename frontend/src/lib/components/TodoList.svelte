@@ -31,6 +31,16 @@
 	const allCompleted = $derived(() => {
 		return todos.length > 0 && todos.every(t => t.status === 'completed');
 	});
+
+	// Progress percentage for circular progress bar
+	const progress = $derived(() => {
+		if (todos.length === 0) return 0;
+		return (todos.filter(t => t.status === 'completed').length / todos.length) * 100;
+	});
+
+	// SVG circle properties for progress ring
+	const circleRadius = 6;
+	const circumference = 2 * Math.PI * circleRadius;
 </script>
 
 {#if todos.length > 0}
@@ -40,14 +50,38 @@
 			onclick={() => isExpanded = !isExpanded}
 			class="w-full flex items-center gap-2 py-1.5 text-left hover:bg-muted/30 rounded px-2 -mx-2 transition-colors"
 		>
-			<!-- Check or Circle -->
+			<!-- Circular Progress or Checkmark -->
 			{#if allCompleted()}
 				<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 				</svg>
 			{:else}
-				<!-- Show static circle for in-progress/pending -->
-				<div class="w-4 h-4 rounded-full border-2 border-muted-foreground/40 flex-shrink-0"></div>
+				<!-- Circular progress bar -->
+				<svg class="w-4 h-4 flex-shrink-0 -rotate-90" viewBox="0 0 16 16">
+					<!-- Background circle -->
+					<circle
+						cx="8"
+						cy="8"
+						r={circleRadius}
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						class="text-muted-foreground/30"
+					/>
+					<!-- Progress circle -->
+					<circle
+						cx="8"
+						cy="8"
+						r={circleRadius}
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						class="text-green-500 transition-all duration-300"
+						stroke-dasharray={circumference}
+						stroke-dashoffset={circumference - (progress() / 100) * circumference}
+					/>
+				</svg>
 			{/if}
 
 			<!-- Task text -->
