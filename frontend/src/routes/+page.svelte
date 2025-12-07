@@ -55,8 +55,32 @@
 		model?: string;
 	}
 
+	// Tool interfaces for tool configuration
+	interface ToolInfo {
+		name: string;
+		category: string;
+		description: string;
+		mcp_server?: string;
+	}
+
+	interface ToolCategory {
+		id: string;
+		name: string;
+		description: string;
+		tools: ToolInfo[];
+	}
+
+	interface ToolsResponse {
+		categories: ToolCategory[];
+		all_tools: ToolInfo[];
+	}
+
 	// Subagents list for profile config
 	let allSubagents: Subagent[] = [];
+
+	// Available tools for profile config
+	let availableTools: ToolsResponse = { categories: [], all_tools: [] };
+	let toolsExpanded: Record<string, boolean> = {}; // Track expanded categories
 
 	// Load subagents
 	async function loadSubagents() {
@@ -65,6 +89,16 @@
 		} catch (e) {
 			console.error('Failed to load subagents:', e);
 			allSubagents = [];
+		}
+	}
+
+	// Load available tools
+	async function loadTools() {
+		try {
+			availableTools = await api.get<ToolsResponse>('/tools');
+		} catch (e) {
+			console.error('Failed to load tools:', e);
+			availableTools = { categories: [], all_tools: [] };
 		}
 	}
 
@@ -249,8 +283,8 @@
 		model: 'sonnet',
 		permission_mode: 'default',
 		max_turns: null as number | null,
-		allowed_tools: '',
-		disallowed_tools: '',
+		allowed_tools: [] as string[],
+		disallowed_tools: [] as string[],
 		enabled_agents: [] as string[],
 		include_partial_messages: true,
 		continue_conversation: false,
@@ -267,6 +301,9 @@
 		max_buffer_size: null as number | null
 	};
 
+	// Tool selection mode: 'all' = all tools allowed, 'allow' = whitelist mode, 'disallow' = blacklist mode
+	let toolSelectionMode: 'all' | 'allow' | 'disallow' = 'all';
+
 	// Toggle agent selection
 	function toggleAgent(agentId: string) {
 		if (profileForm.enabled_agents.includes(agentId)) {
@@ -274,6 +311,77 @@
 		} else {
 			profileForm.enabled_agents = [...profileForm.enabled_agents, agentId];
 		}
+	}
+
+	// Toggle tool selection
+	function toggleTool(toolName: string) {
+		if (toolSelectionMode === 'allow') {
+			if (profileForm.allowed_tools.includes(toolName)) {
+				profileForm.allowed_tools = profileForm.allowed_tools.filter(t => t !== toolName);
+			} else {
+				profileForm.allowed_tools = [...profileForm.allowed_tools, toolName];
+			}
+		} else if (toolSelectionMode === 'disallow') {
+			if (profileForm.disallowed_tools.includes(toolName)) {
+				profileForm.disallowed_tools = profileForm.disallowed_tools.filter(t => t !== toolName);
+			} else {
+				profileForm.disallowed_tools = [...profileForm.disallowed_tools, toolName];
+			}
+		}
+	}
+
+	// Check if a tool is selected based on current mode
+	function isToolSelected(toolName: string): boolean {
+		if (toolSelectionMode === 'all') return true;
+		if (toolSelectionMode === 'allow') return profileForm.allowed_tools.includes(toolName);
+		if (toolSelectionMode === 'disallow') return !profileForm.disallowed_tools.includes(toolName);
+		return true;
+	}
+
+	// Toggle all tools in a category
+	function toggleCategory(category: ToolCategory) {
+		const categoryToolNames = category.tools.map(t => t.name);
+
+		if (toolSelectionMode === 'allow') {
+			const allSelected = categoryToolNames.every(name => profileForm.allowed_tools.includes(name));
+			if (allSelected) {
+				// Deselect all in category
+				profileForm.allowed_tools = profileForm.allowed_tools.filter(t => !categoryToolNames.includes(t));
+			} else {
+				// Select all in category
+				const newTools = categoryToolNames.filter(name => !profileForm.allowed_tools.includes(name));
+				profileForm.allowed_tools = [...profileForm.allowed_tools, ...newTools];
+			}
+		} else if (toolSelectionMode === 'disallow') {
+			const allDisabled = categoryToolNames.every(name => profileForm.disallowed_tools.includes(name));
+			if (allDisabled) {
+				// Enable all in category (remove from disallowed)
+				profileForm.disallowed_tools = profileForm.disallowed_tools.filter(t => !categoryToolNames.includes(t));
+			} else {
+				// Disable all in category (add to disallowed)
+				const newTools = categoryToolNames.filter(name => !profileForm.disallowed_tools.includes(name));
+				profileForm.disallowed_tools = [...profileForm.disallowed_tools, ...newTools];
+			}
+		}
+	}
+
+	// Check if all tools in a category are selected
+	function isCategoryFullySelected(category: ToolCategory): boolean {
+		const categoryToolNames = category.tools.map(t => t.name);
+		if (toolSelectionMode === 'all') return true;
+		if (toolSelectionMode === 'allow') {
+			return categoryToolNames.every(name => profileForm.allowed_tools.includes(name));
+		}
+		if (toolSelectionMode === 'disallow') {
+			return categoryToolNames.every(name => !profileForm.disallowed_tools.includes(name));
+		}
+		return true;
+	}
+
+	// Toggle tool category expansion
+	function toggleToolCategoryExpansion(categoryId: string) {
+		toolsExpanded[categoryId] = !toolsExpanded[categoryId];
+		toolsExpanded = toolsExpanded; // Trigger reactivity
 	}
 
 	function getModelDisplay(model?: string): string {
@@ -317,7 +425,8 @@
 				tabs.loadProfiles(),
 				tabs.loadSessions(),
 				tabs.loadProjects(),
-				loadSubagents()
+				loadSubagents(),
+				loadTools()
 			];
 			// Load admin-specific data if user is admin
 			if ($isAdmin) {
@@ -834,8 +943,8 @@
 			model: 'sonnet',
 			permission_mode: 'default',
 			max_turns: null,
-			allowed_tools: '',
-			disallowed_tools: '',
+			allowed_tools: [],
+			disallowed_tools: [],
 			enabled_agents: [],
 			include_partial_messages: true,
 			continue_conversation: false,
@@ -851,6 +960,7 @@
 			user: '',
 			max_buffer_size: null
 		};
+		toolSelectionMode = 'all';
 		editingProfile = null;
 	}
 
@@ -864,6 +974,18 @@
 		const config = profile.config || {};
 		const sp = config.system_prompt || {};
 
+		const allowedTools = config.allowed_tools || [];
+		const disallowedTools = config.disallowed_tools || [];
+
+		// Determine tool selection mode based on what's configured
+		if (allowedTools.length > 0) {
+			toolSelectionMode = 'allow';
+		} else if (disallowedTools.length > 0) {
+			toolSelectionMode = 'disallow';
+		} else {
+			toolSelectionMode = 'all';
+		}
+
 		profileForm = {
 			id: profile.id,
 			name: profile.name,
@@ -871,8 +993,8 @@
 			model: config.model || 'sonnet',
 			permission_mode: config.permission_mode || 'default',
 			max_turns: config.max_turns || null,
-			allowed_tools: (config.allowed_tools || []).join(', '),
-			disallowed_tools: (config.disallowed_tools || []).join(', '),
+			allowed_tools: allowedTools,
+			disallowed_tools: disallowedTools,
 			enabled_agents: config.enabled_agents || [],
 			include_partial_messages: config.include_partial_messages !== false,
 			continue_conversation: config.continue_conversation || false,
@@ -903,11 +1025,13 @@
 		};
 
 		if (profileForm.max_turns) config.max_turns = profileForm.max_turns;
-		if (profileForm.allowed_tools.trim()) {
-			config.allowed_tools = profileForm.allowed_tools.split(',').map((t) => t.trim()).filter(Boolean);
+
+		// Handle tool configuration based on selection mode
+		if (toolSelectionMode === 'allow' && profileForm.allowed_tools.length > 0) {
+			config.allowed_tools = profileForm.allowed_tools;
 		}
-		if (profileForm.disallowed_tools.trim()) {
-			config.disallowed_tools = profileForm.disallowed_tools.split(',').map((t) => t.trim()).filter(Boolean);
+		if (toolSelectionMode === 'disallow' && profileForm.disallowed_tools.length > 0) {
+			config.disallowed_tools = profileForm.disallowed_tools;
 		}
 		if (profileForm.enabled_agents.length > 0) {
 			config.enabled_agents = profileForm.enabled_agents;
@@ -2833,15 +2957,104 @@
 							</button>
 							{#if expandedSections.toolConfig}
 								<div class="p-3 space-y-3 bg-card">
+									<!-- Tool selection mode -->
 									<div>
-										<label class="block text-xs text-muted-foreground mb-1">Allowed Tools</label>
-										<input bind:value={profileForm.allowed_tools} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground" placeholder="Read, Write, Bash (comma-separated)" />
-										<p class="text-xs text-muted-foreground mt-1">Empty = all tools allowed</p>
+										<label class="block text-xs text-muted-foreground mb-2">Tool Access Mode</label>
+										<div class="flex gap-2">
+											<button
+												type="button"
+												on:click={() => { toolSelectionMode = 'all'; profileForm.allowed_tools = []; profileForm.disallowed_tools = []; }}
+												class="px-3 py-1.5 text-xs rounded-lg transition-colors {toolSelectionMode === 'all' ? 'bg-violet-600 text-white' : 'bg-muted text-foreground hover:bg-muted/80'}"
+											>
+												All Tools
+											</button>
+											<button
+												type="button"
+												on:click={() => { toolSelectionMode = 'allow'; profileForm.disallowed_tools = []; }}
+												class="px-3 py-1.5 text-xs rounded-lg transition-colors {toolSelectionMode === 'allow' ? 'bg-violet-600 text-white' : 'bg-muted text-foreground hover:bg-muted/80'}"
+											>
+												Allow Only
+											</button>
+											<button
+												type="button"
+												on:click={() => { toolSelectionMode = 'disallow'; profileForm.allowed_tools = []; }}
+												class="px-3 py-1.5 text-xs rounded-lg transition-colors {toolSelectionMode === 'disallow' ? 'bg-violet-600 text-white' : 'bg-muted text-foreground hover:bg-muted/80'}"
+											>
+												Disallow
+											</button>
+										</div>
+										<p class="text-xs text-muted-foreground mt-1">
+											{#if toolSelectionMode === 'all'}
+												Agent can use all available tools.
+											{:else if toolSelectionMode === 'allow'}
+												Agent can ONLY use checked tools.
+											{:else}
+												Agent can use all tools EXCEPT checked ones.
+											{/if}
+										</p>
 									</div>
-									<div>
-										<label class="block text-xs text-muted-foreground mb-1">Disallowed Tools</label>
-										<input bind:value={profileForm.disallowed_tools} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground" placeholder="Write, Edit (comma-separated)" />
-									</div>
+
+									<!-- Tool categories and individual tools -->
+									{#if toolSelectionMode !== 'all'}
+										<div class="border-t border-border pt-3 space-y-2">
+											{#each availableTools.categories as category}
+												{#if category.tools.length > 0}
+													<div class="border border-border rounded-lg overflow-hidden">
+														<!-- Category header -->
+														<button
+															type="button"
+															on:click={() => toggleToolCategoryExpansion(category.id)}
+															class="w-full px-3 py-2 bg-muted/50 flex items-center gap-2 text-sm text-foreground hover:bg-muted"
+														>
+															<input
+																type="checkbox"
+																checked={isCategoryFullySelected(category)}
+																on:click|stopPropagation={() => toggleCategory(category)}
+																class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring"
+															/>
+															<span class="flex-1 text-left">{category.name}</span>
+															<span class="text-xs text-muted-foreground">({category.tools.length} tools)</span>
+															<svg class="w-4 h-4 transition-transform {toolsExpanded[category.id] ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+															</svg>
+														</button>
+														<!-- Individual tools -->
+														{#if toolsExpanded[category.id]}
+															<div class="p-2 space-y-1 bg-card">
+																{#each category.tools as tool}
+																	<label class="flex items-center gap-2 px-2 py-1 rounded hover:bg-muted/50 cursor-pointer">
+																		<input
+																			type="checkbox"
+																			checked={isToolSelected(tool.name)}
+																			on:change={() => toggleTool(tool.name)}
+																			class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring"
+																		/>
+																		<span class="text-sm text-foreground">{tool.name}</span>
+																		<span class="text-xs text-muted-foreground">- {tool.description}</span>
+																	</label>
+																{/each}
+															</div>
+														{/if}
+													</div>
+												{/if}
+											{/each}
+										</div>
+
+										<!-- Summary of selected tools -->
+										<div class="text-xs text-muted-foreground pt-2 border-t border-border">
+											{#if toolSelectionMode === 'allow'}
+												{profileForm.allowed_tools.length} tool{profileForm.allowed_tools.length !== 1 ? 's' : ''} allowed
+												{#if profileForm.allowed_tools.length > 0}
+													<span class="text-foreground">: {profileForm.allowed_tools.join(', ')}</span>
+												{/if}
+											{:else if toolSelectionMode === 'disallow'}
+												{profileForm.disallowed_tools.length} tool{profileForm.disallowed_tools.length !== 1 ? 's' : ''} blocked
+												{#if profileForm.disallowed_tools.length > 0}
+													<span class="text-foreground">: {profileForm.disallowed_tools.join(', ')}</span>
+												{/if}
+											{/if}
+										</div>
+									{/if}
 								</div>
 							{/if}
 						</div>

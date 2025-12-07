@@ -1,10 +1,10 @@
 """
-System API routes - health, version, stats, workspace configuration
+System API routes - health, version, stats, workspace configuration, tools
 """
 
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -14,6 +14,65 @@ from app.core.auth import auth_service
 from app.core.config import settings
 from app.db import database
 from app.api.auth import require_auth, require_admin
+
+
+# ============================================================================
+# Built-in Tool Definitions
+# ============================================================================
+
+# Tool categories for UI grouping
+TOOL_CATEGORIES = {
+    "read_only": {
+        "name": "Read-only tools",
+        "description": "Tools that only read data without making changes"
+    },
+    "edit": {
+        "name": "Edit tools",
+        "description": "Tools that modify files"
+    },
+    "execution": {
+        "name": "Execution tools",
+        "description": "Tools that execute commands or code"
+    },
+    "mcp": {
+        "name": "MCP tools",
+        "description": "Tools from MCP servers"
+    },
+    "other": {
+        "name": "Other tools",
+        "description": "Utility and miscellaneous tools"
+    }
+}
+
+# Built-in Claude Code tools with their metadata
+BUILTIN_TOOLS = [
+    # Read-only tools
+    {"name": "Read", "category": "read_only", "description": "Read file contents"},
+    {"name": "Glob", "category": "read_only", "description": "Find files by pattern"},
+    {"name": "Grep", "category": "read_only", "description": "Search file contents"},
+    {"name": "WebFetch", "category": "read_only", "description": "Fetch and analyze web content"},
+    {"name": "WebSearch", "category": "read_only", "description": "Search the web"},
+    {"name": "BashOutput", "category": "read_only", "description": "Get output from background shell"},
+
+    # Edit tools
+    {"name": "Edit", "category": "edit", "description": "Edit file contents"},
+    {"name": "Write", "category": "edit", "description": "Write new files"},
+    {"name": "NotebookEdit", "category": "edit", "description": "Edit Jupyter notebooks"},
+
+    # Execution tools
+    {"name": "Bash", "category": "execution", "description": "Execute shell commands"},
+    {"name": "Task", "category": "execution", "description": "Launch subagent tasks"},
+    {"name": "KillShell", "category": "execution", "description": "Kill background shell"},
+
+    # Other tools
+    {"name": "TodoWrite", "category": "other", "description": "Manage task lists"},
+    {"name": "Skill", "category": "other", "description": "Execute skills"},
+    {"name": "SlashCommand", "category": "other", "description": "Run slash commands"},
+    {"name": "EnterPlanMode", "category": "other", "description": "Enter planning mode"},
+    {"name": "ExitPlanMode", "category": "other", "description": "Exit planning mode"},
+    {"name": "ListMcpResources", "category": "other", "description": "List MCP resources"},
+    {"name": "ReadMcpResource", "category": "other", "description": "Read MCP resource"},
+]
 
 router = APIRouter(tags=["System"])
 
@@ -254,3 +313,92 @@ async def validate_workspace_path(request: WorkspaceConfigRequest) -> dict:
             "exists": False,
             "writable": False
         }
+
+
+# ============================================================================
+# Tools API
+# ============================================================================
+
+class ToolInfo(BaseModel):
+    """Information about a single tool"""
+    name: str
+    category: str
+    description: str
+    mcp_server: Optional[str] = None  # For MCP tools, the server name
+
+
+class ToolCategory(BaseModel):
+    """Tool category with its tools"""
+    id: str
+    name: str
+    description: str
+    tools: List[ToolInfo]
+
+
+class ToolsResponse(BaseModel):
+    """Response containing all available tools organized by category"""
+    categories: List[ToolCategory]
+    all_tools: List[ToolInfo]
+
+
+@router.get("/api/v1/tools", response_model=ToolsResponse)
+async def list_available_tools(token: str = Depends(require_auth)):
+    """
+    List all available tools organized by category.
+
+    Returns built-in Claude Code tools and any MCP tools from configured servers.
+    Use this to populate tool selection UI in profile configuration.
+    """
+    # Build the list of all tools
+    all_tools = []
+    tools_by_category = {}
+
+    # Add built-in tools
+    for tool in BUILTIN_TOOLS:
+        tool_info = ToolInfo(
+            name=tool["name"],
+            category=tool["category"],
+            description=tool["description"]
+        )
+        all_tools.append(tool_info)
+
+        if tool["category"] not in tools_by_category:
+            tools_by_category[tool["category"]] = []
+        tools_by_category[tool["category"]].append(tool_info)
+
+    # TODO: Add MCP tools from configured MCP servers
+    # This would require reading MCP server configuration and querying for available tools
+    # For now, MCP tools need to be entered manually or added via setting_sources
+
+    # Build category list
+    categories = []
+    for cat_id, cat_info in TOOL_CATEGORIES.items():
+        category = ToolCategory(
+            id=cat_id,
+            name=cat_info["name"],
+            description=cat_info["description"],
+            tools=tools_by_category.get(cat_id, [])
+        )
+        categories.append(category)
+
+    return ToolsResponse(
+        categories=categories,
+        all_tools=all_tools
+    )
+
+
+@router.get("/api/v1/tools/builtin", response_model=List[ToolInfo])
+async def list_builtin_tools(token: str = Depends(require_auth)):
+    """
+    List only built-in Claude Code tools.
+
+    Simpler endpoint that returns a flat list of built-in tools.
+    """
+    return [
+        ToolInfo(
+            name=tool["name"],
+            category=tool["category"],
+            description=tool["description"]
+        )
+        for tool in BUILTIN_TOOLS
+    ]
