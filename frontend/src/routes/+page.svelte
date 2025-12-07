@@ -959,6 +959,64 @@
 		}
 	}
 
+	// Profile import/export
+	let profileImportInput: HTMLInputElement;
+	let profileImporting = false;
+
+	async function exportProfile(profileId: string) {
+		try {
+			const data = await api.get<any>(`/export-import/profiles/${profileId}`);
+			const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			a.href = url;
+			a.download = `profile-${profileId}-${new Date().toISOString().split('T')[0]}.json`;
+			document.body.appendChild(a);
+			a.click();
+			document.body.removeChild(a);
+			URL.revokeObjectURL(url);
+		} catch (e: any) {
+			alert('Export failed: ' + (e.detail || 'Unknown error'));
+		}
+	}
+
+	function triggerProfileImport() {
+		profileImportInput?.click();
+	}
+
+	async function handleProfileImport(event: Event) {
+		const input = event.target as HTMLInputElement;
+		const file = input.files?.[0];
+		if (!file) return;
+		input.value = '';
+
+		profileImporting = true;
+		try {
+			const content = await file.text();
+			const data = JSON.parse(content);
+
+			if (!data.profiles || data.profiles.length === 0) {
+				alert('No profiles found in file');
+				profileImporting = false;
+				return;
+			}
+
+			const result = await api.post<any>('/export-import/import/json?overwrite_existing=false', data);
+
+			if (result.profiles_imported > 0) {
+				alert(`Imported ${result.profiles_imported} profile(s)`);
+				await tabs.loadProfiles();
+			} else if (result.profiles_skipped > 0) {
+				alert(`Profile already exists. Use a different ID or delete the existing one first.`);
+			} else if (result.errors?.length > 0) {
+				alert('Import failed: ' + result.errors.join(', '));
+			}
+		} catch (e: any) {
+			alert('Import failed: ' + (e.detail || e.message || 'Invalid JSON file'));
+		}
+		profileImporting = false;
+	}
+
 	async function createProject() {
 		if (!newProjectId || !newProjectName) return;
 
@@ -3002,6 +3060,9 @@
 						</div>
 					</div>
 				{:else}
+					<!-- Hidden file input for import -->
+					<input type="file" accept=".json" bind:this={profileImportInput} on:change={handleProfileImport} class="hidden" />
+
 					<div class="space-y-2 mb-4">
 						{#each $profiles as profile}
 							<div class="flex items-center justify-between p-3 bg-accent rounded-lg">
@@ -3009,26 +3070,44 @@
 									<p class="text-sm text-foreground font-medium">{profile.name}</p>
 									<p class="text-xs text-muted-foreground">{profile.id}</p>
 								</div>
-								{#if !profile.is_builtin}
-									<div class="flex gap-1">
-										<button on:click={() => editProfile(profile)} class="p-1.5 text-muted-foreground hover:text-foreground">
+								<div class="flex gap-1">
+									<!-- Export button (always visible) -->
+									<button on:click={() => exportProfile(profile.id)} class="p-1.5 text-muted-foreground hover:text-foreground" title="Export profile">
+										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+										</svg>
+									</button>
+									{#if !profile.is_builtin}
+										<button on:click={() => editProfile(profile)} class="p-1.5 text-muted-foreground hover:text-foreground" title="Edit profile">
 											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
 											</svg>
 										</button>
-										<button on:click={() => deleteProfile(profile.id)} class="p-1.5 text-muted-foreground hover:text-destructive">
+										<button on:click={() => deleteProfile(profile.id)} class="p-1.5 text-muted-foreground hover:text-destructive" title="Delete profile">
 											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
 											</svg>
 										</button>
-									</div>
-								{/if}
+									{/if}
+								</div>
 							</div>
 						{/each}
 					</div>
-					<button on:click={openNewProfileForm} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-gray-500">
-						+ New Profile
-					</button>
+					<div class="flex gap-2">
+						<button on:click={openNewProfileForm} class="flex-1 py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-gray-500">
+							+ New Profile
+						</button>
+						<button on:click={triggerProfileImport} disabled={profileImporting} class="px-4 py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-gray-500 flex items-center gap-2" title="Import profile from file">
+							{#if profileImporting}
+								<span class="animate-spin inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full"></span>
+							{:else}
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+								</svg>
+							{/if}
+							Import
+						</button>
+					</div>
 				{/if}
 			</div>
 		</div>

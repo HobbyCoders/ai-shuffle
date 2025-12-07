@@ -63,6 +63,10 @@
 	// Expanded view
 	let expandedId = $state<string | null>(null);
 
+	// Import/Export state
+	let importInput: HTMLInputElement;
+	let importing = $state(false);
+
 	// Load subagents
 	async function loadSubagents() {
 		loading = true;
@@ -185,6 +189,67 @@
 		}
 	}
 
+	// Export a single subagent
+	async function exportSubagent(agentId: string) {
+		try {
+			const data = await api.get<any>(`/export-import/subagents/${agentId}`);
+			const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			a.href = url;
+			a.download = `subagent-${agentId}-${new Date().toISOString().split('T')[0]}.json`;
+			document.body.appendChild(a);
+			a.click();
+			document.body.removeChild(a);
+			URL.revokeObjectURL(url);
+		} catch (e: unknown) {
+			const err = e as { detail?: string; message?: string };
+			error = 'Export failed: ' + (err.detail || err.message || 'Unknown error');
+		}
+	}
+
+	// Trigger import file dialog
+	function triggerImport() {
+		importInput?.click();
+	}
+
+	// Handle import file selection
+	async function handleImport(event: Event) {
+		const input = event.target as HTMLInputElement;
+		const file = input.files?.[0];
+		if (!file) return;
+		input.value = '';
+
+		importing = true;
+		error = null;
+
+		try {
+			const content = await file.text();
+			const data = JSON.parse(content);
+
+			if (!data.subagents || data.subagents.length === 0) {
+				error = 'No subagents found in file';
+				importing = false;
+				return;
+			}
+
+			const result = await api.post<any>('/export-import/import/json?overwrite_existing=false', data);
+
+			if (result.subagents_imported > 0) {
+				await loadSubagents();
+			} else if (result.subagents_skipped > 0) {
+				error = 'Subagent already exists. Use a different ID or delete the existing one first.';
+			} else if (result.errors?.length > 0) {
+				error = 'Import failed: ' + result.errors.join(', ');
+			}
+		} catch (e: unknown) {
+			const err = e as { detail?: string; message?: string };
+			error = 'Import failed: ' + (err.detail || err.message || 'Invalid JSON file');
+		}
+
+		importing = false;
+	}
+
 	function handleKeydown(e: KeyboardEvent) {
 		if (e.key === 'Escape') {
 			if (showEditor) {
@@ -219,6 +284,27 @@
 				<span class="text-sm text-muted-foreground">({subagents.length})</span>
 			</div>
 			<div class="flex items-center gap-2">
+				<!-- Hidden file input for import -->
+				<input type="file" accept=".json" bind:this={importInput} onchange={handleImport} class="hidden" />
+
+				<button
+					onclick={triggerImport}
+					disabled={importing}
+					class="flex items-center gap-1 px-2.5 py-1.5 text-sm font-medium text-foreground bg-muted border border-border rounded-md hover:bg-accent transition-colors"
+					title="Import subagent from file"
+				>
+					{#if importing}
+						<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+							<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+							<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+						</svg>
+					{:else}
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+						</svg>
+					{/if}
+					<span>Import</span>
+				</button>
 				<button
 					onclick={handleCreate}
 					class="flex items-center gap-1 px-2.5 py-1.5 text-sm font-medium text-primary-foreground bg-primary rounded-md hover:bg-primary/90 transition-colors"
@@ -328,6 +414,16 @@
 
 								<!-- Actions -->
 								<div class="flex items-center gap-2 pt-1">
+									<button
+										onclick={() => exportSubagent(agent.id)}
+										class="px-3 py-1.5 text-sm font-medium text-foreground bg-muted rounded-md hover:bg-muted/80 transition-colors flex items-center gap-1"
+										title="Export subagent"
+									>
+										<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+										</svg>
+										Export
+									</button>
 									<button
 										onclick={() => handleEdit(agent)}
 										class="flex-1 px-3 py-1.5 text-sm font-medium text-foreground bg-muted rounded-md hover:bg-muted/80 transition-colors"
