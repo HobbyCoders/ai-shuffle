@@ -131,6 +131,7 @@ export interface ProfileConfig {
 		preset?: string;
 		content?: string;
 		append?: string;
+		inject_env_details?: boolean;
 	} | null;
 }
 

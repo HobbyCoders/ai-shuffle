@@ -259,6 +259,7 @@
 		system_prompt_preset: 'claude_code',
 		system_prompt_append: '',
 		system_prompt_content: '',
+		system_prompt_inject_env: false,
 		setting_sources: [] as string[],
 		cwd: '',
 		add_dirs: '',
@@ -843,6 +844,7 @@
 			system_prompt_preset: 'claude_code',
 			system_prompt_append: '',
 			system_prompt_content: '',
+			system_prompt_inject_env: false,
 			setting_sources: [],
 			cwd: '',
 			add_dirs: '',
@@ -879,6 +881,7 @@
 			system_prompt_preset: sp.preset || 'claude_code',
 			system_prompt_append: sp.append || '',
 			system_prompt_content: sp.content || '',
+			system_prompt_inject_env: sp.inject_env_details || false,
 			setting_sources: config.setting_sources || [],
 			cwd: config.cwd || '',
 			add_dirs: (config.add_dirs || []).join(', '),
@@ -927,10 +930,12 @@
 			if (profileForm.system_prompt_append.trim()) {
 				config.system_prompt.append = profileForm.system_prompt_append;
 			}
-		} else if (profileForm.system_prompt_content.trim()) {
+		} else {
+			// Custom system prompt - allow blank content
 			config.system_prompt = {
 				type: 'custom',
-				content: profileForm.system_prompt_content
+				content: profileForm.system_prompt_content,
+				inject_env_details: profileForm.system_prompt_inject_env
 			};
 		}
 
@@ -2970,8 +2975,13 @@
 									{:else}
 										<div>
 											<label class="block text-xs text-muted-foreground mb-1">Custom System Prompt</label>
-											<textarea bind:value={profileForm.system_prompt_content} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-none" rows="4" placeholder="Enter your custom system prompt..."></textarea>
+											<textarea bind:value={profileForm.system_prompt_content} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-none" rows="4" placeholder="Enter your custom system prompt (can be blank)..."></textarea>
 										</div>
+										<label class="flex items-center gap-2 cursor-pointer">
+											<input type="checkbox" bind:checked={profileForm.system_prompt_inject_env} class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring" />
+											<span class="text-sm text-foreground">Inject Environment Details</span>
+										</label>
+										<p class="text-xs text-muted-foreground">Adds working directory, platform, git status, and today's date to the system prompt.</p>
 									{/if}
 								</div>
 							{/if}

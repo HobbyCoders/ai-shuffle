@@ -68,6 +68,7 @@ class SystemPromptConfig(BaseModel):
     preset: Optional[str] = "claude_code"
     content: Optional[str] = None
     append: Optional[str] = None
+    inject_env_details: bool = False  # Inject environment info (working dir, platform, date, etc.)
 
 
 class ProfileConfig(BaseModel):

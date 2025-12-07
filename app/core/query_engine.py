@@ -8,12 +8,15 @@ Based on patterns from Anvil's SessionManager:
 """
 
 import logging
+import os
+import platform
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 import uuid
 import asyncio
-import os
-import tempfile
-import shutil
 from pathlib import Path
 from typing import Optional, Dict, Any, AsyncGenerator
 from dataclasses import dataclass, field
@@ -197,6 +200,55 @@ You ARE allowed full access to:
 """
 
 
+def _is_git_repo(working_dir: str) -> bool:
+    """Check if a directory is a git repository."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=working_dir,
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _get_os_version() -> str:
+    """Get the OS version string."""
+    try:
+        if sys.platform == "linux":
+            return f"Linux {platform.release()}"
+        elif sys.platform == "darwin":
+            return f"macOS {platform.mac_ver()[0]}"
+        elif sys.platform == "win32":
+            return f"Windows {platform.release()}"
+        else:
+            return f"{sys.platform} {platform.release()}"
+    except Exception:
+        return sys.platform
+
+
+def generate_environment_details(working_dir: str) -> str:
+    """
+    Generate environment details block for custom system prompts.
+    Similar to Claude Code's dynamic environment injection.
+    """
+    is_git = _is_git_repo(working_dir)
+    os_version = _get_os_version()
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    return f"""Here is useful information about the environment you are running in:
+<env>
+Working directory: {working_dir}
+Is directory a git repo: {"Yes" if is_git else "No"}
+Platform: {sys.platform}
+OS Version: {os_version}
+Today's date: {today}
+</env>"""
+
+
 def build_options_from_profile(
     profile: Dict[str, Any],
     project: Optional[Dict[str, Any]] = None,
@@ -220,6 +272,14 @@ def build_options_from_profile(
     config = profile["config"]
     overrides = overrides or {}
 
+    # Determine working directory first (needed for env details injection)
+    if project:
+        working_dir = str(settings.workspace_dir / project["path"])
+    elif config.get("cwd"):
+        working_dir = config.get("cwd")
+    else:
+        working_dir = str(settings.workspace_dir)
+
     # Build system prompt
     system_prompt = config.get("system_prompt")
     override_append = overrides.get("system_prompt_append", "")
@@ -232,11 +292,28 @@ def build_options_from_profile(
     elif isinstance(system_prompt, dict):
         prompt_type = system_prompt.get("type", "preset")
 
-        if prompt_type == "custom" and system_prompt.get("content"):
+        if prompt_type == "custom":
             # Custom system prompt - use content directly with security instructions
-            final_system_prompt = SECURITY_INSTRUCTIONS + "\n\n" + system_prompt["content"]
+            # Content can be empty/blank
+            custom_content = system_prompt.get("content", "") or ""
+            inject_env = system_prompt.get("inject_env_details", False)
+
+            # Start building the prompt
+            prompt_parts = [SECURITY_INSTRUCTIONS]
+
+            # Add environment details if enabled
+            if inject_env:
+                prompt_parts.append(generate_environment_details(working_dir))
+
+            # Add custom content if provided
+            if custom_content:
+                prompt_parts.append(custom_content)
+
+            # Add override append if provided
             if override_append:
-                final_system_prompt += "\n\n" + override_append
+                prompt_parts.append(override_append)
+
+            final_system_prompt = "\n\n".join(prompt_parts)
         else:
             # Preset system prompt - pass to SDK with append
             existing_append = system_prompt.get("append", "")
@@ -347,12 +424,8 @@ def build_options_from_profile(
     else:
         logger.info(f"Docker mode: Agents passed via SDK: {list(agents_dict.keys()) if agents_dict else 'None'}")
 
-    # Apply working directory - project overrides profile cwd
-    if project:
-        project_path = settings.workspace_dir / project["path"]
-        options.cwd = str(project_path)
-    elif config.get("cwd"):
-        options.cwd = config.get("cwd")
+    # Apply working directory (already computed above for env details)
+    options.cwd = working_dir
 
     # Additional directories
     add_dirs = config.get("add_dirs")
