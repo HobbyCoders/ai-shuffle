@@ -125,6 +125,52 @@ def cleanup_agents_directory(agents_dir: Path, agent_ids: list) -> None:
                 logger.warning(f"Failed to remove subagent file {agent_file}: {e}")
 
 
+def _build_plugins_list(enabled_plugins: Optional[list]) -> Optional[list]:
+    """
+    Build the plugins list for ClaudeAgentOptions from profile's enabled_plugins.
+
+    According to the Claude Agent SDK documentation, plugins are specified as:
+    [{"type": "local", "path": "./my-plugin"}, ...]
+
+    Paths can be:
+    - Relative paths: Resolved relative to workspace directory
+    - Absolute paths: Used as-is
+
+    Args:
+        enabled_plugins: List of plugin paths from profile config
+
+    Returns:
+        List of plugin dicts for SDK, or None if no plugins enabled
+    """
+    if not enabled_plugins:
+        return None
+
+    plugins = []
+    for plugin_path in enabled_plugins:
+        if not plugin_path:
+            continue
+
+        # Resolve path - if relative, resolve from workspace_dir
+        path = Path(plugin_path)
+        if not path.is_absolute():
+            resolved_path = settings.workspace_dir / plugin_path
+        else:
+            resolved_path = path
+
+        # Convert to string for SDK
+        plugins.append({
+            "type": "local",
+            "path": str(resolved_path)
+        })
+        logger.info(f"Adding plugin: {resolved_path}")
+
+    if not plugins:
+        return None
+
+    logger.info(f"Built plugins list with {len(plugins)} plugin(s)")
+    return plugins
+
+
 @dataclass
 class SessionState:
     """Track state for an active SDK session"""
@@ -460,6 +506,10 @@ def build_options_from_profile(
 
         # Stderr callback for debugging
         stderr=stderr_callback,
+
+        # Plugins - load from enabled_plugins in profile config
+        # Each plugin path is resolved relative to workspace_dir if relative
+        plugins=_build_plugins_list(config.get("enabled_plugins")),
     )
 
     deployment_mode = detect_deployment_mode()

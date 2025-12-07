@@ -112,6 +112,11 @@ class ProfileConfig(BaseModel):
     # Enabled subagent IDs - references global subagents by ID
     enabled_agents: Optional[List[str]] = None
 
+    # Plugins - list of plugin paths to load
+    # Each entry should be a path to a plugin directory containing .claude-plugin/plugin.json
+    # Paths can be relative (resolved from workspace) or absolute
+    enabled_plugins: Optional[List[str]] = None
+
 
 class ProfileBase(BaseModel):
     """Base profile fields"""
