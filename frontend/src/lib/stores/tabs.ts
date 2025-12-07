@@ -1209,6 +1209,22 @@ function createTabsStore() {
 							continue;
 						}
 
+						// Handle system messages from buffer (e.g., /context output)
+						if (bufferType === 'system') {
+							const systemMsg: ChatMessage = {
+								id: `buffer-system-${Date.now()}-${Math.random()}`,
+								role: 'system' as const,
+								content: bufferContent,
+								type: 'system' as const,
+								systemSubtype: m.subtype as string | undefined,
+								systemData: m.data as Record<string, unknown> | undefined,
+								streaming: false
+							};
+							finalMessages.push(systemMsg);
+							existingContentHashes.add(hash);
+							continue;
+						}
+
 						const bufferMsg: ChatMessage = {
 							id: `buffer-${Date.now()}-${Math.random()}`,
 							role: 'assistant' as const,
