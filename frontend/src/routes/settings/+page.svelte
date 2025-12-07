@@ -6,6 +6,7 @@
 	import type { ApiUser, ApiUserWithKey, Profile, WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
 	import type { Project } from '$lib/stores/chat';
 	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig } from '$lib/api/auth';
+	import ImportExportManager from '$lib/components/ImportExportManager.svelte';
 
 	let apiUsers: ApiUser[] = [];
 	let profiles: Profile[] = [];
@@ -629,6 +630,17 @@
 							</div>
 						{/if}
 					</div>
+				</div>
+			</section>
+
+			<!-- Import/Export Section -->
+			<section class="mb-8">
+				<h2 class="text-xl font-bold text-white mb-4">Import & Export</h2>
+				<p class="text-sm text-gray-500 mb-4">
+					Backup or migrate your profiles and subagents. Export creates a JSON file you can import later.
+				</p>
+				<div class="card p-4">
+					<ImportExportManager />
 				</div>
 			</section>
 
