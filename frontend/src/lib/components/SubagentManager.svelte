@@ -48,9 +48,10 @@
 
 	interface Props {
 		onClose: () => void;
+		onUpdate?: () => void;
 	}
 
-	let { onClose }: Props = $props();
+	let { onClose, onUpdate }: Props = $props();
 
 	// State
 	let subagents = $state<Subagent[]>([]);
@@ -223,6 +224,7 @@
 
 			showEditor = false;
 			await loadSubagents();
+			onUpdate?.();
 		} catch (e: unknown) {
 			const err = e as { detail?: string; message?: string };
 			error = err.detail || err.message || 'Failed to save subagent';
@@ -243,6 +245,7 @@
 			await api.delete(`/subagents/${deletingId}`);
 			deletingId = null;
 			await loadSubagents();
+			onUpdate?.();
 		} catch (e: unknown) {
 			const err = e as { detail?: string; message?: string };
 			error = err.detail || err.message || 'Failed to delete subagent';
@@ -308,6 +311,7 @@
 
 			if (result.subagents_imported > 0) {
 				await loadSubagents();
+				onUpdate?.();
 			} else if (result.subagents_skipped > 0) {
 				error = 'Subagent already exists. Use a different ID or delete the existing one first.';
 			} else if (result.errors?.length > 0) {

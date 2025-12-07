@@ -1656,11 +1656,20 @@
 			<!-- Projects Panel Content -->
 			{#if activeSidebarSection === 'projects'}
 				<div class="flex-1 overflow-y-auto p-3">
+					{#if $activeTab?.sessionId}
+						<div class="flex items-center gap-2 p-3 mb-4 bg-muted/50 rounded-lg border border-border">
+							<svg class="w-4 h-4 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+							</svg>
+							<p class="text-xs text-muted-foreground">Project is locked for this chat</p>
+						</div>
+					{/if}
 					<div class="space-y-2 mb-4">
 						{#each $projects as project}
 							<button
-								class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg hover:bg-accent/80 transition-colors text-left {$activeTab?.project === project.id ? 'ring-2 ring-primary' : ''}"
-								on:click={() => { if ($activeTabId) setTabProject($activeTabId, project.id); closeSidebar(); }}
+								class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg transition-colors text-left {$activeTab?.project === project.id ? 'ring-2 ring-primary' : ''} {$activeTab?.sessionId ? 'opacity-50 cursor-not-allowed' : 'hover:bg-accent/80'}"
+								on:click={() => { if ($activeTabId && !$activeTab?.sessionId) { setTabProject($activeTabId, project.id); closeSidebar(); } }}
+								disabled={!!$activeTab?.sessionId}
 							>
 								<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
@@ -1675,7 +1684,7 @@
 							<p class="text-xs text-muted-foreground px-2">No projects yet</p>
 						{/if}
 					</div>
-					<button on:click={() => showProjectModal = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">+ New Project</button>
+					<button on:click={() => showProjectModal = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">{$projects.length === 0 ? '+ Create Project' : 'Manage Projects'}</button>
 				</div>
 			{/if}
 
@@ -1704,7 +1713,7 @@
 							<p class="text-xs text-muted-foreground px-2">No profiles yet</p>
 						{/if}
 					</div>
-					<button on:click={() => showProfileModal = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">+ New Profile</button>
+					<button on:click={() => showProfileModal = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">{$profiles.length === 0 ? '+ Create Profile' : 'Manage Profiles'}</button>
 				</div>
 			{/if}
 
@@ -2898,7 +2907,7 @@
 
 <!-- Subagent Manager Panel -->
 {#if showSubagentManager}
-	<SubagentManager onClose={() => showSubagentManager = false} />
+	<SubagentManager onClose={() => showSubagentManager = false} onUpdate={() => loadSubagents()} />
 {/if}
 
 <!-- Profile Modal -->
