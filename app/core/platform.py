@@ -65,11 +65,13 @@ def get_app_data_dir() -> Path:
         return Path("/data")
 
     if sys.platform == "win32":
-        # Windows: Use APPDATA
-        appdata = os.environ.get("APPDATA")
-        if appdata:
-            return Path(appdata) / "ai-hub"
-        return Path.home() / "AppData" / "Roaming" / "ai-hub"
+        # Windows: Use USERPROFILE directly to avoid Microsoft Store Python virtualization
+        # Microsoft Store Python virtualizes APPDATA and LOCALAPPDATA paths,
+        # but direct USERPROFILE access is not virtualized
+        userprofile = os.environ.get("USERPROFILE")
+        if userprofile:
+            return Path(userprofile) / ".ai-hub"
+        return Path.home() / ".ai-hub"
 
     elif sys.platform == "darwin":
         # macOS: Use Application Support
