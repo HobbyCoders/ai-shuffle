@@ -72,7 +72,7 @@ cd ..
 
 # Copy build to static directory
 # Windows:
-xcopy /e /i frontend\build app\static
+rm -rf app/static/_app && cp -r frontend/build/_app app/static/_app && cp frontend/build/index.html app/static/index.html
 
 # macOS/Linux:
 cp -r frontend/build app/static
