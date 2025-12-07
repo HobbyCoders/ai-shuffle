@@ -63,3 +63,13 @@ async def get_stats(token: str = Depends(require_auth)):
     """Get usage statistics"""
     stats = database.get_usage_stats()
     return stats
+
+
+@router.get("/api/v1/deployment")
+async def get_deployment_info(token: str = Depends(require_auth)):
+    """
+    Get deployment configuration and platform information.
+
+    Useful for debugging and understanding the current deployment mode.
+    """
+    return settings.get_deployment_info()
