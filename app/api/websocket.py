@@ -24,7 +24,7 @@ from app.core.sync_engine import sync_engine, SyncEvent
 from app.db import database
 from app.core.auth import auth_service
 from app.core.profiles import get_profile
-from app.core.cli_bridge import CLIBridge, RewindParser
+from app.core.cli_bridge import CLIBridge, RewindParser, is_pty_available
 from app.core.slash_commands import (
     discover_commands, get_command_by_name, is_slash_command,
     parse_command_input, is_interactive_command, get_all_commands
