@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 # Schema version for migrations
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 def get_connection() -> sqlite3.Connection:
@@ -74,6 +74,15 @@ def init_database():
 
 def _create_schema(cursor: sqlite3.Cursor):
     """Create all database tables"""
+
+    # System settings (key-value store for global configuration)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS system_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
 
     # Admin user (single user system)
     cursor.execute("""
@@ -1632,3 +1641,48 @@ def delete_profile_permission_rules(profile_id: str) -> int:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM permission_rules WHERE profile_id = ?", (profile_id,))
         return cursor.rowcount
+
+
+# ============================================================================
+# System Settings Operations
+# ============================================================================
+
+def get_system_setting(key: str) -> Optional[str]:
+    """Get a system setting by key"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM system_settings WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        return row["value"] if row else None
+
+
+def set_system_setting(key: str, value: str) -> None:
+    """Set a system setting (upsert)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        now = datetime.utcnow().isoformat()
+        cursor.execute(
+            """INSERT INTO system_settings (key, value, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET
+                   value = excluded.value,
+                   updated_at = excluded.updated_at""",
+            (key, value, now)
+        )
+
+
+def delete_system_setting(key: str) -> bool:
+    """Delete a system setting"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM system_settings WHERE key = ?", (key,))
+        return cursor.rowcount > 0
+
+
+def get_all_system_settings() -> Dict[str, str]:
+    """Get all system settings as a dictionary"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT key, value FROM system_settings")
+        rows = cursor.fetchall()
+        return {row["key"]: row["value"] for row in rows}

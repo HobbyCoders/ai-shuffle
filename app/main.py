@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app.core.config import settings, ensure_directories
+from app.core.config import settings, ensure_directories, load_workspace_from_database
 from app.db import database
 from app.db.database import init_database
 from app.core.profiles import run_migrations
@@ -126,6 +126,12 @@ async def lifespan(app: FastAPI):
 
     # Run database migrations
     run_migrations()
+
+    # Load user-configured workspace path from database (for local mode)
+    load_workspace_from_database()
+
+    # Re-ensure workspace directory exists (in case it was just configured)
+    settings.effective_workspace_dir.mkdir(parents=True, exist_ok=True)
 
     # Check Claude CLI authentication
     if auth_service.is_claude_authenticated():

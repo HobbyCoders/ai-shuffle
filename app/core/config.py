@@ -155,3 +155,22 @@ def ensure_directories():
     settings.effective_data_dir.mkdir(parents=True, exist_ok=True)
     settings.sessions_dir.mkdir(parents=True, exist_ok=True)
     settings.effective_workspace_dir.mkdir(parents=True, exist_ok=True)
+
+
+def load_workspace_from_database():
+    """
+    Load workspace path from database if configured.
+
+    This should be called after database initialization to apply any
+    user-configured workspace path from local mode setup.
+    """
+    try:
+        from app.db import database
+        configured_path = database.get_system_setting("workspace_path")
+        if configured_path:
+            path = Path(configured_path)
+            if path.exists() or path.parent.exists():
+                object.__setattr__(settings, 'workspace_dir', path)
+    except Exception:
+        # Database might not be initialized yet
+        pass

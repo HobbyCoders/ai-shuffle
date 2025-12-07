@@ -301,3 +301,20 @@ export interface UserQuestionResponse {
 	answers: Record<string, string | string[]>;
 	remaining_count: number;
 }
+
+// Workspace configuration types
+export interface WorkspaceConfig {
+	workspace_path: string;
+	is_configured: boolean;
+	is_local_mode: boolean;
+	default_path: string;
+	exists: boolean;
+}
+
+export interface WorkspaceValidation {
+	valid: boolean;
+	error: string | null;
+	path: string;
+	exists: boolean;
+	writable: boolean;
+}
