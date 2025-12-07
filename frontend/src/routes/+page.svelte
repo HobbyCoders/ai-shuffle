@@ -3027,6 +3027,12 @@
 										<div class="border-t border-border pt-3 space-y-2">
 											{#each availableTools.categories as category}
 												{#if category.tools.length > 0}
+													{@const categoryToolNames = category.tools.map(t => t.name)}
+													{@const selectedInCategory = toolSelectionMode === 'allow'
+														? categoryToolNames.filter(name => profileForm.allowed_tools.includes(name)).length
+														: categoryToolNames.filter(name => !profileForm.disallowed_tools.includes(name)).length}
+													{@const isFullySelected = selectedInCategory === categoryToolNames.length}
+													{@const isPartiallySelected = selectedInCategory > 0 && selectedInCategory < categoryToolNames.length}
 													<div class="border border-border rounded-lg overflow-hidden">
 														<!-- Category header -->
 														<div class="w-full px-3 py-2 bg-muted/50 flex items-center gap-2 text-sm text-foreground">
@@ -3034,14 +3040,14 @@
 															<button
 																type="button"
 																on:click|stopPropagation={() => toggleCategory(category)}
-																class="w-4 h-4 rounded flex items-center justify-center transition-colors {isCategoryFullySelected(category) ? 'bg-violet-600' : isCategoryPartiallySelected(category) ? 'bg-violet-600' : 'bg-muted border border-border'}"
+																class="w-4 h-4 rounded flex items-center justify-center transition-colors {isFullySelected ? 'bg-violet-600' : isPartiallySelected ? 'bg-violet-600' : 'bg-muted border border-border'}"
 															>
-																{#if isCategoryFullySelected(category)}
+																{#if isFullySelected}
 																	<!-- Checkmark icon -->
 																	<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 																		<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
 																	</svg>
-																{:else if isCategoryPartiallySelected(category)}
+																{:else if isPartiallySelected}
 																	<!-- Minus/dash icon for partial selection -->
 																	<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 																		<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" />
@@ -3064,10 +3070,13 @@
 														{#if toolsExpanded[category.id]}
 															<div class="p-2 space-y-1 bg-card">
 																{#each category.tools as tool}
+																	{@const isSelected = toolSelectionMode === 'allow'
+																		? profileForm.allowed_tools.includes(tool.name)
+																		: !profileForm.disallowed_tools.includes(tool.name)}
 																	<label class="flex items-center gap-2 px-2 py-1 rounded hover:bg-muted/50 cursor-pointer">
 																		<input
 																			type="checkbox"
-																			checked={isToolSelected(tool.name)}
+																			checked={isSelected}
 																			on:change={() => toggleTool(tool.name)}
 																			class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring"
 																		/>
