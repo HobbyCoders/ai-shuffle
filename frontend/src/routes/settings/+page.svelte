@@ -3,8 +3,10 @@
 	import { goto } from '$app/navigation';
 	import { auth, username, isAdmin, apiUser, claudeAuthenticated, githubAuthenticated } from '$lib/stores/auth';
 	import { api } from '$lib/api/client';
-	import type { ApiUser, ApiUserWithKey, Profile } from '$lib/api/client';
+	import type { ApiUser, ApiUserWithKey, Profile, WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
 	import type { Project } from '$lib/stores/chat';
+	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig } from '$lib/api/auth';
+
 	let apiUsers: ApiUser[] = [];
 	let profiles: Profile[] = [];
 	let projects: Project[] = [];
@@ -16,6 +18,15 @@
 	let editingUser: ApiUser | null = null;
 	let newlyCreatedKey: string | null = null;
 	let regeneratedKey: string | null = null;
+
+	// Workspace state
+	let workspaceConfig: WorkspaceConfig | null = null;
+	let workspacePath = '';
+	let workspaceValidation: WorkspaceValidation | null = null;
+	let validatingWorkspace = false;
+	let savingWorkspace = false;
+	let workspaceError = '';
+	let workspaceSuccess = '';
 
 	// Auth state
 	let githubToken = '';
@@ -41,6 +52,7 @@
 		}
 		await loadData();
 		await loadAuthStatus();
+		await loadWorkspaceConfig();
 	});
 
 	async function loadData() {
@@ -67,6 +79,68 @@
 			githubUser = ghStatus.user;
 		} catch (e) {
 			console.error('Failed to load GitHub status:', e);
+		}
+	}
+
+	// Workspace Configuration
+	async function loadWorkspaceConfig() {
+		try {
+			workspaceConfig = await getWorkspaceConfig();
+			workspacePath = workspaceConfig.workspace_path;
+		} catch (e) {
+			console.error('Failed to load workspace config:', e);
+		}
+	}
+
+	async function validateWorkspace() {
+		if (!workspacePath.trim()) {
+			workspaceValidation = null;
+			workspaceError = '';
+			return;
+		}
+
+		validatingWorkspace = true;
+		workspaceError = '';
+		workspaceSuccess = '';
+
+		try {
+			workspaceValidation = await validateWorkspacePath(workspacePath);
+			if (!workspaceValidation.valid && workspaceValidation.error) {
+				workspaceError = workspaceValidation.error;
+			}
+		} catch (e: any) {
+			workspaceError = e.detail || 'Failed to validate path';
+			workspaceValidation = null;
+		} finally {
+			validatingWorkspace = false;
+		}
+	}
+
+	// Debounce workspace validation
+	let workspaceValidateTimeout: ReturnType<typeof setTimeout>;
+	function handleWorkspaceInput() {
+		clearTimeout(workspaceValidateTimeout);
+		workspaceSuccess = '';
+		workspaceValidateTimeout = setTimeout(validateWorkspace, 500);
+	}
+
+	async function saveWorkspace() {
+		if (!workspaceValidation?.valid) {
+			workspaceError = 'Please enter a valid workspace path';
+			return;
+		}
+
+		savingWorkspace = true;
+		workspaceError = '';
+		workspaceSuccess = '';
+
+		try {
+			workspaceConfig = await setWorkspaceConfig(workspacePath);
+			workspaceSuccess = 'Workspace folder updated successfully';
+		} catch (e: any) {
+			workspaceError = e.detail || 'Failed to save workspace path';
+		} finally {
+			savingWorkspace = false;
 		}
 	}
 
@@ -325,6 +399,82 @@
 		</header>
 
 		<main class="max-w-6xl mx-auto px-4 py-6">
+			<!-- Workspace Configuration Section (Local Mode Only) -->
+			{#if workspaceConfig?.is_local_mode}
+				<section class="mb-8">
+					<h2 class="text-xl font-bold text-white mb-4">Workspace Folder</h2>
+					<p class="text-sm text-gray-500 mb-4">
+						Configure where your projects and files are stored on your computer.
+					</p>
+
+					<div class="card p-4">
+						<div class="space-y-4">
+							<div>
+								<label for="workspacePath" class="block text-sm font-medium text-gray-300 mb-1">
+									Workspace Path
+								</label>
+								<div class="flex gap-2">
+									<input
+										type="text"
+										id="workspacePath"
+										bind:value={workspacePath}
+										on:input={handleWorkspaceInput}
+										class="input font-mono text-sm flex-1"
+										placeholder="Enter workspace path"
+									/>
+									<button
+										on:click={saveWorkspace}
+										disabled={savingWorkspace || validatingWorkspace || !workspaceValidation?.valid || workspacePath === workspaceConfig?.workspace_path}
+										class="btn btn-primary whitespace-nowrap"
+									>
+										{#if savingWorkspace}
+											<span class="inline-block animate-spin mr-2">&#9696;</span>
+										{/if}
+										Save
+									</button>
+								</div>
+								<p class="text-gray-500 text-xs mt-1">
+									Full path to your projects folder
+								</p>
+							</div>
+
+							{#if validatingWorkspace}
+								<div class="text-gray-400 text-sm flex items-center gap-2">
+									<span class="inline-block animate-spin">&#9696;</span>
+									Validating path...
+								</div>
+							{:else if workspaceValidation && workspacePath !== workspaceConfig?.workspace_path}
+								{#if workspaceValidation.valid}
+									<div class="bg-green-900/30 border border-green-500/50 text-green-300 px-3 py-2 rounded-lg text-sm flex items-center gap-2">
+										<span>✓</span>
+										<span>
+											{workspaceValidation.exists ? 'Directory exists and is writable' : 'Directory will be created'}
+										</span>
+									</div>
+								{:else}
+									<div class="bg-red-900/50 border border-red-500 text-red-300 px-3 py-2 rounded-lg text-sm">
+										{workspaceError || 'Invalid path'}
+									</div>
+								{/if}
+							{/if}
+
+							{#if workspaceError && !workspaceValidation}
+								<div class="bg-red-900/50 border border-red-500 text-red-300 px-3 py-2 rounded-lg text-sm">
+									{workspaceError}
+								</div>
+							{/if}
+
+							{#if workspaceSuccess}
+								<div class="bg-green-900/30 border border-green-500/50 text-green-300 px-3 py-2 rounded-lg text-sm flex items-center gap-2">
+									<span>✓</span>
+									<span>{workspaceSuccess}</span>
+								</div>
+							{/if}
+						</div>
+					</div>
+				</section>
+			{/if}
+
 			<!-- Service Authentication Section -->
 			<section class="mb-8">
 				<h2 class="text-xl font-bold text-white mb-4">Service Authentication</h2>
