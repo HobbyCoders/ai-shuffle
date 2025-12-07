@@ -1751,7 +1751,7 @@
 							</div>
 						{/if}
 					</div>
-					<button on:click={() => showSubagentManager = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">+ Manage Subagents</button>
+					<button on:click={() => showSubagentManager = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">{allSubagents.length === 0 ? '+ Create Subagent' : 'Manage Subagents'}</button>
 				</div>
 			{/if}
 		</aside>
