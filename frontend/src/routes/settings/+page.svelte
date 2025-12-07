@@ -399,10 +399,19 @@
 		</header>
 
 		<main class="max-w-6xl mx-auto px-4 py-6">
-			<!-- Workspace Configuration Section (Local Mode Only) -->
-			{#if workspaceConfig?.is_local_mode}
-				<section class="mb-8">
-					<h2 class="text-xl font-bold text-white mb-4">Workspace Folder</h2>
+			<!-- Workspace Configuration Section -->
+			<section class="mb-8">
+				<h2 class="text-xl font-bold text-white mb-4">Workspace Folder</h2>
+
+				{#if workspaceConfig === null}
+					<!-- Loading state -->
+					<div class="card p-4">
+						<div class="flex items-center gap-2 text-gray-400">
+							<span class="inline-block animate-spin">&#9696;</span>
+							<span>Loading workspace configuration...</span>
+						</div>
+					</div>
+				{:else if workspaceConfig?.is_local_mode}
 					<p class="text-sm text-gray-500 mb-4">
 						Configure where your projects and files are stored on your computer.
 					</p>
@@ -472,8 +481,27 @@
 							{/if}
 						</div>
 					</div>
-				</section>
-			{/if}
+				{:else}
+					<!-- Docker mode - show informational message -->
+					<div class="card p-4">
+						<div class="flex items-start gap-3">
+							<span class="text-blue-400 text-xl">🐳</span>
+							<div>
+								<h3 class="text-blue-300 font-medium mb-1">Docker Mode</h3>
+								<p class="text-gray-400 text-sm mb-2">
+									AI Hub is running in Docker. The workspace is managed by Docker volume mounts.
+								</p>
+								<p class="text-gray-500 text-xs">
+									Current workspace: <code class="bg-[var(--color-bg)] px-2 py-0.5 rounded">{workspaceConfig?.workspace_path || '/workspace'}</code>
+								</p>
+								<p class="text-gray-600 text-xs mt-2">
+									To use a custom workspace folder, run AI Hub in <a href="https://github.com/your-repo/ai-hub#local-mode" target="_blank" class="text-blue-400 hover:underline">local mode</a> on your PC.
+								</p>
+							</div>
+						</div>
+					</div>
+				{/if}
+			</section>
 
 			<!-- Service Authentication Section -->
 			<section class="mb-8">
