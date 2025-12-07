@@ -542,7 +542,8 @@
 
 	async function handleSubmit(tabId: string) {
 		const prompt = tabInputs[tabId] || '';
-		if (!prompt.trim() || !$activeTab || $activeTab.isStreaming || isUploading) return;
+		// Allow sending while streaming (streaming input) - tabs.sendMessage will queue the message
+		if (!prompt.trim() || !$activeTab || isUploading) return;
 
 		// API users use their API key restrictions - skip profile/project validation if they have restrictions
 		const isApiUserWithRestrictions = $apiUser && ($apiUser.profile_id || $apiUser.project_id);
@@ -2716,16 +2717,28 @@
 										bind:value={tabInputs[tabId]}
 										on:input={() => handleInputChange(tabId)}
 										on:keydown={(e) => handleKeyDown(e, tabId)}
-										placeholder="Message Claude... (/ commands, @ files)"
+										placeholder={currentTab.isStreaming ? "Queue a message while Claude works..." : "Message Claude... (/ commands, @ files)"}
 										class="w-full bg-transparent border-0 px-2 sm:px-3 py-2 text-foreground placeholder-muted-foreground/60 resize-none focus:outline-none focus:ring-0 min-h-[44px] max-h-[200px] leading-relaxed text-sm sm:text-base"
 										rows="1"
-										disabled={currentTab.isStreaming || !$claudeAuthenticated}
+										disabled={!$claudeAuthenticated}
 									></textarea>
 								</div>
 
-								<!-- Send/Stop Button -->
-								<div>
+								<!-- Send/Stop/Queue Buttons -->
+								<div class="flex items-center gap-1">
 									{#if currentTab.isStreaming}
+										<!-- When streaming: show queue button if text entered, always show stop button -->
+										{#if (tabInputs[tabId] || '').trim()}
+											<button
+												type="submit"
+												class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-amber-500/15 text-amber-600 hover:bg-amber-500/25 rounded-xl transition-all"
+												title="Queue message (will be sent when Claude finishes)"
+											>
+												<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+												</svg>
+											</button>
+										{/if}
 										<button
 											type="button"
 											on:click={() => tabs.stopGeneration(tabId)}

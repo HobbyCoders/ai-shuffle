@@ -137,10 +137,55 @@ class SessionState:
     background_task: Optional[asyncio.Task] = None  # Track background streaming task
     written_agent_ids: list = field(default_factory=list)  # Track agents written to filesystem
     agents_dir: Optional[Path] = None  # Path to .claude/agents/ directory
+    # Streaming input support - queue for messages to send while Claude is working
+    message_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
 
 
 # Track active sessions - key is our session_id, value is SessionState
 _active_sessions: Dict[str, SessionState] = {}
+
+
+def get_session_state(session_id: str) -> Optional[SessionState]:
+    """Get the active session state for a session ID"""
+    return _active_sessions.get(session_id)
+
+
+async def queue_user_message(session_id: str, message: str) -> bool:
+    """
+    Queue a user message to be sent to Claude while streaming.
+
+    This supports "streaming input" - allowing users to send additional messages
+    while Claude is still working on the previous response. The message will be
+    delivered to Claude when it finishes the current turn.
+
+    Args:
+        session_id: The session ID to queue the message for
+        message: The user message to queue
+
+    Returns:
+        True if the message was queued successfully, False if session not found or not streaming
+    """
+    state = _active_sessions.get(session_id)
+    if not state:
+        logger.warning(f"Cannot queue message - session {session_id} not found")
+        return False
+
+    if not state.is_streaming:
+        logger.warning(f"Cannot queue message - session {session_id} is not streaming")
+        return False
+
+    # Queue the message
+    await state.message_queue.put(message)
+    logger.info(f"Queued user message for session {session_id}: {message[:50]}...")
+    return True
+
+
+def get_queued_message_count(session_id: str) -> int:
+    """Get the number of queued messages for a session"""
+    state = _active_sessions.get(session_id)
+    if not state:
+        return 0
+    return state.message_queue.qsize()
 
 
 async def cleanup_stale_sessions(max_age_seconds: int = 3600):
@@ -2069,6 +2114,106 @@ async def stream_to_websocket(
                     metadata["tokens_out"] = message.usage.get("output_tokens", 0)
                     metadata["cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                     metadata["cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
+
+        # Streaming input: After completing the receive_response loop, check for queued messages
+        # This allows users to send messages while Claude is working
+        while not state.message_queue.empty() and not interrupted and not state.interrupt_requested:
+            try:
+                next_prompt = state.message_queue.get_nowait()
+                logger.info(f"[WS] Processing queued message for session {session_id}: {next_prompt[:50]}...")
+
+                # Notify frontend that we're processing a queued message
+                yield {
+                    "type": "queued_message_processing",
+                    "prompt": next_prompt
+                }
+
+                # Send the queued message to Claude and process the response
+                await state.client.query(next_prompt)
+
+                # Process the response for this queued message
+                async for queued_message in state.client.receive_response():
+                    # Check for interrupt
+                    if state.interrupt_requested:
+                        logger.info(f"[WS] Interrupt during queued message processing for session {session_id}")
+                        interrupted = True
+                        break
+
+                    # Handle the same message types as the main loop
+                    if isinstance(queued_message, AssistantMessage):
+                        for block in queued_message.content:
+                            if isinstance(block, TextBlock):
+                                response_text.append(block.text)
+                                if not include_partial:
+                                    yield {"type": "chunk", "content": block.text}
+                            elif isinstance(block, ToolUseBlock):
+                                tool_id = getattr(block, 'id', None)
+                                tool_input = block.input or {}
+                                tool_messages.append({
+                                    "type": "tool_use",
+                                    "name": block.name,
+                                    "tool_id": tool_id,
+                                    "input": tool_input
+                                })
+                                yield {
+                                    "type": "tool_use",
+                                    "name": block.name,
+                                    "id": tool_id,
+                                    "input": tool_input
+                                }
+                            elif isinstance(block, ToolResultBlock):
+                                output = str(block.content)[:2000]
+                                tool_use_id = getattr(block, 'tool_use_id', None)
+                                tool_messages.append({
+                                    "type": "tool_result",
+                                    "name": getattr(block, 'name', 'unknown'),
+                                    "tool_id": tool_use_id,
+                                    "output": output
+                                })
+                                yield {
+                                    "type": "tool_result",
+                                    "name": getattr(block, 'name', 'unknown'),
+                                    "tool_use_id": tool_use_id,
+                                    "output": output,
+                                    "is_error": getattr(block, 'is_error', False)
+                                }
+
+                    elif isinstance(queued_message, StreamEvent):
+                        event = queued_message.event
+                        event_type = event.get("type") if event else None
+                        if event_type == "content_block_delta":
+                            delta = event.get("delta", {})
+                            delta_type = delta.get("type")
+                            if delta_type == "text_delta" and delta.get("text"):
+                                yield {
+                                    "type": "stream_delta",
+                                    "delta_type": "text",
+                                    "content": delta["text"],
+                                    "index": event.get("index", 0)
+                                }
+                            elif delta_type == "input_json_delta" and delta.get("partial_json"):
+                                yield {
+                                    "type": "stream_delta",
+                                    "delta_type": "tool_input",
+                                    "content": delta["partial_json"],
+                                    "index": event.get("index", 0)
+                                }
+
+                    elif isinstance(queued_message, ResultMessage):
+                        # Accumulate metadata from queued message processing
+                        metadata["duration_ms"] = metadata.get("duration_ms", 0) + queued_message.duration_ms
+                        metadata["num_turns"] = metadata.get("num_turns", 0) + queued_message.num_turns
+                        if queued_message.total_cost_usd:
+                            metadata["total_cost_usd"] = metadata.get("total_cost_usd", 0) + queued_message.total_cost_usd
+                        if queued_message.usage:
+                            metadata["tokens_in"] = metadata.get("tokens_in", 0) + queued_message.usage.get("input_tokens", 0)
+                            metadata["tokens_out"] = metadata.get("tokens_out", 0) + queued_message.usage.get("output_tokens", 0)
+                            metadata["cache_creation_tokens"] = metadata.get("cache_creation_tokens", 0) + queued_message.usage.get("cache_creation_input_tokens", 0)
+                            metadata["cache_read_tokens"] = metadata.get("cache_read_tokens", 0) + queued_message.usage.get("cache_read_input_tokens", 0)
+                        break  # Exit inner loop on ResultMessage
+
+            except asyncio.QueueEmpty:
+                break  # No more queued messages
 
     except asyncio.CancelledError:
         interrupted = True

@@ -1760,6 +1760,23 @@ function createTabsStore() {
 				break;
 			}
 
+			case 'message_queued': {
+				// Message was successfully queued for streaming input
+				const queuePosition = data.queue_position as number;
+				const prompt = data.prompt as string;
+				console.log(`[Tab ${tabId}] Message queued at position ${queuePosition}: ${prompt.substring(0, 50)}...`);
+				// The message was already added to the UI by sendMessage, just log
+				break;
+			}
+
+			case 'queued_message_processing': {
+				// A queued message is now being processed
+				const prompt = data.prompt as string;
+				console.log(`[Tab ${tabId}] Processing queued message: ${prompt.substring(0, 50)}...`);
+				// The message should already be in the UI, no action needed
+				break;
+			}
+
 			case 'ping': {
 				const ws = tabConnections.get(tabId);
 				if (ws?.readyState === WebSocket.OPEN) {
@@ -2498,7 +2515,9 @@ function createTabsStore() {
 		},
 
 		/**
-		 * Send message in a specific tab
+		 * Send message in a specific tab.
+		 * If the tab is currently streaming, this will queue the message to be
+		 * processed after Claude finishes the current response (streaming input).
 		 */
 		sendMessage(tabId: string, prompt: string) {
 			const tab = getTab(tabId);
@@ -2529,6 +2548,18 @@ function createTabsStore() {
 					};
 				})
 			}));
+
+			// If currently streaming, queue the message instead of starting a new query
+			// This enables "streaming input" - user can send messages while Claude is working
+			if (tab.isStreaming && tab.sessionId) {
+				console.log(`[Tab ${tabId}] Queueing message while streaming: ${prompt.substring(0, 50)}...`);
+				ws.send(JSON.stringify({
+					type: 'queue_message',
+					prompt,
+					session_id: tab.sessionId
+				}));
+				return;
+			}
 
 			// Build overrides object only if there are actual overrides
 			const overrides: Record<string, string> = {};

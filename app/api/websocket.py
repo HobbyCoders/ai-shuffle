@@ -128,6 +128,7 @@ async def chat_websocket(
 
     Message types TO server:
     - query: Start a new query
+    - queue_message: Queue a message to send while Claude is working (streaming input)
     - stop: Interrupt current query
     - load_session: Load/switch to a session
     - pong: Response to ping
@@ -575,6 +576,57 @@ async def chat_websocket(
                                         await asyncio.wait_for(task, timeout=2.0)
                                     except (asyncio.CancelledError, asyncio.TimeoutError):
                                         pass
+
+                    elif msg_type == "queue_message":
+                        # Queue a message to be sent to Claude while streaming
+                        # This supports "streaming input" - user can send messages while Claude works
+                        session_id = data.get("session_id") or current_session_id
+                        prompt = data.get("prompt", "").strip()
+
+                        if not prompt:
+                            await send_json({"type": "error", "message": "Empty prompt"})
+                            continue
+
+                        if not session_id:
+                            await send_json({"type": "error", "message": "No active session"})
+                            continue
+
+                        from app.core.query_engine import queue_user_message, get_queued_message_count
+
+                        # Queue the message
+                        success = await queue_user_message(session_id, prompt)
+
+                        if success:
+                            # Store user message in database
+                            database.add_session_message(
+                                session_id=session_id,
+                                role="user",
+                                content=prompt
+                            )
+
+                            # Broadcast user message to other devices
+                            await sync_engine.broadcast_message_added(
+                                session_id=session_id,
+                                message={
+                                    "role": "user",
+                                    "content": prompt
+                                },
+                                source_device_id=device_id
+                            )
+
+                            # Notify frontend of successful queue
+                            await send_json({
+                                "type": "message_queued",
+                                "session_id": session_id,
+                                "prompt": prompt,
+                                "queue_position": get_queued_message_count(session_id)
+                            })
+                            logger.info(f"Queued message for session {session_id}")
+                        else:
+                            await send_json({
+                                "type": "error",
+                                "message": "Cannot queue message - session not streaming or not found"
+                            })
 
                     elif msg_type == "load_session":
                         # Load a session's message history from JSONL file
