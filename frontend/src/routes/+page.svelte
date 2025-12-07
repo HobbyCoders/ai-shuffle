@@ -370,12 +370,40 @@
 		const categoryToolNames = category.tools.map(t => t.name);
 		if (toolSelectionMode === 'all') return true;
 		if (toolSelectionMode === 'allow') {
-			return categoryToolNames.every(name => profileForm.allowed_tools.includes(name));
+			return categoryToolNames.length > 0 && categoryToolNames.every(name => profileForm.allowed_tools.includes(name));
 		}
 		if (toolSelectionMode === 'disallow') {
 			return categoryToolNames.every(name => !profileForm.disallowed_tools.includes(name));
 		}
 		return true;
+	}
+
+	// Check if some (but not all) tools in a category are selected
+	function isCategoryPartiallySelected(category: ToolCategory): boolean {
+		const categoryToolNames = category.tools.map(t => t.name);
+		if (toolSelectionMode === 'all') return false;
+		if (toolSelectionMode === 'allow') {
+			const selectedCount = categoryToolNames.filter(name => profileForm.allowed_tools.includes(name)).length;
+			return selectedCount > 0 && selectedCount < categoryToolNames.length;
+		}
+		if (toolSelectionMode === 'disallow') {
+			const disabledCount = categoryToolNames.filter(name => profileForm.disallowed_tools.includes(name)).length;
+			return disabledCount > 0 && disabledCount < categoryToolNames.length;
+		}
+		return false;
+	}
+
+	// Check if no tools in a category are selected
+	function isCategoryNoneSelected(category: ToolCategory): boolean {
+		const categoryToolNames = category.tools.map(t => t.name);
+		if (toolSelectionMode === 'all') return false;
+		if (toolSelectionMode === 'allow') {
+			return categoryToolNames.every(name => !profileForm.allowed_tools.includes(name));
+		}
+		if (toolSelectionMode === 'disallow') {
+			return categoryToolNames.every(name => profileForm.disallowed_tools.includes(name));
+		}
+		return false;
 	}
 
 	// Toggle tool category expansion
@@ -3001,23 +3029,37 @@
 												{#if category.tools.length > 0}
 													<div class="border border-border rounded-lg overflow-hidden">
 														<!-- Category header -->
-														<button
-															type="button"
-															on:click={() => toggleToolCategoryExpansion(category.id)}
-															class="w-full px-3 py-2 bg-muted/50 flex items-center gap-2 text-sm text-foreground hover:bg-muted"
-														>
-															<input
-																type="checkbox"
-																checked={isCategoryFullySelected(category)}
+														<div class="w-full px-3 py-2 bg-muted/50 flex items-center gap-2 text-sm text-foreground">
+															<!-- Custom checkbox with indeterminate state -->
+															<button
+																type="button"
 																on:click|stopPropagation={() => toggleCategory(category)}
-																class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring"
-															/>
-															<span class="flex-1 text-left">{category.name}</span>
-															<span class="text-xs text-muted-foreground">({category.tools.length} tools)</span>
-															<svg class="w-4 h-4 transition-transform {toolsExpanded[category.id] ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-															</svg>
-														</button>
+																class="w-4 h-4 rounded flex items-center justify-center transition-colors {isCategoryFullySelected(category) ? 'bg-violet-600' : isCategoryPartiallySelected(category) ? 'bg-violet-600' : 'bg-muted border border-border'}"
+															>
+																{#if isCategoryFullySelected(category)}
+																	<!-- Checkmark icon -->
+																	<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																		<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
+																	</svg>
+																{:else if isCategoryPartiallySelected(category)}
+																	<!-- Minus/dash icon for partial selection -->
+																	<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																		<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" />
+																	</svg>
+																{/if}
+															</button>
+															<button
+																type="button"
+																on:click={() => toggleToolCategoryExpansion(category.id)}
+																class="flex-1 flex items-center gap-2 text-left hover:text-foreground/80"
+															>
+																<span class="flex-1">{category.name}</span>
+																<span class="text-xs text-muted-foreground">({category.tools.length} tools)</span>
+																<svg class="w-4 h-4 transition-transform {toolsExpanded[category.id] ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+																</svg>
+															</button>
+														</div>
 														<!-- Individual tools -->
 														{#if toolsExpanded[category.id]}
 															<div class="p-2 space-y-1 bg-card">
