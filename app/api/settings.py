@@ -2,6 +2,7 @@
 Settings API routes - integration settings, API keys, and configuration
 """
 
+import asyncio
 import logging
 import httpx
 from io import BytesIO
@@ -178,7 +179,10 @@ async def transcribe_audio(
     if len(audio_data) > 25 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Audio file too large. Maximum size is 25MB.")
 
-    # Call OpenAI Whisper API
+    # Call OpenAI Whisper API with retry logic for rate limits
+    max_retries = 3
+    retry_delay = 2  # seconds
+
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             # Prepare the multipart form data
@@ -188,11 +192,35 @@ async def transcribe_audio(
                 "response_format": (None, "json"),
             }
 
-            response = await client.post(
-                "https://api.openai.com/v1/audio/transcriptions",
-                headers={"Authorization": f"Bearer {openai_key}"},
-                files=files
-            )
+            response = None
+            last_error = None
+
+            for attempt in range(max_retries):
+                # Need to recreate BytesIO for each attempt since it gets consumed
+                files["file"] = (filename, BytesIO(audio_data), content_type or "audio/webm")
+
+                response = await client.post(
+                    "https://api.openai.com/v1/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {openai_key}"},
+                    files=files
+                )
+
+                if response.status_code == 429:
+                    # Rate limited - wait and retry
+                    last_error = "rate_limit"
+                    if attempt < max_retries - 1:
+                        # Try to get retry-after header, otherwise use exponential backoff
+                        retry_after = response.headers.get("retry-after")
+                        wait_time = int(retry_after) if retry_after else retry_delay * (2 ** attempt)
+                        logger.info(f"Rate limited, waiting {wait_time}s before retry {attempt + 2}/{max_retries}")
+                        await asyncio.sleep(wait_time)
+                        continue
+                else:
+                    # Not a rate limit error, break out of retry loop
+                    break
+
+            if response is None:
+                raise HTTPException(status_code=500, detail="Failed to connect to OpenAI API")
 
             if response.status_code == 401:
                 raise HTTPException(
@@ -200,9 +228,10 @@ async def transcribe_audio(
                     detail="OpenAI API key is invalid. Please update it in Settings > Integrations."
                 )
             elif response.status_code == 429:
+                # Still rate limited after all retries
                 raise HTTPException(
                     status_code=429,
-                    detail="OpenAI rate limit exceeded. Please try again in a moment."
+                    detail="OpenAI rate limit exceeded. Please wait 30-60 seconds and try again. If this persists, check your OpenAI account usage limits."
                 )
             elif response.status_code != 200:
                 error_detail = response.text
