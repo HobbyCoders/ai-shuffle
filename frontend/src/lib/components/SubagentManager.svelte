@@ -344,67 +344,28 @@
 <!-- Modal backdrop -->
 <div
 	class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
-	onclick={(e) => e.target === e.currentTarget && onClose()}
+	onclick={() => onClose()}
 	role="dialog"
 	aria-modal="true"
 >
 	<!-- Modal content -->
-	<div class="bg-card rounded-xl w-full max-w-2xl max-h-[85vh] overflow-hidden flex flex-col shadow-xl border border-border">
+	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+	<div class="bg-card rounded-xl w-full max-w-lg max-h-[80vh] overflow-y-auto shadow-lg border border-border" onclick={(e) => e.stopPropagation()}>
 		<!-- Header -->
-		<div class="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/30">
-			<div class="flex items-center gap-2">
-				<svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+		<div class="p-4 border-b border-border flex items-center justify-between">
+			<h2 class="text-lg font-semibold text-foreground">Subagents</h2>
+			<button
+				class="text-muted-foreground hover:text-foreground"
+				onclick={onClose}
+			>
+				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 				</svg>
-				<h2 class="text-lg font-semibold text-foreground">Subagents</h2>
-				<span class="text-sm text-muted-foreground">({subagents.length})</span>
-			</div>
-			<div class="flex items-center gap-2">
-				<!-- Hidden file input for import -->
-				<input type="file" accept=".json" bind:this={importInput} onchange={handleImport} class="hidden" />
-
-				<button
-					onclick={triggerImport}
-					disabled={importing}
-					class="flex items-center gap-1 p-1.5 sm:px-2.5 sm:py-1.5 text-sm font-medium text-foreground bg-muted border border-border rounded-md hover:bg-accent transition-colors"
-					title="Import subagent from file"
-				>
-					{#if importing}
-						<svg class="w-5 h-5 sm:w-4 sm:h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-							<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-							<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-						</svg>
-					{:else}
-						<svg class="w-5 h-5 sm:w-4 sm:h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-						</svg>
-					{/if}
-					<span class="hidden sm:inline">Import</span>
-				</button>
-				<button
-					onclick={handleCreate}
-					class="flex items-center gap-1 p-1.5 sm:px-2.5 sm:py-1.5 text-sm font-medium text-primary-foreground bg-primary rounded-md hover:bg-primary/90 transition-colors"
-					title="Add subagent"
-				>
-					<svg class="w-5 h-5 sm:w-4 sm:h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-					</svg>
-					<span class="hidden sm:inline">Add</span>
-				</button>
-				<button
-					onclick={onClose}
-					class="p-1.5 hover:bg-muted rounded-md transition-colors"
-					aria-label="Close"
-				>
-					<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-					</svg>
-				</button>
-			</div>
+			</button>
 		</div>
 
 		<!-- Content -->
-		<div class="flex-1 overflow-y-auto p-4">
+		<div class="p-4">
 		{#if error && !showEditor}
 			<div class="p-3 bg-red-500/10 border border-red-500/20 rounded-md text-red-500 text-sm mb-4">
 				{error}
@@ -420,158 +381,126 @@
 				</svg>
 			</div>
 		{:else if subagents.length === 0}
-			<div class="text-center py-12">
-				<div class="w-16 h-16 mx-auto mb-4 rounded-full bg-muted flex items-center justify-center">
-					<svg class="w-8 h-8 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-					</svg>
-				</div>
-				<p class="text-muted-foreground mb-2">No subagents configured</p>
-				<p class="text-sm text-muted-foreground mb-4">Subagents are specialized helpers that Claude can invoke for specific tasks.</p>
-				<button onclick={handleCreate} class="text-primary hover:underline">
-					Create your first subagent
+			<!-- Hidden file input for import -->
+			<input type="file" accept=".json" bind:this={importInput} onchange={handleImport} class="hidden" />
+
+			<p class="text-sm text-muted-foreground text-center py-4 mb-4">No subagents configured</p>
+			<div class="flex gap-2">
+				<button onclick={handleCreate} class="flex-1 py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-gray-500">
+					+ New Subagent
+				</button>
+				<button onclick={triggerImport} disabled={importing} class="px-4 py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-gray-500 flex items-center gap-2" title="Import subagent from file">
+					{#if importing}
+						<span class="animate-spin inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full"></span>
+					{:else}
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+						</svg>
+					{/if}
+					Import
 				</button>
 			</div>
 		{:else}
-			<div class="space-y-3">
+			<!-- Hidden file input for import -->
+			<input type="file" accept=".json" bind:this={importInput} onchange={handleImport} class="hidden" />
+
+			<div class="space-y-2 mb-4">
 				{#each subagents as agent (agent.id)}
-					<div class="border border-border rounded-lg overflow-hidden bg-card hover:border-primary/50 transition-colors">
-						<!-- Agent header - always visible -->
-						<button
-							class="w-full px-4 py-3 text-left"
-							onclick={() => expandedId = expandedId === agent.id ? null : agent.id}
-						>
-							<div class="flex items-start justify-between gap-2">
-								<div class="flex-1 min-w-0">
-									<div class="flex items-center gap-2 flex-wrap">
-										<h3 class="font-medium text-foreground">{agent.name}</h3>
-										<span class="px-1.5 py-0.5 text-xs font-medium bg-primary/10 text-primary rounded">
-											{getModelDisplay(agent.model)}
-										</span>
-										{#if $groups.subagents.assignments[agent.id]}
-											<span class="px-1.5 py-0.5 text-xs font-medium bg-muted text-muted-foreground rounded">
-												{$groups.subagents.assignments[agent.id]}
-											</span>
-										{/if}
-									</div>
-									<p class="text-sm text-muted-foreground mt-0.5 line-clamp-2">
-										{agent.description}
-									</p>
-								</div>
-								<svg
-									class="w-4 h-4 text-muted-foreground transition-transform {expandedId === agent.id ? 'rotate-180' : ''}"
-									fill="none"
-									stroke="currentColor"
-									viewBox="0 0 24 24"
-								>
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-								</svg>
-							</div>
-						</button>
-
-						<!-- Expanded content -->
-						{#if expandedId === agent.id}
-							<div class="px-4 pb-3 space-y-3 border-t border-border pt-3">
-								<!-- Tools -->
-								{#if agent.tools && agent.tools.length > 0}
-									<div>
-										<p class="text-xs font-medium text-muted-foreground mb-1">Tools</p>
-										<div class="flex flex-wrap gap-1">
-											{#each agent.tools as tool}
-												<span class="px-1.5 py-0.5 text-xs bg-muted text-muted-foreground rounded">
-													{tool}
-												</span>
-											{/each}
-										</div>
-									</div>
-								{:else}
-									<p class="text-xs text-muted-foreground">All tools available</p>
+					<div class="flex items-center justify-between p-3 bg-accent rounded-lg">
+						<div class="flex-1 min-w-0">
+							<div class="flex items-center gap-2">
+								<p class="text-sm text-foreground font-medium">{agent.name}</p>
+								<span class="text-[10px] px-1.5 py-0.5 bg-primary/10 text-primary rounded">
+									{getModelDisplay(agent.model)}
+								</span>
+								{#if $groups.subagents.assignments[agent.id]}
+									<span class="text-[10px] px-1.5 py-0.5 bg-primary/10 text-primary rounded">{$groups.subagents.assignments[agent.id]}</span>
 								{/if}
-
-								<!-- Prompt preview -->
-								<div>
-									<p class="text-xs font-medium text-muted-foreground mb-1">System Prompt</p>
-									<pre class="text-xs text-muted-foreground bg-muted/50 p-2 rounded max-h-24 overflow-y-auto whitespace-pre-wrap font-mono">{agent.prompt.slice(0, 300)}{agent.prompt.length > 300 ? '...' : ''}</pre>
-								</div>
-
-								<!-- Actions -->
-								<div class="flex items-center gap-2 pt-1 flex-wrap">
-									<!-- Group dropdown -->
-									<div class="relative group/dropdown">
-										<button
-											class="px-3 py-1.5 text-sm font-medium text-foreground bg-muted rounded-md hover:bg-muted/80 transition-colors flex items-center gap-1"
-											title="Assign to group"
-										>
-											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
-											</svg>
-											Group
-										</button>
-										<div class="absolute left-0 bottom-full mb-1 w-40 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover/dropdown:opacity-100 group-hover/dropdown:visible transition-all z-50">
-											<div class="py-1 max-h-48 overflow-y-auto">
-												{#each $groups.subagents.groups as group}
-													<button
-														onclick={() => groups.assignToGroup('subagents', agent.id, group.name)}
-														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
-													>
-														{#if $groups.subagents.assignments[agent.id] === group.name}
-															<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-															</svg>
-														{:else}
-															<span class="w-3"></span>
-														{/if}
-														{group.name}
-													</button>
-												{/each}
-												{#if $groups.subagents.assignments[agent.id]}
-													<button
-														onclick={() => groups.removeFromGroup('subagents', agent.id)}
-														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
-													>
-														<span class="ml-5">Remove</span>
-													</button>
+							</div>
+							<p class="text-xs text-muted-foreground">{agent.id}</p>
+						</div>
+						<div class="flex gap-1">
+							<!-- Group button -->
+							<div class="relative group/dropdown">
+								<button class="p-1.5 text-muted-foreground hover:text-foreground" title="Assign to group">
+									<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+									</svg>
+								</button>
+								<div class="absolute right-0 top-full mt-1 w-40 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover/dropdown:opacity-100 group-hover/dropdown:visible transition-all z-50">
+									<div class="py-1 max-h-48 overflow-y-auto">
+										{#each $groups.subagents.groups as group}
+											<button
+												onclick={() => groups.assignToGroup('subagents', agent.id, group.name)}
+												class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
+											>
+												{#if $groups.subagents.assignments[agent.id] === group.name}
+													<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+													</svg>
+												{:else}
+													<span class="w-3"></span>
 												{/if}
-												<div class="border-t border-border my-1"></div>
-												<button
-													onclick={() => { const name = prompt('New group name:'); if (name?.trim()) { groups.createGroup('subagents', name.trim()); groups.assignToGroup('subagents', agent.id, name.trim()); } }}
-													class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
-												>
-													<span class="ml-5">+ New group</span>
-												</button>
-											</div>
-										</div>
+												{group.name}
+											</button>
+										{/each}
+										{#if $groups.subagents.assignments[agent.id]}
+											<button
+												onclick={() => groups.removeFromGroup('subagents', agent.id)}
+												class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
+											>
+												<span class="ml-5">Remove</span>
+											</button>
+										{/if}
+										<div class="border-t border-border my-1"></div>
+										<button
+											onclick={() => { const name = prompt('New group name:'); if (name?.trim()) { groups.createGroup('subagents', name.trim()); groups.assignToGroup('subagents', agent.id, name.trim()); } }}
+											class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
+										>
+											<span class="ml-5">+ New group</span>
+										</button>
 									</div>
-									<button
-										onclick={() => exportSubagent(agent.id)}
-										class="px-3 py-1.5 text-sm font-medium text-foreground bg-muted rounded-md hover:bg-muted/80 transition-colors flex items-center gap-1"
-										title="Export subagent"
-									>
-										<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-										</svg>
-										Export
-									</button>
-									<button
-										onclick={() => handleEdit(agent)}
-										class="flex-1 px-3 py-1.5 text-sm font-medium text-foreground bg-muted rounded-md hover:bg-muted/80 transition-colors"
-									>
-										Edit
-									</button>
-									<button
-										onclick={() => handleDeleteClick(agent.id)}
-										class="px-3 py-1.5 text-sm font-medium text-red-500 bg-red-500/10 rounded-md hover:bg-red-500/20 transition-colors"
-									>
-										Delete
-									</button>
 								</div>
 							</div>
-						{/if}
+							<!-- Export button -->
+							<button onclick={() => exportSubagent(agent.id)} class="p-1.5 text-muted-foreground hover:text-foreground" title="Export subagent">
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+								</svg>
+							</button>
+							<!-- Edit button -->
+							<button onclick={() => handleEdit(agent)} class="p-1.5 text-muted-foreground hover:text-foreground" title="Edit subagent">
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+								</svg>
+							</button>
+							<!-- Delete button -->
+							<button onclick={() => handleDeleteClick(agent.id)} class="p-1.5 text-muted-foreground hover:text-destructive" title="Delete subagent">
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+								</svg>
+							</button>
+						</div>
 					</div>
 				{/each}
 			</div>
+			<div class="flex gap-2">
+				<button onclick={handleCreate} class="flex-1 py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-gray-500">
+					+ New Subagent
+				</button>
+				<button onclick={triggerImport} disabled={importing} class="px-4 py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-gray-500 flex items-center gap-2" title="Import subagent from file">
+					{#if importing}
+						<span class="animate-spin inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full"></span>
+					{:else}
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+						</svg>
+					{/if}
+					Import
+				</button>
+			</div>
 		{/if}
-	</div>
+		</div>
 	</div>
 </div>
 
@@ -579,81 +508,82 @@
 {#if showEditor}
 	<div
 		class="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4"
-		onclick={(e) => e.target === e.currentTarget && (showEditor = false)}
+		onclick={() => showEditor = false}
 		role="dialog"
 		aria-modal="true"
 	>
-		<div class="bg-card border border-border rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
+		<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+		<div class="bg-card rounded-xl w-full max-w-lg max-h-[80vh] overflow-y-auto shadow-lg border border-border" onclick={(e) => e.stopPropagation()}>
 			<!-- Header -->
-			<div class="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/30">
+			<div class="p-4 border-b border-border flex items-center justify-between">
 				<h2 class="text-lg font-semibold text-foreground">
-					{editingSubagent ? 'Edit Subagent' : 'Create Subagent'}
+					{editingSubagent ? 'Edit Subagent' : 'New Subagent'}
 				</h2>
 				<button
+					class="text-muted-foreground hover:text-foreground"
 					onclick={() => showEditor = false}
-					class="p-1 hover:bg-muted rounded-md transition-colors"
 				>
-					<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 					</svg>
 				</button>
 			</div>
 
 			<!-- Content -->
-			<div class="flex-1 overflow-y-auto p-4 space-y-4">
+			<div class="p-4 space-y-4">
 				{#if error}
-					<div class="p-3 bg-red-500/10 border border-red-500/20 rounded-md text-red-500 text-sm">
+					<div class="p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-500 text-sm">
 						{error}
 					</div>
 				{/if}
 
-				<!-- ID (only for new) -->
+				<!-- ID and Name row (only show ID for new) -->
 				{#if !editingSubagent}
-					<div class="space-y-1.5">
-						<label for="agent-id" class="block text-sm font-medium text-foreground">ID</label>
+					<div class="grid grid-cols-2 gap-4">
+						<div>
+							<label class="block text-xs text-muted-foreground mb-1">ID</label>
+							<input
+								bind:value={formId}
+								placeholder="my-agent-id"
+								class="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground"
+							/>
+						</div>
+						<div>
+							<label class="block text-xs text-muted-foreground mb-1">Name</label>
+							<input
+								bind:value={formName}
+								placeholder="Research Assistant"
+								class="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground"
+							/>
+						</div>
+					</div>
+				{:else}
+					<div>
+						<label class="block text-xs text-muted-foreground mb-1">Name</label>
 						<input
-							id="agent-id"
-							type="text"
-							bind:value={formId}
-							placeholder="my-agent-id"
-							class="w-full px-3 py-2 bg-background border border-border rounded-md text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+							bind:value={formName}
+							placeholder="Research Assistant"
+							class="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground"
 						/>
-						<p class="text-xs text-muted-foreground">Lowercase letters, numbers, and hyphens only</p>
 					</div>
 				{/if}
 
-				<!-- Name -->
-				<div class="space-y-1.5">
-					<label for="agent-name" class="block text-sm font-medium text-foreground">Name</label>
-					<input
-						id="agent-name"
-						type="text"
-						bind:value={formName}
-						placeholder="Research Assistant"
-						class="w-full px-3 py-2 bg-background border border-border rounded-md text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-					/>
-				</div>
-
 				<!-- Description -->
-				<div class="space-y-1.5">
-					<label for="agent-description" class="block text-sm font-medium text-foreground">Description</label>
+				<div>
+					<label class="block text-xs text-muted-foreground mb-1">Description</label>
 					<input
-						id="agent-description"
-						type="text"
 						bind:value={formDescription}
 						placeholder="When to use this agent..."
-						class="w-full px-3 py-2 bg-background border border-border rounded-md text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+						class="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground"
 					/>
-					<p class="text-xs text-muted-foreground">Describes when Claude should invoke this subagent</p>
 				</div>
 
 				<!-- Model -->
-				<div class="space-y-1.5">
-					<label for="agent-model" class="block text-sm font-medium text-foreground">Model</label>
+				<div>
+					<label class="block text-xs text-muted-foreground mb-1">Model</label>
 					<select
-						id="agent-model"
 						bind:value={formModel}
-						class="w-full px-3 py-2 bg-background border border-border rounded-md text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+						class="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground"
 					>
 						{#each MODEL_OPTIONS as opt}
 							<option value={opt.value}>{opt.label}</option>
@@ -661,139 +591,168 @@
 					</select>
 				</div>
 
-				<!-- Tools -->
-				<div class="space-y-3">
-					<label class="block text-sm font-medium text-foreground">Tool Access</label>
+				<!-- Tool Configuration Accordion -->
+				<div class="border border-border rounded-lg overflow-hidden">
+					<button
+						type="button"
+						onclick={() => toolCategoriesExpanded['_toolConfig'] = !toolCategoriesExpanded['_toolConfig']}
+						class="w-full px-3 py-2 bg-accent flex items-center justify-between text-sm text-foreground hover:bg-muted"
+					>
+						<span>Tool Configuration</span>
+						<svg class="w-4 h-4 transition-transform {toolCategoriesExpanded['_toolConfig'] ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+						</svg>
+					</button>
+					{#if toolCategoriesExpanded['_toolConfig']}
+						<div class="p-3 space-y-3 bg-card">
+							<!-- Tool selection mode -->
+							<div>
+								<label class="block text-xs text-muted-foreground mb-2">Tool Access Mode</label>
+								<div class="flex gap-2">
+									<button
+										type="button"
+										onclick={() => { toolSelectionMode = 'all'; formTools = []; }}
+										class="px-3 py-1.5 text-xs rounded-lg transition-colors {toolSelectionMode === 'all' ? 'bg-violet-600 text-white' : 'bg-muted text-foreground hover:bg-muted/80'}"
+									>
+										All Tools
+									</button>
+									<button
+										type="button"
+										onclick={() => toolSelectionMode = 'select'}
+										class="px-3 py-1.5 text-xs rounded-lg transition-colors {toolSelectionMode === 'select' ? 'bg-violet-600 text-white' : 'bg-muted text-foreground hover:bg-muted/80'}"
+									>
+										Select Tools
+									</button>
+								</div>
+								<p class="text-xs text-muted-foreground mt-1">
+									{#if toolSelectionMode === 'all'}
+										Subagent can use all tools available to the profile.
+									{:else}
+										Subagent can ONLY use the selected tools below.
+									{/if}
+								</p>
+							</div>
 
-					<!-- Tool selection mode -->
-					<div class="flex gap-2">
-						<button
-							type="button"
-							onclick={() => { toolSelectionMode = 'all'; formTools = []; }}
-							class="px-3 py-1.5 text-xs rounded-lg transition-colors {toolSelectionMode === 'all' ? 'bg-primary text-primary-foreground' : 'bg-muted text-foreground hover:bg-muted/80'}"
-						>
-							All Tools
-						</button>
-						<button
-							type="button"
-							onclick={() => toolSelectionMode = 'select'}
-							class="px-3 py-1.5 text-xs rounded-lg transition-colors {toolSelectionMode === 'select' ? 'bg-primary text-primary-foreground' : 'bg-muted text-foreground hover:bg-muted/80'}"
-						>
-							Select Tools
-						</button>
-					</div>
-					<p class="text-xs text-muted-foreground">
-						{#if toolSelectionMode === 'all'}
-							Subagent can use all tools available to the profile.
-						{:else}
-							Subagent can ONLY use the selected tools below.
-						{/if}
-					</p>
-
-					<!-- Tool categories (only shown in select mode) -->
-					{#if toolSelectionMode === 'select'}
-						<div class="space-y-2 border-t border-border pt-3">
-							{#each availableTools.categories as category}
-								{#if category.tools.length > 0}
-									<div class="border border-border rounded-lg overflow-hidden">
-										<!-- Category header -->
-										<div class="w-full px-3 py-2 bg-muted/50 flex items-center gap-2 text-sm text-foreground">
-											<!-- Custom checkbox with indeterminate state -->
-											<button
-												type="button"
-												onclick={() => toggleFormCategory(category)}
-												class="w-4 h-4 rounded flex items-center justify-center transition-colors {isCategoryFullySelected(category) ? 'bg-primary' : isCategoryPartiallySelected(category) ? 'bg-primary' : 'bg-background border border-border'}"
-											>
-												{#if isCategoryFullySelected(category)}
-													<svg class="w-3 h-3 text-primary-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
-													</svg>
-												{:else if isCategoryPartiallySelected(category)}
-													<svg class="w-3 h-3 text-primary-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" />
-													</svg>
+							<!-- Tool categories (only shown in select mode) -->
+							{#if toolSelectionMode === 'select'}
+								<div class="border-t border-border pt-3 space-y-2">
+									{#each availableTools.categories as category}
+										{#if category.tools.length > 0}
+											<div class="border border-border rounded-lg overflow-hidden">
+												<!-- Category header -->
+												<div class="w-full px-3 py-2 bg-muted/50 flex items-center gap-2 text-sm text-foreground">
+													<!-- Custom checkbox with indeterminate state -->
+													<button
+														type="button"
+														onclick={() => toggleFormCategory(category)}
+														class="w-4 h-4 rounded flex items-center justify-center transition-colors {isCategoryFullySelected(category) ? 'bg-violet-600' : isCategoryPartiallySelected(category) ? 'bg-violet-600' : 'bg-muted border border-border'}"
+													>
+														{#if isCategoryFullySelected(category)}
+															<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
+															</svg>
+														{:else if isCategoryPartiallySelected(category)}
+															<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" />
+															</svg>
+														{/if}
+													</button>
+													<button
+														type="button"
+														onclick={() => toggleToolCategoryExpansion(category.id)}
+														class="flex-1 flex items-center gap-2 text-left hover:text-foreground/80"
+													>
+														<span class="flex-1">{category.name}</span>
+														<span class="text-xs text-muted-foreground">({category.tools.length} tools)</span>
+														<svg class="w-4 h-4 transition-transform {toolCategoriesExpanded[category.id] ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+														</svg>
+													</button>
+												</div>
+												<!-- Individual tools -->
+												{#if toolCategoriesExpanded[category.id]}
+													<div class="p-2 space-y-1 bg-card">
+														{#each category.tools as tool}
+															<label class="flex items-center gap-2 px-2 py-1 rounded hover:bg-muted/50 cursor-pointer">
+																<input
+																	type="checkbox"
+																	checked={formTools.includes(tool.name)}
+																	onchange={() => toggleFormTool(tool.name)}
+																	class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring"
+																/>
+																<span class="text-sm text-foreground">{tool.name}</span>
+																<span class="text-xs text-muted-foreground">- {tool.description}</span>
+															</label>
+														{/each}
+													</div>
 												{/if}
-											</button>
-											<button
-												type="button"
-												onclick={() => toggleToolCategoryExpansion(category.id)}
-												class="flex-1 flex items-center gap-2 text-left hover:text-foreground/80"
-											>
-												<span class="flex-1">{category.name}</span>
-												<span class="text-xs text-muted-foreground">({category.tools.length})</span>
-												<svg class="w-4 h-4 transition-transform {toolCategoriesExpanded[category.id] ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-												</svg>
-											</button>
-										</div>
-										<!-- Individual tools -->
-										{#if toolCategoriesExpanded[category.id]}
-											<div class="p-2 space-y-1 bg-card">
-												{#each category.tools as tool}
-													<label class="flex items-center gap-2 px-2 py-1 rounded hover:bg-muted/50 cursor-pointer">
-														<input
-															type="checkbox"
-															checked={formTools.includes(tool.name)}
-															onchange={() => toggleFormTool(tool.name)}
-															class="w-4 h-4 rounded bg-muted border-0 text-primary focus:ring-ring"
-														/>
-														<span class="text-sm text-foreground">{tool.name}</span>
-														<span class="text-xs text-muted-foreground">- {tool.description}</span>
-													</label>
-												{/each}
 											</div>
 										{/if}
-									</div>
-								{/if}
-							{/each}
-						</div>
+									{/each}
+								</div>
 
-						<!-- Summary -->
-						<div class="text-xs text-muted-foreground pt-2 border-t border-border">
-							{formTools.length} tool{formTools.length !== 1 ? 's' : ''} selected
-							{#if formTools.length > 0}
-								<span class="text-foreground">: {formTools.join(', ')}</span>
+								<!-- Summary -->
+								<div class="text-xs text-muted-foreground pt-2 border-t border-border">
+									{formTools.length} tool{formTools.length !== 1 ? 's' : ''} selected
+									{#if formTools.length > 0}
+										<span class="text-foreground">: {formTools.join(', ')}</span>
+									{/if}
+								</div>
 							{/if}
 						</div>
 					{/if}
 				</div>
 
-				<!-- Prompt -->
-				<div class="space-y-1.5">
-					<label for="agent-prompt" class="block text-sm font-medium text-foreground">System Prompt</label>
-					<textarea
-						id="agent-prompt"
-						bind:value={formPrompt}
-						placeholder="You are a specialized agent..."
-						rows={8}
-						class="w-full px-3 py-2 bg-background border border-border rounded-md text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 font-mono text-sm resize-y"
-					></textarea>
-				</div>
-			</div>
-
-			<!-- Footer -->
-			<div class="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-end gap-2 px-4 py-3 border-t border-border bg-muted/30">
-				<button
-					type="button"
-					onclick={() => showEditor = false}
-					class="px-4 py-2 text-sm font-medium text-foreground bg-background border border-border rounded-md hover:bg-muted transition-colors"
-				>
-					Cancel
-				</button>
-				<button
-					type="button"
-					onclick={handleSave}
-					disabled={!isValid() || saving}
-					class="px-4 py-2 text-sm font-medium text-primary-foreground bg-primary rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-				>
-					{#if saving}
-						<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-							<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-							<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+				<!-- System Prompt Accordion -->
+				<div class="border border-border rounded-lg overflow-hidden">
+					<button
+						type="button"
+						onclick={() => toolCategoriesExpanded['_systemPrompt'] = !toolCategoriesExpanded['_systemPrompt']}
+						class="w-full px-3 py-2 bg-accent flex items-center justify-between text-sm text-foreground hover:bg-muted"
+					>
+						<span>System Prompt</span>
+						<svg class="w-4 h-4 transition-transform {toolCategoriesExpanded['_systemPrompt'] ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 						</svg>
+					</button>
+					{#if toolCategoriesExpanded['_systemPrompt']}
+						<div class="p-3 bg-card">
+							<textarea
+								bind:value={formPrompt}
+								placeholder="You are a specialized agent..."
+								rows={6}
+								class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-none"
+							></textarea>
+						</div>
 					{/if}
-					{editingSubagent ? 'Save Changes' : 'Create Subagent'}
-				</button>
+				</div>
+
+				<!-- Action Buttons -->
+				<div class="flex gap-2 pt-4">
+					<button
+						onclick={() => showEditor = false}
+						class="flex-1 px-4 py-2 bg-muted text-foreground rounded-lg hover:bg-accent"
+					>
+						Cancel
+					</button>
+					<button
+						onclick={handleSave}
+						disabled={!isValid() || saving}
+						class="flex-1 px-4 py-2 bg-primary text-foreground rounded-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+					>
+						{#if saving}
+							<span class="inline-flex items-center gap-2">
+								<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+									<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+									<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+								</svg>
+								Saving...
+							</span>
+						{:else}
+							Save
+						{/if}
+					</button>
+				</div>
 			</div>
 		</div>
 	</div>
@@ -803,36 +762,41 @@
 {#if deletingId}
 	<div
 		class="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4"
-		onclick={(e) => e.target === e.currentTarget && (deletingId = null)}
+		onclick={() => deletingId = null}
 		role="dialog"
 		aria-modal="true"
 	>
-		<div class="bg-card border border-border rounded-lg shadow-xl w-full max-w-sm p-4">
-			<h3 class="text-lg font-semibold text-foreground mb-2">Delete Subagent</h3>
-			<p class="text-muted-foreground mb-4">
-				Are you sure you want to delete <strong>{subagents.find(s => s.id === deletingId)?.name}</strong>? This action cannot be undone.
-			</p>
-			<div class="flex justify-end gap-2">
-				<button
-					onclick={() => deletingId = null}
-					disabled={deleteLoading}
-					class="px-3 py-1.5 text-sm font-medium text-foreground bg-background border border-border rounded-md hover:bg-muted transition-colors"
-				>
-					Cancel
-				</button>
-				<button
-					onclick={confirmDelete}
-					disabled={deleteLoading}
-					class="px-3 py-1.5 text-sm font-medium text-white bg-red-500 rounded-md hover:bg-red-600 transition-colors disabled:opacity-50 flex items-center gap-2"
-				>
-					{#if deleteLoading}
-						<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-							<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-							<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-						</svg>
-					{/if}
-					Delete
-				</button>
+		<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+		<div class="bg-card rounded-xl w-full max-w-sm shadow-lg border border-border" onclick={(e) => e.stopPropagation()}>
+			<div class="p-4 border-b border-border">
+				<h3 class="text-lg font-semibold text-foreground">Delete Subagent</h3>
+			</div>
+			<div class="p-4">
+				<p class="text-sm text-muted-foreground mb-4">
+					Are you sure you want to delete <strong class="text-foreground">{subagents.find(s => s.id === deletingId)?.name}</strong>? This action cannot be undone.
+				</p>
+				<div class="flex gap-2">
+					<button
+						onclick={() => deletingId = null}
+						disabled={deleteLoading}
+						class="flex-1 px-4 py-2 bg-muted text-foreground rounded-lg hover:bg-accent"
+					>
+						Cancel
+					</button>
+					<button
+						onclick={confirmDelete}
+						disabled={deleteLoading}
+						class="flex-1 px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 disabled:opacity-50 flex items-center justify-center gap-2"
+					>
+						{#if deleteLoading}
+							<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+								<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+								<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+							</svg>
+						{/if}
+						Delete
+					</button>
+				</div>
 			</div>
 		</div>
 	</div>
