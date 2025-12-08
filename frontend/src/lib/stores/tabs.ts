@@ -2531,11 +2531,6 @@ function createTabsStore() {
 		closeTab(tabId: string) {
 			const state = get({ subscribe });
 
-			// Don't close if it's the last tab
-			if (state.tabs.length <= 1) {
-				return;
-			}
-
 			// Send close_session message before disconnecting (so other devices know)
 			const tab = state.tabs.find(t => t.id === tabId);
 			if (tab?.sessionId) {
