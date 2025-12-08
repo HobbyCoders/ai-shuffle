@@ -446,6 +446,7 @@ async def generate_image(
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             # Gemini image generation request
+            # See: https://ai.google.dev/gemini-api/docs/image-generation
             payload = {
                 "contents": [
                     {
@@ -455,8 +456,7 @@ async def generate_image(
                     }
                 ],
                 "generationConfig": {
-                    "responseModalities": ["image", "text"],
-                    "responseMimeType": "image/png"
+                    "responseModalities": ["TEXT", "IMAGE"]
                 }
             }
 
