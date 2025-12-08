@@ -230,6 +230,13 @@
 	let isUploading = false;
 	let textareas: Record<string, HTMLTextAreaElement> = {};
 
+	// Voice recording state
+	let isRecording = false;
+	let isTranscribing = false;
+	let mediaRecorder: MediaRecorder | null = null;
+	let audioChunks: Blob[] = [];
+	let recordingError = '';
+
 	// Terminal modal state for /resume and other interactive commands
 	let showTerminalModal = false;
 	let terminalCommand = '/resume';
@@ -1232,6 +1239,110 @@
 		if (!files[index]) return;
 		// File references are shown as chips only, just remove from the array
 		tabUploadedFiles[tabId] = files.filter((_, i) => i !== index);
+	}
+
+	// Voice recording functions
+	async function startRecording() {
+		recordingError = '';
+		try {
+			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+			mediaRecorder = new MediaRecorder(stream, {
+				mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4'
+			});
+			audioChunks = [];
+
+			mediaRecorder.ondataavailable = (event) => {
+				if (event.data.size > 0) {
+					audioChunks.push(event.data);
+				}
+			};
+
+			mediaRecorder.onstop = async () => {
+				// Stop all tracks to release the microphone
+				stream.getTracks().forEach(track => track.stop());
+
+				if (audioChunks.length === 0) {
+					recordingError = 'No audio recorded';
+					return;
+				}
+
+				const audioBlob = new Blob(audioChunks, { type: mediaRecorder?.mimeType || 'audio/webm' });
+				await transcribeAudio(audioBlob);
+			};
+
+			mediaRecorder.start();
+			isRecording = true;
+		} catch (error: any) {
+			console.error('Failed to start recording:', error);
+			if (error.name === 'NotAllowedError') {
+				recordingError = 'Microphone access denied. Please allow microphone access in your browser settings.';
+			} else if (error.name === 'NotFoundError') {
+				recordingError = 'No microphone found. Please connect a microphone and try again.';
+			} else {
+				recordingError = `Failed to start recording: ${error.message || 'Unknown error'}`;
+			}
+		}
+	}
+
+	function stopRecording() {
+		if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+			mediaRecorder.stop();
+		}
+		isRecording = false;
+	}
+
+	async function transcribeAudio(audioBlob: Blob) {
+		if (!$activeTabId) return;
+
+		isTranscribing = true;
+		recordingError = '';
+
+		try {
+			const formData = new FormData();
+			formData.append('file', audioBlob, 'recording.webm');
+
+			const response = await fetch('/api/v1/settings/transcribe', {
+				method: 'POST',
+				credentials: 'include',
+				body: formData
+			});
+
+			if (!response.ok) {
+				const error = await response.json().catch(() => ({ detail: 'Transcription failed' }));
+				throw new Error(error.detail || 'Transcription failed');
+			}
+
+			const result = await response.json();
+			const transcribedText = result.text?.trim();
+
+			if (transcribedText) {
+				// Append to current input
+				const tabId = $activeTabId;
+				const currentInput = tabInputs[tabId] || '';
+				tabInputs[tabId] = currentInput ? `${currentInput} ${transcribedText}` : transcribedText;
+
+				// Focus the textarea and trigger auto-resize
+				await tick();
+				const textarea = textareas[tabId];
+				if (textarea) {
+					textarea.focus();
+					autoResizeTextarea(textarea);
+				}
+			}
+		} catch (error: any) {
+			console.error('Transcription failed:', error);
+			recordingError = error.message || 'Failed to transcribe audio';
+		} finally {
+			isTranscribing = false;
+		}
+	}
+
+	function toggleRecording() {
+		if (isRecording) {
+			stopRecording();
+		} else {
+			startRecording();
+		}
 	}
 
 	function toggleSettingSource(source: string) {
@@ -2656,7 +2767,15 @@
 					<input type="file" bind:this={fileInput} on:change={handleFileUpload} class="hidden" multiple accept="*/*" />
 
 					<!-- Cursor-Style Unified Input Container -->
-					<form on:submit|preventDefault={() => handleSubmit(tabId)} class="relative">
+					<!-- Recording Error Message -->
+						{#if recordingError}
+							<div class="mb-2 px-3 py-2 bg-destructive/10 border border-destructive/30 rounded-lg text-sm text-destructive flex items-center justify-between">
+								<span>{recordingError}</span>
+								<button type="button" on:click={() => recordingError = ''} class="ml-2 hover:opacity-70">&times;</button>
+							</div>
+						{/if}
+
+						<form on:submit|preventDefault={() => handleSubmit(tabId)} class="relative">
 						<div class="bg-card/80 backdrop-blur border border-border/60 rounded-2xl shadow-lg transition-all duration-200 focus-within:border-primary/50 focus-within:shadow-primary/5 focus-within:shadow-xl">
 
 							<!-- Uploaded Files (inside container) -->
@@ -2724,7 +2843,7 @@
 									></textarea>
 								</div>
 
-								<!-- Send/Stop/Queue Buttons -->
+								<!-- Voice/Send/Stop/Queue Buttons -->
 								<div class="flex items-center gap-1">
 									{#if currentTab.isStreaming}
 										<!-- When streaming: show queue button if text entered, always show stop button -->
@@ -2750,11 +2869,30 @@
 											</svg>
 										</button>
 									{:else}
+										<!-- Voice Recording Button -->
+										<button
+											type="button"
+											on:click={toggleRecording}
+											disabled={!$claudeAuthenticated || isUploading || isTranscribing}
+											class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center rounded-xl transition-all disabled:opacity-30 disabled:cursor-not-allowed {isRecording ? 'bg-destructive/20 text-destructive animate-pulse' : isTranscribing ? 'bg-primary/15 text-primary' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}"
+											title={isRecording ? 'Stop recording' : isTranscribing ? 'Transcribing...' : 'Voice input'}
+										>
+											{#if isTranscribing}
+												<svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
+												</svg>
+											{:else}
+												<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+												</svg>
+											{/if}
+										</button>
+										<!-- Send Button -->
 										<button
 											type="submit"
 											class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-primary hover:bg-primary/90 text-primary-foreground rounded-xl transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-											disabled={!(tabInputs[tabId] || '').trim() || !$claudeAuthenticated || isUploading}
-											title={isUploading ? "Uploading files..." : "Send message"}
+											disabled={!(tabInputs[tabId] || '').trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing}
+											title={isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : "Send message"}
 										>
 											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />

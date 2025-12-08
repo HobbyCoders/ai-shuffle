@@ -23,7 +23,7 @@ from app.core.query_engine import cleanup_stale_sessions
 from app.core.sync_engine import sync_engine
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules, import_export
+from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -237,6 +237,7 @@ app.include_router(preferences.router)
 app.include_router(subagents.router)
 app.include_router(permission_rules.router)
 app.include_router(import_export.router)
+app.include_router(settings_api.router)
 
 # Serve static files (Svelte build) if they exist
 static_dir = Path(__file__).parent / "static"
