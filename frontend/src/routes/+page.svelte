@@ -120,18 +120,6 @@
 	let sessionSearchExpanded = false;
 	let collapsedGroups: Set<string> = new Set(['yesterday', 'week', 'month', 'older']); // Only 'today' expanded by default
 
-	// Group context menu state (for projects, profiles, subagents)
-	import type { EntityType } from '$lib/stores/groups';
-	let groupContextMenu = {
-		show: false,
-		x: 0,
-		y: 0,
-		entityType: 'projects' as EntityType,
-		itemId: ''
-	};
-	let newGroupInputVisible = false;
-	let newGroupName = '';
-
 	// Computed: filtered and grouped sessions
 	$: filteredSessions = sessionSearchQuery
 		? $sessions.filter(s =>
@@ -160,43 +148,6 @@
 	function clearSearch() {
 		sessionSearchQuery = '';
 		sessionSearchExpanded = false;
-	}
-
-	// Group context menu handlers
-	function openGroupContextMenu(e: MouseEvent, entityType: EntityType, itemId: string) {
-		groupContextMenu = {
-			show: true,
-			x: e.clientX,
-			y: e.clientY,
-			entityType,
-			itemId
-		};
-	}
-
-	function closeGroupContextMenu() {
-		groupContextMenu.show = false;
-		newGroupInputVisible = false;
-		newGroupName = '';
-	}
-
-	function assignItemToGroup(groupName: string) {
-		groups.assignToGroup(groupContextMenu.entityType, groupContextMenu.itemId, groupName);
-		closeGroupContextMenu();
-	}
-
-	function removeItemFromGroup() {
-		groups.removeFromGroup(groupContextMenu.entityType, groupContextMenu.itemId);
-		closeGroupContextMenu();
-	}
-
-	function createNewGroupAndAssign() {
-		if (newGroupName.trim()) {
-			groups.createGroup(groupContextMenu.entityType, newGroupName.trim());
-			groups.assignToGroup(groupContextMenu.entityType, groupContextMenu.itemId, newGroupName.trim());
-			newGroupName = '';
-			newGroupInputVisible = false;
-		}
-		closeGroupContextMenu();
 	}
 
 	function toggleSidebarSection(section: SidebarSection) {
@@ -1851,7 +1802,6 @@
 												<button
 													class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg transition-colors text-left {$activeTab?.project === project.id ? 'ring-2 ring-primary' : ''} {$activeTab?.sessionId ? 'opacity-50 cursor-not-allowed' : 'hover:bg-accent/80'}"
 													on:click={() => { if ($activeTabId && !$activeTab?.sessionId) { setTabProject($activeTabId, project.id); closeSidebar(); } }}
-													on:contextmenu|preventDefault={(e) => openGroupContextMenu(e, 'projects', project.id)}
 													disabled={!!$activeTab?.sessionId}
 												>
 													<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1878,7 +1828,6 @@
 									<button
 										class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg transition-colors text-left {$activeTab?.project === project.id ? 'ring-2 ring-primary' : ''} {$activeTab?.sessionId ? 'opacity-50 cursor-not-allowed' : 'hover:bg-accent/80'}"
 										on:click={() => { if ($activeTabId && !$activeTab?.sessionId) { setTabProject($activeTabId, project.id); closeSidebar(); } }}
-										on:contextmenu|preventDefault={(e) => openGroupContextMenu(e, 'projects', project.id)}
 										disabled={!!$activeTab?.sessionId}
 									>
 										<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1928,7 +1877,6 @@
 												<button
 													class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg hover:bg-accent/80 transition-colors text-left {$activeTab?.profile === profile.id ? 'ring-2 ring-primary' : ''}"
 													on:click={() => { if ($activeTabId) setTabProfile($activeTabId, profile.id); closeSidebar(); }}
-													on:contextmenu|preventDefault={(e) => openGroupContextMenu(e, 'profiles', profile.id)}
 												>
 													<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
@@ -1957,7 +1905,6 @@
 									<button
 										class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg hover:bg-accent/80 transition-colors text-left {$activeTab?.profile === profile.id ? 'ring-2 ring-primary' : ''}"
 										on:click={() => { if ($activeTabId) setTabProfile($activeTabId, profile.id); closeSidebar(); }}
-										on:contextmenu|preventDefault={(e) => openGroupContextMenu(e, 'profiles', profile.id)}
 									>
 										<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
@@ -2006,10 +1953,7 @@
 									{#if !group.collapsed}
 										<div class="space-y-1 ml-2">
 											{#each groupAgents as agent}
-												<div
-													class="w-full p-3 bg-accent rounded-lg cursor-context-menu"
-													on:contextmenu|preventDefault={(e) => openGroupContextMenu(e, 'subagents', agent.id)}
-												>
+												<div class="w-full p-3 bg-accent rounded-lg">
 													<div class="flex items-start gap-3">
 														<svg class="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
@@ -2041,10 +1985,7 @@
 							{/if}
 							<div class="space-y-1 {subagentsOrganized.groupOrder.length > 0 ? 'ml-2' : ''}">
 								{#each subagentsOrganized.ungrouped as agent}
-									<div
-										class="w-full p-3 bg-accent rounded-lg cursor-context-menu"
-										on:contextmenu|preventDefault={(e) => openGroupContextMenu(e, 'subagents', agent.id)}
-									>
+									<div class="w-full p-3 bg-accent rounded-lg">
 										<div class="flex items-start gap-3">
 											<svg class="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
@@ -4017,87 +3958,6 @@
 		onClose={closeRewindModal}
 		onRewindComplete={handleRewindCompleteV2}
 	/>
-{/if}
-
-<!-- Group Context Menu (for sidebar items) -->
-{#if groupContextMenu.show}
-	<!-- svelte-ignore a11y-click-events-have-key-events -->
-	<!-- svelte-ignore a11y-no-static-element-interactions -->
-	<div class="fixed inset-0 z-[100]" on:click={closeGroupContextMenu}>
-		<div
-			class="fixed min-w-[180px] bg-card border border-border rounded-lg shadow-lg py-1"
-			style="left: {groupContextMenu.x}px; top: {groupContextMenu.y}px;"
-			on:click|stopPropagation
-		>
-			<div class="px-3 py-1.5 text-xs font-medium text-muted-foreground border-b border-border">
-				Move to Group
-			</div>
-
-			<!-- Existing groups -->
-			{#each $groups[groupContextMenu.entityType].groups as group}
-				<button
-					class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
-					on:click={() => assignItemToGroup(group.name)}
-				>
-					{#if $groups[groupContextMenu.entityType].assignments[groupContextMenu.itemId] === group.name}
-						<svg class="w-4 h-4 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-						</svg>
-					{:else}
-						<span class="w-4"></span>
-					{/if}
-					<span>{group.name}</span>
-				</button>
-			{/each}
-
-			<!-- Remove from group (if in a group) -->
-			{#if $groups[groupContextMenu.entityType].assignments[groupContextMenu.itemId]}
-				<button
-					class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
-					on:click={removeItemFromGroup}
-				>
-					<span class="ml-6">Remove from group</span>
-				</button>
-			{/if}
-
-			<div class="border-t border-border my-1"></div>
-
-			<!-- New group input -->
-			{#if newGroupInputVisible}
-				<div class="px-3 py-1.5">
-					<input
-						type="text"
-						bind:value={newGroupName}
-						on:keydown={(e) => e.key === 'Enter' && createNewGroupAndAssign()}
-						class="w-full px-2 py-1 text-sm bg-background border border-border rounded focus:outline-none focus:ring-1 focus:ring-primary"
-						placeholder="Group name..."
-						autofocus
-					/>
-					<div class="flex gap-1 mt-1">
-						<button
-							class="flex-1 px-2 py-1 text-xs bg-primary text-primary-foreground rounded hover:opacity-90"
-							on:click={createNewGroupAndAssign}
-						>
-							Create
-						</button>
-						<button
-							class="flex-1 px-2 py-1 text-xs bg-muted text-muted-foreground rounded hover:bg-muted/80"
-							on:click={() => { newGroupInputVisible = false; newGroupName = ''; }}
-						>
-							Cancel
-						</button>
-					</div>
-				</div>
-			{:else}
-				<button
-					class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
-					on:click|stopPropagation={() => newGroupInputVisible = true}
-				>
-					<span class="ml-6">+ New group...</span>
-				</button>
-			{/if}
-		</div>
-	</div>
 {/if}
 
 <style>
