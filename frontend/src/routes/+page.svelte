@@ -1321,12 +1321,14 @@
 				const currentInput = tabInputs[tabId] || '';
 				tabInputs[tabId] = currentInput ? `${currentInput} ${transcribedText}` : transcribedText;
 
-				// Focus the textarea and trigger auto-resize
+				// Focus the textarea and trigger resize
 				await tick();
 				const textarea = textareas[tabId];
 				if (textarea) {
 					textarea.focus();
-					autoResizeTextarea(textarea);
+					// Trigger auto-resize by resetting height and setting to scrollHeight
+					textarea.style.height = 'auto';
+					textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
 				}
 			}
 		} catch (error: any) {
