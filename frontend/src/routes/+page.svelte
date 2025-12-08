@@ -38,6 +38,7 @@
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import TodoList from '$lib/components/TodoList.svelte';
+	import { groups, organizeByGroups } from '$lib/stores/groups';
 	import { executeCommand, isSlashCommand, syncAfterRewind, listCommands, type Command } from '$lib/api/commands';
 	import { groupSessionsByDate, type DateGroup } from '$lib/utils/dateGroups';
 
@@ -119,6 +120,18 @@
 	let sessionSearchExpanded = false;
 	let collapsedGroups: Set<string> = new Set(['yesterday', 'week', 'month', 'older']); // Only 'today' expanded by default
 
+	// Group context menu state (for projects, profiles, subagents)
+	import type { EntityType } from '$lib/stores/groups';
+	let groupContextMenu = {
+		show: false,
+		x: 0,
+		y: 0,
+		entityType: 'projects' as EntityType,
+		itemId: ''
+	};
+	let newGroupInputVisible = false;
+	let newGroupName = '';
+
 	// Computed: filtered and grouped sessions
 	$: filteredSessions = sessionSearchQuery
 		? $sessions.filter(s =>
@@ -147,6 +160,43 @@
 	function clearSearch() {
 		sessionSearchQuery = '';
 		sessionSearchExpanded = false;
+	}
+
+	// Group context menu handlers
+	function openGroupContextMenu(e: MouseEvent, entityType: EntityType, itemId: string) {
+		groupContextMenu = {
+			show: true,
+			x: e.clientX,
+			y: e.clientY,
+			entityType,
+			itemId
+		};
+	}
+
+	function closeGroupContextMenu() {
+		groupContextMenu.show = false;
+		newGroupInputVisible = false;
+		newGroupName = '';
+	}
+
+	function assignItemToGroup(groupName: string) {
+		groups.assignToGroup(groupContextMenu.entityType, groupContextMenu.itemId, groupName);
+		closeGroupContextMenu();
+	}
+
+	function removeItemFromGroup() {
+		groups.removeFromGroup(groupContextMenu.entityType, groupContextMenu.itemId);
+		closeGroupContextMenu();
+	}
+
+	function createNewGroupAndAssign() {
+		if (newGroupName.trim()) {
+			groups.createGroup(groupContextMenu.entityType, newGroupName.trim());
+			groups.assignToGroup(groupContextMenu.entityType, groupContextMenu.itemId, newGroupName.trim());
+			newGroupName = '';
+			newGroupInputVisible = false;
+		}
+		closeGroupContextMenu();
 	}
 
 	function toggleSidebarSection(section: SidebarSection) {
@@ -1769,7 +1819,8 @@
 
 			<!-- Projects Panel Content -->
 			{#if activeSidebarSection === 'projects'}
-				<div class="flex-1 overflow-y-auto p-3">
+				{@const projectsOrganized = organizeByGroups($projects, 'projects', $groups)}
+				<div class="flex-1 overflow-y-auto p-3 flex flex-col">
 					{#if $activeTab?.sessionId}
 						<div class="flex items-center gap-2 p-3 mb-4 bg-muted/50 rounded-lg border border-border">
 							<svg class="w-4 h-4 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1778,84 +1829,243 @@
 							<p class="text-xs text-muted-foreground">Project is locked for this chat</p>
 						</div>
 					{/if}
-					<div class="space-y-2 mb-4">
-						{#each $projects as project}
-							<button
-								class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg transition-colors text-left {$activeTab?.project === project.id ? 'ring-2 ring-primary' : ''} {$activeTab?.sessionId ? 'opacity-50 cursor-not-allowed' : 'hover:bg-accent/80'}"
-								on:click={() => { if ($activeTabId && !$activeTab?.sessionId) { setTabProject($activeTabId, project.id); closeSidebar(); } }}
-								disabled={!!$activeTab?.sessionId}
-							>
-								<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-								</svg>
-								<div class="flex-1 min-w-0">
-									<p class="text-sm text-foreground font-medium truncate">{project.name}</p>
-									<p class="text-xs text-muted-foreground truncate">/workspace/{project.path}/</p>
+					<div class="flex-1 overflow-y-auto space-y-1">
+						<!-- Grouped projects -->
+						{#each projectsOrganized.groupOrder as group}
+							{@const groupProjects = projectsOrganized.grouped.get(group.name) || []}
+							{#if groupProjects.length > 0}
+								<div class="mb-2">
+									<button
+										class="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+										on:click={() => groups.toggleGroupCollapsed('projects', group.name)}
+									>
+										<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+										</svg>
+										<span class="uppercase tracking-wide">{group.name}</span>
+										<span class="text-muted-foreground/60">({groupProjects.length})</span>
+									</button>
+									{#if !group.collapsed}
+										<div class="space-y-1 ml-2">
+											{#each groupProjects as project}
+												<button
+													class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg transition-colors text-left {$activeTab?.project === project.id ? 'ring-2 ring-primary' : ''} {$activeTab?.sessionId ? 'opacity-50 cursor-not-allowed' : 'hover:bg-accent/80'}"
+													on:click={() => { if ($activeTabId && !$activeTab?.sessionId) { setTabProject($activeTabId, project.id); closeSidebar(); } }}
+													on:contextmenu|preventDefault={(e) => openGroupContextMenu(e, 'projects', project.id)}
+													disabled={!!$activeTab?.sessionId}
+												>
+													<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+													</svg>
+													<div class="flex-1 min-w-0">
+														<p class="text-sm text-foreground font-medium truncate">{project.name}</p>
+														<p class="text-xs text-muted-foreground truncate">/workspace/{project.path}/</p>
+													</div>
+												</button>
+											{/each}
+										</div>
+									{/if}
 								</div>
-							</button>
+							{/if}
 						{/each}
+						<!-- Ungrouped projects -->
+						{#if projectsOrganized.ungrouped.length > 0}
+							{#if projectsOrganized.groupOrder.length > 0}
+								<div class="px-2 py-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide">Other</div>
+							{/if}
+							<div class="space-y-1 {projectsOrganized.groupOrder.length > 0 ? 'ml-2' : ''}">
+								{#each projectsOrganized.ungrouped as project}
+									<button
+										class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg transition-colors text-left {$activeTab?.project === project.id ? 'ring-2 ring-primary' : ''} {$activeTab?.sessionId ? 'opacity-50 cursor-not-allowed' : 'hover:bg-accent/80'}"
+										on:click={() => { if ($activeTabId && !$activeTab?.sessionId) { setTabProject($activeTabId, project.id); closeSidebar(); } }}
+										on:contextmenu|preventDefault={(e) => openGroupContextMenu(e, 'projects', project.id)}
+										disabled={!!$activeTab?.sessionId}
+									>
+										<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+										</svg>
+										<div class="flex-1 min-w-0">
+											<p class="text-sm text-foreground font-medium truncate">{project.name}</p>
+											<p class="text-xs text-muted-foreground truncate">/workspace/{project.path}/</p>
+										</div>
+									</button>
+								{/each}
+							</div>
+						{/if}
 						{#if $projects.length === 0}
-							<p class="text-xs text-muted-foreground px-2">No projects yet</p>
+							<p class="text-xs text-muted-foreground px-2 py-4 text-center">No projects yet</p>
 						{/if}
 					</div>
-					<button on:click={() => showProjectModal = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">{$projects.length === 0 ? '+ Create Project' : 'Manage Projects'}</button>
+					<div class="mt-auto pt-3">
+						<button on:click={() => showProjectModal = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">{$projects.length === 0 ? '+ Create Project' : 'Manage Projects'}</button>
+					</div>
 				</div>
 			{/if}
 
 			<!-- Profiles Panel Content -->
 			{#if activeSidebarSection === 'profiles'}
-				<div class="flex-1 overflow-y-auto p-3">
-					<div class="space-y-2 mb-4">
-						{#each $profiles as profile}
-							<button
-								class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg hover:bg-accent/80 transition-colors text-left {$activeTab?.profile === profile.id ? 'ring-2 ring-primary' : ''}"
-								on:click={() => { if ($activeTabId) setTabProfile($activeTabId, profile.id); closeSidebar(); }}
-							>
-								<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-								</svg>
-								<div class="flex-1 min-w-0">
-									<p class="text-sm text-foreground font-medium truncate">{profile.name}</p>
-									<p class="text-xs text-muted-foreground truncate">{profile.description || 'No description'}</p>
+				{@const profilesOrganized = organizeByGroups($profiles, 'profiles', $groups)}
+				<div class="flex-1 overflow-y-auto p-3 flex flex-col">
+					<div class="flex-1 overflow-y-auto space-y-1">
+						<!-- Grouped profiles -->
+						{#each profilesOrganized.groupOrder as group}
+							{@const groupProfiles = profilesOrganized.grouped.get(group.name) || []}
+							{#if groupProfiles.length > 0}
+								<div class="mb-2">
+									<button
+										class="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+										on:click={() => groups.toggleGroupCollapsed('profiles', group.name)}
+									>
+										<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+										</svg>
+										<span class="uppercase tracking-wide">{group.name}</span>
+										<span class="text-muted-foreground/60">({groupProfiles.length})</span>
+									</button>
+									{#if !group.collapsed}
+										<div class="space-y-1 ml-2">
+											{#each groupProfiles as profile}
+												<button
+													class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg hover:bg-accent/80 transition-colors text-left {$activeTab?.profile === profile.id ? 'ring-2 ring-primary' : ''}"
+													on:click={() => { if ($activeTabId) setTabProfile($activeTabId, profile.id); closeSidebar(); }}
+													on:contextmenu|preventDefault={(e) => openGroupContextMenu(e, 'profiles', profile.id)}
+												>
+													<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+													</svg>
+													<div class="flex-1 min-w-0">
+														<p class="text-sm text-foreground font-medium truncate">{profile.name}</p>
+														<p class="text-xs text-muted-foreground truncate">{profile.description || 'No description'}</p>
+													</div>
+													{#if profile.is_builtin}
+														<span class="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded">Built-in</span>
+													{/if}
+												</button>
+											{/each}
+										</div>
+									{/if}
 								</div>
-								{#if profile.is_builtin}
-									<span class="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded">Built-in</span>
-								{/if}
-							</button>
+							{/if}
 						{/each}
+						<!-- Ungrouped profiles -->
+						{#if profilesOrganized.ungrouped.length > 0}
+							{#if profilesOrganized.groupOrder.length > 0}
+								<div class="px-2 py-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide">Other</div>
+							{/if}
+							<div class="space-y-1 {profilesOrganized.groupOrder.length > 0 ? 'ml-2' : ''}">
+								{#each profilesOrganized.ungrouped as profile}
+									<button
+										class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg hover:bg-accent/80 transition-colors text-left {$activeTab?.profile === profile.id ? 'ring-2 ring-primary' : ''}"
+										on:click={() => { if ($activeTabId) setTabProfile($activeTabId, profile.id); closeSidebar(); }}
+										on:contextmenu|preventDefault={(e) => openGroupContextMenu(e, 'profiles', profile.id)}
+									>
+										<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+										</svg>
+										<div class="flex-1 min-w-0">
+											<p class="text-sm text-foreground font-medium truncate">{profile.name}</p>
+											<p class="text-xs text-muted-foreground truncate">{profile.description || 'No description'}</p>
+										</div>
+										{#if profile.is_builtin}
+											<span class="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded">Built-in</span>
+										{/if}
+									</button>
+								{/each}
+							</div>
+						{/if}
 						{#if $profiles.length === 0}
-							<p class="text-xs text-muted-foreground px-2">No profiles yet</p>
+							<p class="text-xs text-muted-foreground px-2 py-4 text-center">No profiles yet</p>
 						{/if}
 					</div>
-					<button on:click={() => showProfileModal = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">{$profiles.length === 0 ? '+ Create Profile' : 'Manage Profiles'}</button>
+					<div class="mt-auto pt-3">
+						<button on:click={() => showProfileModal = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">{$profiles.length === 0 ? '+ Create Profile' : 'Manage Profiles'}</button>
+					</div>
 				</div>
 			{/if}
 
 			<!-- Subagents Panel Content -->
 			{#if activeSidebarSection === 'subagents'}
-				<div class="flex-1 overflow-y-auto p-3">
-					<div class="space-y-2 mb-4">
-						{#each allSubagents as agent}
-							<div class="w-full p-3 bg-accent rounded-lg">
-								<div class="flex items-start gap-3">
-									<svg class="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-									</svg>
-									<div class="flex-1 min-w-0">
-										<div class="flex items-center gap-2">
-											<p class="text-sm text-foreground font-medium truncate">{agent.name}</p>
-											{#if agent.is_builtin}
-												<span class="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded">Built-in</span>
-											{/if}
+				{@const subagentsOrganized = organizeByGroups(allSubagents, 'subagents', $groups)}
+				<div class="flex-1 overflow-y-auto p-3 flex flex-col">
+					<div class="flex-1 overflow-y-auto space-y-1">
+						<!-- Grouped subagents -->
+						{#each subagentsOrganized.groupOrder as group}
+							{@const groupAgents = subagentsOrganized.grouped.get(group.name) || []}
+							{#if groupAgents.length > 0}
+								<div class="mb-2">
+									<button
+										class="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+										on:click={() => groups.toggleGroupCollapsed('subagents', group.name)}
+									>
+										<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+										</svg>
+										<span class="uppercase tracking-wide">{group.name}</span>
+										<span class="text-muted-foreground/60">({groupAgents.length})</span>
+									</button>
+									{#if !group.collapsed}
+										<div class="space-y-1 ml-2">
+											{#each groupAgents as agent}
+												<div
+													class="w-full p-3 bg-accent rounded-lg cursor-context-menu"
+													on:contextmenu|preventDefault={(e) => openGroupContextMenu(e, 'subagents', agent.id)}
+												>
+													<div class="flex items-start gap-3">
+														<svg class="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+														</svg>
+														<div class="flex-1 min-w-0">
+															<div class="flex items-center gap-2">
+																<p class="text-sm text-foreground font-medium truncate">{agent.name}</p>
+																{#if agent.is_builtin}
+																	<span class="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded">Built-in</span>
+																{/if}
+															</div>
+															<p class="text-xs text-muted-foreground line-clamp-2">{agent.description}</p>
+															{#if agent.model}
+																<span class="text-[10px] text-primary mt-1 inline-block">{agent.model}</span>
+															{/if}
+														</div>
+													</div>
+												</div>
+											{/each}
 										</div>
-										<p class="text-xs text-muted-foreground line-clamp-2">{agent.description}</p>
-										{#if agent.model}
-											<span class="text-[10px] text-primary mt-1 inline-block">{agent.model}</span>
-										{/if}
-									</div>
+									{/if}
 								</div>
-							</div>
+							{/if}
 						{/each}
+						<!-- Ungrouped subagents -->
+						{#if subagentsOrganized.ungrouped.length > 0}
+							{#if subagentsOrganized.groupOrder.length > 0}
+								<div class="px-2 py-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide">Other</div>
+							{/if}
+							<div class="space-y-1 {subagentsOrganized.groupOrder.length > 0 ? 'ml-2' : ''}">
+								{#each subagentsOrganized.ungrouped as agent}
+									<div
+										class="w-full p-3 bg-accent rounded-lg cursor-context-menu"
+										on:contextmenu|preventDefault={(e) => openGroupContextMenu(e, 'subagents', agent.id)}
+									>
+										<div class="flex items-start gap-3">
+											<svg class="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+											</svg>
+											<div class="flex-1 min-w-0">
+												<div class="flex items-center gap-2">
+													<p class="text-sm text-foreground font-medium truncate">{agent.name}</p>
+													{#if agent.is_builtin}
+														<span class="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded">Built-in</span>
+													{/if}
+												</div>
+												<p class="text-xs text-muted-foreground line-clamp-2">{agent.description}</p>
+												{#if agent.model}
+													<span class="text-[10px] text-primary mt-1 inline-block">{agent.model}</span>
+												{/if}
+											</div>
+										</div>
+									</div>
+								{/each}
+							</div>
+						{/if}
 						{#if allSubagents.length === 0}
 							<div class="text-center py-8">
 								<svg class="w-12 h-12 mx-auto text-muted-foreground/30 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1865,7 +2075,9 @@
 							</div>
 						{/if}
 					</div>
-					<button on:click={() => showSubagentManager = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">{allSubagents.length === 0 ? '+ Create Subagent' : 'Manage Subagents'}</button>
+					<div class="mt-auto pt-3">
+						<button on:click={() => showSubagentManager = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">{allSubagents.length === 0 ? '+ Create Subagent' : 'Manage Subagents'}</button>
+					</div>
 				</div>
 			{/if}
 		</aside>
@@ -2238,6 +2450,7 @@
 						</svg>
 					</div>
 				{:else}
+					{@const headerProfilesOrganized = organizeByGroups($profiles, 'profiles', $groups)}
 					<div class="relative group">
 						<button
 							class="flex items-center gap-1 px-2 py-1 text-sm text-foreground hover:bg-accent rounded-md transition-colors"
@@ -2251,19 +2464,57 @@
 							</svg>
 						</button>
 						<!-- Profile dropdown -->
-						<div class="absolute left-0 top-full mt-1 w-48 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+						<div class="absolute left-0 top-full mt-1 w-56 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 max-h-80 overflow-y-auto">
 							<div class="py-1">
 								{#if $profiles.length === 0}
 									<p class="px-3 py-2 text-sm text-muted-foreground">No profiles yet</p>
 								{:else}
-									{#each $profiles as profile}
-										<button
-											on:click={() => setTabProfile(tabId, profile.id)}
-											class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.profile === profile.id ? 'text-primary' : 'text-foreground'}"
-										>
-											{profile.name}
-										</button>
+									<!-- Grouped profiles -->
+									{#each headerProfilesOrganized.groupOrder as group}
+										{@const groupProfiles = headerProfilesOrganized.grouped.get(group.name) || []}
+										{#if groupProfiles.length > 0}
+											<div class="py-1">
+												<div class="px-3 py-1 text-xs font-medium text-muted-foreground uppercase tracking-wide bg-muted/30">
+													{group.name}
+												</div>
+												{#each groupProfiles as profile}
+													<button
+														on:click={() => setTabProfile(tabId, profile.id)}
+														class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.profile === profile.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
+													>
+														{profile.name}
+													</button>
+												{/each}
+											</div>
+										{/if}
 									{/each}
+									<!-- Ungrouped profiles -->
+									{#if headerProfilesOrganized.ungrouped.length > 0}
+										{#if headerProfilesOrganized.groupOrder.length > 0}
+											<div class="py-1">
+												<div class="px-3 py-1 text-xs font-medium text-muted-foreground uppercase tracking-wide bg-muted/30">
+													Other
+												</div>
+												{#each headerProfilesOrganized.ungrouped as profile}
+													<button
+														on:click={() => setTabProfile(tabId, profile.id)}
+														class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.profile === profile.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
+													>
+														{profile.name}
+													</button>
+												{/each}
+											</div>
+										{:else}
+											{#each headerProfilesOrganized.ungrouped as profile}
+												<button
+													on:click={() => setTabProfile(tabId, profile.id)}
+													class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.profile === profile.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
+												>
+													{profile.name}
+												</button>
+											{/each}
+										{/if}
+									{/if}
 								{/if}
 								<div class="border-t border-border my-1"></div>
 								<button
@@ -2315,19 +2566,58 @@
 						</button>
 						<!-- Project dropdown (only show when no session) -->
 						{#if !currentTab.sessionId}
-							<div class="absolute left-0 top-full mt-1 w-48 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+							{@const headerProjectsOrganized = organizeByGroups($projects, 'projects', $groups)}
+							<div class="absolute left-0 top-full mt-1 w-56 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 max-h-80 overflow-y-auto">
 								<div class="py-1">
 									{#if $projects.length === 0}
 										<p class="px-3 py-2 text-sm text-muted-foreground">No projects yet</p>
 									{:else}
-										{#each $projects as project}
-											<button
-												on:click={() => setTabProject(tabId, project.id)}
-												class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.project === project.id ? 'text-primary' : 'text-foreground'}"
-											>
-												{project.name}
-											</button>
+										<!-- Grouped projects -->
+										{#each headerProjectsOrganized.groupOrder as group}
+											{@const groupProjects = headerProjectsOrganized.grouped.get(group.name) || []}
+											{#if groupProjects.length > 0}
+												<div class="py-1">
+													<div class="px-3 py-1 text-xs font-medium text-muted-foreground uppercase tracking-wide bg-muted/30">
+														{group.name}
+													</div>
+													{#each groupProjects as project}
+														<button
+															on:click={() => setTabProject(tabId, project.id)}
+															class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.project === project.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
+														>
+															{project.name}
+														</button>
+													{/each}
+												</div>
+											{/if}
 										{/each}
+										<!-- Ungrouped projects -->
+										{#if headerProjectsOrganized.ungrouped.length > 0}
+											{#if headerProjectsOrganized.groupOrder.length > 0}
+												<div class="py-1">
+													<div class="px-3 py-1 text-xs font-medium text-muted-foreground uppercase tracking-wide bg-muted/30">
+														Other
+													</div>
+													{#each headerProjectsOrganized.ungrouped as project}
+														<button
+															on:click={() => setTabProject(tabId, project.id)}
+															class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.project === project.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
+														>
+															{project.name}
+														</button>
+													{/each}
+												</div>
+											{:else}
+												{#each headerProjectsOrganized.ungrouped as project}
+													<button
+														on:click={() => setTabProject(tabId, project.id)}
+														class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.project === project.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
+													>
+														{project.name}
+													</button>
+												{/each}
+											{/if}
+										{/if}
 									{/if}
 									<div class="border-t border-border my-1"></div>
 									<button
@@ -3631,6 +3921,87 @@
 		onClose={closeRewindModal}
 		onRewindComplete={handleRewindCompleteV2}
 	/>
+{/if}
+
+<!-- Group Context Menu (for sidebar items) -->
+{#if groupContextMenu.show}
+	<!-- svelte-ignore a11y-click-events-have-key-events -->
+	<!-- svelte-ignore a11y-no-static-element-interactions -->
+	<div class="fixed inset-0 z-[100]" on:click={closeGroupContextMenu}>
+		<div
+			class="fixed min-w-[180px] bg-card border border-border rounded-lg shadow-lg py-1"
+			style="left: {groupContextMenu.x}px; top: {groupContextMenu.y}px;"
+			on:click|stopPropagation
+		>
+			<div class="px-3 py-1.5 text-xs font-medium text-muted-foreground border-b border-border">
+				Move to Group
+			</div>
+
+			<!-- Existing groups -->
+			{#each $groups[groupContextMenu.entityType].groups as group}
+				<button
+					class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
+					on:click={() => assignItemToGroup(group.name)}
+				>
+					{#if $groups[groupContextMenu.entityType].assignments[groupContextMenu.itemId] === group.name}
+						<svg class="w-4 h-4 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+						</svg>
+					{:else}
+						<span class="w-4"></span>
+					{/if}
+					<span>{group.name}</span>
+				</button>
+			{/each}
+
+			<!-- Remove from group (if in a group) -->
+			{#if $groups[groupContextMenu.entityType].assignments[groupContextMenu.itemId]}
+				<button
+					class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
+					on:click={removeItemFromGroup}
+				>
+					<span class="ml-6">Remove from group</span>
+				</button>
+			{/if}
+
+			<div class="border-t border-border my-1"></div>
+
+			<!-- New group input -->
+			{#if newGroupInputVisible}
+				<div class="px-3 py-1.5">
+					<input
+						type="text"
+						bind:value={newGroupName}
+						on:keydown={(e) => e.key === 'Enter' && createNewGroupAndAssign()}
+						class="w-full px-2 py-1 text-sm bg-background border border-border rounded focus:outline-none focus:ring-1 focus:ring-primary"
+						placeholder="Group name..."
+						autofocus
+					/>
+					<div class="flex gap-1 mt-1">
+						<button
+							class="flex-1 px-2 py-1 text-xs bg-primary text-primary-foreground rounded hover:opacity-90"
+							on:click={createNewGroupAndAssign}
+						>
+							Create
+						</button>
+						<button
+							class="flex-1 px-2 py-1 text-xs bg-muted text-muted-foreground rounded hover:bg-muted/80"
+							on:click={() => { newGroupInputVisible = false; newGroupName = ''; }}
+						>
+							Cancel
+						</button>
+					</div>
+				</div>
+			{:else}
+				<button
+					class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
+					on:click|stopPropagation={() => newGroupInputVisible = true}
+				>
+					<span class="ml-6">+ New group...</span>
+				</button>
+			{/if}
+		</div>
+	</div>
 {/if}
 
 <style>
