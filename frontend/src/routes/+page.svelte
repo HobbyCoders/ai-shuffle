@@ -3792,11 +3792,58 @@
 					<div class="space-y-2 mb-4">
 						{#each $profiles as profile}
 							<div class="flex items-center justify-between p-3 bg-accent rounded-lg">
-								<div>
-									<p class="text-sm text-foreground font-medium">{profile.name}</p>
+								<div class="flex-1 min-w-0">
+									<div class="flex items-center gap-2">
+										<p class="text-sm text-foreground font-medium">{profile.name}</p>
+										{#if $groups.profiles.assignments[profile.id]}
+											<span class="text-[10px] px-1.5 py-0.5 bg-primary/10 text-primary rounded">{$groups.profiles.assignments[profile.id]}</span>
+										{/if}
+									</div>
 									<p class="text-xs text-muted-foreground">{profile.id}</p>
 								</div>
 								<div class="flex gap-1">
+									<!-- Group button -->
+									<div class="relative group/dropdown">
+										<button class="p-1.5 text-muted-foreground hover:text-foreground" title="Assign to group">
+											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+											</svg>
+										</button>
+										<div class="absolute right-0 top-full mt-1 w-40 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover/dropdown:opacity-100 group-hover/dropdown:visible transition-all z-50">
+											<div class="py-1 max-h-48 overflow-y-auto">
+												{#each $groups.profiles.groups as group}
+													<button
+														on:click={() => groups.assignToGroup('profiles', profile.id, group.name)}
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
+													>
+														{#if $groups.profiles.assignments[profile.id] === group.name}
+															<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+															</svg>
+														{:else}
+															<span class="w-3"></span>
+														{/if}
+														{group.name}
+													</button>
+												{/each}
+												{#if $groups.profiles.assignments[profile.id]}
+													<button
+														on:click={() => groups.removeFromGroup('profiles', profile.id)}
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
+													>
+														<span class="ml-5">Remove</span>
+													</button>
+												{/if}
+												<div class="border-t border-border my-1"></div>
+												<button
+													on:click={() => { const name = prompt('New group name:'); if (name?.trim()) { groups.createGroup('profiles', name.trim()); groups.assignToGroup('profiles', profile.id, name.trim()); } }}
+													class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
+												>
+													<span class="ml-5">+ New group</span>
+												</button>
+											</div>
+										</div>
+									</div>
 									<!-- Export button (always visible) -->
 									<button on:click={() => exportProfile(profile.id)} class="p-1.5 text-muted-foreground hover:text-foreground" title="Export profile">
 										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -3883,15 +3930,64 @@
 					<div class="space-y-2 mb-4">
 						{#each $projects as project}
 							<div class="flex items-center justify-between p-3 bg-accent rounded-lg">
-								<div>
-									<p class="text-sm text-foreground font-medium">{project.name}</p>
+								<div class="flex-1 min-w-0">
+									<div class="flex items-center gap-2">
+										<p class="text-sm text-foreground font-medium">{project.name}</p>
+										{#if $groups.projects.assignments[project.id]}
+											<span class="text-[10px] px-1.5 py-0.5 bg-primary/10 text-primary rounded">{$groups.projects.assignments[project.id]}</span>
+										{/if}
+									</div>
 									<p class="text-xs text-muted-foreground mt-0.5">/workspace/{project.path}/</p>
 								</div>
-								<button on:click={() => deleteProject(project.id)} class="text-muted-foreground hover:text-destructive">
-									<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-									</svg>
-								</button>
+								<div class="flex gap-1">
+									<!-- Group button -->
+									<div class="relative group/dropdown">
+										<button class="p-1.5 text-muted-foreground hover:text-foreground" title="Assign to group">
+											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+											</svg>
+										</button>
+										<div class="absolute right-0 top-full mt-1 w-40 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover/dropdown:opacity-100 group-hover/dropdown:visible transition-all z-50">
+											<div class="py-1 max-h-48 overflow-y-auto">
+												{#each $groups.projects.groups as group}
+													<button
+														on:click={() => groups.assignToGroup('projects', project.id, group.name)}
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
+													>
+														{#if $groups.projects.assignments[project.id] === group.name}
+															<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+															</svg>
+														{:else}
+															<span class="w-3"></span>
+														{/if}
+														{group.name}
+													</button>
+												{/each}
+												{#if $groups.projects.assignments[project.id]}
+													<button
+														on:click={() => groups.removeFromGroup('projects', project.id)}
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
+													>
+														<span class="ml-5">Remove</span>
+													</button>
+												{/if}
+												<div class="border-t border-border my-1"></div>
+												<button
+													on:click={() => { const name = prompt('New group name:'); if (name?.trim()) { groups.createGroup('projects', name.trim()); groups.assignToGroup('projects', project.id, name.trim()); } }}
+													class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
+												>
+													<span class="ml-5">+ New group</span>
+												</button>
+											</div>
+										</div>
+									</div>
+									<button on:click={() => deleteProject(project.id)} class="p-1.5 text-muted-foreground hover:text-destructive" title="Delete project">
+										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+										</svg>
+									</button>
+								</div>
 							</div>
 						{/each}
 					</div>
