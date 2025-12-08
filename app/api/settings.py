@@ -78,7 +78,7 @@ class ImageGenerateResponse(BaseModel):
 # Available Nano Banana models
 # See: https://ai.google.dev/gemini-api/docs/image-generation
 NANO_BANANA_MODELS = {
-    "gemini-2.5-flash-preview-image-generation": {
+    "gemini-2.5-flash-image": {
         "name": "Nano Banana (Gemini 2.5 Flash)",
         "description": "Fast image generation with good quality - $0.039/image",
         "price_per_image": 0.039
