@@ -1474,7 +1474,7 @@
 			{#if activeSidebarSection === 'sessions'}
 				<div class="flex-1 overflow-hidden flex flex-col">
 					{#if $isAdmin}
-						<div class="px-3 flex gap-1">
+						<div class="px-3 pt-3 flex gap-1">
 							<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}">My Chats</button>
 							<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}">Admin</button>
 						</div>
@@ -1772,7 +1772,7 @@
 							<p class="text-xs text-muted-foreground">Project is locked for this chat</p>
 						</div>
 					{/if}
-					<div class="flex-1 overflow-y-auto space-y-1">
+					<div class="flex-1 overflow-y-auto space-y-1 -mx-1 px-1">
 						<!-- Grouped projects -->
 						{#each projectsOrganized.groupOrder as group}
 							{@const groupProjects = projectsOrganized.grouped.get(group.name) || []}
@@ -1847,7 +1847,7 @@
 			{#if activeSidebarSection === 'profiles'}
 				{@const profilesOrganized = organizeByGroups($profiles, 'profiles', $groups)}
 				<div class="flex-1 overflow-y-auto p-3 flex flex-col">
-					<div class="flex-1 overflow-y-auto space-y-1">
+					<div class="flex-1 overflow-y-auto space-y-1 -mx-1 px-1">
 						<!-- Grouped profiles -->
 						{#each profilesOrganized.groupOrder as group}
 							{@const groupProfiles = profilesOrganized.grouped.get(group.name) || []}
@@ -1926,7 +1926,7 @@
 			{#if activeSidebarSection === 'subagents'}
 				{@const subagentsOrganized = organizeByGroups(allSubagents, 'subagents', $groups)}
 				<div class="flex-1 overflow-y-auto p-3 flex flex-col">
-					<div class="flex-1 overflow-y-auto space-y-1">
+					<div class="flex-1 overflow-y-auto space-y-1 -mx-1 px-1">
 						<!-- Grouped subagents -->
 						{#each subagentsOrganized.groupOrder as group}
 							{@const groupAgents = subagentsOrganized.grouped.get(group.name) || []}
