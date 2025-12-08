@@ -321,6 +321,33 @@ def _get_os_version() -> str:
         return sys.platform
 
 
+def _get_available_tools() -> str:
+    """
+    Check which AI Hub tools are configured and available.
+    Returns a formatted string describing available tools.
+    """
+    tools = []
+
+    # Check image generation (Nano Banana)
+    image_provider = database.get_system_setting("image_provider")
+    image_model = database.get_system_setting("image_model")
+    image_api_key = database.get_system_setting("image_api_key")
+
+    if all([image_provider, image_model, image_api_key]):
+        tools.append({
+            "name": "Image Generation (Nano Banana)",
+            "description": "Generate AI images from text prompts",
+            "usage": """import { generateImage } from './tools/image-generation/generateImage.js';
+const result = await generateImage({ prompt: 'your description here' });
+if (result.success) { /* result.image_base64 contains the image */ }"""
+        })
+
+    # Add more tools here as they become available
+    # e.g., voice synthesis, video generation, etc.
+
+    return tools
+
+
 def generate_environment_details(working_dir: str) -> str:
     """
     Generate environment details block for custom system prompts.
@@ -330,6 +357,15 @@ def generate_environment_details(working_dir: str) -> str:
     os_version = _get_os_version()
     today = datetime.now().strftime("%Y-%m-%d")
 
+    # Check for available AI tools
+    available_tools = _get_available_tools()
+    tools_section = ""
+    if available_tools:
+        tools_section = "\n\n<ai-tools>\nThe following AI tools are available via code execution:\n"
+        for tool in available_tools:
+            tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
+        tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\n</ai-tools>"
+
     return f"""Here is useful information about the environment you are running in:
 <env>
 Working directory: {working_dir}
@@ -337,7 +373,7 @@ Is directory a git repo: {"Yes" if is_git else "No"}
 Platform: {sys.platform}
 OS Version: {os_version}
 Today's date: {today}
-</env>"""
+</env>{tools_section}"""
 
 
 def build_options_from_profile(
