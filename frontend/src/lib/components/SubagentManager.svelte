@@ -6,6 +6,7 @@
 	 * Responsive design for mobile (full screen) and desktop (sidebar).
 	 */
 	import { api } from '$lib/api/client';
+	import { groups } from '$lib/stores/groups';
 
 	// Tool interfaces
 	interface ToolInfo {
@@ -446,6 +447,11 @@
 										<span class="px-1.5 py-0.5 text-xs font-medium bg-primary/10 text-primary rounded">
 											{getModelDisplay(agent.model)}
 										</span>
+										{#if $groups.subagents.assignments[agent.id]}
+											<span class="px-1.5 py-0.5 text-xs font-medium bg-muted text-muted-foreground rounded">
+												{$groups.subagents.assignments[agent.id]}
+											</span>
+										{/if}
 									</div>
 									<p class="text-sm text-muted-foreground mt-0.5 line-clamp-2">
 										{agent.description}
@@ -488,7 +494,53 @@
 								</div>
 
 								<!-- Actions -->
-								<div class="flex items-center gap-2 pt-1">
+								<div class="flex items-center gap-2 pt-1 flex-wrap">
+									<!-- Group dropdown -->
+									<div class="relative group/dropdown">
+										<button
+											class="px-3 py-1.5 text-sm font-medium text-foreground bg-muted rounded-md hover:bg-muted/80 transition-colors flex items-center gap-1"
+											title="Assign to group"
+										>
+											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+											</svg>
+											Group
+										</button>
+										<div class="absolute left-0 bottom-full mb-1 w-40 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover/dropdown:opacity-100 group-hover/dropdown:visible transition-all z-50">
+											<div class="py-1 max-h-48 overflow-y-auto">
+												{#each $groups.subagents.groups as group}
+													<button
+														onclick={() => groups.assignToGroup('subagents', agent.id, group.name)}
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
+													>
+														{#if $groups.subagents.assignments[agent.id] === group.name}
+															<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+															</svg>
+														{:else}
+															<span class="w-3"></span>
+														{/if}
+														{group.name}
+													</button>
+												{/each}
+												{#if $groups.subagents.assignments[agent.id]}
+													<button
+														onclick={() => groups.removeFromGroup('subagents', agent.id)}
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
+													>
+														<span class="ml-5">Remove</span>
+													</button>
+												{/if}
+												<div class="border-t border-border my-1"></div>
+												<button
+													onclick={() => { const name = prompt('New group name:'); if (name?.trim()) { groups.createGroup('subagents', name.trim()); groups.assignToGroup('subagents', agent.id, name.trim()); } }}
+													class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
+												>
+													<span class="ml-5">+ New group</span>
+												</button>
+											</div>
+										</div>
+									</div>
 									<button
 										onclick={() => exportSubagent(agent.id)}
 										class="px-3 py-1.5 text-sm font-medium text-foreground bg-muted rounded-md hover:bg-muted/80 transition-colors flex items-center gap-1"
