@@ -460,12 +460,22 @@ async def chat_websocket(
                     )
 
             # Re-register device with SyncEngine now that streaming is complete,
-            # but ONLY if the websocket is still connected.
-            # If the user disconnected during streaming (phone locked, etc.),
-            # they will re-register when they reconnect via load_session.
+            # but ONLY if:
+            # 1. This websocket is still connected
+            # 2. No newer websocket has been registered for this device (e.g., user refreshed page)
+            #
+            # If the user disconnected and reconnected during streaming, their NEW websocket
+            # is already registered via load_session. We must NOT replace it with this old one.
             if websocket.client_state == WebSocketState.CONNECTED:
-                await sync_engine.register_device(device_id, session_id, websocket)
-                logger.info(f"Re-registered device {device_id} after streaming complete")
+                # Check if a different websocket is already registered for this device
+                # (This happens when user refreshes the page during streaming)
+                current_connection = sync_engine._connections.get(session_id, {}).get(device_id)
+                if current_connection is not None and current_connection.websocket is not websocket:
+                    # A newer connection exists - don't replace it with this old websocket
+                    logger.info(f"Skipping re-register for device {device_id} - newer connection already exists")
+                else:
+                    await sync_engine.register_device(device_id, session_id, websocket)
+                    logger.info(f"Re-registered device {device_id} after streaming complete")
             else:
                 logger.info(f"Skipping re-register for device {device_id} - websocket disconnected during streaming")
 
