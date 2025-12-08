@@ -96,7 +96,7 @@ function createGroupsStore() {
 					...state,
 					[entityType]: {
 						...entity,
-						groups: [...entity.groups, { name: groupName, collapsed: false }]
+						groups: [...entity.groups, { name: groupName, collapsed: true }]
 					}
 				};
 			});
@@ -187,7 +187,7 @@ function createGroupsStore() {
 				// Create group if it doesn't exist
 				let groups = entity.groups;
 				if (!groups.some(g => g.name === groupName)) {
-					groups = [...groups, { name: groupName, collapsed: false }];
+					groups = [...groups, { name: groupName, collapsed: true }];
 				}
 				return {
 					...state,
