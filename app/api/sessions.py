@@ -7,7 +7,7 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends, Query, status, Request
 from pydantic import BaseModel
 
-from app.core.models import Session, SessionWithMessages
+from app.core.models import Session, SessionWithMessages, SessionSearchResult
 from app.db import database
 from app.api.auth import require_auth, get_api_user_from_request
 
@@ -93,6 +93,48 @@ async def list_sessions(
         offset=offset
     )
     return sessions
+
+
+@router.get("/search/query", response_model=List[SessionSearchResult])
+async def search_sessions(
+    request: Request,
+    q: str = Query(..., min_length=1, description="Search query"),
+    project_id: Optional[str] = Query(None, description="Filter by project"),
+    profile_id: Optional[str] = Query(None, description="Filter by profile"),
+    admin_only: bool = Query(False, description="Show only admin sessions"),
+    limit: int = Query(20, ge=1, le=50),
+    token: str = Depends(require_auth)
+):
+    """
+    Search sessions by title and message content.
+    Returns sessions with snippets showing where the match was found.
+    API users only see sessions for their assigned project/profile.
+    """
+    api_user = get_api_user_from_request(request)
+
+    # Force API user restrictions
+    filter_api_user_id = None
+    if api_user:
+        if api_user.get("project_id"):
+            project_id = api_user["project_id"]
+        if api_user.get("profile_id"):
+            profile_id = api_user["profile_id"]
+        filter_api_user_id = api_user["id"]
+        admin_only = False
+    elif admin_only:
+        # Admin requesting only admin sessions
+        filter_api_user_id = None
+
+    results = database.search_sessions(
+        query=q,
+        project_id=project_id,
+        profile_id=profile_id,
+        api_user_id=filter_api_user_id,
+        admin_only=admin_only,
+        limit=limit
+    )
+
+    return results
 
 
 @router.get("/{session_id}", response_model=SessionWithMessages)

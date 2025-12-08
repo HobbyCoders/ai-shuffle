@@ -22,7 +22,7 @@
 		type ChatTab,
 		type ApiUser
 	} from '$lib/stores/tabs';
-	import { api, type FileUploadResponse } from '$lib/api/client';
+	import { api, type FileUploadResponse, searchSessions, type SessionSearchResult } from '$lib/api/client';
 	import { marked } from 'marked';
 	import TerminalModal from '$lib/components/TerminalModal.svelte';
 	import RewindModal from '$lib/components/RewindModal.svelte';
@@ -120,20 +120,50 @@
 	let sessionSearchExpanded = false;
 	let collapsedGroups: Set<string> = new Set(['yesterday', 'week', 'month', 'older']); // Only 'today' expanded by default
 
-	// Computed: filtered and grouped sessions
-	$: filteredSessions = sessionSearchQuery
-		? $sessions.filter(s =>
-			s.title?.toLowerCase().includes(sessionSearchQuery.toLowerCase())
-		)
-		: $sessions;
+	// Search state
+	let searchResults: SessionSearchResult[] = [];
+	let isSearching = false;
+	let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+	// Debounced search function
+	function debouncedSearch(query: string) {
+		// Clear existing timer
+		if (searchDebounceTimer) {
+			clearTimeout(searchDebounceTimer);
+		}
+
+		// If query is empty, clear results immediately
+		if (!query.trim()) {
+			searchResults = [];
+			isSearching = false;
+			return;
+		}
+
+		isSearching = true;
+
+		// Debounce the API call by 300ms
+		searchDebounceTimer = setTimeout(async () => {
+			try {
+				const adminOnly = sidebarTab === 'my-chats';
+				searchResults = await searchSessions(query, { adminOnly, limit: 20 });
+			} catch (error) {
+				console.error('Search failed:', error);
+				searchResults = [];
+			} finally {
+				isSearching = false;
+			}
+		}, 300);
+	}
+
+	// Trigger search when query changes
+	$: debouncedSearch(sessionSearchQuery);
+
+	// Computed: filtered and grouped sessions (when not searching)
+	$: filteredSessions = $sessions;
 	$: groupedSessions = groupSessionsByDate(filteredSessions);
 
-	// Admin sessions grouped
-	$: filteredAdminSessions = sessionSearchQuery
-		? $adminSessions.filter(s =>
-			s.title?.toLowerCase().includes(sessionSearchQuery.toLowerCase())
-		)
-		: $adminSessions;
+	// Admin sessions grouped (when not searching)
+	$: filteredAdminSessions = $adminSessions;
 	$: groupedAdminSessions = groupSessionsByDate(filteredAdminSessions);
 
 	function toggleGroupCollapse(key: string) {
@@ -148,6 +178,12 @@
 	function clearSearch() {
 		sessionSearchQuery = '';
 		sessionSearchExpanded = false;
+		searchResults = [];
+		isSearching = false;
+		if (searchDebounceTimer) {
+			clearTimeout(searchDebounceTimer);
+			searchDebounceTimer = null;
+		}
 	}
 
 	function toggleSidebarSection(section: SidebarSection) {
@@ -1534,81 +1570,142 @@
 							</div>
 						{/if}
 
-						<!-- History Header -->
-						<div class="flex items-center justify-between px-2 mb-2">
-							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">History</div>
-							<div class="flex items-center gap-2">
+						<!-- Search Results (when searching) -->
+						{#if sessionSearchQuery.trim()}
+							<div class="flex items-center justify-between px-2 mb-2">
+								<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">
+									{isSearching ? 'Searching...' : `Results (${searchResults.length})`}
+								</div>
 								<button
-									on:click={() => tabs.loadSessions()}
-									class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
-									title="Refresh sessions"
-									disabled={$sessionsLoading}
+									on:click={clearSearch}
+									class="text-xs text-muted-foreground hover:text-foreground transition-colors"
 								>
-									<svg
-										class="w-3.5 h-3.5 {$sessionsLoading ? 'animate-spin' : ''}"
-										fill="none"
-										stroke="currentColor"
-										viewBox="0 0 24 24"
-									>
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-									</svg>
+									Clear
 								</button>
-								{#if filteredSessions.length > 0}
-									<button
-										on:click={() => tabs.toggleSelectionMode(false)}
-										class="text-xs text-muted-foreground hover:text-foreground transition-colors"
-										title={$selectionMode ? 'Exit selection mode' : 'Select multiple'}
-									>
-										{$selectionMode ? 'Cancel' : 'Select'}
-									</button>
+							</div>
+
+							<div class="space-y-1">
+								{#if isSearching}
+									<div class="flex items-center justify-center py-8">
+										<svg class="w-5 h-5 animate-spin text-muted-foreground" fill="none" viewBox="0 0 24 24">
+											<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+											<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+										</svg>
+									</div>
+								{:else if searchResults.length === 0}
+									<p class="text-xs text-muted-foreground px-2 py-4 text-center">No sessions found matching "{sessionSearchQuery}"</p>
+								{:else}
+									{#each searchResults as result}
+										<button
+											on:click={() => { openSession(result.id); closeSidebar(); }}
+											class="w-full text-left px-3 py-2.5 rounded-lg hover:bg-accent transition-colors group"
+										>
+											<div class="flex items-start gap-2">
+												<div class="flex-1 min-w-0">
+													<div class="text-sm font-medium text-foreground truncate">
+														{result.title || 'Untitled session'}
+													</div>
+													{#if result.match_type === 'content' && result.match_snippet}
+														<div class="text-xs text-muted-foreground mt-1 line-clamp-2">
+															{result.match_snippet}
+														</div>
+													{/if}
+													<div class="flex items-center gap-2 mt-1">
+														<span class="text-xs text-muted-foreground/70">
+															{new Date(result.updated_at).toLocaleDateString()}
+														</span>
+														{#if result.match_type === 'content'}
+															<span class="text-xs bg-accent px-1.5 py-0.5 rounded text-muted-foreground">
+																Content match
+															</span>
+														{/if}
+													</div>
+												</div>
+												<svg class="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+												</svg>
+											</div>
+										</button>
+									{/each}
 								{/if}
 							</div>
-						</div>
-
-						<!-- Grouped Sessions -->
-						<div class="space-y-3" class:opacity-50={$sessionsLoading} class:pointer-events-none={$sessionsLoading}>
-							{#each groupedSessions as group}
-								<div>
-									<!-- Group Header -->
+						{:else}
+							<!-- History Header (when not searching) -->
+							<div class="flex items-center justify-between px-2 mb-2">
+								<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">History</div>
+								<div class="flex items-center gap-2">
 									<button
-										on:click={() => toggleGroupCollapse(group.key)}
-										class="flex items-center gap-2 px-2 py-1 w-full text-left hover:bg-accent/50 rounded transition-colors"
+										on:click={() => tabs.loadSessions()}
+										class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+										title="Refresh sessions"
+										disabled={$sessionsLoading}
 									>
 										<svg
-											class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
+											class="w-3.5 h-3.5 {$sessionsLoading ? 'animate-spin' : ''}"
 											fill="none"
 											stroke="currentColor"
 											viewBox="0 0 24 24"
 										>
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
 										</svg>
-										<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
-										<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
 									</button>
-
-									<!-- Group Content -->
-									{#if !collapsedGroups.has(group.key)}
-										<div class="mt-1 space-y-1">
-											{#each group.sessions as session}
-												<SessionCard
-													{session}
-													selectionMode={$selectionMode}
-													isSelected={$selectedSessionIds.has(session.id)}
-													on:click={() => { openSession(session.id); closeSidebar(); }}
-													on:delete={() => deleteSession(null, session.id)}
-													on:select={() => tabs.toggleSessionSelection(session.id, false)}
-												/>
-											{/each}
-										</div>
+									{#if filteredSessions.length > 0}
+										<button
+											on:click={() => tabs.toggleSelectionMode(false)}
+											class="text-xs text-muted-foreground hover:text-foreground transition-colors"
+											title={$selectionMode ? 'Exit selection mode' : 'Select multiple'}
+										>
+											{$selectionMode ? 'Cancel' : 'Select'}
+										</button>
 									{/if}
 								</div>
-							{/each}
-							{#if $sessionsLoading}
-								<p class="text-xs text-muted-foreground px-2 animate-pulse">Loading sessions...</p>
-							{:else if filteredSessions.length === 0}
-								<p class="text-xs text-muted-foreground px-2">{sessionSearchQuery ? 'No matching sessions' : 'No chat history yet'}</p>
-							{/if}
-						</div>
+							</div>
+
+							<!-- Grouped Sessions -->
+							<div class="space-y-3" class:opacity-50={$sessionsLoading} class:pointer-events-none={$sessionsLoading}>
+								{#each groupedSessions as group}
+									<div>
+										<!-- Group Header -->
+										<button
+											on:click={() => toggleGroupCollapse(group.key)}
+											class="flex items-center gap-2 px-2 py-1 w-full text-left hover:bg-accent/50 rounded transition-colors"
+										>
+											<svg
+												class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
+												fill="none"
+												stroke="currentColor"
+												viewBox="0 0 24 24"
+											>
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+											</svg>
+											<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
+											<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
+										</button>
+
+										<!-- Group Content -->
+										{#if !collapsedGroups.has(group.key)}
+											<div class="mt-1 space-y-1">
+												{#each group.sessions as session}
+													<SessionCard
+														{session}
+														selectionMode={$selectionMode}
+														isSelected={$selectedSessionIds.has(session.id)}
+														on:click={() => { openSession(session.id); closeSidebar(); }}
+														on:delete={() => deleteSession(null, session.id)}
+														on:select={() => tabs.toggleSessionSelection(session.id, false)}
+													/>
+												{/each}
+											</div>
+										{/if}
+									</div>
+								{/each}
+								{#if $sessionsLoading}
+									<p class="text-xs text-muted-foreground px-2 animate-pulse">Loading sessions...</p>
+								{:else if filteredSessions.length === 0}
+									<p class="text-xs text-muted-foreground px-2">No chat history yet</p>
+								{/if}
+							</div>
+						{/if}
 					</div>
 				{/if}
 
@@ -1683,78 +1780,139 @@
 							</div>
 						{/if}
 
-						<!-- Header with label and selection toggle -->
-						<div class="flex items-center justify-between px-2 mb-2">
-							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">API User Sessions</div>
-							<div class="flex items-center gap-2">
+						<!-- Search Results (when searching in Admin tab) -->
+						{#if sessionSearchQuery.trim()}
+							<div class="flex items-center justify-between px-2 mb-2">
+								<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">
+									{isSearching ? 'Searching...' : `Results (${searchResults.length})`}
+								</div>
 								<button
-									on:click={() => tabs.loadAdminSessions($adminSessionsFilter)}
-									class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
-									title="Refresh sessions"
+									on:click={clearSearch}
+									class="text-xs text-muted-foreground hover:text-foreground transition-colors"
 								>
-									<svg
-										class="w-3.5 h-3.5"
-										fill="none"
-										stroke="currentColor"
-										viewBox="0 0 24 24"
-									>
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-									</svg>
+									Clear
 								</button>
-								{#if filteredAdminSessions.length > 0}
-									<button
-										on:click={() => tabs.toggleSelectionMode(true)}
-										class="text-xs text-muted-foreground hover:text-foreground transition-colors"
-										title={$adminSelectionMode ? 'Exit selection mode' : 'Select multiple'}
-									>
-										{$adminSelectionMode ? 'Cancel' : 'Select'}
-									</button>
+							</div>
+
+							<div class="space-y-1">
+								{#if isSearching}
+									<div class="flex items-center justify-center py-8">
+										<svg class="w-5 h-5 animate-spin text-muted-foreground" fill="none" viewBox="0 0 24 24">
+											<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+											<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+										</svg>
+									</div>
+								{:else if searchResults.length === 0}
+									<p class="text-xs text-muted-foreground px-2 py-4 text-center">No sessions found matching "{sessionSearchQuery}"</p>
+								{:else}
+									{#each searchResults as result}
+										<button
+											on:click={() => { openSession(result.id); closeSidebar(); }}
+											class="w-full text-left px-3 py-2.5 rounded-lg hover:bg-accent transition-colors group"
+										>
+											<div class="flex items-start gap-2">
+												<div class="flex-1 min-w-0">
+													<div class="text-sm font-medium text-foreground truncate">
+														{result.title || 'Untitled session'}
+													</div>
+													{#if result.match_type === 'content' && result.match_snippet}
+														<div class="text-xs text-muted-foreground mt-1 line-clamp-2">
+															{result.match_snippet}
+														</div>
+													{/if}
+													<div class="flex items-center gap-2 mt-1">
+														<span class="text-xs text-muted-foreground/70">
+															{new Date(result.updated_at).toLocaleDateString()}
+														</span>
+														{#if result.match_type === 'content'}
+															<span class="text-xs bg-accent px-1.5 py-0.5 rounded text-muted-foreground">
+																Content match
+															</span>
+														{/if}
+													</div>
+												</div>
+												<svg class="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+												</svg>
+											</div>
+										</button>
+									{/each}
 								{/if}
 							</div>
-						</div>
-
-						<!-- Grouped Admin Sessions -->
-						<div class="space-y-3">
-							{#each groupedAdminSessions as group}
-								<div>
-									<!-- Group Header -->
+						{:else}
+							<!-- Header with label and selection toggle (when not searching) -->
+							<div class="flex items-center justify-between px-2 mb-2">
+								<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">API User Sessions</div>
+								<div class="flex items-center gap-2">
 									<button
-										on:click={() => toggleGroupCollapse(group.key)}
-										class="flex items-center gap-2 px-2 py-1 w-full text-left hover:bg-accent/50 rounded transition-colors"
+										on:click={() => tabs.loadAdminSessions($adminSessionsFilter)}
+										class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+										title="Refresh sessions"
 									>
 										<svg
-											class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
+											class="w-3.5 h-3.5"
 											fill="none"
 											stroke="currentColor"
 											viewBox="0 0 24 24"
 										>
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
 										</svg>
-										<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
-										<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
 									</button>
-
-									<!-- Group Content -->
-									{#if !collapsedGroups.has(group.key)}
-										<div class="mt-1 space-y-1">
-											{#each group.sessions as session}
-												<SessionCard
-													{session}
-													selectionMode={$adminSelectionMode}
-													isSelected={$selectedAdminSessionIds.has(session.id)}
-													on:click={() => { openSession(session.id); closeSidebar(); }}
-													on:delete={() => deleteSession(null, session.id)}
-													on:select={() => tabs.toggleSessionSelection(session.id, true)}
-												/>
-											{/each}
-										</div>
+									{#if filteredAdminSessions.length > 0}
+										<button
+											on:click={() => tabs.toggleSelectionMode(true)}
+											class="text-xs text-muted-foreground hover:text-foreground transition-colors"
+											title={$adminSelectionMode ? 'Exit selection mode' : 'Select multiple'}
+										>
+											{$adminSelectionMode ? 'Cancel' : 'Select'}
+										</button>
 									{/if}
 								</div>
-							{/each}
-							{#if filteredAdminSessions.length === 0}
-								<p class="text-xs text-muted-foreground px-2">{sessionSearchQuery ? 'No matching sessions' : 'No API user sessions found'}</p>
-							{/if}
-						</div>
+							</div>
+
+							<!-- Grouped Admin Sessions -->
+							<div class="space-y-3">
+								{#each groupedAdminSessions as group}
+									<div>
+										<!-- Group Header -->
+										<button
+											on:click={() => toggleGroupCollapse(group.key)}
+											class="flex items-center gap-2 px-2 py-1 w-full text-left hover:bg-accent/50 rounded transition-colors"
+										>
+											<svg
+												class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
+												fill="none"
+												stroke="currentColor"
+												viewBox="0 0 24 24"
+											>
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+											</svg>
+											<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
+											<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
+										</button>
+
+										<!-- Group Content -->
+										{#if !collapsedGroups.has(group.key)}
+											<div class="mt-1 space-y-1">
+												{#each group.sessions as session}
+													<SessionCard
+														{session}
+														selectionMode={$adminSelectionMode}
+														isSelected={$selectedAdminSessionIds.has(session.id)}
+														on:click={() => { openSession(session.id); closeSidebar(); }}
+														on:delete={() => deleteSession(null, session.id)}
+														on:select={() => tabs.toggleSessionSelection(session.id, true)}
+													/>
+												{/each}
+											</div>
+										{/if}
+									</div>
+								{/each}
+								{#if filteredAdminSessions.length === 0}
+									<p class="text-xs text-muted-foreground px-2">No API user sessions found</p>
+								{/if}
+							</div>
+						{/if}
 					</div>
 				{/if}
 				</div>

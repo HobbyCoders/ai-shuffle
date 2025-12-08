@@ -177,6 +177,33 @@ export interface SessionWithMessages extends Session {
 	messages: SessionMessage[];
 }
 
+export interface SessionSearchResult extends Session {
+	match_type: 'title' | 'content';
+	match_snippet: string | null;
+	match_time: string | null;
+}
+
+/**
+ * Search sessions by title and message content
+ */
+export async function searchSessions(
+	query: string,
+	options: {
+		projectId?: string;
+		profileId?: string;
+		adminOnly?: boolean;
+		limit?: number;
+	} = {}
+): Promise<SessionSearchResult[]> {
+	const params = new URLSearchParams({ q: query });
+	if (options.projectId) params.set('project_id', options.projectId);
+	if (options.profileId) params.set('profile_id', options.profileId);
+	if (options.adminOnly) params.set('admin_only', 'true');
+	if (options.limit) params.set('limit', options.limit.toString());
+
+	return api.get<SessionSearchResult[]>(`/sessions/search/query?${params.toString()}`);
+}
+
 // Query types
 export interface QueryRequest {
 	prompt: string;

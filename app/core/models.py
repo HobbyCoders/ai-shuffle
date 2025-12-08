@@ -259,6 +259,13 @@ class SessionWithMessages(Session):
     messages: List[SessionMessage] = []
 
 
+class SessionSearchResult(Session):
+    """Session search result with match information"""
+    match_type: str  # 'title' or 'content'
+    match_snippet: Optional[str] = None  # Snippet showing where the match was found
+    match_time: Optional[datetime] = None  # When the matching content was created
+
+
 # ============================================================================
 # Query Models
 # ============================================================================
