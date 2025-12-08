@@ -65,6 +65,25 @@
 	let openaiKeySuccess = '';
 	let openaiKeyError = '';
 
+	// Image generation (Nano Banana) settings
+	interface ImageModel {
+		id: string;
+		name: string;
+		description: string;
+		price_per_image: number;
+	}
+	let imageModels: ImageModel[] = [];
+	let imageProvider = '';
+	let imageModel = '';
+	let imageApiKey = '';
+	let imageApiKeyMasked = '';
+	let savingImageConfig = false;
+	let imageConfigSuccess = '';
+	let imageConfigError = '';
+	let selectedImageModel = '';
+	let testingImage = false;
+	let testImageResult: { success: boolean; image_base64?: string; mime_type?: string; error?: string } | null = null;
+
 	let formData = {
 		name: '',
 		description: '',
@@ -124,10 +143,32 @@
 	// Integration Settings
 	async function loadIntegrationSettings() {
 		try {
-			const settings = await api.get<{openai_api_key_set: boolean, openai_api_key_masked: string}>('/settings/integrations');
+			const settings = await api.get<{
+				openai_api_key_set: boolean;
+				openai_api_key_masked: string;
+				image_provider: string | null;
+				image_model: string | null;
+				image_api_key_set: boolean;
+				image_api_key_masked: string;
+			}>('/settings/integrations');
 			openaiApiKeyMasked = settings.openai_api_key_masked;
+			imageProvider = settings.image_provider || '';
+			imageModel = settings.image_model || '';
+			imageApiKeyMasked = settings.image_api_key_masked || '';
+			selectedImageModel = settings.image_model || '';
 		} catch (e) {
 			console.error('Failed to load integration settings:', e);
+		}
+
+		// Load available image models
+		try {
+			const modelsResponse = await api.get<{models: ImageModel[]}>('/settings/integrations/image/models');
+			imageModels = modelsResponse.models;
+			if (!selectedImageModel && imageModels.length > 0) {
+				selectedImageModel = imageModels[0].id;
+			}
+		} catch (e) {
+			console.error('Failed to load image models:', e);
 		}
 	}
 
@@ -172,6 +213,85 @@
 			openaiKeyError = e.detail || 'Failed to remove API key';
 		} finally {
 			savingOpenaiKey = false;
+		}
+	}
+
+	// Image Generation (Nano Banana) functions
+	async function saveImageConfig() {
+		if (!imageApiKey.trim() && !imageApiKeyMasked) {
+			imageConfigError = 'Please enter an API key';
+			return;
+		}
+
+		if (!selectedImageModel) {
+			imageConfigError = 'Please select a model';
+			return;
+		}
+
+		savingImageConfig = true;
+		imageConfigError = '';
+		imageConfigSuccess = '';
+
+		try {
+			const result = await api.post<{success: boolean, provider: string, model: string, masked_key: string}>('/settings/integrations/image', {
+				provider: 'google',
+				model: selectedImageModel,
+				api_key: imageApiKey || imageApiKeyMasked  // Use existing key if not changed
+			});
+			imageProvider = result.provider;
+			imageModel = result.model;
+			imageApiKeyMasked = result.masked_key;
+			imageApiKey = '';
+			imageConfigSuccess = 'Image generation configured successfully';
+			testImageResult = null;
+		} catch (e: any) {
+			imageConfigError = e.detail || 'Failed to save configuration';
+		} finally {
+			savingImageConfig = false;
+		}
+	}
+
+	async function removeImageConfig() {
+		if (!confirm('Are you sure you want to remove the image generation configuration?')) {
+			return;
+		}
+
+		savingImageConfig = true;
+		imageConfigError = '';
+		imageConfigSuccess = '';
+
+		try {
+			await api.delete('/settings/integrations/image');
+			imageProvider = '';
+			imageModel = '';
+			imageApiKeyMasked = '';
+			imageConfigSuccess = 'Image generation configuration removed';
+			testImageResult = null;
+		} catch (e: any) {
+			imageConfigError = e.detail || 'Failed to remove configuration';
+		} finally {
+			savingImageConfig = false;
+		}
+	}
+
+	async function testImageGeneration() {
+		testingImage = true;
+		testImageResult = null;
+		imageConfigError = '';
+
+		try {
+			const result = await api.post<{success: boolean, image_base64?: string, mime_type?: string, error?: string}>('/settings/generate-image', {
+				prompt: 'A cute orange cat sitting on a windowsill, digital art style'
+			});
+			testImageResult = result;
+			if (!result.success) {
+				imageConfigError = result.error || 'Image generation failed';
+			}
+		} catch (e: any) {
+			imageConfigError = e.detail || 'Failed to test image generation';
+			testImageResult = { success: false, error: e.detail || 'Failed to test image generation' };
+		} finally {
+			testingImage = false;
 		}
 	}
 
@@ -1033,6 +1153,160 @@
 								</div>
 							</div>
 
+							<!-- Image Generation (Nano Banana) Integration -->
+							<div class="card p-6">
+								<div class="flex items-center justify-between mb-4">
+									<div class="flex items-center gap-3">
+										<div class="w-10 h-10 bg-yellow-500/15 rounded-lg flex items-center justify-center text-2xl">
+											🍌
+										</div>
+										<div>
+											<span class="font-semibold text-foreground">Nano Banana</span>
+											<p class="text-xs text-muted-foreground">AI Image Generation (Google Gemini)</p>
+										</div>
+									</div>
+									{#if imageApiKeyMasked}
+										<span class="text-xs px-2.5 py-1 rounded-full bg-success/15 text-success font-medium">Configured</span>
+									{:else}
+										<span class="text-xs px-2.5 py-1 rounded-full bg-muted text-muted-foreground font-medium">Not Configured</span>
+									{/if}
+								</div>
+
+								<p class="text-sm text-muted-foreground mb-4">
+									Generate images using Google's Gemini image models (codename: Nano Banana).
+									Create stunning visuals with AI-powered image generation.
+								</p>
+
+								{#if imageConfigSuccess}
+									<div class="bg-success/10 border border-success/30 text-success px-3 py-2 rounded-lg text-sm flex items-center gap-2 mb-4">
+										<span>✓</span>
+										<span>{imageConfigSuccess}</span>
+									</div>
+								{/if}
+
+								{#if imageConfigError}
+									<div class="bg-destructive/10 border border-destructive/30 text-destructive px-3 py-2 rounded-lg text-sm mb-4">
+										{imageConfigError}
+									</div>
+								{/if}
+
+								{#if imageApiKeyMasked}
+									<div class="flex items-center gap-3 mb-4 p-3 bg-muted rounded-lg">
+										<span class="text-sm text-muted-foreground">Current key:</span>
+										<code class="text-sm text-foreground font-mono">{imageApiKeyMasked}</code>
+										{#if imageModel}
+											<span class="text-xs px-2 py-0.5 rounded bg-primary/15 text-primary ml-auto">
+												{imageModels.find(m => m.id === imageModel)?.name || imageModel}
+											</span>
+										{/if}
+									</div>
+								{/if}
+
+								<div class="space-y-4">
+									<!-- Model Selection -->
+									<div>
+										<label for="imageModel" class="block text-sm font-medium text-foreground mb-1.5">
+											Model
+										</label>
+										<select
+											id="imageModel"
+											bind:value={selectedImageModel}
+											class="input text-sm"
+										>
+											{#each imageModels as model}
+												<option value={model.id}>
+													{model.name} (${model.price_per_image}/image)
+												</option>
+											{/each}
+										</select>
+										{#if selectedImageModel}
+											<p class="text-xs text-muted-foreground mt-1">
+												{imageModels.find(m => m.id === selectedImageModel)?.description || ''}
+											</p>
+										{/if}
+									</div>
+
+									<!-- API Key Input -->
+									<div>
+										<label for="imageApiKey" class="block text-sm font-medium text-foreground mb-1.5">
+											{imageApiKeyMasked ? 'Replace API Key' : 'Google AI API Key'}
+										</label>
+										<input
+											type="password"
+											id="imageApiKey"
+											bind:value={imageApiKey}
+											placeholder="AIza..."
+											class="input text-sm font-mono"
+										/>
+									</div>
+
+									<!-- Action Buttons -->
+									<div class="flex gap-2">
+										<button
+											on:click={saveImageConfig}
+											disabled={savingImageConfig || (!imageApiKey.trim() && !imageApiKeyMasked)}
+											class="btn btn-primary text-sm flex-1"
+										>
+											{#if savingImageConfig}
+												<span class="animate-spin inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full mr-2"></span>
+											{/if}
+											{imageApiKeyMasked ? 'Update Configuration' : 'Save Configuration'}
+										</button>
+										{#if imageApiKeyMasked}
+											<button
+												on:click={removeImageConfig}
+												disabled={savingImageConfig}
+												class="btn btn-secondary text-sm"
+											>
+												Remove
+											</button>
+										{/if}
+									</div>
+
+									<!-- Test Generation -->
+									{#if imageApiKeyMasked}
+										<div class="pt-2 border-t border-border">
+											<button
+												on:click={testImageGeneration}
+												disabled={testingImage}
+												class="btn btn-secondary text-sm w-full"
+											>
+												{#if testingImage}
+													<span class="animate-spin inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full mr-2"></span>
+													Generating test image...
+												{:else}
+													🎨 Test Image Generation
+												{/if}
+											</button>
+
+											{#if testImageResult}
+												{#if testImageResult.success && testImageResult.image_base64}
+													<div class="mt-3 p-3 bg-muted rounded-lg">
+														<p class="text-xs text-muted-foreground mb-2">Test image generated successfully:</p>
+														<img
+															src="data:{testImageResult.mime_type || 'image/png'};base64,{testImageResult.image_base64}"
+															alt="Generated test image"
+															class="rounded-lg max-w-full h-auto max-h-64 mx-auto"
+														/>
+													</div>
+												{:else if testImageResult.error}
+													<div class="mt-3 p-3 bg-destructive/10 rounded-lg">
+														<p class="text-xs text-destructive">{testImageResult.error}</p>
+													</div>
+												{/if}
+											{/if}
+										</div>
+									{/if}
+
+									<p class="text-xs text-muted-foreground">
+										<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">
+											Get an API key
+										</a>
+										from Google AI Studio. Image generation costs ~$0.039/image.
+									</p>
+								</div>
+							</div>
+
 							<!-- Future integrations placeholder -->
 							<div class="card p-6 border-dashed opacity-60">
 								<div class="flex items-center gap-3 mb-2">
@@ -1043,7 +1317,7 @@
 									</div>
 									<div>
 										<span class="font-semibold text-muted-foreground">More Integrations Coming</span>
-										<p class="text-xs text-muted-foreground">Additional integrations will be added in future updates</p>
+										<p class="text-xs text-muted-foreground">Video, voice, and more AI tools coming soon</p>
 									</div>
 								</div>
 							</div>
