@@ -1473,14 +1473,6 @@
 			<!-- Sessions Panel Content -->
 			{#if activeSidebarSection === 'sessions'}
 				<div class="flex-1 overflow-hidden flex flex-col">
-					<div class="p-3">
-						<button on:click={() => { handleNewTab(); closeSidebar(); }} class="w-full flex items-center gap-2 px-4 py-2.5 bg-primary hover:opacity-90 text-primary-foreground rounded-lg transition-colors shadow-s">
-							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-							</svg>
-							<span class="font-medium">New Chat</span>
-						</button>
-					</div>
 					{#if $isAdmin}
 						<div class="px-3 flex gap-1">
 							<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}">My Chats</button>
@@ -2043,12 +2035,6 @@
 				</button>
 			</div>
 			<div class="p-3 space-y-2">
-				<button on:click={() => { handleNewTab(); sidebarOpen = false; }} class="w-full flex items-center gap-2 px-4 py-2.5 bg-primary hover:opacity-90 text-primary-foreground rounded-lg transition-colors shadow-s">
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-					</svg>
-					<span class="font-medium">New Chat</span>
-				</button>
 				<!-- Mobile Search (tap to expand) -->
 				{#if sessionSearchExpanded}
 					<div class="relative">
