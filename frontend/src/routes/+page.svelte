@@ -3613,12 +3613,12 @@
 										</div>
 										<div>
 											<label class="block text-xs text-muted-foreground mb-1">Append Instructions</label>
-											<textarea bind:value={profileForm.system_prompt_append} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-none" rows="3" placeholder="Additional instructions to append to the system prompt..."></textarea>
+											<textarea bind:value={profileForm.system_prompt_append} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-y" rows="3" placeholder="Additional instructions to append to the system prompt..."></textarea>
 										</div>
 									{:else}
 										<div>
 											<label class="block text-xs text-muted-foreground mb-1">Custom System Prompt</label>
-											<textarea bind:value={profileForm.system_prompt_content} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-none" rows="4" placeholder="Enter your custom system prompt (can be blank)..."></textarea>
+											<textarea bind:value={profileForm.system_prompt_content} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-y" rows="4" placeholder="Enter your custom system prompt (can be blank)..."></textarea>
 										</div>
 										<label class="flex items-center gap-2 cursor-pointer">
 											<input type="checkbox" bind:checked={profileForm.system_prompt_inject_env} class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring" />

@@ -721,7 +721,7 @@
 								bind:value={formPrompt}
 								placeholder="You are a specialized agent..."
 								rows={6}
-								class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-none"
+								class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-y"
 							></textarea>
 						</div>
 					{/if}
