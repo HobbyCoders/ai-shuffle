@@ -246,32 +246,10 @@ function generateTabId(): string {
 }
 
 function createTabsStore() {
-	const initialTabId = generateTabId();
-
+	// Start with no tabs - will be populated from server or user creates one
 	const { subscribe, set, update } = writable<TabsState>({
-		tabs: [{
-			id: initialTabId,
-			title: 'New Chat',
-			sessionId: null,
-			messages: [],
-			isStreaming: false,
-			wsConnected: false,
-			error: null,
-			profile: getPersistedProfile(),
-			project: getPersistedProject(),
-			totalTokensIn: 0,
-			totalTokensOut: 0,
-			totalCacheCreationTokens: 0,
-			totalCacheReadTokens: 0,
-			contextUsed: null,
-			contextMax: 200000,
-			modelOverride: null,
-			permissionModeOverride: null,
-			pendingPermissions: [],
-			pendingQuestions: [],
-			todos: []
-		}],
-		activeTabId: initialTabId,
+		tabs: [],
+		activeTabId: null,
 		profiles: [],
 		projects: [],
 		sessions: [],
@@ -2407,8 +2385,8 @@ function createTabsStore() {
 				// Try to load persisted tabs from server
 				const persistedState = await loadTabsFromServer();
 
-				if (persistedState && persistedState.tabs && persistedState.tabs.length > 0) {
-					// Restore tabs from server
+				if (persistedState && persistedState.tabs) {
+					// Restore tabs from server (could be empty array)
 					const restoredTabs: ChatTab[] = persistedState.tabs.map(pt => ({
 						id: pt.id,
 						title: pt.title,
@@ -2438,7 +2416,7 @@ function createTabsStore() {
 						activeTabId: persistedState.activeTabId || restoredTabs[0]?.id || null
 					}));
 
-					// Connect WebSockets for each tab
+					// Connect WebSockets for each tab (if any)
 					// Note: We rely on WebSocket load_session (sent in ws.onopen) to load messages
 					// This ensures we get streaming state and buffer for active sessions
 					// DO NOT call loadSessionInTab here - it uses REST which doesn't have streaming info
@@ -2448,11 +2426,8 @@ function createTabsStore() {
 
 					console.log('[Tabs] Restored', restoredTabs.length, 'tabs from server');
 				} else {
-					// No persisted state - connect default tab
-					const state = get({ subscribe });
-					for (const tab of state.tabs) {
-						connectTab(tab.id);
-					}
+					// No persisted state at all - start with empty tabs (user can create one)
+					console.log('[Tabs] No persisted state, starting with empty tabs');
 				}
 			} catch (error) {
 				console.error('[Tabs] Failed to initialize from server:', error);
