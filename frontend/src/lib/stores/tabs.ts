@@ -1196,12 +1196,33 @@ function createTabsStore() {
 						existingContentHashes.add(hash);
 					}
 
+					// First pass: build a map of tool_results in buffer for grouping (legacy support)
+					const bufferToolResults: Map<string, { content: string; status: 'complete' | 'error' }> = new Map();
+					for (const m of streamingBuffer) {
+						const bufferType = (m.type || m.chunk_type || 'text') as string;
+						if (bufferType === 'tool_result') {
+							const toolId = (m.tool_id || '') as string;
+							if (toolId) {
+								bufferToolResults.set(toolId, {
+									content: (m.content || '') as string,
+									status: 'complete'
+								});
+							}
+						}
+					}
+
 					// Process buffer messages and only add non-duplicates
 					for (const m of streamingBuffer) {
 						const bufferType = (m.type || m.chunk_type || 'text') as MessageType;
 						const bufferToolId = (m.tool_id || '') as string;
 						const bufferContent = (m.content || '') as string;
 						const hash = `${bufferType}:${bufferToolId}:${bufferContent.substring(0, 100)}`;
+
+						// Skip standalone tool_result messages - they should be grouped with tool_use
+						if (bufferType === 'tool_result') {
+							console.log(`[Tab ${tabId}] Skipping standalone tool_result, will merge with tool_use:`, bufferToolId);
+							continue;
+						}
 
 						// Skip if we already have similar content in history
 						if (existingContentHashes.has(hash)) {
@@ -1225,6 +1246,7 @@ function createTabsStore() {
 							continue;
 						}
 
+						// Build the buffer message
 						const bufferMsg: ChatMessage = {
 							id: `buffer-${Date.now()}-${Math.random()}`,
 							role: 'assistant' as const,
@@ -1235,6 +1257,25 @@ function createTabsStore() {
 							toolInput: m.tool_input as Record<string, unknown> | undefined,
 							streaming: (m.streaming as boolean) ?? true
 						};
+
+						// For tool_use messages, merge result if present (from new backend format)
+						// or from legacy buffer format (separate tool_result messages)
+						if (bufferType === 'tool_use' && bufferToolId) {
+							// Check for embedded result (new format from backend)
+							if (m.tool_result !== undefined) {
+								bufferMsg.toolResult = m.tool_result as string;
+								bufferMsg.toolStatus = (m.tool_status as 'complete' | 'error') || 'complete';
+								bufferMsg.streaming = false;
+							}
+							// Check for result in legacy format (separate tool_result in buffer)
+							else if (bufferToolResults.has(bufferToolId)) {
+								const result = bufferToolResults.get(bufferToolId)!;
+								bufferMsg.toolResult = result.content;
+								bufferMsg.toolStatus = result.status;
+								bufferMsg.streaming = false;
+							}
+						}
+
 						finalMessages.push(bufferMsg);
 						existingContentHashes.add(hash);
 					}
