@@ -129,6 +129,8 @@ const tabPingTimers: Map<string, ReturnType<typeof setInterval>> = new Map();
 const tabReconnectTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 // Track tabs waiting for history response - queue sync events until history arrives
 const tabsWaitingForHistory: Map<string, Array<Record<string, unknown>>> = new Map();
+// Track stop confirmation timeouts - prevents UI freeze if 'stopped' message never arrives
+const stopTimeouts: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
 // Interface for persisted tab state (only what we need to restore tabs)
 interface PersistedTab {
@@ -389,7 +391,38 @@ function createTabsStore() {
 
 		ws.onclose = (event) => {
 			console.log(`[Tab ${tabId}] WebSocket closed:`, event.code, event.reason);
-			updateTab(tabId, { wsConnected: false });
+
+			// If the WebSocket closes while streaming, reset the streaming state
+			// to prevent the UI from being stuck in a frozen state
+			const tab = getTab(tabId);
+			if (tab?.isStreaming) {
+				console.warn(`[Tab ${tabId}] WebSocket closed while streaming - resetting UI state`);
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(t => {
+						if (t.id !== tabId) return t;
+
+						let messages = t.messages.map(m =>
+							m.streaming ? { ...m, streaming: false } : m
+						);
+						// Remove empty assistant messages
+						messages = messages.filter(
+							m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
+						);
+
+						return { ...t, messages, isStreaming: false, wsConnected: false };
+					})
+				}));
+			} else {
+				updateTab(tabId, { wsConnected: false });
+			}
+
+			// Clear any pending stop timeout
+			const stopTimeout = stopTimeouts.get(tabId);
+			if (stopTimeout) {
+				clearTimeout(stopTimeout);
+				stopTimeouts.delete(tabId);
+			}
 
 			const pingTimer = tabPingTimers.get(tabId);
 			if (pingTimer) {
@@ -404,8 +437,8 @@ function createTabsStore() {
 
 				const reconnectTimer = setTimeout(() => {
 					// Check if tab still exists
-					const tab = getTab(tabId);
-					if (tab) {
+					const currentTab = getTab(tabId);
+					if (currentTab) {
 						console.log(`[Tab ${tabId}] Attempting reconnect...`);
 						connectTab(tabId, true); // Pass isReconnect flag
 					}
@@ -1671,6 +1704,13 @@ function createTabsStore() {
 				const sessionId = data.session_id as string;
 				console.log('[WS] Done event received, cleaning up streaming messages');
 
+				// Clear any pending stop timeout since streaming is complete
+				const doneStopTimeout = stopTimeouts.get(tabId);
+				if (doneStopTimeout) {
+					clearTimeout(doneStopTimeout);
+					stopTimeouts.delete(tabId);
+				}
+
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
@@ -1749,6 +1789,14 @@ function createTabsStore() {
 				// Both 'stopped' (from task cancellation) and 'interrupted' (from SDK interrupt)
 				// should be handled the same way - stop streaming and mark as stopped
 				console.log(`[Tab ${tabId}] Received ${msgType} message`);
+
+				// Clear the fallback timeout since we received confirmation
+				const stopTimeout = stopTimeouts.get(tabId);
+				if (stopTimeout) {
+					clearTimeout(stopTimeout);
+					stopTimeouts.delete(tabId);
+				}
+
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
@@ -2625,9 +2673,9 @@ function createTabsStore() {
 		/**
 		 * Stop generation in a specific tab
 		 *
-		 * Note: We do NOT set isStreaming: false here. We wait for the backend
-		 * to send a 'stopped' message confirming the stop was successful.
-		 * This prevents the UI from showing "stopped" while the backend continues.
+		 * We send a stop message and set a fallback timeout. If the backend
+		 * confirms with 'stopped', the timeout is cleared. If no confirmation
+		 * arrives within the timeout, we force the UI to recover to prevent freezing.
 		 */
 		stopGeneration(tabId: string) {
 			const tab = getTab(tabId);
@@ -2642,8 +2690,38 @@ function createTabsStore() {
 				}));
 			}
 
-			// Don't set isStreaming: false here - wait for 'stopped' confirmation from backend
-			// The backend will send either 'stopped' or 'done' when it actually stops
+			// Set a fallback timeout to force UI recovery if 'stopped' message never arrives
+			// This prevents the UI from freezing indefinitely if the backend fails to respond
+			const existingTimeout = stopTimeouts.get(tabId);
+			if (existingTimeout) {
+				clearTimeout(existingTimeout);
+			}
+
+			const timeoutId = setTimeout(() => {
+				const currentTab = getTab(tabId);
+				if (currentTab?.isStreaming) {
+					console.warn(`[Tab ${tabId}] Stop confirmation timeout - forcing UI recovery`);
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(t => {
+							if (t.id !== tabId) return t;
+
+							let messages = t.messages.map(m =>
+								m.streaming ? { ...m, streaming: false } : m
+							);
+							// Remove empty assistant messages
+							messages = messages.filter(
+								m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
+							);
+
+							return { ...t, messages, isStreaming: false };
+						})
+					}));
+				}
+				stopTimeouts.delete(tabId);
+			}, 5000); // 5 second timeout
+
+			stopTimeouts.set(tabId, timeoutId);
 		},
 
 		/**
