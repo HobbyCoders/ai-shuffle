@@ -381,7 +381,7 @@
 			return categoryToolNames.length > 0 && categoryToolNames.every(name => profileForm.allowed_tools.includes(name));
 		}
 		if (toolSelectionMode === 'disallow') {
-			return categoryToolNames.every(name => !profileForm.disallowed_tools.includes(name));
+			return categoryToolNames.every(name => profileForm.disallowed_tools.includes(name));
 		}
 		return true;
 	}
@@ -409,7 +409,7 @@
 			return categoryToolNames.every(name => !profileForm.allowed_tools.includes(name));
 		}
 		if (toolSelectionMode === 'disallow') {
-			return categoryToolNames.every(name => profileForm.disallowed_tools.includes(name));
+			return categoryToolNames.every(name => !profileForm.disallowed_tools.includes(name));
 		}
 		return false;
 	}
@@ -3354,7 +3354,7 @@
 								</select>
 							</div>
 							<div>
-								<label class="block text-xs text-muted-foreground mb-1">Permission Mode</label>
+								<label class="block text-xs text-muted-foreground mb-1">Permission</label>
 								<select bind:value={profileForm.permission_mode} class="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground">
 									<option value="default">Default</option>
 									<option value="acceptEdits">Accept Edits</option>
@@ -3427,7 +3427,7 @@
 													{@const categoryToolNames = category.tools.map(t => t.name)}
 													{@const selectedInCategory = toolSelectionMode === 'allow'
 														? categoryToolNames.filter(name => profileForm.allowed_tools.includes(name)).length
-														: categoryToolNames.filter(name => !profileForm.disallowed_tools.includes(name)).length}
+														: categoryToolNames.filter(name => profileForm.disallowed_tools.includes(name)).length}
 													{@const isFullySelected = selectedInCategory === categoryToolNames.length}
 													{@const isPartiallySelected = selectedInCategory > 0 && selectedInCategory < categoryToolNames.length}
 													<div class="border border-border rounded-lg overflow-hidden">
@@ -3469,7 +3469,7 @@
 																{#each category.tools as tool}
 																	{@const isSelected = toolSelectionMode === 'allow'
 																		? profileForm.allowed_tools.includes(tool.name)
-																		: !profileForm.disallowed_tools.includes(tool.name)}
+																		: profileForm.disallowed_tools.includes(tool.name)}
 																	<label class="flex items-center gap-2 px-2 py-1 rounded hover:bg-muted/50 cursor-pointer">
 																		<input
 																			type="checkbox"
