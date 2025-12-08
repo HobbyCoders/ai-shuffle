@@ -11,6 +11,23 @@
 	type SettingsTab = 'general' | 'authentication' | 'api-users' | 'integrations';
 	let activeTab: SettingsTab = 'general';
 
+	// Mobile sidebar state
+	let sidebarOpen = false;
+
+	function toggleSidebar() {
+		sidebarOpen = !sidebarOpen;
+	}
+
+	function closeSidebar() {
+		sidebarOpen = false;
+	}
+
+	function selectTab(tabId: SettingsTab) {
+		activeTab = tabId;
+		// Auto-close sidebar on mobile when selecting a tab
+		sidebarOpen = false;
+	}
+
 	let apiUsers: ApiUser[] = [];
 	let profiles: Profile[] = [];
 	let projects: Project[] = [];
@@ -454,7 +471,17 @@
 		<!-- Header -->
 		<header class="bg-card border-b border-border px-4 py-3 shrink-0">
 			<div class="max-w-6xl mx-auto flex items-center justify-between">
-				<div class="flex items-center gap-4">
+				<div class="flex items-center gap-3">
+					<!-- Mobile menu toggle -->
+					<button
+						on:click={toggleSidebar}
+						class="md:hidden p-2 -ml-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors"
+						aria-label="Toggle menu"
+					>
+						<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+						</svg>
+					</button>
 					<a href="/" class="text-muted-foreground hover:text-foreground transition-colors">
 						<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
@@ -463,7 +490,7 @@
 					<h1 class="text-lg font-bold text-foreground">Settings</h1>
 				</div>
 				<div class="flex items-center gap-4">
-					<span class="text-sm text-muted-foreground">{$username}</span>
+					<span class="text-sm text-muted-foreground hidden sm:inline">{$username}</span>
 					<button on:click={handleLogout} class="text-sm text-muted-foreground hover:text-foreground transition-colors">
 						Logout
 					</button>
@@ -471,14 +498,44 @@
 			</div>
 		</header>
 
-		<div class="flex-1 flex overflow-hidden">
+		<div class="flex-1 flex overflow-hidden relative">
+			<!-- Mobile sidebar backdrop -->
+			{#if sidebarOpen}
+				<button
+					class="md:hidden fixed inset-0 bg-black/50 z-40 transition-opacity"
+					on:click={closeSidebar}
+					aria-label="Close menu"
+				></button>
+			{/if}
+
 			<!-- Sidebar Navigation -->
-			<nav class="w-56 bg-card border-r border-border p-4 shrink-0 overflow-y-auto">
+			<nav class="
+				w-64 md:w-56 bg-card border-r border-border p-4 shrink-0 overflow-y-auto
+				fixed md:relative inset-y-0 left-0 z-50 md:z-auto
+				transform transition-transform duration-200 ease-in-out
+				{sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
+				md:transform-none
+				pt-4 md:pt-4
+			">
+				<!-- Mobile close button -->
+				<div class="flex items-center justify-between mb-4 md:hidden">
+					<h2 class="text-lg font-semibold text-foreground">Menu</h2>
+					<button
+						on:click={closeSidebar}
+						class="p-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors"
+						aria-label="Close menu"
+					>
+						<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+						</svg>
+					</button>
+				</div>
+
 				<ul class="space-y-1">
 					{#each tabs as tab}
 						<li>
 							<button
-								on:click={() => activeTab = tab.id}
+								on:click={() => selectTab(tab.id)}
 								class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all {activeTab === tab.id ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}"
 							>
 								<svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
