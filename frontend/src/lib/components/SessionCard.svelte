@@ -61,8 +61,12 @@
 	function handleTouchEnd() {
 		// Close or delete if swiped past threshold
 		if (directionLocked === 'horizontal' && currentSwipeX >= DELETE_THRESHOLD) {
-			// Open tabs get closed, history items get deleted
-			dispatch(isOpen ? 'close' : 'delete');
+			// Open tabs get closed (unless streaming), history items get deleted
+			if (isOpen && isStreaming) {
+				// Don't allow closing streaming tabs
+			} else {
+				dispatch(isOpen ? 'close' : 'delete');
+			}
 		}
 
 		// Reset
@@ -86,14 +90,12 @@
 		return title.length > maxLength ? title.substring(0, maxLength) + '...' : title;
 	}
 
-	// Determine status color
+	// Determine status color - only show green when actively streaming
 	$: statusColor = isStreaming
 		? 'bg-primary animate-pulse'
 		: session.status === 'error'
 			? 'bg-destructive'
-			: isOpen || isActive
-				? 'bg-primary'
-				: 'bg-muted-foreground/30';
+			: 'bg-muted-foreground/30';
 
 	// Check if high cost
 	$: isHighCost = (session.total_cost_usd ?? 0) > 10;
@@ -180,9 +182,10 @@
 		{#if !selectionMode}
 			{#if showCloseButton}
 				<button
-					on:click|stopPropagation={() => dispatch('close')}
-					class="opacity-0 group-hover:opacity-100 p-1 text-muted-foreground hover:text-destructive transition-opacity flex-shrink-0 hidden sm:block"
-					title="Close tab"
+					on:click|stopPropagation={() => !isStreaming && dispatch('close')}
+					class="opacity-0 group-hover:opacity-100 p-1 text-muted-foreground transition-opacity flex-shrink-0 hidden sm:block {isStreaming ? 'cursor-not-allowed opacity-30' : 'hover:text-destructive'}"
+					title={isStreaming ? "Can't close while streaming" : "Close tab"}
+					disabled={isStreaming}
 				>
 					<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />

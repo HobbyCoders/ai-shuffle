@@ -2530,9 +2530,14 @@ function createTabsStore() {
 		 */
 		closeTab(tabId: string) {
 			const state = get({ subscribe });
+			const tab = state.tabs.find(t => t.id === tabId);
+
+			// Don't close if the tab is actively streaming
+			if (tab?.isStreaming) {
+				return;
+			}
 
 			// Send close_session message before disconnecting (so other devices know)
-			const tab = state.tabs.find(t => t.id === tabId);
 			if (tab?.sessionId) {
 				const ws = tabConnections.get(tabId);
 				if (ws && ws.readyState === WebSocket.OPEN) {
