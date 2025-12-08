@@ -2401,17 +2401,26 @@
 										{@const groupProfiles = headerProfilesOrganized.grouped.get(group.name) || []}
 										{#if groupProfiles.length > 0}
 											<div class="py-1">
-												<div class="px-3 py-1 text-xs font-medium text-muted-foreground uppercase tracking-wide bg-muted/30">
-													{group.name}
-												</div>
-												{#each groupProfiles as profile}
-													<button
-														on:click={() => setTabProfile(tabId, profile.id)}
-														class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.profile === profile.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
-													>
-														{profile.name}
-													</button>
-												{/each}
+												<button
+													class="w-full flex items-center gap-2 px-3 py-1 text-xs font-medium text-muted-foreground hover:text-foreground uppercase tracking-wide bg-muted/30 transition-colors"
+													on:click|stopPropagation={() => groups.toggleGroupCollapsed('profiles', group.name)}
+												>
+													<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+													</svg>
+													<span>{group.name}</span>
+													<span class="text-muted-foreground/60 ml-auto">({groupProfiles.length})</span>
+												</button>
+												{#if !group.collapsed}
+													{#each groupProfiles as profile}
+														<button
+															on:click={() => setTabProfile(tabId, profile.id)}
+															class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.profile === profile.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
+														>
+															{profile.name}
+														</button>
+													{/each}
+												{/if}
 											</div>
 										{/if}
 									{/each}
@@ -2504,17 +2513,26 @@
 											{@const groupProjects = headerProjectsOrganized.grouped.get(group.name) || []}
 											{#if groupProjects.length > 0}
 												<div class="py-1">
-													<div class="px-3 py-1 text-xs font-medium text-muted-foreground uppercase tracking-wide bg-muted/30">
-														{group.name}
-													</div>
-													{#each groupProjects as project}
-														<button
-															on:click={() => setTabProject(tabId, project.id)}
-															class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.project === project.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
-														>
-															{project.name}
-														</button>
-													{/each}
+													<button
+														class="w-full flex items-center gap-2 px-3 py-1 text-xs font-medium text-muted-foreground hover:text-foreground uppercase tracking-wide bg-muted/30 transition-colors"
+														on:click|stopPropagation={() => groups.toggleGroupCollapsed('projects', group.name)}
+													>
+														<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+														</svg>
+														<span>{group.name}</span>
+														<span class="text-muted-foreground/60 ml-auto">({groupProjects.length})</span>
+													</button>
+													{#if !group.collapsed}
+														{#each groupProjects as project}
+															<button
+																on:click={() => setTabProject(tabId, project.id)}
+																class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.project === project.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
+															>
+																{project.name}
+															</button>
+														{/each}
+													{/if}
 												</div>
 											{/if}
 										{/each}
