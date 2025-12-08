@@ -2847,6 +2847,24 @@
 
 								<!-- Voice/Send/Stop/Queue Buttons -->
 								<div class="flex items-center gap-1">
+									<!-- Voice Recording Button - always available -->
+									<button
+										type="button"
+										on:click={toggleRecording}
+										disabled={!$claudeAuthenticated || isUploading || isTranscribing}
+										class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center rounded-xl transition-all disabled:opacity-30 disabled:cursor-not-allowed {isRecording ? 'bg-destructive/20 text-destructive animate-pulse' : isTranscribing ? 'bg-primary/15 text-primary' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}"
+										title={isRecording ? 'Stop recording' : isTranscribing ? 'Transcribing...' : 'Voice input'}
+									>
+										{#if isTranscribing}
+											<svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
+											</svg>
+										{:else}
+											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+											</svg>
+										{/if}
+									</button>
 									{#if currentTab.isStreaming}
 										<!-- When streaming: show queue button if text entered, always show stop button -->
 										{#if (tabInputs[tabId] || '').trim()}
@@ -2871,24 +2889,6 @@
 											</svg>
 										</button>
 									{:else}
-										<!-- Voice Recording Button -->
-										<button
-											type="button"
-											on:click={toggleRecording}
-											disabled={!$claudeAuthenticated || isUploading || isTranscribing}
-											class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center rounded-xl transition-all disabled:opacity-30 disabled:cursor-not-allowed {isRecording ? 'bg-destructive/20 text-destructive animate-pulse' : isTranscribing ? 'bg-primary/15 text-primary' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}"
-											title={isRecording ? 'Stop recording' : isTranscribing ? 'Transcribing...' : 'Voice input'}
-										>
-											{#if isTranscribing}
-												<svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
-												</svg>
-											{:else}
-												<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-												</svg>
-											{/if}
-										</button>
 										<!-- Send Button -->
 										<button
 											type="submit"
