@@ -2378,6 +2378,7 @@
 					</div>
 				{:else}
 					{@const headerProfilesOrganized = organizeByGroups($profiles, 'profiles', $groups)}
+					{@const hasProfileGroups = headerProfilesOrganized.groupOrder.length > 0}
 					<div class="relative group">
 						<button
 							class="flex items-center gap-1 px-2 py-1 text-sm text-foreground hover:bg-accent rounded-md transition-colors"
@@ -2426,30 +2427,21 @@
 									{/each}
 									<!-- Ungrouped profiles -->
 									{#if headerProfilesOrganized.ungrouped.length > 0}
-										{#if headerProfilesOrganized.groupOrder.length > 0}
+										{#if hasProfileGroups}
 											<div class="py-1">
 												<div class="px-3 py-1 text-xs font-medium text-muted-foreground uppercase tracking-wide bg-muted/30">
 													Other
 												</div>
-												{#each headerProfilesOrganized.ungrouped as profile}
-													<button
-														on:click={() => setTabProfile(tabId, profile.id)}
-														class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.profile === profile.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
-													>
-														{profile.name}
-													</button>
-												{/each}
 											</div>
-										{:else}
-											{#each headerProfilesOrganized.ungrouped as profile}
-												<button
-													on:click={() => setTabProfile(tabId, profile.id)}
-													class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.profile === profile.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
-												>
-													{profile.name}
-												</button>
-											{/each}
 										{/if}
+										{#each headerProfilesOrganized.ungrouped as profile}
+											<button
+												on:click={() => setTabProfile(tabId, profile.id)}
+												class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.profile === profile.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
+											>
+												{profile.name}
+											</button>
+										{/each}
 									{/if}
 								{/if}
 								<div class="border-t border-border my-1"></div>
@@ -2503,6 +2495,7 @@
 						<!-- Project dropdown (only show when no session) -->
 						{#if !currentTab.sessionId}
 							{@const headerProjectsOrganized = organizeByGroups($projects, 'projects', $groups)}
+							{@const hasGroups = headerProjectsOrganized.groupOrder.length > 0}
 							<div class="absolute left-0 top-full mt-1 w-56 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 max-h-80 overflow-y-auto">
 								<div class="py-1">
 									{#if $projects.length === 0}
@@ -2538,30 +2531,21 @@
 										{/each}
 										<!-- Ungrouped projects -->
 										{#if headerProjectsOrganized.ungrouped.length > 0}
-											{#if headerProjectsOrganized.groupOrder.length > 0}
+											{#if hasGroups}
 												<div class="py-1">
 													<div class="px-3 py-1 text-xs font-medium text-muted-foreground uppercase tracking-wide bg-muted/30">
 														Other
 													</div>
-													{#each headerProjectsOrganized.ungrouped as project}
-														<button
-															on:click={() => setTabProject(tabId, project.id)}
-															class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.project === project.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
-														>
-															{project.name}
-														</button>
-													{/each}
 												</div>
-											{:else}
-												{#each headerProjectsOrganized.ungrouped as project}
-													<button
-														on:click={() => setTabProject(tabId, project.id)}
-														class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.project === project.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
-													>
-														{project.name}
-													</button>
-												{/each}
 											{/if}
+											{#each headerProjectsOrganized.ungrouped as project}
+												<button
+													on:click={() => setTabProject(tabId, project.id)}
+													class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.project === project.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
+												>
+													{project.name}
+												</button>
+											{/each}
 										{/if}
 									{/if}
 									<div class="border-t border-border my-1"></div>
