@@ -9,7 +9,7 @@
  *   VEO_MODEL - Model to use (optional, defaults to veo-3.1-fast-generate-preview)
  *
  * Usage:
- *   import { bridgeFrames } from '/workspace/ai-hub/tools/dist/video-generation/bridgeFrames.js';
+ *   import { bridgeFrames } from '/opt/ai-tools/dist/video-generation/bridgeFrames.js';
  *
  *   const result = await bridgeFrames({
  *     start_image: '/path/to/start.png',

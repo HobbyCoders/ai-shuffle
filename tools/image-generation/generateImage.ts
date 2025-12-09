@@ -9,7 +9,7 @@
  *   GEMINI_MODEL - Model to use (optional, defaults to gemini-2.0-flash-exp)
  *
  * Usage:
- *   import { generateImage } from '/workspace/ai-hub/tools/dist/image-generation/generateImage.js';
+ *   import { generateImage } from '/opt/ai-tools/dist/image-generation/generateImage.js';
  *
  *   const result = await generateImage({
  *     prompt: 'A futuristic city at sunset, cyberpunk style'

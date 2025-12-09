@@ -12,7 +12,7 @@
  *   VEO_MODEL - Model to use (optional, defaults to veo-3.1-fast-generate-preview)
  *
  * Usage:
- *   import { extendVideo } from '/workspace/ai-hub/tools/dist/video-generation/extendVideo.js';
+ *   import { extendVideo } from '/opt/ai-tools/dist/video-generation/extendVideo.js';
  *
  *   // First generate a video
  *   const genResult = await generateVideo({ prompt: 'A cat walking' });

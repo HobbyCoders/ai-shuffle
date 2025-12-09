@@ -9,7 +9,7 @@
  *   GEMINI_MODEL - Model to use (optional, defaults to gemini-2.0-flash-exp)
  *
  * Usage:
- *   import { editImage } from '/workspace/ai-hub/tools/dist/image-generation/editImage.js';
+ *   import { editImage } from '/opt/ai-tools/dist/image-generation/editImage.js';
  *
  *   const result = await editImage({
  *     prompt: 'Add a rainbow in the sky',

@@ -9,7 +9,7 @@
  *   VEO_MODEL - Model to use (optional, defaults to veo-3.1-fast-generate-preview)
  *
  * Usage:
- *   import { generateVideo } from '/workspace/ai-hub/tools/dist/video-generation/generateVideo.js';
+ *   import { generateVideo } from '/opt/ai-tools/dist/video-generation/generateVideo.js';
  *
  *   const result = await generateVideo({
  *     prompt: 'A cat playing with a ball of yarn'

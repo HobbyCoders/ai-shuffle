@@ -9,7 +9,7 @@
  *   VEO_MODEL - Model to use (optional, defaults to veo-3.1-fast-generate-preview)
  *
  * Usage:
- *   import { imageToVideo } from '/workspace/ai-hub/tools/dist/video-generation/imageToVideo.js';
+ *   import { imageToVideo } from '/opt/ai-tools/dist/video-generation/imageToVideo.js';
  *
  *   const result = await imageToVideo({
  *     image_path: '/path/to/image.png',

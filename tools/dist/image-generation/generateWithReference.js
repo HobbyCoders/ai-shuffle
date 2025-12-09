@@ -9,7 +9,7 @@
  *   GEMINI_MODEL - Model to use (optional, defaults to gemini-2.0-flash-exp)
  *
  * Usage:
- *   import { generateWithReference } from '/workspace/ai-hub/tools/dist/image-generation/generateWithReference.js';
+ *   import { generateWithReference } from '/opt/ai-tools/dist/image-generation/generateWithReference.js';
  *
  *   const result = await generateWithReference({
  *     prompt: 'The character standing in a forest',
