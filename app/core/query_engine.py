@@ -362,6 +362,50 @@ if (result.success) {{ /* result.image_base64 contains the image */ }}"""
     return tools
 
 
+def _build_env_with_ai_tools(
+    base_env: Optional[Dict[str, str]],
+    ai_tools_config: Optional[Dict[str, Any]]
+) -> Dict[str, str]:
+    """
+    Build environment variables dict, injecting AI tool credentials when enabled.
+
+    This allows the Claude CLI to execute scripts that use AI tools
+    with the necessary API keys, without exposing them in the prompt.
+
+    Args:
+        base_env: Base environment variables from profile config
+        ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
+
+    Returns:
+        Dict of environment variables to pass to Claude CLI
+    """
+    env = dict(base_env) if base_env else {}
+
+    if not ai_tools_config:
+        return env
+
+    # Inject Gemini API key for image generation
+    if ai_tools_config.get("image_generation", False):
+        image_api_key = database.get_system_setting("image_api_key")
+        image_model = database.get_system_setting("image_model")
+
+        if image_api_key:
+            env["GEMINI_API_KEY"] = image_api_key
+            logger.debug("Injected GEMINI_API_KEY into execution environment")
+
+        if image_model:
+            env["GEMINI_MODEL"] = image_model
+            logger.debug(f"Injected GEMINI_MODEL={image_model} into execution environment")
+
+    # Add more tool credentials here as they become available
+    # if ai_tools_config.get("text_to_speech", False):
+    #     tts_api_key = database.get_system_setting("tts_api_key")
+    #     if tts_api_key:
+    #         env["TTS_API_KEY"] = tts_api_key
+
+    return env
+
+
 def generate_environment_details(working_dir: str, ai_tools_config: Optional[Dict[str, Any]] = None) -> str:
     """
     Generate environment details block for custom system prompts.
@@ -579,8 +623,8 @@ def build_options_from_profile(
         # Settings loading
         setting_sources=config.get("setting_sources"),
 
-        # Environment and arguments
-        env=config.get("env") or {},
+        # Environment and arguments - inject AI tool credentials if enabled
+        env=_build_env_with_ai_tools(config.get("env"), ai_tools_config),
         extra_args=config.get("extra_args") or {},
 
         # Buffer settings

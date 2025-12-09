@@ -1,11 +1,14 @@
 /**
  * Image Generation Tool - Nano Banana (Google Gemini)
  *
- * Generate images using AI. Requires Nano Banana to be configured in
- * Settings > Integrations.
+ * Generate images using AI. The API key is provided via environment variable.
+ *
+ * Environment Variables:
+ *   GEMINI_API_KEY - Google AI API key (injected by AI Hub at runtime)
+ *   GEMINI_MODEL - Model to use (optional, defaults to gemini-2.0-flash-exp)
  *
  * Usage:
- *   import { generateImage } from './tools/image-generation/generateImage.js';
+ *   import { generateImage } from '/workspace/ai-hub/tools/dist/image-generation/generateImage.js';
  *
  *   const result = await generateImage({
  *     prompt: 'A futuristic city at sunset, cyberpunk style'
@@ -13,7 +16,7 @@
  *
  *   if (result.success) {
  *     // result.image_base64 contains the base64-encoded image
- *     // result.mime_type is 'image/png'
+ *     // result.mime_type is 'image/png' or 'image/jpeg'
  *   }
  */
 export interface GenerateImageInput {
@@ -43,7 +46,7 @@ export interface GenerateImageResponse {
     error?: string;
 }
 /**
- * Generate an image from a text prompt using Nano Banana (Google Gemini).
+ * Generate an image from a text prompt using Google Gemini.
  *
  * The image is returned as base64-encoded data that can be:
  * - Saved to a file

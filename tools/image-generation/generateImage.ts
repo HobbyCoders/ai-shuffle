@@ -1,11 +1,14 @@
 /**
  * Image Generation Tool - Nano Banana (Google Gemini)
  *
- * Generate images using AI. Requires Nano Banana to be configured in
- * Settings > Integrations.
+ * Generate images using AI. The API key is provided via environment variable.
+ *
+ * Environment Variables:
+ *   GEMINI_API_KEY - Google AI API key (injected by AI Hub at runtime)
+ *   GEMINI_MODEL - Model to use (optional, defaults to gemini-2.0-flash-exp)
  *
  * Usage:
- *   import { generateImage } from './tools/image-generation/generateImage.js';
+ *   import { generateImage } from '/workspace/ai-hub/tools/dist/image-generation/generateImage.js';
  *
  *   const result = await generateImage({
  *     prompt: 'A futuristic city at sunset, cyberpunk style'
@@ -13,11 +16,9 @@
  *
  *   if (result.success) {
  *     // result.image_base64 contains the base64-encoded image
- *     // result.mime_type is 'image/png'
+ *     // result.mime_type is 'image/png' or 'image/jpeg'
  *   }
  */
-
-import { callTool } from '../client.js';
 
 export interface GenerateImageInput {
   /**
@@ -52,7 +53,7 @@ export interface GenerateImageResponse {
 }
 
 /**
- * Generate an image from a text prompt using Nano Banana (Google Gemini).
+ * Generate an image from a text prompt using Google Gemini.
  *
  * The image is returned as base64-encoded data that can be:
  * - Saved to a file
@@ -79,6 +80,19 @@ export interface GenerateImageResponse {
  * ```
  */
 export async function generateImage(input: GenerateImageInput): Promise<GenerateImageResponse> {
+  // Get API key from environment
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return {
+      success: false,
+      error: 'GEMINI_API_KEY environment variable not set. Image generation is not configured.'
+    };
+  }
+
+  // Get model from environment or use default
+  const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash-exp';
+
+  // Validate input
   if (!input.prompt || input.prompt.trim().length === 0) {
     return {
       success: false,
@@ -93,13 +107,106 @@ export async function generateImage(input: GenerateImageInput): Promise<Generate
     };
   }
 
-  try {
-    const response = await callTool<GenerateImageResponse>('/settings/generate-image', {
-      prompt: input.prompt.trim(),
-      aspect_ratio: input.aspect_ratio || '1:1'
-    });
+  const prompt = input.prompt.trim();
 
-    return response;
+  try {
+    // Call Gemini API directly
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                { text: prompt }
+              ]
+            }
+          ],
+          generationConfig: {
+            responseModalities: ['TEXT', 'IMAGE']
+          }
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      const errorMsg = (errorData as any)?.error?.message || `HTTP ${response.status}`;
+
+      // Check for safety filters
+      if (response.status === 400) {
+        const errorStr = JSON.stringify(errorData);
+        if (errorStr.includes('SAFETY') || errorStr.toLowerCase().includes('blocked')) {
+          return {
+            success: false,
+            error: 'Image generation was blocked by safety filters. Please try a different prompt.'
+          };
+        }
+      }
+
+      if (response.status === 401 || response.status === 403) {
+        return {
+          success: false,
+          error: 'API key is invalid or expired.'
+        };
+      }
+
+      if (response.status === 429) {
+        return {
+          success: false,
+          error: 'Rate limit exceeded. Please wait a moment and try again.'
+        };
+      }
+
+      return {
+        success: false,
+        error: `API error: ${errorMsg}`
+      };
+    }
+
+    const result = await response.json() as any;
+
+    // Extract image from response
+    const candidates = result.candidates || [];
+    if (!candidates.length) {
+      return {
+        success: false,
+        error: 'No image was generated. The model may have refused the request.'
+      };
+    }
+
+    const parts = candidates[0]?.content?.parts || [];
+
+    // Look for inline image data
+    for (const part of parts) {
+      if (part.inlineData) {
+        return {
+          success: true,
+          image_base64: part.inlineData.data,
+          mime_type: part.inlineData.mimeType || 'image/png'
+        };
+      }
+    }
+
+    // No image found - check if there's a text response (model might have refused)
+    for (const part of parts) {
+      if (part.text) {
+        return {
+          success: false,
+          error: `Model response: ${part.text.substring(0, 500)}`
+        };
+      }
+    }
+
+    return {
+      success: false,
+      error: 'No image was generated. Please try a different prompt.'
+    };
+
   } catch (error) {
     return {
       success: false,
