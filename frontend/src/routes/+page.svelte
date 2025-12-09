@@ -340,6 +340,7 @@
 		system_prompt_inject_env: false,
 		// AI tools - individual toggles for each AI tool
 		ai_tools_image_generation: false,
+		ai_tools_image_editing: false,
 		setting_sources: [] as string[],
 		cwd: '',
 		add_dirs: '',
@@ -1301,6 +1302,7 @@
 			system_prompt_content: '',
 			system_prompt_inject_env: false,
 			ai_tools_image_generation: false,
+			ai_tools_image_editing: false,
 			setting_sources: [],
 			cwd: '',
 			add_dirs: '',
@@ -1354,6 +1356,7 @@
 			system_prompt_inject_env: sp.inject_env_details || false,
 			// AI tools - load from config.ai_tools, fallback to legacy sp.enable_ai_tools
 			ai_tools_image_generation: aiTools.image_generation || sp.enable_ai_tools || false,
+			ai_tools_image_editing: aiTools.image_editing || false,
 			setting_sources: config.setting_sources || [],
 			cwd: config.cwd || '',
 			add_dirs: (config.add_dirs || []).join(', '),
@@ -1397,9 +1400,10 @@
 		if (profileForm.max_buffer_size) config.max_buffer_size = profileForm.max_buffer_size;
 
 		// AI tools configuration - individual toggles for each AI tool
-		if (profileForm.ai_tools_image_generation) {
+		if (profileForm.ai_tools_image_generation || profileForm.ai_tools_image_editing) {
 			config.ai_tools = {
-				image_generation: profileForm.ai_tools_image_generation
+				image_generation: profileForm.ai_tools_image_generation,
+				image_editing: profileForm.ai_tools_image_editing
 			};
 		}
 
@@ -4029,6 +4033,17 @@
 												/>
 												<div class="flex-1">
 													<span class="text-sm text-foreground">Image Generation</span>
+													<span class="text-xs text-muted-foreground ml-1">(Nano Banana)</span>
+												</div>
+											</label>
+											<label class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted/50 cursor-pointer border border-border">
+												<input
+													type="checkbox"
+													bind:checked={profileForm.ai_tools_image_editing}
+													class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring"
+												/>
+												<div class="flex-1">
+													<span class="text-sm text-foreground">Image Editing</span>
 													<span class="text-xs text-muted-foreground ml-1">(Nano Banana)</span>
 												</div>
 											</label>

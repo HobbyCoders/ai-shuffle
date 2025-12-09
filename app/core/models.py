@@ -65,6 +65,7 @@ class SubagentDefinition(BaseModel):
 class AIToolsConfig(BaseModel):
     """Configuration for individual AI tools - each tool can be enabled/disabled"""
     image_generation: bool = False  # Enable Nano Banana image generation
+    image_editing: bool = False  # Enable Nano Banana image editing
     # Add more AI tools here as they become available
     # text_to_speech: bool = False
     # video_generation: bool = False

@@ -357,6 +357,29 @@ const result = await generateImage({{ prompt: 'your description here' }});
 console.log(JSON.stringify(result));"""
             })
 
+    # Check image editing (Nano Banana) - only if enabled in profile
+    if ai_tools_config.get("image_editing", False):
+        image_provider = database.get_system_setting("image_provider")
+        image_model = database.get_system_setting("image_model")
+        image_api_key = database.get_system_setting("image_api_key")
+
+        if all([image_provider, image_model, image_api_key]):
+            # Use absolute path so scripts can run from any directory (e.g., /tmp/)
+            tool_path = f"{tools_dir}/dist/image-generation/editImage.js"
+            tools.append({
+                "name": "Image Editing (Nano Banana)",
+                "description": "Edit existing images using AI - add elements, remove objects, change styles, and more",
+                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
+import {{ editImage }} from '{tool_path}';
+const result = await editImage({{
+  prompt: 'your editing instruction here',
+  image_path: '/path/to/existing/image.png'
+}});
+// IMPORTANT: Output the result as JSON - the chat UI will display the image with download button
+// Do NOT save to file or try to read the base64 - just output the JSON result
+console.log(JSON.stringify(result));"""
+            })
+
     # Add more tools here as they become available
     # if ai_tools_config.get("text_to_speech", False):
     #     ...
