@@ -354,7 +354,8 @@ import {{ generateImage }} from '{tool_path}';
 const result = await generateImage({{ prompt: 'your description here' }});
 // IMPORTANT: Output the result as JSON - the chat UI will display the image with download button
 // Do NOT save to file or try to read the base64 - just output the JSON result
-console.log(JSON.stringify(result));"""
+console.log(JSON.stringify(result));
+// DISPLAY: After success, show image as markdown: ![Description](result.image_url)"""
             })
 
     # Check image editing (Nano Banana) - only if enabled in profile
@@ -377,7 +378,8 @@ const result = await editImage({{
 }});
 // IMPORTANT: Output the result as JSON - the chat UI will display the image with download button
 // Do NOT save to file or try to read the base64 - just output the JSON result
-console.log(JSON.stringify(result));"""
+console.log(JSON.stringify(result));
+// DISPLAY: After success, show image as markdown: ![Description](result.image_url)"""
             })
 
     # Check video generation (Veo) - only if enabled in profile
@@ -419,7 +421,8 @@ const result = await generateWithReference({{
   reference_images: ['/path/to/character.png']  // Up to 14 reference images
 }});
 // IMPORTANT: Output the result as JSON - the chat UI will display the image
-console.log(JSON.stringify(result));"""
+console.log(JSON.stringify(result));
+// DISPLAY: After success, show image as markdown: ![Description](result.image_url)"""
             })
 
     # Check image-to-video (Veo) - animate still images
@@ -512,13 +515,17 @@ IMPORTANT: Always delete the .mjs file after execution to keep the workspace cle
 
 After successfully generating content, you MUST display it properly in chat:
 
+**Images:** Display as markdown image using the `image_url` from the result:
+```
+![Image Description](/api/generated-images/by-path?path=...)
+```
+The chat UI will render this with Download and Copy URL buttons in the message header.
+
 **Videos:** Display as a markdown link using the `video_url` from the result:
 ```
 [Video Description](/api/generated-videos/by-path?path=...)
 ```
-The chat UI will render this as an embedded video player with download button.
-
-**Images:** The chat UI automatically renders base64 image data from the JSON output.
+The chat UI will render this as an embedded video player with Download and Copy URL buttons in the message header.
 </ai-tools>"""
 
     return tools_section
