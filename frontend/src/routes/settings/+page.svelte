@@ -1170,9 +1170,9 @@
 								<p class="text-sm text-muted-foreground">Connect external services to extend AI Hub.</p>
 							</div>
 
-							<!-- OpenAI Integration - Compact -->
+							<!-- OpenAI Models Group -->
 							<div class="card p-4">
-								<div class="flex items-center gap-3 mb-3">
+								<div class="flex items-center gap-3 mb-4">
 									<div class="w-9 h-9 bg-emerald-500/15 rounded-lg flex items-center justify-center shrink-0">
 										<svg class="w-5 h-5 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
 											<path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.8956zm16.0993 3.8558L12.6 8.3829l2.02-1.1638a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.4066-.6567zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/>
@@ -1180,70 +1180,162 @@
 									</div>
 									<div class="flex-1 min-w-0">
 										<div class="flex items-center justify-between gap-2">
-											<span class="font-semibold text-foreground text-sm">OpenAI Whisper</span>
+											<span class="font-semibold text-foreground text-sm">OpenAI</span>
 											{#if openaiApiKeyMasked}
 												<span class="text-[10px] px-2 py-0.5 rounded-full bg-success/15 text-success font-medium shrink-0">Configured</span>
 											{:else}
 												<span class="text-[10px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground font-medium shrink-0">Not Set</span>
 											{/if}
 										</div>
-										<p class="text-xs text-muted-foreground truncate">Voice-to-text transcription</p>
+										<p class="text-xs text-muted-foreground truncate">Whisper, GPT Image & Sora</p>
 									</div>
 								</div>
 
-								{#if openaiKeySuccess}
-									<div class="bg-success/10 border border-success/30 text-success px-2 py-1.5 rounded text-xs flex items-center gap-1.5 mb-3">
-										<span>✓</span>
-										<span>{openaiKeySuccess}</span>
-									</div>
-								{/if}
+								<!-- API Key Section -->
+								<div class="mb-4 pb-4 border-b border-border">
+									{#if openaiKeySuccess}
+										<div class="bg-success/10 border border-success/30 text-success px-2 py-1.5 rounded text-xs flex items-center gap-1.5 mb-3">
+											<span>✓</span>
+											<span>{openaiKeySuccess}</span>
+										</div>
+									{/if}
 
-								{#if openaiKeyError}
-									<div class="bg-destructive/10 border border-destructive/30 text-destructive px-2 py-1.5 rounded text-xs mb-3">
-										{openaiKeyError}
-									</div>
-								{/if}
+									{#if openaiKeyError}
+										<div class="bg-destructive/10 border border-destructive/30 text-destructive px-2 py-1.5 rounded text-xs mb-3">
+											{openaiKeyError}
+										</div>
+									{/if}
 
-								{#if openaiApiKeyMasked}
-									<div class="flex items-center gap-2 mb-3 p-2 bg-muted rounded text-xs">
-										<code class="text-foreground font-mono flex-1 truncate">{openaiApiKeyMasked}</code>
-									</div>
-								{/if}
-
-								<div class="flex gap-2">
-									<input
-										type="password"
-										bind:value={openaiApiKey}
-										placeholder={openaiApiKeyMasked ? "New API key..." : "sk-..."}
-										class="input text-xs py-1.5 font-mono flex-1"
-									/>
-									<button
-										on:click={saveOpenaiApiKey}
-										disabled={savingOpenaiKey || !openaiApiKey.trim()}
-										class="btn btn-primary text-xs py-1.5 px-3"
-									>
-										{#if savingOpenaiKey}
-											<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
-										{:else}
-											{openaiApiKeyMasked ? 'Update' : 'Save'}
-										{/if}
-									</button>
 									{#if openaiApiKeyMasked}
+										<div class="flex items-center gap-2 mb-3 p-2 bg-muted rounded text-xs">
+											<code class="text-foreground font-mono flex-1 truncate">{openaiApiKeyMasked}</code>
+										</div>
+									{/if}
+
+									<div class="flex gap-2">
+										<input
+											type="password"
+											bind:value={openaiApiKey}
+											placeholder={openaiApiKeyMasked ? "New API key..." : "sk-..."}
+											class="input text-xs py-1.5 font-mono flex-1"
+										/>
 										<button
-											on:click={removeOpenaiApiKey}
-											disabled={savingOpenaiKey}
-											class="btn btn-secondary text-xs py-1.5 px-3"
-											title="Remove API key"
+											on:click={saveOpenaiApiKey}
+											disabled={savingOpenaiKey || !openaiApiKey.trim()}
+											class="btn btn-primary text-xs py-1.5 px-3"
 										>
-											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-											</svg>
+											{#if savingOpenaiKey}
+												<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
+											{:else}
+												{openaiApiKeyMasked ? 'Update' : 'Save'}
+											{/if}
 										</button>
+										{#if openaiApiKeyMasked}
+											<button
+												on:click={removeOpenaiApiKey}
+												disabled={savingOpenaiKey}
+												class="btn btn-secondary text-xs py-1.5 px-3"
+												title="Remove API key"
+											>
+												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+												</svg>
+											</button>
+										{/if}
+									</div>
+									<p class="text-[10px] text-muted-foreground mt-2">
+										<a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">Get API key</a> · Used for all OpenAI services
+									</p>
+								</div>
+
+								<!-- Whisper (Voice-to-Text) -->
+								<div class="mb-4 pb-4 border-b border-border">
+									<div class="flex items-center gap-2 mb-3">
+										<span class="text-lg">🎤</span>
+										<span class="font-medium text-foreground text-sm">Whisper</span>
+										<span class="text-[10px] text-muted-foreground">Voice-to-Text</span>
+									</div>
+									<p class="text-[10px] text-muted-foreground">~$0.006/min · Automatic speech recognition</p>
+									{#if !openaiApiKeyMasked}
+										<p class="text-[10px] text-warning mt-2">Configure API key above to enable</p>
 									{/if}
 								</div>
-								<p class="text-[10px] text-muted-foreground mt-2">
-									<a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">Get API key</a> · ~$0.006/min
-								</p>
+
+								<!-- GPT Image (Image Generation) -->
+								<div class="mb-4 pb-4 border-b border-border">
+									<div class="flex items-center gap-2 mb-3">
+										<span class="text-lg">🖼️</span>
+										<span class="font-medium text-foreground text-sm">GPT Image</span>
+										<span class="text-[10px] text-muted-foreground">Image Generation</span>
+									</div>
+									<div class="flex gap-2">
+										<select
+											bind:value={selectedImageModel}
+											class="input text-xs py-1.5 flex-1"
+										>
+											{#each imageModels.filter(m => m.provider === 'openai-gpt-image') as model}
+												<option value={model.id} disabled={!model.available}>
+													{model.name} (${model.price_per_image}/img){!model.available ? ' - API key required' : ''}
+												</option>
+											{/each}
+										</select>
+										{#if selectedImageModel !== imageModel && imageModels.find(m => m.id === selectedImageModel)?.provider === 'openai-gpt-image'}
+											<button
+												on:click={updateImageModel}
+												disabled={updatingImageModel || !imageModels.find(m => m.id === selectedImageModel)?.available}
+												class="btn btn-primary text-xs py-1.5 px-3"
+												title="Apply model change"
+											>
+												{#if updatingImageModel}
+													<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
+												{:else}
+													Apply
+												{/if}
+											</button>
+										{/if}
+									</div>
+									<p class="text-[10px] text-muted-foreground mt-1.5">~$0.07/image · High quality with accurate text</p>
+								</div>
+
+								<!-- Sora (Video Generation) -->
+								<div>
+									<div class="flex items-center gap-2 mb-3">
+										<span class="text-lg">🎬</span>
+										<span class="font-medium text-foreground text-sm">Sora</span>
+										<span class="text-[10px] text-muted-foreground">Video Generation</span>
+									</div>
+									<div class="flex gap-2">
+										<select
+											bind:value={selectedVideoModel}
+											class="input text-xs py-1.5 flex-1"
+										>
+											{#each videoModels.filter(m => m.provider === 'openai-sora') as model}
+												<option value={model.id} disabled={!model.available}>
+													{model.name} (${model.price_per_second}/sec){!model.available ? ' - API key required' : ''}
+												</option>
+											{/each}
+										</select>
+										{#if selectedVideoModel !== videoModel && videoModels.find(m => m.id === selectedVideoModel)?.provider === 'openai-sora'}
+											<button
+												on:click={saveVideoModel}
+												disabled={savingVideoModel || !videoModels.find(m => m.id === selectedVideoModel)?.available}
+												class="btn btn-primary text-xs py-1.5 px-3"
+												title="Apply model change"
+											>
+												{#if savingVideoModel}
+													<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
+												{:else}
+													Apply
+												{/if}
+											</button>
+										{/if}
+									</div>
+									<p class="text-[10px] text-muted-foreground mt-1.5">$0.10-$0.40/sec · 4-12 sec videos</p>
+
+									{#if !openaiApiKeyMasked}
+										<p class="text-[10px] text-warning mt-2">Configure API key above to enable video generation</p>
+									{/if}
+								</div>
 							</div>
 
 							<!-- Google Gemini Models Group -->
@@ -1413,118 +1505,6 @@
 										<p class="text-[10px] text-warning mt-2">Configure API key above to enable video generation</p>
 									{/if}
 								</div>
-							</div>
-
-							<!-- OpenAI Sora (Video Generation) -->
-							<div class="card p-4">
-								<div class="flex items-center gap-3 mb-4">
-									<div class="w-9 h-9 bg-emerald-500/15 rounded-lg flex items-center justify-center shrink-0">
-										<svg class="w-5 h-5 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
-											<path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.8956zm16.0993 3.8558L12.6 8.3829l2.02-1.1638a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.4066-.6567zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/>
-										</svg>
-									</div>
-									<div class="flex-1 min-w-0">
-										<div class="flex items-center justify-between gap-2">
-											<span class="font-semibold text-foreground text-sm">OpenAI Sora</span>
-											{#if videoModels.some(m => m.provider === 'openai-sora' && m.available)}
-												<span class="text-[10px] px-2 py-0.5 rounded-full bg-success/15 text-success font-medium shrink-0">Available</span>
-											{:else}
-												<span class="text-[10px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground font-medium shrink-0">Requires OpenAI Key</span>
-											{/if}
-										</div>
-										<p class="text-xs text-muted-foreground truncate">AI Video Generation</p>
-									</div>
-								</div>
-
-								<div class="flex gap-2">
-									<select
-										bind:value={selectedVideoModel}
-										class="input text-xs py-1.5 flex-1"
-									>
-										{#each videoModels.filter(m => m.provider === 'openai-sora') as model}
-											<option value={model.id} disabled={!model.available}>
-												{model.name} (${model.price_per_second}/sec){!model.available ? ' - API key required' : ''}
-											</option>
-										{/each}
-									</select>
-									{#if selectedVideoModel !== videoModel && videoModels.find(m => m.id === selectedVideoModel)?.provider === 'openai-sora'}
-										<button
-											on:click={saveVideoModel}
-											disabled={savingVideoModel || !videoModels.find(m => m.id === selectedVideoModel)?.available}
-											class="btn btn-primary text-xs py-1.5 px-3"
-											title="Apply model change"
-										>
-											{#if savingVideoModel}
-												<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
-											{:else}
-												Apply
-											{/if}
-										</button>
-									{/if}
-								</div>
-								<p class="text-[10px] text-muted-foreground mt-1.5">$0.10-$0.40/sec · 4-12 sec videos</p>
-
-								{#if !openaiApiKeyMasked}
-									<p class="text-[10px] text-warning mt-2">
-										Configure OpenAI API key in Voice-to-Text section to enable Sora
-									</p>
-								{/if}
-							</div>
-
-							<!-- OpenAI GPT Image (Image Generation) -->
-							<div class="card p-4">
-								<div class="flex items-center gap-3 mb-4">
-									<div class="w-9 h-9 bg-emerald-500/15 rounded-lg flex items-center justify-center shrink-0">
-										<svg class="w-5 h-5 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
-											<path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.8956zm16.0993 3.8558L12.6 8.3829l2.02-1.1638a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.4066-.6567zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/>
-										</svg>
-									</div>
-									<div class="flex-1 min-w-0">
-										<div class="flex items-center justify-between gap-2">
-											<span class="font-semibold text-foreground text-sm">OpenAI GPT Image</span>
-											{#if imageModels.some(m => m.provider === 'openai-gpt-image' && m.available)}
-												<span class="text-[10px] px-2 py-0.5 rounded-full bg-success/15 text-success font-medium shrink-0">Available</span>
-											{:else}
-												<span class="text-[10px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground font-medium shrink-0">Requires OpenAI Key</span>
-											{/if}
-										</div>
-										<p class="text-xs text-muted-foreground truncate">AI Image Generation (GPT-4o)</p>
-									</div>
-								</div>
-
-								<div class="flex gap-2">
-									<select
-										bind:value={selectedImageModel}
-										class="input text-xs py-1.5 flex-1"
-									>
-										{#each imageModels.filter(m => m.provider === 'openai-gpt-image') as model}
-											<option value={model.id} disabled={!model.available}>
-												{model.name} (${model.price_per_image}/img){!model.available ? ' - API key required' : ''}
-											</option>
-										{/each}
-									</select>
-									{#if selectedImageModel !== imageModel && imageModels.find(m => m.id === selectedImageModel)?.provider === 'openai-gpt-image'}
-										<button
-											on:click={updateImageModel}
-											disabled={updatingImageModel || !imageModels.find(m => m.id === selectedImageModel)?.available}
-											class="btn btn-primary text-xs py-1.5 px-3"
-											title="Apply model change"
-										>
-											{#if updatingImageModel}
-												<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
-											{:else}
-												Apply
-											{/if}
-										</button>
-									{/if}
-								</div>
-								<p class="text-[10px] text-muted-foreground mt-1.5">~$0.07/image · High quality with accurate text</p>
-
-								{#if !openaiApiKeyMasked}
-									<p class="text-[10px] text-warning mt-2">
-										Configure OpenAI API key in Voice-to-Text section to enable GPT Image
-									</p>
-								{/if}
 							</div>
 
 							<!-- Future integrations placeholder - Compact -->
