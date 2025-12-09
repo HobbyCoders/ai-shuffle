@@ -127,7 +127,8 @@
 		name: '',
 		description: '',
 		project_id: '',
-		profile_id: ''
+		profile_id: '',
+		web_login_allowed: true
 	};
 
 	onMount(async () => {
@@ -555,7 +556,8 @@
 			name: '',
 			description: '',
 			project_id: '',
-			profile_id: ''
+			profile_id: '',
+			web_login_allowed: true
 		};
 		editingUser = null;
 		showCreateForm = false;
@@ -573,7 +575,8 @@
 			name: user.name,
 			description: user.description || '',
 			project_id: user.project_id || '',
-			profile_id: user.profile_id || ''
+			profile_id: user.profile_id || '',
+			web_login_allowed: user.web_login_allowed ?? true
 		};
 		showCreateForm = true;
 		newlyCreatedKey = null;
@@ -592,14 +595,16 @@
 					name: formData.name,
 					description: formData.description || null,
 					project_id: formData.project_id || null,
-					profile_id: formData.profile_id || null
+					profile_id: formData.profile_id || null,
+					web_login_allowed: formData.web_login_allowed
 				});
 			} else {
 				const result = await api.post<ApiUserWithKey>('/api-users', {
 					name: formData.name,
 					description: formData.description || null,
 					project_id: formData.project_id || null,
-					profile_id: formData.profile_id || null
+					profile_id: formData.profile_id || null,
+					web_login_allowed: formData.web_login_allowed
 				});
 				newlyCreatedKey = result.api_key;
 			}
@@ -1075,9 +1080,15 @@
 												<div class="flex-1 min-w-0">
 													<div class="flex items-center gap-2 mb-1">
 														<span class="font-medium text-foreground">{user.name}</span>
+														{#if user.username}
+															<span class="text-xs px-2 py-0.5 rounded-full bg-primary/15 text-primary">@{user.username}</span>
+														{/if}
 														<span class="text-xs px-2 py-0.5 rounded-full {user.is_active ? 'bg-success/15 text-success' : 'bg-destructive/15 text-destructive'}">
 															{user.is_active ? 'Active' : 'Inactive'}
 														</span>
+														{#if user.web_login_allowed === false}
+															<span class="text-xs px-2 py-0.5 rounded-full bg-warning/15 text-warning">API Only</span>
+														{/if}
 													</div>
 													{#if user.description}
 														<p class="text-sm text-muted-foreground mb-2">{user.description}</p>
@@ -1646,6 +1657,17 @@
 								{/each}
 							</select>
 							<p class="text-xs text-muted-foreground mt-1">Restrict this user to use a specific agent profile</p>
+						</div>
+
+						<div class="flex items-center gap-3 py-2">
+							<label class="relative inline-flex items-center cursor-pointer">
+								<input type="checkbox" bind:checked={formData.web_login_allowed} class="sr-only peer" />
+								<div class="w-9 h-5 bg-muted rounded-full peer peer-checked:bg-primary transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4"></div>
+							</label>
+							<div>
+								<span class="text-sm font-medium text-foreground">Allow Web Login</span>
+								<p class="text-xs text-muted-foreground">When disabled, user can only access via API key (API-only mode)</p>
+							</div>
 						</div>
 
 						<div class="flex gap-2 pt-2">

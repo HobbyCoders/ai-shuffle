@@ -468,6 +468,13 @@ async def register_api_user(req: Request, register_data: ApiUserRegisterRequest,
             detail="This API key is disabled"
         )
 
+    # Check if web login is allowed for this API user
+    if not api_user.get("web_login_allowed", True):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Web login is not allowed for this API key. Use the API key directly for API access."
+        )
+
     # Hash the password with bcrypt
     password_hash = bcrypt.hashpw(
         register_data.password.encode('utf-8'),
@@ -545,6 +552,13 @@ async def login_api_user(req: Request, login_data: ApiUserLoginRequest, response
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Account is disabled"
+        )
+
+    # Check if web login is allowed
+    if not api_user.get("web_login_allowed", True):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Web login is not allowed for this account. Use your API key directly for API access."
         )
 
     # Verify password

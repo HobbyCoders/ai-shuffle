@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 # Schema version for migrations
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 def get_connection() -> sqlite3.Connection:
@@ -210,6 +210,7 @@ def _create_schema(cursor: sqlite3.Cursor):
             project_id TEXT,
             profile_id TEXT,
             is_active BOOLEAN DEFAULT TRUE,
+            web_login_allowed BOOLEAN DEFAULT TRUE,
             description TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -219,13 +220,17 @@ def _create_schema(cursor: sqlite3.Cursor):
         )
     """)
 
-    # Add username and password_hash columns if they don't exist (migration for existing DBs)
+    # Add columns if they don't exist (migration for existing DBs)
     try:
         cursor.execute("ALTER TABLE api_users ADD COLUMN username TEXT UNIQUE")
     except sqlite3.OperationalError:
         pass  # Column already exists
     try:
         cursor.execute("ALTER TABLE api_users ADD COLUMN password_hash TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        cursor.execute("ALTER TABLE api_users ADD COLUMN web_login_allowed BOOLEAN DEFAULT TRUE")
     except sqlite3.OperationalError:
         pass  # Column already exists
 
@@ -1098,16 +1103,17 @@ def create_api_user(
     profile_id: Optional[str] = None,
     description: Optional[str] = None,
     username: Optional[str] = None,
-    password_hash: Optional[str] = None
+    password_hash: Optional[str] = None,
+    web_login_allowed: bool = True
 ) -> Dict[str, Any]:
     """Create a new API user"""
     now = datetime.utcnow().isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO api_users (id, name, api_key_hash, project_id, profile_id, description, username, password_hash, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (user_id, name, api_key_hash, project_id, profile_id, description, username, password_hash, now, now)
+            """INSERT INTO api_users (id, name, api_key_hash, project_id, profile_id, description, username, password_hash, web_login_allowed, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user_id, name, api_key_hash, project_id, profile_id, description, username, password_hash, web_login_allowed, now, now)
         )
     return get_api_user(user_id)
 
@@ -1118,7 +1124,8 @@ def update_api_user(
     project_id: Optional[str] = None,
     profile_id: Optional[str] = None,
     description: Optional[str] = None,
-    is_active: Optional[bool] = None
+    is_active: Optional[bool] = None,
+    web_login_allowed: Optional[bool] = None
 ) -> Optional[Dict[str, Any]]:
     """Update an API user"""
     existing = get_api_user(user_id)
@@ -1142,6 +1149,9 @@ def update_api_user(
     if is_active is not None:
         updates.append("is_active = ?")
         values.append(is_active)
+    if web_login_allowed is not None:
+        updates.append("web_login_allowed = ?")
+        values.append(web_login_allowed)
 
     if updates:
         updates.append("updated_at = ?")

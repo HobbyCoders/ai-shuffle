@@ -418,6 +418,7 @@ class ApiUserBase(BaseModel):
     description: Optional[str] = None
     project_id: Optional[str] = None
     profile_id: Optional[str] = None
+    web_login_allowed: bool = True  # Whether user can login to web UI
 
 
 class ApiUserCreate(ApiUserBase):
@@ -432,12 +433,14 @@ class ApiUserUpdate(BaseModel):
     project_id: Optional[str] = None
     profile_id: Optional[str] = None
     is_active: Optional[bool] = None
+    web_login_allowed: Optional[bool] = None
 
 
 class ApiUser(ApiUserBase):
     """Full API user response (without sensitive data)"""
     id: str
     is_active: bool = True
+    username: Optional[str] = None  # Set when user registers
     created_at: datetime
     updated_at: datetime
     last_used_at: Optional[datetime] = None
