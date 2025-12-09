@@ -349,18 +349,6 @@ const result = await generateImage({ prompt: 'your description here' });
 if (result.success) { /* result.image_base64 contains the image */ }"""
         })
 
-    # Check voice-to-text (OpenAI Whisper)
-    openai_api_key = database.get_system_setting("openai_api_key")
-
-    if openai_api_key:
-        tools.append({
-            "name": "Voice-to-Text (OpenAI Whisper)",
-            "description": "Transcribe audio files to text",
-            "usage": """import { transcribeAudio } from './tools/voice-to-text/transcribe.js';
-const result = await transcribeAudio({ audioPath: '/path/to/audio.mp3' });
-if (result.success) { console.log(result.text); }"""
-        })
-
     # Add more tools here as they become available
     # e.g., text-to-speech, video generation, etc.
 
