@@ -221,8 +221,10 @@ def _create_schema(cursor: sqlite3.Cursor):
     """)
 
     # Add columns if they don't exist (migration for existing DBs)
+    # Note: SQLite doesn't support ADD COLUMN with UNIQUE constraint, so we add
+    # the column without UNIQUE and rely on the CREATE UNIQUE INDEX below
     try:
-        cursor.execute("ALTER TABLE api_users ADD COLUMN username TEXT UNIQUE")
+        cursor.execute("ALTER TABLE api_users ADD COLUMN username TEXT")
     except sqlite3.OperationalError:
         pass  # Column already exists
     try:
@@ -333,7 +335,7 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_usage_log_created ON usage_log(created_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_users_active ON api_users(is_active)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_users_username ON api_users(username)")
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_api_users_username ON api_users(username) WHERE username IS NOT NULL")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_api_user ON sessions(api_user_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_session ON sync_log(session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_created ON sync_log(created_at)")
