@@ -32,6 +32,8 @@ class IntegrationSettingsResponse(BaseModel):
     image_model: Optional[str] = None  # "gemini-2.0-flash-preview-image-generation" or "gemini-2.0-flash-exp"
     image_api_key_set: bool = False
     image_api_key_masked: str = ""
+    # Video generation settings
+    video_model: Optional[str] = None  # "veo-3.1-fast-generate-preview" or "veo-3.1-generate-preview"
 
 
 class OpenAIKeyRequest(BaseModel):
@@ -119,6 +121,7 @@ async def get_integration_settings(token: str = Depends(require_auth)):
     image_provider = database.get_system_setting("image_provider")
     image_model = database.get_system_setting("image_model")
     image_api_key = database.get_system_setting("image_api_key")
+    video_model = database.get_system_setting("video_model")
 
     return IntegrationSettingsResponse(
         openai_api_key_set=bool(openai_key),
@@ -126,7 +129,8 @@ async def get_integration_settings(token: str = Depends(require_auth)):
         image_provider=image_provider,
         image_model=image_model,
         image_api_key_set=bool(image_api_key),
-        image_api_key_masked=mask_api_key(image_api_key) if image_api_key else ""
+        image_api_key_masked=mask_api_key(image_api_key) if image_api_key else "",
+        video_model=video_model
     )
 
 
@@ -594,6 +598,75 @@ async def generate_image(
             status_code=500,
             detail=f"Image generation failed: {str(e)}"
         )
+
+
+# ============================================================================
+# Video Generation (Veo) Model Selection
+# ============================================================================
+
+# Available Veo models
+VEO_MODELS = {
+    "veo-3.1-fast-generate-preview": {
+        "name": "Veo 3.1 Fast",
+        "description": "Fast video generation - lower latency",
+        "price_per_second": 0.15
+    },
+    "veo-3.1-generate-preview": {
+        "name": "Veo 3.1",
+        "description": "High quality video generation",
+        "price_per_second": 0.40
+    }
+}
+
+
+class VideoModelUpdateRequest(BaseModel):
+    """Request to update the video model"""
+    model: str
+
+
+@router.patch("/integrations/video/model")
+async def update_video_model(
+    request: VideoModelUpdateRequest,
+    token: str = Depends(require_admin)
+):
+    """
+    Update the video generation model (admin only).
+
+    Video generation uses the same API key as image generation (Gemini API).
+    """
+    model = request.model.strip()
+
+    if model not in VEO_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid model. Available models: {', '.join(VEO_MODELS.keys())}"
+        )
+
+    # Save the model
+    database.set_system_setting("video_model", model)
+
+    return {
+        "success": True,
+        "model": model
+    }
+
+
+@router.get("/integrations/video/models")
+async def get_video_models(token: str = Depends(require_auth)):
+    """
+    Get available video generation models.
+    """
+    return {
+        "models": [
+            {
+                "id": model_id,
+                "name": model_info["name"],
+                "description": model_info["description"],
+                "price_per_second": model_info["price_per_second"]
+            }
+            for model_id, model_info in VEO_MODELS.items()
+        ]
+    }
 
 
 # ============================================================================

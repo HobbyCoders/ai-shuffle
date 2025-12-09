@@ -380,6 +380,30 @@ const result = await editImage({{
 console.log(JSON.stringify(result));"""
             })
 
+    # Check video generation (Veo) - only if enabled in profile
+    if ai_tools_config.get("video_generation", False):
+        # Video uses the same API key as images (Gemini API)
+        video_api_key = database.get_system_setting("image_api_key")
+        video_model = database.get_system_setting("video_model")
+
+        if video_api_key:
+            # Use absolute path so scripts can run from any directory (e.g., /tmp/)
+            tool_path = f"{tools_dir}/dist/video-generation/generateVideo.js"
+            tools.append({
+                "name": "Video Generation (Veo)",
+                "description": "Generate AI videos from text prompts (4-8 seconds, 720p/1080p)",
+                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
+import {{ generateVideo }} from '{tool_path}';
+const result = await generateVideo({{
+  prompt: 'your video description here',
+  duration: 8,  // 4, 6, or 8 seconds
+  aspect_ratio: '16:9'  // or '9:16' for vertical
+}});
+// IMPORTANT: Output the result as JSON - the chat UI will display the video
+// Video generation takes 1-6 minutes, please be patient
+console.log(JSON.stringify(result));"""
+            })
+
     # Add more tools here as they become available
     # if ai_tools_config.get("text_to_speech", False):
     #     ...
@@ -409,8 +433,8 @@ def _build_env_with_ai_tools(
     if not ai_tools_config:
         return env
 
-    # Inject Gemini API key for image generation
-    if ai_tools_config.get("image_generation", False):
+    # Inject Gemini API key for image generation/editing
+    if ai_tools_config.get("image_generation", False) or ai_tools_config.get("image_editing", False):
         image_api_key = database.get_system_setting("image_api_key")
         image_model = database.get_system_setting("image_model")
 
@@ -421,6 +445,19 @@ def _build_env_with_ai_tools(
         if image_model:
             env["GEMINI_MODEL"] = image_model
             logger.debug(f"Injected GEMINI_MODEL={image_model} into execution environment")
+
+    # Inject Veo model for video generation (uses same API key as images)
+    if ai_tools_config.get("video_generation", False):
+        video_api_key = database.get_system_setting("image_api_key")
+        video_model = database.get_system_setting("video_model")
+
+        if video_api_key and "GEMINI_API_KEY" not in env:
+            env["GEMINI_API_KEY"] = video_api_key
+            logger.debug("Injected GEMINI_API_KEY for video generation")
+
+        if video_model:
+            env["VEO_MODEL"] = video_model
+            logger.debug(f"Injected VEO_MODEL={video_model} into execution environment")
 
     # Add more tool credentials here as they become available
     # if ai_tools_config.get("text_to_speech", False):

@@ -84,6 +84,23 @@
 	let testingImage = false;
 	let testImageResult: { success: boolean; image_base64?: string; mime_type?: string; error?: string } | null = null;
 
+	// Video generation (Veo) settings
+	interface VideoModel {
+		id: string;
+		name: string;
+		description: string;
+		price_per_second: number;
+	}
+	let videoModels: VideoModel[] = [
+		{ id: 'veo-3.1-fast-generate-preview', name: 'Veo 3.1 Fast', description: 'Fast video generation', price_per_second: 0.15 },
+		{ id: 'veo-3.1-generate-preview', name: 'Veo 3.1', description: 'High quality video generation', price_per_second: 0.40 }
+	];
+	let videoModel = '';
+	let selectedVideoModel = 'veo-3.1-fast-generate-preview';
+	let savingVideoModel = false;
+	let videoConfigSuccess = '';
+	let videoConfigError = '';
+
 	let formData = {
 		name: '',
 		description: '',
@@ -150,12 +167,15 @@
 				image_model: string | null;
 				image_api_key_set: boolean;
 				image_api_key_masked: string;
+				video_model: string | null;
 			}>('/settings/integrations');
 			openaiApiKeyMasked = settings.openai_api_key_masked;
 			imageProvider = settings.image_provider || '';
 			imageModel = settings.image_model || '';
 			imageApiKeyMasked = settings.image_api_key_masked || '';
 			selectedImageModel = settings.image_model || '';
+			videoModel = settings.video_model || '';
+			selectedVideoModel = settings.video_model || 'veo-3.1-fast-generate-preview';
 		} catch (e) {
 			console.error('Failed to load integration settings:', e);
 		}
@@ -316,6 +336,29 @@
 			testImageResult = { success: false, error: e.detail || 'Failed to test image generation' };
 		} finally {
 			testingImage = false;
+		}
+	}
+
+	// Video model selection
+	async function saveVideoModel() {
+		if (!selectedVideoModel || selectedVideoModel === videoModel) {
+			return;
+		}
+
+		savingVideoModel = true;
+		videoConfigError = '';
+		videoConfigSuccess = '';
+
+		try {
+			const result = await api.patch<{success: boolean, model: string}>('/settings/integrations/video/model', {
+				model: selectedVideoModel
+			});
+			videoModel = result.model;
+			videoConfigSuccess = 'Video model updated successfully';
+		} catch (e: any) {
+			videoConfigError = e.detail || 'Failed to update video model';
+		} finally {
+			savingVideoModel = false;
 		}
 	}
 
@@ -1300,6 +1343,77 @@
 
 								<p class="text-[10px] text-muted-foreground mt-2">
 									<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">Get API key</a> · ~$0.039/image
+								</p>
+							</div>
+
+							<!-- Video Generation (Veo) - Model Selection -->
+							<div class="card p-4">
+								<div class="flex items-center gap-3 mb-3">
+									<div class="w-9 h-9 bg-purple-500/15 rounded-lg flex items-center justify-center text-lg shrink-0">
+										🎬
+									</div>
+									<div class="flex-1 min-w-0">
+										<div class="flex items-center justify-between gap-2">
+											<span class="font-semibold text-foreground text-sm">Veo Video Generation</span>
+											{#if imageApiKeyMasked}
+												<span class="text-[10px] px-2 py-0.5 rounded-full bg-success/15 text-success font-medium shrink-0">Ready</span>
+											{:else}
+												<span class="text-[10px] px-2 py-0.5 rounded-full bg-warning/15 text-warning font-medium shrink-0">Needs API Key</span>
+											{/if}
+										</div>
+										<p class="text-xs text-muted-foreground truncate">AI Video Generation (Google Veo)</p>
+									</div>
+								</div>
+
+								{#if videoConfigSuccess}
+									<div class="bg-success/10 border border-success/30 text-success px-2 py-1.5 rounded text-xs flex items-center gap-1.5 mb-3">
+										<span>✓</span>
+										<span>{videoConfigSuccess}</span>
+									</div>
+								{/if}
+
+								{#if videoConfigError}
+									<div class="bg-destructive/10 border border-destructive/30 text-destructive px-2 py-1.5 rounded text-xs mb-3">
+										{videoConfigError}
+									</div>
+								{/if}
+
+								<div class="space-y-3">
+									<!-- Model Selection -->
+									<div class="flex gap-2">
+										<select
+											bind:value={selectedVideoModel}
+											class="input text-xs py-1.5 flex-1"
+										>
+											{#each videoModels as model}
+												<option value={model.id}>
+													{model.name} (${model.price_per_second}/sec)
+												</option>
+											{/each}
+										</select>
+										{#if selectedVideoModel !== videoModel}
+											<button
+												on:click={saveVideoModel}
+												disabled={savingVideoModel}
+												class="btn btn-primary text-xs py-1.5 px-3"
+												title="Apply model change"
+											>
+												{#if savingVideoModel}
+													<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
+												{:else}
+													Apply
+												{/if}
+											</button>
+										{/if}
+									</div>
+
+									{#if !imageApiKeyMasked}
+										<p class="text-[10px] text-warning">Configure Nano Banana API key above to enable video generation (uses same key)</p>
+									{/if}
+								</div>
+
+								<p class="text-[10px] text-muted-foreground mt-2">
+									Uses same API key as Nano Banana · $0.15-$0.40/sec · 4-8 sec videos
 								</p>
 							</div>
 

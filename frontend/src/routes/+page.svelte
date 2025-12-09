@@ -381,7 +381,7 @@
 			id: 'video',
 			name: 'Video Tools',
 			tools: [
-				// Future: { id: 'video_generation', name: 'Video Generation', description: 'Generate AI videos from text prompts', provider: 'Veo' }
+				{ id: 'video_generation', name: 'Video Generation', description: 'Generate AI videos from text prompts (4-8 sec)', provider: 'Veo' }
 			]
 		},
 		{
@@ -1424,6 +1424,7 @@
 		const enabledAITools: string[] = [];
 		if (aiTools.image_generation || sp.enable_ai_tools) enabledAITools.push('image_generation');
 		if (aiTools.image_editing) enabledAITools.push('image_editing');
+		if (aiTools.video_generation) enabledAITools.push('video_generation');
 		// Add more AI tools here as they become available
 
 		// Determine AI tool selection mode
@@ -1511,7 +1512,8 @@
 		if (effectiveAITools.length > 0) {
 			config.ai_tools = {
 				image_generation: effectiveAITools.includes('image_generation'),
-				image_editing: effectiveAITools.includes('image_editing')
+				image_editing: effectiveAITools.includes('image_editing'),
+				video_generation: effectiveAITools.includes('video_generation')
 				// Add more AI tools here as they become available
 			};
 		}

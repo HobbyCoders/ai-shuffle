@@ -80,6 +80,50 @@ console.log(JSON.stringify(result));
 - Modify backgrounds: "Change the background to a beach sunset"
 - Enhance images: "Make the colors more vibrant", "Add dramatic lighting"
 
+---
+
+### Video Generation (Veo)
+
+Generate AI videos using Google Veo models.
+
+**Setup:** Configure your Google AI API key in Settings > Integrations > Nano Banana (same key is used)
+
+```typescript
+// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
+import { generateVideo } from '/workspace/ai-hub/tools/dist/video-generation/generateVideo.js';
+
+// Generate a video
+const result = await generateVideo({
+  prompt: 'A cat playing with a ball of yarn, slow motion',
+  duration: 8,
+  aspect_ratio: '16:9'
+});
+
+// IMPORTANT: Output the result as JSON - the chat UI will display the video
+// Video generation takes 1-6 minutes, please be patient
+console.log(JSON.stringify(result));
+```
+
+**Parameters:**
+- `prompt` (required): Text description of the video to generate (max ~1,024 tokens)
+- `duration` (optional): Duration in seconds - `4`, `6`, or `8` (default: 8)
+- `aspect_ratio` (optional): `16:9` (landscape) or `9:16` (vertical) (default: 16:9)
+- `resolution` (optional): `720p` or `1080p` (1080p only for 8-sec videos) (default: 720p)
+- `negative_prompt` (optional): Elements to exclude from the video
+
+**Returns:**
+- `success`: Whether generation succeeded
+- `video_url`: URL to access the generated video (for display in chat)
+- `file_path`: Local file path where the video was saved
+- `filename`: Filename of the generated video
+- `mime_type`: Video MIME type (usually `video/mp4`)
+- `duration_seconds`: Duration of the video
+- `error`: Error message if failed
+
+**Available Models:**
+- `veo-3.1-fast-generate-preview` - Fast generation, lower latency (~$0.15/sec)
+- `veo-3.1-generate-preview` - High quality generation (~$0.40/sec)
+
 ## Architecture
 
 ```

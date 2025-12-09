@@ -23,6 +23,17 @@
  * });
  * ```
  *
+ * ### Video Generation (Veo)
+ * Generate videos using Google Veo models.
+ * ```typescript
+ * import { generateVideo } from './tools/video-generation/generateVideo.js';
+ * const result = await generateVideo({
+ *   prompt: 'A cat playing with yarn',
+ *   duration: 8,
+ *   aspect_ratio: '16:9'
+ * });
+ * ```
+ *
  * ### Voice-to-Text (OpenAI Whisper)
  * Transcribe audio to text using OpenAI's Whisper API.
  * ```typescript
@@ -51,6 +62,7 @@
 
 // Re-export all tools for convenience
 export * as imageGeneration from './image-generation/index.js';
+export * as videoGeneration from './video-generation/index.js';
 
 // Note: voice-to-text module will be available in a future release
 // export * as voiceToText from './voice-to-text/index.js';

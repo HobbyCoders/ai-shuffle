@@ -27,6 +27,14 @@
       "types": "./dist/image-generation/editImage.d.ts",
       "import": "./dist/image-generation/editImage.js"
     },
+    "./video-generation": {
+      "types": "./dist/video-generation/index.d.ts",
+      "import": "./dist/video-generation/index.js"
+    },
+    "./video-generation/generateVideo": {
+      "types": "./dist/video-generation/generateVideo.d.ts",
+      "import": "./dist/video-generation/generateVideo.js"
+    },
     "./client": {
       "types": "./dist/client.d.ts",
       "import": "./dist/client.js"
