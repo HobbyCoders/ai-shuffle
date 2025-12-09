@@ -81,8 +81,6 @@
 	let imageConfigSuccess = '';
 	let imageConfigError = '';
 	let selectedImageModel = '';
-	let testingImage = false;
-	let testImageResult: { success: boolean; image_base64?: string; mime_type?: string; error?: string } | null = null;
 
 	// Video generation (Veo) settings
 	interface VideoModel {
@@ -265,7 +263,6 @@
 			imageApiKeyMasked = result.masked_key;
 			imageApiKey = '';
 			imageConfigSuccess = 'Image generation configured successfully';
-			testImageResult = null;
 		} catch (e: any) {
 			imageConfigError = e.detail || 'Failed to save configuration';
 		} finally {
@@ -310,32 +307,10 @@
 			imageModel = '';
 			imageApiKeyMasked = '';
 			imageConfigSuccess = 'Image generation configuration removed';
-			testImageResult = null;
 		} catch (e: any) {
 			imageConfigError = e.detail || 'Failed to remove configuration';
 		} finally {
 			savingImageConfig = false;
-		}
-	}
-
-	async function testImageGeneration() {
-		testingImage = true;
-		testImageResult = null;
-		imageConfigError = '';
-
-		try {
-			const result = await api.post<{success: boolean, image_base64?: string, mime_type?: string, error?: string}>('/settings/generate-image', {
-				prompt: 'A cute orange cat sitting on a windowsill, digital art style'
-			});
-			testImageResult = result;
-			if (!result.success) {
-				imageConfigError = result.error || 'Image generation failed';
-			}
-		} catch (e: any) {
-			imageConfigError = e.detail || 'Failed to test image generation';
-			testImageResult = { success: false, error: e.detail || 'Failed to test image generation' };
-		} finally {
-			testingImage = false;
 		}
 	}
 
@@ -1307,38 +1282,6 @@
 											</button>
 										{/if}
 									</div>
-
-									<!-- Test button - compact -->
-									{#if imageApiKeyMasked}
-										<button
-											on:click={testImageGeneration}
-											disabled={testingImage}
-											class="btn btn-secondary text-xs py-1.5 w-full"
-										>
-											{#if testingImage}
-												<span class="animate-spin inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full mr-1.5"></span>
-												Generating...
-											{:else}
-												🎨 Test Generation
-											{/if}
-										</button>
-
-										{#if testImageResult}
-											{#if testImageResult.success && testImageResult.image_base64}
-												<div class="p-2 bg-muted rounded">
-													<img
-														src="data:{testImageResult.mime_type || 'image/png'};base64,{testImageResult.image_base64}"
-														alt="Generated test image"
-														class="rounded max-w-full h-auto max-h-48 mx-auto"
-													/>
-												</div>
-											{:else if testImageResult.error}
-												<div class="p-2 bg-destructive/10 rounded">
-													<p class="text-[10px] text-destructive">{testImageResult.error}</p>
-												</div>
-											{/if}
-										{/if}
-									{/if}
 								</div>
 
 								<p class="text-[10px] text-muted-foreground mt-2">
