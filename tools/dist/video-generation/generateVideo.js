@@ -124,8 +124,8 @@ export async function generateVideo(input) {
         if ('error' in videoBuffer) {
             return { success: false, error: videoBuffer.error };
         }
-        // Save and return
-        return saveVideo(videoBuffer, 'video', duration);
+        // Save and return (include source_video_uri for use with extendVideo)
+        return saveVideo(videoBuffer, 'video', duration, pollResult.videoUri);
     }
     catch (error) {
         return {

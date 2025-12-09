@@ -161,8 +161,8 @@ export async function bridgeFrames(input) {
         if ('error' in videoBuffer) {
             return { success: false, error: videoBuffer.error };
         }
-        // Save and return
-        return saveVideo(videoBuffer, 'bridge', duration);
+        // Save and return (include source_video_uri for use with extendVideo)
+        return saveVideo(videoBuffer, 'bridge', duration, pollResult.videoUri);
     }
     catch (error) {
         return {
