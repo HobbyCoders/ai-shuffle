@@ -337,18 +337,42 @@ def _get_available_tools(ai_tools_config: Optional[Dict[str, Any]] = None) -> li
     # Get the absolute path to tools directory
     tools_dir = settings.effective_tools_dir
 
-    # Check image generation (Nano Banana) - only if enabled in profile
+    # Provider display names for dynamic tool names
+    IMAGE_PROVIDER_NAMES = {
+        "google-gemini": "Nano Banana",
+        "openai-gpt-image": "GPT Image"
+    }
+    VIDEO_PROVIDER_NAMES = {
+        "google-veo": "Veo",
+        "openai-sora": "Sora"
+    }
+
+    # Helper to check if an image provider has API key configured
+    def _has_image_api_key(provider: str) -> bool:
+        if provider == "openai-gpt-image":
+            return bool(database.get_system_setting("openai_api_key"))
+        else:  # google-gemini
+            return bool(database.get_system_setting("image_api_key"))
+
+    # Helper to check if a video provider has API key configured
+    def _has_video_api_key(provider: str) -> bool:
+        if provider == "openai-sora":
+            return bool(database.get_system_setting("openai_api_key"))
+        else:  # google-veo
+            return bool(database.get_system_setting("image_api_key"))
+
+    # Check image generation - only if enabled in profile
     if ai_tools_config.get("image_generation", False):
         image_provider = database.get_system_setting("image_provider")
         image_model = database.get_system_setting("image_model")
-        image_api_key = database.get_system_setting("image_api_key")
 
-        if all([image_provider, image_model, image_api_key]):
+        if image_provider and image_model and _has_image_api_key(image_provider):
             # Use absolute path so scripts can run from any directory (e.g., /tmp/)
             tool_path = f"{tools_dir}/dist/image-generation/generateImage.js"
+            provider_name = IMAGE_PROVIDER_NAMES.get(image_provider, "AI")
             tools.append({
-                "name": "Image Generation (Nano Banana)",
-                "description": "Generate AI images from text prompts",
+                "name": f"Image Generation ({provider_name})",
+                "description": f"Generate AI images from text prompts using {provider_name}",
                 "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
 import {{ generateImage }} from '{tool_path}';
 const result = await generateImage({{ prompt: 'your description here' }});
@@ -358,18 +382,18 @@ console.log(JSON.stringify(result));
 // DISPLAY: After success, show image as markdown: ![Description](result.image_url)"""
             })
 
-    # Check image editing (Nano Banana) - only if enabled in profile
+    # Check image editing - only if enabled in profile
     if ai_tools_config.get("image_editing", False):
         image_provider = database.get_system_setting("image_provider")
         image_model = database.get_system_setting("image_model")
-        image_api_key = database.get_system_setting("image_api_key")
 
-        if all([image_provider, image_model, image_api_key]):
+        if image_provider and image_model and _has_image_api_key(image_provider):
             # Use absolute path so scripts can run from any directory (e.g., /tmp/)
             tool_path = f"{tools_dir}/dist/image-generation/editImage.js"
+            provider_name = IMAGE_PROVIDER_NAMES.get(image_provider, "AI")
             tools.append({
-                "name": "Image Editing (Nano Banana)",
-                "description": "Edit existing images using AI - add elements, remove objects, change styles, and more",
+                "name": f"Image Editing ({provider_name})",
+                "description": f"Edit existing images using {provider_name} - add elements, remove objects, change styles, and more",
                 "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
 import {{ editImage }} from '{tool_path}';
 const result = await editImage({{
@@ -382,21 +406,27 @@ console.log(JSON.stringify(result));
 // DISPLAY: After success, show image as markdown: ![Description](result.image_url)"""
             })
 
-    # Check video generation (Veo) - only if enabled in profile
+    # Check video generation - only if enabled in profile
     if ai_tools_config.get("video_generation", False):
-        # Video uses the same API key as images (Gemini API)
-        video_api_key = database.get_system_setting("image_api_key")
+        video_provider = database.get_system_setting("video_provider")
+        video_model = database.get_system_setting("video_model")
 
-        if video_api_key:
+        if video_provider and video_model and _has_video_api_key(video_provider):
             tool_path = f"{tools_dir}/dist/video-generation/generateVideo.js"
+            provider_name = VIDEO_PROVIDER_NAMES.get(video_provider, "AI")
+            # Adjust duration info based on provider
+            if video_provider == "openai-sora":
+                duration_info = "4, 8, or 12 seconds"
+            else:
+                duration_info = "4, 6, or 8 seconds"
             tools.append({
-                "name": "Video Generation (Veo)",
-                "description": "Generate AI videos from text prompts (4-8 seconds, 720p/1080p)",
+                "name": f"Video Generation ({provider_name})",
+                "description": f"Generate AI videos from text prompts using {provider_name} ({duration_info}, 720p/1080p)",
                 "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
 import {{ generateVideo }} from '{tool_path}';
 const result = await generateVideo({{
   prompt: 'your video description here',
-  duration: 8,  // 4, 6, or 8 seconds
+  duration: 8,  // {duration_info}
   aspect_ratio: '16:9'  // or '9:16' for vertical
 }});
 // IMPORTANT: Output the result as JSON - the chat UI will display the video
@@ -405,7 +435,8 @@ console.log(JSON.stringify(result));
 // DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
             })
 
-    # Check reference-based image generation (Nano Banana) - for character/style consistency
+    # Check reference-based image generation - for character/style consistency
+    # Note: This feature is currently only supported by Nano Banana (Google Gemini)
     if ai_tools_config.get("image_reference", False):
         image_api_key = database.get_system_setting("image_api_key")
 
@@ -413,7 +444,7 @@ console.log(JSON.stringify(result));
             tool_path = f"{tools_dir}/dist/image-generation/generateWithReference.js"
             tools.append({
                 "name": "Reference-Based Image Generation (Nano Banana)",
-                "description": "Generate images with character/style consistency using reference images (up to 14)",
+                "description": "Generate images with character/style consistency using reference images (up to 14). Note: Only available with Nano Banana provider.",
                 "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
 import {{ generateWithReference }} from '{tool_path}';
 const result = await generateWithReference({{
@@ -425,15 +456,17 @@ console.log(JSON.stringify(result));
 // DISPLAY: After success, show image as markdown: ![Description](result.image_url)"""
             })
 
-    # Check image-to-video (Veo) - animate still images
+    # Check image-to-video - animate still images
     if ai_tools_config.get("image_to_video", False):
-        video_api_key = database.get_system_setting("image_api_key")
+        video_provider = database.get_system_setting("video_provider")
+        video_model = database.get_system_setting("video_model")
 
-        if video_api_key:
+        if video_provider and video_model and _has_video_api_key(video_provider):
             tool_path = f"{tools_dir}/dist/video-generation/imageToVideo.js"
+            provider_name = VIDEO_PROVIDER_NAMES.get(video_provider, "AI")
             tools.append({
-                "name": "Image to Video (Veo)",
-                "description": "Animate a still image into a video",
+                "name": f"Image to Video ({provider_name})",
+                "description": f"Animate a still image into a video using {provider_name}",
                 "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
 import {{ imageToVideo }} from '{tool_path}';
 const result = await imageToVideo({{
@@ -445,7 +478,8 @@ console.log(JSON.stringify(result));
 // DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
             })
 
-    # Check video extension (Veo) - extend existing videos
+    # Check video extension - extend existing videos
+    # Note: This feature is currently only supported by Veo (Google)
     if ai_tools_config.get("video_extend", False):
         video_api_key = database.get_system_setting("image_api_key")
 
@@ -465,7 +499,8 @@ console.log(JSON.stringify(result));
 // DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
             })
 
-    # Check frame bridging (Veo) - smooth transitions between images
+    # Check frame bridging - smooth transitions between images
+    # Note: This feature is currently only supported by Veo (Google)
     if ai_tools_config.get("video_bridge", False):
         video_api_key = database.get_system_setting("image_api_key")
 
@@ -473,7 +508,7 @@ console.log(JSON.stringify(result));
             tool_path = f"{tools_dir}/dist/video-generation/bridgeFrames.js"
             tools.append({
                 "name": "Frame Bridging (Veo)",
-                "description": "Generate a smooth video transition between two images (first and last frame)",
+                "description": "Generate a smooth video transition between two images (first and last frame). Note: Only available with Veo provider.",
                 "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
 import {{ bridgeFrames }} from '{tool_path}';
 const result = await bridgeFrames({{
