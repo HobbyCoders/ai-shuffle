@@ -193,7 +193,7 @@ export async function imageToVideo(input: ImageToVideoInput): Promise<ImageToVid
           }],
           parameters: {
             aspectRatio: aspectRatio,
-            durationSeconds: String(duration),
+            durationSeconds: duration,
             resolution: resolution,
             ...(input.negative_prompt && { negativePrompt: input.negative_prompt }),
             ...(input.seed !== undefined && { seed: input.seed }),
