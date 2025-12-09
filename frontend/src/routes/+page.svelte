@@ -307,6 +307,7 @@
 	// Accordion states for profile form sections
 	let expandedSections: Record<string, boolean> = {
 		toolConfig: false,
+		aiTools: false,
 		behavior: false,
 		enabledAgents: false,
 		systemPrompt: false,
@@ -4020,12 +4021,39 @@
 										</div>
 									{/if}
 
-									<!-- AI Tools Section -->
-									<div class="border-t border-border pt-3 mt-3">
-										<label class="block text-xs text-muted-foreground mb-2">AI Tools</label>
-										<p class="text-xs text-muted-foreground mb-2">Enable AI-powered tools. Configure API keys in Settings → Integrations.</p>
-										<div class="space-y-2">
-											<label class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted/50 cursor-pointer border border-border">
+								</div>
+							{/if}
+						</div>
+
+						<!-- AI Tools Accordion -->
+						<div class="border border-border rounded-lg overflow-hidden">
+							<button
+								type="button"
+								on:click={() => toggleSection('aiTools')}
+								class="w-full px-3 py-2 bg-accent flex items-center justify-between text-sm text-foreground hover:bg-muted"
+							>
+								<div class="flex items-center gap-2">
+									<span>AI Tools</span>
+									{#if profileForm.ai_tools_image_generation || profileForm.ai_tools_image_editing}
+										<span class="text-xs px-1.5 py-0.5 bg-primary/20 text-primary rounded">{[profileForm.ai_tools_image_generation, profileForm.ai_tools_image_editing].filter(Boolean).length}</span>
+									{/if}
+								</div>
+								<svg class="w-4 h-4 transition-transform {expandedSections.aiTools ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+								</svg>
+							</button>
+							{#if expandedSections.aiTools}
+								<div class="p-3 space-y-3 bg-card">
+									<p class="text-xs text-muted-foreground">Enable AI-powered tools for this profile. Configure API keys in Settings → Integrations.</p>
+
+									<!-- Nano Banana (Image) Category -->
+									<div class="border border-border rounded-lg overflow-hidden">
+										<div class="w-full px-3 py-2 bg-muted/50 flex items-center gap-2 text-sm text-foreground">
+											<span class="flex-1 font-medium">Nano Banana</span>
+											<span class="text-xs text-muted-foreground">(Google Gemini)</span>
+										</div>
+										<div class="p-2 space-y-1 bg-card">
+											<label class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted/50 cursor-pointer">
 												<input
 													type="checkbox"
 													bind:checked={profileForm.ai_tools_image_generation}
@@ -4033,10 +4061,10 @@
 												/>
 												<div class="flex-1">
 													<span class="text-sm text-foreground">Image Generation</span>
-													<span class="text-xs text-muted-foreground ml-1">(Nano Banana)</span>
+													<p class="text-xs text-muted-foreground">Generate AI images from text prompts</p>
 												</div>
 											</label>
-											<label class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted/50 cursor-pointer border border-border">
+											<label class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted/50 cursor-pointer">
 												<input
 													type="checkbox"
 													bind:checked={profileForm.ai_tools_image_editing}
@@ -4044,12 +4072,29 @@
 												/>
 												<div class="flex-1">
 													<span class="text-sm text-foreground">Image Editing</span>
-													<span class="text-xs text-muted-foreground ml-1">(Nano Banana)</span>
+													<p class="text-xs text-muted-foreground">Edit existing images - add elements, remove objects, change styles</p>
 												</div>
 											</label>
-											<!-- Add more AI tools here as they become available -->
 										</div>
 									</div>
+
+									<!-- Future: More AI tool categories -->
+									<!--
+									<div class="border border-border rounded-lg overflow-hidden">
+										<div class="w-full px-3 py-2 bg-muted/50 flex items-center gap-2 text-sm text-foreground">
+											<span class="flex-1 font-medium">Audio Tools</span>
+										</div>
+										<div class="p-2 space-y-1 bg-card">
+											<label class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted/50 cursor-pointer">
+												<input type="checkbox" class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring" disabled />
+												<div class="flex-1">
+													<span class="text-sm text-muted-foreground">Text to Speech</span>
+													<p class="text-xs text-muted-foreground">Coming soon</p>
+												</div>
+											</label>
+										</div>
+									</div>
+									-->
 								</div>
 							{/if}
 						</div>
