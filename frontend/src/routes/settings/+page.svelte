@@ -1170,6 +1170,144 @@
 								<p class="text-sm text-muted-foreground">Connect external services to extend AI Hub.</p>
 							</div>
 
+							<!-- Default Models Selection Card -->
+							{#if (imageModels.filter(m => m.available).length > 0) || (videoModels.filter(m => m.available).length > 0)}
+								<div class="card p-4 border-primary/30 bg-primary/5">
+									<div class="flex items-center gap-3 mb-4">
+										<div class="w-9 h-9 bg-primary/15 rounded-lg flex items-center justify-center shrink-0">
+											<svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+											</svg>
+										</div>
+										<div class="flex-1 min-w-0">
+											<span class="font-semibold text-foreground text-sm">Default Models</span>
+											<p class="text-xs text-muted-foreground">Select which models to use by default. You can override these in your messages.</p>
+										</div>
+									</div>
+
+									<div class="space-y-4">
+										<!-- Default Image Model -->
+										{#if imageModels.filter(m => m.available).length > 0}
+											<div>
+												<label for="default-image-model" class="block text-xs font-medium text-foreground mb-1.5 flex items-center gap-2">
+													<span class="text-base">🖼️</span>
+													Image Generation
+												</label>
+												<div class="flex gap-2">
+													<select
+														id="default-image-model"
+														bind:value={selectedImageModel}
+														class="input text-xs py-1.5 flex-1"
+													>
+														<optgroup label="Google Gemini (Nano Banana)">
+															{#each imageModels.filter(m => m.provider === 'google-gemini') as model}
+																<option value={model.id} disabled={!model.available}>
+																	{model.name} (${model.price_per_image}/img){!model.available ? ' - needs API key' : ''}
+																</option>
+															{/each}
+														</optgroup>
+														<optgroup label="OpenAI GPT Image">
+															{#each imageModels.filter(m => m.provider === 'openai-gpt-image') as model}
+																<option value={model.id} disabled={!model.available}>
+																	{model.name} (${model.price_per_image}/img){!model.available ? ' - needs API key' : ''}
+																</option>
+															{/each}
+														</optgroup>
+													</select>
+													{#if selectedImageModel !== imageModel}
+														<button
+															on:click={updateImageModel}
+															disabled={updatingImageModel || !imageModels.find(m => m.id === selectedImageModel)?.available}
+															class="btn btn-primary text-xs py-1.5 px-3"
+															title="Save as default"
+														>
+															{#if updatingImageModel}
+																<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
+															{:else}
+																Save
+															{/if}
+														</button>
+													{/if}
+												</div>
+												{#if imageModel}
+													{@const currentImageModel = imageModels.find(m => m.id === imageModel)}
+													{#if currentImageModel}
+														<p class="text-[10px] text-muted-foreground mt-1">
+															Current: {currentImageModel.name} via {currentImageModel.provider_name}
+														</p>
+													{/if}
+												{/if}
+											</div>
+										{/if}
+
+										<!-- Default Video Model -->
+										{#if videoModels.filter(m => m.available).length > 0}
+											<div>
+												<label for="default-video-model" class="block text-xs font-medium text-foreground mb-1.5 flex items-center gap-2">
+													<span class="text-base">🎬</span>
+													Video Generation
+												</label>
+												<div class="flex gap-2">
+													<select
+														id="default-video-model"
+														bind:value={selectedVideoModel}
+														class="input text-xs py-1.5 flex-1"
+													>
+														<optgroup label="Google Veo">
+															{#each videoModels.filter(m => m.provider === 'google-veo') as model}
+																<option value={model.id} disabled={!model.available}>
+																	{model.name} (${model.price_per_second}/sec){!model.available ? ' - needs API key' : ''}
+																</option>
+															{/each}
+														</optgroup>
+														<optgroup label="OpenAI Sora">
+															{#each videoModels.filter(m => m.provider === 'openai-sora') as model}
+																<option value={model.id} disabled={!model.available}>
+																	{model.name} (${model.price_per_second}/sec){!model.available ? ' - needs API key' : ''}
+																</option>
+															{/each}
+														</optgroup>
+													</select>
+													{#if selectedVideoModel !== videoModel}
+														<button
+															on:click={saveVideoModel}
+															disabled={savingVideoModel || !videoModels.find(m => m.id === selectedVideoModel)?.available}
+															class="btn btn-primary text-xs py-1.5 px-3"
+															title="Save as default"
+														>
+															{#if savingVideoModel}
+																<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
+															{:else}
+																Save
+															{/if}
+														</button>
+													{/if}
+												</div>
+												{#if videoModel}
+													{@const currentVideoModel = videoModels.find(m => m.id === videoModel)}
+													{#if currentVideoModel}
+														<p class="text-[10px] text-muted-foreground mt-1">
+															Current: {currentVideoModel.name} via {currentVideoModel.provider_name}
+														</p>
+													{/if}
+												{/if}
+											</div>
+										{/if}
+									</div>
+
+									{#if imageConfigSuccess || videoConfigSuccess}
+										<div class="bg-success/10 border border-success/30 text-success px-2 py-1.5 rounded text-xs flex items-center gap-1.5 mt-3">
+											<span>✓</span>
+											<span>{imageConfigSuccess || videoConfigSuccess}</span>
+										</div>
+									{/if}
+
+									<p class="text-[10px] text-muted-foreground mt-3 border-t border-border/50 pt-3">
+										💡 <strong>Tip:</strong> You can override these defaults by specifying a model in your message, e.g., "generate an image using GPT Image 1" or "use Sora 2 Pro for this video".
+									</p>
+								</div>
+							{/if}
+
 							<!-- OpenAI Models Group -->
 							<div class="card p-4">
 								<div class="flex items-center gap-3 mb-4">
