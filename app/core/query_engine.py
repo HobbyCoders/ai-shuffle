@@ -352,7 +352,9 @@ def _get_available_tools(ai_tools_config: Optional[Dict[str, Any]] = None) -> li
                 "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
 import {{ generateImage }} from '{tool_path}';
 const result = await generateImage({{ prompt: 'your description here' }});
-if (result.success) {{ /* result.image_base64 contains the image */ }}"""
+// IMPORTANT: Output the result as JSON - the chat UI will display the image with download button
+// Do NOT save to file or try to read the base64 - just output the JSON result
+console.log(JSON.stringify(result));"""
             })
 
     # Add more tools here as they become available
