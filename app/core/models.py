@@ -69,6 +69,7 @@ class SystemPromptConfig(BaseModel):
     content: Optional[str] = None
     append: Optional[str] = None
     inject_env_details: bool = False  # Inject environment info (working dir, platform, date, etc.)
+    enable_ai_tools: bool = False  # Enable AI tools (image generation, etc.) when configured in Settings
 
 
 class ProfileConfig(BaseModel):

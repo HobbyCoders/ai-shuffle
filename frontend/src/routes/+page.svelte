@@ -338,6 +338,7 @@
 		system_prompt_append: '',
 		system_prompt_content: '',
 		system_prompt_inject_env: false,
+		system_prompt_enable_ai_tools: false,
 		setting_sources: [] as string[],
 		cwd: '',
 		add_dirs: '',
@@ -898,7 +899,111 @@
 	}
 
 	function renderMarkdown(content: string): string {
-		return marked(content, { breaks: true }) as string;
+		// Process base64 images with download capability
+		// Match data URLs in image tags or standalone base64 image data
+		const base64ImagePattern = /!\[([^\]]*)\]\((data:image\/[^;]+;base64,[^)]+)\)/g;
+
+		// Replace base64 image markdown with custom HTML that includes download button
+		let processedContent = content.replace(base64ImagePattern, (match, alt, dataUrl) => {
+			const downloadId = `img-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+			return `<div class="generated-image-container my-4">
+				<img src="${dataUrl}" alt="${alt || 'Generated image'}" class="max-w-full rounded-lg shadow-md border border-border" />
+				<div class="flex gap-2 mt-2">
+					<button onclick="(function(){
+						const link = document.createElement('a');
+						link.href = '${dataUrl}';
+						link.download = '${alt || 'generated-image'}.png';
+						link.click();
+					})()" class="text-xs px-3 py-1 bg-primary text-primary-foreground rounded hover:opacity-90 flex items-center gap-1">
+						<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+						</svg>
+						Download
+					</button>
+				</div>
+			</div>`;
+		});
+
+		// Also detect JSON tool results with image_base64 field
+		const jsonImagePattern = /"image_base64"\s*:\s*"([A-Za-z0-9+/=]+)"/g;
+		processedContent = processedContent.replace(jsonImagePattern, (match, base64Data) => {
+			// Only replace if it looks like substantial base64 data (not a short string)
+			if (base64Data.length > 100) {
+				return `<div class="generated-image-container my-4">
+					<img src="data:image/png;base64,${base64Data}" alt="Generated image" class="max-w-full rounded-lg shadow-md border border-border" />
+					<div class="flex gap-2 mt-2">
+						<button onclick="(function(){
+							const link = document.createElement('a');
+							link.href = 'data:image/png;base64,${base64Data}';
+							link.download = 'generated-image.png';
+							link.click();
+						})()" class="text-xs px-3 py-1 bg-primary text-primary-foreground rounded hover:opacity-90 flex items-center gap-1">
+							<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+							</svg>
+							Download
+						</button>
+					</div>
+				</div>`;
+			}
+			return match;
+		});
+
+		return marked(processedContent, { breaks: true }) as string;
+	}
+
+	// Render tool result content, detecting and displaying images
+	function renderToolResult(content: string): string {
+		try {
+			// Try to parse as JSON to detect image data
+			const data = JSON.parse(content);
+			if (data.success && data.image_base64 && data.mime_type) {
+				// This is an image generation result!
+				const mimeType = data.mime_type || 'image/png';
+				const dataUrl = `data:${mimeType};base64,${data.image_base64}`;
+				return `<div class="generated-image-result">
+					<div class="mb-2 text-xs text-green-500">✓ Image generated successfully</div>
+					<img src="${dataUrl}" alt="Generated image" class="max-w-full max-h-96 rounded-lg shadow-md border border-border" />
+					<div class="flex gap-2 mt-3">
+						<button onclick="(function(){
+							const link = document.createElement('a');
+							link.href = '${dataUrl}';
+							link.download = 'generated-image.png';
+							link.click();
+						})()" class="text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 flex items-center gap-1.5 font-medium">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+							</svg>
+							Download Image
+						</button>
+						<button onclick="(function(){
+							navigator.clipboard.writeText('${dataUrl}');
+							this.textContent = 'Copied!';
+							setTimeout(() => this.textContent = 'Copy Data URL', 2000);
+						}).call(this)" class="text-xs px-3 py-1.5 bg-muted text-foreground rounded-md hover:bg-accent flex items-center gap-1.5">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+							</svg>
+							Copy Data URL
+						</button>
+					</div>
+				</div>`;
+			}
+		} catch {
+			// Not JSON, continue with default rendering
+		}
+		// Return empty to use default <pre> rendering
+		return '';
+	}
+
+	// Check if tool result contains an image
+	function toolResultHasImage(content: string): boolean {
+		try {
+			const data = JSON.parse(content);
+			return data.success && data.image_base64 && data.mime_type;
+		} catch {
+			return false;
+		}
 	}
 
 	// Copy text to clipboard with feedback
@@ -1027,6 +1132,7 @@
 			system_prompt_append: '',
 			system_prompt_content: '',
 			system_prompt_inject_env: false,
+			system_prompt_enable_ai_tools: false,
 			setting_sources: [],
 			cwd: '',
 			add_dirs: '',
@@ -1077,6 +1183,7 @@
 			system_prompt_append: sp.append || '',
 			system_prompt_content: sp.content || '',
 			system_prompt_inject_env: sp.inject_env_details || false,
+			system_prompt_enable_ai_tools: sp.enable_ai_tools || false,
 			setting_sources: config.setting_sources || [],
 			cwd: config.cwd || '',
 			add_dirs: (config.add_dirs || []).join(', '),
@@ -1122,7 +1229,8 @@
 		if (profileForm.system_prompt_type === 'preset') {
 			config.system_prompt = {
 				type: 'preset',
-				preset: profileForm.system_prompt_preset
+				preset: profileForm.system_prompt_preset,
+				enable_ai_tools: profileForm.system_prompt_enable_ai_tools
 			};
 			if (profileForm.system_prompt_append.trim()) {
 				config.system_prompt.append = profileForm.system_prompt_append;
@@ -1132,7 +1240,8 @@
 			config.system_prompt = {
 				type: 'custom',
 				content: profileForm.system_prompt_content,
-				inject_env_details: profileForm.system_prompt_inject_env
+				inject_env_details: profileForm.system_prompt_inject_env,
+				enable_ai_tools: profileForm.system_prompt_enable_ai_tools
 			};
 		}
 
@@ -3035,7 +3144,11 @@
 												{#if message.toolResult}
 													<div class="px-4 py-3">
 														<div class="text-xs text-muted-foreground mb-1 font-medium">Result</div>
-														<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.toolResult}</pre>
+														{#if toolResultHasImage(message.toolResult)}
+															{@html renderToolResult(message.toolResult)}
+														{:else}
+															<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.toolResult}</pre>
+														{/if}
 													</div>
 												{/if}
 											</div>
@@ -3069,7 +3182,11 @@
 												</svg>
 											</summary>
 											<div class="px-4 py-3 bg-card border-t border-border">
-												<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.content}</pre>
+												{#if toolResultHasImage(message.content)}
+													{@html renderToolResult(message.content)}
+												{:else}
+													<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.content}</pre>
+												{/if}
 											</div>
 										</details>
 									</div>
@@ -3824,6 +3941,15 @@
 										</label>
 										<p class="text-xs text-muted-foreground">Adds working directory, platform, git status, and today's date to the system prompt.</p>
 									{/if}
+
+									<!-- AI Tools toggle - shown for both preset and custom -->
+									<div class="pt-3 border-t border-border">
+										<label class="flex items-center gap-2 cursor-pointer">
+											<input type="checkbox" bind:checked={profileForm.system_prompt_enable_ai_tools} class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring" />
+											<span class="text-sm text-foreground">Enable AI Tools</span>
+										</label>
+										<p class="text-xs text-muted-foreground mt-1">Allow Claude to use AI tools like image generation (Nano Banana). Configure tools in Settings → Integrations.</p>
+									</div>
 								</div>
 							{/if}
 						</div>
