@@ -24,6 +24,11 @@ const result = await generateImage({
 console.log(JSON.stringify(result));
 ```
 
+**Displaying in Chat:** Images use base64 data URLs. The chat UI automatically renders base64 image markdown. After generation succeeds, display using markdown image syntax with the base64 data:
+```
+![Description](data:image/png;base64,...)
+```
+
 **Parameters:**
 - `prompt` (required): Text description of the image to generate
 - `aspect_ratio` (optional): Image dimensions - `1:1`, `16:9`, `9:16`, `4:3`, `3:4`
@@ -99,10 +104,18 @@ const result = await generateVideo({
   aspect_ratio: '16:9'
 });
 
-// IMPORTANT: Output the result as JSON - the chat UI will display the video
+// IMPORTANT: Output the result as JSON
 // Video generation takes 1-6 minutes, please be patient
 console.log(JSON.stringify(result));
 ```
+
+**Displaying in Chat:** Videos are displayed via markdown links to the API endpoint. After generation succeeds, display the video using a markdown link with the `video_url` from the result:
+```
+[Video Description](result.video_url)
+```
+Example: `[My Generated Video](/api/generated-videos/by-path?path=...)`
+
+The chat UI automatically converts these links into embedded video players with download buttons.
 
 **Parameters:**
 - `prompt` (required): Text description of the video to generate (max ~1,024 tokens)

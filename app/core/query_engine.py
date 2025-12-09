@@ -399,7 +399,8 @@ const result = await generateVideo({{
 }});
 // IMPORTANT: Output the result as JSON - the chat UI will display the video
 // Video generation takes 1-6 minutes, please be patient
-console.log(JSON.stringify(result));"""
+console.log(JSON.stringify(result));
+// DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
             })
 
     # Check reference-based image generation (Nano Banana) - for character/style consistency
@@ -437,7 +438,8 @@ const result = await imageToVideo({{
   prompt: 'The character starts walking forward'
 }});
 // IMPORTANT: Output the result as JSON - the chat UI will display the video
-console.log(JSON.stringify(result));"""
+console.log(JSON.stringify(result));
+// DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
             })
 
     # Check video extension (Veo) - extend existing videos
@@ -456,7 +458,8 @@ const result = await extendVideo({{
   prompt: 'Continue the action smoothly'  // Optional
 }});
 // IMPORTANT: Output the result as JSON - the chat UI will display the video
-console.log(JSON.stringify(result));"""
+console.log(JSON.stringify(result));
+// DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
             })
 
     # Check frame bridging (Veo) - smooth transitions between images
@@ -476,7 +479,8 @@ const result = await bridgeFrames({{
   prompt: 'Smooth camera pan between scenes'  // Optional
 }});
 // IMPORTANT: Output the result as JSON - the chat UI will display the video
-console.log(JSON.stringify(result));"""
+console.log(JSON.stringify(result));
+// DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
             })
 
     return tools
@@ -500,7 +504,22 @@ def _build_ai_tools_section(ai_tools_config: Optional[Dict[str, Any]] = None, pr
     tools_section = f"{prefix}<ai-tools>\nThe following AI tools are available via code execution:\n"
     for tool in available_tools:
         tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
-    tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\nIMPORTANT: Always delete the .mjs file after execution to keep the workspace clean.\n</ai-tools>"
+    tools_section += """
+To use these tools, write and execute TypeScript code that imports and calls them.
+IMPORTANT: Always delete the .mjs file after execution to keep the workspace clean.
+
+## Displaying Generated Content
+
+After successfully generating content, you MUST display it properly in chat:
+
+**Videos:** Display as a markdown link using the `video_url` from the result:
+```
+[Video Description](/api/generated-videos/by-path?path=...)
+```
+The chat UI will render this as an embedded video player with download button.
+
+**Images:** The chat UI automatically renders base64 image data from the JSON output.
+</ai-tools>"""
 
     return tools_section
 
