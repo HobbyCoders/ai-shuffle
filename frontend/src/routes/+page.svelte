@@ -950,14 +950,46 @@
 			return match;
 		});
 
-		// Remove markdown images that reference our generated-images API
-		// These are already displayed via the tool result, so we don't want duplicates
-		const generatedImagePattern = /!\[[^\]]*\]\(\/api\/generated-images\/[^)]+\)/g;
-		processedContent = processedContent.replace(generatedImagePattern, '');
-
-		// Also remove any standalone generated-images URLs that might be in the content
-		const standaloneUrlPattern = /(?:^|\s)\/api\/generated-images\/by-path\?path=[^\s<]+/g;
-		processedContent = processedContent.replace(standaloneUrlPattern, '');
+		// Enhance generated-images markdown with Download/Copy buttons
+		const generatedImagePattern = /!\[([^\]]*)\]\((\/api\/generated-images\/[^)]+)\)/g;
+		processedContent = processedContent.replace(generatedImagePattern, (match, alt, imageUrl) => {
+			const filename = alt || 'generated-image.png';
+			return `<div class="generated-image-container my-4">
+				<img src="${imageUrl}" alt="${alt || 'Generated image'}" class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border" />
+				<div class="flex items-center gap-2 mt-2">
+					<a href="${imageUrl}" download="${filename}" class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors no-underline" title="Download image">
+						<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+						</svg>
+						<span>Download</span>
+					</a>
+					<button onclick="(function(btn){
+						navigator.clipboard.writeText(window.location.origin + '${imageUrl}');
+						var iconSpan = btn.querySelector('.copy-icon');
+						var checkSpan = btn.querySelector('.check-icon');
+						var textSpan = btn.querySelector('.btn-text');
+						iconSpan.style.display = 'none';
+						checkSpan.style.display = 'block';
+						textSpan.textContent = 'Copied';
+						textSpan.classList.add('text-green-500');
+						setTimeout(function() {
+							iconSpan.style.display = 'block';
+							checkSpan.style.display = 'none';
+							textSpan.textContent = 'Copy URL';
+							textSpan.classList.remove('text-green-500');
+						}, 2000);
+					})(this)" class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors" title="Copy image URL">
+						<svg class="w-3.5 h-3.5 copy-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+						</svg>
+						<svg class="w-3.5 h-3.5 check-icon text-green-500" style="display:none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+						</svg>
+						<span class="btn-text">Copy URL</span>
+					</button>
+				</div>
+			</div>`;
+		});
 
 		return marked(processedContent, { breaks: true }) as string;
 	}
@@ -3299,10 +3331,6 @@
 												{/if}
 											</div>
 										</details>
-										<!-- Display generated image outside the collapsible tool group -->
-										{#if message.toolResult && toolResultHasImage(message.toolResult)}
-											{@html renderStandaloneImage(message.toolResult)}
-										{/if}
 									</div>
 								</div>
 							{:else if message.type === 'tool_result'}
@@ -3340,10 +3368,6 @@
 												{/if}
 											</div>
 										</details>
-										<!-- Display generated image outside the collapsible tool group -->
-										{#if toolResultHasImage(message.content)}
-											{@html renderStandaloneImage(message.content)}
-										{/if}
 									</div>
 								</div>
 							{:else if message.type === 'system'}
