@@ -65,6 +65,10 @@ RUN mkdir -p /app/app/static && cp -r build/* /app/app/static/
 
 WORKDIR /app
 
+# Copy AI tools to /opt/ai-tools (accessible by Claude agent)
+COPY tools/ /opt/ai-tools/
+RUN chown -R appuser:appuser /opt/ai-tools
+
 # Copy entrypoint script
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
