@@ -488,7 +488,7 @@ def generate_environment_details(working_dir: str, ai_tools_config: Optional[Dic
         tools_section = "\n\n<ai-tools>\nThe following AI tools are available via code execution:\n"
         for tool in available_tools:
             tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
-        tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\n</ai-tools>"
+        tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\nIMPORTANT: Always delete the .mjs file after execution to keep the workspace clean.\n</ai-tools>"
 
     return f"""Here is useful information about the environment you are running in:
 <env>
@@ -548,7 +548,7 @@ def build_options_from_profile(
             tools_section = "\n\n<ai-tools>\nThe following AI tools are available via code execution:\n"
             for tool in available_tools:
                 tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
-            tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\n</ai-tools>"
+            tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\nIMPORTANT: Always delete the .mjs file after execution to keep the workspace clean.\n</ai-tools>"
             final_system_prompt += tools_section
 
         if override_append:
@@ -575,7 +575,7 @@ def build_options_from_profile(
                     tools_section = "<ai-tools>\nThe following AI tools are available via code execution:\n"
                     for tool in available_tools:
                         tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
-                    tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\n</ai-tools>"
+                    tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\nIMPORTANT: Always delete the .mjs file after execution to keep the workspace clean.\n</ai-tools>"
                     prompt_parts.append(tools_section)
 
             # Add custom content if provided
@@ -602,7 +602,7 @@ def build_options_from_profile(
                 tools_section = "\n\n<ai-tools>\nThe following AI tools are available via code execution:\n"
                 for tool in available_tools:
                     tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
-                tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\n</ai-tools>"
+                tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\nIMPORTANT: Always delete the .mjs file after execution to keep the workspace clean.\n</ai-tools>"
                 full_append += tools_section
 
             final_system_prompt = {
@@ -620,7 +620,7 @@ def build_options_from_profile(
             tools_section = "\n\n<ai-tools>\nThe following AI tools are available via code execution:\n"
             for tool in available_tools:
                 tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
-            tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\n</ai-tools>"
+            tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\nIMPORTANT: Always delete the .mjs file after execution to keep the workspace clean.\n</ai-tools>"
             final_system_prompt += tools_section
 
         if override_append:
