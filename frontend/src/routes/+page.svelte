@@ -958,6 +958,36 @@
 		try {
 			// Try to parse as JSON to detect image data
 			const data = JSON.parse(content);
+
+			// Handle URL-based image results (new format - saves to disk)
+			if (data.success && data.image_url) {
+				const imageUrl = data.image_url;
+				const filename = data.filename || 'generated-image.png';
+				return `<div class="generated-image-result">
+					<div class="mb-2 text-xs text-green-500">✓ Image generated successfully</div>
+					<img src="${imageUrl}" alt="Generated image" class="max-w-full max-h-96 rounded-lg shadow-md border border-border" />
+					<div class="flex gap-2 mt-3">
+						<a href="${imageUrl}" download="${filename}" class="text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 flex items-center gap-1.5 font-medium no-underline">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+							</svg>
+							Download Image
+						</a>
+						<button onclick="(function(){
+							navigator.clipboard.writeText(window.location.origin + '${imageUrl}');
+							this.textContent = 'Copied!';
+							setTimeout(() => this.textContent = 'Copy URL', 2000);
+						}).call(this)" class="text-xs px-3 py-1.5 bg-muted text-foreground rounded-md hover:bg-accent flex items-center gap-1.5">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+							</svg>
+							Copy URL
+						</button>
+					</div>
+				</div>`;
+			}
+
+			// Handle base64 image results (legacy format)
 			if (data.success && data.image_base64 && data.mime_type) {
 				// This is an image generation result!
 				const mimeType = data.mime_type || 'image/png';
@@ -1001,7 +1031,8 @@
 	function toolResultHasImage(content: string): boolean {
 		try {
 			const data = JSON.parse(content);
-			return data.success && data.image_base64 && data.mime_type;
+			// Check for both URL-based (new) and base64 (legacy) formats
+			return data.success && (data.image_url || (data.image_base64 && data.mime_type));
 		} catch {
 			return false;
 		}

@@ -2,6 +2,7 @@
  * Image Generation Tool - Nano Banana (Google Gemini)
  *
  * Generate images using AI. The API key is provided via environment variable.
+ * Images are saved to disk and a URL is returned for display.
  *
  * Environment Variables:
  *   GEMINI_API_KEY - Google AI API key (injected by AI Hub at runtime)
@@ -15,20 +16,33 @@
  *   });
  *
  *   if (result.success) {
- *     // result.image_base64 contains the base64-encoded image
- *     // result.mime_type is 'image/png' or 'image/jpeg'
+ *     // result.image_url contains the URL to access the image
+ *     // result.file_path contains the local file path
  *   }
  */
+import { writeFileSync, mkdirSync, existsSync } from 'fs';
+import { join } from 'path';
+/**
+ * Get the directory for storing generated images.
+ * Uses GENERATED_IMAGES_DIR env var if set, otherwise creates a 'generated-images'
+ * folder in the current working directory.
+ */
+function getGeneratedImagesDir() {
+    // Allow override via environment variable
+    if (process.env.GENERATED_IMAGES_DIR) {
+        return process.env.GENERATED_IMAGES_DIR;
+    }
+    // Default to a folder in the current working directory
+    return join(process.cwd(), 'generated-images');
+}
 /**
  * Generate an image from a text prompt using Google Gemini.
  *
- * The image is returned as base64-encoded data that can be:
- * - Saved to a file
- * - Displayed in HTML: `<img src="data:${mime_type};base64,${image_base64}">`
- * - Processed further
+ * The image is saved to disk and a URL is returned for display in the chat UI.
+ * This avoids context window limitations with large base64 strings.
  *
  * @param input - The generation parameters
- * @returns The generated image or error details
+ * @returns The generated image URL and file path, or error details
  *
  * @example
  * ```typescript
@@ -37,10 +51,8 @@
  * });
  *
  * if (result.success) {
- *   // Save to file
- *   const buffer = Buffer.from(result.image_base64!, 'base64');
- *   fs.writeFileSync('coffee-shop.png', buffer);
- *   console.log('Image saved!');
+ *   console.log('Image URL:', result.image_url);
+ *   console.log('Saved to:', result.file_path);
  * } else {
  *   console.error('Failed:', result.error);
  * }
@@ -134,10 +146,33 @@ export async function generateImage(input) {
         // Look for inline image data
         for (const part of parts) {
             if (part.inlineData) {
+                const base64Data = part.inlineData.data;
+                const mimeType = part.inlineData.mimeType || 'image/png';
+                // Determine file extension from mime type
+                const ext = mimeType === 'image/jpeg' ? 'jpg' : 'png';
+                // Generate unique filename with timestamp
+                const timestamp = Date.now();
+                const randomSuffix = Math.random().toString(36).substring(2, 8);
+                const filename = `image-${timestamp}-${randomSuffix}.${ext}`;
+                // Get the output directory (uses env var or cwd)
+                const outputDir = getGeneratedImagesDir();
+                // Ensure the output directory exists
+                if (!existsSync(outputDir)) {
+                    mkdirSync(outputDir, { recursive: true });
+                }
+                // Save the image to disk
+                const filePath = join(outputDir, filename);
+                const buffer = Buffer.from(base64Data, 'base64');
+                writeFileSync(filePath, buffer);
+                // Return the URL that the API will serve
+                // Use the /by-path endpoint with full path for flexibility across projects
+                const encodedPath = encodeURIComponent(filePath);
                 return {
                     success: true,
-                    image_base64: part.inlineData.data,
-                    mime_type: part.inlineData.mimeType || 'image/png'
+                    image_url: `/api/generated-images/by-path?path=${encodedPath}`,
+                    file_path: filePath,
+                    filename: filename,
+                    mime_type: mimeType
                 };
             }
         }

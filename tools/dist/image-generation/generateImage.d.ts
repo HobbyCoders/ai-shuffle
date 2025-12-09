@@ -2,6 +2,7 @@
  * Image Generation Tool - Nano Banana (Google Gemini)
  *
  * Generate images using AI. The API key is provided via environment variable.
+ * Images are saved to disk and a URL is returned for display.
  *
  * Environment Variables:
  *   GEMINI_API_KEY - Google AI API key (injected by AI Hub at runtime)
@@ -15,8 +16,8 @@
  *   });
  *
  *   if (result.success) {
- *     // result.image_base64 contains the base64-encoded image
- *     // result.mime_type is 'image/png' or 'image/jpeg'
+ *     // result.image_url contains the URL to access the image
+ *     // result.file_path contains the local file path
  *   }
  */
 export interface GenerateImageInput {
@@ -38,8 +39,12 @@ export interface GenerateImageInput {
 export interface GenerateImageResponse {
     /** Whether the image was generated successfully */
     success: boolean;
-    /** Base64-encoded image data (only present if success=true) */
-    image_base64?: string;
+    /** URL to access the generated image (for display in chat) */
+    image_url?: string;
+    /** Local file path where the image was saved */
+    file_path?: string;
+    /** Filename of the generated image */
+    filename?: string;
     /** MIME type of the image (e.g., 'image/png') */
     mime_type?: string;
     /** Error message if generation failed */
@@ -48,13 +53,11 @@ export interface GenerateImageResponse {
 /**
  * Generate an image from a text prompt using Google Gemini.
  *
- * The image is returned as base64-encoded data that can be:
- * - Saved to a file
- * - Displayed in HTML: `<img src="data:${mime_type};base64,${image_base64}">`
- * - Processed further
+ * The image is saved to disk and a URL is returned for display in the chat UI.
+ * This avoids context window limitations with large base64 strings.
  *
  * @param input - The generation parameters
- * @returns The generated image or error details
+ * @returns The generated image URL and file path, or error details
  *
  * @example
  * ```typescript
@@ -63,10 +66,8 @@ export interface GenerateImageResponse {
  * });
  *
  * if (result.success) {
- *   // Save to file
- *   const buffer = Buffer.from(result.image_base64!, 'base64');
- *   fs.writeFileSync('coffee-shop.png', buffer);
- *   console.log('Image saved!');
+ *   console.log('Image URL:', result.image_url);
+ *   console.log('Saved to:', result.file_path);
  * } else {
  *   console.error('Failed:', result.error);
  * }
