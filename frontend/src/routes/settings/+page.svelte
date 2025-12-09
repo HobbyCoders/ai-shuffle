@@ -217,6 +217,8 @@
 	}
 
 	// Image Generation (Nano Banana) functions
+	let updatingImageModel = false;
+
 	async function saveImageConfig() {
 		if (!imageApiKey.trim() && !imageApiKeyMasked) {
 			imageConfigError = 'Please enter an API key';
@@ -248,6 +250,28 @@
 			imageConfigError = e.detail || 'Failed to save configuration';
 		} finally {
 			savingImageConfig = false;
+		}
+	}
+
+	async function updateImageModel() {
+		if (!selectedImageModel || selectedImageModel === imageModel) {
+			return;
+		}
+
+		updatingImageModel = true;
+		imageConfigError = '';
+		imageConfigSuccess = '';
+
+		try {
+			const result = await api.patch<{success: boolean, model: string}>('/settings/integrations/image/model', {
+				model: selectedImageModel
+			});
+			imageModel = result.model;
+			imageConfigSuccess = 'Model updated successfully';
+		} catch (e: any) {
+			imageConfigError = e.detail || 'Failed to update model';
+		} finally {
+			updatingImageModel = false;
 		}
 	}
 
@@ -792,137 +816,138 @@
 
 					<!-- Authentication Tab -->
 					{#if activeTab === 'authentication'}
-						<div class="space-y-6">
+						<div class="space-y-4">
 							<div>
 								<h2 class="text-xl font-bold text-foreground mb-1">Service Authentication</h2>
-								<p class="text-sm text-muted-foreground">Connect Claude Code and GitHub CLI to enable AI features and repository management.</p>
+								<p class="text-sm text-muted-foreground">Connect services to enable AI features and repository management.</p>
 							</div>
 
-							<div class="grid gap-4">
-								<!-- Claude Code Auth -->
-								<div class="card p-6">
-									<div class="flex items-center justify-between mb-4">
-										<div class="flex items-center gap-3">
-											<div class="w-10 h-10 bg-orange-500/15 rounded-lg flex items-center justify-center">
-												<svg class="w-5 h-5 text-orange-400" viewBox="0 0 24 24" fill="currentColor">
-													<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
-												</svg>
-											</div>
-											<div>
-												<span class="font-semibold text-foreground">Claude Code</span>
-												<p class="text-xs text-muted-foreground">AI-powered code assistance</p>
-											</div>
+							<!-- Compact auth cards grid -->
+							<div class="grid gap-3 sm:grid-cols-2">
+								<!-- Claude Code Auth - Compact -->
+								<div class="card p-4">
+									<div class="flex items-center gap-3 mb-3">
+										<div class="w-9 h-9 bg-orange-500/15 rounded-lg flex items-center justify-center shrink-0">
+											<svg class="w-4 h-4 text-orange-400" viewBox="0 0 24 24" fill="currentColor">
+												<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+											</svg>
 										</div>
-										{#if $claudeAuthenticated}
-											<span class="text-xs px-2.5 py-1 rounded-full bg-success/15 text-success font-medium">Connected</span>
-										{:else}
-											<span class="text-xs px-2.5 py-1 rounded-full bg-warning/15 text-warning font-medium">Not Connected</span>
-										{/if}
+										<div class="flex-1 min-w-0">
+											<div class="flex items-center justify-between gap-2">
+												<span class="font-semibold text-foreground text-sm">Claude Code</span>
+												{#if $claudeAuthenticated}
+													<span class="text-[10px] px-2 py-0.5 rounded-full bg-success/15 text-success font-medium shrink-0">Connected</span>
+												{:else}
+													<span class="text-[10px] px-2 py-0.5 rounded-full bg-warning/15 text-warning font-medium shrink-0">Not Connected</span>
+												{/if}
+											</div>
+											<p class="text-xs text-muted-foreground truncate">AI-powered code assistance</p>
+										</div>
 									</div>
 
 									{#if $claudeAuthenticated}
-										<p class="text-sm text-muted-foreground mb-4">Claude Code is authenticated and ready to use.</p>
 										<div class="flex gap-2">
-											<button on:click={handleClaudeReconnect} disabled={claudeLoginLoading} class="btn btn-primary text-sm flex-1">
+											<button on:click={handleClaudeReconnect} disabled={claudeLoginLoading} class="btn btn-primary text-xs py-1.5 flex-1">
 												{#if claudeLoginLoading}
-													<span class="animate-spin inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full mr-2"></span>
+													<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full mr-1"></span>
 												{/if}
 												Reconnect
 											</button>
-											<button on:click={handleClaudeLogout} class="btn btn-secondary text-sm flex-1">
+											<button on:click={handleClaudeLogout} class="btn btn-secondary text-xs py-1.5 flex-1">
 												Disconnect
 											</button>
 										</div>
-										<p class="text-xs text-muted-foreground mt-3">Use Reconnect if your session has expired.</p>
 									{:else if claudeOAuthUrl}
-										<div class="space-y-3">
-											<p class="text-sm text-muted-foreground">Step 1: Open the login page in your browser:</p>
-											<a href={claudeOAuthUrl} target="_blank" rel="noopener noreferrer" class="btn btn-primary text-sm w-full flex items-center justify-center gap-2">
-												<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<div class="space-y-2">
+											<a href={claudeOAuthUrl} target="_blank" rel="noopener noreferrer" class="btn btn-primary text-xs py-1.5 w-full flex items-center justify-center gap-1.5">
+												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
 												</svg>
-												Open Login Page
+												1. Open Login
 											</a>
-											<p class="text-sm text-muted-foreground">Step 2: After authenticating, paste the code here:</p>
-											<input
-												type="text"
-												bind:value={claudeAuthCode}
-												placeholder="Paste authorization code here"
-												class="input text-sm"
-											/>
-											<button
-												on:click={completeClaudeLogin}
-												disabled={claudeCompletingLogin || !claudeAuthCode.trim()}
-												class="btn btn-primary text-sm w-full"
-											>
-												{#if claudeCompletingLogin}
-													<span class="animate-spin inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full mr-2"></span>
-												{/if}
-												Complete Login
-											</button>
-											<button on:click={cancelClaudeLogin} class="text-xs text-muted-foreground hover:text-foreground w-full text-center">
+											<div class="flex gap-2">
+												<input
+													type="text"
+													bind:value={claudeAuthCode}
+													placeholder="2. Paste code"
+													class="input text-xs py-1.5 flex-1"
+												/>
+												<button
+													on:click={completeClaudeLogin}
+													disabled={claudeCompletingLogin || !claudeAuthCode.trim()}
+													class="btn btn-primary text-xs py-1.5 px-3"
+												>
+													{#if claudeCompletingLogin}
+														<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
+													{:else}
+														OK
+													{/if}
+												</button>
+											</div>
+											<button on:click={cancelClaudeLogin} class="text-[10px] text-muted-foreground hover:text-foreground w-full text-center">
 												Cancel
 											</button>
 										</div>
 									{:else}
-										<p class="text-sm text-muted-foreground mb-4">Connect to enable AI-powered code assistance.</p>
-										<button on:click={() => handleClaudeLogin()} disabled={claudeLoginLoading} class="btn btn-primary text-sm w-full">
+										<button on:click={() => handleClaudeLogin()} disabled={claudeLoginLoading} class="btn btn-primary text-xs py-1.5 w-full">
 											{#if claudeLoginLoading}
-												<span class="animate-spin inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full mr-2"></span>
+												<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full mr-1"></span>
 											{/if}
-											Connect Claude Code
+											Connect
 										</button>
 									{/if}
 								</div>
 
-								<!-- GitHub CLI Auth -->
-								<div class="card p-6">
-									<div class="flex items-center justify-between mb-4">
-										<div class="flex items-center gap-3">
-											<div class="w-10 h-10 bg-white/10 rounded-lg flex items-center justify-center">
-												<svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="currentColor">
-													<path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
-												</svg>
-											</div>
-											<div>
-												<span class="font-semibold text-foreground">GitHub CLI</span>
-												<p class="text-xs text-muted-foreground">Repository management</p>
-											</div>
+								<!-- GitHub CLI Auth - Compact -->
+								<div class="card p-4">
+									<div class="flex items-center gap-3 mb-3">
+										<div class="w-9 h-9 bg-white/10 rounded-lg flex items-center justify-center shrink-0">
+											<svg class="w-4 h-4 text-white" viewBox="0 0 24 24" fill="currentColor">
+												<path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+											</svg>
 										</div>
-										{#if $githubAuthenticated}
-											<span class="text-xs px-2.5 py-1 rounded-full bg-success/15 text-success font-medium">Connected</span>
-										{:else}
-											<span class="text-xs px-2.5 py-1 rounded-full bg-warning/15 text-warning font-medium">Not Connected</span>
-										{/if}
+										<div class="flex-1 min-w-0">
+											<div class="flex items-center justify-between gap-2">
+												<span class="font-semibold text-foreground text-sm">GitHub</span>
+												{#if $githubAuthenticated}
+													<span class="text-[10px] px-2 py-0.5 rounded-full bg-success/15 text-success font-medium shrink-0">Connected</span>
+												{:else}
+													<span class="text-[10px] px-2 py-0.5 rounded-full bg-warning/15 text-warning font-medium shrink-0">Not Connected</span>
+												{/if}
+											</div>
+											<p class="text-xs text-muted-foreground truncate">
+												{#if $githubAuthenticated && githubUser}
+													{githubUser}
+												{:else}
+													Repository management
+												{/if}
+											</p>
+										</div>
 									</div>
 
 									{#if $githubAuthenticated}
-										<p class="text-sm text-muted-foreground mb-4">
-											Connected as <span class="text-foreground font-medium">{githubUser || 'GitHub User'}</span>
-										</p>
-										<button on:click={handleGitHubLogout} class="btn btn-secondary text-sm w-full">
+										<button on:click={handleGitHubLogout} class="btn btn-secondary text-xs py-1.5 w-full">
 											Disconnect
 										</button>
 									{:else}
-										<p class="text-sm text-muted-foreground mb-4">Connect to enable repository management.</p>
-										<div class="space-y-3">
+										<div class="space-y-2">
 											<input
 												type="password"
 												bind:value={githubToken}
-												placeholder="GitHub Personal Access Token"
-												class="input text-sm"
+												placeholder="Personal Access Token"
+												class="input text-xs py-1.5"
 											/>
-											<button on:click={handleGitHubLogin} disabled={githubLoginLoading} class="btn btn-primary text-sm w-full">
+											<button on:click={handleGitHubLogin} disabled={githubLoginLoading} class="btn btn-primary text-xs py-1.5 w-full">
 												{#if githubLoginLoading}
-													<span class="animate-spin inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full mr-2"></span>
+													<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full mr-1"></span>
 												{/if}
-												Connect GitHub
+												Connect
 											</button>
-											<p class="text-xs text-muted-foreground">
+											<p class="text-[10px] text-muted-foreground text-center">
 												<a href="https://github.com/settings/tokens/new?scopes=repo,read:org,gist,workflow" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">
-													Create a token
+													Create token
 												</a>
-												with repo, read:org, gist, workflow scopes
+												 (repo, read:org, gist, workflow)
 											</p>
 										</div>
 									{/if}
@@ -1058,267 +1083,235 @@
 
 					<!-- Integrations Tab -->
 					{#if activeTab === 'integrations'}
-						<div class="space-y-6">
+						<div class="space-y-4">
 							<div>
 								<h2 class="text-xl font-bold text-foreground mb-1">Integrations</h2>
-								<p class="text-sm text-muted-foreground">Connect external services to extend AI Hub functionality.</p>
+								<p class="text-sm text-muted-foreground">Connect external services to extend AI Hub.</p>
 							</div>
 
-							<!-- OpenAI Integration -->
-							<div class="card p-6">
-								<div class="flex items-center justify-between mb-4">
-									<div class="flex items-center gap-3">
-										<div class="w-10 h-10 bg-emerald-500/15 rounded-lg flex items-center justify-center">
-											<svg class="w-6 h-6 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
-												<path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.8956zm16.0993 3.8558L12.6 8.3829l2.02-1.1638a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.4066-.6567zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/>
-											</svg>
-										</div>
-										<div>
-											<span class="font-semibold text-foreground">OpenAI</span>
-											<p class="text-xs text-muted-foreground">Voice-to-text transcription (Whisper)</p>
-										</div>
+							<!-- OpenAI Integration - Compact -->
+							<div class="card p-4">
+								<div class="flex items-center gap-3 mb-3">
+									<div class="w-9 h-9 bg-emerald-500/15 rounded-lg flex items-center justify-center shrink-0">
+										<svg class="w-5 h-5 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
+											<path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.8956zm16.0993 3.8558L12.6 8.3829l2.02-1.1638a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.4066-.6567zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/>
+										</svg>
 									</div>
-									{#if openaiApiKeyMasked}
-										<span class="text-xs px-2.5 py-1 rounded-full bg-success/15 text-success font-medium">Configured</span>
-									{:else}
-										<span class="text-xs px-2.5 py-1 rounded-full bg-muted text-muted-foreground font-medium">Not Configured</span>
-									{/if}
+									<div class="flex-1 min-w-0">
+										<div class="flex items-center justify-between gap-2">
+											<span class="font-semibold text-foreground text-sm">OpenAI Whisper</span>
+											{#if openaiApiKeyMasked}
+												<span class="text-[10px] px-2 py-0.5 rounded-full bg-success/15 text-success font-medium shrink-0">Configured</span>
+											{:else}
+												<span class="text-[10px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground font-medium shrink-0">Not Set</span>
+											{/if}
+										</div>
+										<p class="text-xs text-muted-foreground truncate">Voice-to-text transcription</p>
+									</div>
 								</div>
 
-								<p class="text-sm text-muted-foreground mb-4">
-									Add your OpenAI API key to enable voice-to-text transcription using the Whisper model.
-									This allows you to dictate messages instead of typing.
-								</p>
-
 								{#if openaiKeySuccess}
-									<div class="bg-success/10 border border-success/30 text-success px-3 py-2 rounded-lg text-sm flex items-center gap-2 mb-4">
+									<div class="bg-success/10 border border-success/30 text-success px-2 py-1.5 rounded text-xs flex items-center gap-1.5 mb-3">
 										<span>✓</span>
 										<span>{openaiKeySuccess}</span>
 									</div>
 								{/if}
 
 								{#if openaiKeyError}
-									<div class="bg-destructive/10 border border-destructive/30 text-destructive px-3 py-2 rounded-lg text-sm mb-4">
+									<div class="bg-destructive/10 border border-destructive/30 text-destructive px-2 py-1.5 rounded text-xs mb-3">
 										{openaiKeyError}
 									</div>
 								{/if}
 
 								{#if openaiApiKeyMasked}
-									<div class="flex items-center gap-3 mb-4 p-3 bg-muted rounded-lg">
-										<span class="text-sm text-muted-foreground">Current key:</span>
-										<code class="text-sm text-foreground font-mono">{openaiApiKeyMasked}</code>
+									<div class="flex items-center gap-2 mb-3 p-2 bg-muted rounded text-xs">
+										<code class="text-foreground font-mono flex-1 truncate">{openaiApiKeyMasked}</code>
 									</div>
 								{/if}
 
-								<div class="space-y-3">
-									<div>
-										<label for="openaiKey" class="block text-sm font-medium text-foreground mb-1.5">
-											{openaiApiKeyMasked ? 'Replace API Key' : 'API Key'}
-										</label>
-										<input
-											type="password"
-											id="openaiKey"
-											bind:value={openaiApiKey}
-											placeholder="sk-..."
-											class="input text-sm font-mono"
-										/>
-									</div>
-									<div class="flex gap-2">
-										<button
-											on:click={saveOpenaiApiKey}
-											disabled={savingOpenaiKey || !openaiApiKey.trim()}
-											class="btn btn-primary text-sm flex-1"
-										>
-											{#if savingOpenaiKey}
-												<span class="animate-spin inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full mr-2"></span>
-											{/if}
-											{openaiApiKeyMasked ? 'Update Key' : 'Save Key'}
-										</button>
-										{#if openaiApiKeyMasked}
-											<button
-												on:click={removeOpenaiApiKey}
-												disabled={savingOpenaiKey}
-												class="btn btn-secondary text-sm"
-											>
-												Remove
-											</button>
+								<div class="flex gap-2">
+									<input
+										type="password"
+										bind:value={openaiApiKey}
+										placeholder={openaiApiKeyMasked ? "New API key..." : "sk-..."}
+										class="input text-xs py-1.5 font-mono flex-1"
+									/>
+									<button
+										on:click={saveOpenaiApiKey}
+										disabled={savingOpenaiKey || !openaiApiKey.trim()}
+										class="btn btn-primary text-xs py-1.5 px-3"
+									>
+										{#if savingOpenaiKey}
+											<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
+										{:else}
+											{openaiApiKeyMasked ? 'Update' : 'Save'}
 										{/if}
-									</div>
-									<p class="text-xs text-muted-foreground">
-										<a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">
-											Get an API key
-										</a>
-										from OpenAI. Whisper transcription costs ~$0.006/minute.
-									</p>
-								</div>
-							</div>
-
-							<!-- Image Generation (Nano Banana) Integration -->
-							<div class="card p-6">
-								<div class="flex items-center justify-between mb-4">
-									<div class="flex items-center gap-3">
-										<div class="w-10 h-10 bg-yellow-500/15 rounded-lg flex items-center justify-center text-2xl">
-											🍌
-										</div>
-										<div>
-											<span class="font-semibold text-foreground">Nano Banana</span>
-											<p class="text-xs text-muted-foreground">AI Image Generation (Google Gemini)</p>
-										</div>
-									</div>
-									{#if imageApiKeyMasked}
-										<span class="text-xs px-2.5 py-1 rounded-full bg-success/15 text-success font-medium">Configured</span>
-									{:else}
-										<span class="text-xs px-2.5 py-1 rounded-full bg-muted text-muted-foreground font-medium">Not Configured</span>
+									</button>
+									{#if openaiApiKeyMasked}
+										<button
+											on:click={removeOpenaiApiKey}
+											disabled={savingOpenaiKey}
+											class="btn btn-secondary text-xs py-1.5 px-3"
+											title="Remove API key"
+										>
+											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+											</svg>
+										</button>
 									{/if}
 								</div>
-
-								<p class="text-sm text-muted-foreground mb-4">
-									Generate images using Google's Gemini image models (codename: Nano Banana).
-									Create stunning visuals with AI-powered image generation.
+								<p class="text-[10px] text-muted-foreground mt-2">
+									<a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">Get API key</a> · ~$0.006/min
 								</p>
+							</div>
+
+							<!-- Image Generation (Nano Banana) Integration - Compact -->
+							<div class="card p-4">
+								<div class="flex items-center gap-3 mb-3">
+									<div class="w-9 h-9 bg-yellow-500/15 rounded-lg flex items-center justify-center text-lg shrink-0">
+										🍌
+									</div>
+									<div class="flex-1 min-w-0">
+										<div class="flex items-center justify-between gap-2">
+											<span class="font-semibold text-foreground text-sm">Nano Banana</span>
+											{#if imageApiKeyMasked}
+												<span class="text-[10px] px-2 py-0.5 rounded-full bg-success/15 text-success font-medium shrink-0">Configured</span>
+											{:else}
+												<span class="text-[10px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground font-medium shrink-0">Not Set</span>
+											{/if}
+										</div>
+										<p class="text-xs text-muted-foreground truncate">AI Image Generation (Google Gemini)</p>
+									</div>
+								</div>
 
 								{#if imageConfigSuccess}
-									<div class="bg-success/10 border border-success/30 text-success px-3 py-2 rounded-lg text-sm flex items-center gap-2 mb-4">
+									<div class="bg-success/10 border border-success/30 text-success px-2 py-1.5 rounded text-xs flex items-center gap-1.5 mb-3">
 										<span>✓</span>
 										<span>{imageConfigSuccess}</span>
 									</div>
 								{/if}
 
 								{#if imageConfigError}
-									<div class="bg-destructive/10 border border-destructive/30 text-destructive px-3 py-2 rounded-lg text-sm mb-4">
+									<div class="bg-destructive/10 border border-destructive/30 text-destructive px-2 py-1.5 rounded text-xs mb-3">
 										{imageConfigError}
 									</div>
 								{/if}
 
 								{#if imageApiKeyMasked}
-									<div class="flex items-center gap-3 mb-4 p-3 bg-muted rounded-lg">
-										<span class="text-sm text-muted-foreground">Current key:</span>
-										<code class="text-sm text-foreground font-mono">{imageApiKeyMasked}</code>
-										{#if imageModel}
-											<span class="text-xs px-2 py-0.5 rounded bg-primary/15 text-primary ml-auto">
-												{imageModels.find(m => m.id === imageModel)?.name || imageModel}
-											</span>
-										{/if}
+									<div class="flex items-center gap-2 mb-3 p-2 bg-muted rounded text-xs">
+										<code class="text-foreground font-mono truncate">{imageApiKeyMasked}</code>
 									</div>
 								{/if}
 
-								<div class="space-y-4">
-									<!-- Model Selection -->
-									<div>
-										<label for="imageModel" class="block text-sm font-medium text-foreground mb-1.5">
-											Model
-										</label>
+								<div class="space-y-3">
+									<!-- Model Selection - Always visible, with quick update when configured -->
+									<div class="flex gap-2">
 										<select
-											id="imageModel"
 											bind:value={selectedImageModel}
-											class="input text-sm"
+											class="input text-xs py-1.5 flex-1"
 										>
 											{#each imageModels as model}
 												<option value={model.id}>
-													{model.name} (${model.price_per_image}/image)
+													{model.name} (${model.price_per_image}/img)
 												</option>
 											{/each}
 										</select>
-										{#if selectedImageModel}
-											<p class="text-xs text-muted-foreground mt-1">
-												{imageModels.find(m => m.id === selectedImageModel)?.description || ''}
-											</p>
+										{#if imageApiKeyMasked && selectedImageModel !== imageModel}
+											<button
+												on:click={updateImageModel}
+												disabled={updatingImageModel}
+												class="btn btn-primary text-xs py-1.5 px-3"
+												title="Apply model change"
+											>
+												{#if updatingImageModel}
+													<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
+												{:else}
+													Apply
+												{/if}
+											</button>
 										{/if}
 									</div>
 
 									<!-- API Key Input -->
-									<div>
-										<label for="imageApiKey" class="block text-sm font-medium text-foreground mb-1.5">
-											{imageApiKeyMasked ? 'Replace API Key' : 'Google AI API Key'}
-										</label>
+									<div class="flex gap-2">
 										<input
 											type="password"
-											id="imageApiKey"
 											bind:value={imageApiKey}
-											placeholder="AIza..."
-											class="input text-sm font-mono"
+											placeholder={imageApiKeyMasked ? "New API key..." : "AIza..."}
+											class="input text-xs py-1.5 font-mono flex-1"
 										/>
-									</div>
-
-									<!-- Action Buttons -->
-									<div class="flex gap-2">
 										<button
 											on:click={saveImageConfig}
 											disabled={savingImageConfig || (!imageApiKey.trim() && !imageApiKeyMasked)}
-											class="btn btn-primary text-sm flex-1"
+											class="btn btn-primary text-xs py-1.5 px-3"
 										>
 											{#if savingImageConfig}
-												<span class="animate-spin inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full mr-2"></span>
+												<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
+											{:else}
+												{imageApiKeyMasked ? 'Update' : 'Save'}
 											{/if}
-											{imageApiKeyMasked ? 'Update Configuration' : 'Save Configuration'}
 										</button>
 										{#if imageApiKeyMasked}
 											<button
 												on:click={removeImageConfig}
 												disabled={savingImageConfig}
-												class="btn btn-secondary text-sm"
+												class="btn btn-secondary text-xs py-1.5 px-3"
+												title="Remove configuration"
 											>
-												Remove
+												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+												</svg>
 											</button>
 										{/if}
 									</div>
 
-									<!-- Test Generation -->
+									<!-- Test button - compact -->
 									{#if imageApiKeyMasked}
-										<div class="pt-2 border-t border-border">
-											<button
-												on:click={testImageGeneration}
-												disabled={testingImage}
-												class="btn btn-secondary text-sm w-full"
-											>
-												{#if testingImage}
-													<span class="animate-spin inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full mr-2"></span>
-													Generating test image...
-												{:else}
-													🎨 Test Image Generation
-												{/if}
-											</button>
-
-											{#if testImageResult}
-												{#if testImageResult.success && testImageResult.image_base64}
-													<div class="mt-3 p-3 bg-muted rounded-lg">
-														<p class="text-xs text-muted-foreground mb-2">Test image generated successfully:</p>
-														<img
-															src="data:{testImageResult.mime_type || 'image/png'};base64,{testImageResult.image_base64}"
-															alt="Generated test image"
-															class="rounded-lg max-w-full h-auto max-h-64 mx-auto"
-														/>
-													</div>
-												{:else if testImageResult.error}
-													<div class="mt-3 p-3 bg-destructive/10 rounded-lg">
-														<p class="text-xs text-destructive">{testImageResult.error}</p>
-													</div>
-												{/if}
+										<button
+											on:click={testImageGeneration}
+											disabled={testingImage}
+											class="btn btn-secondary text-xs py-1.5 w-full"
+										>
+											{#if testingImage}
+												<span class="animate-spin inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full mr-1.5"></span>
+												Generating...
+											{:else}
+												🎨 Test Generation
 											{/if}
-										</div>
-									{/if}
+										</button>
 
-									<p class="text-xs text-muted-foreground">
-										<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">
-											Get an API key
-										</a>
-										from Google AI Studio. Image generation costs ~$0.039/image.
-									</p>
+										{#if testImageResult}
+											{#if testImageResult.success && testImageResult.image_base64}
+												<div class="p-2 bg-muted rounded">
+													<img
+														src="data:{testImageResult.mime_type || 'image/png'};base64,{testImageResult.image_base64}"
+														alt="Generated test image"
+														class="rounded max-w-full h-auto max-h-48 mx-auto"
+													/>
+												</div>
+											{:else if testImageResult.error}
+												<div class="p-2 bg-destructive/10 rounded">
+													<p class="text-[10px] text-destructive">{testImageResult.error}</p>
+												</div>
+											{/if}
+										{/if}
+									{/if}
 								</div>
+
+								<p class="text-[10px] text-muted-foreground mt-2">
+									<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">Get API key</a> · ~$0.039/image
+								</p>
 							</div>
 
-							<!-- Future integrations placeholder -->
-							<div class="card p-6 border-dashed opacity-60">
-								<div class="flex items-center gap-3 mb-2">
-									<div class="w-10 h-10 bg-muted rounded-lg flex items-center justify-center">
-										<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<!-- Future integrations placeholder - Compact -->
+							<div class="card p-3 border-dashed opacity-50">
+								<div class="flex items-center gap-2">
+									<div class="w-7 h-7 bg-muted rounded flex items-center justify-center">
+										<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
 										</svg>
 									</div>
-									<div>
-										<span class="font-semibold text-muted-foreground">More Integrations Coming</span>
-										<p class="text-xs text-muted-foreground">Video, voice, and more AI tools coming soon</p>
-									</div>
+									<span class="text-xs text-muted-foreground">More integrations coming soon</span>
 								</div>
 							</div>
 						</div>
