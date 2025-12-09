@@ -67,7 +67,6 @@ WORKDIR /app
 
 # Copy AI tools to /opt/ai-tools (accessible by Claude agent)
 COPY tools/ /opt/ai-tools/
-RUN chown -R appuser:appuser /opt/ai-tools
 
 # Copy entrypoint script
 COPY entrypoint.sh /entrypoint.sh
@@ -80,7 +79,7 @@ RUN mkdir -p /data /workspace
 RUN groupadd -g 1000 appuser && \
     useradd -m -u 1000 -g 1000 appuser && \
     mkdir -p /home/appuser/.config/claude /home/appuser/.claude && \
-    chown -R appuser:appuser /app /home/appuser /data /workspace
+    chown -R appuser:appuser /app /home/appuser /data /workspace /opt/ai-tools
 
 # Expose port
 EXPOSE 8000
