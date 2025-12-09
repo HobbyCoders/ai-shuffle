@@ -94,7 +94,7 @@ export async function generateVideo(input) {
                     }],
                 parameters: {
                     aspectRatio: aspectRatio,
-                    durationSeconds: String(duration),
+                    durationSeconds: duration,
                     resolution: resolution,
                     ...(input.negative_prompt && { negativePrompt: input.negative_prompt }),
                     ...(input.seed !== undefined && { seed: input.seed }),
@@ -119,8 +119,8 @@ export async function generateVideo(input) {
         if (!pollResult.success) {
             return { success: false, error: pollResult.error };
         }
-        // Download the video
-        const videoBuffer = await downloadVideo(pollResult.videoUri);
+        // Download the video (pass apiKey for authenticated download)
+        const videoBuffer = await downloadVideo(pollResult.videoUri, apiKey);
         if ('error' in videoBuffer) {
             return { success: false, error: videoBuffer.error };
         }

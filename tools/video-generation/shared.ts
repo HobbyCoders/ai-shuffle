@@ -168,7 +168,10 @@ export async function pollForCompletion(
         };
       }
 
-      const generatedSamples = pollResult.response?.generatedSamples || [];
+      // Handle both response structures: direct generatedSamples or nested under generateVideoResponse
+      const generatedSamples = pollResult.response?.generateVideoResponse?.generatedSamples
+        || pollResult.response?.generatedSamples
+        || [];
       if (generatedSamples.length === 0) {
         return {
           success: false,
@@ -191,8 +194,16 @@ export async function pollForCompletion(
 /**
  * Download video from URI
  */
-export async function downloadVideo(videoUri: string): Promise<Buffer | { error: string }> {
-  const videoResponse = await fetch(videoUri);
+export async function downloadVideo(videoUri: string, apiKey?: string): Promise<Buffer | { error: string }> {
+  // If the URI is from Google's API, we need to append the API key
+  let downloadUrl = videoUri;
+  if (apiKey && videoUri.includes('generativelanguage.googleapis.com')) {
+    downloadUrl = videoUri.includes('?')
+      ? `${videoUri}&key=${apiKey}`
+      : `${videoUri}?key=${apiKey}`;
+  }
+
+  const videoResponse = await fetch(downloadUrl);
   if (!videoResponse.ok) {
     return { error: `Failed to download video: HTTP ${videoResponse.status}` };
   }
