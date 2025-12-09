@@ -65,3 +65,7 @@ frontend/tests/screenshots/
 /data
 /workspace
 PLAN.md
+
+# Tools - include compiled output but not node_modules
+!tools/dist/
+tools/node_modules/
