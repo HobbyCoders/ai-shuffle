@@ -25,6 +25,24 @@ export async function loginWithApiKey(apiKey: string): Promise<{
 	return api.post('/auth/login/api-key', { api_key: apiKey });
 }
 
+export async function registerApiUser(apiKey: string, username: string, password: string): Promise<{
+	status: string;
+	message: string;
+	is_admin: boolean;
+	api_user: ApiUserInfo & { username: string };
+}> {
+	return api.post('/auth/register/api-user', { api_key: apiKey, username, password });
+}
+
+export async function loginApiUser(username: string, password: string): Promise<{
+	status: string;
+	message: string;
+	is_admin: boolean;
+	api_user: ApiUserInfo & { username: string };
+}> {
+	return api.post('/auth/login/api-user', { username, password });
+}
+
 export async function logout(): Promise<void> {
 	await api.post('/auth/logout');
 }

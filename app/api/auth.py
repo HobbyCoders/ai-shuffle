@@ -14,8 +14,10 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Response, Request, Depends, status
 
 from app.core.models import (
-    SetupRequest, LoginRequest, AuthStatus, HealthResponse, ApiKeyLoginRequest
+    SetupRequest, LoginRequest, AuthStatus, HealthResponse, ApiKeyLoginRequest,
+    ApiUserRegisterRequest, ApiUserLoginRequest
 )
+import bcrypt
 from app.core.auth import auth_service
 from app.core.config import settings
 from app.db import database as db
@@ -403,6 +405,203 @@ async def login_with_api_key(req: Request, login_data: ApiKeyLoginRequest, respo
         "api_user": {
             "id": api_user["id"],
             "name": api_user["name"],
+            "project_id": api_user["project_id"],
+            "profile_id": api_user["profile_id"]
+        }
+    }
+
+
+@router.post("/register/api-user")
+async def register_api_user(req: Request, register_data: ApiUserRegisterRequest, response: Response):
+    """
+    Register as an API user by claiming an API key with a username and password.
+
+    The API key must be pre-created by an admin. This endpoint allows the end user
+    to claim that API key by setting their own username and password. After registration,
+    the user can login with just username/password.
+    """
+    # Check rate limiting
+    check_rate_limit(req, register_data.username)
+
+    # Validate API key format
+    if not register_data.api_key.startswith("aih_"):
+        record_login_result(req, register_data.username, success=False)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid API key format"
+        )
+
+    # Check if username is already taken
+    if db.is_username_taken(register_data.username):
+        record_login_result(req, register_data.username, success=False)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username already taken"
+        )
+
+    # Hash the API key to look it up
+    key_hash = hash_api_key(register_data.api_key)
+
+    # Check if API key exists
+    api_user = db.get_api_user_by_key_hash(key_hash)
+    if not api_user:
+        record_login_result(req, register_data.username, success=False)
+        client_ip = get_client_ip(req)
+        logger.warning(f"Registration attempt with invalid API key from IP {client_ip}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid API key"
+        )
+
+    # Check if API key is already claimed
+    if api_user.get("username"):
+        record_login_result(req, register_data.username, success=False)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This API key has already been registered"
+        )
+
+    # Check if API user is active
+    if not api_user.get("is_active", True):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This API key is disabled"
+        )
+
+    # Hash the password with bcrypt
+    password_hash = bcrypt.hashpw(
+        register_data.password.encode('utf-8'),
+        bcrypt.gensalt()
+    ).decode('utf-8')
+
+    # Claim the API key
+    updated_user = db.claim_api_key(key_hash, register_data.username, password_hash)
+    if not updated_user:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to register. Please try again."
+        )
+
+    # Create session for the newly registered user
+    session_token = secrets.token_urlsafe(32)
+    expires_at = datetime.utcnow() + timedelta(hours=settings.api_key_session_expire_hours)
+    db.create_api_key_session(session_token, updated_user["id"], expires_at)
+
+    # Record successful registration
+    record_login_result(req, register_data.username, success=True)
+    db.update_api_user_last_used(updated_user["id"])
+    client_ip = get_client_ip(req)
+    logger.info(f"Successful API user registration for '{register_data.username}' from IP {client_ip}")
+
+    # Set session cookie
+    response.set_cookie(
+        key="session",
+        value=session_token,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+        max_age=settings.api_key_session_expire_hours * 60 * 60
+    )
+
+    return {
+        "status": "ok",
+        "message": "Registration successful",
+        "is_admin": False,
+        "api_user": {
+            "id": updated_user["id"],
+            "name": updated_user["name"],
+            "username": updated_user["username"],
+            "project_id": updated_user["project_id"],
+            "profile_id": updated_user["profile_id"]
+        }
+    }
+
+
+@router.post("/login/api-user")
+async def login_api_user(req: Request, login_data: ApiUserLoginRequest, response: Response):
+    """
+    Login as an API user using username and password.
+
+    This is for API users who have already registered (claimed their API key
+    with a username and password).
+    """
+    # Check rate limiting
+    check_rate_limit(req, login_data.username)
+
+    # Look up user by username
+    api_user = db.get_api_user_by_username(login_data.username)
+
+    if not api_user:
+        record_login_result(req, login_data.username, success=False)
+        client_ip = get_client_ip(req)
+        logger.warning(f"Failed API user login attempt for '{login_data.username}' from IP {client_ip}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password"
+        )
+
+    # Check if user is active
+    if not api_user.get("is_active", True):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is disabled"
+        )
+
+    # Verify password
+    if not api_user.get("password_hash"):
+        # User exists but hasn't set up password (shouldn't happen, but handle it)
+        record_login_result(req, login_data.username, success=False)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password"
+        )
+
+    try:
+        password_valid = bcrypt.checkpw(
+            login_data.password.encode('utf-8'),
+            api_user["password_hash"].encode('utf-8')
+        )
+    except Exception:
+        password_valid = False
+
+    if not password_valid:
+        record_login_result(req, login_data.username, success=False)
+        client_ip = get_client_ip(req)
+        logger.warning(f"Failed API user login attempt for '{login_data.username}' from IP {client_ip}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password"
+        )
+
+    # Create session
+    session_token = secrets.token_urlsafe(32)
+    expires_at = datetime.utcnow() + timedelta(hours=settings.api_key_session_expire_hours)
+    db.create_api_key_session(session_token, api_user["id"], expires_at)
+
+    # Record successful login
+    record_login_result(req, login_data.username, success=True)
+    db.update_api_user_last_used(api_user["id"])
+    client_ip = get_client_ip(req)
+    logger.info(f"Successful API user login for '{login_data.username}' from IP {client_ip}")
+
+    # Set session cookie
+    response.set_cookie(
+        key="session",
+        value=session_token,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+        max_age=settings.api_key_session_expire_hours * 60 * 60
+    )
+
+    return {
+        "status": "ok",
+        "message": "Logged in",
+        "is_admin": False,
+        "api_user": {
+            "id": api_user["id"],
+            "name": api_user["name"],
+            "username": api_user["username"],
             "project_id": api_user["project_id"],
             "profile_id": api_user["profile_id"]
         }

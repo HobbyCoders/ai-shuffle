@@ -28,6 +28,19 @@ class ApiKeyLoginRequest(BaseModel):
     api_key: str
 
 
+class ApiUserRegisterRequest(BaseModel):
+    """API user registration request - claim an API key with username/password"""
+    api_key: str
+    username: str = Field(..., min_length=3, max_length=50)
+    password: str = Field(..., min_length=8)
+
+
+class ApiUserLoginRequest(BaseModel):
+    """API user login request with username/password"""
+    username: str
+    password: str
+
+
 class ApiUserInfo(BaseModel):
     """API user info in auth responses"""
     id: str
