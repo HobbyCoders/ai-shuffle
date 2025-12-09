@@ -11,7 +11,8 @@ Generate AI images using Google Gemini's image models.
 **Setup:** Configure your Google AI API key in Settings > Integrations > Nano Banana
 
 ```typescript
-// IMPORTANT: Use absolute path since scripts may run from /tmp/
+// The import path is automatically injected by AI Hub when tools are enabled.
+// It will be an absolute path like: /workspace/ai-hub/tools/dist/image-generation/generateImage.js
 import { generateImage } from '/workspace/ai-hub/tools/dist/image-generation/generateImage.js';
 import * as fs from 'fs';
 

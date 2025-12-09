@@ -334,6 +334,9 @@ def _get_available_tools(ai_tools_config: Optional[Dict[str, Any]] = None) -> li
     if not ai_tools_config:
         return tools
 
+    # Get the absolute path to tools directory
+    tools_dir = settings.effective_tools_dir
+
     # Check image generation (Nano Banana) - only if enabled in profile
     if ai_tools_config.get("image_generation", False):
         image_provider = database.get_system_setting("image_provider")
@@ -341,12 +344,14 @@ def _get_available_tools(ai_tools_config: Optional[Dict[str, Any]] = None) -> li
         image_api_key = database.get_system_setting("image_api_key")
 
         if all([image_provider, image_model, image_api_key]):
+            # Use absolute path so scripts can run from any directory (e.g., /tmp/)
+            tool_path = f"{tools_dir}/dist/image-generation/generateImage.js"
             tools.append({
                 "name": "Image Generation (Nano Banana)",
                 "description": "Generate AI images from text prompts",
-                "usage": """import { generateImage } from './tools/image-generation/generateImage.js';
-const result = await generateImage({ prompt: 'your description here' });
-if (result.success) { /* result.image_base64 contains the image */ }"""
+                "usage": f"""import {{ generateImage }} from '{tool_path}';
+const result = await generateImage({{ prompt: 'your description here' }});
+if (result.success) {{ /* result.image_base64 contains the image */ }}"""
             })
 
     # Add more tools here as they become available
