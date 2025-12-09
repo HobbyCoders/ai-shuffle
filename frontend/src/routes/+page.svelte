@@ -339,9 +339,8 @@
 		system_prompt_append: '',
 		system_prompt_content: '',
 		system_prompt_inject_env: false,
-		// AI tools - individual toggles for each AI tool
-		ai_tools_image_generation: false,
-		ai_tools_image_editing: false,
+		// AI tools - array of enabled tool IDs
+		enabled_ai_tools: [] as string[],
 		setting_sources: [] as string[],
 		cwd: '',
 		add_dirs: '',
@@ -351,6 +350,99 @@
 
 	// Tool selection mode: 'all' = all tools allowed, 'allow' = whitelist mode, 'disallow' = blacklist mode
 	let toolSelectionMode: 'all' | 'allow' | 'disallow' = 'all';
+
+	// AI Tool selection mode: 'all' = all enabled, 'custom' = individually selected
+	let aiToolSelectionMode: 'all' | 'custom' = 'custom';
+
+	// AI Tool categories - structured like regular tools
+	interface AITool {
+		id: string;
+		name: string;
+		description: string;
+		provider: string;
+	}
+
+	interface AIToolCategory {
+		id: string;
+		name: string;
+		tools: AITool[];
+	}
+
+	const aiToolCategories: AIToolCategory[] = [
+		{
+			id: 'image',
+			name: 'Image Tools',
+			tools: [
+				{ id: 'image_generation', name: 'Image Generation', description: 'Generate AI images from text prompts', provider: 'Nano Banana' },
+				{ id: 'image_editing', name: 'Image Editing', description: 'Edit existing images - add, remove, or modify elements', provider: 'Nano Banana' }
+			]
+		},
+		{
+			id: 'video',
+			name: 'Video Tools',
+			tools: [
+				// Future: { id: 'video_generation', name: 'Video Generation', description: 'Generate AI videos from text prompts', provider: 'Veo' }
+			]
+		},
+		{
+			id: 'audio',
+			name: 'Audio Tools',
+			tools: [
+				// Future: { id: 'text_to_speech', name: 'Text to Speech', description: 'Convert text to natural speech', provider: 'ElevenLabs' }
+			]
+		}
+	];
+
+	// Track expanded state for AI tool categories
+	let aiToolCategoriesExpanded: Record<string, boolean> = {};
+
+	// Toggle AI tool category expansion
+	function toggleAIToolCategoryExpansion(categoryId: string) {
+		aiToolCategoriesExpanded[categoryId] = !aiToolCategoriesExpanded[categoryId];
+		aiToolCategoriesExpanded = aiToolCategoriesExpanded;
+	}
+
+	// Toggle individual AI tool
+	function toggleAITool(toolId: string) {
+		if (profileForm.enabled_ai_tools.includes(toolId)) {
+			profileForm.enabled_ai_tools = profileForm.enabled_ai_tools.filter(t => t !== toolId);
+		} else {
+			profileForm.enabled_ai_tools = [...profileForm.enabled_ai_tools, toolId];
+		}
+	}
+
+	// Toggle all AI tools in a category
+	function toggleAIToolCategory(category: AIToolCategory) {
+		const categoryToolIds = category.tools.map(t => t.id);
+		const allSelected = categoryToolIds.every(id => profileForm.enabled_ai_tools.includes(id));
+
+		if (allSelected) {
+			// Deselect all in category
+			profileForm.enabled_ai_tools = profileForm.enabled_ai_tools.filter(t => !categoryToolIds.includes(t));
+		} else {
+			// Select all in category
+			const newTools = categoryToolIds.filter(id => !profileForm.enabled_ai_tools.includes(id));
+			profileForm.enabled_ai_tools = [...profileForm.enabled_ai_tools, ...newTools];
+		}
+	}
+
+	// Check if all AI tools in a category are selected
+	function isAIToolCategoryFullySelected(category: AIToolCategory): boolean {
+		const categoryToolIds = category.tools.map(t => t.id);
+		return categoryToolIds.length > 0 && categoryToolIds.every(id => profileForm.enabled_ai_tools.includes(id));
+	}
+
+	// Check if some (but not all) AI tools in a category are selected
+	function isAIToolCategoryPartiallySelected(category: AIToolCategory): boolean {
+		const categoryToolIds = category.tools.map(t => t.id);
+		const selectedCount = categoryToolIds.filter(id => profileForm.enabled_ai_tools.includes(id)).length;
+		return selectedCount > 0 && selectedCount < categoryToolIds.length;
+	}
+
+	// Get all available AI tool IDs
+	function getAllAIToolIds(): string[] {
+		return aiToolCategories.flatMap(cat => cat.tools.map(t => t.id));
+	}
 
 	// Toggle agent selection
 	function toggleAgent(agentId: string) {
@@ -1302,8 +1394,7 @@
 			system_prompt_append: '',
 			system_prompt_content: '',
 			system_prompt_inject_env: false,
-			ai_tools_image_generation: false,
-			ai_tools_image_editing: false,
+			enabled_ai_tools: [],
 			setting_sources: [],
 			cwd: '',
 			add_dirs: '',
@@ -1311,6 +1402,7 @@
 			max_buffer_size: null
 		};
 		toolSelectionMode = 'all';
+		aiToolSelectionMode = 'custom';
 		editingProfile = null;
 	}
 
@@ -1327,6 +1419,20 @@
 
 		const allowedTools = config.allowed_tools || [];
 		const disallowedTools = config.disallowed_tools || [];
+
+		// Build enabled AI tools array from config
+		const enabledAITools: string[] = [];
+		if (aiTools.image_generation || sp.enable_ai_tools) enabledAITools.push('image_generation');
+		if (aiTools.image_editing) enabledAITools.push('image_editing');
+		// Add more AI tools here as they become available
+
+		// Determine AI tool selection mode
+		const allAIToolIds = getAllAIToolIds();
+		if (enabledAITools.length === allAIToolIds.length && allAIToolIds.every(id => enabledAITools.includes(id))) {
+			aiToolSelectionMode = 'all';
+		} else {
+			aiToolSelectionMode = 'custom';
+		}
 
 		// Determine tool selection mode based on what's configured
 		if (allowedTools.length > 0) {
@@ -1355,9 +1461,8 @@
 			system_prompt_append: sp.append || '',
 			system_prompt_content: sp.content || '',
 			system_prompt_inject_env: sp.inject_env_details || false,
-			// AI tools - load from config.ai_tools, fallback to legacy sp.enable_ai_tools
-			ai_tools_image_generation: aiTools.image_generation || sp.enable_ai_tools || false,
-			ai_tools_image_editing: aiTools.image_editing || false,
+			// AI tools - array of enabled tool IDs
+			enabled_ai_tools: enabledAITools,
 			setting_sources: config.setting_sources || [],
 			cwd: config.cwd || '',
 			add_dirs: (config.add_dirs || []).join(', '),
@@ -1400,11 +1505,14 @@
 		if (profileForm.user.trim()) config.user = profileForm.user;
 		if (profileForm.max_buffer_size) config.max_buffer_size = profileForm.max_buffer_size;
 
-		// AI tools configuration - individual toggles for each AI tool
-		if (profileForm.ai_tools_image_generation || profileForm.ai_tools_image_editing) {
+		// AI tools configuration - convert array to individual toggles
+		// If 'all' mode, enable all available tools; otherwise use the selected ones
+		const effectiveAITools = aiToolSelectionMode === 'all' ? getAllAIToolIds() : profileForm.enabled_ai_tools;
+		if (effectiveAITools.length > 0) {
 			config.ai_tools = {
-				image_generation: profileForm.ai_tools_image_generation,
-				image_editing: profileForm.ai_tools_image_editing
+				image_generation: effectiveAITools.includes('image_generation'),
+				image_editing: effectiveAITools.includes('image_editing')
+				// Add more AI tools here as they become available
 			};
 		}
 
@@ -4034,8 +4142,10 @@
 							>
 								<div class="flex items-center gap-2">
 									<span>AI Tools</span>
-									{#if profileForm.ai_tools_image_generation || profileForm.ai_tools_image_editing}
-										<span class="text-xs px-1.5 py-0.5 bg-primary/20 text-primary rounded">{[profileForm.ai_tools_image_generation, profileForm.ai_tools_image_editing].filter(Boolean).length}</span>
+									{#if aiToolSelectionMode === 'all' || profileForm.enabled_ai_tools.length > 0}
+										<span class="text-xs px-1.5 py-0.5 bg-primary/20 text-primary rounded">
+											{aiToolSelectionMode === 'all' ? getAllAIToolIds().length : profileForm.enabled_ai_tools.length}
+										</span>
 									{/if}
 								</div>
 								<svg class="w-4 h-4 transition-transform {expandedSections.aiTools ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -4044,57 +4154,119 @@
 							</button>
 							{#if expandedSections.aiTools}
 								<div class="p-3 space-y-3 bg-card">
-									<p class="text-xs text-muted-foreground">Enable AI-powered tools for this profile. Configure API keys in Settings → Integrations.</p>
-
-									<!-- Nano Banana (Image) Category -->
-									<div class="border border-border rounded-lg overflow-hidden">
-										<div class="w-full px-3 py-2 bg-muted/50 flex items-center gap-2 text-sm text-foreground">
-											<span class="flex-1 font-medium">Nano Banana</span>
-											<span class="text-xs text-muted-foreground">(Google Gemini)</span>
+									<!-- AI Tool selection mode -->
+									<div>
+										<label class="block text-xs text-muted-foreground mb-2">AI Tool Access Mode</label>
+										<div class="flex gap-2">
+											<button
+												type="button"
+												on:click={() => { aiToolSelectionMode = 'all'; }}
+												class="px-3 py-1.5 text-xs rounded-lg transition-colors {aiToolSelectionMode === 'all' ? 'bg-violet-600 text-white' : 'bg-muted text-foreground hover:bg-muted/80'}"
+											>
+												All Tools
+											</button>
+											<button
+												type="button"
+												on:click={() => { aiToolSelectionMode = 'custom'; }}
+												class="px-3 py-1.5 text-xs rounded-lg transition-colors {aiToolSelectionMode === 'custom' ? 'bg-violet-600 text-white' : 'bg-muted text-foreground hover:bg-muted/80'}"
+											>
+												Custom
+											</button>
 										</div>
-										<div class="p-2 space-y-1 bg-card">
-											<label class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted/50 cursor-pointer">
-												<input
-													type="checkbox"
-													bind:checked={profileForm.ai_tools_image_generation}
-													class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring"
-												/>
-												<div class="flex-1">
-													<span class="text-sm text-foreground">Image Generation</span>
-													<p class="text-xs text-muted-foreground">Generate AI images from text prompts</p>
-												</div>
-											</label>
-											<label class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted/50 cursor-pointer">
-												<input
-													type="checkbox"
-													bind:checked={profileForm.ai_tools_image_editing}
-													class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring"
-												/>
-												<div class="flex-1">
-													<span class="text-sm text-foreground">Image Editing</span>
-													<p class="text-xs text-muted-foreground">Edit existing images - add elements, remove objects, change styles</p>
-												</div>
-											</label>
-										</div>
+										<p class="text-xs text-muted-foreground mt-1">
+											{#if aiToolSelectionMode === 'all'}
+												All AI tools are enabled. Configure API keys in Settings → Integrations.
+											{:else}
+												Select which AI tools to enable for this profile.
+											{/if}
+										</p>
 									</div>
 
-									<!-- Future: More AI tool categories -->
-									<!--
-									<div class="border border-border rounded-lg overflow-hidden">
-										<div class="w-full px-3 py-2 bg-muted/50 flex items-center gap-2 text-sm text-foreground">
-											<span class="flex-1 font-medium">Audio Tools</span>
+									<!-- AI Tool categories and individual tools -->
+									{#if aiToolSelectionMode === 'custom'}
+										<div class="border-t border-border pt-3 space-y-2">
+											{#each aiToolCategories as category}
+												{#if category.tools.length > 0}
+													{@const categoryToolIds = category.tools.map(t => t.id)}
+													{@const selectedInCategory = categoryToolIds.filter(id => profileForm.enabled_ai_tools.includes(id)).length}
+													{@const isFullySelected = selectedInCategory === categoryToolIds.length}
+													{@const isPartiallySelected = selectedInCategory > 0 && selectedInCategory < categoryToolIds.length}
+													<div class="border border-border rounded-lg overflow-hidden">
+														<!-- Category header -->
+														<div class="w-full px-3 py-2 bg-muted/50 flex items-center gap-2 text-sm text-foreground">
+															<!-- Custom checkbox with indeterminate state -->
+															<button
+																type="button"
+																on:click|stopPropagation={() => toggleAIToolCategory(category)}
+																class="w-4 h-4 rounded flex items-center justify-center transition-colors {isFullySelected ? 'bg-violet-600' : isPartiallySelected ? 'bg-violet-600' : 'bg-muted border border-border'}"
+															>
+																{#if isFullySelected}
+																	<!-- Checkmark icon -->
+																	<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																		<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
+																	</svg>
+																{:else if isPartiallySelected}
+																	<!-- Minus/dash icon for partial selection -->
+																	<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																		<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" />
+																	</svg>
+																{/if}
+															</button>
+															<button
+																type="button"
+																on:click={() => toggleAIToolCategoryExpansion(category.id)}
+																class="flex-1 flex items-center gap-2 text-left hover:text-foreground/80"
+															>
+																<span class="flex-1">{category.name}</span>
+																<span class="text-xs text-muted-foreground">({category.tools.length} tools)</span>
+																<svg class="w-4 h-4 transition-transform {aiToolCategoriesExpanded[category.id] ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+																</svg>
+															</button>
+														</div>
+														<!-- Individual tools -->
+														{#if aiToolCategoriesExpanded[category.id]}
+															<div class="p-2 space-y-1 bg-card">
+																{#each category.tools as tool}
+																	{@const isSelected = profileForm.enabled_ai_tools.includes(tool.id)}
+																	<label class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted/50 cursor-pointer">
+																		<input
+																			type="checkbox"
+																			checked={isSelected}
+																			on:change={() => toggleAITool(tool.id)}
+																			class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring"
+																		/>
+																		<div class="flex-1">
+																			<div class="flex items-center gap-2">
+																				<span class="text-sm text-foreground">{tool.name}</span>
+																				<span class="text-xs text-muted-foreground">({tool.provider})</span>
+																			</div>
+																			<p class="text-xs text-muted-foreground">{tool.description}</p>
+																		</div>
+																	</label>
+																{/each}
+															</div>
+														{/if}
+													</div>
+												{/if}
+											{/each}
 										</div>
-										<div class="p-2 space-y-1 bg-card">
-											<label class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted/50 cursor-pointer">
-												<input type="checkbox" class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring" disabled />
-												<div class="flex-1">
-													<span class="text-sm text-muted-foreground">Text to Speech</span>
-													<p class="text-xs text-muted-foreground">Coming soon</p>
-												</div>
-											</label>
+
+										<!-- Summary of selected AI tools -->
+										<div class="text-xs text-muted-foreground pt-2 border-t border-border">
+											{profileForm.enabled_ai_tools.length} AI tool{profileForm.enabled_ai_tools.length !== 1 ? 's' : ''} enabled
+											{#if profileForm.enabled_ai_tools.length > 0}
+												{@const toolNames = profileForm.enabled_ai_tools.map(id => {
+													for (const cat of aiToolCategories) {
+														const tool = cat.tools.find(t => t.id === id);
+														if (tool) return tool.name;
+													}
+													return id;
+												})}
+												<span class="text-foreground">: {toolNames.join(', ')}</span>
+											{/if}
 										</div>
-									</div>
-									-->
+									{/if}
 								</div>
 							{/if}
 						</div>
