@@ -1056,22 +1056,13 @@
 			</div>`;
 		});
 
-		// Render generated-videos markdown links as video player
+		// Render generated-videos markdown links as video player (buttons are in message header)
 		const generatedVideoPattern = /\[([^\]]*)\]\((\/api\/generated-videos\/[^)]+)\)/g;
 		processedContent = processedContent.replace(generatedVideoPattern, (match, text, videoUrl) => {
-			const filename = videoUrl.split('/').pop() || 'generated-video.mp4';
 			return `<div class="generated-video-container my-4">
 				<video src="${videoUrl}" controls class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border">
 					Your browser does not support the video tag.
 				</video>
-				<div class="flex items-center gap-2 mt-2">
-					<a href="${videoUrl}" download="${filename}" class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors no-underline" title="Download video">
-						<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-						</svg>
-						<span>Download</span>
-					</a>
-				</div>
 			</div>`;
 		});
 
@@ -1406,6 +1397,12 @@
 		return match ? match[1] : null;
 	}
 
+	// Extract generated video URL from message content
+	function extractGeneratedVideoUrl(content: string): string | null {
+		const match = content.match(/\[[^\]]*\]\((\/api\/generated-videos\/[^)]+)\)/);
+		return match ? match[1] : null;
+	}
+
 	// Get filename from generated image URL
 	function getFilenameFromUrl(url: string): string {
 		const pathMatch = url.match(/path=([^&]+)/);
@@ -1414,6 +1411,16 @@
 			return path.split('/').pop() || 'generated-image.png';
 		}
 		return url.split('/').pop() || 'generated-image.png';
+	}
+
+	// Get filename from generated video URL
+	function getVideoFilenameFromUrl(url: string): string {
+		const pathMatch = url.match(/path=([^&]+)/);
+		if (pathMatch) {
+			const path = decodeURIComponent(pathMatch[1]);
+			return path.split('/').pop() || 'generated-video.mp4';
+		}
+		return url.split('/').pop() || 'generated-video.mp4';
 	}
 
 	function formatTime(date?: Date): string {
@@ -3479,6 +3486,40 @@
 															class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
 															on:click={() => copyUrlToClipboard(imageUrl || '', message.id)}
 															title="Copy image URL"
+														>
+															{#if copiedUrlMessageId === message.id}
+																<svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+																</svg>
+																<span class="text-green-500">Copied</span>
+															{:else}
+																<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+																</svg>
+																<span>Copy URL</span>
+															{/if}
+														</button>
+														<span class="w-px h-4 bg-border"></span>
+													{/if}
+													<!-- Download and Copy URL buttons for generated videos -->
+													{#if extractGeneratedVideoUrl(message.content)}
+														{@const videoUrl = extractGeneratedVideoUrl(message.content)}
+														{@const filename = getVideoFilenameFromUrl(videoUrl || '')}
+														<a
+															href={videoUrl}
+															download={filename}
+															class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors no-underline"
+															title="Download video"
+														>
+															<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+															</svg>
+															<span>Download</span>
+														</a>
+														<button
+															class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
+															on:click={() => copyUrlToClipboard(videoUrl || '', message.id)}
+															title="Copy video URL"
 														>
 															{#if copiedUrlMessageId === message.id}
 																<svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
