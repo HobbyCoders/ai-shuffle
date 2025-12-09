@@ -411,6 +411,29 @@ console.log(JSON.stringify(result));"""
     return tools
 
 
+def _build_ai_tools_section(ai_tools_config: Optional[Dict[str, Any]] = None, prefix: str = "\n\n") -> str:
+    """
+    Build the <ai-tools> section for system prompts based on enabled tools.
+
+    Args:
+        ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
+        prefix: String to prepend before the section (default: "\n\n")
+
+    Returns:
+        The formatted <ai-tools> section, or empty string if no tools enabled
+    """
+    available_tools = _get_available_tools(ai_tools_config)
+    if not available_tools:
+        return ""
+
+    tools_section = f"{prefix}<ai-tools>\nThe following AI tools are available via code execution:\n"
+    for tool in available_tools:
+        tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
+    tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\nIMPORTANT: Always delete the .mjs file after execution to keep the workspace clean.\n</ai-tools>"
+
+    return tools_section
+
+
 def _build_env_with_ai_tools(
     base_env: Optional[Dict[str, str]],
     ai_tools_config: Optional[Dict[str, Any]]
@@ -481,14 +504,8 @@ def generate_environment_details(working_dir: str, ai_tools_config: Optional[Dic
     os_version = _get_os_version()
     today = datetime.now().strftime("%Y-%m-%d")
 
-    # Check for available AI tools based on individual tool settings
-    available_tools = _get_available_tools(ai_tools_config)
-    tools_section = ""
-    if available_tools:
-        tools_section = "\n\n<ai-tools>\nThe following AI tools are available via code execution:\n"
-        for tool in available_tools:
-            tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
-        tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\nIMPORTANT: Always delete the .mjs file after execution to keep the workspace clean.\n</ai-tools>"
+    # Get AI tools section using helper function
+    tools_section = _build_ai_tools_section(ai_tools_config)
 
     return f"""Here is useful information about the environment you are running in:
 <env>
@@ -543,13 +560,7 @@ def build_options_from_profile(
         final_system_prompt = SECURITY_INSTRUCTIONS
 
         # Add AI tools section if any are enabled
-        available_tools = _get_available_tools(ai_tools_config)
-        if available_tools:
-            tools_section = "\n\n<ai-tools>\nThe following AI tools are available via code execution:\n"
-            for tool in available_tools:
-                tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
-            tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\nIMPORTANT: Always delete the .mjs file after execution to keep the workspace clean.\n</ai-tools>"
-            final_system_prompt += tools_section
+        final_system_prompt += _build_ai_tools_section(ai_tools_config)
 
         if override_append:
             final_system_prompt += "\n\n" + override_append
@@ -570,12 +581,8 @@ def build_options_from_profile(
                 prompt_parts.append(generate_environment_details(working_dir, ai_tools_config))
             else:
                 # If env details not enabled, still add AI tools section if any are enabled
-                available_tools = _get_available_tools(ai_tools_config)
-                if available_tools:
-                    tools_section = "<ai-tools>\nThe following AI tools are available via code execution:\n"
-                    for tool in available_tools:
-                        tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
-                    tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\nIMPORTANT: Always delete the .mjs file after execution to keep the workspace clean.\n</ai-tools>"
+                tools_section = _build_ai_tools_section(ai_tools_config, prefix="")
+                if tools_section:
                     prompt_parts.append(tools_section)
 
             # Add custom content if provided
@@ -597,13 +604,7 @@ def build_options_from_profile(
                 full_append += "\n\n" + override_append
 
             # Add AI tools section if any are enabled
-            available_tools = _get_available_tools(ai_tools_config)
-            if available_tools:
-                tools_section = "\n\n<ai-tools>\nThe following AI tools are available via code execution:\n"
-                for tool in available_tools:
-                    tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
-                tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\nIMPORTANT: Always delete the .mjs file after execution to keep the workspace clean.\n</ai-tools>"
-                full_append += tools_section
+            full_append += _build_ai_tools_section(ai_tools_config)
 
             final_system_prompt = {
                 "type": "preset",
@@ -615,13 +616,7 @@ def build_options_from_profile(
         final_system_prompt = SECURITY_INSTRUCTIONS + "\n\n" + str(system_prompt)
 
         # Add AI tools section if any are enabled
-        available_tools = _get_available_tools(ai_tools_config)
-        if available_tools:
-            tools_section = "\n\n<ai-tools>\nThe following AI tools are available via code execution:\n"
-            for tool in available_tools:
-                tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
-            tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\nIMPORTANT: Always delete the .mjs file after execution to keep the workspace clean.\n</ai-tools>"
-            final_system_prompt += tools_section
+        final_system_prompt += _build_ai_tools_section(ai_tools_config)
 
         if override_append:
             final_system_prompt += "\n\n" + override_append
