@@ -94,23 +94,63 @@ export interface EditImageInput {
    * If not specified, maintains the original aspect ratio.
    */
   aspect_ratio?: '1:1' | '16:9' | '9:16' | '4:3' | '3:4' | '2:3' | '3:2' | '4:5' | '5:4' | '21:9';
+
+  /**
+   * Output image size/resolution.
+   * - "1K" = ~1024px (default, fastest)
+   * - "2K" = ~2048px (higher quality)
+   * - "4K" = ~4096px (highest quality, slower)
+   * @default "1K"
+   */
+  image_size?: '1K' | '2K' | '4K';
+
+  /**
+   * Number of edited variants to generate (1-4).
+   * When > 1, response will contain multiple images array.
+   * @default 1
+   */
+  number_of_images?: 1 | 2 | 3 | 4;
+
+  /**
+   * Control generation of people in the edited image.
+   * - "dont_allow": No people allowed
+   * - "allow_adult": Only adults allowed (default)
+   * - "allow_all": All people including children
+   * @default "allow_adult"
+   */
+  person_generation?: 'dont_allow' | 'allow_adult' | 'allow_all';
+}
+
+/** Single edited image result */
+export interface EditedImage {
+  /** URL to access the edited image (for display in chat) */
+  image_url: string;
+  /** Local file path where the edited image was saved */
+  file_path: string;
+  /** Filename of the edited image */
+  filename: string;
+  /** MIME type of the image (e.g., 'image/png') */
+  mime_type: string;
 }
 
 export interface EditImageResponse {
   /** Whether the image was edited successfully */
   success: boolean;
 
-  /** URL to access the edited image (for display in chat) */
+  /** URL to access the edited image (for display in chat) - first image when multiple */
   image_url?: string;
 
-  /** Local file path where the edited image was saved */
+  /** Local file path where the edited image was saved - first image when multiple */
   file_path?: string;
 
-  /** Filename of the edited image */
+  /** Filename of the edited image - first image when multiple */
   filename?: string;
 
-  /** MIME type of the image (e.g., 'image/png') */
+  /** MIME type of the image (e.g., 'image/png') - first image when multiple */
   mime_type?: string;
+
+  /** All edited images when number_of_images > 1 */
+  images?: EditedImage[];
 
   /** Error message if editing failed */
   error?: string;
@@ -242,11 +282,27 @@ export async function editImage(input: EditImageInput): Promise<EditImageRespons
       }
     };
 
-    // Add aspect ratio if specified
+    // Build imageConfig with all options
+    const imageConfig: any = {};
+
     if (input.aspect_ratio) {
-      requestBody.generationConfig.imageConfig = {
-        aspectRatio: input.aspect_ratio
-      };
+      imageConfig.aspectRatio = input.aspect_ratio;
+    }
+
+    if (input.image_size) {
+      imageConfig.imageSize = input.image_size;
+    }
+
+    if (input.person_generation) {
+      imageConfig.personGeneration = input.person_generation;
+    }
+
+    if (input.number_of_images && input.number_of_images > 1) {
+      imageConfig.numberOfImages = input.number_of_images;
+    }
+
+    if (Object.keys(imageConfig).length > 0) {
+      requestBody.generationConfig.imageConfig = imageConfig;
     }
 
     // Call Gemini API directly
@@ -308,8 +364,17 @@ export async function editImage(input: EditImageInput): Promise<EditImageRespons
     }
 
     const parts = candidates[0]?.content?.parts || [];
+    const editedImages: EditedImage[] = [];
 
-    // Look for inline image data
+    // Get the output directory
+    const outputDir = getGeneratedImagesDir();
+
+    // Ensure the output directory exists
+    if (!existsSync(outputDir)) {
+      mkdirSync(outputDir, { recursive: true });
+    }
+
+    // Process all image parts
     for (const part of parts) {
       if (part.inlineData) {
         const base64Data = part.inlineData.data;
@@ -323,45 +388,48 @@ export async function editImage(input: EditImageInput): Promise<EditImageRespons
         const randomSuffix = Math.random().toString(36).substring(2, 8);
         const filename = `edited-${timestamp}-${randomSuffix}.${ext}`;
 
-        // Get the output directory (uses env var or cwd)
-        const outputDir = getGeneratedImagesDir();
-
-        // Ensure the output directory exists
-        if (!existsSync(outputDir)) {
-          mkdirSync(outputDir, { recursive: true });
-        }
-
         // Save the image to disk
         const filePath = join(outputDir, filename);
         const buffer = Buffer.from(base64Data, 'base64');
         writeFileSync(filePath, buffer);
 
-        // Return the URL that the API will serve
-        // Use the /by-path endpoint with full path for flexibility across projects
+        // Build the URL
         const encodedPath = encodeURIComponent(filePath);
-        return {
-          success: true,
+        editedImages.push({
           image_url: `/api/generated-images/by-path?path=${encodedPath}`,
           file_path: filePath,
           filename: filename,
           mime_type: mimeType
-        };
+        });
       }
     }
 
-    // No image found - check if there's a text response (model might have refused)
-    for (const part of parts) {
-      if (part.text) {
-        return {
-          success: false,
-          error: `Model response: ${part.text.substring(0, 500)}`
-        };
+    if (editedImages.length === 0) {
+      // No image found - check if there's a text response (model might have refused)
+      for (const part of parts) {
+        if (part.text) {
+          return {
+            success: false,
+            error: `Model response: ${part.text.substring(0, 500)}`
+          };
+        }
       }
+
+      return {
+        success: false,
+        error: 'No edited image was generated. Please try a different prompt.'
+      };
     }
 
+    // Return response with first image as primary + all images array
+    const firstImage = editedImages[0];
     return {
-      success: false,
-      error: 'No edited image was generated. Please try a different prompt.'
+      success: true,
+      image_url: firstImage.image_url,
+      file_path: firstImage.file_path,
+      filename: firstImage.filename,
+      mime_type: firstImage.mime_type,
+      ...(editedImages.length > 1 && { images: editedImages })
     };
 
   } catch (error) {

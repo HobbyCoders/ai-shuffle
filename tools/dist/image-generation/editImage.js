@@ -166,11 +166,22 @@ export async function editImage(input) {
                 responseModalities: ['TEXT', 'IMAGE']
             }
         };
-        // Add aspect ratio if specified
+        // Build imageConfig with all options
+        const imageConfig = {};
         if (input.aspect_ratio) {
-            requestBody.generationConfig.imageConfig = {
-                aspectRatio: input.aspect_ratio
-            };
+            imageConfig.aspectRatio = input.aspect_ratio;
+        }
+        if (input.image_size) {
+            imageConfig.imageSize = input.image_size;
+        }
+        if (input.person_generation) {
+            imageConfig.personGeneration = input.person_generation;
+        }
+        if (input.number_of_images && input.number_of_images > 1) {
+            imageConfig.numberOfImages = input.number_of_images;
+        }
+        if (Object.keys(imageConfig).length > 0) {
+            requestBody.generationConfig.imageConfig = imageConfig;
         }
         // Call Gemini API directly
         const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
@@ -220,7 +231,14 @@ export async function editImage(input) {
             };
         }
         const parts = candidates[0]?.content?.parts || [];
-        // Look for inline image data
+        const editedImages = [];
+        // Get the output directory
+        const outputDir = getGeneratedImagesDir();
+        // Ensure the output directory exists
+        if (!existsSync(outputDir)) {
+            mkdirSync(outputDir, { recursive: true });
+        }
+        // Process all image parts
         for (const part of parts) {
             if (part.inlineData) {
                 const base64Data = part.inlineData.data;
@@ -231,40 +249,44 @@ export async function editImage(input) {
                 const timestamp = Date.now();
                 const randomSuffix = Math.random().toString(36).substring(2, 8);
                 const filename = `edited-${timestamp}-${randomSuffix}.${ext}`;
-                // Get the output directory (uses env var or cwd)
-                const outputDir = getGeneratedImagesDir();
-                // Ensure the output directory exists
-                if (!existsSync(outputDir)) {
-                    mkdirSync(outputDir, { recursive: true });
-                }
                 // Save the image to disk
                 const filePath = join(outputDir, filename);
                 const buffer = Buffer.from(base64Data, 'base64');
                 writeFileSync(filePath, buffer);
-                // Return the URL that the API will serve
-                // Use the /by-path endpoint with full path for flexibility across projects
+                // Build the URL
                 const encodedPath = encodeURIComponent(filePath);
-                return {
-                    success: true,
+                editedImages.push({
                     image_url: `/api/generated-images/by-path?path=${encodedPath}`,
                     file_path: filePath,
                     filename: filename,
                     mime_type: mimeType
-                };
+                });
             }
         }
-        // No image found - check if there's a text response (model might have refused)
-        for (const part of parts) {
-            if (part.text) {
-                return {
-                    success: false,
-                    error: `Model response: ${part.text.substring(0, 500)}`
-                };
+        if (editedImages.length === 0) {
+            // No image found - check if there's a text response (model might have refused)
+            for (const part of parts) {
+                if (part.text) {
+                    return {
+                        success: false,
+                        error: `Model response: ${part.text.substring(0, 500)}`
+                    };
+                }
             }
+            return {
+                success: false,
+                error: 'No edited image was generated. Please try a different prompt.'
+            };
         }
+        // Return response with first image as primary + all images array
+        const firstImage = editedImages[0];
         return {
-            success: false,
-            error: 'No edited image was generated. Please try a different prompt.'
+            success: true,
+            image_url: firstImage.image_url,
+            file_path: firstImage.file_path,
+            filename: firstImage.filename,
+            mime_type: firstImage.mime_type,
+            ...(editedImages.length > 1 && { images: editedImages })
         };
     }
     catch (error) {

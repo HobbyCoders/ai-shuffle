@@ -1,31 +1,25 @@
 /**
- * Image Generation Tool - Nano Banana (Google Gemini)
+ * Reference-Based Image Generation Tool - Nano Banana (Google Gemini)
  *
- * Generate images using AI. The API key is provided via environment variable.
- * Images are saved to disk and a URL is returned for display.
+ * Generate images while maintaining character/style consistency using reference images.
+ * Use up to 14 reference images (6 objects, 5 humans) to guide generation.
  *
  * Environment Variables:
  *   GEMINI_API_KEY - Google AI API key (injected by AI Hub at runtime)
  *   GEMINI_MODEL - Model to use (optional, defaults to gemini-2.0-flash-exp)
  *
  * Usage:
- *   import { generateImage } from '/workspace/ai-hub/tools/dist/image-generation/generateImage.js';
+ *   import { generateWithReference } from '/workspace/ai-hub/tools/dist/image-generation/generateWithReference.js';
  *
- *   const result = await generateImage({
- *     prompt: 'A futuristic city at sunset, cyberpunk style'
+ *   const result = await generateWithReference({
+ *     prompt: 'The character standing in a forest',
+ *     reference_images: ['/path/to/character.png']
  *   });
- *
- *   if (result.success) {
- *     // result.image_url contains the URL to access the image
- *     // result.file_path contains the local file path
- *   }
  */
-import { writeFileSync, mkdirSync, existsSync } from 'fs';
-import { join } from 'path';
+import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'fs';
+import { join, extname } from 'path';
 /**
  * Get the directory for storing generated images.
- * Uses GENERATED_IMAGES_DIR env var if set, otherwise creates a 'generated-images'
- * folder in the current working directory.
  */
 function getGeneratedImagesDir() {
     if (process.env.GENERATED_IMAGES_DIR) {
@@ -34,37 +28,74 @@ function getGeneratedImagesDir() {
     return join(process.cwd(), 'generated-images');
 }
 /**
- * Generate an image from a text prompt using Google Gemini.
+ * Get MIME type from file extension
+ */
+function getMimeType(filePath) {
+    const ext = extname(filePath).toLowerCase();
+    const mimeTypes = {
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp',
+    };
+    return mimeTypes[ext] || 'image/png';
+}
+/**
+ * Load image and convert to base64
+ */
+function loadImageAsBase64(imagePath) {
+    try {
+        if (!existsSync(imagePath)) {
+            return { error: `Image file not found: ${imagePath}` };
+        }
+        const imageBuffer = readFileSync(imagePath);
+        return {
+            base64: imageBuffer.toString('base64'),
+            mimeType: getMimeType(imagePath)
+        };
+    }
+    catch (error) {
+        return { error: error instanceof Error ? error.message : 'Failed to read image' };
+    }
+}
+/**
+ * Generate an image using reference images for consistency.
  *
- * The image is saved to disk and a URL is returned for display in the chat UI.
- * This avoids context window limitations with large base64 strings.
+ * This is useful for:
+ * - Maintaining character consistency across multiple generations
+ * - Applying a specific art style from a reference
+ * - Placing the same subject in different environments
+ * - Creating consistent product shots or brand assets
  *
- * @param input - The generation parameters
+ * @param input - The generation parameters including reference images
  * @returns The generated image URL and file path, or error details
  *
  * @example
  * ```typescript
- * // Generate a single image
- * const result = await generateImage({
- *   prompt: 'A cozy coffee shop interior, watercolor style'
+ * // Use a character reference
+ * const result = await generateWithReference({
+ *   prompt: 'The robot character exploring a jungle',
+ *   reference_images: ['/workspace/robot-character.png']
  * });
  *
- * // Generate multiple images
- * const result = await generateImage({
- *   prompt: 'A cute robot',
- *   number_of_images: 4,
- *   image_size: '2K'
+ * // Use multiple references with labels
+ * const result = await generateWithReference({
+ *   prompt: 'The hero fighting the villain in a city',
+ *   reference_images: [
+ *     { path: '/workspace/hero.png', label: 'hero character' },
+ *     { path: '/workspace/villain.png', label: 'villain character' }
+ *   ]
  * });
  *
- * if (result.success) {
- *   console.log('Image URL:', result.image_url);
- *   if (result.images) {
- *     result.images.forEach((img, i) => console.log(`Image ${i+1}:`, img.image_url));
- *   }
- * }
+ * // Style transfer
+ * const result = await generateWithReference({
+ *   prompt: 'A mountain landscape in this art style',
+ *   reference_images: [{ path: '/workspace/style.png', label: 'art style' }]
+ * });
  * ```
  */
-export async function generateImage(input) {
+export async function generateWithReference(input) {
     // Get API key from environment
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
@@ -88,14 +119,50 @@ export async function generateImage(input) {
             error: 'Prompt is too long. Maximum 10,000 characters.'
         };
     }
+    if (!input.reference_images || input.reference_images.length === 0) {
+        return {
+            success: false,
+            error: 'At least one reference image is required'
+        };
+    }
+    if (input.reference_images.length > 14) {
+        return {
+            success: false,
+            error: 'Maximum 14 reference images allowed'
+        };
+    }
     const prompt = input.prompt.trim();
     const numberOfImages = input.number_of_images || 1;
     try {
+        // Build parts array with prompt and reference images
+        const parts = [{ text: prompt }];
+        // Load and add each reference image
+        for (const ref of input.reference_images) {
+            const imagePath = typeof ref === 'string' ? ref : ref.path;
+            const label = typeof ref === 'string' ? undefined : ref.label;
+            const imageResult = loadImageAsBase64(imagePath);
+            if ('error' in imageResult) {
+                return {
+                    success: false,
+                    error: imageResult.error
+                };
+            }
+            // Add label as text part if provided
+            if (label) {
+                parts.push({ text: `[Reference: ${label}]` });
+            }
+            // Add the image
+            parts.push({
+                inline_data: {
+                    mime_type: imageResult.mimeType,
+                    data: imageResult.base64
+                }
+            });
+        }
         // Build generation config
         const generationConfig = {
             responseModalities: ['TEXT', 'IMAGE']
         };
-        // Add image config if any options specified
         const imageConfig = {};
         if (input.aspect_ratio) {
             imageConfig.aspectRatio = input.aspect_ratio;
@@ -119,13 +186,7 @@ export async function generateImage(input) {
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-                contents: [
-                    {
-                        parts: [
-                            { text: prompt }
-                        ]
-                    }
-                ],
+                contents: [{ parts }],
                 generationConfig
             }),
         });
@@ -137,7 +198,7 @@ export async function generateImage(input) {
                 if (errorStr.includes('SAFETY') || errorStr.toLowerCase().includes('blocked')) {
                     return {
                         success: false,
-                        error: 'Image generation was blocked by safety filters. Please try a different prompt.'
+                        error: 'Image generation was blocked by safety filters. Please try a different prompt or reference images.'
                     };
                 }
             }
@@ -167,30 +228,25 @@ export async function generateImage(input) {
                 error: 'No image was generated. The model may have refused the request.'
             };
         }
-        const parts = candidates[0]?.content?.parts || [];
+        const responseParts = candidates[0]?.content?.parts || [];
         const generatedImages = [];
         // Get the output directory
         const outputDir = getGeneratedImagesDir();
-        // Ensure the output directory exists
         if (!existsSync(outputDir)) {
             mkdirSync(outputDir, { recursive: true });
         }
         // Process all image parts
-        for (const part of parts) {
+        for (const part of responseParts) {
             if (part.inlineData) {
                 const base64Data = part.inlineData.data;
                 const mimeType = part.inlineData.mimeType || 'image/png';
-                // Determine file extension from mime type
                 const ext = mimeType === 'image/jpeg' ? 'jpg' : 'png';
-                // Generate unique filename with timestamp
                 const timestamp = Date.now();
                 const randomSuffix = Math.random().toString(36).substring(2, 8);
-                const filename = `image-${timestamp}-${randomSuffix}.${ext}`;
-                // Save the image to disk
+                const filename = `ref-${timestamp}-${randomSuffix}.${ext}`;
                 const filePath = join(outputDir, filename);
                 const buffer = Buffer.from(base64Data, 'base64');
                 writeFileSync(filePath, buffer);
-                // Build the URL
                 const encodedPath = encodeURIComponent(filePath);
                 generatedImages.push({
                     image_url: `/api/generated-images/by-path?path=${encodedPath}`,
@@ -201,8 +257,7 @@ export async function generateImage(input) {
             }
         }
         if (generatedImages.length === 0) {
-            // No image found - check if there's a text response
-            for (const part of parts) {
+            for (const part of responseParts) {
                 if (part.text) {
                     return {
                         success: false,
@@ -215,7 +270,6 @@ export async function generateImage(input) {
                 error: 'No image was generated. Please try a different prompt.'
             };
         }
-        // Return response with first image as primary + all images array
         const firstImage = generatedImages[0];
         return {
             success: true,
@@ -233,5 +287,5 @@ export async function generateImage(input) {
         };
     }
 }
-export default generateImage;
-//# sourceMappingURL=generateImage.js.map
+export default generateWithReference;
+//# sourceMappingURL=generateWithReference.js.map
