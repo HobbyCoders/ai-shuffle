@@ -87,21 +87,53 @@ class VoiceToTextResponse(BaseModel):
     error: Optional[str] = None
 
 
-# Available Nano Banana models
-# Verified via ListModels API and tested with generateContent
-# See: https://ai.google.dev/gemini-api/docs/models
-NANO_BANANA_MODELS = {
+# ============================================================================
+# Image Generation Model Selection
+# ============================================================================
+
+# Available image providers and their models
+IMAGE_PROVIDERS = {
+    "google-gemini": {
+        "name": "Google Gemini (Nano Banana)",
+        "description": "Google's Gemini image generation API",
+        "requires_key": "image_api_key"
+    },
+    "openai-gpt-image": {
+        "name": "OpenAI GPT Image",
+        "description": "OpenAI's GPT-4o native image generation",
+        "requires_key": "openai_api_key"
+    }
+}
+
+# Available image models by provider
+IMAGE_MODELS = {
+    # Google Gemini (Nano Banana) models
     "gemini-2.5-flash-image": {
         "name": "Nano Banana (Gemini 2.5 Flash)",
-        "description": "Fast image generation with good quality - ~$0.039/image",
-        "price_per_image": 0.039
+        "description": "Fast image generation with good quality",
+        "price_per_image": 0.039,
+        "provider": "google-gemini",
+        "capabilities": ["text-to-image", "image-edit", "image-reference"]
     },
     "gemini-3-pro-image-preview": {
         "name": "Nano Banana Pro (Gemini 3 Pro)",
-        "description": "Studio-quality, better text rendering, 2K/4K support - ~$0.10/image",
-        "price_per_image": 0.10
+        "description": "Studio-quality, better text rendering, 2K/4K support",
+        "price_per_image": 0.10,
+        "provider": "google-gemini",
+        "capabilities": ["text-to-image", "image-edit", "image-reference"]
+    },
+    # OpenAI GPT Image models
+    "gpt-image-1": {
+        "name": "GPT Image 1",
+        "description": "GPT-4o native image generation - high quality, accurate text",
+        "price_per_image": 0.07,
+        "provider": "openai-gpt-image",
+        "capabilities": ["text-to-image", "image-edit"]
     }
 }
+
+# Legacy alias for backwards compatibility
+NANO_BANANA_MODELS = {k: v for k, v in IMAGE_MODELS.items() if v.get("provider") == "google-gemini"}
 
 
 def mask_api_key(key: str) -> str:
@@ -340,24 +372,66 @@ async def transcribe_audio(
 
 
 # ============================================================================
-# Image Generation (Nano Banana / Google Gemini)
+# Image Generation (Multi-Provider)
 # ============================================================================
+
+class ImageModelUpdateRequest(BaseModel):
+    """Request to update the image model"""
+    model: str
+
+
+class ImageProviderUpdateRequest(BaseModel):
+    """Request to update the image provider"""
+    provider: str
+
 
 @router.get("/integrations/image/models")
 async def get_image_models(token: str = Depends(require_auth)):
     """
-    Get available image generation models.
+    Get available image generation models grouped by provider.
     """
+    # Get current settings
+    current_provider = database.get_system_setting("image_provider")
+    current_model = database.get_system_setting("image_model")
+    openai_key = database.get_system_setting("openai_api_key")
+    image_api_key = database.get_system_setting("image_api_key")
+
+    # Build models list with availability info
+    models = []
+    for model_id, model_info in IMAGE_MODELS.items():
+        provider_id = model_info["provider"]
+        provider_info = IMAGE_PROVIDERS[provider_id]
+
+        # Check if this provider's API key is configured
+        required_key = provider_info["requires_key"]
+        is_available = bool(database.get_system_setting(required_key))
+
+        models.append({
+            "id": model_id,
+            "name": model_info["name"],
+            "description": model_info["description"],
+            "price_per_image": model_info["price_per_image"],
+            "provider": provider_id,
+            "provider_name": provider_info["name"],
+            "capabilities": model_info.get("capabilities", []),
+            "available": is_available,
+            "is_current": model_id == current_model
+        })
+
     return {
-        "models": [
+        "models": models,
+        "providers": [
             {
-                "id": model_id,
-                "name": model_info["name"],
-                "description": model_info["description"],
-                "price_per_image": model_info["price_per_image"]
+                "id": provider_id,
+                "name": provider_info["name"],
+                "description": provider_info["description"],
+                "available": bool(database.get_system_setting(provider_info["requires_key"])),
+                "is_current": provider_id == current_provider
             }
-            for model_id, model_info in NANO_BANANA_MODELS.items()
-        ]
+            for provider_id, provider_info in IMAGE_PROVIDERS.items()
+        ],
+        "current_provider": current_provider,
+        "current_model": current_model
     }
 
 
@@ -369,7 +443,8 @@ async def set_image_generation(
     """
     Configure image generation provider and API key (admin only).
 
-    Currently supports Google Gemini (Nano Banana) models.
+    Supports Google Gemini (Nano Banana) models.
+    For OpenAI GPT Image, use the OpenAI API key configured in Whisper section.
     """
     provider = request.provider.lower().strip()
     model = request.model.strip()
@@ -378,19 +453,28 @@ async def set_image_generation(
     if not api_key:
         raise HTTPException(status_code=400, detail="API key cannot be empty")
 
-    if provider != "google":
-        raise HTTPException(status_code=400, detail="Currently only 'google' provider is supported for Nano Banana")
+    # Map legacy "google" provider to new ID
+    if provider == "google":
+        provider = "google-gemini"
 
-    if model not in NANO_BANANA_MODELS:
+    # Validate provider
+    if provider not in ["google-gemini"]:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid model. Available models: {', '.join(NANO_BANANA_MODELS.keys())}"
+            detail="This endpoint is for Google Gemini API key. OpenAI GPT Image uses the OpenAI key from Whisper settings."
+        )
+
+    # Get models for this provider
+    provider_models = [m for m in IMAGE_MODELS.keys() if IMAGE_MODELS[m]["provider"] == provider]
+    if model not in provider_models:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid model for {provider}. Available models: {', '.join(provider_models)}"
         )
 
     # Validate the API key by making a test request to Google AI
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            # Test the API key with a simple models list request
             response = await client.get(
                 f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
             )
@@ -398,7 +482,7 @@ async def set_image_generation(
                 raise HTTPException(status_code=400, detail="Invalid API key. Please check your Google AI API key.")
             elif response.status_code == 403:
                 raise HTTPException(status_code=400, detail="API key doesn't have permission. Enable the Generative Language API.")
-            elif response.status_code not in [200, 401]:  # 401 might be okay for some key types
+            elif response.status_code not in [200, 401]:
                 logger.warning(f"Google AI API check returned status {response.status_code}: {response.text}")
     except httpx.TimeoutException:
         logger.warning("Google AI API validation timed out, saving key anyway")
@@ -431,42 +515,45 @@ async def remove_image_generation(token: str = Depends(require_admin)):
     return {"success": True}
 
 
-class ImageModelUpdateRequest(BaseModel):
-    """Request to update just the image model"""
-    model: str
-
-
 @router.patch("/integrations/image/model")
 async def update_image_model(
     request: ImageModelUpdateRequest,
     token: str = Depends(require_admin)
 ):
     """
-    Update just the image model without changing the API key (admin only).
+    Update the image generation model (admin only).
 
-    Allows users to switch between models on the fly without re-entering credentials.
+    The provider is automatically determined from the selected model.
     """
     model = request.model.strip()
 
-    # Check if image generation is configured
-    api_key = database.get_system_setting("image_api_key")
+    if model not in IMAGE_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid model. Available models: {', '.join(IMAGE_MODELS.keys())}"
+        )
+
+    model_info = IMAGE_MODELS[model]
+    provider = model_info["provider"]
+
+    # Check if the required API key is configured
+    required_key = IMAGE_PROVIDERS[provider]["requires_key"]
+    api_key = database.get_system_setting(required_key)
+
     if not api_key:
+        key_name = "Google AI API key (Nano Banana)" if required_key == "image_api_key" else "OpenAI API key"
         raise HTTPException(
             status_code=400,
-            detail="Image generation not configured. Please set up with an API key first."
+            detail=f"{key_name} is required for {IMAGE_PROVIDERS[provider]['name']}. Configure it in Settings first."
         )
 
-    if model not in NANO_BANANA_MODELS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid model. Available models: {', '.join(NANO_BANANA_MODELS.keys())}"
-        )
-
-    # Update just the model
+    # Save the provider and model
+    database.set_system_setting("image_provider", provider)
     database.set_system_setting("image_model", model)
 
     return {
         "success": True,
+        "provider": provider,
         "model": model
     }
 

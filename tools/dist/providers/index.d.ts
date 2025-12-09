@@ -8,6 +8,7 @@ export * from './types.js';
 export { registry } from './registry.js';
 export { default } from './registry.js';
 export { googleGeminiProvider } from './image/google-gemini.js';
+export { openaiGptImageProvider } from './image/openai-gpt-image.js';
 export { googleVeoProvider } from './video/google-veo.js';
 export { openaiSoraProvider } from './video/openai-sora.js';
 //# sourceMappingURL=index.d.ts.map

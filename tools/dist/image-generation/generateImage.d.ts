@@ -1,17 +1,21 @@
 /**
  * Image Generation Tool - Unified Provider Interface
  *
- * Generate images using AI from multiple providers (Google Gemini/Nano Banana, etc.)
+ * Generate images using AI from multiple providers:
+ * - Google Gemini (Nano Banana): gemini-2.5-flash-image, gemini-3-pro-image-preview
+ * - OpenAI GPT Image: gpt-image-1 (GPT-4o native image generation)
+ *
  * The provider and model are selected based on environment variables or explicit input.
  * Images are saved to disk and a URL is returned for display.
  *
  * Environment Variables:
- *   IMAGE_PROVIDER - Provider ID (e.g., "google-gemini")
+ *   IMAGE_PROVIDER - Provider ID (e.g., "google-gemini", "openai-gpt-image")
  *   IMAGE_API_KEY - API key for the selected provider
- *   IMAGE_MODEL - Model to use (e.g., "gemini-2.5-flash-image")
+ *   IMAGE_MODEL - Model to use (e.g., "gemini-2.5-flash-image", "gpt-image-1")
  *
  *   Legacy (backwards compatible):
- *   GEMINI_API_KEY - Google AI API key (used if IMAGE_API_KEY not set)
+ *   GEMINI_API_KEY - Google AI API key (used if IMAGE_API_KEY not set for Gemini)
+ *   OPENAI_API_KEY - OpenAI API key (used if IMAGE_API_KEY not set for GPT Image)
  *   GEMINI_MODEL - Gemini model (used if IMAGE_MODEL not set)
  *
  * Usage:

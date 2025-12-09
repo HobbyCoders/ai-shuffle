@@ -1,12 +1,22 @@
 /**
- * Image Editing Tool - Nano Banana (Google Gemini)
+ * Image Editing Tool - Unified Provider Interface
  *
- * Edit existing images using AI. The API key is provided via environment variable.
+ * Edit existing images using AI from multiple providers:
+ * - Google Gemini (Nano Banana): gemini-2.5-flash-image, gemini-3-pro-image-preview
+ * - OpenAI GPT Image: gpt-image-1 (GPT-4o native image editing)
+ *
+ * The provider and model are selected based on environment variables or explicit input.
  * Images are saved to disk and a URL is returned for display.
  *
  * Environment Variables:
- *   GEMINI_API_KEY - Google AI API key (injected by AI Hub at runtime)
- *   GEMINI_MODEL - Model to use (optional, defaults to gemini-2.0-flash-exp)
+ *   IMAGE_PROVIDER - Provider ID (e.g., "google-gemini", "openai-gpt-image")
+ *   IMAGE_API_KEY - API key for the selected provider
+ *   IMAGE_MODEL - Model to use (e.g., "gemini-2.5-flash-image", "gpt-image-1")
+ *
+ *   Legacy (backwards compatible):
+ *   GEMINI_API_KEY - Google AI API key (used if IMAGE_API_KEY not set for Gemini)
+ *   OPENAI_API_KEY - OpenAI API key (used if IMAGE_API_KEY not set for GPT Image)
+ *   GEMINI_MODEL - Gemini model (used if IMAGE_MODEL not set)
  *
  * Usage:
  *   import { editImage } from '/opt/ai-tools/dist/image-generation/editImage.js';
@@ -39,19 +49,26 @@ export interface EditImageInput {
      *
      * @example "/workspace/my-project/generated-images/image-123.png"
      */
-    image_path?: string;
+    image_path: string;
     /**
-     * Base64-encoded image data to edit.
-     * Use this if you have the image data directly instead of a file path.
-     * Do not include the data URL prefix (e.g., "data:image/png;base64,")
+     * Override the default image provider.
+     * Available: "google-gemini", "openai-gpt-image"
+     * If not specified, uses IMAGE_PROVIDER env var or defaults to "google-gemini"
      */
-    image_base64?: string;
+    provider?: string;
     /**
-     * MIME type of the image when using image_base64.
-     * Required if using image_base64.
-     * @default "image/png"
+     * Override the default model for the selected provider.
+     * Google Gemini: "gemini-2.5-flash-image", "gemini-3-pro-image-preview"
+     * OpenAI: "gpt-image-1"
+     * If not specified, uses IMAGE_MODEL/GEMINI_MODEL env var or provider default
      */
-    image_mime_type?: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
+    model?: string;
+    /**
+     * Path to a mask image for inpainting (optional).
+     * White areas indicate where to edit, black areas are preserved.
+     * Only supported by some providers (OpenAI GPT Image).
+     */
+    mask_path?: string;
     /**
      * Aspect ratio of the output image.
      * If not specified, maintains the original aspect ratio.
@@ -108,7 +125,10 @@ export interface EditImageResponse {
     error?: string;
 }
 /**
- * Edit an existing image using Google Gemini.
+ * Edit an existing image using AI.
+ *
+ * Uses the configured provider (Google Gemini, OpenAI GPT Image, etc.) or allows
+ * explicit override via the provider/model parameters.
  *
  * The edited image is saved to disk and a URL is returned for display in the chat UI.
  * This avoids context window limitations with large base64 strings.
@@ -118,17 +138,18 @@ export interface EditImageResponse {
  *
  * @example
  * ```typescript
- * // Edit using a file path
+ * // Edit using default provider
  * const result = await editImage({
  *   prompt: 'Add a cat sitting on the couch',
  *   image_path: '/path/to/living-room.png'
  * });
  *
- * // Edit using base64 data
+ * // Edit using specific provider
  * const result = await editImage({
  *   prompt: 'Make it black and white',
- *   image_base64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB...',
- *   image_mime_type: 'image/png'
+ *   image_path: '/path/to/image.png',
+ *   provider: 'openai-gpt-image',
+ *   model: 'gpt-image-1'
  * });
  *
  * if (result.success) {

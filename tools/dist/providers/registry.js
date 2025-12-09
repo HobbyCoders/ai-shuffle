@@ -138,18 +138,18 @@ export const registry = new ProviderRegistry();
 // Import and register all providers
 // These imports will trigger provider registration via side effects
 import { googleGeminiProvider } from './image/google-gemini.js';
+import { openaiGptImageProvider } from './image/openai-gpt-image.js';
 import { googleVeoProvider } from './video/google-veo.js';
 import { openaiSoraProvider } from './video/openai-sora.js';
 // Register image providers
 registry.registerImageProvider(googleGeminiProvider);
+registry.registerImageProvider(openaiGptImageProvider);
 // Register video providers
 registry.registerVideoProvider(googleVeoProvider);
 registry.registerVideoProvider(openaiSoraProvider);
 // Future providers:
-// import { openaiDalleProvider } from './image/openai-dalle.js';
 // import { stabilityAiProvider } from './image/stability-ai.js';
 // import { runwayMlProvider } from './video/runway-ml.js';
-// registry.registerImageProvider(openaiDalleProvider);
 // registry.registerImageProvider(stabilityAiProvider);
 // registry.registerVideoProvider(runwayMlProvider);
 export default registry;

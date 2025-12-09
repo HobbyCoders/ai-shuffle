@@ -553,18 +553,38 @@ def _build_env_with_ai_tools(
     if not ai_tools_config:
         return env
 
-    # Inject Gemini API key for image generation/editing
+    # Inject credentials for image generation/editing (supports multiple providers)
     if ai_tools_config.get("image_generation", False) or ai_tools_config.get("image_editing", False):
-        image_api_key = database.get_system_setting("image_api_key")
+        image_provider = database.get_system_setting("image_provider")
         image_model = database.get_system_setting("image_model")
 
-        if image_api_key:
-            env["GEMINI_API_KEY"] = image_api_key
-            logger.debug("Injected GEMINI_API_KEY into execution environment")
+        # Set the provider
+        if image_provider:
+            env["IMAGE_PROVIDER"] = image_provider
+            logger.debug(f"Injected IMAGE_PROVIDER={image_provider} into execution environment")
 
+        # Set the model
         if image_model:
+            env["IMAGE_MODEL"] = image_model
+            # Also set legacy GEMINI_MODEL for backwards compatibility
             env["GEMINI_MODEL"] = image_model
-            logger.debug(f"Injected GEMINI_MODEL={image_model} into execution environment")
+            logger.debug(f"Injected IMAGE_MODEL={image_model} into execution environment")
+
+        # Inject API key based on provider
+        if image_provider == "openai-gpt-image":
+            # GPT Image uses OpenAI API key
+            openai_api_key = database.get_system_setting("openai_api_key")
+            if openai_api_key:
+                env["OPENAI_API_KEY"] = openai_api_key
+                env["IMAGE_API_KEY"] = openai_api_key
+                logger.debug("Injected OPENAI_API_KEY for GPT Image generation")
+        else:
+            # Default to Google Gemini - uses Gemini API key
+            image_api_key = database.get_system_setting("image_api_key")
+            if image_api_key:
+                env["GEMINI_API_KEY"] = image_api_key
+                env["IMAGE_API_KEY"] = image_api_key
+                logger.debug("Injected GEMINI_API_KEY for Gemini image generation")
 
     # Inject video generation credentials (supports multiple providers)
     if ai_tools_config.get("video_generation", False):

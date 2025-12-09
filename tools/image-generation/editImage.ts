@@ -1,12 +1,22 @@
 /**
- * Image Editing Tool - Nano Banana (Google Gemini)
+ * Image Editing Tool - Unified Provider Interface
  *
- * Edit existing images using AI. The API key is provided via environment variable.
+ * Edit existing images using AI from multiple providers:
+ * - Google Gemini (Nano Banana): gemini-2.5-flash-image, gemini-3-pro-image-preview
+ * - OpenAI GPT Image: gpt-image-1 (GPT-4o native image editing)
+ *
+ * The provider and model are selected based on environment variables or explicit input.
  * Images are saved to disk and a URL is returned for display.
  *
  * Environment Variables:
- *   GEMINI_API_KEY - Google AI API key (injected by AI Hub at runtime)
- *   GEMINI_MODEL - Model to use (optional, defaults to gemini-2.0-flash-exp)
+ *   IMAGE_PROVIDER - Provider ID (e.g., "google-gemini", "openai-gpt-image")
+ *   IMAGE_API_KEY - API key for the selected provider
+ *   IMAGE_MODEL - Model to use (e.g., "gemini-2.5-flash-image", "gpt-image-1")
+ *
+ *   Legacy (backwards compatible):
+ *   GEMINI_API_KEY - Google AI API key (used if IMAGE_API_KEY not set for Gemini)
+ *   OPENAI_API_KEY - OpenAI API key (used if IMAGE_API_KEY not set for GPT Image)
+ *   GEMINI_MODEL - Gemini model (used if IMAGE_MODEL not set)
  *
  * Usage:
  *   import { editImage } from '/opt/ai-tools/dist/image-generation/editImage.js';
@@ -22,37 +32,8 @@
  *   }
  */
 
-import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'fs';
-import { join, extname } from 'path';
-
-/**
- * Get the directory for storing generated images.
- * Uses GENERATED_IMAGES_DIR env var if set, otherwise creates a 'generated-images'
- * folder in the current working directory.
- */
-function getGeneratedImagesDir(): string {
-  // Allow override via environment variable
-  if (process.env.GENERATED_IMAGES_DIR) {
-    return process.env.GENERATED_IMAGES_DIR;
-  }
-  // Default to a folder in the current working directory
-  return join(process.cwd(), 'generated-images');
-}
-
-/**
- * Get MIME type from file extension
- */
-function getMimeType(filePath: string): string {
-  const ext = extname(filePath).toLowerCase();
-  const mimeTypes: Record<string, string> = {
-    '.png': 'image/png',
-    '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.gif': 'image/gif',
-    '.webp': 'image/webp',
-  };
-  return mimeTypes[ext] || 'image/png';
-}
+import { registry } from '../providers/registry.js';
+import { ImageResult, ProviderCredentials } from '../providers/types.js';
 
 export interface EditImageInput {
   /**
@@ -73,21 +54,29 @@ export interface EditImageInput {
    *
    * @example "/workspace/my-project/generated-images/image-123.png"
    */
-  image_path?: string;
+  image_path: string;
 
   /**
-   * Base64-encoded image data to edit.
-   * Use this if you have the image data directly instead of a file path.
-   * Do not include the data URL prefix (e.g., "data:image/png;base64,")
+   * Override the default image provider.
+   * Available: "google-gemini", "openai-gpt-image"
+   * If not specified, uses IMAGE_PROVIDER env var or defaults to "google-gemini"
    */
-  image_base64?: string;
+  provider?: string;
 
   /**
-   * MIME type of the image when using image_base64.
-   * Required if using image_base64.
-   * @default "image/png"
+   * Override the default model for the selected provider.
+   * Google Gemini: "gemini-2.5-flash-image", "gemini-3-pro-image-preview"
+   * OpenAI: "gpt-image-1"
+   * If not specified, uses IMAGE_MODEL/GEMINI_MODEL env var or provider default
    */
-  image_mime_type?: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
+  model?: string;
+
+  /**
+   * Path to a mask image for inpainting (optional).
+   * White areas indicate where to edit, black areas are preserved.
+   * Only supported by some providers (OpenAI GPT Image).
+   */
+  mask_path?: string;
 
   /**
    * Aspect ratio of the output image.
@@ -156,9 +145,105 @@ export interface EditImageResponse {
   error?: string;
 }
 
+/**
+ * Determine the provider ID to use based on input and environment
+ */
+function getProviderId(inputProvider?: string): string {
+  // Explicit input takes priority
+  if (inputProvider) {
+    return inputProvider;
+  }
+
+  // Check environment variables
+  if (process.env.IMAGE_PROVIDER) {
+    return process.env.IMAGE_PROVIDER;
+  }
+
+  // Default to Google Gemini
+  return 'google-gemini';
+}
 
 /**
- * Edit an existing image using Google Gemini.
+ * Get API key for the specified provider
+ */
+function getApiKey(providerId: string): string {
+  // Check provider-specific env var first
+  if (process.env.IMAGE_API_KEY) {
+    return process.env.IMAGE_API_KEY;
+  }
+
+  // Legacy fallbacks based on provider
+  if (providerId === 'google-gemini') {
+    return process.env.GEMINI_API_KEY || '';
+  }
+
+  if (providerId === 'openai-gpt-image') {
+    return process.env.OPENAI_API_KEY || '';
+  }
+
+  return '';
+}
+
+/**
+ * Get model ID for the specified provider
+ */
+function getModelId(providerId: string, inputModel?: string): string {
+  // Explicit input takes priority
+  if (inputModel) {
+    return inputModel;
+  }
+
+  // Check environment variables
+  if (process.env.IMAGE_MODEL) {
+    return process.env.IMAGE_MODEL;
+  }
+
+  // Legacy fallbacks
+  if (providerId === 'google-gemini' && process.env.GEMINI_MODEL) {
+    return process.env.GEMINI_MODEL;
+  }
+
+  // Provider defaults
+  const provider = registry.getImageProvider(providerId);
+  if (provider && provider.models.length > 0) {
+    return provider.models[0].id;
+  }
+
+  // Ultimate fallback
+  if (providerId === 'google-gemini') {
+    return 'gemini-2.5-flash-image';
+  }
+
+  if (providerId === 'openai-gpt-image') {
+    return 'gpt-image-1';
+  }
+
+  return '';
+}
+
+/**
+ * Convert provider result to our response format
+ */
+function toResponse(result: ImageResult): EditImageResponse {
+  if (!result.success) {
+    return { success: false, error: result.error };
+  }
+
+  return {
+    success: true,
+    image_url: result.image_url,
+    file_path: result.file_path,
+    filename: result.filename,
+    mime_type: result.mime_type,
+    ...(result.images && { images: result.images as EditedImage[] })
+  };
+}
+
+/**
+ * Edit an existing image using AI.
+ *
+ * Uses the configured provider (Google Gemini, OpenAI GPT Image, etc.) or allows
+ * explicit override via the provider/model parameters.
  *
  * The edited image is saved to disk and a URL is returned for display in the chat UI.
  * This avoids context window limitations with large base64 strings.
@@ -168,17 +253,18 @@ export interface EditImageResponse {
  *
  * @example
  * ```typescript
- * // Edit using a file path
+ * // Edit using default provider
  * const result = await editImage({
  *   prompt: 'Add a cat sitting on the couch',
  *   image_path: '/path/to/living-room.png'
  * });
  *
- * // Edit using base64 data
+ * // Edit using specific provider
  * const result = await editImage({
  *   prompt: 'Make it black and white',
- *   image_base64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB...',
- *   image_mime_type: 'image/png'
+ *   image_path: '/path/to/image.png',
+ *   provider: 'openai-gpt-image',
+ *   model: 'gpt-image-1'
  * });
  *
  * if (result.success) {
@@ -190,254 +276,74 @@ export interface EditImageResponse {
  * ```
  */
 export async function editImage(input: EditImageInput): Promise<EditImageResponse> {
-  // Get API key from environment
-  const apiKey = process.env.GEMINI_API_KEY;
+  // Determine provider
+  const providerId = getProviderId(input.provider);
+  const provider = registry.getImageProvider(providerId);
+
+  if (!provider) {
+    const availableProviders = registry.listImageProviders().map(p => p.id);
+    return {
+      success: false,
+      error: `Image provider '${providerId}' not found. Available providers: ${availableProviders.join(', ')}`
+    };
+  }
+
+  // Check if provider supports editing
+  if (!provider.edit) {
+    return {
+      success: false,
+      error: `Provider '${provider.name}' does not support image editing. Try a different provider.`
+    };
+  }
+
+  // Get API key
+  const apiKey = getApiKey(providerId);
   if (!apiKey) {
     return {
       success: false,
-      error: 'GEMINI_API_KEY environment variable not set. Image editing is not configured.'
+      error: `No API key configured for ${provider.name}. Set IMAGE_API_KEY or provider-specific key.`
     };
   }
 
-  // Get model from environment or use default
-  const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash-exp';
+  // Get model
+  const modelId = getModelId(providerId, input.model);
+  const modelInfo = provider.models.find(m => m.id === modelId);
 
-  // Validate input - need prompt
-  if (!input.prompt || input.prompt.trim().length === 0) {
+  if (!modelInfo) {
+    const availableModels = provider.models.map(m => m.id);
     return {
       success: false,
-      error: 'Prompt cannot be empty. Describe what changes you want to make to the image.'
+      error: `Model '${modelId}' not found for ${provider.name}. Available models: ${availableModels.join(', ')}`
     };
   }
 
-  if (input.prompt.length > 10000) {
+  // Check if model supports editing
+  if (!modelInfo.capabilities.includes('image-edit')) {
     return {
       success: false,
-      error: 'Prompt is too long. Maximum 10,000 characters.'
+      error: `Model '${modelId}' does not support image editing. Try a different model.`
     };
   }
 
-  // Validate input - need image
-  if (!input.image_path && !input.image_base64) {
-    return {
-      success: false,
-      error: 'Either image_path or image_base64 must be provided.'
-    };
-  }
+  // Build credentials
+  const credentials: ProviderCredentials = { apiKey };
 
-  const prompt = input.prompt.trim();
+  // Delegate to provider
+  const result = await provider.edit(
+    {
+      prompt: input.prompt,
+      source_image: input.image_path,
+      mask_image: input.mask_path,
+      aspect_ratio: input.aspect_ratio,
+      image_size: input.image_size,
+      number_of_images: input.number_of_images,
+      person_generation: input.person_generation
+    },
+    credentials,
+    modelId
+  );
 
-  // Load image data
-  let imageBase64: string;
-  let imageMimeType: string;
-
-  try {
-    if (input.image_path) {
-      // Load from file path
-      if (!existsSync(input.image_path)) {
-        return {
-          success: false,
-          error: `Image file not found: ${input.image_path}`
-        };
-      }
-
-      const imageBuffer = readFileSync(input.image_path);
-      imageBase64 = imageBuffer.toString('base64');
-      imageMimeType = getMimeType(input.image_path);
-    } else {
-      // Use provided base64 data
-      imageBase64 = input.image_base64!;
-      imageMimeType = input.image_mime_type || 'image/png';
-
-      // Remove data URL prefix if present
-      if (imageBase64.includes(',')) {
-        imageBase64 = imageBase64.split(',')[1];
-      }
-    }
-  } catch (error) {
-    return {
-      success: false,
-      error: `Failed to load image: ${error instanceof Error ? error.message : 'Unknown error'}`
-    };
-  }
-
-  try {
-    // Build the request body
-    const requestBody: any = {
-      contents: [
-        {
-          parts: [
-            { text: prompt },
-            {
-              inline_data: {
-                mime_type: imageMimeType,
-                data: imageBase64
-              }
-            }
-          ]
-        }
-      ],
-      generationConfig: {
-        responseModalities: ['TEXT', 'IMAGE']
-      }
-    };
-
-    // Build imageConfig with all options
-    const imageConfig: any = {};
-
-    if (input.aspect_ratio) {
-      imageConfig.aspectRatio = input.aspect_ratio;
-    }
-
-    if (input.image_size) {
-      imageConfig.imageSize = input.image_size;
-    }
-
-    if (input.person_generation) {
-      imageConfig.personGeneration = input.person_generation;
-    }
-
-    if (input.number_of_images && input.number_of_images > 1) {
-      imageConfig.numberOfImages = input.number_of_images;
-    }
-
-    if (Object.keys(imageConfig).length > 0) {
-      requestBody.generationConfig.imageConfig = imageConfig;
-    }
-
-    // Call Gemini API directly
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(requestBody),
-      }
-    );
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      const errorMsg = (errorData as any)?.error?.message || `HTTP ${response.status}`;
-
-      // Check for safety filters
-      if (response.status === 400) {
-        const errorStr = JSON.stringify(errorData);
-        if (errorStr.includes('SAFETY') || errorStr.toLowerCase().includes('blocked')) {
-          return {
-            success: false,
-            error: 'Image editing was blocked by safety filters. Please try a different prompt or image.'
-          };
-        }
-      }
-
-      if (response.status === 401 || response.status === 403) {
-        return {
-          success: false,
-          error: 'API key is invalid or expired.'
-        };
-      }
-
-      if (response.status === 429) {
-        return {
-          success: false,
-          error: 'Rate limit exceeded. Please wait a moment and try again.'
-        };
-      }
-
-      return {
-        success: false,
-        error: `API error: ${errorMsg}`
-      };
-    }
-
-    const result = await response.json() as any;
-
-    // Extract image from response
-    const candidates = result.candidates || [];
-    if (!candidates.length) {
-      return {
-        success: false,
-        error: 'No edited image was generated. The model may have refused the request.'
-      };
-    }
-
-    const parts = candidates[0]?.content?.parts || [];
-    const editedImages: EditedImage[] = [];
-
-    // Get the output directory
-    const outputDir = getGeneratedImagesDir();
-
-    // Ensure the output directory exists
-    if (!existsSync(outputDir)) {
-      mkdirSync(outputDir, { recursive: true });
-    }
-
-    // Process all image parts
-    for (const part of parts) {
-      if (part.inlineData) {
-        const base64Data = part.inlineData.data;
-        const mimeType = part.inlineData.mimeType || 'image/png';
-
-        // Determine file extension from mime type
-        const ext = mimeType === 'image/jpeg' ? 'jpg' : 'png';
-
-        // Generate unique filename with timestamp - prefix with 'edited-'
-        const timestamp = Date.now();
-        const randomSuffix = Math.random().toString(36).substring(2, 8);
-        const filename = `edited-${timestamp}-${randomSuffix}.${ext}`;
-
-        // Save the image to disk
-        const filePath = join(outputDir, filename);
-        const buffer = Buffer.from(base64Data, 'base64');
-        writeFileSync(filePath, buffer);
-
-        // Build the URL
-        const encodedPath = encodeURIComponent(filePath);
-        editedImages.push({
-          image_url: `/api/generated-images/by-path?path=${encodedPath}`,
-          file_path: filePath,
-          filename: filename,
-          mime_type: mimeType
-        });
-      }
-    }
-
-    if (editedImages.length === 0) {
-      // No image found - check if there's a text response (model might have refused)
-      for (const part of parts) {
-        if (part.text) {
-          return {
-            success: false,
-            error: `Model response: ${part.text.substring(0, 500)}`
-          };
-        }
-      }
-
-      return {
-        success: false,
-        error: 'No edited image was generated. Please try a different prompt.'
-      };
-    }
-
-    // Return response with first image as primary + all images array
-    const firstImage = editedImages[0];
-    return {
-      success: true,
-      image_url: firstImage.image_url,
-      file_path: firstImage.file_path,
-      filename: firstImage.filename,
-      mime_type: firstImage.mime_type,
-      ...(editedImages.length > 1 && { images: editedImages })
-    };
-
-  } catch (error) {
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error occurred'
-    };
-  }
+  return toResponse(result);
 }
 
 export default editImage;
