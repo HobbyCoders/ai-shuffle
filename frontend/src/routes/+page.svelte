@@ -1038,6 +1038,75 @@
 		}
 	}
 
+	// Render standalone image display (for main chat, outside tool groups)
+	function renderStandaloneImage(content: string): string {
+		try {
+			const data = JSON.parse(content);
+
+			// Handle URL-based image results (new format)
+			if (data.success && data.image_url) {
+				const imageUrl = data.image_url;
+				const filename = data.filename || 'generated-image.png';
+				return `<div class="generated-image-standalone mt-3">
+					<img src="${imageUrl}" alt="Generated image" class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border" />
+					<div class="flex gap-2 mt-3">
+						<a href="${imageUrl}" download="${filename}" class="text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 flex items-center gap-1.5 font-medium no-underline">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+							</svg>
+							Download
+						</a>
+						<button onclick="(function(){
+							navigator.clipboard.writeText(window.location.origin + '${imageUrl}');
+							this.textContent = 'Copied!';
+							setTimeout(() => this.textContent = 'Copy URL', 2000);
+						}).call(this)" class="text-xs px-3 py-1.5 bg-muted text-foreground rounded-md hover:bg-accent flex items-center gap-1.5">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+							</svg>
+							Copy URL
+						</button>
+					</div>
+				</div>`;
+			}
+
+			// Handle base64 image results (legacy format)
+			if (data.success && data.image_base64 && data.mime_type) {
+				const mimeType = data.mime_type || 'image/png';
+				const dataUrl = `data:${mimeType};base64,${data.image_base64}`;
+				return `<div class="generated-image-standalone mt-3">
+					<img src="${dataUrl}" alt="Generated image" class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border" />
+					<div class="flex gap-2 mt-3">
+						<button onclick="(function(){
+							const link = document.createElement('a');
+							link.href = '${dataUrl}';
+							link.download = 'generated-image.png';
+							link.click();
+						})()" class="text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 flex items-center gap-1.5 font-medium">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+							</svg>
+							Download
+						</button>
+						<button onclick="(function(){
+							navigator.clipboard.writeText('${dataUrl}');
+							this.textContent = 'Copied!';
+							setTimeout(() => this.textContent = 'Copy URL', 2000);
+						}).call(this)" class="text-xs px-3 py-1.5 bg-muted text-foreground rounded-md hover:bg-accent flex items-center gap-1.5">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+							</svg>
+							Copy URL
+						</button>
+					</div>
+				</div>`;
+			}
+		} catch {
+			// Not valid JSON
+		}
+		return '';
+	}
+
 	// Copy text to clipboard with feedback
 	let copiedMessageId: string | null = null;
 	async function copyToClipboard(text: string, messageId: string) {
@@ -3184,7 +3253,8 @@
 													<div class="px-4 py-3">
 														<div class="text-xs text-muted-foreground mb-1 font-medium">Result</div>
 														{#if toolResultHasImage(message.toolResult)}
-															{@html renderToolResult(message.toolResult)}
+															<!-- Show compact message for images - full image displayed outside tool group -->
+															<span class="text-xs text-green-500">✓ Image generated successfully (see below)</span>
 														{:else}
 															<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.toolResult}</pre>
 														{/if}
@@ -3192,6 +3262,10 @@
 												{/if}
 											</div>
 										</details>
+										<!-- Display generated image outside the collapsible tool group -->
+										{#if message.toolResult && toolResultHasImage(message.toolResult)}
+											{@html renderStandaloneImage(message.toolResult)}
+										{/if}
 									</div>
 								</div>
 							{:else if message.type === 'tool_result'}
@@ -3222,12 +3296,17 @@
 											</summary>
 											<div class="px-4 py-3 bg-card border-t border-border">
 												{#if toolResultHasImage(message.content)}
-													{@html renderToolResult(message.content)}
+													<!-- Show compact message for images - full image displayed outside tool group -->
+													<span class="text-xs text-green-500">✓ Image generated successfully (see below)</span>
 												{:else}
 													<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.content}</pre>
 												{/if}
 											</div>
 										</details>
+										<!-- Display generated image outside the collapsible tool group -->
+										{#if toolResultHasImage(message.content)}
+											{@html renderStandaloneImage(message.content)}
+										{/if}
 									</div>
 								</div>
 							{:else if message.type === 'system'}
