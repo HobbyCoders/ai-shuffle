@@ -1101,8 +1101,8 @@
 
 					<!-- Integrations Tab -->
 					{#if activeTab === 'integrations'}
-						<div class="space-y-4">
-							<div>
+						<div class="space-y-4 max-h-[calc(100vh-12rem)] overflow-y-auto pb-4 pr-1">
+							<div class="sticky top-0 bg-background pb-2 z-10">
 								<h2 class="text-xl font-bold text-foreground mb-1">Integrations</h2>
 								<p class="text-sm text-muted-foreground">Connect external services to extend AI Hub.</p>
 							</div>
@@ -1183,74 +1183,48 @@
 								</p>
 							</div>
 
-							<!-- Image Generation (Nano Banana) Integration - Compact -->
+							<!-- Google Gemini Models Group -->
 							<div class="card p-4">
-								<div class="flex items-center gap-3 mb-3">
-									<div class="w-9 h-9 bg-yellow-500/15 rounded-lg flex items-center justify-center text-lg shrink-0">
-										🍌
+								<div class="flex items-center gap-3 mb-4">
+									<div class="w-9 h-9 bg-blue-500/15 rounded-lg flex items-center justify-center shrink-0">
+										<svg class="w-5 h-5 text-blue-400" viewBox="0 0 24 24" fill="currentColor">
+											<path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+										</svg>
 									</div>
 									<div class="flex-1 min-w-0">
 										<div class="flex items-center justify-between gap-2">
-											<span class="font-semibold text-foreground text-sm">Nano Banana</span>
+											<span class="font-semibold text-foreground text-sm">Google Gemini</span>
 											{#if imageApiKeyMasked}
 												<span class="text-[10px] px-2 py-0.5 rounded-full bg-success/15 text-success font-medium shrink-0">Configured</span>
 											{:else}
 												<span class="text-[10px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground font-medium shrink-0">Not Set</span>
 											{/if}
 										</div>
-										<p class="text-xs text-muted-foreground truncate">AI Image Generation (Google Gemini)</p>
+										<p class="text-xs text-muted-foreground truncate">Image & Video Generation (Nano Banana + Veo)</p>
 									</div>
 								</div>
 
-								{#if imageConfigSuccess}
-									<div class="bg-success/10 border border-success/30 text-success px-2 py-1.5 rounded text-xs flex items-center gap-1.5 mb-3">
-										<span>✓</span>
-										<span>{imageConfigSuccess}</span>
-									</div>
-								{/if}
+								<!-- API Key Section -->
+								<div class="mb-4 pb-4 border-b border-border">
+									{#if imageConfigSuccess}
+										<div class="bg-success/10 border border-success/30 text-success px-2 py-1.5 rounded text-xs flex items-center gap-1.5 mb-3">
+											<span>✓</span>
+											<span>{imageConfigSuccess}</span>
+										</div>
+									{/if}
 
-								{#if imageConfigError}
-									<div class="bg-destructive/10 border border-destructive/30 text-destructive px-2 py-1.5 rounded text-xs mb-3">
-										{imageConfigError}
-									</div>
-								{/if}
+									{#if imageConfigError}
+										<div class="bg-destructive/10 border border-destructive/30 text-destructive px-2 py-1.5 rounded text-xs mb-3">
+											{imageConfigError}
+										</div>
+									{/if}
 
-								{#if imageApiKeyMasked}
-									<div class="flex items-center gap-2 mb-3 p-2 bg-muted rounded text-xs">
-										<code class="text-foreground font-mono truncate">{imageApiKeyMasked}</code>
-									</div>
-								{/if}
+									{#if imageApiKeyMasked}
+										<div class="flex items-center gap-2 mb-3 p-2 bg-muted rounded text-xs">
+											<code class="text-foreground font-mono truncate">{imageApiKeyMasked}</code>
+										</div>
+									{/if}
 
-								<div class="space-y-3">
-									<!-- Model Selection - Always visible, with quick update when configured -->
-									<div class="flex gap-2">
-										<select
-											bind:value={selectedImageModel}
-											class="input text-xs py-1.5 flex-1"
-										>
-											{#each imageModels as model}
-												<option value={model.id}>
-													{model.name} (${model.price_per_image}/img)
-												</option>
-											{/each}
-										</select>
-										{#if imageApiKeyMasked && selectedImageModel !== imageModel}
-											<button
-												on:click={updateImageModel}
-												disabled={updatingImageModel}
-												class="btn btn-primary text-xs py-1.5 px-3"
-												title="Apply model change"
-											>
-												{#if updatingImageModel}
-													<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
-												{:else}
-													Apply
-												{/if}
-											</button>
-										{/if}
-									</div>
-
-									<!-- API Key Input -->
 									<div class="flex gap-2">
 										<input
 											type="password"
@@ -1282,47 +1256,68 @@
 											</button>
 										{/if}
 									</div>
+									<p class="text-[10px] text-muted-foreground mt-2">
+										<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">Get API key</a> · Used for both image and video generation
+									</p>
 								</div>
 
-								<p class="text-[10px] text-muted-foreground mt-2">
-									<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">Get API key</a> · ~$0.039/image
-								</p>
-							</div>
-
-							<!-- Video Generation (Veo) - Model Selection -->
-							<div class="card p-4">
-								<div class="flex items-center gap-3 mb-3">
-									<div class="w-9 h-9 bg-purple-500/15 rounded-lg flex items-center justify-center text-lg shrink-0">
-										🎬
+								<!-- Nano Banana (Image Generation) -->
+								<div class="mb-4 pb-4 border-b border-border">
+									<div class="flex items-center gap-2 mb-3">
+										<span class="text-lg">🍌</span>
+										<span class="font-medium text-foreground text-sm">Nano Banana</span>
+										<span class="text-[10px] text-muted-foreground">Image Generation</span>
 									</div>
-									<div class="flex-1 min-w-0">
-										<div class="flex items-center justify-between gap-2">
-											<span class="font-semibold text-foreground text-sm">Veo Video Generation</span>
-											{#if imageApiKeyMasked}
-												<span class="text-[10px] px-2 py-0.5 rounded-full bg-success/15 text-success font-medium shrink-0">Ready</span>
-											{:else}
-												<span class="text-[10px] px-2 py-0.5 rounded-full bg-warning/15 text-warning font-medium shrink-0">Needs API Key</span>
-											{/if}
+									<div class="flex gap-2">
+										<select
+											bind:value={selectedImageModel}
+											class="input text-xs py-1.5 flex-1"
+										>
+											{#each imageModels as model}
+												<option value={model.id}>
+													{model.name} (${model.price_per_image}/img)
+												</option>
+											{/each}
+										</select>
+										{#if imageApiKeyMasked && selectedImageModel !== imageModel}
+											<button
+												on:click={updateImageModel}
+												disabled={updatingImageModel}
+												class="btn btn-primary text-xs py-1.5 px-3"
+												title="Apply model change"
+											>
+												{#if updatingImageModel}
+													<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
+												{:else}
+													Apply
+												{/if}
+											</button>
+										{/if}
+									</div>
+									<p class="text-[10px] text-muted-foreground mt-1.5">~$0.039/image</p>
+								</div>
+
+								<!-- Veo (Video Generation) -->
+								<div>
+									<div class="flex items-center gap-2 mb-3">
+										<span class="text-lg">🎬</span>
+										<span class="font-medium text-foreground text-sm">Veo</span>
+										<span class="text-[10px] text-muted-foreground">Video Generation</span>
+									</div>
+
+									{#if videoConfigSuccess}
+										<div class="bg-success/10 border border-success/30 text-success px-2 py-1.5 rounded text-xs flex items-center gap-1.5 mb-3">
+											<span>✓</span>
+											<span>{videoConfigSuccess}</span>
 										</div>
-										<p class="text-xs text-muted-foreground truncate">AI Video Generation (Google Veo)</p>
-									</div>
-								</div>
+									{/if}
 
-								{#if videoConfigSuccess}
-									<div class="bg-success/10 border border-success/30 text-success px-2 py-1.5 rounded text-xs flex items-center gap-1.5 mb-3">
-										<span>✓</span>
-										<span>{videoConfigSuccess}</span>
-									</div>
-								{/if}
+									{#if videoConfigError}
+										<div class="bg-destructive/10 border border-destructive/30 text-destructive px-2 py-1.5 rounded text-xs mb-3">
+											{videoConfigError}
+										</div>
+									{/if}
 
-								{#if videoConfigError}
-									<div class="bg-destructive/10 border border-destructive/30 text-destructive px-2 py-1.5 rounded text-xs mb-3">
-										{videoConfigError}
-									</div>
-								{/if}
-
-								<div class="space-y-3">
-									<!-- Model Selection -->
 									<div class="flex gap-2">
 										<select
 											bind:value={selectedVideoModel}
@@ -1349,15 +1344,12 @@
 											</button>
 										{/if}
 									</div>
+									<p class="text-[10px] text-muted-foreground mt-1.5">$0.15-$0.40/sec · 4-8 sec videos</p>
 
 									{#if !imageApiKeyMasked}
-										<p class="text-[10px] text-warning">Configure Nano Banana API key above to enable video generation (uses same key)</p>
+										<p class="text-[10px] text-warning mt-2">Configure API key above to enable video generation</p>
 									{/if}
 								</div>
-
-								<p class="text-[10px] text-muted-foreground mt-2">
-									Uses same API key as Nano Banana · $0.15-$0.40/sec · 4-8 sec videos
-								</p>
 							</div>
 
 							<!-- Future integrations placeholder - Compact -->
