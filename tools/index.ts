@@ -41,7 +41,9 @@
 
 // Re-export all tools for convenience
 export * as imageGeneration from './image-generation/index.js';
-export * as voiceToText from './voice-to-text/index.js';
+
+// Note: voice-to-text module will be available in a future release
+// export * as voiceToText from './voice-to-text/index.js';
 
 // Export the client utilities
 export { callTool, getTool, uploadTool, getApiBaseUrl } from './client.js';

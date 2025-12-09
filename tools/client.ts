@@ -36,13 +36,18 @@ export interface ApiResponse<T> {
 export async function callTool<T>(endpoint: string, payload: Record<string, unknown>): Promise<T> {
   const url = `${API_BASE_URL}/api/v1${endpoint}`;
 
+  // Build headers - only include Authorization if we have a token
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+
+  if (AUTH_TOKEN) {
+    headers['Authorization'] = `Bearer ${AUTH_TOKEN}`;
+  }
+
   const response = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': AUTH_TOKEN ? `Bearer ${AUTH_TOKEN}` : '',
-      'Cookie': '', // Session cookie will be included automatically in browser context
-    },
+    headers,
     body: JSON.stringify(payload),
     credentials: 'include',
   });
@@ -71,11 +76,16 @@ export async function callTool<T>(endpoint: string, payload: Record<string, unkn
 export async function getTool<T>(endpoint: string): Promise<T> {
   const url = `${API_BASE_URL}/api/v1${endpoint}`;
 
+  // Build headers - only include Authorization if we have a token
+  const headers: Record<string, string> = {};
+
+  if (AUTH_TOKEN) {
+    headers['Authorization'] = `Bearer ${AUTH_TOKEN}`;
+  }
+
   const response = await fetch(url, {
     method: 'GET',
-    headers: {
-      'Authorization': AUTH_TOKEN ? `Bearer ${AUTH_TOKEN}` : '',
-    },
+    headers,
     credentials: 'include',
   });
 
@@ -97,12 +107,17 @@ export async function getTool<T>(endpoint: string): Promise<T> {
 export async function uploadTool<T>(endpoint: string, formData: FormData): Promise<T> {
   const url = `${API_BASE_URL}/api/v1${endpoint}`;
 
+  // Build headers - only include Authorization if we have a token
+  // Don't set Content-Type for FormData - browser will set it with boundary
+  const headers: Record<string, string> = {};
+
+  if (AUTH_TOKEN) {
+    headers['Authorization'] = `Bearer ${AUTH_TOKEN}`;
+  }
+
   const response = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Authorization': AUTH_TOKEN ? `Bearer ${AUTH_TOKEN}` : '',
-      // Don't set Content-Type for FormData - browser will set it with boundary
-    },
+    headers,
     body: formData,
     credentials: 'include',
   });
