@@ -151,10 +151,10 @@ export async function extendVideo(input: ExtendVideoInput): Promise<ExtendVideoR
 
   try {
     // Build the request body
+    // Note: Veo API does not support mimeType for video extension
     const instances: any = {
       video: {
-        bytesBase64Encoded: videoResult.base64,
-        mimeType: videoResult.mimeType
+        bytesBase64Encoded: videoResult.base64
       }
     };
 
