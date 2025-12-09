@@ -11,24 +11,17 @@ Generate AI images using Google Gemini's image models.
 **Setup:** Configure your Google AI API key in Settings > Integrations > Nano Banana
 
 ```typescript
-// The import path is automatically injected by AI Hub when tools are enabled.
-// It will be an absolute path like: /workspace/ai-hub/tools/dist/image-generation/generateImage.js
+// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
 import { generateImage } from '/workspace/ai-hub/tools/dist/image-generation/generateImage.js';
-import * as fs from 'fs';
 
 // Generate an image
 const result = await generateImage({
   prompt: 'A futuristic city at sunset, cyberpunk style, neon lights'
 });
 
-if (result.success) {
-  // Save the image
-  const buffer = Buffer.from(result.image_base64!, 'base64');
-  fs.writeFileSync('generated-image.png', buffer);
-  console.log('Image saved to generated-image.png');
-} else {
-  console.error('Generation failed:', result.error);
-}
+// IMPORTANT: Output the result as JSON - the chat UI will display the image with download button
+// Do NOT save to file or try to read the base64 - just output the JSON result
+console.log(JSON.stringify(result));
 ```
 
 **Parameters:**
@@ -37,9 +30,55 @@ if (result.success) {
 
 **Returns:**
 - `success`: Whether generation succeeded
-- `image_base64`: Base64-encoded PNG image data
+- `image_url`: URL to access the generated image (for display in chat)
+- `file_path`: Local file path where the image was saved
+- `filename`: Filename of the generated image
 - `mime_type`: Image MIME type (usually `image/png`)
 - `error`: Error message if failed
+
+---
+
+### Image Editing (Nano Banana)
+
+Edit existing images using AI. Add elements, remove objects, change styles, and more.
+
+**Setup:** Configure your Google AI API key in Settings > Integrations > Nano Banana
+
+```typescript
+// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
+import { editImage } from '/workspace/ai-hub/tools/dist/image-generation/editImage.js';
+
+// Edit an existing image
+const result = await editImage({
+  prompt: 'Add a rainbow in the sky',
+  image_path: '/path/to/existing/image.png'
+});
+
+// IMPORTANT: Output the result as JSON - the chat UI will display the image with download button
+// Do NOT save to file or try to read the base64 - just output the JSON result
+console.log(JSON.stringify(result));
+```
+
+**Parameters:**
+- `prompt` (required): Editing instruction describing what changes to make
+- `image_path` (optional): Path to the image file to edit
+- `image_base64` (optional): Base64-encoded image data (use this OR image_path)
+- `image_mime_type` (optional): MIME type when using base64 - `image/png`, `image/jpeg`, `image/gif`, `image/webp`
+- `aspect_ratio` (optional): Output dimensions - `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `2:3`, `3:2`, `4:5`, `5:4`, `21:9`
+
+**Returns:**
+- `success`: Whether editing succeeded
+- `image_url`: URL to access the edited image (for display in chat)
+- `file_path`: Local file path where the edited image was saved
+- `filename`: Filename of the edited image
+- `mime_type`: Image MIME type (usually `image/png`)
+- `error`: Error message if failed
+
+**Example Use Cases:**
+- Add or remove objects: "Add a cat sitting on the couch", "Remove the person on the left"
+- Change styles: "Make it look like a watercolor painting", "Convert to black and white"
+- Modify backgrounds: "Change the background to a beach sunset"
+- Enhance images: "Make the colors more vibrant", "Add dramatic lighting"
 
 ## Architecture
 
@@ -50,7 +89,8 @@ tools/
 ├── README.md              # This file
 └── image-generation/
     ├── index.ts           # Module exports
-    └── generateImage.ts   # Image generation tool
+    ├── generateImage.ts   # Image generation tool
+    └── editImage.ts       # Image editing tool
 ```
 
 ## Adding New Tools
@@ -97,6 +137,7 @@ export async function myTool(input: MyToolInput): Promise<MyToolResponse> {
 | Tool | Provider | Cost |
 |------|----------|------|
 | Image Generation | Google Gemini (Nano Banana) | ~$0.039/image |
+| Image Editing | Google Gemini (Nano Banana) | ~$0.039/image |
 
 ## Future Tools
 

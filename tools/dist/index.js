@@ -13,6 +13,16 @@
  * const result = await generateImage({ prompt: 'A sunset over mountains' });
  * ```
  *
+ * ### Image Editing (Nano Banana)
+ * Edit existing images using Google Gemini's image models.
+ * ```typescript
+ * import { editImage } from './tools/image-generation/editImage.js';
+ * const result = await editImage({
+ *   prompt: 'Add a rainbow in the sky',
+ *   image_path: '/path/to/image.png'
+ * });
+ * ```
+ *
  * ### Voice-to-Text (OpenAI Whisper)
  * Transcribe audio to text using OpenAI's Whisper API.
  * ```typescript
