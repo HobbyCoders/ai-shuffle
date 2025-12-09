@@ -384,10 +384,8 @@ console.log(JSON.stringify(result));"""
     if ai_tools_config.get("video_generation", False):
         # Video uses the same API key as images (Gemini API)
         video_api_key = database.get_system_setting("image_api_key")
-        video_model = database.get_system_setting("video_model")
 
         if video_api_key:
-            # Use absolute path so scripts can run from any directory (e.g., /tmp/)
             tool_path = f"{tools_dir}/dist/video-generation/generateVideo.js"
             tools.append({
                 "name": "Video Generation (Veo)",
@@ -404,9 +402,82 @@ const result = await generateVideo({{
 console.log(JSON.stringify(result));"""
             })
 
-    # Add more tools here as they become available
-    # if ai_tools_config.get("text_to_speech", False):
-    #     ...
+    # Check reference-based image generation (Nano Banana) - for character/style consistency
+    if ai_tools_config.get("image_reference", False):
+        image_api_key = database.get_system_setting("image_api_key")
+
+        if image_api_key:
+            tool_path = f"{tools_dir}/dist/image-generation/generateWithReference.js"
+            tools.append({
+                "name": "Reference-Based Image Generation (Nano Banana)",
+                "description": "Generate images with character/style consistency using reference images (up to 14)",
+                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
+import {{ generateWithReference }} from '{tool_path}';
+const result = await generateWithReference({{
+  prompt: 'The character standing in a forest',
+  reference_images: ['/path/to/character.png']  // Up to 14 reference images
+}});
+// IMPORTANT: Output the result as JSON - the chat UI will display the image
+console.log(JSON.stringify(result));"""
+            })
+
+    # Check image-to-video (Veo) - animate still images
+    if ai_tools_config.get("image_to_video", False):
+        video_api_key = database.get_system_setting("image_api_key")
+
+        if video_api_key:
+            tool_path = f"{tools_dir}/dist/video-generation/imageToVideo.js"
+            tools.append({
+                "name": "Image to Video (Veo)",
+                "description": "Animate a still image into a video",
+                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
+import {{ imageToVideo }} from '{tool_path}';
+const result = await imageToVideo({{
+  image_path: '/path/to/image.png',
+  prompt: 'The character starts walking forward'
+}});
+// IMPORTANT: Output the result as JSON - the chat UI will display the video
+console.log(JSON.stringify(result));"""
+            })
+
+    # Check video extension (Veo) - extend existing videos
+    if ai_tools_config.get("video_extend", False):
+        video_api_key = database.get_system_setting("image_api_key")
+
+        if video_api_key:
+            tool_path = f"{tools_dir}/dist/video-generation/extendVideo.js"
+            tools.append({
+                "name": "Video Extension (Veo)",
+                "description": "Extend existing Veo videos by approximately 7 seconds (up to 20 times)",
+                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
+import {{ extendVideo }} from '{tool_path}';
+const result = await extendVideo({{
+  video_path: '/path/to/video.mp4',
+  prompt: 'Continue the action smoothly'  // Optional
+}});
+// IMPORTANT: Output the result as JSON - the chat UI will display the video
+console.log(JSON.stringify(result));"""
+            })
+
+    # Check frame bridging (Veo) - smooth transitions between images
+    if ai_tools_config.get("video_bridge", False):
+        video_api_key = database.get_system_setting("image_api_key")
+
+        if video_api_key:
+            tool_path = f"{tools_dir}/dist/video-generation/bridgeFrames.js"
+            tools.append({
+                "name": "Frame Bridging (Veo)",
+                "description": "Generate a smooth video transition between two images (first and last frame)",
+                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
+import {{ bridgeFrames }} from '{tool_path}';
+const result = await bridgeFrames({{
+  start_image: '/path/to/start.png',
+  end_image: '/path/to/end.png',
+  prompt: 'Smooth camera pan between scenes'  // Optional
+}});
+// IMPORTANT: Output the result as JSON - the chat UI will display the video
+console.log(JSON.stringify(result));"""
+            })
 
     return tools
 

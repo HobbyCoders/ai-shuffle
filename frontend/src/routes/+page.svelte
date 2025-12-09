@@ -373,15 +373,19 @@
 			id: 'image',
 			name: 'Image Tools',
 			tools: [
-				{ id: 'image_generation', name: 'Image Generation', description: 'Generate AI images from text prompts', provider: 'Nano Banana' },
-				{ id: 'image_editing', name: 'Image Editing', description: 'Edit existing images - add, remove, or modify elements', provider: 'Nano Banana' }
+				{ id: 'image_generation', name: 'Image Generation', description: 'Generate AI images from text prompts (supports 1K-4K, multiple images)', provider: 'Nano Banana' },
+				{ id: 'image_editing', name: 'Image Editing', description: 'Edit existing images - add, remove, or modify elements', provider: 'Nano Banana' },
+				{ id: 'image_reference', name: 'Reference-Based Generation', description: 'Generate images with character/style consistency using reference images', provider: 'Nano Banana' }
 			]
 		},
 		{
 			id: 'video',
 			name: 'Video Tools',
 			tools: [
-				{ id: 'video_generation', name: 'Video Generation', description: 'Generate AI videos from text prompts (4-8 sec)', provider: 'Veo' }
+				{ id: 'video_generation', name: 'Video Generation', description: 'Generate AI videos from text prompts (4-8 sec)', provider: 'Veo' },
+				{ id: 'image_to_video', name: 'Image to Video', description: 'Animate a still image into a video', provider: 'Veo' },
+				{ id: 'video_extend', name: 'Video Extension', description: 'Extend existing Veo videos by ~7 seconds', provider: 'Veo' },
+				{ id: 'video_bridge', name: 'Frame Bridging', description: 'Generate smooth transitions between two images', provider: 'Veo' }
 			]
 		},
 		{
@@ -1552,10 +1556,15 @@
 
 		// Build enabled AI tools array from config
 		const enabledAITools: string[] = [];
+		// Image tools (Nano Banana)
 		if (aiTools.image_generation || sp.enable_ai_tools) enabledAITools.push('image_generation');
 		if (aiTools.image_editing) enabledAITools.push('image_editing');
+		if (aiTools.image_reference) enabledAITools.push('image_reference');
+		// Video tools (Veo)
 		if (aiTools.video_generation) enabledAITools.push('video_generation');
-		// Add more AI tools here as they become available
+		if (aiTools.image_to_video) enabledAITools.push('image_to_video');
+		if (aiTools.video_extend) enabledAITools.push('video_extend');
+		if (aiTools.video_bridge) enabledAITools.push('video_bridge');
 
 		// Determine AI tool selection mode
 		const allAIToolIds = getAllAIToolIds();
@@ -1641,10 +1650,15 @@
 		const effectiveAITools = aiToolSelectionMode === 'all' ? getAllAIToolIds() : profileForm.enabled_ai_tools;
 		if (effectiveAITools.length > 0) {
 			config.ai_tools = {
+				// Image tools (Nano Banana)
 				image_generation: effectiveAITools.includes('image_generation'),
 				image_editing: effectiveAITools.includes('image_editing'),
-				video_generation: effectiveAITools.includes('video_generation')
-				// Add more AI tools here as they become available
+				image_reference: effectiveAITools.includes('image_reference'),
+				// Video tools (Veo)
+				video_generation: effectiveAITools.includes('video_generation'),
+				image_to_video: effectiveAITools.includes('image_to_video'),
+				video_extend: effectiveAITools.includes('video_extend'),
+				video_bridge: effectiveAITools.includes('video_bridge')
 			};
 		}
 
