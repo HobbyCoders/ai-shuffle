@@ -349,7 +349,8 @@ def _get_available_tools(ai_tools_config: Optional[Dict[str, Any]] = None) -> li
             tools.append({
                 "name": "Image Generation (Nano Banana)",
                 "description": "Generate AI images from text prompts",
-                "usage": f"""import {{ generateImage }} from '{tool_path}';
+                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
+import {{ generateImage }} from '{tool_path}';
 const result = await generateImage({{ prompt: 'your description here' }});
 if (result.success) {{ /* result.image_base64 contains the image */ }}"""
             })
