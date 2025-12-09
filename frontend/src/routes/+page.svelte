@@ -950,6 +950,15 @@
 			return match;
 		});
 
+		// Remove markdown images that reference our generated-images API
+		// These are already displayed via the tool result, so we don't want duplicates
+		const generatedImagePattern = /!\[[^\]]*\]\(\/api\/generated-images\/[^)]+\)/g;
+		processedContent = processedContent.replace(generatedImagePattern, '');
+
+		// Also remove any standalone generated-images URLs that might be in the content
+		const standaloneUrlPattern = /(?:^|\s)\/api\/generated-images\/by-path\?path=[^\s<]+/g;
+		processedContent = processedContent.replace(standaloneUrlPattern, '');
+
 		return marked(processedContent, { breaks: true }) as string;
 	}
 
