@@ -316,7 +316,6 @@ export const openaiSoraProvider: VideoProvider = {
     try {
       // Read the image file
       const imageBuffer = readFileSync(input.image_path);
-      const imageBase64 = imageBuffer.toString('base64');
 
       // Determine mime type
       const ext = input.image_path.toLowerCase().split('.').pop();
@@ -329,61 +328,27 @@ export const openaiSoraProvider: VideoProvider = {
       const mimeType = mimeTypes[ext || ''] || 'image/jpeg';
 
       // Create FormData for multipart upload
-      const boundary = '----FormBoundary' + Math.random().toString(36).substring(2);
-      const formParts: string[] = [];
+      // Sora API requires multipart/form-data with input_reference as a file field
+      const formData = new FormData();
 
-      // Add model field
-      formParts.push(`--${boundary}`);
-      formParts.push('Content-Disposition: form-data; name="model"');
-      formParts.push('');
-      formParts.push(model);
+      // Add required fields
+      formData.append('model', model);
+      formData.append('prompt', input.prompt || 'Animate this image smoothly');
+      formData.append('size', size);
+      formData.append('seconds', seconds);
 
-      // Add prompt field (optional for i2v)
-      if (input.prompt) {
-        formParts.push(`--${boundary}`);
-        formParts.push('Content-Disposition: form-data; name="prompt"');
-        formParts.push('');
-        formParts.push(input.prompt.trim());
-      }
+      // Add the image as input_reference file field
+      const imageBlob = new Blob([imageBuffer], { type: mimeType });
+      const imageFilename = `input_frame.${ext || 'jpg'}`;
+      formData.append('input_reference', imageBlob, imageFilename);
 
-      // Add size field
-      formParts.push(`--${boundary}`);
-      formParts.push('Content-Disposition: form-data; name="size"');
-      formParts.push('');
-      formParts.push(size);
-
-      // Add seconds field
-      formParts.push(`--${boundary}`);
-      formParts.push('Content-Disposition: form-data; name="seconds"');
-      formParts.push('');
-      formParts.push(seconds);
-
-      // End form
-      formParts.push(`--${boundary}--`);
-
-      // Build body with image as multipart
-      // Note: For actual implementation, use FormData or proper multipart encoding
-      // This is a simplified version - in production use proper FormData handling
-
-      // Use JSON with base64 image for simplicity (if API supports it)
-      // Otherwise, implement proper multipart/form-data
       const response = await fetch('https://api.openai.com/v1/videos', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json'
+          'Authorization': `Bearer ${apiKey}`
+          // Don't set Content-Type - let fetch handle it for FormData
         },
-        body: JSON.stringify({
-          model: model,
-          prompt: input.prompt || 'Animate this image',
-          size: size,
-          seconds: seconds,
-          input_reference: {
-            type: 'image',
-            data: imageBase64,
-            mime_type: mimeType
-          }
-        })
+        body: formData
       });
 
       if (!response.ok) {

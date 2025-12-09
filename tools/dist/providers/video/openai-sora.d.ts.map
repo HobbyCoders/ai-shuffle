@@ -1,1 +1,1 @@
-{"version":3,"file":"openai-sora.d.ts","sourceRoot":"","sources":["../../../providers/video/openai-sora.ts"],"names":[],"mappings":"AAAA;;;;;;;GAOG;AAIH,OAAO,EACL,aAAa,EAKd,MAAM,aAAa,CAAC;AA+KrB,eAAO,MAAM,kBAAkB,EAAE,aAqRhC,CAAC;AAEF,eAAe,kBAAkB,CAAC"}
+{"version":3,"file":"openai-sora.d.ts","sourceRoot":"","sources":["../../../providers/video/openai-sora.ts"],"names":[],"mappings":"AAAA;;;;;;;GAOG;AAIH,OAAO,EACL,aAAa,EAKd,MAAM,aAAa,CAAC;AA+KrB,eAAO,MAAM,kBAAkB,EAAE,aAkPhC,CAAC;AAEF,eAAe,kBAAkB,CAAC"}
