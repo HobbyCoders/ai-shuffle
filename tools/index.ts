@@ -9,8 +9,15 @@
  * ### Image Generation (Nano Banana)
  * Generate images using Google Gemini's image models.
  * ```typescript
- * import * as imageGen from './tools/image-generation';
- * const result = await imageGen.generateImage({ prompt: 'A sunset over mountains' });
+ * import { generateImage } from './tools/image-generation/generateImage.js';
+ * const result = await generateImage({ prompt: 'A sunset over mountains' });
+ * ```
+ *
+ * ### Voice-to-Text (OpenAI Whisper)
+ * Transcribe audio to text using OpenAI's Whisper API.
+ * ```typescript
+ * import { transcribeAudio } from './tools/voice-to-text/transcribe.js';
+ * const result = await transcribeAudio({ audioPath: '/path/to/audio.mp3' });
  * ```
  *
  * ## How to Use
@@ -34,6 +41,7 @@
 
 // Re-export all tools for convenience
 export * as imageGeneration from './image-generation/index.js';
+export * as voiceToText from './voice-to-text/index.js';
 
 // Export the client utilities
-export { callTool, getTool, getApiBaseUrl } from './client.js';
+export { callTool, getTool, uploadTool, getApiBaseUrl } from './client.js';

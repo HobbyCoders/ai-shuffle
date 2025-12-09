@@ -75,6 +75,15 @@ class ImageGenerateResponse(BaseModel):
     error: Optional[str] = None
 
 
+class VoiceToTextResponse(BaseModel):
+    """Response from voice-to-text transcription"""
+    success: bool
+    text: Optional[str] = None
+    language: Optional[str] = None
+    duration: Optional[float] = None
+    error: Optional[str] = None
+
+
 # Available Nano Banana models
 # Verified via ListModels API and tested with generateContent
 # See: https://ai.google.dev/gemini-api/docs/models
@@ -544,4 +553,141 @@ async def generate_image(
         raise HTTPException(
             status_code=500,
             detail=f"Image generation failed: {str(e)}"
+        )
+
+
+# ============================================================================
+# Voice-to-Text (Speech Recognition)
+# ============================================================================
+
+@router.post("/transcribe", response_model=VoiceToTextResponse)
+async def transcribe_audio(
+    audio: UploadFile = File(...),
+    language: Optional[str] = None,
+    token: str = Depends(require_auth)
+):
+    """
+    Transcribe audio to text using OpenAI Whisper API.
+
+    Accepts audio files (mp3, mp4, mpeg, mpga, m4a, wav, webm).
+    Returns the transcribed text.
+
+    Args:
+        audio: Audio file to transcribe
+        language: Optional language code (e.g., 'en', 'es', 'fr')
+    """
+    # Check if OpenAI API key is configured
+    api_key = database.get_system_setting("openai_api_key")
+
+    if not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="OpenAI API key not configured. Go to Settings > Integrations to set up voice-to-text."
+        )
+
+    # Validate file type
+    allowed_types = ["audio/mpeg", "audio/mp3", "audio/mp4", "audio/m4a",
+                     "audio/wav", "audio/webm", "audio/x-wav", "video/mp4",
+                     "video/webm", "audio/ogg", "audio/flac"]
+    content_type = audio.content_type or ""
+
+    # Also check by extension
+    filename = audio.filename or ""
+    allowed_extensions = [".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".ogg", ".flac"]
+    ext = "." + filename.split(".")[-1].lower() if "." in filename else ""
+
+    if content_type not in allowed_types and ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported audio format: {content_type or ext}. Supported: mp3, mp4, m4a, wav, webm, ogg, flac"
+        )
+
+    # Read audio file
+    try:
+        audio_content = await audio.read()
+
+        # Check file size (25MB limit for Whisper API)
+        if len(audio_content) > 25 * 1024 * 1024:
+            raise HTTPException(
+                status_code=400,
+                detail="Audio file too large. Maximum size is 25MB."
+            )
+
+        if len(audio_content) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Audio file is empty."
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error reading audio file: {e}")
+        raise HTTPException(status_code=400, detail="Failed to read audio file")
+
+    # Call OpenAI Whisper API
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            # Prepare multipart form data
+            files = {
+                "file": (filename or "audio.webm", audio_content, content_type or "audio/webm"),
+                "model": (None, "whisper-1"),
+            }
+
+            if language:
+                files["language"] = (None, language)
+
+            response = await client.post(
+                "https://api.openai.com/v1/audio/transcriptions",
+                files=files,
+                headers={"Authorization": f"Bearer {api_key}"}
+            )
+
+            if response.status_code == 401:
+                raise HTTPException(
+                    status_code=400,
+                    detail="OpenAI API key is invalid or expired. Please update it in Settings > Integrations."
+                )
+
+            elif response.status_code == 429:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Rate limit exceeded. Please wait a moment and try again."
+                )
+
+            elif response.status_code != 200:
+                error_text = response.text
+                logger.error(f"Whisper API error: {response.status_code} - {error_text}")
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get("error", {}).get("message", error_text)
+                except Exception:
+                    error_msg = error_text
+
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Transcription failed: {error_msg}"
+                )
+
+            result = response.json()
+
+            return VoiceToTextResponse(
+                success=True,
+                text=result.get("text", ""),
+                language=result.get("language"),
+                duration=result.get("duration")
+            )
+
+    except HTTPException:
+        raise
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail="Transcription timed out. Please try with a shorter audio file."
+        )
+    except Exception as e:
+        logger.error(f"Transcription error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Transcription failed: {str(e)}"
         )

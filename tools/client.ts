@@ -86,3 +86,38 @@ export async function getTool<T>(endpoint: string): Promise<T> {
 
   return response.json() as Promise<T>;
 }
+
+/**
+ * Call an AI Hub API endpoint with multipart form data (for file uploads)
+ *
+ * @param endpoint - The API endpoint path
+ * @param formData - FormData object containing files and fields
+ * @returns The API response
+ */
+export async function uploadTool<T>(endpoint: string, formData: FormData): Promise<T> {
+  const url = `${API_BASE_URL}/api/v1${endpoint}`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': AUTH_TOKEN ? `Bearer ${AUTH_TOKEN}` : '',
+      // Don't set Content-Type for FormData - browser will set it with boundary
+    },
+    body: formData,
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    let errorMessage: string;
+    try {
+      const errorJson = JSON.parse(errorText);
+      errorMessage = errorJson.detail || errorJson.message || errorText;
+    } catch {
+      errorMessage = errorText;
+    }
+    throw new Error(`API call failed (${response.status}): ${errorMessage}`);
+  }
+
+  return response.json() as Promise<T>;
+}
