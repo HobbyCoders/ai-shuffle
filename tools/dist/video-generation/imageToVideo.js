@@ -1,7 +1,7 @@
 /**
- * Video Generation Tool - Veo (Google)
+ * Image-to-Video Tool - Veo (Google)
  *
- * Generate videos using AI. The API key is provided via environment variable.
+ * Animate a still image into a video using AI. The API key is provided via environment variable.
  * Videos are saved to disk and a URL is returned for display.
  *
  * Environment Variables:
@@ -9,10 +9,11 @@
  *   VEO_MODEL - Model to use (optional, defaults to veo-3.1-fast-generate-preview)
  *
  * Usage:
- *   import { generateVideo } from '/workspace/ai-hub/tools/dist/video-generation/generateVideo.js';
+ *   import { imageToVideo } from '/workspace/ai-hub/tools/dist/video-generation/imageToVideo.js';
  *
- *   const result = await generateVideo({
- *     prompt: 'A cat playing with a ball of yarn'
+ *   const result = await imageToVideo({
+ *     image_path: '/path/to/image.png',
+ *     prompt: 'The character starts walking forward slowly'
  *   });
  *
  *   if (result.success) {
@@ -20,21 +21,22 @@
  *     // result.file_path contains the local file path
  *   }
  */
-import { handleApiError, pollForCompletion, downloadVideo, saveVideo } from './shared.js';
+import { imageToBase64, handleApiError, pollForCompletion, downloadVideo, saveVideo } from './shared.js';
 /**
- * Generate a video from a text prompt using Google Veo.
+ * Convert a still image into an animated video using Google Veo.
  *
  * The video is saved to disk and a URL is returned for display in the chat UI.
  * Video generation is asynchronous - this function polls until complete.
  *
- * @param input - The generation parameters
+ * @param input - The generation parameters including source image
  * @returns The generated video URL and file path, or error details
  *
  * @example
  * ```typescript
- * const result = await generateVideo({
- *   prompt: 'A butterfly landing on a flower, macro shot, cinematic',
- *   duration: 8,
+ * const result = await imageToVideo({
+ *   image_path: '/workspace/photo.jpg',
+ *   prompt: 'The person in the photo smiles and waves at the camera',
+ *   duration: 4,
  *   aspect_ratio: '16:9'
  * });
  *
@@ -46,7 +48,7 @@ import { handleApiError, pollForCompletion, downloadVideo, saveVideo } from './s
  * }
  * ```
  */
-export async function generateVideo(input) {
+export async function imageToVideo(input) {
     // Get API key from environment
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
@@ -55,13 +57,19 @@ export async function generateVideo(input) {
             error: 'GEMINI_API_KEY environment variable not set. Video generation is not configured.'
         };
     }
-    // Get model from environment or use default (Veo 3.1 Fast for speed)
+    // Get model from environment or use default
     const model = process.env.VEO_MODEL || 'veo-3.1-fast-generate-preview';
     // Validate input
+    if (!input.image_path) {
+        return {
+            success: false,
+            error: 'image_path is required'
+        };
+    }
     if (!input.prompt || input.prompt.trim().length === 0) {
         return {
             success: false,
-            error: 'Prompt cannot be empty'
+            error: 'Prompt cannot be empty. Describe the motion/animation to apply.'
         };
     }
     if (input.prompt.length > 4000) {
@@ -77,6 +85,14 @@ export async function generateVideo(input) {
             error: '1080p resolution is only available for 8-second videos.'
         };
     }
+    // Read and encode the image
+    const imageResult = imageToBase64(input.image_path);
+    if ('error' in imageResult) {
+        return {
+            success: false,
+            error: imageResult.error
+        };
+    }
     const prompt = input.prompt.trim();
     const aspectRatio = input.aspect_ratio || '16:9';
     const duration = input.duration || 8;
@@ -90,7 +106,11 @@ export async function generateVideo(input) {
             },
             body: JSON.stringify({
                 instances: [{
-                        prompt: prompt
+                        prompt: prompt,
+                        image: {
+                            bytesBase64Encoded: imageResult.base64,
+                            mimeType: imageResult.mimeType
+                        }
                     }],
                 parameters: {
                     aspectRatio: aspectRatio,
@@ -125,7 +145,7 @@ export async function generateVideo(input) {
             return { success: false, error: videoBuffer.error };
         }
         // Save and return
-        return saveVideo(videoBuffer, 'video', duration);
+        return saveVideo(videoBuffer, 'i2v', duration);
     }
     catch (error) {
         return {
@@ -134,5 +154,5 @@ export async function generateVideo(input) {
         };
     }
 }
-export default generateVideo;
-//# sourceMappingURL=generateVideo.js.map
+export default imageToVideo;
+//# sourceMappingURL=imageToVideo.js.map

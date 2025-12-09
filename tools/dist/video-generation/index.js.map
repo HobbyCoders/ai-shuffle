@@ -1,1 +1,1 @@
-{"version":3,"file":"index.js","sourceRoot":"","sources":["../../video-generation/index.ts"],"names":[],"mappings":"AAAA;;;;;;;;;;;;;;;;;;;;;;;GAuBG;AAEH,OAAO,EAAE,aAAa,EAAuD,MAAM,oBAAoB,CAAC"}
+{"version":3,"file":"index.js","sourceRoot":"","sources":["../../video-generation/index.ts"],"names":[],"mappings":"AAAA;;;;;;;;;;;;;;;;;;;;;;;;;;;;;GA6BG;AAKH,gBAAgB;AAChB,OAAO,EAAE,aAAa,EAAuD,MAAM,oBAAoB,CAAC;AAExG,iBAAiB;AACjB,OAAO,EAAE,YAAY,EAAqD,MAAM,mBAAmB,CAAC;AAEpG,kBAAkB;AAClB,OAAO,EAAE,WAAW,EAAmD,MAAM,kBAAkB,CAAC;AAEhG,iBAAiB;AACjB,OAAO,EAAE,YAAY,EAAqD,MAAM,mBAAmB,CAAC"}

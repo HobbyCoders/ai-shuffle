@@ -1,18 +1,20 @@
 /**
- * Video Generation Tool - Veo (Google)
+ * Frame Bridging Tool - Veo (Google)
  *
- * Generate videos using AI. The API key is provided via environment variable.
- * Videos are saved to disk and a URL is returned for display.
+ * Generate a video that smoothly transitions between two images (first and last frame).
+ * Perfect for creating natural transitions, morph effects, or scene changes.
  *
  * Environment Variables:
  *   GEMINI_API_KEY - Google AI API key (injected by AI Hub at runtime)
  *   VEO_MODEL - Model to use (optional, defaults to veo-3.1-fast-generate-preview)
  *
  * Usage:
- *   import { generateVideo } from '/workspace/ai-hub/tools/dist/video-generation/generateVideo.js';
+ *   import { bridgeFrames } from '/workspace/ai-hub/tools/dist/video-generation/bridgeFrames.js';
  *
- *   const result = await generateVideo({
- *     prompt: 'A cat playing with a ball of yarn'
+ *   const result = await bridgeFrames({
+ *     start_image: '/path/to/start.png',
+ *     end_image: '/path/to/end.png',
+ *     prompt: 'Smooth camera pan from the bedroom to the living room'
  *   });
  *
  *   if (result.success) {
@@ -23,25 +25,42 @@
 
 import {
   VideoResponse,
+  imageToBase64,
   handleApiError,
   pollForCompletion,
   downloadVideo,
   saveVideo
 } from './shared.js';
 
-export interface GenerateVideoInput {
+export interface BridgeFramesInput {
   /**
-   * The text prompt describing the video to generate.
-   * Be descriptive! Include action, scene, style, mood details.
+   * Path to the starting image (first frame of the video).
+   * Supported formats: JPEG, PNG, GIF, WebP.
+   * For best quality, use 720p (1280x720) or higher resolution.
+   */
+  start_image: string;
+
+  /**
+   * Path to the ending image (last frame of the video).
+   * Supported formats: JPEG, PNG, GIF, WebP.
+   * Should have the same aspect ratio as start_image for best results.
+   */
+  end_image: string;
+
+  /**
+   * Text prompt describing how to transition between the frames.
+   * Describe the motion, camera movement, or transformation.
    * Max 1,024 tokens.
    *
-   * @example "A golden retriever running through a field of sunflowers at sunset"
-   * @example "Aerial drone shot of a city skyline transitioning from day to night"
+   * @example "Smooth zoom out revealing the full cityscape"
+   * @example "Time lapse of the flower blooming"
+   * @example "Camera slowly pans from left to right"
    */
-  prompt: string;
+  prompt?: string;
 
   /**
    * Aspect ratio of the generated video.
+   * Should match your input images for best results.
    * @default "16:9"
    */
   aspect_ratio?: '16:9' | '9:16';
@@ -61,7 +80,7 @@ export interface GenerateVideoInput {
 
   /**
    * Elements to exclude from the video generation.
-   * @example "blurry, low quality, text, watermark"
+   * @example "abrupt cuts, morphing artifacts, blur"
    */
   negative_prompt?: string;
 
@@ -78,21 +97,23 @@ export interface GenerateVideoInput {
   person_generation?: 'allow_all' | 'allow_adult';
 }
 
-export type GenerateVideoResponse = VideoResponse;
+export type BridgeFramesResponse = VideoResponse;
 
 /**
- * Generate a video from a text prompt using Google Veo.
+ * Generate a video that transitions between two images using Google Veo.
  *
- * The video is saved to disk and a URL is returned for display in the chat UI.
- * Video generation is asynchronous - this function polls until complete.
+ * This creates a smooth, natural video that starts at one image and ends at another.
+ * Useful for transitions, morphs, time-lapses, and scene changes.
  *
- * @param input - The generation parameters
+ * @param input - The generation parameters including start and end images
  * @returns The generated video URL and file path, or error details
  *
  * @example
  * ```typescript
- * const result = await generateVideo({
- *   prompt: 'A butterfly landing on a flower, macro shot, cinematic',
+ * const result = await bridgeFrames({
+ *   start_image: '/workspace/morning.jpg',
+ *   end_image: '/workspace/evening.jpg',
+ *   prompt: 'Time lapse of the sun moving across the sky',
  *   duration: 8,
  *   aspect_ratio: '16:9'
  * });
@@ -105,7 +126,7 @@ export type GenerateVideoResponse = VideoResponse;
  * }
  * ```
  */
-export async function generateVideo(input: GenerateVideoInput): Promise<GenerateVideoResponse> {
+export async function bridgeFrames(input: BridgeFramesInput): Promise<BridgeFramesResponse> {
   // Get API key from environment
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -115,18 +136,25 @@ export async function generateVideo(input: GenerateVideoInput): Promise<Generate
     };
   }
 
-  // Get model from environment or use default (Veo 3.1 Fast for speed)
+  // Get model from environment or use default
   const model = process.env.VEO_MODEL || 'veo-3.1-fast-generate-preview';
 
   // Validate input
-  if (!input.prompt || input.prompt.trim().length === 0) {
+  if (!input.start_image) {
     return {
       success: false,
-      error: 'Prompt cannot be empty'
+      error: 'start_image is required'
     };
   }
 
-  if (input.prompt.length > 4000) {
+  if (!input.end_image) {
+    return {
+      success: false,
+      error: 'end_image is required'
+    };
+  }
+
+  if (input.prompt && input.prompt.length > 4000) {
     return {
       success: false,
       error: 'Prompt is too long. Maximum ~1,024 tokens (approximately 4,000 characters).'
@@ -141,12 +169,45 @@ export async function generateVideo(input: GenerateVideoInput): Promise<Generate
     };
   }
 
-  const prompt = input.prompt.trim();
+  // Read and encode both images
+  const startImageResult = imageToBase64(input.start_image);
+  if ('error' in startImageResult) {
+    return {
+      success: false,
+      error: `Start image error: ${startImageResult.error}`
+    };
+  }
+
+  const endImageResult = imageToBase64(input.end_image);
+  if ('error' in endImageResult) {
+    return {
+      success: false,
+      error: `End image error: ${endImageResult.error}`
+    };
+  }
+
   const aspectRatio = input.aspect_ratio || '16:9';
   const duration = input.duration || 8;
   const resolution = input.resolution || '720p';
 
   try {
+    // Build the request body with both images
+    const instances: any = {
+      image: {
+        bytesBase64Encoded: startImageResult.base64,
+        mimeType: startImageResult.mimeType
+      },
+      lastFrame: {
+        bytesBase64Encoded: endImageResult.base64,
+        mimeType: endImageResult.mimeType
+      }
+    };
+
+    // Add optional prompt
+    if (input.prompt) {
+      instances.prompt = input.prompt.trim();
+    }
+
     // Start the video generation (long-running operation)
     const startResponse = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:predictLongRunning?key=${apiKey}`,
@@ -156,9 +217,7 @@ export async function generateVideo(input: GenerateVideoInput): Promise<Generate
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          instances: [{
-            prompt: prompt
-          }],
+          instances: [instances],
           parameters: {
             aspectRatio: aspectRatio,
             durationSeconds: String(duration),
@@ -199,7 +258,7 @@ export async function generateVideo(input: GenerateVideoInput): Promise<Generate
     }
 
     // Save and return
-    return saveVideo(videoBuffer, 'video', duration);
+    return saveVideo(videoBuffer, 'bridge', duration);
 
   } catch (error) {
     return {
@@ -209,4 +268,4 @@ export async function generateVideo(input: GenerateVideoInput): Promise<Generate
   }
 }
 
-export default generateVideo;
+export default bridgeFrames;

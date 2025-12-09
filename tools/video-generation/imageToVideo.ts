@@ -1,7 +1,7 @@
 /**
- * Video Generation Tool - Veo (Google)
+ * Image-to-Video Tool - Veo (Google)
  *
- * Generate videos using AI. The API key is provided via environment variable.
+ * Animate a still image into a video using AI. The API key is provided via environment variable.
  * Videos are saved to disk and a URL is returned for display.
  *
  * Environment Variables:
@@ -9,10 +9,11 @@
  *   VEO_MODEL - Model to use (optional, defaults to veo-3.1-fast-generate-preview)
  *
  * Usage:
- *   import { generateVideo } from '/workspace/ai-hub/tools/dist/video-generation/generateVideo.js';
+ *   import { imageToVideo } from '/workspace/ai-hub/tools/dist/video-generation/imageToVideo.js';
  *
- *   const result = await generateVideo({
- *     prompt: 'A cat playing with a ball of yarn'
+ *   const result = await imageToVideo({
+ *     image_path: '/path/to/image.png',
+ *     prompt: 'The character starts walking forward slowly'
  *   });
  *
  *   if (result.success) {
@@ -23,25 +24,35 @@
 
 import {
   VideoResponse,
+  imageToBase64,
   handleApiError,
   pollForCompletion,
   downloadVideo,
   saveVideo
 } from './shared.js';
 
-export interface GenerateVideoInput {
+export interface ImageToVideoInput {
   /**
-   * The text prompt describing the video to generate.
-   * Be descriptive! Include action, scene, style, mood details.
+   * Path to the source image file to animate.
+   * Supported formats: JPEG, PNG, GIF, WebP.
+   * For best quality, use 720p (1280x720) or higher resolution.
+   * Aspect ratio should be 16:9 or 9:16.
+   */
+  image_path: string;
+
+  /**
+   * Text prompt describing the motion/animation to apply.
+   * Describe what should happen in the video, not just the scene.
    * Max 1,024 tokens.
    *
-   * @example "A golden retriever running through a field of sunflowers at sunset"
-   * @example "Aerial drone shot of a city skyline transitioning from day to night"
+   * @example "The dog starts running towards the camera"
+   * @example "Clouds slowly drift across the sky, trees sway gently"
    */
   prompt: string;
 
   /**
    * Aspect ratio of the generated video.
+   * Should match your input image for best results.
    * @default "16:9"
    */
   aspect_ratio?: '16:9' | '9:16';
@@ -61,7 +72,7 @@ export interface GenerateVideoInput {
 
   /**
    * Elements to exclude from the video generation.
-   * @example "blurry, low quality, text, watermark"
+   * @example "blurry, shaky camera, text, watermark"
    */
   negative_prompt?: string;
 
@@ -78,22 +89,23 @@ export interface GenerateVideoInput {
   person_generation?: 'allow_all' | 'allow_adult';
 }
 
-export type GenerateVideoResponse = VideoResponse;
+export type ImageToVideoResponse = VideoResponse;
 
 /**
- * Generate a video from a text prompt using Google Veo.
+ * Convert a still image into an animated video using Google Veo.
  *
  * The video is saved to disk and a URL is returned for display in the chat UI.
  * Video generation is asynchronous - this function polls until complete.
  *
- * @param input - The generation parameters
+ * @param input - The generation parameters including source image
  * @returns The generated video URL and file path, or error details
  *
  * @example
  * ```typescript
- * const result = await generateVideo({
- *   prompt: 'A butterfly landing on a flower, macro shot, cinematic',
- *   duration: 8,
+ * const result = await imageToVideo({
+ *   image_path: '/workspace/photo.jpg',
+ *   prompt: 'The person in the photo smiles and waves at the camera',
+ *   duration: 4,
  *   aspect_ratio: '16:9'
  * });
  *
@@ -105,7 +117,7 @@ export type GenerateVideoResponse = VideoResponse;
  * }
  * ```
  */
-export async function generateVideo(input: GenerateVideoInput): Promise<GenerateVideoResponse> {
+export async function imageToVideo(input: ImageToVideoInput): Promise<ImageToVideoResponse> {
   // Get API key from environment
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -115,14 +127,21 @@ export async function generateVideo(input: GenerateVideoInput): Promise<Generate
     };
   }
 
-  // Get model from environment or use default (Veo 3.1 Fast for speed)
+  // Get model from environment or use default
   const model = process.env.VEO_MODEL || 'veo-3.1-fast-generate-preview';
 
   // Validate input
+  if (!input.image_path) {
+    return {
+      success: false,
+      error: 'image_path is required'
+    };
+  }
+
   if (!input.prompt || input.prompt.trim().length === 0) {
     return {
       success: false,
-      error: 'Prompt cannot be empty'
+      error: 'Prompt cannot be empty. Describe the motion/animation to apply.'
     };
   }
 
@@ -138,6 +157,15 @@ export async function generateVideo(input: GenerateVideoInput): Promise<Generate
     return {
       success: false,
       error: '1080p resolution is only available for 8-second videos.'
+    };
+  }
+
+  // Read and encode the image
+  const imageResult = imageToBase64(input.image_path);
+  if ('error' in imageResult) {
+    return {
+      success: false,
+      error: imageResult.error
     };
   }
 
@@ -157,7 +185,11 @@ export async function generateVideo(input: GenerateVideoInput): Promise<Generate
         },
         body: JSON.stringify({
           instances: [{
-            prompt: prompt
+            prompt: prompt,
+            image: {
+              bytesBase64Encoded: imageResult.base64,
+              mimeType: imageResult.mimeType
+            }
           }],
           parameters: {
             aspectRatio: aspectRatio,
@@ -199,7 +231,7 @@ export async function generateVideo(input: GenerateVideoInput): Promise<Generate
     }
 
     // Save and return
-    return saveVideo(videoBuffer, 'video', duration);
+    return saveVideo(videoBuffer, 'i2v', duration);
 
   } catch (error) {
     return {
@@ -209,4 +241,4 @@ export async function generateVideo(input: GenerateVideoInput): Promise<Generate
   }
 }
 
-export default generateVideo;
+export default imageToVideo;
