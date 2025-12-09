@@ -155,19 +155,16 @@ export const openaiGptImageProvider = {
         // Determine output format - use webp for transparency support, png otherwise
         const outputFormat = 'png';
         try {
+            // gpt-image-1 API parameters - note: response_format is NOT supported
+            // It always returns base64-encoded images
             const requestBody = {
                 model: model,
                 prompt: prompt,
                 size: size,
                 quality: quality,
                 n: numberOfImages,
-                response_format: 'b64_json',
-                output_format: outputFormat
+                output_format: outputFormat // png, jpeg, or webp
             };
-            // Add style if not using natural
-            if (input.style && input.style !== 'natural') {
-                requestBody.style = 'vivid';
-            }
             const response = await fetch('https://api.openai.com/v1/images/generations', {
                 method: 'POST',
                 headers: {
@@ -230,6 +227,9 @@ export const openaiGptImageProvider = {
             // Build multipart form data manually for fetch
             const boundary = '----FormBoundary' + Math.random().toString(36).substring(2);
             // For the images/edit endpoint, we need to use multipart/form-data
+            // Note: gpt-image-1 does NOT support the images/edits endpoint as of April 2025
+            // It only supports text-to-image. For editing, users should use the text prompt
+            // to describe the desired changes along with the image.
             const formData = new FormData();
             // Create a Blob from the image buffer
             const imageBlob = new Blob([imageBuffer], { type: mimeType });
@@ -237,7 +237,6 @@ export const openaiGptImageProvider = {
             formData.append('model', model);
             formData.append('prompt', prompt);
             formData.append('size', size);
-            formData.append('response_format', 'b64_json');
             // Add mask if provided
             if (input.mask_image && existsSync(input.mask_image)) {
                 const maskBuffer = readFileSync(input.mask_image);
