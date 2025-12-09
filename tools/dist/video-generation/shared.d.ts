@@ -53,7 +53,7 @@ export declare function pollForCompletion(operationName: string, apiKey: string,
 /**
  * Download video from URI
  */
-export declare function downloadVideo(videoUri: string): Promise<Buffer | {
+export declare function downloadVideo(videoUri: string, apiKey?: string): Promise<Buffer | {
     error: string;
 }>;
 //# sourceMappingURL=shared.d.ts.map

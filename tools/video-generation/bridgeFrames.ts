@@ -251,8 +251,8 @@ export async function bridgeFrames(input: BridgeFramesInput): Promise<BridgeFram
       return { success: false, error: pollResult.error };
     }
 
-    // Download the video
-    const videoBuffer = await downloadVideo(pollResult.videoUri);
+    // Download the video (pass apiKey for authenticated download)
+    const videoBuffer = await downloadVideo(pollResult.videoUri, apiKey);
     if ('error' in videoBuffer) {
       return { success: false, error: videoBuffer.error };
     }
