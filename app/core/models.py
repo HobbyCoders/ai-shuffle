@@ -64,11 +64,15 @@ class SubagentDefinition(BaseModel):
 
 class AIToolsConfig(BaseModel):
     """Configuration for individual AI tools - each tool can be enabled/disabled"""
-    image_generation: bool = False  # Enable Nano Banana image generation
-    image_editing: bool = False  # Enable Nano Banana image editing
-    video_generation: bool = False  # Enable Veo video generation
-    # Add more AI tools here as they become available
-    # text_to_speech: bool = False
+    # Image tools (Nano Banana)
+    image_generation: bool = False  # Generate AI images from text prompts
+    image_editing: bool = False  # Edit existing images
+    image_reference: bool = False  # Reference-based generation (character/style consistency)
+    # Video tools (Veo)
+    video_generation: bool = False  # Generate AI videos from text prompts
+    image_to_video: bool = False  # Animate a still image into a video
+    video_extend: bool = False  # Extend existing Veo videos
+    video_bridge: bool = False  # Generate smooth transitions between two images
 
 
 class SystemPromptConfig(BaseModel):
