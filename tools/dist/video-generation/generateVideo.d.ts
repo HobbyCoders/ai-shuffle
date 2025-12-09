@@ -1,18 +1,33 @@
 /**
- * Video Generation Tool - Veo (Google)
+ * Video Generation Tool - Unified Provider Interface
  *
- * Generate videos using AI. The API key is provided via environment variable.
+ * Generate videos using AI from multiple providers (Google Veo, OpenAI Sora, etc.)
+ * The provider and model are selected based on environment variables or explicit input.
  * Videos are saved to disk and a URL is returned for display.
  *
  * Environment Variables:
- *   GEMINI_API_KEY - Google AI API key (injected by AI Hub at runtime)
- *   VEO_MODEL - Model to use (optional, defaults to veo-3.1-fast-generate-preview)
+ *   VIDEO_PROVIDER - Provider ID (e.g., "google-veo", "openai-sora")
+ *   VIDEO_API_KEY - API key for the selected provider
+ *   VIDEO_MODEL - Model to use (e.g., "veo-3.1-fast-generate-preview", "sora-2")
+ *
+ *   Legacy (backwards compatible):
+ *   GEMINI_API_KEY - Google AI API key (used if VIDEO_API_KEY not set)
+ *   VEO_MODEL - Veo model (used if VIDEO_MODEL not set for Google provider)
+ *   OPENAI_API_KEY - OpenAI API key (used for Sora if VIDEO_API_KEY not set)
  *
  * Usage:
  *   import { generateVideo } from '/opt/ai-tools/dist/video-generation/generateVideo.js';
  *
+ *   // Use default provider from settings
  *   const result = await generateVideo({
  *     prompt: 'A cat playing with a ball of yarn'
+ *   });
+ *
+ *   // Or explicitly specify provider/model
+ *   const result = await generateVideo({
+ *     prompt: 'A cat playing with a ball of yarn',
+ *     provider: 'openai-sora',
+ *     model: 'sora-2-pro'
  *   });
  *
  *   if (result.success) {
@@ -20,30 +35,46 @@
  *     // result.file_path contains the local file path
  *   }
  */
-import { VideoResponse } from './shared.js';
+import { VideoResult } from '../providers/types.js';
+export { VideoResponse } from './shared.js';
 export interface GenerateVideoInput {
     /**
      * The text prompt describing the video to generate.
      * Be descriptive! Include action, scene, style, mood details.
-     * Max 1,024 tokens.
+     * Max ~1,024 tokens (approximately 4,000 characters).
      *
      * @example "A golden retriever running through a field of sunflowers at sunset"
      * @example "Aerial drone shot of a city skyline transitioning from day to night"
      */
     prompt: string;
     /**
+     * Override the default video provider.
+     * Available: "google-veo", "openai-sora"
+     * If not specified, uses VIDEO_PROVIDER env var or defaults to "google-veo"
+     */
+    provider?: string;
+    /**
+     * Override the default model for the selected provider.
+     * Google Veo: "veo-3.1-fast-generate-preview", "veo-3.1-generate-preview"
+     * OpenAI Sora: "sora-2", "sora-2-pro"
+     * If not specified, uses VIDEO_MODEL/VEO_MODEL env var or provider default
+     */
+    model?: string;
+    /**
      * Aspect ratio of the generated video.
      * @default "16:9"
      */
-    aspect_ratio?: '16:9' | '9:16';
+    aspect_ratio?: '16:9' | '9:16' | '1:1';
     /**
      * Duration of the generated video in seconds.
+     * Google Veo: 4, 6, or 8 seconds
+     * OpenAI Sora: 4, 8, or 12 seconds
      * @default 8
      */
-    duration?: 4 | 6 | 8;
+    duration?: number;
     /**
      * Resolution of the generated video.
-     * Note: 1080p is only available for 8-second videos.
+     * Note: Higher resolutions may have duration restrictions.
      * @default "720p"
      */
     resolution?: '720p' | '1080p';
@@ -63,9 +94,12 @@ export interface GenerateVideoInput {
      */
     person_generation?: 'allow_all' | 'allow_adult';
 }
-export type GenerateVideoResponse = VideoResponse;
+export type GenerateVideoResponse = VideoResult;
 /**
- * Generate a video from a text prompt using Google Veo.
+ * Generate a video from a text prompt.
+ *
+ * Uses the configured provider (Google Veo, OpenAI Sora, etc.) or allows
+ * explicit override via the provider/model parameters.
  *
  * The video is saved to disk and a URL is returned for display in the chat UI.
  * Video generation is asynchronous - this function polls until complete.
@@ -75,10 +109,18 @@ export type GenerateVideoResponse = VideoResponse;
  *
  * @example
  * ```typescript
+ * // Use default provider
  * const result = await generateVideo({
  *   prompt: 'A butterfly landing on a flower, macro shot, cinematic',
  *   duration: 8,
  *   aspect_ratio: '16:9'
+ * });
+ *
+ * // Use specific provider
+ * const result = await generateVideo({
+ *   prompt: 'A butterfly landing on a flower',
+ *   provider: 'openai-sora',
+ *   model: 'sora-2-pro'
  * });
  *
  * if (result.success) {

@@ -1,0 +1,13 @@
+/**
+ * AI Provider Registry
+ *
+ * Unified interface for all AI generation providers.
+ * Import the registry to access any registered provider.
+ */
+export * from './types.js';
+export { registry } from './registry.js';
+export { default } from './registry.js';
+export { googleGeminiProvider } from './image/google-gemini.js';
+export { googleVeoProvider } from './video/google-veo.js';
+export { openaiSoraProvider } from './video/openai-sora.js';
+//# sourceMappingURL=index.d.ts.map

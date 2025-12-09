@@ -1,18 +1,32 @@
 /**
- * Image Generation Tool - Nano Banana (Google Gemini)
+ * Image Generation Tool - Unified Provider Interface
  *
- * Generate images using AI. The API key is provided via environment variable.
+ * Generate images using AI from multiple providers (Google Gemini/Nano Banana, etc.)
+ * The provider and model are selected based on environment variables or explicit input.
  * Images are saved to disk and a URL is returned for display.
  *
  * Environment Variables:
- *   GEMINI_API_KEY - Google AI API key (injected by AI Hub at runtime)
- *   GEMINI_MODEL - Model to use (optional, defaults to gemini-2.0-flash-exp)
+ *   IMAGE_PROVIDER - Provider ID (e.g., "google-gemini")
+ *   IMAGE_API_KEY - API key for the selected provider
+ *   IMAGE_MODEL - Model to use (e.g., "gemini-2.5-flash-image")
+ *
+ *   Legacy (backwards compatible):
+ *   GEMINI_API_KEY - Google AI API key (used if IMAGE_API_KEY not set)
+ *   GEMINI_MODEL - Gemini model (used if IMAGE_MODEL not set)
  *
  * Usage:
  *   import { generateImage } from '/opt/ai-tools/dist/image-generation/generateImage.js';
  *
+ *   // Use default provider from settings
  *   const result = await generateImage({
  *     prompt: 'A futuristic city at sunset, cyberpunk style'
+ *   });
+ *
+ *   // Or explicitly specify provider/model
+ *   const result = await generateImage({
+ *     prompt: 'A futuristic city at sunset',
+ *     provider: 'google-gemini',
+ *     model: 'gemini-3-pro-image-preview'
  *   });
  *
  *   if (result.success) {
@@ -30,6 +44,18 @@ export interface GenerateImageInput {
      * @example "Cute robot holding a flower, digital art, soft lighting"
      */
     prompt: string;
+    /**
+     * Override the default image provider.
+     * Available: "google-gemini"
+     * If not specified, uses IMAGE_PROVIDER env var or defaults to "google-gemini"
+     */
+    provider?: string;
+    /**
+     * Override the default model for the selected provider.
+     * Google Gemini: "gemini-2.5-flash-image", "gemini-3-pro-image-preview"
+     * If not specified, uses IMAGE_MODEL/GEMINI_MODEL env var or provider default
+     */
+    model?: string;
     /**
      * Aspect ratio of the generated image.
      * @default "1:1"
@@ -86,7 +112,10 @@ export interface GenerateImageResponse {
     error?: string;
 }
 /**
- * Generate an image from a text prompt using Google Gemini.
+ * Generate an image from a text prompt.
+ *
+ * Uses the configured provider (Google Gemini, etc.) or allows
+ * explicit override via the provider/model parameters.
  *
  * The image is saved to disk and a URL is returned for display in the chat UI.
  * This avoids context window limitations with large base64 strings.
@@ -96,14 +125,16 @@ export interface GenerateImageResponse {
  *
  * @example
  * ```typescript
- * // Generate a single image
+ * // Generate a single image with default provider
  * const result = await generateImage({
  *   prompt: 'A cozy coffee shop interior, watercolor style'
  * });
  *
- * // Generate multiple images
+ * // Generate multiple images with specific provider
  * const result = await generateImage({
  *   prompt: 'A cute robot',
+ *   provider: 'google-gemini',
+ *   model: 'gemini-3-pro-image-preview',
  *   number_of_images: 4,
  *   image_size: '2K'
  * });

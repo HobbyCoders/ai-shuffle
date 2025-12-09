@@ -82,19 +82,31 @@
 	let imageConfigError = '';
 	let selectedImageModel = '';
 
-	// Video generation (Veo) settings
+	// Video generation settings (multi-provider)
 	interface VideoModel {
 		id: string;
 		name: string;
 		description: string;
 		price_per_second: number;
+		provider: string;
+		provider_name: string;
+		max_duration: number;
+		capabilities: string[];
+		available: boolean;
+		is_current: boolean;
 	}
-	let videoModels: VideoModel[] = [
-		{ id: 'veo-3.1-fast-generate-preview', name: 'Veo 3.1 Fast', description: 'Fast video generation', price_per_second: 0.15 },
-		{ id: 'veo-3.1-generate-preview', name: 'Veo 3.1', description: 'High quality video generation', price_per_second: 0.40 }
-	];
+	interface VideoProvider {
+		id: string;
+		name: string;
+		description: string;
+		available: boolean;
+		is_current: boolean;
+	}
+	let videoModels: VideoModel[] = [];
+	let videoProviders: VideoProvider[] = [];
 	let videoModel = '';
-	let selectedVideoModel = 'veo-3.1-fast-generate-preview';
+	let videoProvider = '';
+	let selectedVideoModel = '';
 	let savingVideoModel = false;
 	let videoConfigSuccess = '';
 	let videoConfigError = '';
@@ -165,6 +177,7 @@
 				image_model: string | null;
 				image_api_key_set: boolean;
 				image_api_key_masked: string;
+				video_provider: string | null;
 				video_model: string | null;
 			}>('/settings/integrations');
 			openaiApiKeyMasked = settings.openai_api_key_masked;
@@ -172,8 +185,9 @@
 			imageModel = settings.image_model || '';
 			imageApiKeyMasked = settings.image_api_key_masked || '';
 			selectedImageModel = settings.image_model || '';
+			videoProvider = settings.video_provider || '';
 			videoModel = settings.video_model || '';
-			selectedVideoModel = settings.video_model || 'veo-3.1-fast-generate-preview';
+			selectedVideoModel = settings.video_model || '';
 		} catch (e) {
 			console.error('Failed to load integration settings:', e);
 		}
@@ -187,6 +201,27 @@
 			}
 		} catch (e) {
 			console.error('Failed to load image models:', e);
+		}
+
+		// Load available video models and providers
+		try {
+			const videoResponse = await api.get<{
+				models: VideoModel[];
+				providers: VideoProvider[];
+				current_provider: string | null;
+				current_model: string | null;
+			}>('/settings/integrations/video/models');
+			videoModels = videoResponse.models;
+			videoProviders = videoResponse.providers;
+			if (!selectedVideoModel && videoResponse.current_model) {
+				selectedVideoModel = videoResponse.current_model;
+			} else if (!selectedVideoModel && videoModels.length > 0) {
+				// Default to first available model
+				const availableModel = videoModels.find(m => m.available);
+				selectedVideoModel = availableModel?.id || videoModels[0].id;
+			}
+		} catch (e) {
+			console.error('Failed to load video models:', e);
 		}
 	}
 
@@ -325,11 +360,14 @@
 		videoConfigSuccess = '';
 
 		try {
-			const result = await api.patch<{success: boolean, model: string}>('/settings/integrations/video/model', {
+			const result = await api.patch<{success: boolean, provider: string, model: string}>('/settings/integrations/video/model', {
 				model: selectedVideoModel
 			});
 			videoModel = result.model;
+			videoProvider = result.provider;
 			videoConfigSuccess = 'Video model updated successfully';
+			// Reload to refresh availability status
+			await loadIntegrationSettings();
 		} catch (e: any) {
 			videoConfigError = e.detail || 'Failed to update video model';
 		} finally {
@@ -1323,16 +1361,16 @@
 											bind:value={selectedVideoModel}
 											class="input text-xs py-1.5 flex-1"
 										>
-											{#each videoModels as model}
-												<option value={model.id}>
-													{model.name} (${model.price_per_second}/sec)
+											{#each videoModels.filter(m => m.provider === 'google-veo') as model}
+												<option value={model.id} disabled={!model.available}>
+													{model.name} (${model.price_per_second}/sec){!model.available ? ' - API key required' : ''}
 												</option>
 											{/each}
 										</select>
 										{#if selectedVideoModel !== videoModel}
 											<button
 												on:click={saveVideoModel}
-												disabled={savingVideoModel}
+												disabled={savingVideoModel || !videoModels.find(m => m.id === selectedVideoModel)?.available}
 												class="btn btn-primary text-xs py-1.5 px-3"
 												title="Apply model change"
 											>
@@ -1350,6 +1388,62 @@
 										<p class="text-[10px] text-warning mt-2">Configure API key above to enable video generation</p>
 									{/if}
 								</div>
+							</div>
+
+							<!-- OpenAI Sora (Video Generation) -->
+							<div class="card p-4">
+								<div class="flex items-center gap-3 mb-4">
+									<div class="w-9 h-9 bg-emerald-500/15 rounded-lg flex items-center justify-center shrink-0">
+										<svg class="w-5 h-5 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
+											<path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.8956zm16.0993 3.8558L12.6 8.3829l2.02-1.1638a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.4066-.6567zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/>
+										</svg>
+									</div>
+									<div class="flex-1 min-w-0">
+										<div class="flex items-center justify-between gap-2">
+											<span class="font-semibold text-foreground text-sm">OpenAI Sora</span>
+											{#if videoModels.some(m => m.provider === 'openai-sora' && m.available)}
+												<span class="text-[10px] px-2 py-0.5 rounded-full bg-success/15 text-success font-medium shrink-0">Available</span>
+											{:else}
+												<span class="text-[10px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground font-medium shrink-0">Requires OpenAI Key</span>
+											{/if}
+										</div>
+										<p class="text-xs text-muted-foreground truncate">AI Video Generation</p>
+									</div>
+								</div>
+
+								<div class="flex gap-2">
+									<select
+										bind:value={selectedVideoModel}
+										class="input text-xs py-1.5 flex-1"
+									>
+										{#each videoModels.filter(m => m.provider === 'openai-sora') as model}
+											<option value={model.id} disabled={!model.available}>
+												{model.name} (${model.price_per_second}/sec){!model.available ? ' - API key required' : ''}
+											</option>
+										{/each}
+									</select>
+									{#if selectedVideoModel !== videoModel && videoModels.find(m => m.id === selectedVideoModel)?.provider === 'openai-sora'}
+										<button
+											on:click={saveVideoModel}
+											disabled={savingVideoModel || !videoModels.find(m => m.id === selectedVideoModel)?.available}
+											class="btn btn-primary text-xs py-1.5 px-3"
+											title="Apply model change"
+										>
+											{#if savingVideoModel}
+												<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
+											{:else}
+												Apply
+											{/if}
+										</button>
+									{/if}
+								</div>
+								<p class="text-[10px] text-muted-foreground mt-1.5">$0.10-$0.40/sec · 4-12 sec videos</p>
+
+								{#if !openaiApiKeyMasked}
+									<p class="text-[10px] text-warning mt-2">
+										Configure OpenAI API key in Voice-to-Text section to enable Sora
+									</p>
+								{/if}
 							</div>
 
 							<!-- Future integrations placeholder - Compact -->

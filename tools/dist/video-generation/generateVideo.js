@@ -1,18 +1,33 @@
 /**
- * Video Generation Tool - Veo (Google)
+ * Video Generation Tool - Unified Provider Interface
  *
- * Generate videos using AI. The API key is provided via environment variable.
+ * Generate videos using AI from multiple providers (Google Veo, OpenAI Sora, etc.)
+ * The provider and model are selected based on environment variables or explicit input.
  * Videos are saved to disk and a URL is returned for display.
  *
  * Environment Variables:
- *   GEMINI_API_KEY - Google AI API key (injected by AI Hub at runtime)
- *   VEO_MODEL - Model to use (optional, defaults to veo-3.1-fast-generate-preview)
+ *   VIDEO_PROVIDER - Provider ID (e.g., "google-veo", "openai-sora")
+ *   VIDEO_API_KEY - API key for the selected provider
+ *   VIDEO_MODEL - Model to use (e.g., "veo-3.1-fast-generate-preview", "sora-2")
+ *
+ *   Legacy (backwards compatible):
+ *   GEMINI_API_KEY - Google AI API key (used if VIDEO_API_KEY not set)
+ *   VEO_MODEL - Veo model (used if VIDEO_MODEL not set for Google provider)
+ *   OPENAI_API_KEY - OpenAI API key (used for Sora if VIDEO_API_KEY not set)
  *
  * Usage:
  *   import { generateVideo } from '/opt/ai-tools/dist/video-generation/generateVideo.js';
  *
+ *   // Use default provider from settings
  *   const result = await generateVideo({
  *     prompt: 'A cat playing with a ball of yarn'
+ *   });
+ *
+ *   // Or explicitly specify provider/model
+ *   const result = await generateVideo({
+ *     prompt: 'A cat playing with a ball of yarn',
+ *     provider: 'openai-sora',
+ *     model: 'sora-2-pro'
  *   });
  *
  *   if (result.success) {
@@ -20,9 +35,78 @@
  *     // result.file_path contains the local file path
  *   }
  */
-import { handleApiError, pollForCompletion, downloadVideo, saveVideo } from './shared.js';
+import { registry } from '../providers/registry.js';
 /**
- * Generate a video from a text prompt using Google Veo.
+ * Determine the provider ID to use based on input and environment
+ */
+function getProviderId(inputProvider) {
+    // Explicit input takes priority
+    if (inputProvider) {
+        return inputProvider;
+    }
+    // Check environment variables
+    if (process.env.VIDEO_PROVIDER) {
+        return process.env.VIDEO_PROVIDER;
+    }
+    // Legacy: If OPENAI_API_KEY is set but not GEMINI_API_KEY, default to Sora
+    if (process.env.OPENAI_API_KEY && !process.env.GEMINI_API_KEY) {
+        return 'openai-sora';
+    }
+    // Default to Google Veo
+    return 'google-veo';
+}
+/**
+ * Get API key for the specified provider
+ */
+function getApiKey(providerId) {
+    // Check provider-specific env var first
+    if (process.env.VIDEO_API_KEY) {
+        return process.env.VIDEO_API_KEY;
+    }
+    // Legacy fallbacks based on provider
+    if (providerId === 'google-veo') {
+        return process.env.GEMINI_API_KEY || '';
+    }
+    if (providerId === 'openai-sora') {
+        return process.env.OPENAI_API_KEY || '';
+    }
+    return '';
+}
+/**
+ * Get model ID for the specified provider
+ */
+function getModelId(providerId, inputModel) {
+    // Explicit input takes priority
+    if (inputModel) {
+        return inputModel;
+    }
+    // Check environment variables
+    if (process.env.VIDEO_MODEL) {
+        return process.env.VIDEO_MODEL;
+    }
+    // Legacy fallbacks
+    if (providerId === 'google-veo' && process.env.VEO_MODEL) {
+        return process.env.VEO_MODEL;
+    }
+    // Provider defaults
+    const provider = registry.getVideoProvider(providerId);
+    if (provider && provider.models.length > 0) {
+        return provider.models[0].id;
+    }
+    // Ultimate fallbacks
+    if (providerId === 'google-veo') {
+        return 'veo-3.1-fast-generate-preview';
+    }
+    if (providerId === 'openai-sora') {
+        return 'sora-2';
+    }
+    return '';
+}
+/**
+ * Generate a video from a text prompt.
+ *
+ * Uses the configured provider (Google Veo, OpenAI Sora, etc.) or allows
+ * explicit override via the provider/model parameters.
  *
  * The video is saved to disk and a URL is returned for display in the chat UI.
  * Video generation is asynchronous - this function polls until complete.
@@ -32,10 +116,18 @@ import { handleApiError, pollForCompletion, downloadVideo, saveVideo } from './s
  *
  * @example
  * ```typescript
+ * // Use default provider
  * const result = await generateVideo({
  *   prompt: 'A butterfly landing on a flower, macro shot, cinematic',
  *   duration: 8,
  *   aspect_ratio: '16:9'
+ * });
+ *
+ * // Use specific provider
+ * const result = await generateVideo({
+ *   prompt: 'A butterfly landing on a flower',
+ *   provider: 'openai-sora',
+ *   model: 'sora-2-pro'
  * });
  *
  * if (result.success) {
@@ -47,92 +139,46 @@ import { handleApiError, pollForCompletion, downloadVideo, saveVideo } from './s
  * ```
  */
 export async function generateVideo(input) {
-    // Get API key from environment
-    const apiKey = process.env.GEMINI_API_KEY;
+    // Determine provider
+    const providerId = getProviderId(input.provider);
+    const provider = registry.getVideoProvider(providerId);
+    if (!provider) {
+        const availableProviders = registry.listVideoProviders().map(p => p.id);
+        return {
+            success: false,
+            error: `Video provider '${providerId}' not found. Available providers: ${availableProviders.join(', ')}`
+        };
+    }
+    // Get API key
+    const apiKey = getApiKey(providerId);
     if (!apiKey) {
         return {
             success: false,
-            error: 'GEMINI_API_KEY environment variable not set. Video generation is not configured.'
+            error: `No API key configured for ${provider.name}. Set VIDEO_API_KEY or provider-specific key.`
         };
     }
-    // Get model from environment or use default (Veo 3.1 Fast for speed)
-    const model = process.env.VEO_MODEL || 'veo-3.1-fast-generate-preview';
-    // Validate input
-    if (!input.prompt || input.prompt.trim().length === 0) {
+    // Get model
+    const modelId = getModelId(providerId, input.model);
+    const modelInfo = provider.models.find(m => m.id === modelId);
+    if (!modelInfo) {
+        const availableModels = provider.models.map(m => m.id);
         return {
             success: false,
-            error: 'Prompt cannot be empty'
+            error: `Model '${modelId}' not found for ${provider.name}. Available models: ${availableModels.join(', ')}`
         };
     }
-    if (input.prompt.length > 4000) {
-        return {
-            success: false,
-            error: 'Prompt is too long. Maximum ~1,024 tokens (approximately 4,000 characters).'
-        };
-    }
-    // Validate resolution/duration combination
-    if (input.resolution === '1080p' && input.duration && input.duration !== 8) {
-        return {
-            success: false,
-            error: '1080p resolution is only available for 8-second videos.'
-        };
-    }
-    const prompt = input.prompt.trim();
-    const aspectRatio = input.aspect_ratio || '16:9';
-    const duration = input.duration || 8;
-    const resolution = input.resolution || '720p';
-    try {
-        // Start the video generation (long-running operation)
-        const startResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:predictLongRunning?key=${apiKey}`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                instances: [{
-                        prompt: prompt
-                    }],
-                parameters: {
-                    aspectRatio: aspectRatio,
-                    durationSeconds: duration,
-                    resolution: resolution,
-                    ...(input.negative_prompt && { negativePrompt: input.negative_prompt }),
-                    ...(input.seed !== undefined && { seed: input.seed }),
-                    ...(input.person_generation && { personGeneration: input.person_generation })
-                }
-            }),
-        });
-        if (!startResponse.ok) {
-            const errorData = await startResponse.json().catch(() => ({}));
-            return handleApiError(startResponse, errorData);
-        }
-        const startResult = await startResponse.json();
-        const operationName = startResult.name;
-        if (!operationName) {
-            return {
-                success: false,
-                error: 'Failed to start video generation: no operation name returned.'
-            };
-        }
-        // Poll for completion
-        const pollResult = await pollForCompletion(operationName, apiKey);
-        if (!pollResult.success) {
-            return { success: false, error: pollResult.error };
-        }
-        // Download the video (pass apiKey for authenticated download)
-        const videoBuffer = await downloadVideo(pollResult.videoUri, apiKey);
-        if ('error' in videoBuffer) {
-            return { success: false, error: videoBuffer.error };
-        }
-        // Save and return (include source_video_uri for use with extendVideo)
-        return saveVideo(videoBuffer, 'video', duration, pollResult.videoUri);
-    }
-    catch (error) {
-        return {
-            success: false,
-            error: error instanceof Error ? error.message : 'Unknown error occurred'
-        };
-    }
+    // Build credentials
+    const credentials = { apiKey };
+    // Delegate to provider
+    return provider.generate({
+        prompt: input.prompt,
+        aspect_ratio: input.aspect_ratio,
+        duration: input.duration,
+        resolution: input.resolution,
+        negative_prompt: input.negative_prompt,
+        seed: input.seed,
+        person_generation: input.person_generation
+    }, credentials, modelId);
 }
 export default generateVideo;
 //# sourceMappingURL=generateVideo.js.map

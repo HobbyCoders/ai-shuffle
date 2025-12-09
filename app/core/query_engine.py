@@ -566,18 +566,39 @@ def _build_env_with_ai_tools(
             env["GEMINI_MODEL"] = image_model
             logger.debug(f"Injected GEMINI_MODEL={image_model} into execution environment")
 
-    # Inject Veo model for video generation (uses same API key as images)
+    # Inject video generation credentials (supports multiple providers)
     if ai_tools_config.get("video_generation", False):
-        video_api_key = database.get_system_setting("image_api_key")
+        video_provider = database.get_system_setting("video_provider")
         video_model = database.get_system_setting("video_model")
 
-        if video_api_key and "GEMINI_API_KEY" not in env:
-            env["GEMINI_API_KEY"] = video_api_key
-            logger.debug("Injected GEMINI_API_KEY for video generation")
+        # Set the provider
+        if video_provider:
+            env["VIDEO_PROVIDER"] = video_provider
+            logger.debug(f"Injected VIDEO_PROVIDER={video_provider} into execution environment")
 
+        # Set the model
         if video_model:
+            env["VIDEO_MODEL"] = video_model
+            # Also set legacy VEO_MODEL for backwards compatibility
             env["VEO_MODEL"] = video_model
-            logger.debug(f"Injected VEO_MODEL={video_model} into execution environment")
+            logger.debug(f"Injected VIDEO_MODEL={video_model} into execution environment")
+
+        # Inject API key based on provider
+        if video_provider == "openai-sora":
+            # Sora uses OpenAI API key
+            openai_api_key = database.get_system_setting("openai_api_key")
+            if openai_api_key:
+                env["OPENAI_API_KEY"] = openai_api_key
+                env["VIDEO_API_KEY"] = openai_api_key
+                logger.debug("Injected OPENAI_API_KEY for Sora video generation")
+        else:
+            # Default to Google Veo - uses Gemini API key
+            video_api_key = database.get_system_setting("image_api_key")
+            if video_api_key:
+                if "GEMINI_API_KEY" not in env:
+                    env["GEMINI_API_KEY"] = video_api_key
+                env["VIDEO_API_KEY"] = video_api_key
+                logger.debug("Injected GEMINI_API_KEY for Veo video generation")
 
     # Add more tool credentials here as they become available
     # if ai_tools_config.get("text_to_speech", False):

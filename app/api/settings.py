@@ -33,7 +33,8 @@ class IntegrationSettingsResponse(BaseModel):
     image_api_key_set: bool = False
     image_api_key_masked: str = ""
     # Video generation settings
-    video_model: Optional[str] = None  # "veo-3.1-fast-generate-preview" or "veo-3.1-generate-preview"
+    video_provider: Optional[str] = None  # "google-veo" or "openai-sora"
+    video_model: Optional[str] = None  # "veo-3.1-fast-generate-preview", "sora-2", etc.
 
 
 class OpenAIKeyRequest(BaseModel):
@@ -121,6 +122,7 @@ async def get_integration_settings(token: str = Depends(require_auth)):
     image_provider = database.get_system_setting("image_provider")
     image_model = database.get_system_setting("image_model")
     image_api_key = database.get_system_setting("image_api_key")
+    video_provider = database.get_system_setting("video_provider")
     video_model = database.get_system_setting("video_model")
 
     return IntegrationSettingsResponse(
@@ -130,6 +132,7 @@ async def get_integration_settings(token: str = Depends(require_auth)):
         image_model=image_model,
         image_api_key_set=bool(image_api_key),
         image_api_key_masked=mask_api_key(image_api_key) if image_api_key else "",
+        video_provider=video_provider,
         video_model=video_model
     )
 
@@ -601,27 +604,73 @@ async def generate_image(
 
 
 # ============================================================================
-# Video Generation (Veo) Model Selection
+# Video Generation Model Selection
 # ============================================================================
 
-# Available Veo models
-VEO_MODELS = {
+# Available video providers and their models
+VIDEO_PROVIDERS = {
+    "google-veo": {
+        "name": "Google Veo",
+        "description": "Google's video generation API",
+        "requires_key": "image_api_key"  # Uses the same key as Gemini/Nano Banana
+    },
+    "openai-sora": {
+        "name": "OpenAI Sora",
+        "description": "OpenAI's video generation API",
+        "requires_key": "openai_api_key"
+    }
+}
+
+# Available video models by provider
+VIDEO_MODELS = {
+    # Google Veo models
     "veo-3.1-fast-generate-preview": {
         "name": "Veo 3.1 Fast",
         "description": "Fast video generation - lower latency",
-        "price_per_second": 0.15
+        "price_per_second": 0.15,
+        "provider": "google-veo",
+        "max_duration": 8,
+        "capabilities": ["text-to-video", "image-to-video", "video-extend", "frame-bridge"]
     },
     "veo-3.1-generate-preview": {
         "name": "Veo 3.1",
         "description": "High quality video generation",
-        "price_per_second": 0.40
+        "price_per_second": 0.40,
+        "provider": "google-veo",
+        "max_duration": 8,
+        "capabilities": ["text-to-video", "image-to-video", "video-extend", "frame-bridge"]
+    },
+    # OpenAI Sora models
+    "sora-2": {
+        "name": "Sora 2",
+        "description": "Fast video generation with good quality",
+        "price_per_second": 0.10,
+        "provider": "openai-sora",
+        "max_duration": 12,
+        "capabilities": ["text-to-video", "image-to-video"]
+    },
+    "sora-2-pro": {
+        "name": "Sora 2 Pro",
+        "description": "High quality video generation with better details",
+        "price_per_second": 0.40,
+        "provider": "openai-sora",
+        "max_duration": 12,
+        "capabilities": ["text-to-video", "image-to-video"]
     }
 }
+
+# Legacy alias for backwards compatibility
+VEO_MODELS = {k: v for k, v in VIDEO_MODELS.items() if v.get("provider") == "google-veo"}
 
 
 class VideoModelUpdateRequest(BaseModel):
     """Request to update the video model"""
     model: str
+
+
+class VideoProviderUpdateRequest(BaseModel):
+    """Request to update the video provider"""
+    provider: str
 
 
 @router.patch("/integrations/video/model")
@@ -632,40 +681,134 @@ async def update_video_model(
     """
     Update the video generation model (admin only).
 
-    Video generation uses the same API key as image generation (Gemini API).
+    The provider is automatically determined from the selected model.
     """
     model = request.model.strip()
 
-    if model not in VEO_MODELS:
+    if model not in VIDEO_MODELS:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid model. Available models: {', '.join(VEO_MODELS.keys())}"
+            detail=f"Invalid model. Available models: {', '.join(VIDEO_MODELS.keys())}"
         )
 
-    # Save the model
+    model_info = VIDEO_MODELS[model]
+    provider = model_info["provider"]
+
+    # Check if the required API key is configured
+    required_key = VIDEO_PROVIDERS[provider]["requires_key"]
+    api_key = database.get_system_setting(required_key)
+
+    if not api_key:
+        key_name = "Google AI API key (Nano Banana)" if required_key == "image_api_key" else "OpenAI API key"
+        raise HTTPException(
+            status_code=400,
+            detail=f"{key_name} is required for {VIDEO_PROVIDERS[provider]['name']}. Configure it in Settings first."
+        )
+
+    # Save the provider and model
+    database.set_system_setting("video_provider", provider)
     database.set_system_setting("video_model", model)
 
     return {
         "success": True,
+        "provider": provider,
         "model": model
+    }
+
+
+@router.patch("/integrations/video/provider")
+async def update_video_provider(
+    request: VideoProviderUpdateRequest,
+    token: str = Depends(require_admin)
+):
+    """
+    Update the video generation provider (admin only).
+
+    This will also reset the model to the first available model for that provider.
+    """
+    provider = request.provider.strip()
+
+    if provider not in VIDEO_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid provider. Available providers: {', '.join(VIDEO_PROVIDERS.keys())}"
+        )
+
+    # Check if the required API key is configured
+    required_key = VIDEO_PROVIDERS[provider]["requires_key"]
+    api_key = database.get_system_setting(required_key)
+
+    if not api_key:
+        key_name = "Google AI API key (Nano Banana)" if required_key == "image_api_key" else "OpenAI API key"
+        raise HTTPException(
+            status_code=400,
+            detail=f"{key_name} is required for {VIDEO_PROVIDERS[provider]['name']}. Configure it in Settings first."
+        )
+
+    # Get first model for this provider
+    provider_models = [m for m, info in VIDEO_MODELS.items() if info["provider"] == provider]
+    default_model = provider_models[0] if provider_models else None
+
+    # Save the provider and model
+    database.set_system_setting("video_provider", provider)
+    if default_model:
+        database.set_system_setting("video_model", default_model)
+
+    return {
+        "success": True,
+        "provider": provider,
+        "model": default_model
     }
 
 
 @router.get("/integrations/video/models")
 async def get_video_models(token: str = Depends(require_auth)):
     """
-    Get available video generation models.
+    Get available video generation models grouped by provider.
     """
+    # Get current settings
+    current_provider = database.get_system_setting("video_provider")
+    current_model = database.get_system_setting("video_model")
+    openai_key = database.get_system_setting("openai_api_key")
+    image_api_key = database.get_system_setting("image_api_key")
+
+    # Build models list with availability info
+    models = []
+    for model_id, model_info in VIDEO_MODELS.items():
+        provider_id = model_info["provider"]
+        provider_info = VIDEO_PROVIDERS[provider_id]
+
+        # Check if this provider's API key is configured
+        required_key = provider_info["requires_key"]
+        is_available = bool(database.get_system_setting(required_key))
+
+        models.append({
+            "id": model_id,
+            "name": model_info["name"],
+            "description": model_info["description"],
+            "price_per_second": model_info["price_per_second"],
+            "provider": provider_id,
+            "provider_name": provider_info["name"],
+            "max_duration": model_info.get("max_duration", 8),
+            "capabilities": model_info.get("capabilities", []),
+            "available": is_available,
+            "is_current": model_id == current_model
+        })
+
     return {
-        "models": [
+        "models": models,
+        "providers": [
             {
-                "id": model_id,
-                "name": model_info["name"],
-                "description": model_info["description"],
-                "price_per_second": model_info["price_per_second"]
+                "id": provider_id,
+                "name": provider_info["name"],
+                "description": provider_info["description"],
+                "available": bool(database.get_system_setting(provider_info["requires_key"])),
+                "is_current": provider_id == current_provider
             }
-            for model_id, model_info in VEO_MODELS.items()
-        ]
+            for provider_id, provider_info in VIDEO_PROVIDERS.items()
+        ],
+        "current_provider": current_provider,
+        "current_model": current_model
     }
 
 
