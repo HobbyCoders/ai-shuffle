@@ -129,18 +129,18 @@ function saveImages(parts: any[], prefix: string): GeneratedImage[] {
 
 export const googleGeminiProvider: ImageProvider = {
   id: 'google-gemini',
-  name: 'Google Gemini (Nano Banana)',
+  name: 'Nano Banana',
   models: [
     {
       id: 'gemini-2.5-flash-image',
-      name: 'Nano Banana (Gemini 2.5 Flash)',
+      name: 'Nano Banana',
       description: 'Fast image generation with good quality - ~$0.039/image',
       capabilities: ['text-to-image', 'image-edit', 'image-reference'],
       pricing: { unit: 'image', price: 0.039 }
     },
     {
       id: 'gemini-3-pro-image-preview',
-      name: 'Nano Banana Pro (Gemini 3 Pro)',
+      name: 'Nano Banana Pro',
       description: 'Studio-quality, better text rendering, 2K/4K support - ~$0.10/image',
       capabilities: ['text-to-image', 'image-edit', 'image-reference'],
       pricing: { unit: 'image', price: 0.10 }

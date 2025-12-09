@@ -4187,7 +4187,14 @@
 								on:click={() => toggleSection('toolConfig')}
 								class="w-full px-3 py-2 bg-accent flex items-center justify-between text-sm text-foreground hover:bg-muted"
 							>
-								<span>Tool Configuration</span>
+								<div class="flex items-center gap-2">
+									<span>Tool Configuration</span>
+									{#if availableTools.all_tools.length > 0}
+										<span class="text-xs px-1.5 py-0.5 bg-primary/20 text-primary rounded">
+											{availableTools.all_tools.length}
+										</span>
+									{/if}
+								</div>
 								<svg class="w-4 h-4 transition-transform {expandedSections.toolConfig ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 								</svg>
@@ -4424,10 +4431,7 @@
 																			class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring"
 																		/>
 																		<div class="flex-1">
-																			<div class="flex items-center gap-2">
-																				<span class="text-sm text-foreground">{tool.name}</span>
-																				<span class="text-xs text-muted-foreground">({tool.provider})</span>
-																			</div>
+																			<span class="text-sm text-foreground">{tool.name}</span>
 																			<p class="text-xs text-muted-foreground">{tool.description}</p>
 																		</div>
 																	</label>

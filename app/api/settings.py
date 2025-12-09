@@ -149,14 +149,14 @@ IMAGE_PROVIDERS = {
 IMAGE_MODELS = {
     # Google Gemini (Nano Banana) models
     "gemini-2.5-flash-image": {
-        "name": "Nano Banana (Gemini 2.5 Flash)",
+        "name": "Nano Banana",
         "description": "Fast image generation with good quality",
         "price_per_image": 0.039,
         "provider": "google-gemini",
         "capabilities": ["text-to-image", "image-edit", "image-reference"]
     },
     "gemini-3-pro-image-preview": {
-        "name": "Nano Banana Pro (Gemini 3 Pro)",
+        "name": "Nano Banana Pro",
         "description": "Studio-quality, better text rendering, 2K/4K support",
         "price_per_image": 0.10,
         "provider": "google-gemini",
