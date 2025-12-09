@@ -79,14 +79,9 @@ class ImageGenerateResponse(BaseModel):
 # Verified via ListModels API and tested with generateContent
 # See: https://ai.google.dev/gemini-api/docs/models
 NANO_BANANA_MODELS = {
-    "gemini-2.0-flash-exp-image-generation": {
-        "name": "Nano Banana (Gemini 2.0 Flash)",
-        "description": "Fast image generation, experimental - ~$0.039/image",
-        "price_per_image": 0.039
-    },
     "gemini-2.5-flash-image": {
-        "name": "Nano Banana 2 (Gemini 2.5 Flash)",
-        "description": "Faster generation with improved quality - ~$0.039/image",
+        "name": "Nano Banana (Gemini 2.5 Flash)",
+        "description": "Fast image generation with good quality - ~$0.039/image",
         "price_per_image": 0.039
     },
     "gemini-3-pro-image-preview": {
