@@ -1405,34 +1405,16 @@
 										<span class="text-lg">🖼️</span>
 										<span class="font-medium text-foreground text-sm">GPT Image</span>
 										<span class="text-[10px] text-muted-foreground">Image Generation</span>
-									</div>
-									<div class="flex gap-2">
-										<select
-											bind:value={selectedImageModel}
-											class="input text-xs py-1.5 flex-1"
-										>
-											{#each imageModels.filter(m => m.provider === 'openai-gpt-image') as model}
-												<option value={model.id} disabled={!model.available}>
-													{model.name} (${model.price_per_image}/img){!model.available ? ' - API key required' : ''}
-												</option>
-											{/each}
-										</select>
-										{#if selectedImageModel !== imageModel && imageModels.find(m => m.id === selectedImageModel)?.provider === 'openai-gpt-image'}
-											<button
-												on:click={updateImageModel}
-												disabled={updatingImageModel || !imageModels.find(m => m.id === selectedImageModel)?.available}
-												class="btn btn-primary text-xs py-1.5 px-3"
-												title="Apply model change"
-											>
-												{#if updatingImageModel}
-													<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
-												{:else}
-													Apply
-												{/if}
-											</button>
+										{#if imageModels.find(m => m.id === imageModel)?.provider === 'openai-gpt-image'}
+											<span class="text-[10px] px-1.5 py-0.5 rounded bg-primary/15 text-primary font-medium">Default</span>
 										{/if}
 									</div>
-									<p class="text-[10px] text-muted-foreground mt-1.5">~$0.07/image · High quality with accurate text</p>
+									<p class="text-[10px] text-muted-foreground">~$0.07/image · High quality with accurate text</p>
+									{#if !openaiApiKeyMasked}
+										<p class="text-[10px] text-warning mt-1">Configure API key above to enable</p>
+									{:else}
+										<p class="text-[10px] text-success mt-1">✓ Available</p>
+									{/if}
 								</div>
 
 								<!-- Sora (Video Generation) -->
@@ -1441,37 +1423,15 @@
 										<span class="text-lg">🎬</span>
 										<span class="font-medium text-foreground text-sm">Sora</span>
 										<span class="text-[10px] text-muted-foreground">Video Generation</span>
-									</div>
-									<div class="flex gap-2">
-										<select
-											bind:value={selectedVideoModel}
-											class="input text-xs py-1.5 flex-1"
-										>
-											{#each videoModels.filter(m => m.provider === 'openai-sora') as model}
-												<option value={model.id} disabled={!model.available}>
-													{model.name} (${model.price_per_second}/sec){!model.available ? ' - API key required' : ''}
-												</option>
-											{/each}
-										</select>
-										{#if selectedVideoModel !== videoModel && videoModels.find(m => m.id === selectedVideoModel)?.provider === 'openai-sora'}
-											<button
-												on:click={saveVideoModel}
-												disabled={savingVideoModel || !videoModels.find(m => m.id === selectedVideoModel)?.available}
-												class="btn btn-primary text-xs py-1.5 px-3"
-												title="Apply model change"
-											>
-												{#if savingVideoModel}
-													<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
-												{:else}
-													Apply
-												{/if}
-											</button>
+										{#if videoModels.find(m => m.id === videoModel)?.provider === 'openai-sora'}
+											<span class="text-[10px] px-1.5 py-0.5 rounded bg-primary/15 text-primary font-medium">Default</span>
 										{/if}
 									</div>
-									<p class="text-[10px] text-muted-foreground mt-1.5">$0.10-$0.40/sec · 4-12 sec videos</p>
-
+									<p class="text-[10px] text-muted-foreground">$0.10-$0.40/sec · 4-12 sec videos</p>
 									{#if !openaiApiKeyMasked}
-										<p class="text-[10px] text-warning mt-2">Configure API key above to enable video generation</p>
+										<p class="text-[10px] text-warning mt-1">Configure API key above to enable</p>
+									{:else}
+										<p class="text-[10px] text-success mt-1">✓ Available</p>
 									{/if}
 								</div>
 							</div>
@@ -1560,34 +1520,16 @@
 										<span class="text-lg">🍌</span>
 										<span class="font-medium text-foreground text-sm">Nano Banana</span>
 										<span class="text-[10px] text-muted-foreground">Image Generation</span>
-									</div>
-									<div class="flex gap-2">
-										<select
-											bind:value={selectedImageModel}
-											class="input text-xs py-1.5 flex-1"
-										>
-											{#each imageModels.filter(m => m.provider === 'google-gemini') as model}
-												<option value={model.id} disabled={!model.available}>
-													{model.name} (${model.price_per_image}/img){!model.available ? ' - API key required' : ''}
-												</option>
-											{/each}
-										</select>
-										{#if selectedImageModel !== imageModel && imageModels.find(m => m.id === selectedImageModel)?.provider === 'google-gemini'}
-											<button
-												on:click={updateImageModel}
-												disabled={updatingImageModel || !imageModels.find(m => m.id === selectedImageModel)?.available}
-												class="btn btn-primary text-xs py-1.5 px-3"
-												title="Apply model change"
-											>
-												{#if updatingImageModel}
-													<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
-												{:else}
-													Apply
-												{/if}
-											</button>
+										{#if imageModels.find(m => m.id === imageModel)?.provider === 'google-gemini'}
+											<span class="text-[10px] px-1.5 py-0.5 rounded bg-primary/15 text-primary font-medium">Default</span>
 										{/if}
 									</div>
-									<p class="text-[10px] text-muted-foreground mt-1.5">~$0.039/image</p>
+									<p class="text-[10px] text-muted-foreground">~$0.039/image</p>
+									{#if !imageApiKeyMasked}
+										<p class="text-[10px] text-warning mt-1">Configure API key above to enable</p>
+									{:else}
+										<p class="text-[10px] text-success mt-1">✓ Available</p>
+									{/if}
 								</div>
 
 								<!-- Veo (Video Generation) -->
@@ -1596,51 +1538,15 @@
 										<span class="text-lg">🎬</span>
 										<span class="font-medium text-foreground text-sm">Veo</span>
 										<span class="text-[10px] text-muted-foreground">Video Generation</span>
-									</div>
-
-									{#if videoConfigSuccess}
-										<div class="bg-success/10 border border-success/30 text-success px-2 py-1.5 rounded text-xs flex items-center gap-1.5 mb-3">
-											<span>✓</span>
-											<span>{videoConfigSuccess}</span>
-										</div>
-									{/if}
-
-									{#if videoConfigError}
-										<div class="bg-destructive/10 border border-destructive/30 text-destructive px-2 py-1.5 rounded text-xs mb-3">
-											{videoConfigError}
-										</div>
-									{/if}
-
-									<div class="flex gap-2">
-										<select
-											bind:value={selectedVideoModel}
-											class="input text-xs py-1.5 flex-1"
-										>
-											{#each videoModels.filter(m => m.provider === 'google-veo') as model}
-												<option value={model.id} disabled={!model.available}>
-													{model.name} (${model.price_per_second}/sec){!model.available ? ' - API key required' : ''}
-												</option>
-											{/each}
-										</select>
-										{#if selectedVideoModel !== videoModel}
-											<button
-												on:click={saveVideoModel}
-												disabled={savingVideoModel || !videoModels.find(m => m.id === selectedVideoModel)?.available}
-												class="btn btn-primary text-xs py-1.5 px-3"
-												title="Apply model change"
-											>
-												{#if savingVideoModel}
-													<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
-												{:else}
-													Apply
-												{/if}
-											</button>
+										{#if videoModels.find(m => m.id === videoModel)?.provider === 'google-veo'}
+											<span class="text-[10px] px-1.5 py-0.5 rounded bg-primary/15 text-primary font-medium">Default</span>
 										{/if}
 									</div>
-									<p class="text-[10px] text-muted-foreground mt-1.5">$0.15-$0.40/sec · 4-8 sec videos</p>
-
+									<p class="text-[10px] text-muted-foreground">$0.15-$0.40/sec · 4-8 sec videos</p>
 									{#if !imageApiKeyMasked}
-										<p class="text-[10px] text-warning mt-2">Configure API key above to enable video generation</p>
+										<p class="text-[10px] text-warning mt-1">Configure API key above to enable</p>
+									{:else}
+										<p class="text-[10px] text-success mt-1">✓ Available</p>
 									{/if}
 								</div>
 							</div>
