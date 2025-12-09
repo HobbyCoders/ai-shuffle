@@ -338,7 +338,8 @@
 		system_prompt_append: '',
 		system_prompt_content: '',
 		system_prompt_inject_env: false,
-		system_prompt_enable_ai_tools: false,
+		// AI tools - individual toggles for each AI tool
+		ai_tools_image_generation: false,
 		setting_sources: [] as string[],
 		cwd: '',
 		add_dirs: '',
@@ -1132,7 +1133,7 @@
 			system_prompt_append: '',
 			system_prompt_content: '',
 			system_prompt_inject_env: false,
-			system_prompt_enable_ai_tools: false,
+			ai_tools_image_generation: false,
 			setting_sources: [],
 			cwd: '',
 			add_dirs: '',
@@ -1152,6 +1153,7 @@
 		editingProfile = profile;
 		const config = profile.config || {};
 		const sp = config.system_prompt || {};
+		const aiTools = config.ai_tools || {};
 
 		const allowedTools = config.allowed_tools || [];
 		const disallowedTools = config.disallowed_tools || [];
@@ -1183,7 +1185,8 @@
 			system_prompt_append: sp.append || '',
 			system_prompt_content: sp.content || '',
 			system_prompt_inject_env: sp.inject_env_details || false,
-			system_prompt_enable_ai_tools: sp.enable_ai_tools || false,
+			// AI tools - load from config.ai_tools, fallback to legacy sp.enable_ai_tools
+			ai_tools_image_generation: aiTools.image_generation || sp.enable_ai_tools || false,
 			setting_sources: config.setting_sources || [],
 			cwd: config.cwd || '',
 			add_dirs: (config.add_dirs || []).join(', '),
@@ -1226,11 +1229,17 @@
 		if (profileForm.user.trim()) config.user = profileForm.user;
 		if (profileForm.max_buffer_size) config.max_buffer_size = profileForm.max_buffer_size;
 
+		// AI tools configuration - individual toggles for each AI tool
+		if (profileForm.ai_tools_image_generation) {
+			config.ai_tools = {
+				image_generation: profileForm.ai_tools_image_generation
+			};
+		}
+
 		if (profileForm.system_prompt_type === 'preset') {
 			config.system_prompt = {
 				type: 'preset',
-				preset: profileForm.system_prompt_preset,
-				enable_ai_tools: profileForm.system_prompt_enable_ai_tools
+				preset: 'claude_code'  // Always use claude_code preset
 			};
 			if (profileForm.system_prompt_append.trim()) {
 				config.system_prompt.append = profileForm.system_prompt_append;
@@ -1240,8 +1249,7 @@
 			config.system_prompt = {
 				type: 'custom',
 				content: profileForm.system_prompt_content,
-				inject_env_details: profileForm.system_prompt_inject_env,
-				enable_ai_tools: profileForm.system_prompt_enable_ai_tools
+				inject_env_details: profileForm.system_prompt_inject_env
 			};
 		}
 
@@ -3800,6 +3808,26 @@
 											{/if}
 										</div>
 									{/if}
+
+									<!-- AI Tools Section -->
+									<div class="border-t border-border pt-3 mt-3">
+										<label class="block text-xs text-muted-foreground mb-2">AI Tools</label>
+										<p class="text-xs text-muted-foreground mb-2">Enable AI-powered tools. Configure API keys in Settings → Integrations.</p>
+										<div class="space-y-2">
+											<label class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted/50 cursor-pointer border border-border">
+												<input
+													type="checkbox"
+													bind:checked={profileForm.ai_tools_image_generation}
+													class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring"
+												/>
+												<div class="flex-1">
+													<span class="text-sm text-foreground">Image Generation</span>
+													<span class="text-xs text-muted-foreground ml-1">(Nano Banana)</span>
+												</div>
+											</label>
+											<!-- Add more AI tools here as they become available -->
+										</div>
+									</div>
 								</div>
 							{/if}
 						</div>
@@ -3914,21 +3942,15 @@
 									<div>
 										<label class="block text-xs text-muted-foreground mb-1">Prompt Type</label>
 										<select bind:value={profileForm.system_prompt_type} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground">
-											<option value="preset">Use Claude Code Preset</option>
-											<option value="custom">Custom Prompt</option>
+											<option value="preset">Claude Code + Appended Instructions</option>
+											<option value="custom">Custom System Prompt</option>
 										</select>
 									</div>
 									{#if profileForm.system_prompt_type === 'preset'}
 										<div>
-											<label class="block text-xs text-muted-foreground mb-1">Preset</label>
-											<select bind:value={profileForm.system_prompt_preset} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground">
-												<option value="claude_code">Claude Code</option>
-												<option value="default">Default</option>
-											</select>
-										</div>
-										<div>
 											<label class="block text-xs text-muted-foreground mb-1">Append Instructions</label>
-											<textarea bind:value={profileForm.system_prompt_append} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-y" rows="3" placeholder="Additional instructions to append to the system prompt..."></textarea>
+											<textarea bind:value={profileForm.system_prompt_append} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-y" rows="3" placeholder="Additional instructions to append to Claude Code's system prompt..."></textarea>
+											<p class="text-xs text-muted-foreground mt-1">These instructions will be added after Claude Code's built-in system prompt.</p>
 										</div>
 									{:else}
 										<div>
@@ -3941,15 +3963,6 @@
 										</label>
 										<p class="text-xs text-muted-foreground">Adds working directory, platform, git status, and today's date to the system prompt.</p>
 									{/if}
-
-									<!-- AI Tools toggle - shown for both preset and custom -->
-									<div class="pt-3 border-t border-border">
-										<label class="flex items-center gap-2 cursor-pointer">
-											<input type="checkbox" bind:checked={profileForm.system_prompt_enable_ai_tools} class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring" />
-											<span class="text-sm text-foreground">Enable AI Tools</span>
-										</label>
-										<p class="text-xs text-muted-foreground mt-1">Allow Claude to use AI tools like image generation (Nano Banana). Configure tools in Settings → Integrations.</p>
-									</div>
 								</div>
 							{/if}
 						</div>

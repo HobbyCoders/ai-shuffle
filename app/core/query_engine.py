@@ -321,55 +321,56 @@ def _get_os_version() -> str:
         return sys.platform
 
 
-def _get_available_tools(enable_ai_tools: bool = False) -> list:
+def _get_available_tools(ai_tools_config: Optional[Dict[str, Any]] = None) -> list:
     """
     Check which AI Hub tools are configured and available.
-    Returns a list of tool descriptions.
+    Returns a list of tool descriptions based on individual tool toggles.
 
     Args:
-        enable_ai_tools: Whether AI tools are enabled for this profile
+        ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
     """
     tools = []
 
-    # Only return tools if AI tools are enabled in the profile
-    if not enable_ai_tools:
+    if not ai_tools_config:
         return tools
 
-    # Check image generation (Nano Banana)
-    image_provider = database.get_system_setting("image_provider")
-    image_model = database.get_system_setting("image_model")
-    image_api_key = database.get_system_setting("image_api_key")
+    # Check image generation (Nano Banana) - only if enabled in profile
+    if ai_tools_config.get("image_generation", False):
+        image_provider = database.get_system_setting("image_provider")
+        image_model = database.get_system_setting("image_model")
+        image_api_key = database.get_system_setting("image_api_key")
 
-    if all([image_provider, image_model, image_api_key]):
-        tools.append({
-            "name": "Image Generation (Nano Banana)",
-            "description": "Generate AI images from text prompts",
-            "usage": """import { generateImage } from './tools/image-generation/generateImage.js';
+        if all([image_provider, image_model, image_api_key]):
+            tools.append({
+                "name": "Image Generation (Nano Banana)",
+                "description": "Generate AI images from text prompts",
+                "usage": """import { generateImage } from './tools/image-generation/generateImage.js';
 const result = await generateImage({ prompt: 'your description here' });
 if (result.success) { /* result.image_base64 contains the image */ }"""
-        })
+            })
 
     # Add more tools here as they become available
-    # e.g., text-to-speech, video generation, etc.
+    # if ai_tools_config.get("text_to_speech", False):
+    #     ...
 
     return tools
 
 
-def generate_environment_details(working_dir: str, enable_ai_tools: bool = False) -> str:
+def generate_environment_details(working_dir: str, ai_tools_config: Optional[Dict[str, Any]] = None) -> str:
     """
     Generate environment details block for custom system prompts.
     Similar to Claude Code's dynamic environment injection.
 
     Args:
         working_dir: The working directory path
-        enable_ai_tools: Whether AI tools are enabled for this profile
+        ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
     """
     is_git = _is_git_repo(working_dir)
     os_version = _get_os_version()
     today = datetime.now().strftime("%Y-%m-%d")
 
-    # Check for available AI tools (only if enabled in profile)
-    available_tools = _get_available_tools(enable_ai_tools)
+    # Check for available AI tools based on individual tool settings
+    available_tools = _get_available_tools(ai_tools_config)
     tools_section = ""
     if available_tools:
         tools_section = "\n\n<ai-tools>\nThe following AI tools are available via code execution:\n"
@@ -422,14 +423,26 @@ def build_options_from_profile(
     system_prompt = config.get("system_prompt")
     override_append = overrides.get("system_prompt_append", "")
 
+    # Get AI tools config from profile config (not system_prompt)
+    ai_tools_config = config.get("ai_tools")
+
     if system_prompt is None:
         # No preset - just security instructions as plain text
         final_system_prompt = SECURITY_INSTRUCTIONS
+
+        # Add AI tools section if any are enabled
+        available_tools = _get_available_tools(ai_tools_config)
+        if available_tools:
+            tools_section = "\n\n<ai-tools>\nThe following AI tools are available via code execution:\n"
+            for tool in available_tools:
+                tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
+            tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\n</ai-tools>"
+            final_system_prompt += tools_section
+
         if override_append:
             final_system_prompt += "\n\n" + override_append
     elif isinstance(system_prompt, dict):
         prompt_type = system_prompt.get("type", "preset")
-        enable_ai_tools = system_prompt.get("enable_ai_tools", False)
 
         if prompt_type == "custom":
             # Custom system prompt - use content directly with security instructions
@@ -440,12 +453,12 @@ def build_options_from_profile(
             # Start building the prompt
             prompt_parts = [SECURITY_INSTRUCTIONS]
 
-            # Add environment details if enabled (includes AI tools if enable_ai_tools is true)
+            # Add environment details if enabled (includes AI tools based on ai_tools_config)
             if inject_env:
-                prompt_parts.append(generate_environment_details(working_dir, enable_ai_tools))
-            elif enable_ai_tools:
-                # If env details not enabled but AI tools are, just add the AI tools section
-                available_tools = _get_available_tools(True)
+                prompt_parts.append(generate_environment_details(working_dir, ai_tools_config))
+            else:
+                # If env details not enabled, still add AI tools section if any are enabled
+                available_tools = _get_available_tools(ai_tools_config)
                 if available_tools:
                     tools_section = "<ai-tools>\nThe following AI tools are available via code execution:\n"
                     for tool in available_tools:
@@ -471,15 +484,14 @@ def build_options_from_profile(
             if override_append:
                 full_append += "\n\n" + override_append
 
-            # Add AI tools section if enabled
-            if enable_ai_tools:
-                available_tools = _get_available_tools(True)
-                if available_tools:
-                    tools_section = "\n\n<ai-tools>\nThe following AI tools are available via code execution:\n"
-                    for tool in available_tools:
-                        tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
-                    tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\n</ai-tools>"
-                    full_append += tools_section
+            # Add AI tools section if any are enabled
+            available_tools = _get_available_tools(ai_tools_config)
+            if available_tools:
+                tools_section = "\n\n<ai-tools>\nThe following AI tools are available via code execution:\n"
+                for tool in available_tools:
+                    tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
+                tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\n</ai-tools>"
+                full_append += tools_section
 
             final_system_prompt = {
                 "type": "preset",
@@ -489,6 +501,16 @@ def build_options_from_profile(
     else:
         # String system prompt - use it directly with security instructions
         final_system_prompt = SECURITY_INSTRUCTIONS + "\n\n" + str(system_prompt)
+
+        # Add AI tools section if any are enabled
+        available_tools = _get_available_tools(ai_tools_config)
+        if available_tools:
+            tools_section = "\n\n<ai-tools>\nThe following AI tools are available via code execution:\n"
+            for tool in available_tools:
+                tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
+            tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\n</ai-tools>"
+            final_system_prompt += tools_section
+
         if override_append:
             final_system_prompt += "\n\n" + override_append
 
