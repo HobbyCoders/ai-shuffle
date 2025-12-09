@@ -424,6 +424,46 @@ async def remove_image_generation(token: str = Depends(require_admin)):
     return {"success": True}
 
 
+class ImageModelUpdateRequest(BaseModel):
+    """Request to update just the image model"""
+    model: str
+
+
+@router.patch("/integrations/image/model")
+async def update_image_model(
+    request: ImageModelUpdateRequest,
+    token: str = Depends(require_admin)
+):
+    """
+    Update just the image model without changing the API key (admin only).
+
+    Allows users to switch between models on the fly without re-entering credentials.
+    """
+    model = request.model.strip()
+
+    # Check if image generation is configured
+    api_key = database.get_system_setting("image_api_key")
+    if not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Image generation not configured. Please set up with an API key first."
+        )
+
+    if model not in NANO_BANANA_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid model. Available models: {', '.join(NANO_BANANA_MODELS.keys())}"
+        )
+
+    # Update just the model
+    database.set_system_setting("image_model", model)
+
+    return {
+        "success": True,
+        "model": model
+    }
+
+
 @router.post("/generate-image", response_model=ImageGenerateResponse)
 async def generate_image(
     request: ImageGenerateRequest,
