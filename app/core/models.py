@@ -23,6 +23,12 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class ChangePasswordRequest(BaseModel):
+    """Admin password change request"""
+    current_password: str
+    new_password: str = Field(..., min_length=8)
+
+
 class ApiKeyLoginRequest(BaseModel):
     """API key login request for web UI"""
     api_key: str

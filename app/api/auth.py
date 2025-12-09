@@ -15,11 +15,12 @@ from fastapi import APIRouter, HTTPException, Response, Request, Depends, status
 
 from app.core.models import (
     SetupRequest, LoginRequest, AuthStatus, HealthResponse, ApiKeyLoginRequest,
-    ApiUserRegisterRequest, ApiUserLoginRequest
+    ApiUserRegisterRequest, ApiUserLoginRequest, ChangePasswordRequest
 )
 import bcrypt
 from app.core.auth import auth_service
 from app.core.config import settings
+from app.core import encryption
 from app.db import database as db
 
 logger = logging.getLogger(__name__)
@@ -292,6 +293,12 @@ async def setup_admin(request: SetupRequest, response: Response):
     try:
         result = auth_service.setup_admin(request.username, request.password)
 
+        # Set encryption key in memory (derived from password)
+        try:
+            encryption.set_encryption_key(request.password, db)
+        except Exception as e:
+            logger.error(f"Failed to set up encryption during admin setup: {e}")
+
         # Set session cookie
         response.set_cookie(
             key="session",
@@ -337,6 +344,17 @@ async def login(req: Request, login_data: LoginRequest, response: Response):
     record_login_result(req, login_data.username, success=True)
     client_ip = get_client_ip(req)
     logger.info(f"Successful admin login for user '{login_data.username}' from IP {client_ip}")
+
+    # Set encryption key in memory (derived from password)
+    try:
+        encryption.set_encryption_key(login_data.password, db)
+        # Encrypt any existing plaintext API keys (migration)
+        encrypted_count = encryption.encrypt_existing_plaintext_keys(db)
+        if encrypted_count > 0:
+            logger.info(f"Encrypted {encrypted_count} existing plaintext API keys")
+    except Exception as e:
+        logger.error(f"Failed to set up encryption: {e}")
+        # Don't fail login, but log the error
 
     # Set session cookie
     response.set_cookie(
@@ -632,8 +650,86 @@ async def logout(request: Request, response: Response):
         # Also try to delete API key session if exists
         db.delete_api_key_session(token)
 
+    # Note: We don't clear the encryption key on logout to allow
+    # the app to continue functioning for API users
+
     response.delete_cookie(key="session")
     return {"status": "ok", "message": "Logged out"}
+
+
+@router.post("/change-password")
+async def change_password(
+    req: Request,
+    password_data: ChangePasswordRequest,
+    token: str = Depends(require_admin)
+):
+    """
+    Change admin password and re-encrypt all sensitive data.
+
+    This endpoint:
+    1. Verifies the current password
+    2. Decrypts all sensitive data with the old password
+    3. Re-encrypts all sensitive data with the new password
+    4. Updates the admin password hash
+    """
+    # Get current admin info
+    admin = db.get_admin()
+    if not admin:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Admin account not found"
+        )
+
+    # Verify current password
+    if not auth_service.verify_password(password_data.current_password, admin["password_hash"]):
+        client_ip = get_client_ip(req)
+        logger.warning(f"Failed password change attempt - wrong current password from IP {client_ip}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Current password is incorrect"
+        )
+
+    # Check if new password is same as old
+    if password_data.current_password == password_data.new_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be different from current password"
+        )
+
+    # Re-encrypt all secrets with new password
+    try:
+        success = encryption.re_encrypt_all_secrets(
+            password_data.current_password,
+            password_data.new_password,
+            db
+        )
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to re-encrypt secrets. Password not changed."
+            )
+    except Exception as e:
+        logger.error(f"Failed to re-encrypt secrets: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to re-encrypt secrets. Password not changed."
+        )
+
+    # Update admin password
+    new_password_hash = bcrypt.hashpw(
+        password_data.new_password.encode('utf-8'),
+        bcrypt.gensalt()
+    ).decode('utf-8')
+
+    db.update_admin_password(new_password_hash)
+
+    client_ip = get_client_ip(req)
+    logger.info(f"Admin password changed successfully from IP {client_ip}")
+
+    return {
+        "status": "ok",
+        "message": "Password changed successfully. All encrypted data has been re-encrypted."
+    }
 
 
 @router.get("/claude/status")

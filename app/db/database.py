@@ -394,6 +394,17 @@ def create_admin(username: str, password_hash: str) -> Dict[str, Any]:
         return {"id": 1, "username": username}
 
 
+def update_admin_password(password_hash: str) -> bool:
+    """Update admin password"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE admin SET password_hash = ? WHERE id = 1",
+            (password_hash,)
+        )
+        return cursor.rowcount > 0
+
+
 # ============================================================================
 # Auth Session Operations
 # ============================================================================

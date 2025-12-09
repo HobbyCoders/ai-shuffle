@@ -13,8 +13,48 @@ from pydantic import BaseModel
 
 from app.db import database
 from app.api.auth import require_admin, require_auth
+from app.core import encryption
 
 logger = logging.getLogger(__name__)
+
+
+def get_decrypted_api_key(setting_name: str) -> Optional[str]:
+    """
+    Get an API key from the database and decrypt it if encrypted.
+    Returns None if not set or if decryption fails.
+    """
+    value = database.get_system_setting(setting_name)
+    if not value:
+        return None
+
+    # If encrypted, try to decrypt
+    if encryption.is_encrypted(value):
+        if not encryption.is_encryption_ready():
+            logger.warning(f"Cannot decrypt {setting_name} - encryption key not loaded")
+            return None
+        try:
+            return encryption.decrypt_value(value)
+        except Exception as e:
+            logger.error(f"Failed to decrypt {setting_name}: {e}")
+            return None
+    else:
+        # Plaintext (legacy or migration pending)
+        return value
+
+
+def set_encrypted_api_key(setting_name: str, api_key: str) -> None:
+    """
+    Encrypt and store an API key in the database.
+    If encryption is not ready, stores as plaintext (will be encrypted on next admin login).
+    """
+    if encryption.is_encryption_ready():
+        encrypted = encryption.encrypt_value(api_key)
+        database.set_system_setting(setting_name, encrypted)
+    else:
+        # Fallback to plaintext if encryption not ready
+        # This will be encrypted when admin logs in
+        logger.warning(f"Storing {setting_name} as plaintext - encryption key not loaded")
+        database.set_system_setting(setting_name, api_key)
 
 router = APIRouter(prefix="/api/v1/settings", tags=["Settings"])
 
@@ -150,10 +190,13 @@ async def get_integration_settings(token: str = Depends(require_auth)):
 
     Returns whether API keys are configured (without exposing the actual keys).
     """
-    openai_key = database.get_system_setting("openai_api_key")
+    # Get decrypted API keys for masking display
+    openai_key = get_decrypted_api_key("openai_api_key")
+    image_api_key = get_decrypted_api_key("image_api_key")
+
+    # Non-sensitive settings
     image_provider = database.get_system_setting("image_provider")
     image_model = database.get_system_setting("image_model")
-    image_api_key = database.get_system_setting("image_api_key")
     video_provider = database.get_system_setting("video_provider")
     video_model = database.get_system_setting("video_model")
 
@@ -207,8 +250,8 @@ async def set_openai_api_key(
         logger.warning(f"Error validating OpenAI key: {e}")
         # Don't fail on network errors - save the key
 
-    # Save to database
-    database.set_system_setting("openai_api_key", api_key)
+    # Save to database (encrypted if encryption is ready)
+    set_encrypted_api_key("openai_api_key", api_key)
 
     return OpenAIKeyResponse(
         success=True,
@@ -247,7 +290,7 @@ async def transcribe_audio(
     Requires an OpenAI API key to be configured in settings.
     """
     # Check if OpenAI key is configured
-    openai_key = database.get_system_setting("openai_api_key")
+    openai_key = get_decrypted_api_key("openai_api_key")
     if not openai_key:
         raise HTTPException(
             status_code=400,
@@ -393,8 +436,8 @@ async def get_image_models(token: str = Depends(require_auth)):
     # Get current settings
     current_provider = database.get_system_setting("image_provider")
     current_model = database.get_system_setting("image_model")
-    openai_key = database.get_system_setting("openai_api_key")
-    image_api_key = database.get_system_setting("image_api_key")
+    openai_key = get_decrypted_api_key("openai_api_key")
+    image_api_key = get_decrypted_api_key("image_api_key")
 
     # Build models list with availability info
     models = []
@@ -404,7 +447,7 @@ async def get_image_models(token: str = Depends(require_auth)):
 
         # Check if this provider's API key is configured
         required_key = provider_info["requires_key"]
-        is_available = bool(database.get_system_setting(required_key))
+        is_available = bool(get_decrypted_api_key(required_key))
 
         models.append({
             "id": model_id,
@@ -491,10 +534,10 @@ async def set_image_generation(
     except Exception as e:
         logger.warning(f"Error validating Google AI key: {e}")
 
-    # Save to database
+    # Save to database (API key encrypted)
     database.set_system_setting("image_provider", provider)
     database.set_system_setting("image_model", model)
-    database.set_system_setting("image_api_key", api_key)
+    set_encrypted_api_key("image_api_key", api_key)
 
     return ImageGenerationResponse(
         success=True,
@@ -571,7 +614,7 @@ async def generate_image(
     # Check if image generation is configured
     provider = database.get_system_setting("image_provider")
     model = database.get_system_setting("image_model")
-    api_key = database.get_system_setting("image_api_key")
+    api_key = get_decrypted_api_key("image_api_key")
 
     if not all([provider, model, api_key]):
         raise HTTPException(
@@ -856,8 +899,8 @@ async def get_video_models(token: str = Depends(require_auth)):
     # Get current settings
     current_provider = database.get_system_setting("video_provider")
     current_model = database.get_system_setting("video_model")
-    openai_key = database.get_system_setting("openai_api_key")
-    image_api_key = database.get_system_setting("image_api_key")
+    openai_key = get_decrypted_api_key("openai_api_key")
+    image_api_key = get_decrypted_api_key("image_api_key")
 
     # Build models list with availability info
     models = []
@@ -867,7 +910,7 @@ async def get_video_models(token: str = Depends(require_auth)):
 
         # Check if this provider's API key is configured
         required_key = provider_info["requires_key"]
-        is_available = bool(database.get_system_setting(required_key))
+        is_available = bool(get_decrypted_api_key(required_key))
 
         models.append({
             "id": model_id,
@@ -920,7 +963,7 @@ async def transcribe_audio(
         language: Optional language code (e.g., 'en', 'es', 'fr')
     """
     # Check if OpenAI API key is configured
-    api_key = database.get_system_setting("openai_api_key")
+    api_key = get_decrypted_api_key("openai_api_key")
 
     if not api_key:
         raise HTTPException(

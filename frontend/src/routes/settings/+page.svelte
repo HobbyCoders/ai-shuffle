@@ -5,10 +5,10 @@
 	import { api } from '$lib/api/client';
 	import type { ApiUser, ApiUserWithKey, Profile, WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
 	import type { Project } from '$lib/stores/chat';
-	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig } from '$lib/api/auth';
+	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig, changePassword } from '$lib/api/auth';
 
 	// Tab management
-	type SettingsTab = 'general' | 'authentication' | 'api-users' | 'integrations';
+	type SettingsTab = 'general' | 'security' | 'authentication' | 'api-users' | 'integrations';
 	let activeTab: SettingsTab = 'general';
 
 	// Mobile sidebar state
@@ -122,6 +122,14 @@
 	let savingVideoModel = false;
 	let videoConfigSuccess = '';
 	let videoConfigError = '';
+
+	// Password change state
+	let currentPassword = '';
+	let newPassword = '';
+	let confirmPassword = '';
+	let changingPassword = false;
+	let passwordChangeError = '';
+	let passwordChangeSuccess = '';
 
 	let formData = {
 		name: '',
@@ -551,6 +559,39 @@
 		}
 	}
 
+	async function handlePasswordChange() {
+		passwordChangeError = '';
+		passwordChangeSuccess = '';
+
+		if (!currentPassword || !newPassword || !confirmPassword) {
+			passwordChangeError = 'All fields are required';
+			return;
+		}
+
+		if (newPassword.length < 8) {
+			passwordChangeError = 'New password must be at least 8 characters';
+			return;
+		}
+
+		if (newPassword !== confirmPassword) {
+			passwordChangeError = 'New passwords do not match';
+			return;
+		}
+
+		changingPassword = true;
+		try {
+			await changePassword(currentPassword, newPassword);
+			passwordChangeSuccess = 'Password changed successfully. All encrypted data has been re-encrypted.';
+			currentPassword = '';
+			newPassword = '';
+			confirmPassword = '';
+		} catch (e: any) {
+			passwordChangeError = e.detail || 'Failed to change password';
+		} finally {
+			changingPassword = false;
+		}
+	}
+
 	function resetForm() {
 		formData = {
 			name: '',
@@ -674,6 +715,7 @@
 
 	const tabs: { id: SettingsTab; label: string; icon: string }[] = [
 		{ id: 'general', label: 'General', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z' },
+		{ id: 'security', label: 'Security', icon: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z' },
 		{ id: 'authentication', label: 'Authentication', icon: 'M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z' },
 		{ id: 'api-users', label: 'API Users', icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z' },
 		{ id: 'integrations', label: 'Integrations', icon: 'M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z' }
@@ -897,6 +939,119 @@
 									</div>
 								{/if}
 							</section>
+						</div>
+					{/if}
+
+					<!-- Security Tab -->
+					{#if activeTab === 'security'}
+						<div class="space-y-6">
+							<div>
+								<h2 class="text-xl font-bold text-foreground mb-1">Security Settings</h2>
+								<p class="text-sm text-muted-foreground">Manage your account security and encryption settings.</p>
+							</div>
+
+							<!-- Change Password Section -->
+							<div class="card p-6">
+								<div class="flex items-center gap-3 mb-4">
+									<div class="w-10 h-10 bg-primary/15 rounded-lg flex items-center justify-center">
+										<svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+										</svg>
+									</div>
+									<div>
+										<h3 class="font-semibold text-foreground">Change Password</h3>
+										<p class="text-xs text-muted-foreground">Update your admin password. This will re-encrypt all stored API keys.</p>
+									</div>
+								</div>
+
+								<div class="space-y-4 max-w-md">
+									<div>
+										<label for="currentPassword" class="block text-sm font-medium text-foreground mb-1.5">Current Password</label>
+										<input
+											type="password"
+											id="currentPassword"
+											bind:value={currentPassword}
+											class="input"
+											placeholder="Enter current password"
+											autocomplete="current-password"
+										/>
+									</div>
+
+									<div>
+										<label for="newPassword" class="block text-sm font-medium text-foreground mb-1.5">New Password</label>
+										<input
+											type="password"
+											id="newPassword"
+											bind:value={newPassword}
+											class="input"
+											placeholder="Enter new password (min 8 characters)"
+											autocomplete="new-password"
+										/>
+									</div>
+
+									<div>
+										<label for="confirmPassword" class="block text-sm font-medium text-foreground mb-1.5">Confirm New Password</label>
+										<input
+											type="password"
+											id="confirmPassword"
+											bind:value={confirmPassword}
+											class="input"
+											placeholder="Confirm new password"
+											autocomplete="new-password"
+										/>
+									</div>
+
+									{#if passwordChangeError}
+										<div class="bg-destructive/10 border border-destructive/30 text-destructive px-3 py-2 rounded-lg text-sm">
+											{passwordChangeError}
+										</div>
+									{/if}
+
+									{#if passwordChangeSuccess}
+										<div class="bg-success/10 border border-success/30 text-success px-3 py-2 rounded-lg text-sm">
+											{passwordChangeSuccess}
+										</div>
+									{/if}
+
+									<button
+										on:click={handlePasswordChange}
+										class="btn btn-primary"
+										disabled={changingPassword}
+									>
+										{#if changingPassword}
+											<span class="inline-block animate-spin mr-2">&#9696;</span>
+											Changing Password...
+										{:else}
+											Change Password
+										{/if}
+									</button>
+								</div>
+							</div>
+
+							<!-- Encryption Info Section -->
+							<div class="card p-6">
+								<div class="flex items-center gap-3 mb-4">
+									<div class="w-10 h-10 bg-success/15 rounded-lg flex items-center justify-center">
+										<svg class="w-5 h-5 text-success" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+										</svg>
+									</div>
+									<div>
+										<h3 class="font-semibold text-foreground">Encryption</h3>
+										<p class="text-xs text-muted-foreground">Your API keys are encrypted at rest using your admin password.</p>
+									</div>
+								</div>
+
+								<div class="bg-muted/30 rounded-lg p-4 text-sm text-muted-foreground">
+									<p class="mb-2"><strong class="text-foreground">How it works:</strong></p>
+									<ul class="list-disc list-inside space-y-1">
+										<li>API keys (OpenAI, Gemini, etc.) are encrypted using a key derived from your password</li>
+										<li>The encryption key is never stored - it's generated when you log in</li>
+										<li>If you change your password, all keys are automatically re-encrypted</li>
+										<li>Even if the database is accessed, keys cannot be decrypted without your password</li>
+									</ul>
+								</div>
+							</div>
 						</div>
 					{/if}
 
