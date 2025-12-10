@@ -450,6 +450,23 @@ def cleanup_expired_sessions():
         )
 
 
+def clear_all_sessions():
+    """
+    Clear all authentication sessions (admin and API user).
+    Called on app startup to force re-login, which is required
+    to restore the encryption key to memory.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Clear admin sessions
+        cursor.execute("DELETE FROM auth_sessions")
+        admin_count = cursor.rowcount
+        # Clear API user web sessions
+        cursor.execute("DELETE FROM api_key_sessions")
+        api_count = cursor.rowcount
+        return admin_count, api_count
+
+
 # ============================================================================
 # Profile Operations
 # ============================================================================
