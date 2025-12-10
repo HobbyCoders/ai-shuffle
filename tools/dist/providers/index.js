@@ -18,8 +18,6 @@ export { openaiGptImageProvider } from './image/openai-gpt-image.js';
 export { googleVeoProvider } from './video/google-veo.js';
 export { googleGeminiVideoProvider } from './video/google-gemini-video.js';
 export { openaiSoraProvider } from './video/openai-sora.js';
-// Audio providers
+// Audio providers (for app features like TTS/STT, not model tools)
 export { openaiAudioProvider } from './audio/openai-audio.js';
-// Realtime providers
-export { openaiRealtimeProvider } from './realtime/openai-realtime.js';
 //# sourceMappingURL=index.js.map

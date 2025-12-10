@@ -112,6 +112,14 @@ export interface GenerateImageResponse {
     mime_type?: string;
     /** All generated images when number_of_images > 1 */
     images?: GeneratedImage[];
+    /** Provider that was used for generation (e.g., "google-gemini", "google-imagen") */
+    provider_used?: string;
+    /** Model that was used for generation (e.g., "gemini-2.5-flash-image") */
+    model_used?: string;
+    /** Capabilities of the provider used (e.g., ["text-to-image", "image-edit"]) */
+    capabilities?: string[];
+    /** Hint for editing: which providers can edit this image */
+    edit_with?: string;
     /** Error message if generation failed */
     error?: string;
 }

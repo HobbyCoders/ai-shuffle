@@ -1512,14 +1512,17 @@
 								</div>
 							</div>
 
-							<!-- Default Models Section -->
+							<!-- AI Generation Models Section -->
 							<div class="card p-4">
-								<h3 class="text-sm font-semibold text-foreground mb-3 flex items-center gap-2">
+								<h3 class="text-sm font-semibold text-foreground mb-1 flex items-center gap-2">
 									<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
 									</svg>
-									Default Models
+									AI Generation Models
 								</h3>
+								<p class="text-[10px] text-muted-foreground mb-3">
+									Select default models for each tool type. Claude can dynamically switch between any available provider per-request.
+								</p>
 
 								<!-- Image Generation -->
 								<div class="mb-4">
@@ -1530,6 +1533,7 @@
 											</svg>
 										</span>
 										<span class="text-xs font-medium text-foreground">Image Generation</span>
+										<span class="text-[9px] text-muted-foreground">(All providers available to Claude)</span>
 									</div>
 									<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
 										{#each imageModels as model}
@@ -1573,6 +1577,7 @@
 											</svg>
 										</span>
 										<span class="text-xs font-medium text-foreground">Video Generation</span>
+										<span class="text-[9px] text-muted-foreground">(All providers available to Claude)</span>
 									</div>
 									<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
 										{#each videoModels as model}
@@ -1681,7 +1686,7 @@
 							</div>
 
 							<p class="text-[10px] text-muted-foreground text-center">
-								💡 Click a model card to set it as default. You can override defaults in your messages.
+								💡 Click a model card to set it as default. Claude can use any available provider dynamically - just ask!
 							</p>
 						</div>
 					{/if}

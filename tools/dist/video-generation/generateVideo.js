@@ -170,7 +170,7 @@ export async function generateVideo(input) {
     // Build credentials
     const credentials = { apiKey };
     // Delegate to provider
-    return provider.generate({
+    const result = await provider.generate({
         prompt: input.prompt,
         aspect_ratio: input.aspect_ratio,
         duration: input.duration,
@@ -179,6 +179,20 @@ export async function generateVideo(input) {
         seed: input.seed,
         person_generation: input.person_generation
     }, credentials, modelId);
+    // Add provider metadata to the result
+    if (result.success) {
+        const capabilities = modelInfo.capabilities.map(c => c.toString());
+        const supportsExtend = capabilities.includes('video-extend');
+        result.provider_metadata = {
+            ...result.provider_metadata,
+            provider_used: providerId,
+            model_used: modelId,
+            capabilities: capabilities,
+            can_extend: supportsExtend,
+            extend_with: supportsExtend ? providerId : 'google-veo (Veo only supports extend)'
+        };
+    }
+    return result;
 }
 export default generateVideo;
 //# sourceMappingURL=generateVideo.js.map

@@ -14,5 +14,4 @@ export { googleVeoProvider } from './video/google-veo.js';
 export { googleGeminiVideoProvider } from './video/google-gemini-video.js';
 export { openaiSoraProvider } from './video/openai-sora.js';
 export { openaiAudioProvider } from './audio/openai-audio.js';
-export { openaiRealtimeProvider } from './realtime/openai-realtime.js';
 //# sourceMappingURL=index.d.ts.map

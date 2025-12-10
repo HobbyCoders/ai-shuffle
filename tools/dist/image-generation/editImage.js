@@ -95,9 +95,9 @@ function getModelId(providerId, inputModel) {
     return '';
 }
 /**
- * Convert provider result to our response format
+ * Convert provider result to our response format, including provider metadata
  */
-function toResponse(result) {
+function toResponse(result, providerId, modelId) {
     if (!result.success) {
         return { success: false, error: result.error };
     }
@@ -107,7 +107,9 @@ function toResponse(result) {
         file_path: result.file_path,
         filename: result.filename,
         mime_type: result.mime_type,
-        ...(result.images && { images: result.images })
+        ...(result.images && { images: result.images }),
+        provider_used: providerId,
+        model_used: modelId
     };
 }
 /**
@@ -201,7 +203,7 @@ export async function editImage(input) {
         number_of_images: input.number_of_images,
         person_generation: input.person_generation
     }, credentials, modelId);
-    return toResponse(result);
+    return toResponse(result, providerId, modelId);
 }
 export default editImage;
 //# sourceMappingURL=editImage.js.map

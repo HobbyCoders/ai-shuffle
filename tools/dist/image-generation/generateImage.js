@@ -102,19 +102,28 @@ function getModelId(providerId, inputModel) {
     return '';
 }
 /**
- * Convert provider result to our response format
+ * Convert provider result to our response format, including provider metadata
  */
-function toResponse(result) {
+function toResponse(result, providerId, modelId, capabilities) {
     if (!result.success) {
         return { success: false, error: result.error };
     }
+    // Determine which providers can edit this image
+    const supportsEdit = capabilities.includes('image-edit');
+    const editWith = supportsEdit
+        ? providerId // Same provider can edit
+        : 'google-gemini or openai-gpt-image'; // Suggest providers that support editing
     return {
         success: true,
         image_url: result.image_url,
         file_path: result.file_path,
         filename: result.filename,
         mime_type: result.mime_type,
-        ...(result.images && { images: result.images })
+        ...(result.images && { images: result.images }),
+        provider_used: providerId,
+        model_used: modelId,
+        capabilities: capabilities,
+        edit_with: editWith
     };
 }
 /**
@@ -192,7 +201,9 @@ export async function generateImage(input) {
         number_of_images: input.number_of_images,
         person_generation: input.person_generation
     }, credentials, modelId);
-    return toResponse(result);
+    // Get capabilities from the model info
+    const capabilities = modelInfo.capabilities.map(c => c.toString());
+    return toResponse(result, providerId, modelId, capabilities);
 }
 export default generateImage;
 //# sourceMappingURL=generateImage.js.map

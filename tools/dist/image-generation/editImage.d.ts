@@ -121,6 +121,10 @@ export interface EditImageResponse {
     mime_type?: string;
     /** All edited images when number_of_images > 1 */
     images?: EditedImage[];
+    /** Provider that was used for editing (e.g., "google-gemini", "openai-gpt-image") */
+    provider_used?: string;
+    /** Model that was used for editing */
+    model_used?: string;
     /** Error message if editing failed */
     error?: string;
 }

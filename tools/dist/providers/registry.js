@@ -13,7 +13,6 @@ class ProviderRegistry {
     videoProviders = new Map();
     audioProviders = new Map();
     videoAnalysisProviders = new Map();
-    realtimeProviders = new Map();
     // ============================================================================
     // Registration
     // ============================================================================
@@ -53,15 +52,6 @@ class ProviderRegistry {
         }
         this.videoAnalysisProviders.set(provider.id, provider);
     }
-    /**
-     * Register a realtime voice provider
-     */
-    registerRealtimeProvider(provider) {
-        if (this.realtimeProviders.has(provider.id)) {
-            console.warn(`Realtime provider '${provider.id}' is already registered. Overwriting.`);
-        }
-        this.realtimeProviders.set(provider.id, provider);
-    }
     // ============================================================================
     // Retrieval
     // ============================================================================
@@ -90,12 +80,6 @@ class ProviderRegistry {
         return this.videoAnalysisProviders.get(id);
     }
     /**
-     * Get a realtime voice provider by ID
-     */
-    getRealtimeProvider(id) {
-        return this.realtimeProviders.get(id);
-    }
-    /**
      * List all registered image providers
      */
     listImageProviders() {
@@ -118,12 +102,6 @@ class ProviderRegistry {
      */
     listVideoAnalysisProviders() {
         return Array.from(this.videoAnalysisProviders.values());
-    }
-    /**
-     * List all registered realtime providers
-     */
-    listRealtimeProviders() {
-        return Array.from(this.realtimeProviders.values());
     }
     // ============================================================================
     // Model Discovery
@@ -211,10 +189,8 @@ import { openaiGptImageProvider } from './image/openai-gpt-image.js';
 import { googleVeoProvider } from './video/google-veo.js';
 import { googleGeminiVideoProvider } from './video/google-gemini-video.js';
 import { openaiSoraProvider } from './video/openai-sora.js';
-// Audio providers
+// Audio providers (for app features like TTS/STT, not model tools)
 import { openaiAudioProvider } from './audio/openai-audio.js';
-// Realtime providers
-import { openaiRealtimeProvider } from './realtime/openai-realtime.js';
 // Register image providers
 registry.registerImageProvider(googleGeminiProvider);
 registry.registerImageProvider(googleImagenProvider);
@@ -224,10 +200,8 @@ registry.registerVideoProvider(googleVeoProvider);
 registry.registerVideoProvider(openaiSoraProvider);
 // Register video analysis providers
 registry.registerVideoAnalysisProvider(googleGeminiVideoProvider);
-// Register audio providers
+// Register audio providers (for app features)
 registry.registerAudioProvider(openaiAudioProvider);
-// Register realtime providers
-registry.registerRealtimeProvider(openaiRealtimeProvider);
 // Future providers:
 // import { stabilityAiProvider } from './image/stability-ai.js';
 // import { runwayMlProvider } from './video/runway-ml.js';

@@ -322,214 +322,70 @@ def _get_os_version() -> str:
         return sys.platform
 
 
-def _get_available_tools(ai_tools_config: Optional[Dict[str, Any]] = None) -> list:
+def _get_available_providers() -> Dict[str, Any]:
     """
-    Check which AI Hub tools are configured and available.
-    Returns a list of tool descriptions based on individual tool toggles.
-
-    Args:
-        ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
+    Get all available AI providers based on configured API keys.
+    Returns a dict with image_providers and video_providers that have valid keys.
     """
-    tools = []
+    gemini_key = _get_decrypted_api_key("image_api_key")
+    openai_key = _get_decrypted_api_key("openai_api_key")
 
-    if not ai_tools_config:
-        return tools
+    # Image providers with their capabilities
+    image_providers = {}
+    if gemini_key:
+        image_providers["google-gemini"] = {
+            "name": "Nano Banana",
+            "models": ["gemini-2.5-flash-image", "gemini-3-pro-image-preview"],
+            "capabilities": ["text-to-image", "image-edit", "image-reference"],
+            "best_for": "Fast iteration, editing, reference images"
+        }
+        image_providers["google-imagen"] = {
+            "name": "Imagen 4",
+            "models": ["imagen-4.0-fast-generate-001", "imagen-4.0-generate-001", "imagen-4.0-ultra-generate-001"],
+            "capabilities": ["text-to-image"],
+            "best_for": "Highest quality, photo-realism"
+        }
+    if openai_key:
+        image_providers["openai-gpt-image"] = {
+            "name": "GPT Image",
+            "models": ["gpt-image-1"],
+            "capabilities": ["text-to-image", "image-edit"],
+            "best_for": "Accurate text in images, inpainting"
+        }
 
-    # Get the absolute path to tools directory
-    tools_dir = settings.effective_tools_dir
+    # Video providers with their capabilities
+    video_providers = {}
+    if gemini_key:
+        video_providers["google-veo"] = {
+            "name": "Veo",
+            "models": ["veo-3.1-fast-generate-preview", "veo-3.1-generate-preview", "veo-3-fast-generate-preview", "veo-3-generate-preview"],
+            "capabilities": ["text-to-video", "image-to-video", "video-extend", "frame-bridge", "video-with-audio"],
+            "best_for": "Video extension, frame bridging, native audio (Veo 3)",
+            "durations": "4, 6, or 8 seconds"
+        }
+    if openai_key:
+        video_providers["openai-sora"] = {
+            "name": "Sora",
+            "models": ["sora-2", "sora-2-pro"],
+            "capabilities": ["text-to-video", "image-to-video"],
+            "best_for": "Fast generation, good quality",
+            "durations": "4, 8, or 12 seconds"
+        }
 
-    # Provider display names for dynamic tool names
-    IMAGE_PROVIDER_NAMES = {
-        "google-gemini": "Nano Banana",
-        "openai-gpt-image": "GPT Image"
+    return {
+        "image_providers": image_providers,
+        "video_providers": video_providers,
+        "has_gemini": bool(gemini_key),
+        "has_openai": bool(openai_key)
     }
-    VIDEO_PROVIDER_NAMES = {
-        "google-veo": "Veo",
-        "openai-sora": "Sora"
-    }
-
-    # Helper to check if an image provider has API key configured AND decryptable
-    def _has_image_api_key(provider: str) -> bool:
-        if provider == "openai-gpt-image":
-            key = _get_decrypted_api_key("openai_api_key")
-        else:  # google-gemini
-            key = _get_decrypted_api_key("image_api_key")
-        return bool(key)
-
-    # Helper to check if a video provider has API key configured AND decryptable
-    def _has_video_api_key(provider: str) -> bool:
-        if provider == "openai-sora":
-            key = _get_decrypted_api_key("openai_api_key")
-        else:  # google-veo
-            key = _get_decrypted_api_key("image_api_key")
-        return bool(key)
-
-    # Check image generation - only if enabled in profile
-    if ai_tools_config.get("image_generation", False):
-        image_provider = database.get_system_setting("image_provider")
-        image_model = database.get_system_setting("image_model")
-
-        if image_provider and image_model and _has_image_api_key(image_provider):
-            # Use absolute path so scripts can run from any directory (e.g., /tmp/)
-            tool_path = f"{tools_dir}/dist/image-generation/generateImage.js"
-            provider_name = IMAGE_PROVIDER_NAMES.get(image_provider, "AI")
-            tools.append({
-                "name": f"Image Generation ({provider_name})",
-                "description": f"Generate AI images from text prompts using {provider_name}",
-                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
-import {{ generateImage }} from '{tool_path}';
-const result = await generateImage({{ prompt: 'your description here' }});
-// IMPORTANT: Output the result as JSON - the chat UI will display the image with download button
-// Do NOT save to file or try to read the base64 - just output the JSON result
-console.log(JSON.stringify(result));
-// DISPLAY: After success, show image as markdown: ![Description](result.image_url)"""
-            })
-
-    # Check image editing - only if enabled in profile
-    if ai_tools_config.get("image_editing", False):
-        image_provider = database.get_system_setting("image_provider")
-        image_model = database.get_system_setting("image_model")
-
-        if image_provider and image_model and _has_image_api_key(image_provider):
-            # Use absolute path so scripts can run from any directory (e.g., /tmp/)
-            tool_path = f"{tools_dir}/dist/image-generation/editImage.js"
-            provider_name = IMAGE_PROVIDER_NAMES.get(image_provider, "AI")
-            tools.append({
-                "name": f"Image Editing ({provider_name})",
-                "description": f"Edit existing images using {provider_name} - add elements, remove objects, change styles, and more",
-                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
-import {{ editImage }} from '{tool_path}';
-const result = await editImage({{
-  prompt: 'your editing instruction here',
-  image_path: '/path/to/existing/image.png'
-}});
-// IMPORTANT: Output the result as JSON - the chat UI will display the image with download button
-// Do NOT save to file or try to read the base64 - just output the JSON result
-console.log(JSON.stringify(result));
-// DISPLAY: After success, show image as markdown: ![Description](result.image_url)"""
-            })
-
-    # Check video generation - only if enabled in profile
-    if ai_tools_config.get("video_generation", False):
-        video_provider = database.get_system_setting("video_provider")
-        video_model = database.get_system_setting("video_model")
-
-        if video_provider and video_model and _has_video_api_key(video_provider):
-            tool_path = f"{tools_dir}/dist/video-generation/generateVideo.js"
-            provider_name = VIDEO_PROVIDER_NAMES.get(video_provider, "AI")
-            # Adjust duration info based on provider
-            if video_provider == "openai-sora":
-                duration_info = "4, 8, or 12 seconds"
-            else:
-                duration_info = "4, 6, or 8 seconds"
-            tools.append({
-                "name": f"Video Generation ({provider_name})",
-                "description": f"Generate AI videos from text prompts using {provider_name} ({duration_info}, 720p/1080p)",
-                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
-import {{ generateVideo }} from '{tool_path}';
-const result = await generateVideo({{
-  prompt: 'your video description here',
-  duration: 8,  // {duration_info}
-  aspect_ratio: '16:9'  // or '9:16' for vertical
-}});
-// IMPORTANT: Output the result as JSON - the chat UI will display the video
-// Video generation takes 1-6 minutes, please be patient
-console.log(JSON.stringify(result));
-// DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
-            })
-
-    # Check reference-based image generation - for character/style consistency
-    # Note: This feature is currently only supported by Nano Banana (Google Gemini)
-    if ai_tools_config.get("image_reference", False):
-        image_api_key = database.get_system_setting("image_api_key")
-
-        if image_api_key:
-            tool_path = f"{tools_dir}/dist/image-generation/generateWithReference.js"
-            tools.append({
-                "name": "Reference-Based Image Generation (Nano Banana)",
-                "description": "Generate images with character/style consistency using reference images (up to 14). Note: Only available with Nano Banana provider.",
-                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
-import {{ generateWithReference }} from '{tool_path}';
-const result = await generateWithReference({{
-  prompt: 'The character standing in a forest',
-  reference_images: ['/path/to/character.png']  // Up to 14 reference images
-}});
-// IMPORTANT: Output the result as JSON - the chat UI will display the image
-console.log(JSON.stringify(result));
-// DISPLAY: After success, show image as markdown: ![Description](result.image_url)"""
-            })
-
-    # Check image-to-video - animate still images
-    if ai_tools_config.get("image_to_video", False):
-        video_provider = database.get_system_setting("video_provider")
-        video_model = database.get_system_setting("video_model")
-
-        if video_provider and video_model and _has_video_api_key(video_provider):
-            tool_path = f"{tools_dir}/dist/video-generation/imageToVideo.js"
-            provider_name = VIDEO_PROVIDER_NAMES.get(video_provider, "AI")
-            tools.append({
-                "name": f"Image to Video ({provider_name})",
-                "description": f"Animate a still image into a video using {provider_name}",
-                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
-import {{ imageToVideo }} from '{tool_path}';
-const result = await imageToVideo({{
-  image_path: '/path/to/image.png',
-  prompt: 'The character starts walking forward'
-}});
-// IMPORTANT: Output the result as JSON - the chat UI will display the video
-console.log(JSON.stringify(result));
-// DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
-            })
-
-    # Check video extension - extend existing videos
-    # Note: This feature is currently only supported by Veo (Google)
-    if ai_tools_config.get("video_extend", False):
-        video_api_key = database.get_system_setting("image_api_key")
-
-        if video_api_key:
-            tool_path = f"{tools_dir}/dist/video-generation/extendVideo.js"
-            tools.append({
-                "name": "Video Extension (Veo)",
-                "description": "Extend existing Veo videos by approximately 7 seconds (up to 20 times). IMPORTANT: Can only extend videos generated by Veo - use the source_video_uri from a previous generateVideo/imageToVideo/bridgeFrames result.",
-                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
-import {{ extendVideo }} from '{tool_path}';
-const result = await extendVideo({{
-  video_uri: 'https://generativelanguage.googleapis.com/v1beta/files/...',  // URI from previous generation (source_video_uri)
-  prompt: 'Continue the action smoothly'  // Describe what should happen next
-}});
-// IMPORTANT: Output the result as JSON - the chat UI will display the video
-console.log(JSON.stringify(result));
-// DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
-            })
-
-    # Check frame bridging - smooth transitions between images
-    # Note: This feature is currently only supported by Veo (Google)
-    if ai_tools_config.get("video_bridge", False):
-        video_api_key = database.get_system_setting("image_api_key")
-
-        if video_api_key:
-            tool_path = f"{tools_dir}/dist/video-generation/bridgeFrames.js"
-            tools.append({
-                "name": "Frame Bridging (Veo)",
-                "description": "Generate a smooth video transition between two images (first and last frame). Note: Only available with Veo provider.",
-                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
-import {{ bridgeFrames }} from '{tool_path}';
-const result = await bridgeFrames({{
-  start_image: '/path/to/start.png',
-  end_image: '/path/to/end.png',
-  prompt: 'Smooth camera pan between scenes'  // Optional
-}});
-// IMPORTANT: Output the result as JSON - the chat UI will display the video
-console.log(JSON.stringify(result));
-// DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
-            })
-
-    return tools
 
 
 def _build_ai_tools_section(ai_tools_config: Optional[Dict[str, Any]] = None, prefix: str = "\n\n") -> str:
     """
-    Build the <ai-tools> section for system prompts based on enabled tools.
+    Build the <ai-tools> section for system prompts with multi-provider support.
+
+    This new design exposes ALL available providers to Claude, allowing dynamic
+    provider selection per-request instead of requiring settings changes.
 
     Args:
         ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
@@ -538,32 +394,293 @@ def _build_ai_tools_section(ai_tools_config: Optional[Dict[str, Any]] = None, pr
     Returns:
         The formatted <ai-tools> section, or empty string if no tools enabled
     """
-    available_tools = _get_available_tools(ai_tools_config)
-    if not available_tools:
+    if not ai_tools_config:
         return ""
 
-    tools_section = f"{prefix}<ai-tools>\nThe following AI tools are available via code execution:\n"
-    for tool in available_tools:
-        tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
-    tools_section += """
-To use these tools, write and execute TypeScript code that imports and calls them.
-IMPORTANT: Always delete the .mjs file after execution to keep the workspace clean.
+    providers = _get_available_providers()
+    tools_dir = settings.effective_tools_dir
 
+    # Check if any AI tools are enabled
+    any_image_tools = ai_tools_config.get("image_generation", False) or ai_tools_config.get("image_editing", False) or ai_tools_config.get("image_reference", False)
+    any_video_tools = ai_tools_config.get("video_generation", False) or ai_tools_config.get("image_to_video", False) or ai_tools_config.get("video_extend", False) or ai_tools_config.get("video_bridge", False) or ai_tools_config.get("video_with_audio", False) or ai_tools_config.get("video_understanding", False)
+
+    if not any_image_tools and not any_video_tools:
+        return ""
+
+    if not providers["image_providers"] and not providers["video_providers"]:
+        return ""
+
+    tools_section = f"{prefix}<ai-tools>\n"
+    tools_section += """## AI Content Generation Tools
+
+You have access to multiple AI providers for generating images and videos. You can dynamically choose which provider to use based on the task requirements - no settings changes needed!
+
+**IMPORTANT:** Always save scripts as `.mjs` files and run with `node script.mjs`. Delete scripts after execution.
+
+"""
+
+    # =========================================================================
+    # IMAGE TOOLS SECTION
+    # =========================================================================
+    if any_image_tools and providers["image_providers"]:
+        tools_section += """---
+## 🖼️ Image Tools
+
+"""
+        # Build provider comparison table
+        tools_section += """### Available Image Providers
+
+| Provider | ID | Supports Editing | Best For |
+|----------|-----|------------------|----------|
+"""
+        for pid, pinfo in providers["image_providers"].items():
+            supports_edit = "✅ Yes" if "image-edit" in pinfo["capabilities"] else "❌ No"
+            tools_section += f"| {pinfo['name']} | `{pid}` | {supports_edit} | {pinfo['best_for']} |\n"
+
+        tools_section += """
+### Provider Selection Guidelines
+
+- **Need to edit later?** → Use `google-gemini` or `openai-gpt-image` (they support editing)
+- **Need highest quality?** → Use `google-imagen` (Imagen 4)
+- **Need accurate text in image?** → Use `openai-gpt-image`
+- **Need character consistency?** → Use `google-gemini` with reference images
+
+"""
+        # Image Generation
+        if ai_tools_config.get("image_generation", False):
+            tool_path = f"{tools_dir}/dist/image-generation/generateImage.js"
+            tools_section += f"""### Generate Image
+
+Generate images from text prompts. Specify a provider or let the system use the default.
+
+```typescript
+import {{ generateImage }} from '{tool_path}';
+
+// Use default provider (from settings)
+const result = await generateImage({{ prompt: 'a sunset over mountains' }});
+
+// OR specify provider explicitly
+const result = await generateImage({{
+  prompt: 'a sunset over mountains',
+  provider: 'google-gemini',  // or 'google-imagen', 'openai-gpt-image'
+  model: 'gemini-2.5-flash-image'  // optional: specific model
+}});
+
+console.log(JSON.stringify(result));
+// DISPLAY: ![Description](result.image_url)
+```
+
+**Response includes:** `image_url`, `file_path`, `provider_used`, `model_used`
+
+"""
+
+        # Image Editing
+        if ai_tools_config.get("image_editing", False):
+            tool_path = f"{tools_dir}/dist/image-generation/editImage.js"
+            tools_section += f"""### Edit Image
+
+Edit existing images. **Only `google-gemini` and `openai-gpt-image` support editing.**
+
+```typescript
+import {{ editImage }} from '{tool_path}';
+
+const result = await editImage({{
+  prompt: 'Add a rainbow in the sky',
+  image_path: '/path/to/image.png',
+  provider: 'google-gemini'  // Must be a provider that supports editing
+}});
+
+console.log(JSON.stringify(result));
+// DISPLAY: ![Description](result.image_url)
+```
+
+**Tip:** Use the same provider that generated the original image for best results.
+
+"""
+
+        # Reference-based Generation
+        if ai_tools_config.get("image_reference", False) and providers["has_gemini"]:
+            tool_path = f"{tools_dir}/dist/image-generation/generateWithReference.js"
+            tools_section += f"""### Generate with Reference Images
+
+Create images with character/style consistency. **Only available with `google-gemini`.**
+
+```typescript
+import {{ generateWithReference }} from '{tool_path}';
+
+const result = await generateWithReference({{
+  prompt: 'The character standing in a forest',
+  reference_images: ['/path/to/character.png']  // Up to 14 reference images
+}});
+
+console.log(JSON.stringify(result));
+// DISPLAY: ![Description](result.image_url)
+```
+
+"""
+
+    # =========================================================================
+    # VIDEO TOOLS SECTION
+    # =========================================================================
+    if any_video_tools and providers["video_providers"]:
+        tools_section += """---
+## 🎬 Video Tools
+
+"""
+        # Build provider comparison table
+        tools_section += """### Available Video Providers
+
+| Provider | ID | Duration | Extend | Audio | Best For |
+|----------|-----|----------|--------|-------|----------|
+"""
+        for pid, pinfo in providers["video_providers"].items():
+            supports_extend = "✅" if "video-extend" in pinfo["capabilities"] else "❌"
+            supports_audio = "✅" if "video-with-audio" in pinfo["capabilities"] else "❌"
+            tools_section += f"| {pinfo['name']} | `{pid}` | {pinfo['durations']} | {supports_extend} | {supports_audio} | {pinfo['best_for']} |\n"
+
+        tools_section += """
+### Provider Selection Guidelines
+
+- **Need to extend video later?** → Use `google-veo` (Sora doesn't support extend)
+- **Need native audio (dialogue, effects)?** → Use `google-veo` with Veo 3 models
+- **Need frame bridging?** → Use `google-veo`
+- **Longer duration (12s)?** → Use `openai-sora`
+
+"""
+        # Video Generation
+        if ai_tools_config.get("video_generation", False) or ai_tools_config.get("video_with_audio", False):
+            tool_path = f"{tools_dir}/dist/video-generation/generateVideo.js"
+            tools_section += f"""### Generate Video
+
+Generate videos from text prompts. Video generation takes 1-6 minutes.
+
+```typescript
+import {{ generateVideo }} from '{tool_path}';
+
+// Use default provider
+const result = await generateVideo({{
+  prompt: 'A cat playing with a ball of yarn',
+  duration: 8,
+  aspect_ratio: '16:9'
+}});
+
+// OR specify provider explicitly
+const result = await generateVideo({{
+  prompt: 'A cat playing with a ball of yarn',
+  duration: 8,
+  aspect_ratio: '16:9',
+  provider: 'google-veo',  // or 'openai-sora'
+  model: 'veo-3-generate-preview'  // For native audio support
+}});
+
+console.log(JSON.stringify(result));
+// DISPLAY: [Video](result.video_url)
+```
+
+**Response includes:** `video_url`, `file_path`, `source_video_uri` (for extending), `provider_used`
+
+"""
+
+        # Image to Video
+        if ai_tools_config.get("image_to_video", False):
+            tool_path = f"{tools_dir}/dist/video-generation/imageToVideo.js"
+            tools_section += f"""### Image to Video
+
+Animate a still image into a video.
+
+```typescript
+import {{ imageToVideo }} from '{tool_path}';
+
+const result = await imageToVideo({{
+  image_path: '/path/to/image.png',
+  prompt: 'The character starts walking forward',
+  provider: 'google-veo'  // or 'openai-sora'
+}});
+
+console.log(JSON.stringify(result));
+// DISPLAY: [Video](result.video_url)
+```
+
+"""
+
+        # Video Extension (Veo only)
+        if ai_tools_config.get("video_extend", False) and providers["has_gemini"]:
+            tool_path = f"{tools_dir}/dist/video-generation/extendVideo.js"
+            tools_section += f"""### Extend Video (Veo Only)
+
+Extend Veo-generated videos by ~7 seconds. Uses `source_video_uri` from previous generation.
+
+```typescript
+import {{ extendVideo }} from '{tool_path}';
+
+const result = await extendVideo({{
+  video_uri: previousResult.source_video_uri,  // From generateVideo/imageToVideo
+  prompt: 'Continue the action smoothly'
+}});
+
+console.log(JSON.stringify(result));
+// DISPLAY: [Extended Video](result.video_url)
+```
+
+**Note:** Can only extend videos generated by Veo, not Sora.
+
+"""
+
+        # Frame Bridging (Veo only)
+        if ai_tools_config.get("video_bridge", False) and providers["has_gemini"]:
+            tool_path = f"{tools_dir}/dist/video-generation/bridgeFrames.js"
+            tools_section += f"""### Frame Bridging (Veo Only)
+
+Create smooth video transitions between two images.
+
+```typescript
+import {{ bridgeFrames }} from '{tool_path}';
+
+const result = await bridgeFrames({{
+  start_image: '/path/to/start.png',
+  end_image: '/path/to/end.png',
+  prompt: 'Smooth camera pan between scenes'
+}});
+
+console.log(JSON.stringify(result));
+// DISPLAY: [Transition Video](result.video_url)
+```
+
+"""
+
+        # Video Analysis/Understanding
+        if ai_tools_config.get("video_understanding", False) and providers["has_gemini"]:
+            tool_path = f"{tools_dir}/dist/video-analysis/analyzeVideo.js"
+            tools_section += f"""### Analyze Video
+
+Analyze video content using AI - understand scenes, extract information, get transcripts.
+
+```typescript
+import {{ analyzeVideo }} from '{tool_path}';
+
+const result = await analyzeVideo({{
+  video_path: '/path/to/video.mp4',
+  prompt: 'Describe what happens in this video'
+}});
+
+console.log(JSON.stringify(result));
+// Result includes: response, scenes, transcript, duration_seconds
+```
+
+"""
+
+    # =========================================================================
+    # FOOTER
+    # =========================================================================
+    tools_section += """---
 ## Displaying Generated Content
 
-After successfully generating content, you MUST display it properly in chat:
+After generating content, display it in chat:
 
-**Images:** Display as markdown image using the `image_url` from the result:
-```
-![Image Description](/api/generated-images/by-path?path=...)
-```
-The chat UI will render this with Download and Copy URL buttons in the message header.
+**Images:** `![Description](result.image_url)`
+**Videos:** `[Description](result.video_url)`
 
-**Videos:** Display as a markdown link using the `video_url` from the result:
-```
-[Video Description](/api/generated-videos/by-path?path=...)
-```
-The chat UI will render this as an embedded video player with Download and Copy URL buttons in the message header.
+The chat UI renders these with Download and Copy URL buttons.
 </ai-tools>"""
 
     return tools_section
@@ -609,6 +726,10 @@ def _build_env_with_ai_tools(
     This allows the Claude CLI to execute scripts that use AI tools
     with the necessary API keys, without exposing them in the prompt.
 
+    NEW DESIGN: Inject ALL available API keys so Claude can dynamically switch
+    between providers without needing settings changes. The default provider/model
+    is still set, but Claude can override per-request.
+
     Args:
         base_env: Base environment variables from profile config
         ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
@@ -621,78 +742,57 @@ def _build_env_with_ai_tools(
     if not ai_tools_config:
         return env
 
-    # Inject credentials for image generation/editing (supports multiple providers)
-    if ai_tools_config.get("image_generation", False) or ai_tools_config.get("image_editing", False):
+    # Check if any AI tools are enabled
+    any_image_tools = ai_tools_config.get("image_generation", False) or ai_tools_config.get("image_editing", False) or ai_tools_config.get("image_reference", False)
+    any_video_tools = ai_tools_config.get("video_generation", False) or ai_tools_config.get("image_to_video", False) or ai_tools_config.get("video_extend", False) or ai_tools_config.get("video_bridge", False) or ai_tools_config.get("video_with_audio", False) or ai_tools_config.get("video_understanding", False)
+
+    if not any_image_tools and not any_video_tools:
+        return env
+
+    # Get all available API keys
+    gemini_api_key = _get_decrypted_api_key("image_api_key")
+    openai_api_key = _get_decrypted_api_key("openai_api_key")
+
+    # Inject ALL available API keys so Claude can dynamically choose providers
+    # This is the key change - instead of only injecting the default provider's key,
+    # we inject all keys so any provider can be used per-request
+
+    if gemini_api_key:
+        env["GEMINI_API_KEY"] = gemini_api_key
+        env["IMAGE_API_KEY"] = gemini_api_key  # For backwards compatibility
+        env["VIDEO_API_KEY"] = gemini_api_key  # Veo uses same key
+        logger.debug("Injected GEMINI_API_KEY for Google AI tools (Nano Banana, Imagen, Veo)")
+
+    if openai_api_key:
+        env["OPENAI_API_KEY"] = openai_api_key
+        logger.debug("Injected OPENAI_API_KEY for OpenAI tools (GPT Image, Sora)")
+
+    # Set default provider/model from settings (Claude can override these per-request)
+    if any_image_tools:
         image_provider = database.get_system_setting("image_provider")
         image_model = database.get_system_setting("image_model")
 
-        # Set the provider
         if image_provider:
             env["IMAGE_PROVIDER"] = image_provider
-            logger.debug(f"Injected IMAGE_PROVIDER={image_provider} into execution environment")
+            logger.debug(f"Set default IMAGE_PROVIDER={image_provider}")
 
-        # Set the model
         if image_model:
             env["IMAGE_MODEL"] = image_model
-            # Also set legacy GEMINI_MODEL for backwards compatibility
-            env["GEMINI_MODEL"] = image_model
-            logger.debug(f"Injected IMAGE_MODEL={image_model} into execution environment")
+            env["GEMINI_MODEL"] = image_model  # Legacy compatibility
+            logger.debug(f"Set default IMAGE_MODEL={image_model}")
 
-        # Inject API key based on provider (using decryption helper)
-        if image_provider == "openai-gpt-image":
-            # GPT Image uses OpenAI API key
-            openai_api_key = _get_decrypted_api_key("openai_api_key")
-            if openai_api_key:
-                env["OPENAI_API_KEY"] = openai_api_key
-                env["IMAGE_API_KEY"] = openai_api_key
-                logger.debug("Injected OPENAI_API_KEY for GPT Image generation")
-        else:
-            # Default to Google Gemini - uses Gemini API key
-            image_api_key = _get_decrypted_api_key("image_api_key")
-            if image_api_key:
-                env["GEMINI_API_KEY"] = image_api_key
-                env["IMAGE_API_KEY"] = image_api_key
-                logger.debug("Injected GEMINI_API_KEY for Gemini image generation")
-
-    # Inject video generation credentials (supports multiple providers)
-    if ai_tools_config.get("video_generation", False):
+    if any_video_tools:
         video_provider = database.get_system_setting("video_provider")
         video_model = database.get_system_setting("video_model")
 
-        # Set the provider
         if video_provider:
             env["VIDEO_PROVIDER"] = video_provider
-            logger.debug(f"Injected VIDEO_PROVIDER={video_provider} into execution environment")
+            logger.debug(f"Set default VIDEO_PROVIDER={video_provider}")
 
-        # Set the model
         if video_model:
             env["VIDEO_MODEL"] = video_model
-            # Also set legacy VEO_MODEL for backwards compatibility
-            env["VEO_MODEL"] = video_model
-            logger.debug(f"Injected VIDEO_MODEL={video_model} into execution environment")
-
-        # Inject API key based on provider (using decryption helper)
-        if video_provider == "openai-sora":
-            # Sora uses OpenAI API key
-            openai_api_key = _get_decrypted_api_key("openai_api_key")
-            if openai_api_key:
-                env["OPENAI_API_KEY"] = openai_api_key
-                env["VIDEO_API_KEY"] = openai_api_key
-                logger.debug("Injected OPENAI_API_KEY for Sora video generation")
-        else:
-            # Default to Google Veo - uses Gemini API key
-            video_api_key = _get_decrypted_api_key("image_api_key")
-            if video_api_key:
-                if "GEMINI_API_KEY" not in env:
-                    env["GEMINI_API_KEY"] = video_api_key
-                env["VIDEO_API_KEY"] = video_api_key
-                logger.debug("Injected GEMINI_API_KEY for Veo video generation")
-
-    # Add more tool credentials here as they become available
-    # if ai_tools_config.get("text_to_speech", False):
-    #     tts_api_key = database.get_system_setting("tts_api_key")
-    #     if tts_api_key:
-    #         env["TTS_API_KEY"] = tts_api_key
+            env["VEO_MODEL"] = video_model  # Legacy compatibility
+            logger.debug(f"Set default VIDEO_MODEL={video_model}")
 
     return env
 
