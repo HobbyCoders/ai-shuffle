@@ -6,7 +6,7 @@
  * to get the appropriate provider based on configuration.
  */
 
-import { ImageProvider, VideoProvider, AudioProvider, VideoAnalysisProvider, RealtimeVoiceProvider, ModelInfo } from './types.js';
+import { ImageProvider, VideoProvider, AudioProvider, VideoAnalysisProvider, ModelInfo } from './types.js';
 
 /**
  * Central registry for managing AI providers
@@ -16,7 +16,6 @@ class ProviderRegistry {
   private videoProviders = new Map<string, VideoProvider>();
   private audioProviders = new Map<string, AudioProvider>();
   private videoAnalysisProviders = new Map<string, VideoAnalysisProvider>();
-  private realtimeProviders = new Map<string, RealtimeVoiceProvider>();
 
   // ============================================================================
   // Registration
@@ -62,15 +61,6 @@ class ProviderRegistry {
     this.videoAnalysisProviders.set(provider.id, provider);
   }
 
-  /**
-   * Register a realtime voice provider
-   */
-  registerRealtimeProvider(provider: RealtimeVoiceProvider): void {
-    if (this.realtimeProviders.has(provider.id)) {
-      console.warn(`Realtime provider '${provider.id}' is already registered. Overwriting.`);
-    }
-    this.realtimeProviders.set(provider.id, provider);
-  }
 
   // ============================================================================
   // Retrieval
@@ -104,12 +94,6 @@ class ProviderRegistry {
     return this.videoAnalysisProviders.get(id);
   }
 
-  /**
-   * Get a realtime voice provider by ID
-   */
-  getRealtimeProvider(id: string): RealtimeVoiceProvider | undefined {
-    return this.realtimeProviders.get(id);
-  }
 
   /**
    * List all registered image providers
@@ -139,12 +123,6 @@ class ProviderRegistry {
     return Array.from(this.videoAnalysisProviders.values());
   }
 
-  /**
-   * List all registered realtime providers
-   */
-  listRealtimeProviders(): RealtimeVoiceProvider[] {
-    return Array.from(this.realtimeProviders.values());
-  }
 
   // ============================================================================
   // Model Discovery
@@ -243,11 +221,8 @@ import { googleVeoProvider } from './video/google-veo.js';
 import { googleGeminiVideoProvider } from './video/google-gemini-video.js';
 import { openaiSoraProvider } from './video/openai-sora.js';
 
-// Audio providers
+// Audio providers (for app features like TTS/STT, not model tools)
 import { openaiAudioProvider } from './audio/openai-audio.js';
-
-// Realtime providers
-import { openaiRealtimeProvider } from './realtime/openai-realtime.js';
 
 // Register image providers
 registry.registerImageProvider(googleGeminiProvider);
@@ -261,11 +236,8 @@ registry.registerVideoProvider(openaiSoraProvider);
 // Register video analysis providers
 registry.registerVideoAnalysisProvider(googleGeminiVideoProvider);
 
-// Register audio providers
+// Register audio providers (for app features)
 registry.registerAudioProvider(openaiAudioProvider);
-
-// Register realtime providers
-registry.registerRealtimeProvider(openaiRealtimeProvider);
 
 // Future providers:
 // import { stabilityAiProvider } from './image/stability-ai.js';

@@ -35,27 +35,6 @@
  * });
  * ```
  *
- * ### Text-to-Speech (OpenAI TTS)
- * Convert text to natural speech.
- * ```typescript
- * import { textToSpeech } from '/opt/ai-tools/dist/audio-generation/textToSpeech.js';
- * const result = await textToSpeech({
- *   text: 'Hello, world!',
- *   voice: 'alloy',
- *   instructions: 'Speak in a friendly, upbeat tone'
- * });
- * ```
- *
- * ### Speech-to-Text (GPT-4o Transcribe)
- * Transcribe audio to text with improved accuracy.
- * ```typescript
- * import { speechToText } from '/opt/ai-tools/dist/audio-generation/speechToText.js';
- * const result = await speechToText({
- *   audio_path: '/path/to/audio.mp3',
- *   language: 'en'
- * });
- * ```
- *
  * ### Video Analysis (Gemini)
  * Analyze video content and answer questions.
  * ```typescript
@@ -83,12 +62,18 @@
  * - Input interface with JSDoc descriptions
  * - Output interface with success/error handling
  * - Async function that calls the API and handles errors
+ *
+ * ## Note on TTS/STT
+ *
+ * Text-to-Speech and Speech-to-Text are NOT model tools - they are app features:
+ * - TTS: For reading Claude's messages aloud to the user
+ * - STT: For voice input (already implemented in the chat UI)
+ * These are handled by the backend API directly, not as tools Claude calls.
  */
 
 // Re-export all tools for convenience
 export * as imageGeneration from './image-generation/index.js';
 export * as videoGeneration from './video-generation/index.js';
-export * as audioGeneration from './audio-generation/index.js';
 export * as videoAnalysis from './video-analysis/index.js';
 
 // Export the client utilities

@@ -63,10 +63,9 @@ export type ModelCapability =
   | 'frame-bridge'
   | 'video-edit'
   | 'video-with-audio'
-  // Audio capabilities
+  // Audio capabilities (for app features, not model tools)
   | 'text-to-speech'
   | 'speech-to-text'
-  | 'realtime-voice'
   // Analysis capabilities
   | 'video-understanding'
   | 'image-understanding';
@@ -578,73 +577,3 @@ export interface VideoAnalysisProvider {
   ): Promise<{ valid: boolean; error?: string }>;
 }
 
-// ============================================================================
-// REALTIME VOICE PROVIDER TYPES
-// ============================================================================
-
-/**
- * Configuration for realtime voice session
- */
-export interface RealtimeSessionConfig {
-  /** Voice to use */
-  voice?: string;
-  /** System instructions for the conversation */
-  instructions?: string;
-  /** Input audio format */
-  input_audio_format?: 'pcm16' | 'g711_ulaw' | 'g711_alaw';
-  /** Output audio format */
-  output_audio_format?: 'pcm16' | 'g711_ulaw' | 'g711_alaw';
-  /** Enable input audio transcription */
-  input_audio_transcription?: boolean;
-  /** Turn detection mode */
-  turn_detection?: 'server_vad' | 'none';
-  /** Temperature for responses */
-  temperature?: number;
-  /** Provider-specific options */
-  [key: string]: any;
-}
-
-/**
- * Result from creating a realtime session
- */
-export interface RealtimeSessionResult {
-  success: boolean;
-  /** Session ID for connection */
-  session_id?: string;
-  /** WebSocket URL to connect to */
-  websocket_url?: string;
-  /** Token for authentication */
-  token?: string;
-  /** Expiration time */
-  expires_at?: string;
-  /** Error message if failed */
-  error?: string;
-}
-
-/**
- * Realtime voice provider interface
- */
-export interface RealtimeVoiceProvider {
-  /** Unique provider identifier */
-  readonly id: string;
-  /** Human-readable provider name */
-  readonly name: string;
-  /** Available models for this provider */
-  readonly models: ModelInfo[];
-
-  /**
-   * Create a realtime voice session
-   */
-  createSession(
-    config: RealtimeSessionConfig,
-    credentials: ProviderCredentials,
-    model: string
-  ): Promise<RealtimeSessionResult>;
-
-  /**
-   * Validate provider credentials
-   */
-  validateCredentials(
-    credentials: ProviderCredentials
-  ): Promise<{ valid: boolean; error?: string }>;
-}

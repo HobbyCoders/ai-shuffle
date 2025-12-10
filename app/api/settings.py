@@ -1023,6 +1023,8 @@ async def get_video_models(token: str = Depends(require_auth)):
 # ============================================================================
 
 # AI Tools definitions with provider requirements
+# NOTE: These are tools the model (Claude) can use, not app features
+# TTS/STT are app features (voice input, read messages) - not model tools
 AI_TOOLS = {
     # Image tools
     "image_generation": {
@@ -1074,32 +1076,12 @@ AI_TOOLS = {
         "category": "video",
         "providers": ["google-veo"]  # Only Veo supports this
     },
-    # Audio tools
-    "text_to_speech": {
-        "name": "Text-to-Speech",
-        "description": "Convert text to natural speech with 11 voices (gpt-4o-mini-tts)",
-        "category": "audio",
-        "providers": ["openai-audio"]
-    },
-    "speech_to_text": {
-        "name": "Speech-to-Text",
-        "description": "Transcribe audio to text with high accuracy (gpt-4o-transcribe)",
-        "category": "audio",
-        "providers": ["openai-audio"]
-    },
     # Analysis tools
     "video_understanding": {
         "name": "Video Understanding",
         "description": "Analyze videos up to 2 hours and answer questions about content",
         "category": "analysis",
         "providers": ["google-gemini-video"]
-    },
-    # Realtime tools
-    "realtime_voice": {
-        "name": "Realtime Voice",
-        "description": "Live speech-to-speech conversations (gpt-realtime) - requires WebSocket",
-        "category": "realtime",
-        "providers": ["openai-realtime"]
     }
 }
 
@@ -1110,9 +1092,7 @@ PROVIDER_KEY_MAP = {
     "openai-gpt-image": "openai_api_key",
     "google-veo": "image_api_key",
     "openai-sora": "openai_api_key",
-    "openai-audio": "openai_api_key",
-    "google-gemini-video": "image_api_key",
-    "openai-realtime": "openai_api_key"
+    "google-gemini-video": "image_api_key"
 }
 
 
@@ -1128,7 +1108,7 @@ async def get_available_ai_tools(token: str = Depends(require_auth)):
     openai_key = get_decrypted_api_key("openai_api_key")
     image_api_key = get_decrypted_api_key("image_api_key")
 
-    # Determine which providers are available
+    # Determine which providers are available (for model tools only)
     available_providers = set()
     if image_api_key:
         available_providers.add("google-gemini")
@@ -1138,8 +1118,6 @@ async def get_available_ai_tools(token: str = Depends(require_auth)):
     if openai_key:
         available_providers.add("openai-gpt-image")
         available_providers.add("openai-sora")
-        available_providers.add("openai-audio")
-        available_providers.add("openai-realtime")
 
     # Get current configured providers
     current_image_provider = database.get_system_setting("image_provider")
