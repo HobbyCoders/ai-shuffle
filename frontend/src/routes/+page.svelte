@@ -1573,9 +1573,12 @@
 		if (aiTools.image_reference) enabledAITools.push('image_reference');
 		// Video tools (Veo)
 		if (aiTools.video_generation) enabledAITools.push('video_generation');
+		if (aiTools.video_with_audio) enabledAITools.push('video_with_audio');
 		if (aiTools.image_to_video) enabledAITools.push('image_to_video');
 		if (aiTools.video_extend) enabledAITools.push('video_extend');
 		if (aiTools.video_bridge) enabledAITools.push('video_bridge');
+		// Analysis tools
+		if (aiTools.video_understanding) enabledAITools.push('video_understanding');
 
 		// Determine AI tool selection mode
 		const allAIToolIds = getAllAIToolIds();
@@ -1667,9 +1670,12 @@
 				image_reference: effectiveAITools.includes('image_reference'),
 				// Video tools (Veo)
 				video_generation: effectiveAITools.includes('video_generation'),
+				video_with_audio: effectiveAITools.includes('video_with_audio'),
 				image_to_video: effectiveAITools.includes('image_to_video'),
 				video_extend: effectiveAITools.includes('video_extend'),
-				video_bridge: effectiveAITools.includes('video_bridge')
+				video_bridge: effectiveAITools.includes('video_bridge'),
+				// Analysis tools
+				video_understanding: effectiveAITools.includes('video_understanding')
 			};
 		}
 
