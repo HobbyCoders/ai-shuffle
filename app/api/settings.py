@@ -147,6 +147,9 @@ class IntegrationSettingsResponse(BaseModel):
     # Video generation settings
     video_provider: Optional[str] = None  # "google-veo" or "openai-sora"
     video_model: Optional[str] = None  # "veo-3.1-fast-generate-preview", "sora-2", etc.
+    # Audio settings (TTS/STT)
+    tts_model: Optional[str] = None  # "gpt-4o-mini-tts", "tts-1", "tts-1-hd"
+    stt_model: Optional[str] = None  # "gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"
 
 
 class OpenAIKeyRequest(BaseModel):
@@ -271,6 +274,8 @@ async def get_integration_settings(token: str = Depends(require_auth)):
     image_model = database.get_system_setting("image_model")
     video_provider = database.get_system_setting("video_provider")
     video_model = database.get_system_setting("video_model")
+    tts_model = database.get_system_setting("tts_model") or "gpt-4o-mini-tts"
+    stt_model = database.get_system_setting("stt_model") or "whisper-1"
 
     return IntegrationSettingsResponse(
         openai_api_key_set=bool(openai_key),
@@ -280,7 +285,9 @@ async def get_integration_settings(token: str = Depends(require_auth)):
         image_api_key_set=bool(image_api_key),
         image_api_key_masked=mask_api_key(image_api_key) if image_api_key else "",
         video_provider=video_provider,
-        video_model=video_model
+        video_model=video_model,
+        tts_model=tts_model,
+        stt_model=stt_model
     )
 
 
@@ -341,6 +348,138 @@ async def remove_openai_api_key(token: str = Depends(require_admin)):
 
 
 # ============================================================================
+# Audio Settings (TTS/STT)
+# ============================================================================
+
+# Available TTS models
+TTS_MODELS = {
+    "gpt-4o-mini-tts": {
+        "name": "GPT-4o Mini TTS",
+        "description": "Steerable TTS with natural speech and instructions support",
+        "price_display": "~$0.015/min",
+        "price_per_minute": 0.015
+    },
+    "tts-1": {
+        "name": "TTS-1",
+        "description": "Standard quality TTS, optimized for speed",
+        "price_display": "~$0.015/1K chars",
+        "price_per_1k_chars": 0.015
+    },
+    "tts-1-hd": {
+        "name": "TTS-1 HD",
+        "description": "High quality TTS with better clarity",
+        "price_display": "~$0.030/1K chars",
+        "price_per_1k_chars": 0.030
+    }
+}
+
+# Available STT models
+STT_MODELS = {
+    "gpt-4o-transcribe": {
+        "name": "GPT-4o Transcribe",
+        "description": "Best quality transcription with improved accuracy",
+        "price_display": "~$0.006/min",
+        "price_per_minute": 0.006
+    },
+    "gpt-4o-mini-transcribe": {
+        "name": "GPT-4o Mini Transcribe",
+        "description": "Fast, affordable transcription",
+        "price_display": "~$0.003/min",
+        "price_per_minute": 0.003
+    },
+    "whisper-1": {
+        "name": "Whisper",
+        "description": "Original Whisper model for transcription",
+        "price_display": "~$0.006/min",
+        "price_per_minute": 0.006
+    }
+}
+
+
+class AudioModelUpdateRequest(BaseModel):
+    """Request to update TTS or STT model"""
+    model: str
+
+
+@router.get("/integrations/audio/models")
+async def get_audio_models(token: str = Depends(require_auth)):
+    """
+    Get available TTS and STT models.
+    """
+    openai_key = get_decrypted_api_key("openai_api_key")
+    current_tts = database.get_system_setting("tts_model") or "gpt-4o-mini-tts"
+    current_stt = database.get_system_setting("stt_model") or "whisper-1"
+
+    tts_models = [
+        {
+            "id": model_id,
+            "name": info["name"],
+            "description": info["description"],
+            "price_display": info["price_display"],
+            "available": bool(openai_key),
+            "is_current": model_id == current_tts
+        }
+        for model_id, info in TTS_MODELS.items()
+    ]
+
+    stt_models = [
+        {
+            "id": model_id,
+            "name": info["name"],
+            "description": info["description"],
+            "price_display": info["price_display"],
+            "available": bool(openai_key),
+            "is_current": model_id == current_stt
+        }
+        for model_id, info in STT_MODELS.items()
+    ]
+
+    return {
+        "tts_models": tts_models,
+        "stt_models": stt_models,
+        "current_tts": current_tts,
+        "current_stt": current_stt,
+        "openai_configured": bool(openai_key)
+    }
+
+
+@router.patch("/integrations/audio/tts")
+async def update_tts_model(
+    request: AudioModelUpdateRequest,
+    token: str = Depends(require_admin)
+):
+    """Update the default TTS model."""
+    model = request.model.strip()
+
+    if model not in TTS_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid TTS model. Available: {', '.join(TTS_MODELS.keys())}"
+        )
+
+    database.set_system_setting("tts_model", model)
+    return {"success": True, "model": model}
+
+
+@router.patch("/integrations/audio/stt")
+async def update_stt_model(
+    request: AudioModelUpdateRequest,
+    token: str = Depends(require_admin)
+):
+    """Update the default STT model."""
+    model = request.model.strip()
+
+    if model not in STT_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid STT model. Available: {', '.join(STT_MODELS.keys())}"
+        )
+
+    database.set_system_setting("stt_model", model)
+    return {"success": True, "model": model}
+
+
+# ============================================================================
 # Voice Transcription
 # ============================================================================
 
@@ -356,9 +495,10 @@ async def transcribe_audio(
     token: str = Depends(require_auth)
 ):
     """
-    Transcribe audio to text using OpenAI Whisper.
+    Transcribe audio to text using OpenAI STT models.
 
     Accepts audio files (webm, mp3, mp4, wav, m4a, etc.) and returns transcribed text.
+    Uses the configured STT model (whisper-1, gpt-4o-transcribe, gpt-4o-mini-transcribe).
     Requires an OpenAI API key to be configured in settings.
     """
     # Check if OpenAI key is configured
@@ -368,6 +508,9 @@ async def transcribe_audio(
             status_code=400,
             detail="OpenAI API key not configured. Go to Settings > Integrations to add your key."
         )
+
+    # Get configured STT model (default to whisper-1 for backwards compatibility)
+    stt_model = database.get_system_setting("stt_model") or "whisper-1"
 
     # Validate file type
     content_type = file.content_type or ""
@@ -401,16 +544,16 @@ async def transcribe_audio(
     if len(audio_data) > 25 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Audio file too large. Maximum size is 25MB.")
 
-    # Call OpenAI Whisper API with retry logic for rate limits
+    # Call OpenAI Audio Transcription API with retry logic for rate limits
     max_retries = 3
     retry_delay = 2  # seconds
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            # Prepare the multipart form data
+            # Prepare the multipart form data with selected model
             files = {
                 "file": (filename, BytesIO(audio_data), content_type or "audio/webm"),
-                "model": (None, "whisper-1"),
+                "model": (None, stt_model),
                 "response_format": (None, "json"),
             }
 
