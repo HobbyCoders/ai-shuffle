@@ -717,6 +717,13 @@
 		tabInputs[tabId] = '';
 		tabInputs = tabInputs; // Trigger Svelte reactivity
 		tabUploadedFiles[tabId] = [];
+
+		// Reset textarea height to original size after clearing input
+		const textarea = textareas[tabId];
+		if (textarea) {
+			textarea.style.height = '';
+		}
+
 		tabs.sendMessage(tabId, finalPrompt);
 	}
 
