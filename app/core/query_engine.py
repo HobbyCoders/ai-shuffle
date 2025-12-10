@@ -960,12 +960,29 @@ def build_options_from_profile(
         # Log all stderr at INFO level for debugging subagent issues
         logger.info(f"[Claude CLI stderr] {line}")
 
+    # Process model selection - handle special 1M context models
+    # Models ending in "-1m" use the base model with 1M context beta header
+    raw_model = overrides.get("model") or config.get("model")
+    model_to_use = raw_model
+    betas_to_use = []
+
+    # Map special model names to base model + beta headers
+    MODEL_1M_MAPPING = {
+        "sonnet-1m": ("sonnet", ["context-1m-2025-08-07"]),
+        "claude-sonnet-4-5-1m": ("claude-sonnet-4-5-20250514", ["context-1m-2025-08-07"]),
+        "claude-sonnet-4-1m": ("claude-sonnet-4-20250514", ["context-1m-2025-08-07"]),
+    }
+
+    if raw_model in MODEL_1M_MAPPING:
+        model_to_use, betas_to_use = MODEL_1M_MAPPING[raw_model]
+        logger.info(f"1M context model selected: {raw_model} -> model={model_to_use}, betas={betas_to_use}")
+
     # Build options with all ClaudeAgentOptions fields
     # Note: We don't set cli_path - let the SDK use its bundled CLI or find system CLI automatically
     # The SDK handles finding Claude properly on all platforms
     options = ClaudeAgentOptions(
         # Core settings
-        model=overrides.get("model") or config.get("model"),
+        model=model_to_use,
         permission_mode=permission_mode,
         max_turns=overrides.get("max_turns") or config.get("max_turns"),
 
@@ -1012,6 +1029,9 @@ def build_options_from_profile(
         # Plugins - load from enabled_plugins in profile config
         # Each plugin path is resolved relative to workspace_dir if relative
         plugins=_build_plugins_list(config.get("enabled_plugins")),
+
+        # Beta features - e.g., 1M context window
+        betas=betas_to_use,
     )
 
     deployment_mode = detect_deployment_mode()

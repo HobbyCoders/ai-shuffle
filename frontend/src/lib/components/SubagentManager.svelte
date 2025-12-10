@@ -32,6 +32,7 @@
 		{ value: '', label: 'Inherit' },
 		{ value: 'haiku', label: 'Haiku' },
 		{ value: 'sonnet', label: 'Sonnet' },
+		{ value: 'sonnet-1m', label: 'Sonnet 1M' },
 		{ value: 'opus', label: 'Opus' }
 	];
 
@@ -259,6 +260,7 @@
 		switch (model) {
 			case 'haiku': return 'Haiku';
 			case 'sonnet': return 'Sonnet';
+			case 'sonnet-1m': return 'Sonnet 1M';
 			case 'opus': return 'Opus';
 			default: return 'Inherit';
 		}

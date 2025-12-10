@@ -110,6 +110,7 @@
 		switch (model) {
 			case 'haiku': return 'Haiku';
 			case 'sonnet': return 'Sonnet';
+			case 'sonnet-1m': return 'Sonnet 1M';
 			case 'opus': return 'Opus';
 			default: return 'Inherited';
 		}

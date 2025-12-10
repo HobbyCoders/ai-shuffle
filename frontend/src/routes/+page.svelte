@@ -563,6 +563,7 @@
 		switch (model) {
 			case 'haiku': return 'Haiku';
 			case 'sonnet': return 'Sonnet';
+			case 'sonnet-1m': return 'Sonnet 1M';
 			case 'opus': return 'Opus';
 			default: return 'Inherit';
 		}
@@ -3939,7 +3940,7 @@
 								{@const profilePermissionMode = currentProfile?.config?.permission_mode || 'default'}
 								{@const effectiveModel = currentTab.modelOverride || profileModel}
 								{@const effectiveMode = currentTab.permissionModeOverride || profilePermissionMode}
-								{@const modelLabels = { sonnet: 'Sonnet', opus: 'Opus', haiku: 'Haiku' } as Record<string, string>}
+								{@const modelLabels = { sonnet: 'Sonnet', 'sonnet-1m': 'Sonnet 1M', opus: 'Opus', haiku: 'Haiku' } as Record<string, string>}
 								{@const modeLabels = { default: 'Ask', acceptEdits: 'Auto-Accept', plan: 'Plan', bypassPermissions: 'Bypass' } as Record<string, string>}
 								<!-- Model Selector Pill -->
 								<div class="relative">
@@ -3957,7 +3958,7 @@
 									{#if showModelPopup}
 										<div class="fixed inset-0 z-40" on:click={() => showModelPopup = false}></div>
 										<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[90px]">
-											{#each [['sonnet', 'Sonnet'], ['opus', 'Opus'], ['haiku', 'Haiku']] as [value, label]}
+											{#each [['sonnet', 'Sonnet'], ['sonnet-1m', 'Sonnet 1M'], ['opus', 'Opus'], ['haiku', 'Haiku']] as [value, label]}
 												<button
 													type="button"
 													on:click={() => {
@@ -4178,6 +4179,7 @@
 								<label class="block text-xs text-muted-foreground mb-1">Model</label>
 								<select bind:value={profileForm.model} class="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground">
 									<option value="sonnet">Sonnet</option>
+									<option value="sonnet-1m">Sonnet 1M (1M context)</option>
 									<option value="opus">Opus</option>
 									<option value="haiku">Haiku</option>
 								</select>
