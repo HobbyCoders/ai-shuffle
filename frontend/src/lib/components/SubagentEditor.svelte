@@ -26,7 +26,7 @@
 		{ value: '', label: 'Inherit from profile' },
 		{ value: 'haiku', label: 'Haiku (fast, cheap)' },
 		{ value: 'sonnet', label: 'Sonnet (balanced)' },
-		{ value: 'sonnet-1m', label: 'Sonnet 1M (1M context)' },
+		{ value: 'sonnet-1m', label: 'Sonnet 1M (extended context)' },
 		{ value: 'opus', label: 'Opus (powerful)' }
 	];
 

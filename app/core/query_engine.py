@@ -1035,7 +1035,7 @@ def build_options_from_profile(
     )
 
     deployment_mode = detect_deployment_mode()
-    logger.info(f"Built options with permission_mode={permission_mode}, can_use_tool={options.can_use_tool is not None}, hooks={hooks is not None}, deployment_mode={deployment_mode}")
+    logger.info(f"Built options with model={model_to_use}, betas={betas_to_use}, permission_mode={permission_mode}, can_use_tool={options.can_use_tool is not None}, hooks={hooks is not None}, deployment_mode={deployment_mode}")
     if deployment_mode == DeploymentMode.LOCAL:
         logger.info(f"Windows local mode: Agents to write to filesystem: {list(agents_dict.keys()) if agents_dict else 'None'}")
     else:

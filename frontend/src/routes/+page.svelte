@@ -4179,7 +4179,7 @@
 								<label class="block text-xs text-muted-foreground mb-1">Model</label>
 								<select bind:value={profileForm.model} class="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground">
 									<option value="sonnet">Sonnet</option>
-									<option value="sonnet-1m">Sonnet 1M (1M context)</option>
+									<option value="sonnet-1m">Sonnet 1M</option>
 									<option value="opus">Opus</option>
 									<option value="haiku">Haiku</option>
 								</select>
