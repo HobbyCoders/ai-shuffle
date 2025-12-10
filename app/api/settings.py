@@ -60,6 +60,78 @@ router = APIRouter(prefix="/api/v1/settings", tags=["Settings"])
 
 
 # ============================================================================
+# Internal API Key Access (for AI tools)
+# ============================================================================
+
+@router.get("/internal/api-keys/{key_name}")
+async def get_internal_api_key(key_name: str):
+    """
+    Internal endpoint for AI tools to get decrypted API keys.
+
+    This endpoint is used by the Node.js AI tools (image generation, video generation)
+    to access API keys that are encrypted in the database.
+
+    Only allows specific key names to prevent arbitrary setting access.
+    """
+    allowed_keys = ["openai_api_key", "image_api_key", "gemini_api_key", "video_api_key"]
+
+    if key_name not in allowed_keys:
+        raise HTTPException(status_code=400, detail=f"Invalid key name. Allowed: {allowed_keys}")
+
+    api_key = get_decrypted_api_key(key_name)
+
+    if not api_key:
+        raise HTTPException(status_code=404, detail=f"API key '{key_name}' not configured or encryption not ready")
+
+    return {"key": api_key}
+
+
+@router.get("/internal/image-config")
+async def get_internal_image_config():
+    """
+    Internal endpoint for AI tools to get image generation configuration.
+    Returns provider, model, and decrypted API key.
+    """
+    provider = database.get_system_setting("image_provider")
+    model = database.get_system_setting("image_model")
+    api_key = get_decrypted_api_key("image_api_key")
+
+    if not all([provider, model, api_key]):
+        raise HTTPException(status_code=404, detail="Image generation not configured")
+
+    return {
+        "provider": provider,
+        "model": model,
+        "api_key": api_key
+    }
+
+
+@router.get("/internal/video-config")
+async def get_internal_video_config():
+    """
+    Internal endpoint for AI tools to get video generation configuration.
+    Returns provider, model, and decrypted API key.
+    """
+    provider = database.get_system_setting("video_provider")
+    model = database.get_system_setting("video_model")
+
+    # Video can use either OpenAI key (Sora) or image_api_key (Veo/Google)
+    if provider == "openai-sora":
+        api_key = get_decrypted_api_key("openai_api_key")
+    else:
+        api_key = get_decrypted_api_key("image_api_key")
+
+    if not all([provider, model, api_key]):
+        raise HTTPException(status_code=404, detail="Video generation not configured")
+
+    return {
+        "provider": provider,
+        "model": model,
+        "api_key": api_key
+    }
+
+
+# ============================================================================
 # Integration Settings
 # ============================================================================
 

@@ -37,6 +37,7 @@ from app.core.checkpoint_manager import checkpoint_manager
 from app.core.permission_handler import permission_handler
 from app.core.platform import detect_deployment_mode, DeploymentMode
 from app.core.user_question_handler import user_question_handler
+from app.core import encryption
 
 logger = logging.getLogger(__name__)
 
@@ -566,6 +567,36 @@ The chat UI will render this as an embedded video player with Download and Copy 
     return tools_section
 
 
+def _get_decrypted_api_key(setting_name: str) -> Optional[str]:
+    """
+    Get an API key from the database and decrypt it if encrypted.
+
+    Args:
+        setting_name: The name of the setting (e.g., "openai_api_key")
+
+    Returns:
+        The decrypted API key, or None if not found or decryption fails
+    """
+    value = database.get_system_setting(setting_name)
+    if not value:
+        return None
+
+    # Check if the value is encrypted
+    if encryption.is_encrypted(value):
+        if not encryption.is_encryption_ready():
+            logger.warning(f"Cannot decrypt {setting_name}: encryption key not available")
+            return None
+        try:
+            decrypted = encryption.decrypt_value(value)
+            return decrypted
+        except Exception as e:
+            logger.error(f"Failed to decrypt {setting_name}: {e}")
+            return None
+
+    # Return plaintext value (for backwards compatibility during migration)
+    return value
+
+
 def _build_env_with_ai_tools(
     base_env: Optional[Dict[str, str]],
     ai_tools_config: Optional[Dict[str, Any]]
@@ -605,17 +636,17 @@ def _build_env_with_ai_tools(
             env["GEMINI_MODEL"] = image_model
             logger.debug(f"Injected IMAGE_MODEL={image_model} into execution environment")
 
-        # Inject API key based on provider
+        # Inject API key based on provider (using decryption helper)
         if image_provider == "openai-gpt-image":
             # GPT Image uses OpenAI API key
-            openai_api_key = database.get_system_setting("openai_api_key")
+            openai_api_key = _get_decrypted_api_key("openai_api_key")
             if openai_api_key:
                 env["OPENAI_API_KEY"] = openai_api_key
                 env["IMAGE_API_KEY"] = openai_api_key
                 logger.debug("Injected OPENAI_API_KEY for GPT Image generation")
         else:
             # Default to Google Gemini - uses Gemini API key
-            image_api_key = database.get_system_setting("image_api_key")
+            image_api_key = _get_decrypted_api_key("image_api_key")
             if image_api_key:
                 env["GEMINI_API_KEY"] = image_api_key
                 env["IMAGE_API_KEY"] = image_api_key
@@ -638,17 +669,17 @@ def _build_env_with_ai_tools(
             env["VEO_MODEL"] = video_model
             logger.debug(f"Injected VIDEO_MODEL={video_model} into execution environment")
 
-        # Inject API key based on provider
+        # Inject API key based on provider (using decryption helper)
         if video_provider == "openai-sora":
             # Sora uses OpenAI API key
-            openai_api_key = database.get_system_setting("openai_api_key")
+            openai_api_key = _get_decrypted_api_key("openai_api_key")
             if openai_api_key:
                 env["OPENAI_API_KEY"] = openai_api_key
                 env["VIDEO_API_KEY"] = openai_api_key
                 logger.debug("Injected OPENAI_API_KEY for Sora video generation")
         else:
             # Default to Google Veo - uses Gemini API key
-            video_api_key = database.get_system_setting("image_api_key")
+            video_api_key = _get_decrypted_api_key("image_api_key")
             if video_api_key:
                 if "GEMINI_API_KEY" not in env:
                     env["GEMINI_API_KEY"] = video_api_key
