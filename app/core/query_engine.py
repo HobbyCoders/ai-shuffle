@@ -173,6 +173,18 @@ def _build_plugins_list(enabled_plugins: Optional[list]) -> Optional[list]:
 
 
 @dataclass
+class StreamingInputMessage:
+    """A message to be sent to Claude via streaming input.
+
+    Supports text messages and image attachments per the SDK documentation.
+    """
+    content: str  # Text content
+    images: list = field(default_factory=list)  # List of image attachments
+    # Each image should be: {"type": "base64", "media_type": "image/png", "data": "..."}
+    # Or: {"type": "url", "url": "https://..."}
+
+
+@dataclass
 class SessionState:
     """Track state for an active SDK session"""
     client: ClaudeSDKClient
@@ -197,7 +209,11 @@ def get_session_state(session_id: str) -> Optional[SessionState]:
     return _active_sessions.get(session_id)
 
 
-async def queue_user_message(session_id: str, message: str) -> bool:
+async def queue_user_message(
+    session_id: str,
+    message: str,
+    images: Optional[list] = None
+) -> bool:
     """
     Queue a user message to be sent to Claude while streaming.
 
@@ -207,7 +223,10 @@ async def queue_user_message(session_id: str, message: str) -> bool:
 
     Args:
         session_id: The session ID to queue the message for
-        message: The user message to queue
+        message: The text content of the user message
+        images: Optional list of image attachments. Each should be:
+            - {"type": "base64", "media_type": "image/png", "data": "..."}
+            - {"type": "url", "url": "https://..."}
 
     Returns:
         True if the message was queued successfully, False if session not found or not streaming
@@ -221,9 +240,15 @@ async def queue_user_message(session_id: str, message: str) -> bool:
         logger.warning(f"Cannot queue message - session {session_id} is not streaming")
         return False
 
+    # Create streaming input message with optional images
+    streaming_msg = StreamingInputMessage(
+        content=message,
+        images=images or []
+    )
+
     # Queue the message
-    await state.message_queue.put(message)
-    logger.info(f"Queued user message for session {session_id}: {message[:50]}...")
+    await state.message_queue.put(streaming_msg)
+    logger.info(f"Queued streaming input for session {session_id}: {message[:50]}... (images: {len(streaming_msg.images)})")
     return True
 
 
@@ -233,6 +258,82 @@ def get_queued_message_count(session_id: str) -> int:
     if not state:
         return 0
     return state.message_queue.qsize()
+
+
+def _build_message_content(streaming_msg: StreamingInputMessage) -> Any:
+    """Build the message content structure for the SDK.
+
+    Converts a StreamingInputMessage into the format expected by Claude SDK:
+    - Simple string if no images
+    - List of content blocks if images are attached
+    """
+    if not streaming_msg.images:
+        # Simple text-only message
+        return streaming_msg.content
+
+    # Build content blocks array with text and images
+    content_blocks = []
+
+    # Add text block first
+    if streaming_msg.content:
+        content_blocks.append({
+            "type": "text",
+            "text": streaming_msg.content
+        })
+
+    # Add image blocks
+    for img in streaming_msg.images:
+        if img.get("type") == "base64":
+            content_blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img.get("media_type", "image/png"),
+                    "data": img.get("data", "")
+                }
+            })
+        elif img.get("type") == "url":
+            content_blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "url",
+                    "url": img.get("url", "")
+                }
+            })
+
+    return content_blocks
+
+
+def create_single_message_generator(
+    prompt: str,
+    images: Optional[list] = None
+) -> AsyncGenerator:
+    """
+    Create an AsyncGenerator that yields a single message to the Claude SDK.
+
+    This wraps the initial prompt (and optional images) in the generator format
+    required by the SDK for streaming input with image support.
+
+    Args:
+        prompt: The message text
+        images: Optional images to attach
+
+    Yields:
+        Single message dictionary in SDK format
+    """
+    async def generator():
+        msg = StreamingInputMessage(content=prompt, images=images or [])
+        content = _build_message_content(msg)
+
+        yield {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": content
+            }
+        }
+
+    return generator()
 
 
 async def cleanup_stale_sessions(max_age_seconds: int = 3600):
@@ -2038,13 +2139,25 @@ async def stream_to_websocket(
     profile_id: str,
     project_id: Optional[str] = None,
     overrides: Optional[Dict[str, Any]] = None,
-    broadcast_func: Optional[callable] = None
+    broadcast_func: Optional[callable] = None,
+    images: Optional[list] = None
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Stream Claude response directly to WebSocket.
 
     This is the simplified streaming function for the WebSocket-first architecture.
     No sync engine, no background tasks - just direct streaming.
+
+    Args:
+        prompt: The user's message text
+        session_id: The chat session ID
+        profile_id: The profile to use
+        project_id: Optional project ID
+        overrides: Optional overrides for model, permission_mode, etc.
+        broadcast_func: Async function to broadcast messages to the WebSocket
+        images: Optional list of image attachments in SDK format:
+            - {"type": "base64", "media_type": "image/png", "data": "..."}
+            - {"type": "url", "url": "https://..."}
 
     Yields events:
     - {"type": "chunk", "content": "..."}
@@ -2053,14 +2166,6 @@ async def stream_to_websocket(
     - {"type": "permission_request", ...} - When tool permission is needed
     - {"type": "done", "session_id": "...", "metadata": {...}}
     - {"type": "error", "message": "..."}
-
-    Args:
-        prompt: The user's message
-        session_id: The chat session ID
-        profile_id: The profile to use
-        project_id: Optional project ID
-        overrides: Optional overrides for model, permission_mode, etc.
-        broadcast_func: Async function to broadcast messages to the WebSocket
     """
     # Get profile
     profile = get_profile(profile_id)
@@ -2253,7 +2358,11 @@ async def stream_to_websocket(
     include_partial = options.include_partial_messages  # Track if streaming events are enabled
 
     try:
-        await state.client.query(prompt)
+        # Send the initial query to Claude using streaming input format
+        # This yields a single message with optional images
+        # Additional queued messages are processed sequentially after each response
+        message_gen = create_single_message_generator(prompt, images)
+        await state.client.query(message_gen)
 
         async for message in state.client.receive_response():
             # Check for interrupt request as a failsafe
@@ -2567,21 +2676,30 @@ async def stream_to_websocket(
                     metadata["cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                     metadata["cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
 
-        # Streaming input: After completing the receive_response loop, check for queued messages
-        # This allows users to send messages while Claude is working
+        # Process any queued messages (streaming input)
+        # Messages queued via message_queue while Claude was responding
         while not state.message_queue.empty() and not interrupted and not state.interrupt_requested:
             try:
-                next_prompt = state.message_queue.get_nowait()
-                logger.info(f"[WS] Processing queued message for session {session_id}: {next_prompt[:50]}...")
+                next_msg = state.message_queue.get_nowait()
+                # Handle both StreamingInputMessage and plain strings for backwards compatibility
+                if isinstance(next_msg, StreamingInputMessage):
+                    next_prompt = next_msg.content
+                    next_images = next_msg.images
+                else:
+                    next_prompt = str(next_msg)
+                    next_images = None
+                logger.info(f"[WS] Processing queued message for session {session_id}: {next_prompt[:50]}... (images: {len(next_images) if next_images else 0})")
 
                 # Notify frontend that we're processing a queued message
                 yield {
                     "type": "queued_message_processing",
-                    "prompt": next_prompt
+                    "prompt": next_prompt,
+                    "has_images": bool(next_images)
                 }
 
-                # Send the queued message to Claude and process the response
-                await state.client.query(next_prompt)
+                # Send the queued message to Claude using generator format (supports images)
+                queued_gen = create_single_message_generator(next_prompt, next_images)
+                await state.client.query(queued_gen)
 
                 # Process the response for this queued message
                 async for queued_message in state.client.receive_response():
