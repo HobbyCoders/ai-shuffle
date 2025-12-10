@@ -173,6 +173,18 @@ def _build_plugins_list(enabled_plugins: Optional[list]) -> Optional[list]:
 
 
 @dataclass
+class StreamingInputMessage:
+    """A message to be sent to Claude via streaming input.
+
+    Supports text messages and image attachments per the SDK documentation.
+    """
+    content: str  # Text content
+    images: list = field(default_factory=list)  # List of image attachments
+    # Each image should be: {"type": "base64", "media_type": "image/png", "data": "..."}
+    # Or: {"type": "url", "url": "https://..."}
+
+
+@dataclass
 class SessionState:
     """Track state for an active SDK session"""
     client: ClaudeSDKClient
@@ -184,8 +196,11 @@ class SessionState:
     background_task: Optional[asyncio.Task] = None  # Track background streaming task
     written_agent_ids: list = field(default_factory=list)  # Track agents written to filesystem
     agents_dir: Optional[Path] = None  # Path to .claude/agents/ directory
-    # Streaming input support - queue for messages to send while Claude is working
-    message_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    # Streaming input support - channel to feed messages INTO the async generator
+    # This replaces the old message_queue approach with proper SDK streaming input
+    input_channel: asyncio.Queue = field(default_factory=asyncio.Queue)
+    # Signal to stop the message generator
+    generator_stop_event: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 # Track active sessions - key is our session_id, value is SessionState
@@ -197,17 +212,24 @@ def get_session_state(session_id: str) -> Optional[SessionState]:
     return _active_sessions.get(session_id)
 
 
-async def queue_user_message(session_id: str, message: str) -> bool:
+async def queue_user_message(
+    session_id: str,
+    message: str,
+    images: Optional[list] = None
+) -> bool:
     """
-    Queue a user message to be sent to Claude while streaming.
+    Queue a user message to be sent to Claude via streaming input.
 
-    This supports "streaming input" - allowing users to send additional messages
-    while Claude is still working on the previous response. The message will be
-    delivered to Claude when it finishes the current turn.
+    This implements true streaming input per the SDK documentation - messages
+    are fed into an AsyncGenerator that the SDK consumes in real-time, rather
+    than waiting for the current response to complete.
 
     Args:
         session_id: The session ID to queue the message for
-        message: The user message to queue
+        message: The text content of the user message
+        images: Optional list of image attachments. Each should be:
+            - {"type": "base64", "media_type": "image/png", "data": "..."}
+            - {"type": "url", "url": "https://..."}
 
     Returns:
         True if the message was queued successfully, False if session not found or not streaming
@@ -221,9 +243,15 @@ async def queue_user_message(session_id: str, message: str) -> bool:
         logger.warning(f"Cannot queue message - session {session_id} is not streaming")
         return False
 
-    # Queue the message
-    await state.message_queue.put(message)
-    logger.info(f"Queued user message for session {session_id}: {message[:50]}...")
+    # Create streaming input message with optional images
+    streaming_msg = StreamingInputMessage(
+        content=message,
+        images=images or []
+    )
+
+    # Put into input channel - the message generator will yield this to the SDK
+    await state.input_channel.put(streaming_msg)
+    logger.info(f"Queued streaming input for session {session_id}: {message[:50]}... (images: {len(streaming_msg.images)})")
     return True
 
 
@@ -232,7 +260,102 @@ def get_queued_message_count(session_id: str) -> int:
     state = _active_sessions.get(session_id)
     if not state:
         return 0
-    return state.message_queue.qsize()
+    return state.input_channel.qsize()
+
+
+def _build_message_content(streaming_msg: StreamingInputMessage) -> Any:
+    """Build the message content structure for the SDK.
+
+    Converts a StreamingInputMessage into the format expected by Claude SDK:
+    - Simple string if no images
+    - List of content blocks if images are attached
+    """
+    if not streaming_msg.images:
+        # Simple text-only message
+        return streaming_msg.content
+
+    # Build content blocks array with text and images
+    content_blocks = []
+
+    # Add text block first
+    if streaming_msg.content:
+        content_blocks.append({
+            "type": "text",
+            "text": streaming_msg.content
+        })
+
+    # Add image blocks
+    for img in streaming_msg.images:
+        if img.get("type") == "base64":
+            content_blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img.get("media_type", "image/png"),
+                    "data": img.get("data", "")
+                }
+            })
+        elif img.get("type") == "url":
+            content_blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "url",
+                    "url": img.get("url", "")
+                }
+            })
+
+    return content_blocks
+
+
+def create_single_message_generator(
+    prompt: str,
+    images: Optional[list] = None
+) -> AsyncGenerator:
+    """
+    Create an AsyncGenerator that yields a single message to the Claude SDK.
+
+    This is the simplest form of streaming input - just wrapping the initial
+    prompt in the generator format required by the SDK.
+
+    Per SDK docs, streaming input format is:
+        yield {"type": "text", "text": "message"}
+    For images:
+        yield {"type": "image", "source": {"type": "base64", ...}}
+
+    Args:
+        prompt: The message text
+        images: Optional images to attach
+
+    Yields:
+        Message dictionaries in SDK streaming input format
+    """
+    async def generator():
+        # Yield text content
+        if prompt:
+            yield {"type": "text", "text": prompt}
+
+        # Yield any images
+        if images:
+            for img in images:
+                if img.get("type") == "base64":
+                    yield {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": img.get("media_type", "image/png"),
+                            "data": img.get("data", "")
+                        }
+                    }
+                elif img.get("type") == "url":
+                    yield {
+                        "type": "image",
+                        "source": {
+                            "type": "url",
+                            "url": img.get("url", "")
+                        }
+                    }
+
+    return generator()
 
 
 async def cleanup_stale_sessions(max_age_seconds: int = 3600):
@@ -1982,8 +2105,11 @@ async def interrupt_session(session_id: str) -> bool:
     """Interrupt an active streaming session.
 
     This calls the SDK's interrupt() method which signals the Claude API
-    to stop processing. This is more reliable than just cancelling the
-    asyncio task, which only takes effect at the next await point.
+    to stop processing. It also stops the message generator to prevent
+    new messages from being sent.
+
+    This is more reliable than just cancelling the asyncio task, which
+    only takes effect at the next await point.
     """
     state = _active_sessions.get(session_id)
     if not state:
@@ -1996,6 +2122,9 @@ async def interrupt_session(session_id: str) -> bool:
 
     # Set interrupt flag first - this is checked in the streaming loop as a failsafe
     state.interrupt_requested = True
+
+    # Stop the message generator to prevent new messages from being yielded
+    state.generator_stop_event.set()
 
     # Don't check is_streaming too strictly - there might be race conditions
     # and it's better to try to interrupt anyway
@@ -2253,7 +2382,11 @@ async def stream_to_websocket(
     include_partial = options.include_partial_messages  # Track if streaming events are enabled
 
     try:
-        await state.client.query(prompt)
+        # Send the query to Claude using streaming input format
+        # This uses a single-message generator which allows for image attachments
+        # Queued messages are processed after each response completes
+        message_gen = create_single_message_generator(prompt)
+        await state.client.query(message_gen)
 
         async for message in state.client.receive_response():
             # Check for interrupt request as a failsafe
@@ -2567,12 +2700,15 @@ async def stream_to_websocket(
                     metadata["cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                     metadata["cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
 
-        # Streaming input: After completing the receive_response loop, check for queued messages
-        # This allows users to send messages while Claude is working
-        while not state.message_queue.empty() and not interrupted and not state.interrupt_requested:
+        # Process any queued messages (streaming input)
+        # Messages queued via input_channel while Claude was responding
+        while not state.input_channel.empty() and not interrupted and not state.interrupt_requested:
             try:
-                next_prompt = state.message_queue.get_nowait()
-                logger.info(f"[WS] Processing queued message for session {session_id}: {next_prompt[:50]}...")
+                next_msg = state.input_channel.get_nowait()
+                # Extract content and images from StreamingInputMessage
+                next_prompt = next_msg.content if hasattr(next_msg, 'content') else str(next_msg)
+                next_images = next_msg.images if hasattr(next_msg, 'images') else None
+                logger.info(f"[WS] Processing queued message for session {session_id}: {next_prompt[:50]}... (images: {len(next_images) if next_images else 0})")
 
                 # Notify frontend that we're processing a queued message
                 yield {
@@ -2580,18 +2716,17 @@ async def stream_to_websocket(
                     "prompt": next_prompt
                 }
 
-                # Send the queued message to Claude and process the response
-                await state.client.query(next_prompt)
+                # Send the queued message to Claude using generator format (supports images)
+                queued_gen = create_single_message_generator(next_prompt, next_images)
+                await state.client.query(queued_gen)
 
-                # Process the response for this queued message
+                # Process the response
                 async for queued_message in state.client.receive_response():
-                    # Check for interrupt
                     if state.interrupt_requested:
                         logger.info(f"[WS] Interrupt during queued message processing for session {session_id}")
                         interrupted = True
                         break
 
-                    # Handle the same message types as the main loop
                     if isinstance(queued_message, AssistantMessage):
                         for block in queued_message.content:
                             if isinstance(block, TextBlock):
@@ -2601,12 +2736,6 @@ async def stream_to_websocket(
                             elif isinstance(block, ToolUseBlock):
                                 tool_id = getattr(block, 'id', None)
                                 tool_input = block.input or {}
-                                tool_messages.append({
-                                    "type": "tool_use",
-                                    "name": block.name,
-                                    "tool_id": tool_id,
-                                    "input": tool_input
-                                })
                                 yield {
                                     "type": "tool_use",
                                     "name": block.name,
@@ -2616,12 +2745,6 @@ async def stream_to_websocket(
                             elif isinstance(block, ToolResultBlock):
                                 output = str(block.content)[:2000]
                                 tool_use_id = getattr(block, 'tool_use_id', None)
-                                tool_messages.append({
-                                    "type": "tool_result",
-                                    "name": getattr(block, 'name', 'unknown'),
-                                    "tool_id": tool_use_id,
-                                    "output": output
-                                })
                                 yield {
                                     "type": "tool_result",
                                     "name": getattr(block, 'name', 'unknown'),
@@ -2652,7 +2775,7 @@ async def stream_to_websocket(
                                 }
 
                     elif isinstance(queued_message, ResultMessage):
-                        # Accumulate metadata from queued message processing
+                        # Accumulate metadata
                         metadata["duration_ms"] = metadata.get("duration_ms", 0) + queued_message.duration_ms
                         metadata["num_turns"] = metadata.get("num_turns", 0) + queued_message.num_turns
                         if queued_message.total_cost_usd:
@@ -2660,12 +2783,11 @@ async def stream_to_websocket(
                         if queued_message.usage:
                             metadata["tokens_in"] = metadata.get("tokens_in", 0) + queued_message.usage.get("input_tokens", 0)
                             metadata["tokens_out"] = metadata.get("tokens_out", 0) + queued_message.usage.get("output_tokens", 0)
-                            metadata["cache_creation_tokens"] = metadata.get("cache_creation_tokens", 0) + queued_message.usage.get("cache_creation_input_tokens", 0)
-                            metadata["cache_read_tokens"] = metadata.get("cache_read_tokens", 0) + queued_message.usage.get("cache_read_input_tokens", 0)
-                        break  # Exit inner loop on ResultMessage
+                        break
 
-            except asyncio.QueueEmpty:
-                break  # No more queued messages
+            except Exception as e:
+                logger.error(f"[WS] Error processing queued message: {e}")
+                break
 
     except asyncio.CancelledError:
         interrupted = True
@@ -2679,6 +2801,8 @@ async def stream_to_websocket(
         return
 
     finally:
+        # Stop the message generator
+        state.generator_stop_event.set()
         # Mark as not streaming and reset interrupt flag
         state.is_streaming = False
         state.interrupt_requested = False

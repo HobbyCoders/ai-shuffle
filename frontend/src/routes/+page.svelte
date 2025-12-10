@@ -3878,28 +3878,31 @@
 										{/if}
 									</button>
 									{#if currentTab.isStreaming}
-										<!-- When streaming: show queue button if text entered, always show stop button -->
+										<!-- When streaming: show send button if text entered, otherwise show stop button -->
 										{#if (tabInputs[tabId] || '').trim()}
+											<!-- Send button to queue message via streaming input -->
 											<button
 												type="submit"
-												class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-amber-500/15 text-amber-600 hover:bg-amber-500/25 rounded-xl transition-all"
-												title="Queue message (will be sent when Claude finishes)"
+												class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-primary hover:bg-primary/90 text-primary-foreground rounded-xl transition-all"
+												title="Send message (streaming input)"
 											>
 												<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
+												</svg>
+											</button>
+										{:else}
+											<!-- Stop button when no text entered -->
+											<button
+												type="button"
+												on:click={() => tabs.stopGeneration(tabId)}
+												class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-destructive/15 text-destructive hover:bg-destructive/25 rounded-xl transition-all"
+												title="Stop generating"
+											>
+												<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+													<rect x="6" y="6" width="12" height="12" rx="2" />
 												</svg>
 											</button>
 										{/if}
-										<button
-											type="button"
-											on:click={() => tabs.stopGeneration(tabId)}
-											class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-destructive/15 text-destructive hover:bg-destructive/25 rounded-xl transition-all"
-											title="Stop generating"
-										>
-											<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-												<rect x="6" y="6" width="12" height="12" rx="2" />
-											</svg>
-										</button>
 									{:else}
 										<!-- Send Button -->
 										<button

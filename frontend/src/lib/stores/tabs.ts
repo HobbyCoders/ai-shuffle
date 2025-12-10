@@ -2582,10 +2582,16 @@ function createTabsStore() {
 
 		/**
 		 * Send message in a specific tab.
-		 * If the tab is currently streaming, this will queue the message to be
-		 * processed after Claude finishes the current response (streaming input).
+		 * If the tab is currently streaming, this will queue the message via
+		 * streaming input - feeding it directly into the SDK's AsyncGenerator.
+		 *
+		 * @param tabId - The tab ID to send the message to
+		 * @param prompt - The text content of the message
+		 * @param images - Optional array of image attachments for streaming input
+		 *                 Format: [{type: "base64", media_type: "image/png", data: "..."}]
+		 *                 Or: [{type: "url", url: "https://..."}]
 		 */
-		sendMessage(tabId: string, prompt: string) {
+		sendMessage(tabId: string, prompt: string, images?: Array<{type: string; media_type?: string; data?: string; url?: string}>) {
 			const tab = getTab(tabId);
 			if (!tab) return;
 
@@ -2593,6 +2599,12 @@ function createTabsStore() {
 			if (!ws || ws.readyState !== WebSocket.OPEN) {
 				updateTab(tabId, { error: 'Not connected' });
 				return;
+			}
+
+			// Build display content for user message
+			let displayContent = prompt;
+			if (images && images.length > 0) {
+				displayContent += ` [+${images.length} image(s)]`;
 			}
 
 			// Add user message immediately
@@ -2606,7 +2618,7 @@ function createTabsStore() {
 						messages: [...t.messages, {
 							id: userMsgId,
 							role: 'user' as const,
-							content: prompt
+							content: displayContent
 						}],
 						isStreaming: true,
 						error: null,
@@ -2615,13 +2627,14 @@ function createTabsStore() {
 				})
 			}));
 
-			// If currently streaming, queue the message instead of starting a new query
-			// This enables "streaming input" - user can send messages while Claude is working
+			// If currently streaming, queue the message via streaming input
+			// This feeds it directly into the SDK's AsyncGenerator in real-time
 			if (tab.isStreaming && tab.sessionId) {
-				console.log(`[Tab ${tabId}] Queueing message while streaming: ${prompt.substring(0, 50)}...`);
+				console.log(`[Tab ${tabId}] Streaming input: ${prompt.substring(0, 50)}... (images: ${images?.length || 0})`);
 				ws.send(JSON.stringify({
 					type: 'queue_message',
 					prompt,
+					images: images || [],
 					session_id: tab.sessionId
 				}));
 				return;
