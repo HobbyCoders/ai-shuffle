@@ -2383,13 +2383,14 @@ async def stream_to_websocket(
                 break
 
             if isinstance(message, SystemMessage):
+                logger.info(f"[WS] SystemMessage received: subtype={message.subtype}, data_keys={list(message.data.keys()) if message.data else []}, data_preview={str(message.data)[:500] if message.data else 'None'}")
                 if message.subtype == "init" and "session_id" in message.data:
                     sdk_session_id = message.data["session_id"]
                     state.sdk_session_id = sdk_session_id
                     logger.info(f"[WS] Captured SDK session ID: {sdk_session_id}")
                 else:
                     # Forward other system messages (like /context output) to frontend
-                    logger.info(f"[WS] SystemMessage subtype={message.subtype}, data keys={list(message.data.keys()) if message.data else []}")
+                    logger.info(f"[WS] Forwarding SystemMessage to frontend: subtype={message.subtype}")
                     yield {
                         "type": "system",
                         "subtype": message.subtype,
@@ -2599,10 +2600,12 @@ async def stream_to_websocket(
                 # 2. Local command output like /context, /compact (TextBlock with <local-command-stdout>)
                 # Check if this message is from a subagent using parent_tool_use_id
                 parent_tool_id = message.parent_tool_use_id
+                logger.info(f"[WS] UserMessage received: content_type={type(message.content).__name__}, parent_tool_id={parent_tool_id}")
 
                 # Handle string content (rare but possible)
                 if isinstance(message.content, str):
                     content = message.content
+                    logger.info(f"[WS] UserMessage string content preview: {content[:200] if content else 'empty'}")
                     # Check for local command output
                     if "<local-command-stdout>" in content:
                         match = re.search(r'<local-command-stdout>(.*?)</local-command-stdout>', content, re.DOTALL)
