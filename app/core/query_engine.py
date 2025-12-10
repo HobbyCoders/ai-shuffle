@@ -348,19 +348,21 @@ def _get_available_tools(ai_tools_config: Optional[Dict[str, Any]] = None) -> li
         "openai-sora": "Sora"
     }
 
-    # Helper to check if an image provider has API key configured
+    # Helper to check if an image provider has API key configured AND decryptable
     def _has_image_api_key(provider: str) -> bool:
         if provider == "openai-gpt-image":
-            return bool(database.get_system_setting("openai_api_key"))
+            key = _get_decrypted_api_key("openai_api_key")
         else:  # google-gemini
-            return bool(database.get_system_setting("image_api_key"))
+            key = _get_decrypted_api_key("image_api_key")
+        return bool(key)
 
-    # Helper to check if a video provider has API key configured
+    # Helper to check if a video provider has API key configured AND decryptable
     def _has_video_api_key(provider: str) -> bool:
         if provider == "openai-sora":
-            return bool(database.get_system_setting("openai_api_key"))
+            key = _get_decrypted_api_key("openai_api_key")
         else:  # google-veo
-            return bool(database.get_system_setting("image_api_key"))
+            key = _get_decrypted_api_key("image_api_key")
+        return bool(key)
 
     # Check image generation - only if enabled in profile
     if ai_tools_config.get("image_generation", False):
