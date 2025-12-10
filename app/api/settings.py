@@ -1018,6 +1018,144 @@ async def get_video_models(token: str = Depends(require_auth)):
 # Voice-to-Text (Speech Recognition)
 # ============================================================================
 
+# ============================================================================
+# AI Tools Configuration (for Profile Management)
+# ============================================================================
+
+# AI Tools definitions with provider requirements
+AI_TOOLS = {
+    # Image tools
+    "image_generation": {
+        "name": "Image Generation",
+        "description": "Generate AI images from text prompts (supports 1K-4K, multiple images)",
+        "category": "image",
+        "providers": ["google-gemini", "openai-gpt-image"]  # Works with either
+    },
+    "image_editing": {
+        "name": "Image Editing",
+        "description": "Edit existing images - add, remove, or modify elements",
+        "category": "image",
+        "providers": ["google-gemini", "openai-gpt-image"]
+    },
+    "image_reference": {
+        "name": "Reference-Based Generation",
+        "description": "Generate images with character/style consistency using reference images",
+        "category": "image",
+        "providers": ["google-gemini"]  # Only Gemini supports this
+    },
+    # Video tools
+    "video_generation": {
+        "name": "Video Generation",
+        "description": "Generate AI videos from text prompts (4-12 sec)",
+        "category": "video",
+        "providers": ["google-veo", "openai-sora"]
+    },
+    "image_to_video": {
+        "name": "Image to Video",
+        "description": "Animate a still image into a video",
+        "category": "video",
+        "providers": ["google-veo", "openai-sora"]
+    },
+    "video_extend": {
+        "name": "Video Extension",
+        "description": "Extend existing Veo videos by ~7 seconds",
+        "category": "video",
+        "providers": ["google-veo"]  # Only Veo supports this
+    },
+    "video_bridge": {
+        "name": "Frame Bridging",
+        "description": "Generate smooth transitions between two images",
+        "category": "video",
+        "providers": ["google-veo"]  # Only Veo supports this
+    }
+}
+
+# Map providers to their required API key
+PROVIDER_KEY_MAP = {
+    "google-gemini": "image_api_key",
+    "openai-gpt-image": "openai_api_key",
+    "google-veo": "image_api_key",
+    "openai-sora": "openai_api_key"
+}
+
+
+@router.get("/ai-tools/available")
+async def get_available_ai_tools(token: str = Depends(require_auth)):
+    """
+    Get list of AI tools available based on configured providers.
+
+    Returns tools grouped by category with availability status.
+    Used by the profile management UI to show only available tools.
+    """
+    # Check which API keys are configured
+    openai_key = get_decrypted_api_key("openai_api_key")
+    image_api_key = get_decrypted_api_key("image_api_key")
+
+    # Determine which providers are available
+    available_providers = set()
+    if image_api_key:
+        available_providers.add("google-gemini")
+        available_providers.add("google-veo")
+    if openai_key:
+        available_providers.add("openai-gpt-image")
+        available_providers.add("openai-sora")
+
+    # Get current configured providers
+    current_image_provider = database.get_system_setting("image_provider")
+    current_video_provider = database.get_system_setting("video_provider")
+
+    # Build tools list with availability
+    tools = []
+    categories = {}
+
+    for tool_id, tool_info in AI_TOOLS.items():
+        # Check if any of the tool's providers are available
+        tool_providers = tool_info["providers"]
+        is_available = any(p in available_providers for p in tool_providers)
+
+        # Determine which provider would be used for this tool
+        active_provider = None
+        if tool_info["category"] == "image" and current_image_provider in tool_providers:
+            active_provider = current_image_provider
+        elif tool_info["category"] == "video" and current_video_provider in tool_providers:
+            active_provider = current_video_provider
+        elif is_available:
+            # Use first available provider
+            for p in tool_providers:
+                if p in available_providers:
+                    active_provider = p
+                    break
+
+        tool_data = {
+            "id": tool_id,
+            "name": tool_info["name"],
+            "description": tool_info["description"],
+            "category": tool_info["category"],
+            "available": is_available,
+            "providers": tool_providers,
+            "active_provider": active_provider
+        }
+        tools.append(tool_data)
+
+        # Group by category
+        cat = tool_info["category"]
+        if cat not in categories:
+            categories[cat] = {
+                "id": cat,
+                "name": f"{cat.title()} Tools",
+                "tools": []
+            }
+        categories[cat]["tools"].append(tool_data)
+
+    return {
+        "tools": tools,
+        "categories": list(categories.values()),
+        "available_providers": list(available_providers),
+        "current_image_provider": current_image_provider,
+        "current_video_provider": current_video_provider
+    }
+
+
 @router.post("/transcribe", response_model=VoiceToTextResponse)
 async def transcribe_audio(
     audio: UploadFile = File(...),

@@ -354,12 +354,15 @@
 	// AI Tool selection mode: 'all' = all enabled, 'custom' = individually selected
 	let aiToolSelectionMode: 'all' | 'custom' = 'custom';
 
-	// AI Tool categories - structured like regular tools
+	// AI Tool categories - dynamically loaded from backend based on configured providers
 	interface AITool {
 		id: string;
 		name: string;
 		description: string;
-		provider: string;
+		category: string;
+		available: boolean;
+		providers: string[];
+		active_provider: string | null;
 	}
 
 	interface AIToolCategory {
@@ -368,34 +371,34 @@
 		tools: AITool[];
 	}
 
-	const aiToolCategories: AIToolCategory[] = [
-		{
-			id: 'image',
-			name: 'Image Tools',
-			tools: [
-				{ id: 'image_generation', name: 'Image Generation', description: 'Generate AI images from text prompts (supports 1K-4K, multiple images)', provider: 'Nano Banana' },
-				{ id: 'image_editing', name: 'Image Editing', description: 'Edit existing images - add, remove, or modify elements', provider: 'Nano Banana' },
-				{ id: 'image_reference', name: 'Reference-Based Generation', description: 'Generate images with character/style consistency using reference images', provider: 'Nano Banana' }
-			]
-		},
-		{
-			id: 'video',
-			name: 'Video Tools',
-			tools: [
-				{ id: 'video_generation', name: 'Video Generation', description: 'Generate AI videos from text prompts (4-8 sec)', provider: 'Veo' },
-				{ id: 'image_to_video', name: 'Image to Video', description: 'Animate a still image into a video', provider: 'Veo' },
-				{ id: 'video_extend', name: 'Video Extension', description: 'Extend existing Veo videos by ~7 seconds', provider: 'Veo' },
-				{ id: 'video_bridge', name: 'Frame Bridging', description: 'Generate smooth transitions between two images', provider: 'Veo' }
-			]
-		},
-		{
-			id: 'audio',
-			name: 'Audio Tools',
-			tools: [
-				// Future: { id: 'text_to_speech', name: 'Text to Speech', description: 'Convert text to natural speech', provider: 'ElevenLabs' }
-			]
+	interface AIToolsResponse {
+		tools: AITool[];
+		categories: AIToolCategory[];
+		available_providers: string[];
+		current_image_provider: string | null;
+		current_video_provider: string | null;
+	}
+
+	// Dynamically loaded AI tools from backend
+	let aiToolCategories: AIToolCategory[] = [];
+	let aiToolsLoading = false;
+	let availableProviders: string[] = [];
+
+	// Load available AI tools from backend (based on configured API keys)
+	async function loadAvailableAITools() {
+		aiToolsLoading = true;
+		try {
+			const response = await api.get<AIToolsResponse>('/settings/ai-tools/available');
+			aiToolCategories = response.categories;
+			availableProviders = response.available_providers;
+		} catch (e) {
+			console.error('Failed to load AI tools:', e);
+			// Fallback to empty - tools will show as unavailable
+			aiToolCategories = [];
+			availableProviders = [];
 		}
-	];
+		aiToolsLoading = false;
+	}
 
 	// Track expanded state for AI tool categories
 	let aiToolCategoriesExpanded: Record<string, boolean> = {};
@@ -598,7 +601,8 @@
 				tabs.loadSessions(),
 				tabs.loadProjects(),
 				loadSubagents(),
-				loadTools()
+				loadTools(),
+				loadAvailableAITools()
 			];
 			// Load admin-specific data if user is admin
 			if ($isAdmin) {
@@ -4379,68 +4383,87 @@
 									<!-- AI Tool categories and individual tools -->
 									{#if aiToolSelectionMode === 'custom'}
 										<div class="border-t border-border pt-3 space-y-2">
-											{#each aiToolCategories as category}
-												{#if category.tools.length > 0}
-													{@const categoryToolIds = category.tools.map(t => t.id)}
-													{@const selectedInCategory = categoryToolIds.filter(id => profileForm.enabled_ai_tools.includes(id)).length}
-													{@const isFullySelected = selectedInCategory === categoryToolIds.length}
-													{@const isPartiallySelected = selectedInCategory > 0 && selectedInCategory < categoryToolIds.length}
-													<div class="border border-border rounded-lg overflow-hidden">
-														<!-- Category header -->
-														<div class="w-full px-3 py-2 bg-muted/50 flex items-center gap-2 text-sm text-foreground">
-															<!-- Custom checkbox with indeterminate state -->
-															<button
-																type="button"
-																on:click|stopPropagation={() => toggleAIToolCategory(category)}
-																class="w-4 h-4 rounded flex items-center justify-center transition-colors {isFullySelected ? 'bg-violet-600' : isPartiallySelected ? 'bg-violet-600' : 'bg-muted border border-border'}"
-															>
-																{#if isFullySelected}
-																	<!-- Checkmark icon -->
-																	<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																		<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
+											{#if aiToolsLoading}
+												<div class="text-sm text-muted-foreground text-center py-4">Loading available AI tools...</div>
+											{:else if aiToolCategories.length === 0}
+												<div class="text-sm text-muted-foreground text-center py-4">
+													No AI tools available. Configure API keys in Settings → Integrations.
+												</div>
+											{:else}
+												{#each aiToolCategories as category}
+													{#if category.tools.length > 0}
+														{@const availableTools = category.tools.filter(t => t.available)}
+														{@const categoryToolIds = category.tools.map(t => t.id)}
+														{@const selectedInCategory = categoryToolIds.filter(id => profileForm.enabled_ai_tools.includes(id)).length}
+														{@const isFullySelected = selectedInCategory === categoryToolIds.length}
+														{@const isPartiallySelected = selectedInCategory > 0 && selectedInCategory < categoryToolIds.length}
+														<div class="border border-border rounded-lg overflow-hidden">
+															<!-- Category header -->
+															<div class="w-full px-3 py-2 bg-muted/50 flex items-center gap-2 text-sm text-foreground">
+																<!-- Custom checkbox with indeterminate state -->
+																<button
+																	type="button"
+																	on:click|stopPropagation={() => toggleAIToolCategory(category)}
+																	class="w-4 h-4 rounded flex items-center justify-center transition-colors {isFullySelected ? 'bg-violet-600' : isPartiallySelected ? 'bg-violet-600' : 'bg-muted border border-border'}"
+																>
+																	{#if isFullySelected}
+																		<!-- Checkmark icon -->
+																		<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
+																		</svg>
+																	{:else if isPartiallySelected}
+																		<!-- Minus/dash icon for partial selection -->
+																		<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" />
+																		</svg>
+																	{/if}
+																</button>
+																<button
+																	type="button"
+																	on:click={() => toggleAIToolCategoryExpansion(category.id)}
+																	class="flex-1 flex items-center gap-2 text-left hover:text-foreground/80"
+																>
+																	<span class="flex-1">{category.name}</span>
+																	<span class="text-xs text-muted-foreground">
+																		({availableTools.length}/{category.tools.length} available)
+																	</span>
+																	<svg class="w-4 h-4 transition-transform {aiToolCategoriesExpanded[category.id] ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																		<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 																	</svg>
-																{:else if isPartiallySelected}
-																	<!-- Minus/dash icon for partial selection -->
-																	<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																		<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" />
-																	</svg>
-																{/if}
-															</button>
-															<button
-																type="button"
-																on:click={() => toggleAIToolCategoryExpansion(category.id)}
-																class="flex-1 flex items-center gap-2 text-left hover:text-foreground/80"
-															>
-																<span class="flex-1">{category.name}</span>
-																<span class="text-xs text-muted-foreground">({category.tools.length} tools)</span>
-																<svg class="w-4 h-4 transition-transform {aiToolCategoriesExpanded[category.id] ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-																</svg>
-															</button>
-														</div>
-														<!-- Individual tools -->
-														{#if aiToolCategoriesExpanded[category.id]}
-															<div class="p-2 space-y-1 bg-card">
-																{#each category.tools as tool}
-																	{@const isSelected = profileForm.enabled_ai_tools.includes(tool.id)}
-																	<label class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted/50 cursor-pointer">
-																		<input
-																			type="checkbox"
-																			checked={isSelected}
-																			on:change={() => toggleAITool(tool.id)}
-																			class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring"
-																		/>
-																		<div class="flex-1">
-																			<span class="text-sm text-foreground">{tool.name}</span>
-																			<p class="text-xs text-muted-foreground">{tool.description}</p>
-																		</div>
-																	</label>
-																{/each}
+																</button>
 															</div>
-														{/if}
-													</div>
-												{/if}
-											{/each}
+															<!-- Individual tools -->
+															{#if aiToolCategoriesExpanded[category.id]}
+																<div class="p-2 space-y-1 bg-card">
+																	{#each category.tools as tool}
+																		{@const isSelected = profileForm.enabled_ai_tools.includes(tool.id)}
+																		<label class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted/50 {tool.available ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'}">
+																			<input
+																				type="checkbox"
+																				checked={isSelected}
+																				disabled={!tool.available}
+																				on:change={() => toggleAITool(tool.id)}
+																				class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring disabled:opacity-50"
+																			/>
+																			<div class="flex-1">
+																				<div class="flex items-center gap-2">
+																					<span class="text-sm text-foreground">{tool.name}</span>
+																					{#if !tool.available}
+																						<span class="text-xs px-1.5 py-0.5 bg-amber-500/20 text-amber-600 rounded">No API key</span>
+																					{:else if tool.active_provider}
+																						<span class="text-xs px-1.5 py-0.5 bg-green-500/20 text-green-600 rounded">{tool.active_provider}</span>
+																					{/if}
+																				</div>
+																				<p class="text-xs text-muted-foreground">{tool.description}</p>
+																			</div>
+																		</label>
+																	{/each}
+																</div>
+															{/if}
+														</div>
+													{/if}
+												{/each}
+											{/if}
 										</div>
 
 										<!-- Summary of selected AI tools -->
