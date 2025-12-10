@@ -169,17 +169,8 @@ async def chat_websocket(
             except Exception as e:
                 logger.warning(f"Failed to send WebSocket message: {e}")
 
-    async def run_query(prompt: str, session_id: str, profile_id: str, project_id: Optional[str], overrides: Optional[Dict[str, Any]] = None, images: Optional[list] = None):
-        """Execute query and stream results directly to WebSocket
-
-        Args:
-            prompt: The user's message text
-            session_id: The chat session ID
-            profile_id: The profile to use
-            project_id: Optional project ID
-            overrides: Optional overrides for model, permission_mode, etc.
-            images: Optional list of image attachments for streaming input
-        """
+    async def run_query(prompt: str, session_id: str, profile_id: str, project_id: Optional[str], overrides: Optional[Dict[str, Any]] = None):
+        """Execute query and stream results directly to WebSocket"""
         nonlocal current_session_id
 
         from app.core.query_engine import stream_to_websocket
@@ -195,7 +186,7 @@ async def chat_websocket(
         logger.info(f"Unregistered device {device_id} during streaming to prevent duplicates")
 
         try:
-            logger.info(f"Starting query for session {session_id}, profile={profile_id}, project={project_id}, overrides={overrides}, images={len(images) if images else 0}")
+            logger.info(f"Starting query for session {session_id}, profile={profile_id}, project={project_id}, overrides={overrides}")
             await send_json({"type": "start", "session_id": session_id, "message_id": message_id})
 
             logger.info(f"Calling stream_to_websocket for session {session_id}")
@@ -205,8 +196,7 @@ async def chat_websocket(
                 profile_id=profile_id,
                 project_id=project_id,
                 overrides=overrides,
-                broadcast_func=send_json,  # Pass send_json for permission requests
-                images=images  # Pass images for streaming input with attachments
+                broadcast_func=send_json  # Pass send_json for permission requests
             ):
                 event_type = event.get('type')
                 logger.debug(f"Streaming event for session {session_id}: {event_type}")
@@ -514,13 +504,9 @@ async def chat_websocket(
                         profile_id = data.get("profile", "claude-code")
                         project_id = data.get("project")
                         overrides = data.get("overrides")  # Optional: {model, permission_mode}
-                        # Support image attachments in initial query (streaming input)
-                        # Format: [{"type": "base64", "media_type": "image/png", "data": "..."}]
-                        # Or: [{"type": "url", "url": "https://..."}]
-                        images = data.get("images", [])
 
-                        if not prompt and not images:
-                            await send_json({"type": "error", "message": "Empty prompt (no text or images)"})
+                        if not prompt:
+                            await send_json({"type": "error", "message": "Empty prompt"})
                             continue
 
                         # Create or get session
@@ -549,15 +535,11 @@ async def chat_websocket(
                             await sync_engine.register_device(device_id, session_id, websocket)
                             current_session_id = session_id
 
-                        # Store user message (note images in content if present)
-                        message_content = prompt
-                        if images:
-                            message_content += f" [+{len(images)} image(s)]"
-
+                        # Store user message
                         database.add_session_message(
                             session_id=session_id,
                             role="user",
-                            content=message_content
+                            content=prompt
                         )
 
                         # Broadcast user message to other devices
@@ -565,8 +547,7 @@ async def chat_websocket(
                             session_id=session_id,
                             message={
                                 "role": "user",
-                                "content": message_content,
-                                "has_images": len(images) > 0
+                                "content": prompt
                             },
                             source_device_id=device_id  # Exclude the sender
                         )
@@ -579,11 +560,11 @@ async def chat_websocket(
                             except asyncio.CancelledError:
                                 pass
 
-                        # Start new query task with images for streaming input
+                        # Start new query task
                         # Note: broadcast_stream_start is called inside run_query when actual
                         # streaming begins. This prevents stuck streaming state if query fails early.
                         query_task = asyncio.create_task(
-                            run_query(prompt, session_id, profile_id, project_id, overrides, images=images if images else None)
+                            run_query(prompt, session_id, profile_id, project_id, overrides)
                         )
                         _active_chat_sessions[session_id] = query_task
 
@@ -611,13 +592,9 @@ async def chat_websocket(
                         # This supports "streaming input" - user can send messages while Claude works
                         session_id = data.get("session_id") or current_session_id
                         prompt = data.get("prompt", "").strip()
-                        # Support image attachments in queued messages
-                        # Format: [{"type": "base64", "media_type": "image/png", "data": "..."}]
-                        # Or: [{"type": "url", "url": "https://..."}]
-                        images = data.get("images", [])
 
-                        if not prompt and not images:
-                            await send_json({"type": "error", "message": "Empty message (no prompt or images)"})
+                        if not prompt:
+                            await send_json({"type": "error", "message": "Empty prompt"})
                             continue
 
                         if not session_id:
@@ -626,19 +603,15 @@ async def chat_websocket(
 
                         from app.core.query_engine import queue_user_message, get_queued_message_count
 
-                        # Queue the message with optional images
-                        success = await queue_user_message(session_id, prompt, images=images if images else None)
+                        # Queue the message
+                        success = await queue_user_message(session_id, prompt)
 
                         if success:
                             # Store user message in database
-                            message_content = prompt
-                            if images:
-                                message_content += f" [+{len(images)} image(s)]"
-
                             database.add_session_message(
                                 session_id=session_id,
                                 role="user",
-                                content=message_content
+                                content=prompt
                             )
 
                             # Broadcast user message to other devices
@@ -646,8 +619,7 @@ async def chat_websocket(
                                 session_id=session_id,
                                 message={
                                     "role": "user",
-                                    "content": message_content,
-                                    "has_images": len(images) > 0
+                                    "content": prompt
                                 },
                                 source_device_id=device_id
                             )
@@ -657,10 +629,9 @@ async def chat_websocket(
                                 "type": "message_queued",
                                 "session_id": session_id,
                                 "prompt": prompt,
-                                "has_images": len(images) > 0,
                                 "queue_position": get_queued_message_count(session_id)
                             })
-                            logger.info(f"Queued message for session {session_id} (images: {len(images)})")
+                            logger.info(f"Queued message for session {session_id}")
                         else:
                             await send_json({
                                 "type": "error",
