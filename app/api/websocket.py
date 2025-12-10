@@ -588,18 +588,13 @@ async def chat_websocket(
                                         pass
 
                     elif msg_type == "queue_message":
-                        # Queue a message to be sent to Claude via streaming input
-                        # This implements true streaming input - messages are fed into an
-                        # AsyncGenerator that the SDK consumes in real-time
+                        # Queue a message to be sent to Claude while streaming
+                        # This supports "streaming input" - user can send messages while Claude works
                         session_id = data.get("session_id") or current_session_id
                         prompt = data.get("prompt", "").strip()
-                        # Support image attachments in streaming input
-                        # Format: [{"type": "base64", "media_type": "image/png", "data": "..."}]
-                        # Or: [{"type": "url", "url": "https://..."}]
-                        images = data.get("images", [])
 
-                        if not prompt and not images:
-                            await send_json({"type": "error", "message": "Empty message (no prompt or images)"})
+                        if not prompt:
+                            await send_json({"type": "error", "message": "Empty prompt"})
                             continue
 
                         if not session_id:
@@ -608,20 +603,15 @@ async def chat_websocket(
 
                         from app.core.query_engine import queue_user_message, get_queued_message_count
 
-                        # Queue the message with optional images (streaming input)
-                        success = await queue_user_message(session_id, prompt, images=images if images else None)
+                        # Queue the message
+                        success = await queue_user_message(session_id, prompt)
 
                         if success:
                             # Store user message in database
-                            # Note: Images are stored as metadata, not in content
-                            message_content = prompt
-                            if images:
-                                message_content += f" [+{len(images)} image(s)]"
-
                             database.add_session_message(
                                 session_id=session_id,
                                 role="user",
-                                content=message_content
+                                content=prompt
                             )
 
                             # Broadcast user message to other devices
@@ -629,8 +619,7 @@ async def chat_websocket(
                                 session_id=session_id,
                                 message={
                                     "role": "user",
-                                    "content": message_content,
-                                    "has_images": len(images) > 0
+                                    "content": prompt
                                 },
                                 source_device_id=device_id
                             )
@@ -640,10 +629,9 @@ async def chat_websocket(
                                 "type": "message_queued",
                                 "session_id": session_id,
                                 "prompt": prompt,
-                                "has_images": len(images) > 0,
                                 "queue_position": get_queued_message_count(session_id)
                             })
-                            logger.info(f"Queued streaming input for session {session_id} (images: {len(images)})")
+                            logger.info(f"Queued message for session {session_id}")
                         else:
                             await send_json({
                                 "type": "error",
