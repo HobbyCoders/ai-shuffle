@@ -1506,7 +1506,7 @@
 											</button>
 										</div>
 										<p class="text-[9px] text-muted-foreground mt-1.5">
-											<a href="https://aistudio.google.com/apikey" target="_blank" class="text-primary hover:underline">Get key</a> · Nano Banana, Veo
+											<a href="https://aistudio.google.com/apikey" target="_blank" class="text-primary hover:underline">Get key</a> · Nano Banana, Imagen 4, Veo
 										</p>
 									</div>
 								</div>
@@ -1524,19 +1524,41 @@
 								<!-- Image Generation -->
 								<div class="mb-4">
 									<div class="flex items-center gap-2 mb-2">
-										<span class="text-sm">🖼️</span>
+										<span class="w-5 h-5 bg-purple-500/15 rounded flex items-center justify-center">
+											<svg class="w-3 h-3 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+											</svg>
+										</span>
 										<span class="text-xs font-medium text-foreground">Image Generation</span>
 									</div>
-									<div class="grid grid-cols-2 md:grid-cols-3 gap-2">
+									<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
 										{#each imageModels as model}
 											<button
 												on:click={() => { selectedImageModel = model.id; updateImageModel(); }}
 												disabled={!model.available || updatingImageModel}
-												class="p-2 rounded-lg border text-left transition-all {model.id === imageModel ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/50 hover:bg-muted/50'} {!model.available ? 'opacity-40 cursor-not-allowed' : ''}"
+												class="h-[72px] p-2.5 rounded-lg border text-left transition-all flex flex-col justify-between {model.id === imageModel ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/50 hover:bg-muted/50'} {!model.available ? 'opacity-40 cursor-not-allowed' : ''}"
 											>
-												<div class="text-[10px] font-medium text-foreground truncate">{model.name}</div>
-												<div class="text-[9px] text-muted-foreground">${model.price_per_image}/img</div>
-												<div class="text-[8px] text-muted-foreground/70 truncate">{model.provider_name}</div>
+												<div class="flex items-start justify-between gap-1">
+													<div class="text-[11px] font-medium text-foreground leading-tight">{model.name}</div>
+													<!-- Provider icon -->
+													{#if model.provider === 'google-gemini' || model.provider === 'google-imagen'}
+														<span class="w-4 h-4 bg-blue-500/15 rounded flex-shrink-0 flex items-center justify-center">
+															<svg class="w-2.5 h-2.5 text-blue-400" viewBox="0 0 24 24" fill="currentColor">
+																<path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+															</svg>
+														</span>
+													{:else if model.provider === 'openai-gpt-image'}
+														<span class="w-4 h-4 bg-emerald-500/15 rounded flex-shrink-0 flex items-center justify-center">
+															<svg class="w-2.5 h-2.5 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
+																<path d="M22.28 9.82a5.98 5.98 0 00-.52-4.91 6.05 6.05 0 00-6.51-2.9A6.07 6.07 0 004.98 4.18a5.98 5.98 0 00-4 2.9 6.05 6.05 0 00.74 7.1 5.98 5.98 0 00.51 4.91 6.05 6.05 0 006.51 2.9A5.98 5.98 0 0013.26 24a6.06 6.06 0 005.77-4.21 5.99 5.99 0 004-2.9 6.06 6.06 0 00-.75-7.07z"/>
+															</svg>
+														</span>
+													{/if}
+												</div>
+												<div>
+													<div class="text-[10px] text-primary font-medium">${model.price_per_image}/img</div>
+													<div class="text-[9px] text-muted-foreground truncate">{model.provider_name}</div>
+												</div>
 											</button>
 										{/each}
 									</div>
@@ -1545,19 +1567,41 @@
 								<!-- Video Generation -->
 								<div class="mb-4">
 									<div class="flex items-center gap-2 mb-2">
-										<span class="text-sm">🎬</span>
+										<span class="w-5 h-5 bg-pink-500/15 rounded flex items-center justify-center">
+											<svg class="w-3 h-3 text-pink-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+											</svg>
+										</span>
 										<span class="text-xs font-medium text-foreground">Video Generation</span>
 									</div>
-									<div class="grid grid-cols-2 md:grid-cols-4 gap-2">
+									<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
 										{#each videoModels as model}
 											<button
 												on:click={() => { selectedVideoModel = model.id; saveVideoModel(); }}
 												disabled={!model.available || savingVideoModel}
-												class="p-2 rounded-lg border text-left transition-all {model.id === videoModel ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/50 hover:bg-muted/50'} {!model.available ? 'opacity-40 cursor-not-allowed' : ''}"
+												class="h-[72px] p-2.5 rounded-lg border text-left transition-all flex flex-col justify-between {model.id === videoModel ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/50 hover:bg-muted/50'} {!model.available ? 'opacity-40 cursor-not-allowed' : ''}"
 											>
-												<div class="text-[10px] font-medium text-foreground truncate">{model.name}</div>
-												<div class="text-[9px] text-muted-foreground">${model.price_per_second}/sec</div>
-												<div class="text-[8px] text-muted-foreground/70 truncate">{model.provider_name}</div>
+												<div class="flex items-start justify-between gap-1">
+													<div class="text-[11px] font-medium text-foreground leading-tight">{model.name}</div>
+													<!-- Provider icon -->
+													{#if model.provider === 'google-veo'}
+														<span class="w-4 h-4 bg-blue-500/15 rounded flex-shrink-0 flex items-center justify-center">
+															<svg class="w-2.5 h-2.5 text-blue-400" viewBox="0 0 24 24" fill="currentColor">
+																<path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+															</svg>
+														</span>
+													{:else if model.provider === 'openai-sora'}
+														<span class="w-4 h-4 bg-emerald-500/15 rounded flex-shrink-0 flex items-center justify-center">
+															<svg class="w-2.5 h-2.5 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
+																<path d="M22.28 9.82a5.98 5.98 0 00-.52-4.91 6.05 6.05 0 00-6.51-2.9A6.07 6.07 0 004.98 4.18a5.98 5.98 0 00-4 2.9 6.05 6.05 0 00.74 7.1 5.98 5.98 0 00.51 4.91 6.05 6.05 0 006.51 2.9A5.98 5.98 0 0013.26 24a6.06 6.06 0 005.77-4.21 5.99 5.99 0 004-2.9 6.06 6.06 0 00-.75-7.07z"/>
+															</svg>
+														</span>
+													{/if}
+												</div>
+												<div>
+													<div class="text-[10px] text-primary font-medium">${model.price_per_second}/sec</div>
+													<div class="text-[9px] text-muted-foreground truncate">{model.provider_name}</div>
+												</div>
 											</button>
 										{/each}
 									</div>
@@ -1566,19 +1610,33 @@
 								<!-- Speech-to-Text (STT) -->
 								<div class="mb-4">
 									<div class="flex items-center gap-2 mb-2">
-										<span class="text-sm">🎤</span>
+										<span class="w-5 h-5 bg-amber-500/15 rounded flex items-center justify-center">
+											<svg class="w-3 h-3 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+											</svg>
+										</span>
 										<span class="text-xs font-medium text-foreground">Speech-to-Text</span>
 										<span class="text-[9px] text-muted-foreground">(Voice input)</span>
 									</div>
-									<div class="grid grid-cols-3 gap-2">
+									<div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
 										{#each sttModels as model}
 											<button
 												on:click={() => { selectedSttModel = model.id; saveSttModel(); }}
 												disabled={!model.available || savingSttModel}
-												class="p-2 rounded-lg border text-left transition-all {model.id === currentSttModel ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/50 hover:bg-muted/50'} {!model.available ? 'opacity-40 cursor-not-allowed' : ''}"
+												class="h-[72px] p-2.5 rounded-lg border text-left transition-all flex flex-col justify-between {model.id === currentSttModel ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/50 hover:bg-muted/50'} {!model.available ? 'opacity-40 cursor-not-allowed' : ''}"
 											>
-												<div class="text-[10px] font-medium text-foreground truncate">{model.name}</div>
-												<div class="text-[9px] text-muted-foreground">{model.price_display}</div>
+												<div class="flex items-start justify-between gap-1">
+													<div class="text-[11px] font-medium text-foreground leading-tight">{model.name}</div>
+													<span class="w-4 h-4 bg-emerald-500/15 rounded flex-shrink-0 flex items-center justify-center">
+														<svg class="w-2.5 h-2.5 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
+															<path d="M22.28 9.82a5.98 5.98 0 00-.52-4.91 6.05 6.05 0 00-6.51-2.9A6.07 6.07 0 004.98 4.18a5.98 5.98 0 00-4 2.9 6.05 6.05 0 00.74 7.1 5.98 5.98 0 00.51 4.91 6.05 6.05 0 006.51 2.9A5.98 5.98 0 0013.26 24a6.06 6.06 0 005.77-4.21 5.99 5.99 0 004-2.9 6.06 6.06 0 00-.75-7.07z"/>
+														</svg>
+													</span>
+												</div>
+												<div>
+													<div class="text-[10px] text-primary font-medium">{model.price_display}</div>
+													<div class="text-[9px] text-muted-foreground">OpenAI</div>
+												</div>
 											</button>
 										{/each}
 									</div>
@@ -1588,19 +1646,33 @@
 								<!-- Text-to-Speech (TTS) -->
 								<div>
 									<div class="flex items-center gap-2 mb-2">
-										<span class="text-sm">🔊</span>
+										<span class="w-5 h-5 bg-cyan-500/15 rounded flex items-center justify-center">
+											<svg class="w-3 h-3 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+											</svg>
+										</span>
 										<span class="text-xs font-medium text-foreground">Text-to-Speech</span>
 										<span class="text-[9px] text-muted-foreground">(Read aloud)</span>
 									</div>
-									<div class="grid grid-cols-3 gap-2">
+									<div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
 										{#each ttsModels as model}
 											<button
 												on:click={() => { selectedTtsModel = model.id; saveTtsModel(); }}
 												disabled={!model.available || savingTtsModel}
-												class="p-2 rounded-lg border text-left transition-all {model.id === currentTtsModel ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/50 hover:bg-muted/50'} {!model.available ? 'opacity-40 cursor-not-allowed' : ''}"
+												class="h-[72px] p-2.5 rounded-lg border text-left transition-all flex flex-col justify-between {model.id === currentTtsModel ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/50 hover:bg-muted/50'} {!model.available ? 'opacity-40 cursor-not-allowed' : ''}"
 											>
-												<div class="text-[10px] font-medium text-foreground truncate">{model.name}</div>
-												<div class="text-[9px] text-muted-foreground">{model.price_display}</div>
+												<div class="flex items-start justify-between gap-1">
+													<div class="text-[11px] font-medium text-foreground leading-tight">{model.name}</div>
+													<span class="w-4 h-4 bg-emerald-500/15 rounded flex-shrink-0 flex items-center justify-center">
+														<svg class="w-2.5 h-2.5 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
+															<path d="M22.28 9.82a5.98 5.98 0 00-.52-4.91 6.05 6.05 0 00-6.51-2.9A6.07 6.07 0 004.98 4.18a5.98 5.98 0 00-4 2.9 6.05 6.05 0 00.74 7.1 5.98 5.98 0 00.51 4.91 6.05 6.05 0 006.51 2.9A5.98 5.98 0 0013.26 24a6.06 6.06 0 005.77-4.21 5.99 5.99 0 004-2.9 6.06 6.06 0 00-.75-7.07z"/>
+														</svg>
+													</span>
+												</div>
+												<div>
+													<div class="text-[10px] text-primary font-medium">{model.price_display}</div>
+													<div class="text-[9px] text-muted-foreground">OpenAI</div>
+												</div>
 											</button>
 										{/each}
 									</div>

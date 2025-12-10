@@ -213,6 +213,11 @@ IMAGE_PROVIDERS = {
         "description": "Google's Gemini image generation API",
         "requires_key": "image_api_key"
     },
+    "google-imagen": {
+        "name": "Google Imagen 4",
+        "description": "Google's flagship image generation",
+        "requires_key": "image_api_key"
+    },
     "openai-gpt-image": {
         "name": "OpenAI GPT Image",
         "description": "OpenAI's GPT-4o native image generation",
@@ -236,6 +241,28 @@ IMAGE_MODELS = {
         "price_per_image": 0.10,
         "provider": "google-gemini",
         "capabilities": ["text-to-image", "image-edit", "image-reference"]
+    },
+    # Google Imagen 4 models
+    "imagen-4.0-fast-generate-001": {
+        "name": "Imagen 4 Fast",
+        "description": "Speed-optimized for rapid generation",
+        "price_per_image": 0.02,
+        "provider": "google-imagen",
+        "capabilities": ["text-to-image"]
+    },
+    "imagen-4.0-generate-001": {
+        "name": "Imagen 4",
+        "description": "Flagship quality with superior text rendering",
+        "price_per_image": 0.04,
+        "provider": "google-imagen",
+        "capabilities": ["text-to-image"]
+    },
+    "imagen-4.0-ultra-generate-001": {
+        "name": "Imagen 4 Ultra",
+        "description": "Highest quality with 2K resolution support",
+        "price_per_image": 0.06,
+        "provider": "google-imagen",
+        "capabilities": ["text-to-image"]
     },
     # OpenAI GPT Image models
     "gpt-image-1": {
@@ -968,7 +995,24 @@ VIDEO_PROVIDERS = {
 
 # Available video models by provider
 VIDEO_MODELS = {
-    # Google Veo models
+    # Google Veo 3 models with native audio
+    "veo-3-fast-generate-preview": {
+        "name": "Veo 3 Fast",
+        "description": "Fast video with native audio (dialogue, effects, music)",
+        "price_per_second": 0.40,
+        "provider": "google-veo",
+        "max_duration": 8,
+        "capabilities": ["text-to-video", "image-to-video", "video-with-audio"]
+    },
+    "veo-3-generate-preview": {
+        "name": "Veo 3",
+        "description": "Highest quality video with native audio",
+        "price_per_second": 0.75,
+        "provider": "google-veo",
+        "max_duration": 8,
+        "capabilities": ["text-to-video", "image-to-video", "video-with-audio"]
+    },
+    # Google Veo 3.1 models (no audio)
     "veo-3.1-fast-generate-preview": {
         "name": "Veo 3.1 Fast",
         "description": "Fast video generation - lower latency",
