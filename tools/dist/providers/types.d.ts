@@ -42,7 +42,7 @@ export interface ModelInfo {
 /**
  * Capabilities a model can support
  */
-export type ModelCapability = 'text-to-image' | 'image-edit' | 'image-inpaint' | 'image-variation' | 'image-reference' | 'text-to-video' | 'image-to-video' | 'video-extend' | 'frame-bridge' | 'video-edit';
+export type ModelCapability = 'text-to-image' | 'image-edit' | 'image-inpaint' | 'image-variation' | 'image-reference' | 'text-to-video' | 'image-to-video' | 'video-extend' | 'frame-bridge' | 'video-edit' | 'video-with-audio' | 'text-to-speech' | 'speech-to-text' | 'realtime-voice' | 'video-understanding' | 'image-understanding';
 /**
  * Input for generating an image from text
  */
@@ -279,11 +279,236 @@ export interface ToolEnvironment {
     VIDEO_PROVIDER?: string;
     VIDEO_API_KEY?: string;
     VIDEO_MODEL?: string;
+    AUDIO_PROVIDER?: string;
+    AUDIO_API_KEY?: string;
+    AUDIO_MODEL?: string;
     GEMINI_API_KEY?: string;
     GEMINI_MODEL?: string;
     VEO_MODEL?: string;
     OPENAI_API_KEY?: string;
     GENERATED_IMAGES_DIR?: string;
     GENERATED_VIDEOS_DIR?: string;
+    GENERATED_AUDIO_DIR?: string;
+}
+/**
+ * Input for text-to-speech generation
+ */
+export interface UnifiedTTSInput {
+    /** Text to convert to speech */
+    text: string;
+    /** Voice to use */
+    voice?: string;
+    /** Speech speed (0.25 to 4.0, default 1.0) */
+    speed?: number;
+    /** Output format (mp3, opus, aac, flac, wav, pcm) */
+    response_format?: 'mp3' | 'opus' | 'aac' | 'flac' | 'wav' | 'pcm';
+    /** Instructions for how to speak (for steerable TTS like gpt-4o-mini-tts) */
+    instructions?: string;
+    /** Provider-specific options */
+    [key: string]: any;
+}
+/**
+ * Input for speech-to-text transcription
+ */
+export interface UnifiedSTTInput {
+    /** Path to the audio file */
+    audio_path: string;
+    /** Language code (optional, for language-specific optimizations) */
+    language?: string;
+    /** Prompt to guide transcription (optional) */
+    prompt?: string;
+    /** Output format (json, text, srt, verbose_json, vtt) */
+    response_format?: 'json' | 'text' | 'srt' | 'verbose_json' | 'vtt';
+    /** Include word-level timestamps */
+    timestamp_granularities?: Array<'word' | 'segment'>;
+    /** Provider-specific options */
+    [key: string]: any;
+}
+/**
+ * Result from TTS generation
+ */
+export interface TTSResult {
+    success: boolean;
+    /** URL to access the audio (for playback in chat) */
+    audio_url?: string;
+    /** Local file path where audio was saved */
+    file_path?: string;
+    /** Filename of the generated audio */
+    filename?: string;
+    /** MIME type (e.g., 'audio/mpeg') */
+    mime_type?: string;
+    /** Duration in seconds */
+    duration_seconds?: number;
+    /** Error message if failed */
+    error?: string;
+}
+/**
+ * Result from STT transcription
+ */
+export interface STTResult {
+    success: boolean;
+    /** Transcribed text */
+    text?: string;
+    /** Detected language */
+    language?: string;
+    /** Duration of audio in seconds */
+    duration_seconds?: number;
+    /** Word-level timestamps (if requested) */
+    words?: Array<{
+        word: string;
+        start: number;
+        end: number;
+    }>;
+    /** Segment-level info (if verbose) */
+    segments?: Array<{
+        id: number;
+        text: string;
+        start: number;
+        end: number;
+    }>;
+    /** Error message if failed */
+    error?: string;
+}
+/**
+ * Audio generation/transcription provider interface
+ */
+export interface AudioProvider {
+    /** Unique provider identifier */
+    readonly id: string;
+    /** Human-readable provider name */
+    readonly name: string;
+    /** Available models for this provider */
+    readonly models: ModelInfo[];
+    /**
+     * Generate speech from text
+     */
+    textToSpeech?(input: UnifiedTTSInput, credentials: ProviderCredentials, model: string): Promise<TTSResult>;
+    /**
+     * Transcribe speech to text
+     */
+    speechToText?(input: UnifiedSTTInput, credentials: ProviderCredentials, model: string): Promise<STTResult>;
+    /**
+     * Validate provider credentials
+     */
+    validateCredentials(credentials: ProviderCredentials): Promise<{
+        valid: boolean;
+        error?: string;
+    }>;
+}
+/**
+ * Input for video understanding/analysis
+ */
+export interface UnifiedVideoAnalysisInput {
+    /** Path to the video file or URL */
+    video_path: string;
+    /** Question or prompt about the video */
+    prompt: string;
+    /** Timestamp to start analysis (in seconds) */
+    start_time?: number;
+    /** Timestamp to end analysis (in seconds) */
+    end_time?: number;
+    /** Provider-specific options */
+    [key: string]: any;
+}
+/**
+ * Result from video analysis
+ */
+export interface VideoAnalysisResult {
+    success: boolean;
+    /** Analysis response/answer */
+    response?: string;
+    /** Detected scenes or segments */
+    scenes?: Array<{
+        start_time: number;
+        end_time: number;
+        description: string;
+    }>;
+    /** Extracted transcription (if audio present) */
+    transcript?: string;
+    /** Video duration */
+    duration_seconds?: number;
+    /** Error message if failed */
+    error?: string;
+}
+/**
+ * Video analysis provider interface
+ */
+export interface VideoAnalysisProvider {
+    /** Unique provider identifier */
+    readonly id: string;
+    /** Human-readable provider name */
+    readonly name: string;
+    /** Available models for this provider */
+    readonly models: ModelInfo[];
+    /**
+     * Analyze video content and answer questions
+     */
+    analyzeVideo(input: UnifiedVideoAnalysisInput, credentials: ProviderCredentials, model: string): Promise<VideoAnalysisResult>;
+    /**
+     * Validate provider credentials
+     */
+    validateCredentials(credentials: ProviderCredentials): Promise<{
+        valid: boolean;
+        error?: string;
+    }>;
+}
+/**
+ * Configuration for realtime voice session
+ */
+export interface RealtimeSessionConfig {
+    /** Voice to use */
+    voice?: string;
+    /** System instructions for the conversation */
+    instructions?: string;
+    /** Input audio format */
+    input_audio_format?: 'pcm16' | 'g711_ulaw' | 'g711_alaw';
+    /** Output audio format */
+    output_audio_format?: 'pcm16' | 'g711_ulaw' | 'g711_alaw';
+    /** Enable input audio transcription */
+    input_audio_transcription?: boolean;
+    /** Turn detection mode */
+    turn_detection?: 'server_vad' | 'none';
+    /** Temperature for responses */
+    temperature?: number;
+    /** Provider-specific options */
+    [key: string]: any;
+}
+/**
+ * Result from creating a realtime session
+ */
+export interface RealtimeSessionResult {
+    success: boolean;
+    /** Session ID for connection */
+    session_id?: string;
+    /** WebSocket URL to connect to */
+    websocket_url?: string;
+    /** Token for authentication */
+    token?: string;
+    /** Expiration time */
+    expires_at?: string;
+    /** Error message if failed */
+    error?: string;
+}
+/**
+ * Realtime voice provider interface
+ */
+export interface RealtimeVoiceProvider {
+    /** Unique provider identifier */
+    readonly id: string;
+    /** Human-readable provider name */
+    readonly name: string;
+    /** Available models for this provider */
+    readonly models: ModelInfo[];
+    /**
+     * Create a realtime voice session
+     */
+    createSession(config: RealtimeSessionConfig, credentials: ProviderCredentials, model: string): Promise<RealtimeSessionResult>;
+    /**
+     * Validate provider credentials
+     */
+    validateCredentials(credentials: ProviderCredentials): Promise<{
+        valid: boolean;
+        error?: string;
+    }>;
 }
 //# sourceMappingURL=types.d.ts.map

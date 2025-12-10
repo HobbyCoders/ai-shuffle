@@ -11,6 +11,9 @@
 class ProviderRegistry {
     imageProviders = new Map();
     videoProviders = new Map();
+    audioProviders = new Map();
+    videoAnalysisProviders = new Map();
+    realtimeProviders = new Map();
     // ============================================================================
     // Registration
     // ============================================================================
@@ -32,6 +35,33 @@ class ProviderRegistry {
         }
         this.videoProviders.set(provider.id, provider);
     }
+    /**
+     * Register an audio provider
+     */
+    registerAudioProvider(provider) {
+        if (this.audioProviders.has(provider.id)) {
+            console.warn(`Audio provider '${provider.id}' is already registered. Overwriting.`);
+        }
+        this.audioProviders.set(provider.id, provider);
+    }
+    /**
+     * Register a video analysis provider
+     */
+    registerVideoAnalysisProvider(provider) {
+        if (this.videoAnalysisProviders.has(provider.id)) {
+            console.warn(`Video analysis provider '${provider.id}' is already registered. Overwriting.`);
+        }
+        this.videoAnalysisProviders.set(provider.id, provider);
+    }
+    /**
+     * Register a realtime voice provider
+     */
+    registerRealtimeProvider(provider) {
+        if (this.realtimeProviders.has(provider.id)) {
+            console.warn(`Realtime provider '${provider.id}' is already registered. Overwriting.`);
+        }
+        this.realtimeProviders.set(provider.id, provider);
+    }
     // ============================================================================
     // Retrieval
     // ============================================================================
@@ -48,6 +78,24 @@ class ProviderRegistry {
         return this.videoProviders.get(id);
     }
     /**
+     * Get an audio provider by ID
+     */
+    getAudioProvider(id) {
+        return this.audioProviders.get(id);
+    }
+    /**
+     * Get a video analysis provider by ID
+     */
+    getVideoAnalysisProvider(id) {
+        return this.videoAnalysisProviders.get(id);
+    }
+    /**
+     * Get a realtime voice provider by ID
+     */
+    getRealtimeProvider(id) {
+        return this.realtimeProviders.get(id);
+    }
+    /**
      * List all registered image providers
      */
     listImageProviders() {
@@ -58,6 +106,24 @@ class ProviderRegistry {
      */
     listVideoProviders() {
         return Array.from(this.videoProviders.values());
+    }
+    /**
+     * List all registered audio providers
+     */
+    listAudioProviders() {
+        return Array.from(this.audioProviders.values());
+    }
+    /**
+     * List all registered video analysis providers
+     */
+    listVideoAnalysisProviders() {
+        return Array.from(this.videoAnalysisProviders.values());
+    }
+    /**
+     * List all registered realtime providers
+     */
+    listRealtimeProviders() {
+        return Array.from(this.realtimeProviders.values());
     }
     // ============================================================================
     // Model Discovery
@@ -137,20 +203,37 @@ export const registry = new ProviderRegistry();
 // ============================================================================
 // Import and register all providers
 // These imports will trigger provider registration via side effects
+// Image providers
 import { googleGeminiProvider } from './image/google-gemini.js';
+import { googleImagenProvider } from './image/google-imagen.js';
 import { openaiGptImageProvider } from './image/openai-gpt-image.js';
+// Video providers
 import { googleVeoProvider } from './video/google-veo.js';
+import { googleGeminiVideoProvider } from './video/google-gemini-video.js';
 import { openaiSoraProvider } from './video/openai-sora.js';
+// Audio providers
+import { openaiAudioProvider } from './audio/openai-audio.js';
+// Realtime providers
+import { openaiRealtimeProvider } from './realtime/openai-realtime.js';
 // Register image providers
 registry.registerImageProvider(googleGeminiProvider);
+registry.registerImageProvider(googleImagenProvider);
 registry.registerImageProvider(openaiGptImageProvider);
 // Register video providers
 registry.registerVideoProvider(googleVeoProvider);
 registry.registerVideoProvider(openaiSoraProvider);
+// Register video analysis providers
+registry.registerVideoAnalysisProvider(googleGeminiVideoProvider);
+// Register audio providers
+registry.registerAudioProvider(openaiAudioProvider);
+// Register realtime providers
+registry.registerRealtimeProvider(openaiRealtimeProvider);
 // Future providers:
 // import { stabilityAiProvider } from './image/stability-ai.js';
 // import { runwayMlProvider } from './video/runway-ml.js';
+// import { elevenlabsProvider } from './audio/elevenlabs.js';
 // registry.registerImageProvider(stabilityAiProvider);
 // registry.registerVideoProvider(runwayMlProvider);
+// registry.registerAudioProvider(elevenlabsProvider);
 export default registry;
 //# sourceMappingURL=registry.js.map

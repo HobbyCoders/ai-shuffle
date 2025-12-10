@@ -6,39 +6,64 @@
  *
  * ## Available Tools
  *
- * ### Image Generation (Nano Banana)
- * Generate images using Google Gemini's image models.
+ * ### Image Generation (Nano Banana / Imagen 4)
+ * Generate images using Google Gemini, Imagen 4, or OpenAI GPT Image.
  * ```typescript
- * import { generateImage } from './tools/image-generation/generateImage.js';
+ * import { generateImage } from '/opt/ai-tools/dist/image-generation/generateImage.js';
  * const result = await generateImage({ prompt: 'A sunset over mountains' });
  * ```
  *
- * ### Image Editing (Nano Banana)
- * Edit existing images using Google Gemini's image models.
+ * ### Image Editing
+ * Edit existing images using AI models.
  * ```typescript
- * import { editImage } from './tools/image-generation/editImage.js';
+ * import { editImage } from '/opt/ai-tools/dist/image-generation/editImage.js';
  * const result = await editImage({
  *   prompt: 'Add a rainbow in the sky',
  *   image_path: '/path/to/image.png'
  * });
  * ```
  *
- * ### Video Generation (Veo)
- * Generate videos using Google Veo models.
+ * ### Video Generation (Veo 3 / Veo 3.1 / Sora)
+ * Generate videos with optional native audio using Veo 3 or Sora.
  * ```typescript
- * import { generateVideo } from './tools/video-generation/generateVideo.js';
+ * import { generateVideo } from '/opt/ai-tools/dist/video-generation/generateVideo.js';
  * const result = await generateVideo({
  *   prompt: 'A cat playing with yarn',
  *   duration: 8,
- *   aspect_ratio: '16:9'
+ *   aspect_ratio: '16:9',
+ *   model: 'veo-3-fast-generate-preview'  // For video with audio
  * });
  * ```
  *
- * ### Voice-to-Text (OpenAI Whisper)
- * Transcribe audio to text using OpenAI's Whisper API.
+ * ### Text-to-Speech (OpenAI TTS)
+ * Convert text to natural speech.
  * ```typescript
- * import { transcribeAudio } from './tools/voice-to-text/transcribe.js';
- * const result = await transcribeAudio({ audioPath: '/path/to/audio.mp3' });
+ * import { textToSpeech } from '/opt/ai-tools/dist/audio-generation/textToSpeech.js';
+ * const result = await textToSpeech({
+ *   text: 'Hello, world!',
+ *   voice: 'alloy',
+ *   instructions: 'Speak in a friendly, upbeat tone'
+ * });
+ * ```
+ *
+ * ### Speech-to-Text (GPT-4o Transcribe)
+ * Transcribe audio to text with improved accuracy.
+ * ```typescript
+ * import { speechToText } from '/opt/ai-tools/dist/audio-generation/speechToText.js';
+ * const result = await speechToText({
+ *   audio_path: '/path/to/audio.mp3',
+ *   language: 'en'
+ * });
+ * ```
+ *
+ * ### Video Analysis (Gemini)
+ * Analyze video content and answer questions.
+ * ```typescript
+ * import { analyzeVideo } from '/opt/ai-tools/dist/video-analysis/analyzeVideo.js';
+ * const result = await analyzeVideo({
+ *   video_path: '/path/to/video.mp4',
+ *   prompt: 'Describe what happens in this video'
+ * });
  * ```
  *
  * ## How to Use
@@ -62,8 +87,8 @@
 // Re-export all tools for convenience
 export * as imageGeneration from './image-generation/index.js';
 export * as videoGeneration from './video-generation/index.js';
-// Note: voice-to-text module will be available in a future release
-// export * as voiceToText from './voice-to-text/index.js';
+export * as audioGeneration from './audio-generation/index.js';
+export * as videoAnalysis from './video-analysis/index.js';
 // Export the client utilities
 export { callTool, getTool, uploadTool, getApiBaseUrl } from './client.js';
 //# sourceMappingURL=index.js.map

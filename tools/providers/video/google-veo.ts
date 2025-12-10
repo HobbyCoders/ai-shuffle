@@ -188,6 +188,34 @@ export const googleVeoProvider: VideoProvider = {
   id: 'google-veo',
   name: 'Google Veo',
   models: [
+    // Veo 3 models with native audio generation
+    {
+      id: 'veo-3-fast-generate-preview',
+      name: 'Veo 3 Fast',
+      description: 'Fast video with native audio (dialogue, effects, music) - ~$0.40/second',
+      capabilities: ['text-to-video', 'image-to-video', 'video-with-audio'],
+      pricing: { unit: 'second', price: 0.40 },
+      constraints: {
+        minDuration: 4,
+        maxDuration: 8,
+        supportedResolutions: ['720p', '1080p'],
+        supportedAspectRatios: ['16:9', '9:16']
+      }
+    },
+    {
+      id: 'veo-3-generate-preview',
+      name: 'Veo 3',
+      description: 'Highest quality video with native audio - ~$0.75/second',
+      capabilities: ['text-to-video', 'image-to-video', 'video-with-audio'],
+      pricing: { unit: 'second', price: 0.75 },
+      constraints: {
+        minDuration: 4,
+        maxDuration: 8,
+        supportedResolutions: ['720p', '1080p'],
+        supportedAspectRatios: ['16:9', '9:16']
+      }
+    },
+    // Veo 3.1 models without audio
     {
       id: 'veo-3.1-fast-generate-preview',
       name: 'Veo 3.1 Fast',

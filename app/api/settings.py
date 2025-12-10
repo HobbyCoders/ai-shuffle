@@ -1029,7 +1029,7 @@ AI_TOOLS = {
         "name": "Image Generation",
         "description": "Generate AI images from text prompts (supports 1K-4K, multiple images)",
         "category": "image",
-        "providers": ["google-gemini", "openai-gpt-image"]  # Works with either
+        "providers": ["google-gemini", "google-imagen", "openai-gpt-image"]
     },
     "image_editing": {
         "name": "Image Editing",
@@ -1050,6 +1050,12 @@ AI_TOOLS = {
         "category": "video",
         "providers": ["google-veo", "openai-sora"]
     },
+    "video_with_audio": {
+        "name": "Video with Audio",
+        "description": "Generate video with native audio (dialogue, effects, music) using Veo 3",
+        "category": "video",
+        "providers": ["google-veo"]  # Veo 3 models only
+    },
     "image_to_video": {
         "name": "Image to Video",
         "description": "Animate a still image into a video",
@@ -1067,15 +1073,46 @@ AI_TOOLS = {
         "description": "Generate smooth transitions between two images",
         "category": "video",
         "providers": ["google-veo"]  # Only Veo supports this
+    },
+    # Audio tools
+    "text_to_speech": {
+        "name": "Text-to-Speech",
+        "description": "Convert text to natural speech with 11 voices (gpt-4o-mini-tts)",
+        "category": "audio",
+        "providers": ["openai-audio"]
+    },
+    "speech_to_text": {
+        "name": "Speech-to-Text",
+        "description": "Transcribe audio to text with high accuracy (gpt-4o-transcribe)",
+        "category": "audio",
+        "providers": ["openai-audio"]
+    },
+    # Analysis tools
+    "video_understanding": {
+        "name": "Video Understanding",
+        "description": "Analyze videos up to 2 hours and answer questions about content",
+        "category": "analysis",
+        "providers": ["google-gemini-video"]
+    },
+    # Realtime tools
+    "realtime_voice": {
+        "name": "Realtime Voice",
+        "description": "Live speech-to-speech conversations (gpt-realtime) - requires WebSocket",
+        "category": "realtime",
+        "providers": ["openai-realtime"]
     }
 }
 
 # Map providers to their required API key
 PROVIDER_KEY_MAP = {
     "google-gemini": "image_api_key",
+    "google-imagen": "image_api_key",
     "openai-gpt-image": "openai_api_key",
     "google-veo": "image_api_key",
-    "openai-sora": "openai_api_key"
+    "openai-sora": "openai_api_key",
+    "openai-audio": "openai_api_key",
+    "google-gemini-video": "image_api_key",
+    "openai-realtime": "openai_api_key"
 }
 
 
@@ -1095,10 +1132,14 @@ async def get_available_ai_tools(token: str = Depends(require_auth)):
     available_providers = set()
     if image_api_key:
         available_providers.add("google-gemini")
+        available_providers.add("google-imagen")
         available_providers.add("google-veo")
+        available_providers.add("google-gemini-video")
     if openai_key:
         available_providers.add("openai-gpt-image")
         available_providers.add("openai-sora")
+        available_providers.add("openai-audio")
+        available_providers.add("openai-realtime")
 
     # Get current configured providers
     current_image_provider = database.get_system_setting("image_provider")
