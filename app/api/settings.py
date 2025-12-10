@@ -1263,11 +1263,11 @@ AI_TOOLS = {
         "category": "video",
         "providers": ["google-veo"]  # Only Veo supports this
     },
-    # Analysis tools
+    # Video analysis (part of video tools)
     "video_understanding": {
         "name": "Video Understanding",
         "description": "Analyze videos up to 2 hours and answer questions about content",
-        "category": "analysis",
+        "category": "video",
         "providers": ["google-gemini-video"]
     }
 }
