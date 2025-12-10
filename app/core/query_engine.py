@@ -198,8 +198,6 @@ class SessionState:
     agents_dir: Optional[Path] = None  # Path to .claude/agents/ directory
     # Streaming input support - queue for messages to send while Claude is working
     message_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
-    # Event to signal the streaming input generator to stop
-    generator_stop_event: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 # Track active sessions - key is our session_id, value is SessionState
@@ -306,40 +304,27 @@ def _build_message_content(streaming_msg: StreamingInputMessage) -> Any:
     return content_blocks
 
 
-def create_streaming_input_generator(
-    initial_prompt: str,
-    initial_images: Optional[list],
-    message_queue: asyncio.Queue,
-    stop_event: asyncio.Event
+def create_single_message_generator(
+    prompt: str,
+    images: Optional[list] = None
 ) -> AsyncGenerator:
     """
-    Create an AsyncGenerator for TRUE streaming input with the Claude SDK.
+    Create an AsyncGenerator that yields a single message to the Claude SDK.
 
-    This is the correct streaming input implementation per the SDK documentation.
-    The generator:
-    1. Yields the initial message immediately
-    2. Keeps running and waits for more messages from the queue
-    3. Yields queued messages to the SDK IN REAL-TIME while Claude is working
-    4. Stops when the stop_event is set
-
-    This enables the streaming input pattern where users can queue messages
-    that are processed by Claude as they arrive, NOT after each response completes.
+    This wraps the initial prompt (and optional images) in the generator format
+    required by the SDK for streaming input with image support.
 
     Args:
-        initial_prompt: The first message text
-        initial_images: Optional images for the first message
-        message_queue: asyncio.Queue where new StreamingInputMessage objects are pushed
-        stop_event: asyncio.Event that signals the generator to stop
+        prompt: The message text
+        images: Optional images to attach
 
     Yields:
-        Message dictionaries in SDK format, continuously as they're queued
+        Single message dictionary in SDK format
     """
     async def generator():
-        # First, yield the initial message
-        msg = StreamingInputMessage(content=initial_prompt, images=initial_images or [])
+        msg = StreamingInputMessage(content=prompt, images=images or [])
         content = _build_message_content(msg)
 
-        logger.info(f"Streaming input: yielding initial message (images: {len(initial_images or [])})")
         yield {
             "type": "user",
             "message": {
@@ -347,41 +332,6 @@ def create_streaming_input_generator(
                 "content": content
             }
         }
-
-        # Now continuously wait for and yield queued messages
-        # This is the key difference from the old implementation - we don't exit!
-        while not stop_event.is_set():
-            try:
-                # Wait for a message with a short timeout to check stop_event periodically
-                streaming_msg = await asyncio.wait_for(
-                    message_queue.get(),
-                    timeout=0.1
-                )
-
-                # Build and yield the queued message immediately
-                content = _build_message_content(streaming_msg)
-                logger.info(f"Streaming input: yielding queued message '{streaming_msg.content[:50]}...' (images: {len(streaming_msg.images)})")
-
-                yield {
-                    "type": "user",
-                    "message": {
-                        "role": "user",
-                        "content": content
-                    }
-                }
-
-            except asyncio.TimeoutError:
-                # No message yet, continue waiting (check stop_event on next iteration)
-                continue
-            except asyncio.CancelledError:
-                # Generator was cancelled, exit cleanly
-                logger.info("Streaming input generator cancelled")
-                break
-            except Exception as e:
-                logger.error(f"Streaming input generator error: {e}")
-                break
-
-        logger.info("Streaming input generator stopped")
 
     return generator()
 
@@ -2408,18 +2358,10 @@ async def stream_to_websocket(
     include_partial = options.include_partial_messages  # Track if streaming events are enabled
 
     try:
-        # Send the query to Claude using TRUE streaming input format
-        # This creates a continuous generator that:
-        # 1. Yields the initial message with optional images
-        # 2. Keeps running and yields queued messages IN REAL-TIME as they arrive
-        # 3. Messages are processed by Claude as they're yielded, not after responses complete
-        # This is the correct implementation per the SDK streaming input documentation
-        message_gen = create_streaming_input_generator(
-            initial_prompt=prompt,
-            initial_images=images,
-            message_queue=state.message_queue,
-            stop_event=state.generator_stop_event
-        )
+        # Send the initial query to Claude using streaming input format
+        # This yields a single message with optional images
+        # Additional queued messages are processed sequentially after each response
+        message_gen = create_single_message_generator(prompt, images)
         await state.client.query(message_gen)
 
         async for message in state.client.receive_response():
@@ -2734,9 +2676,114 @@ async def stream_to_websocket(
                     metadata["cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                     metadata["cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
 
-        # NOTE: With TRUE streaming input, queued messages are automatically yielded
-        # to the SDK by the continuous generator. We no longer need to process them
-        # separately after each response - they're handled in real-time!
+        # Process any queued messages (streaming input)
+        # Messages queued via message_queue while Claude was responding
+        while not state.message_queue.empty() and not interrupted and not state.interrupt_requested:
+            try:
+                next_msg = state.message_queue.get_nowait()
+                # Handle both StreamingInputMessage and plain strings for backwards compatibility
+                if isinstance(next_msg, StreamingInputMessage):
+                    next_prompt = next_msg.content
+                    next_images = next_msg.images
+                else:
+                    next_prompt = str(next_msg)
+                    next_images = None
+                logger.info(f"[WS] Processing queued message for session {session_id}: {next_prompt[:50]}... (images: {len(next_images) if next_images else 0})")
+
+                # Notify frontend that we're processing a queued message
+                yield {
+                    "type": "queued_message_processing",
+                    "prompt": next_prompt,
+                    "has_images": bool(next_images)
+                }
+
+                # Send the queued message to Claude using generator format (supports images)
+                queued_gen = create_single_message_generator(next_prompt, next_images)
+                await state.client.query(queued_gen)
+
+                # Process the response for this queued message
+                async for queued_message in state.client.receive_response():
+                    # Check for interrupt
+                    if state.interrupt_requested:
+                        logger.info(f"[WS] Interrupt during queued message processing for session {session_id}")
+                        interrupted = True
+                        break
+
+                    # Handle the same message types as the main loop
+                    if isinstance(queued_message, AssistantMessage):
+                        for block in queued_message.content:
+                            if isinstance(block, TextBlock):
+                                response_text.append(block.text)
+                                if not include_partial:
+                                    yield {"type": "chunk", "content": block.text}
+                            elif isinstance(block, ToolUseBlock):
+                                tool_id = getattr(block, 'id', None)
+                                tool_input = block.input or {}
+                                tool_messages.append({
+                                    "type": "tool_use",
+                                    "name": block.name,
+                                    "tool_id": tool_id,
+                                    "input": tool_input
+                                })
+                                yield {
+                                    "type": "tool_use",
+                                    "name": block.name,
+                                    "id": tool_id,
+                                    "input": tool_input
+                                }
+                            elif isinstance(block, ToolResultBlock):
+                                output = str(block.content)[:2000]
+                                tool_use_id = getattr(block, 'tool_use_id', None)
+                                tool_messages.append({
+                                    "type": "tool_result",
+                                    "name": getattr(block, 'name', 'unknown'),
+                                    "tool_id": tool_use_id,
+                                    "output": output
+                                })
+                                yield {
+                                    "type": "tool_result",
+                                    "name": getattr(block, 'name', 'unknown'),
+                                    "tool_use_id": tool_use_id,
+                                    "output": output,
+                                    "is_error": getattr(block, 'is_error', False)
+                                }
+
+                    elif isinstance(queued_message, StreamEvent):
+                        event = queued_message.event
+                        event_type = event.get("type") if event else None
+                        if event_type == "content_block_delta":
+                            delta = event.get("delta", {})
+                            delta_type = delta.get("type")
+                            if delta_type == "text_delta" and delta.get("text"):
+                                yield {
+                                    "type": "stream_delta",
+                                    "delta_type": "text",
+                                    "content": delta["text"],
+                                    "index": event.get("index", 0)
+                                }
+                            elif delta_type == "input_json_delta" and delta.get("partial_json"):
+                                yield {
+                                    "type": "stream_delta",
+                                    "delta_type": "tool_input",
+                                    "content": delta["partial_json"],
+                                    "index": event.get("index", 0)
+                                }
+
+                    elif isinstance(queued_message, ResultMessage):
+                        # Accumulate metadata from queued message processing
+                        metadata["duration_ms"] = metadata.get("duration_ms", 0) + queued_message.duration_ms
+                        metadata["num_turns"] = metadata.get("num_turns", 0) + queued_message.num_turns
+                        if queued_message.total_cost_usd:
+                            metadata["total_cost_usd"] = metadata.get("total_cost_usd", 0) + queued_message.total_cost_usd
+                        if queued_message.usage:
+                            metadata["tokens_in"] = metadata.get("tokens_in", 0) + queued_message.usage.get("input_tokens", 0)
+                            metadata["tokens_out"] = metadata.get("tokens_out", 0) + queued_message.usage.get("output_tokens", 0)
+                            metadata["cache_creation_tokens"] = metadata.get("cache_creation_tokens", 0) + queued_message.usage.get("cache_creation_input_tokens", 0)
+                            metadata["cache_read_tokens"] = metadata.get("cache_read_tokens", 0) + queued_message.usage.get("cache_read_input_tokens", 0)
+                        break  # Exit inner loop on ResultMessage
+
+            except asyncio.QueueEmpty:
+                break  # No more queued messages
 
     except asyncio.CancelledError:
         interrupted = True
@@ -2750,14 +2797,10 @@ async def stream_to_websocket(
         return
 
     finally:
-        # Stop the streaming input generator
-        state.generator_stop_event.set()
         # Mark as not streaming and reset interrupt flag
         state.is_streaming = False
         state.interrupt_requested = False
         state.last_activity = datetime.now()
-        # Clear the stop event for next session use
-        state.generator_stop_event.clear()
 
     # Update session in database - always update title to the last user message
     title = prompt[:50].strip()
