@@ -3381,7 +3381,7 @@
 											<span class="font-semibold text-sm text-foreground">You</span>
 											<span class="text-xs text-muted-foreground">{formatTime()}</span>
 										</div>
-										<div class="bg-card border border-border rounded-lg p-4 shadow-s overflow-hidden">
+										<div class="overflow-hidden">
 											<p class="whitespace-pre-wrap break-words overflow-wrap-anywhere text-foreground">{message.content}</p>
 										</div>
 									</div>
@@ -3501,7 +3501,7 @@
 												</div>
 											{/if}
 										</div>
-										<div class="bg-card border border-border rounded-lg p-4 shadow-s overflow-hidden">
+										<div class="overflow-hidden">
 											<div class="prose prose-sm max-w-none break-words overflow-x-auto">
 												{#if message.content}
 													{@html renderMarkdown(message.content)}
