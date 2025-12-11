@@ -99,8 +99,8 @@
 		{/if}
 	</button>
 
-	<!-- Desktop: Hover dropdown (hidden on mobile) -->
-	<div class="hidden sm:block absolute right-0 top-full mt-1 w-52 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+	<!-- Desktop: Hover dropdown (hidden on mobile) - positioned fixed to viewport right edge with margin -->
+	<div class="hidden sm:block fixed top-14 right-4 w-52 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
 		<div class="py-2 px-3 space-y-2">
 			<!-- Status -->
 			<div class="flex items-center justify-between text-xs pb-1 border-b border-border">
