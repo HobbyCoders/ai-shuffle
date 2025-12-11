@@ -159,6 +159,8 @@ export interface Session {
 	cache_read_tokens: number;  // Tokens read from cache (doesn't count toward context)
 	context_tokens: number;  // Current context window size (input + cache_creation + cache_read)
 	turn_count: number;
+	first_user_message: string | null;  // Preview of first user message (used as title)
+	last_assistant_message: string | null;  // Preview of last assistant response
 	created_at: string;
 	updated_at: string;
 }

@@ -236,6 +236,16 @@ def _create_schema(cursor: sqlite3.Cursor):
     except sqlite3.OperationalError:
         pass  # Column already exists
 
+    # Add message preview columns to sessions (migration for existing DBs)
+    try:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN first_user_message TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN last_assistant_message TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
     # Login attempts tracking for brute force protection
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS login_attempts (
@@ -766,7 +776,9 @@ def update_session(
     cost_increment: float = 0,
     tokens_in_increment: int = 0,
     tokens_out_increment: int = 0,
-    turn_increment: int = 0
+    turn_increment: int = 0,
+    first_user_message: Optional[str] = None,
+    last_assistant_message: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     """Update a session with usage stats"""
     updates = ["updated_at = ?"]
@@ -793,6 +805,12 @@ def update_session(
     if turn_increment != 0:
         updates.append("turn_count = turn_count + ?")
         values.append(turn_increment)
+    if first_user_message is not None:
+        updates.append("first_user_message = ?")
+        values.append(first_user_message[:500] if first_user_message else None)  # Truncate to 500 chars
+    if last_assistant_message is not None:
+        updates.append("last_assistant_message = ?")
+        values.append(last_assistant_message[:500] if last_assistant_message else None)  # Truncate to 500 chars
 
     values.append(session_id)
 

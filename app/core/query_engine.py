@@ -1276,6 +1276,13 @@ async def execute_query(
         metadata=metadata
     )
 
+    # Update last assistant message preview for session card display
+    if full_response:
+        database.update_session(
+            session_id=session_id,
+            last_assistant_message=full_response[:200].strip()
+        )
+
     # Log usage
     database.log_usage(
         session_id=session_id,
@@ -1351,6 +1358,11 @@ async def stream_query(
             api_user_id=api_user_id
         )
         is_new_session = True
+        # Store first user message preview for session card display
+        database.update_session(
+            session_id=session_id,
+            first_user_message=prompt[:200].strip()
+        )
         logger.info(f"Created new session {session_id} with title: {title}")
 
     # Store user message and broadcast to other devices
@@ -1659,6 +1671,13 @@ async def stream_query(
             content=full_response + ("\n[Interrupted]" if interrupted else ""),
             metadata=metadata
         )
+
+        # Update last assistant message preview for session card display
+        if full_response:
+            database.update_session(
+                session_id=session_id,
+                last_assistant_message=full_response[:200].strip()
+            )
 
         # Log stream end for polling fallback
         database.add_sync_log(
@@ -2013,6 +2032,13 @@ async def _run_background_query(
             content=full_response + ("\n[Interrupted]" if interrupted else ""),
             metadata=metadata
         )
+
+        # Update last assistant message preview for session card display
+        if full_response:
+            database.update_session(
+                session_id=session_id,
+                last_assistant_message=full_response[:200].strip()
+            )
 
         # Log stream end for polling fallback
         database.add_sync_log(
@@ -2906,6 +2932,13 @@ async def stream_to_websocket(
             content=full_response + ("\n\n[Interrupted]" if interrupted else ""),
             metadata=metadata
         )
+
+        # Update last assistant message preview for session card display
+        if full_response:
+            database.update_session(
+                session_id=session_id,
+                last_assistant_message=full_response[:200].strip()
+            )
 
     # Log usage
     if metadata:
