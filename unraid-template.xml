@@ -1,23 +1,23 @@
 <?xml version="1.0"?>
 <Container version="2">
-  <Name>Claude-Code-SDK</Name>
-  <Repository>ghcr.io/quickkill0/proxy-python-sdk:latest</Repository>
+  <Name>AI-Hub</Name>
+  <Repository>ghcr.io/quickkill0/ai-hub:latest</Repository>
   <Registry>https://ghcr.io/</Registry>
   <Network>bridge</Network>
   <MyIP/>
   <Shell>bash</Shell>
   <Privileged>false</Privileged>
-  <Support>https://github.com/Quickkill0/Proxy-Python-SDK/issues</Support>
-  <Project>https://github.com/Quickkill0/Proxy-Python-SDK</Project>
+  <Support>https://github.com/Quickkill0/ai-hub/issues</Support>
+  <Project>https://github.com/Quickkill0/ai-hub</Project>
   <Overview>
-    Claude Code SDK - A FastAPI-based service that provides REST API access to Claude AI using OAuth authentication.
+    AI Hub - A self-hosted web interface and API server for Claude Code.
 
-    Perfect for integrating Claude AI into your applications:
-    - Web scraping and data extraction
-    - Structured data parsing (JSON output)
-    - Multi-turn conversations
-    - File and HTML analysis
-    - General-purpose AI assistant
+    Features:
+    - Claude.ai-like chat interface
+    - Multi-user support with API keys
+    - Real-time streaming responses
+    - Agent profiles and tool management
+    - Session history and checkpoints
 
     After installation, you must authenticate:
     1. Open container console in Unraid
@@ -27,8 +27,8 @@
   </Overview>
   <Category>Tools:Utilities Network:Web</Category>
   <WebUI>http://[IP]:[PORT:8000]/</WebUI>
-  <TemplateURL>https://raw.githubusercontent.com/Quickkill0/Proxy-Python-SDK/main/unraid-template.xml</TemplateURL>
-  <Icon>https://raw.githubusercontent.com/Quickkill0/Proxy-Python-SDK/main/.github/claude-icon.png</Icon>
+  <TemplateURL>https://raw.githubusercontent.com/Quickkill0/ai-hub/main/unraid-template.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/Quickkill0/ai-hub/main/.github/claude-icon.png</Icon>
   <ExtraParams>--tty --interactive</ExtraParams>
   <PostArgs/>
   <CPUset/>
@@ -45,7 +45,7 @@
   <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group ID (100 for Unraid compatibility)" Type="Variable" Display="advanced" Required="true" Mask="false">100</Config>
   <Config Name="Log Level" Target="LOG_LEVEL" Default="info" Mode="" Description="Logging level: debug, info, warning, error" Type="Variable" Display="advanced" Required="false" Mask="false">info</Config>
   <Config Name="Command Timeout" Target="COMMAND_TIMEOUT" Default="300" Mode="" Description="Timeout for Claude commands in seconds" Type="Variable" Display="advanced" Required="false" Mask="false">300</Config>
-  <Config Name="Service Name" Target="SERVICE_NAME" Default="claude-code-sdk" Mode="" Description="Service identifier" Type="Variable" Display="advanced" Required="false" Mask="false">claude-code-sdk</Config>
+  <Config Name="Service Name" Target="SERVICE_NAME" Default="ai-hub" Mode="" Description="Service identifier" Type="Variable" Display="advanced" Required="false" Mask="false">ai-hub</Config>
   <Config Name="CORS Origins" Target="CORS_ORIGINS" Default="*" Mode="" Description="Allowed CORS origins (comma-separated). Use * for local access, or specify exact URLs like http://192.168.1.100:8000 for production" Type="Variable" Display="advanced" Required="false" Mask="false">*</Config>
   <Config Name="Cookie Secure" Target="COOKIE_SECURE" Default="false" Mode="" Description="Set to true if using HTTPS, false for HTTP" Type="Variable" Display="advanced" Required="false" Mask="false">false</Config>
   <Config Name="Max Upload Size (MB)" Target="MAX_REQUEST_BODY_MB" Default="50" Mode="" Description="Maximum file upload size in megabytes" Type="Variable" Display="advanced" Required="false" Mask="false">50</Config>
