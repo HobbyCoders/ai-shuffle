@@ -3847,7 +3847,7 @@
 			{/if}
 
 			<!-- Input Area - Floating Island -->
-			<div class="p-3 sm:p-4">
+			<div class="px-3 py-1.5 sm:p-4">
 				<div class="max-w-4xl mx-auto">
 					<!-- Hidden file input -->
 					<input type="file" bind:this={fileInput} on:change={handleFileUpload} class="hidden" multiple accept="*/*" />
