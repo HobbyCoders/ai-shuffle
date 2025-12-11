@@ -84,7 +84,7 @@
 	<!-- Desktop: hover to show, Mobile: tap to show -->
 	<button
 		onclick={toggleMobilePanel}
-		class="flex items-center gap-1.5 text-xs {statusConfig.color} hover:bg-white/10 transition-colors"
+		class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-xs {statusConfig.color} hover:bg-white/10 transition-colors"
 		title={statusConfig.label}
 	>
 		{#if statusConfig.icon === 'spinner'}
