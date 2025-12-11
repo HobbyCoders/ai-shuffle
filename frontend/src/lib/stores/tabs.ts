@@ -2412,6 +2412,11 @@ function createTabsStore() {
 				const persistedState = await loadTabsFromServer();
 
 				if (persistedState && persistedState.tabs) {
+					// Get localStorage defaults for profile/project
+					// This ensures tabs without saved selections fall back to last-used values
+					const defaultProfile = getPersistedProfile();
+					const defaultProject = getPersistedProject();
+
 					// Restore tabs from server (could be empty array)
 					const restoredTabs: ChatTab[] = persistedState.tabs.map(pt => ({
 						id: pt.id,
@@ -2421,8 +2426,9 @@ function createTabsStore() {
 						isStreaming: false,
 						wsConnected: false,
 						error: null,
-						profile: pt.profile,
-						project: pt.project,
+						// Fall back to localStorage if server-saved profile/project is empty
+						profile: pt.profile || defaultProfile,
+						project: pt.project || defaultProject,
 						totalTokensIn: 0,
 						totalTokensOut: 0,
 						totalCacheCreationTokens: 0,

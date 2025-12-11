@@ -84,7 +84,7 @@
 	<!-- Desktop: hover to show, Mobile: tap to show -->
 	<button
 		onclick={toggleMobilePanel}
-		class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-xs {statusConfig.color} hover:bg-white/10 transition-colors"
+		class="flex items-center gap-1.5 text-xs {statusConfig.color} hover:bg-white/10 transition-colors"
 		title={statusConfig.label}
 	>
 		{#if statusConfig.icon === 'spinner'}
@@ -99,8 +99,8 @@
 		{/if}
 	</button>
 
-	<!-- Desktop: Hover dropdown (hidden on mobile) - positioned fixed to viewport right edge with margin -->
-	<div class="hidden sm:block fixed top-14 right-4 w-52 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+	<!-- Desktop: Hover dropdown (hidden on mobile) - positioned absolute to right edge -->
+	<div class="hidden sm:block absolute top-full right-0 mt-1 w-52 min-w-[13rem] bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
 		<div class="py-2 px-3 space-y-2">
 			<!-- Status -->
 			<div class="flex items-center justify-between text-xs pb-1 border-b border-border">
