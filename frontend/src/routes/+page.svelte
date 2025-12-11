@@ -743,8 +743,11 @@
 		}
 
 		// Normal textarea behavior - on desktop, Enter sends; on mobile, let Enter create newlines
-		// Mobile detection: touch device with narrow screen
-		const isMobile = window.matchMedia('(max-width: 640px)').matches && ('ontouchstart' in window);
+		// Mobile detection: check for touch-primary device (no mouse/fine pointer)
+		// This is more reliable than screen width since it detects actual input capability
+		const isTouchDevice = window.matchMedia('(pointer: coarse)').matches;
+		const hasNoFinePointer = !window.matchMedia('(any-pointer: fine)').matches;
+		const isMobile = isTouchDevice || (hasNoFinePointer && ('ontouchstart' in window));
 
 		if (e.key === 'Enter' && !e.shiftKey && !isMobile) {
 			e.preventDefault();
