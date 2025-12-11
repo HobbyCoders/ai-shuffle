@@ -3763,16 +3763,29 @@
 										}}
 									/>
 
-									<!-- Visual overlay that renders text with inline file chips -->
+									<!-- Actual textarea (text made transparent, caret visible) -->
+									<textarea
+										bind:this={textareas[tabId]}
+										bind:value={tabInputs[tabId]}
+										on:input={() => handleInputChange(tabId)}
+										on:keydown={(e) => handleKeyDown(e, tabId)}
+										placeholder={currentTab.isStreaming ? "Queue a message while Claude works..." : "Message Claude... (/ commands, @ files)"}
+										class="relative z-10 w-full bg-transparent border-0 px-2 sm:px-3 py-2 resize-none focus:outline-none focus:ring-0 min-h-[44px] max-h-[200px] leading-relaxed text-sm sm:text-base text-transparent placeholder-muted-foreground/60"
+										style="caret-color: hsl(var(--foreground));"
+										rows="1"
+										disabled={!$claudeAuthenticated}
+									></textarea>
+
+									<!-- Visual overlay that renders text with inline file chips (on top) -->
 									<div
-										class="absolute inset-0 px-2 sm:px-3 py-2 pointer-events-none overflow-hidden text-sm sm:text-base leading-relaxed whitespace-pre-wrap break-words"
+										class="absolute inset-0 z-20 px-2 sm:px-3 py-2 pointer-events-none overflow-hidden text-sm sm:text-base leading-relaxed whitespace-pre-wrap break-words"
 										aria-hidden="true"
 									>
 										{#each renderInputWithChips(tabInputs[tabId] || '') as segment}
 											{#if segment.type === 'text'}
-												<span class="text-transparent">{segment.content}</span>
+												<span class="text-foreground">{segment.content}</span>
 											{:else if segment.type === 'file'}
-												<span class="inline-flex items-center gap-0.5 bg-primary/20 text-primary text-xs px-1.5 py-0.5 rounded-md align-middle pointer-events-auto" title={segment.path}>
+												<span class="inline-flex items-center gap-0.5 bg-primary/20 text-primary text-xs px-1.5 py-0.5 rounded-md align-middle" title={segment.path}>
 													<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
 													</svg>
@@ -3781,18 +3794,6 @@
 											{/if}
 										{/each}
 									</div>
-
-									<!-- Actual textarea (text invisible where chips are, visible elsewhere) -->
-									<textarea
-										bind:this={textareas[tabId]}
-										bind:value={tabInputs[tabId]}
-										on:input={() => handleInputChange(tabId)}
-										on:keydown={(e) => handleKeyDown(e, tabId)}
-										placeholder={currentTab.isStreaming ? "Queue a message while Claude works..." : "Message Claude... (/ commands, @ files)"}
-										class="relative w-full bg-transparent border-0 px-2 sm:px-3 py-2 text-foreground placeholder-muted-foreground/60 resize-none focus:outline-none focus:ring-0 min-h-[44px] max-h-[200px] leading-relaxed text-sm sm:text-base file-input-text"
-										rows="1"
-										disabled={!$claudeAuthenticated}
-									></textarea>
 								</div>
 
 								<!-- Voice/Send/Stop/Queue Buttons -->
