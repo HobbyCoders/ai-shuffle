@@ -299,5 +299,8 @@ if __name__ == "__main__":
         host=settings.host,
         port=settings.port,
         log_level=settings.log_level.lower(),
-        reload=False
+        reload=False,
+        # Increase WebSocket max message size from default 1MB to 10MB
+        # This is a safety net - payloads should be truncated before hitting this limit
+        ws_max_size=10 * 1024 * 1024  # 10MB
     )

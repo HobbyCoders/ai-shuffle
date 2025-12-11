@@ -41,6 +41,60 @@ from app.core import encryption
 
 logger = logging.getLogger(__name__)
 
+# Maximum size for tool output before truncation (in characters)
+# Keep well under 1MB to avoid WebSocket JSON buffer overflow
+MAX_TOOL_OUTPUT_SIZE = 500_000  # ~500KB to leave room for JSON overhead
+MAX_DISPLAY_OUTPUT_SIZE = 2000  # What we show in the UI
+
+
+def truncate_large_payload(content: Any, max_size: int = MAX_TOOL_OUTPUT_SIZE) -> str:
+    """
+    Intelligently truncate large tool output payloads.
+
+    Handles:
+    - Base64 encoded images/files (detected by pattern)
+    - Very long text outputs
+    - List/dict content that serializes to large strings
+
+    Args:
+        content: The raw content from a ToolResultBlock
+        max_size: Maximum allowed size in characters
+
+    Returns:
+        Truncated string with informative message if content was too large
+    """
+    if content is None:
+        return ""
+
+    # Convert to string for size checking
+    content_str = str(content)
+    content_len = len(content_str)
+
+    # If it's small enough, return as-is (truncated for display)
+    if content_len <= max_size:
+        return content_str[:MAX_DISPLAY_OUTPUT_SIZE]
+
+    # Check if it looks like base64 image data
+    # Common patterns: data:image/..., very long alphanumeric strings, iVBOR (PNG), /9j/ (JPEG)
+    is_likely_base64 = (
+        'data:image/' in content_str[:100] or
+        content_str[:10].startswith('iVBOR') or  # PNG base64 signature
+        content_str[:10].startswith('/9j/') or   # JPEG base64 signature
+        content_str[:10].startswith('R0lGOD') or # GIF base64 signature
+        # Check for very high ratio of alphanumeric chars (typical of base64)
+        (content_len > 10000 and sum(c.isalnum() or c in '+/=' for c in content_str[:1000]) > 950)
+    )
+
+    if is_likely_base64:
+        # Calculate approximate original size
+        original_size_kb = int(content_len * 0.75 / 1024)  # base64 is ~33% larger
+        return f"[Image/binary content - {original_size_kb}KB - content processed by Claude but truncated for display]"
+
+    # For other large content, truncate with indicator
+    size_kb = content_len // 1024
+    truncated = content_str[:MAX_DISPLAY_OUTPUT_SIZE]
+    return f"{truncated}\n\n[... truncated - total size: {size_kb}KB]"
+
 
 def write_agents_to_filesystem(agents_dict: Dict[str, AgentDefinition], cwd: str) -> Optional[Path]:
     """
@@ -1145,7 +1199,7 @@ async def execute_query(
                             "input": block.input
                         })
                     elif isinstance(block, ToolResultBlock):
-                        output = str(block.content)[:2000]
+                        output = truncate_large_payload(block.content)
                         tool_messages.append({
                             "type": "tool_result",
                             "name": getattr(block, 'name', 'unknown'),
@@ -1158,7 +1212,7 @@ async def execute_query(
                 # UserMessage contains tool results from Claude's tool executions
                 for block in message.content:
                     if isinstance(block, ToolResultBlock):
-                        output = str(block.content)[:2000] if block.content else ""
+                        output = truncate_large_payload(block.content) if block.content else ""
                         tool_messages.append({
                             "type": "tool_result",
                             "name": "unknown",
@@ -1469,7 +1523,7 @@ async def stream_query(
 
                     elif isinstance(block, ToolResultBlock):
                         # Truncate large outputs
-                        output = str(block.content)[:2000]
+                        output = truncate_large_payload(block.content)
                         yield {
                             "type": "tool_result",
                             "name": getattr(block, 'name', 'unknown'),
@@ -1499,7 +1553,7 @@ async def stream_query(
                 # UserMessage contains tool results from Claude's tool executions
                 for block in message.content:
                     if isinstance(block, ToolResultBlock):
-                        output = str(block.content)[:2000] if block.content else ""
+                        output = truncate_large_payload(block.content) if block.content else ""
                         logger.debug(f"UserMessage ToolResultBlock - tool_use_id: {block.tool_use_id}, content length: {len(str(block.content) if block.content else '')}")
 
                         yield {
@@ -1832,7 +1886,7 @@ async def _run_background_query(
                         )
 
                     elif isinstance(block, ToolResultBlock):
-                        output = str(block.content)[:2000]
+                        output = truncate_large_payload(block.content)
 
                         # Collect tool result for storage
                         tool_messages.append({
@@ -1860,7 +1914,7 @@ async def _run_background_query(
                 # UserMessage contains tool results from Claude's tool executions
                 for block in message.content:
                     if isinstance(block, ToolResultBlock):
-                        output = str(block.content)[:2000] if block.content else ""
+                        output = truncate_large_payload(block.content) if block.content else ""
                         logger.debug(f"[Background] UserMessage ToolResultBlock - tool_use_id: {block.tool_use_id}, content length: {len(str(block.content) if block.content else '')}")
 
                         # Collect tool result for storage
@@ -2547,7 +2601,7 @@ async def stream_to_websocket(
                             }
 
                     elif isinstance(block, ToolResultBlock):
-                        output = str(block.content)[:2000]
+                        output = truncate_large_payload(block.content)
                         tool_use_id = getattr(block, 'tool_use_id', None)
                         tool_name = getattr(block, 'name', 'unknown')
 
@@ -2633,7 +2687,7 @@ async def stream_to_websocket(
                         # Don't yield regular text from UserMessage - it's usually meta/system info
 
                     elif isinstance(block, ToolResultBlock):
-                        output = str(block.content)[:2000] if block.content else ""
+                        output = truncate_large_payload(block.content) if block.content else ""
                         tool_use_id = block.tool_use_id
                         logger.debug(f"[WS] UserMessage ToolResultBlock - tool_use_id: {tool_use_id}, parent_tool_id: {parent_tool_id}, content length: {len(str(block.content) if block.content else '')}, is_error: {block.is_error}")
 
@@ -2737,7 +2791,7 @@ async def stream_to_websocket(
                                     "input": tool_input
                                 }
                             elif isinstance(block, ToolResultBlock):
-                                output = str(block.content)[:2000]
+                                output = truncate_large_payload(block.content)
                                 tool_use_id = getattr(block, 'tool_use_id', None)
                                 tool_messages.append({
                                     "type": "tool_result",
