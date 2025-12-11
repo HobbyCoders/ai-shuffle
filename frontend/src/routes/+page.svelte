@@ -2437,16 +2437,64 @@
 							{@const groupProjects = projectsOrganized.grouped.get(group.name) || []}
 							{#if groupProjects.length > 0}
 								<div class="mb-2">
-									<button
-										class="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
-										on:click={() => groups.toggleGroupCollapsed('projects', group.name)}
-									>
-										<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-										</svg>
-										<span class="uppercase tracking-wide">{group.name}</span>
-										<span class="text-muted-foreground/60">({groupProjects.length})</span>
-									</button>
+									<div class="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground group/groupheader">
+										<button
+											class="flex items-center gap-2 flex-1 hover:text-foreground transition-colors"
+											on:click={() => groups.toggleGroupCollapsed('projects', group.name)}
+										>
+											<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+											</svg>
+											<span class="uppercase tracking-wide">{group.name}</span>
+											<span class="text-muted-foreground/60">({groupProjects.length})</span>
+										</button>
+										<div class="relative">
+											<button
+												class="p-1 rounded opacity-0 group-hover/groupheader:opacity-100 hover:bg-accent transition-all"
+												on:click|stopPropagation={(e) => {
+													const menu = e.currentTarget.nextElementSibling;
+													document.querySelectorAll('[data-group-menu]').forEach(m => m !== menu && m.classList.add('hidden'));
+													menu?.classList.toggle('hidden');
+												}}
+												title="Group options"
+											>
+												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
+												</svg>
+											</button>
+											<div data-group-menu class="hidden absolute right-0 top-full mt-1 w-32 bg-card border border-border rounded-lg shadow-lg z-50">
+												<div class="py-1">
+													<button
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
+														on:click|stopPropagation={() => {
+															const newName = prompt('Rename group:', group.name);
+															if (newName?.trim() && newName.trim() !== group.name) {
+																groups.renameGroup('projects', group.name, newName.trim());
+															}
+														}}
+													>
+														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+														</svg>
+														Rename
+													</button>
+													<button
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2 text-destructive"
+														on:click|stopPropagation={() => {
+															if (confirm(`Delete group "${group.name}"? Items will be moved to ungrouped.`)) {
+																groups.deleteGroup('projects', group.name);
+															}
+														}}
+													>
+														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+														</svg>
+														Delete
+													</button>
+												</div>
+											</div>
+										</div>
+									</div>
 									{#if !group.collapsed}
 										<div class="space-y-1 ml-2">
 											{#each groupProjects as project}
@@ -2512,16 +2560,64 @@
 							{@const groupProfiles = profilesOrganized.grouped.get(group.name) || []}
 							{#if groupProfiles.length > 0}
 								<div class="mb-2">
-									<button
-										class="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
-										on:click={() => groups.toggleGroupCollapsed('profiles', group.name)}
-									>
-										<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-										</svg>
-										<span class="uppercase tracking-wide">{group.name}</span>
-										<span class="text-muted-foreground/60">({groupProfiles.length})</span>
-									</button>
+									<div class="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground group/groupheader">
+										<button
+											class="flex items-center gap-2 flex-1 hover:text-foreground transition-colors"
+											on:click={() => groups.toggleGroupCollapsed('profiles', group.name)}
+										>
+											<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+											</svg>
+											<span class="uppercase tracking-wide">{group.name}</span>
+											<span class="text-muted-foreground/60">({groupProfiles.length})</span>
+										</button>
+										<div class="relative">
+											<button
+												class="p-1 rounded opacity-0 group-hover/groupheader:opacity-100 hover:bg-accent transition-all"
+												on:click|stopPropagation={(e) => {
+													const menu = e.currentTarget.nextElementSibling;
+													document.querySelectorAll('[data-group-menu]').forEach(m => m !== menu && m.classList.add('hidden'));
+													menu?.classList.toggle('hidden');
+												}}
+												title="Group options"
+											>
+												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
+												</svg>
+											</button>
+											<div data-group-menu class="hidden absolute right-0 top-full mt-1 w-32 bg-card border border-border rounded-lg shadow-lg z-50">
+												<div class="py-1">
+													<button
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
+														on:click|stopPropagation={() => {
+															const newName = prompt('Rename group:', group.name);
+															if (newName?.trim() && newName.trim() !== group.name) {
+																groups.renameGroup('profiles', group.name, newName.trim());
+															}
+														}}
+													>
+														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+														</svg>
+														Rename
+													</button>
+													<button
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2 text-destructive"
+														on:click|stopPropagation={() => {
+															if (confirm(`Delete group "${group.name}"? Items will be moved to ungrouped.`)) {
+																groups.deleteGroup('profiles', group.name);
+															}
+														}}
+													>
+														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+														</svg>
+														Delete
+													</button>
+												</div>
+											</div>
+										</div>
+									</div>
 									{#if !group.collapsed}
 										<div class="space-y-1 ml-2">
 											{#each groupProfiles as profile}
@@ -2591,16 +2687,64 @@
 							{@const groupAgents = subagentsOrganized.grouped.get(group.name) || []}
 							{#if groupAgents.length > 0}
 								<div class="mb-2">
-									<button
-										class="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
-										on:click={() => groups.toggleGroupCollapsed('subagents', group.name)}
-									>
-										<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-										</svg>
-										<span class="uppercase tracking-wide">{group.name}</span>
-										<span class="text-muted-foreground/60">({groupAgents.length})</span>
-									</button>
+									<div class="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground group/groupheader">
+										<button
+											class="flex items-center gap-2 flex-1 hover:text-foreground transition-colors"
+											on:click={() => groups.toggleGroupCollapsed('subagents', group.name)}
+										>
+											<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+											</svg>
+											<span class="uppercase tracking-wide">{group.name}</span>
+											<span class="text-muted-foreground/60">({groupAgents.length})</span>
+										</button>
+										<div class="relative">
+											<button
+												class="p-1 rounded opacity-0 group-hover/groupheader:opacity-100 hover:bg-accent transition-all"
+												on:click|stopPropagation={(e) => {
+													const menu = e.currentTarget.nextElementSibling;
+													document.querySelectorAll('[data-group-menu]').forEach(m => m !== menu && m.classList.add('hidden'));
+													menu?.classList.toggle('hidden');
+												}}
+												title="Group options"
+											>
+												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
+												</svg>
+											</button>
+											<div data-group-menu class="hidden absolute right-0 top-full mt-1 w-32 bg-card border border-border rounded-lg shadow-lg z-50">
+												<div class="py-1">
+													<button
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
+														on:click|stopPropagation={() => {
+															const newName = prompt('Rename group:', group.name);
+															if (newName?.trim() && newName.trim() !== group.name) {
+																groups.renameGroup('subagents', group.name, newName.trim());
+															}
+														}}
+													>
+														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+														</svg>
+														Rename
+													</button>
+													<button
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2 text-destructive"
+														on:click|stopPropagation={() => {
+															if (confirm(`Delete group "${group.name}"? Items will be moved to ungrouped.`)) {
+																groups.deleteGroup('subagents', group.name);
+															}
+														}}
+													>
+														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+														</svg>
+														Delete
+													</button>
+												</div>
+											</div>
+										</div>
+									</div>
 									{#if !group.collapsed}
 										<div class="space-y-1 ml-2">
 											{#each groupAgents as agent}
