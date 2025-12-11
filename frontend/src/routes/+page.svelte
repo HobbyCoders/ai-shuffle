@@ -3021,22 +3021,24 @@
 
 	<!-- Main Content -->
 	<main class="flex-1 flex flex-col min-w-0 bg-background pb-14 lg:pb-0 lg:ml-[4.5rem]">
-		<!-- Context Bar -->
+		<!-- Context Bar - Floating Pills Design -->
 		{#if $activeTab}
 			{@const currentTab = $activeTab}
 			{@const tabId = currentTab.id}
-			<div class="bg-card border-b border-border h-12 flex items-center px-2 sm:px-4">
-				<!-- Mobile Menu Button -->
-				<button class="lg:hidden p-2 mr-2 text-muted-foreground hover:text-foreground rounded-md hover:bg-accent transition-colors" on:click={() => (sidebarOpen = true)}>
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
-					</svg>
-				</button>
+			<div class="h-14 flex items-center justify-between px-3 sm:px-4 gap-2">
+				<!-- Left side: Mobile menu + Profile/Project pills -->
+				<div class="flex items-center gap-2">
+					<!-- Mobile Menu Button -->
+					<button class="lg:hidden p-2 text-muted-foreground hover:text-foreground floating-pill transition-colors" on:click={() => (sidebarOpen = true)}>
+						<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+						</svg>
+					</button>
 
-				<!-- Profile Selector (clickable text style with dropdown) -->
+				<!-- Profile Selector (floating pill style with dropdown) -->
 				{#if $apiUser?.profile_id}
 					<!-- API user with locked profile - show as locked indicator -->
-					<div class="flex items-center gap-1 px-2 py-1 text-sm text-foreground opacity-75">
+					<div class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-sm text-foreground">
 						<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
 						</svg>
@@ -3050,7 +3052,7 @@
 					{@const hasProfileGroups = headerProfilesOrganized.groupOrder.length > 0}
 					<div class="relative group">
 						<button
-							class="flex items-center gap-1 px-2 py-1 text-sm text-foreground hover:bg-accent rounded-md transition-colors"
+							class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-sm text-foreground hover:bg-white/10 transition-colors"
 						>
 							<svg class="w-4 h-4 {currentTab.profile ? 'text-muted-foreground' : 'text-amber-500'}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
@@ -3125,13 +3127,10 @@
 					</div>
 				{/if}
 
-				<!-- Breadcrumb separator -->
-				<span class="text-muted-foreground/50 mx-1 hidden sm:inline">/</span>
-
 				<!-- Project Selector (locked when session exists or for API users) -->
 				{#if $apiUser?.project_id}
 					<!-- API user with locked project - show as locked indicator -->
-					<div class="flex items-center gap-1 px-2 py-1 text-sm text-foreground opacity-75">
+					<div class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-sm text-foreground">
 						<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 						</svg>
@@ -3143,7 +3142,7 @@
 				{:else}
 					<div class="relative group">
 						<button
-							class="flex items-center gap-1 px-2 py-1 text-sm text-foreground {currentTab.sessionId ? 'cursor-default opacity-75' : 'hover:bg-accent'} rounded-md transition-colors"
+							class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-sm text-foreground {currentTab.sessionId ? 'cursor-default opacity-75' : 'hover:bg-white/10'} transition-colors"
 							title={currentTab.sessionId ? 'Project is locked for this chat' : 'Select project'}
 						>
 							<svg class="w-4 h-4 {currentTab.project ? 'text-muted-foreground' : 'text-amber-500'}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -3229,12 +3228,10 @@
 						{/if}
 					</div>
 				{/if}
+				</div>
 
-				<!-- Spacer -->
-				<div class="flex-1"></div>
-
-				<!-- Right side: Token counts, connection status -->
-				<div class="flex items-center gap-2 sm:gap-3">
+				<!-- Right side: Context usage & connection status floating pills -->
+				<div class="flex items-center gap-2">
 					<!-- Context usage dropdown (only show if any tokens > 0) -->
 					{#if currentTab.totalTokensIn > 0 || currentTab.totalTokensOut > 0 || currentTab.totalCacheCreationTokens > 0 || currentTab.totalCacheReadTokens > 0}
 						{@const autocompactBuffer = 45000}
@@ -3243,7 +3240,7 @@
 						{@const contextPercent = Math.min((contextUsed / contextMax) * 100, 100)}
 						<div class="relative group">
 							<button
-								class="flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors"
+								class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-white/10 transition-colors"
 								title="Context usage: {formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}"
 							>
 								<!-- Circular progress indicator -->
@@ -3317,13 +3314,15 @@
 					{/if}
 
 					<!-- Connection Status (always far right) -->
-					<ConnectionStatus wsConnected={currentTab.wsConnected} />
+					<div class="floating-pill px-3 py-1.5">
+						<ConnectionStatus wsConnected={currentTab.wsConnected} />
+					</div>
 				</div>
 			</div>
 		{:else}
 			<!-- Empty state context bar (no active tab) - just show mobile menu button -->
-			<div class="bg-card border-b border-border h-12 flex items-center px-2 sm:px-4">
-				<button class="lg:hidden p-2 mr-2 text-muted-foreground hover:text-foreground rounded-md hover:bg-accent transition-colors" on:click={() => (sidebarOpen = true)}>
+			<div class="h-14 flex items-center px-3 sm:px-4">
+				<button class="lg:hidden p-2 text-muted-foreground hover:text-foreground floating-pill transition-colors" on:click={() => (sidebarOpen = true)}>
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
 					</svg>
@@ -3716,23 +3715,23 @@
 				</div>
 			{/if}
 
-			<!-- Input Area -->
-			<div class="border-t border-border/50 bg-background/80 backdrop-blur-sm p-3 sm:p-4">
-				<div class="max-w-5xl mx-auto">
+			<!-- Input Area - Floating Island -->
+			<div class="p-3 sm:p-4">
+				<div class="max-w-4xl mx-auto">
 					<!-- Hidden file input -->
 					<input type="file" bind:this={fileInput} on:change={handleFileUpload} class="hidden" multiple accept="*/*" />
 
-					<!-- Cursor-Style Unified Input Container -->
 					<!-- Recording Error Message -->
-						{#if recordingError}
-							<div class="mb-2 px-3 py-2 bg-destructive/10 border border-destructive/30 rounded-lg text-sm text-destructive flex items-center justify-between">
-								<span>{recordingError}</span>
-								<button type="button" on:click={() => recordingError = ''} class="ml-2 hover:opacity-70">&times;</button>
-							</div>
-						{/if}
+					{#if recordingError}
+						<div class="mb-2 px-3 py-2 bg-destructive/10 border border-destructive/30 rounded-lg text-sm text-destructive flex items-center justify-between floating-panel">
+							<span>{recordingError}</span>
+							<button type="button" on:click={() => recordingError = ''} class="ml-2 hover:opacity-70">&times;</button>
+						</div>
+					{/if}
 
-						<form on:submit|preventDefault={() => handleSubmit(tabId)} class="relative">
-						<div class="bg-card/80 backdrop-blur border border-border/60 rounded-2xl shadow-lg transition-all duration-200 focus-within:border-primary/50 focus-within:shadow-primary/5 focus-within:shadow-xl">
+					<form on:submit|preventDefault={() => handleSubmit(tabId)} class="relative">
+						<!-- Floating Island Input Container -->
+						<div class="floating-island transition-all duration-200 focus-within:border-primary/40 focus-within:shadow-primary/10 focus-within:shadow-xl">
 
 							<!-- Uploaded Files (inside container) -->
 							{#if (tabUploadedFiles[tabId] || []).length > 0}
@@ -4892,6 +4891,33 @@
 			0 0 0 1px oklch(0 0 0 / 0.3),
 			0 8px 32px oklch(0 0 0 / 0.4),
 			0 2px 8px oklch(0 0 0 / 0.2),
+			inset 0 1px 0 oklch(1 0 0 / 0.05);
+	}
+
+	/* Floating Pill Styles (for header elements) */
+	.floating-pill {
+		background: oklch(0.16 0.012 260 / 0.7);
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
+		border: 1px solid oklch(1 0 0 / 0.06);
+		border-radius: 9999px;
+		box-shadow:
+			0 0 0 1px oklch(0 0 0 / 0.2),
+			0 2px 8px oklch(0 0 0 / 0.15),
+			inset 0 1px 0 oklch(1 0 0 / 0.04);
+	}
+
+	/* Floating Island Styles (for input area) */
+	.floating-island {
+		background: oklch(0.16 0.012 260 / 0.85);
+		backdrop-filter: blur(20px);
+		-webkit-backdrop-filter: blur(20px);
+		border: 1px solid oklch(1 0 0 / 0.08);
+		border-radius: 1.5rem;
+		box-shadow:
+			0 0 0 1px oklch(0 0 0 / 0.25),
+			0 8px 32px oklch(0 0 0 / 0.35),
+			0 4px 16px oklch(0 0 0 / 0.2),
 			inset 0 1px 0 oklch(1 0 0 / 0.05);
 	}
 
