@@ -3739,13 +3739,13 @@
 										disabled={currentTab.isStreaming}
 									>
 										<span>{modelLabels[effectiveModel] || effectiveModel}</span>
-										<svg class="w-2.5 h-2.5 opacity-60 transition-transform {showModelPopup ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<svg class="w-2.5 h-2.5 opacity-60 transition-transform rotate-180 {showModelPopup ? 'rotate-0' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
 										</svg>
 									</button>
 									{#if showModelPopup}
 										<div class="fixed inset-0 z-40" on:click={() => showModelPopup = false}></div>
-										<div class="absolute top-full left-1/2 -translate-x-1/2 mt-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[90px]">
+										<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[90px]">
 											{#each [['sonnet', 'Sonnet'], ['sonnet-1m', 'Sonnet 1M'], ['opus', 'Opus'], ['haiku', 'Haiku']] as [value, label]}
 												<button
 													type="button"
@@ -3780,13 +3780,13 @@
 										disabled={currentTab.isStreaming}
 									>
 										<span>{modeLabels[effectiveMode] || effectiveMode}</span>
-										<svg class="w-2.5 h-2.5 opacity-60 transition-transform {showModePopup ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<svg class="w-2.5 h-2.5 opacity-60 transition-transform rotate-180 {showModePopup ? 'rotate-0' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
 										</svg>
 									</button>
 									{#if showModePopup}
 										<div class="fixed inset-0 z-40" on:click={() => showModePopup = false}></div>
-										<div class="absolute top-full left-1/2 -translate-x-1/2 mt-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[100px]">
+										<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[100px]">
 											{#each [['default', 'Ask'], ['acceptEdits', 'Auto-Accept'], ['plan', 'Plan'], ['bypassPermissions', 'Bypass']] as [value, label]}
 												<button
 													type="button"
