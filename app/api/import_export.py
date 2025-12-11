@@ -1,8 +1,12 @@
 """
 Import/Export API routes for profiles and subagents
+
+This module uses DYNAMIC export/import - all fields from the database are
+automatically included without needing to update models when new fields are added.
+Only system fields (is_builtin, created_at, updated_at) are excluded from export.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 import json
 
@@ -20,38 +24,35 @@ router = APIRouter(prefix="/api/v1/export-import", tags=["Import/Export"])
 # Export/Import Data Models
 # ============================================================================
 
+# Fields to exclude from export (system-managed fields)
+SYSTEM_FIELDS = {"is_builtin", "created_at", "updated_at"}
+
+
 class ExportedSubagent(BaseModel):
-    """Subagent data for export (excludes timestamps and builtin flag)"""
+    """
+    Subagent data for export - uses dynamic dict to capture all fields.
+    Only system fields (is_builtin, created_at, updated_at) are excluded.
+    """
     id: str
     name: str
     description: str
     prompt: str
     tools: Optional[List[str]] = None
     model: Optional[str] = None
-
-
-class ExportedProfileConfig(BaseModel):
-    """Profile config for export"""
-    model: Optional[str] = None
-    permission_mode: Optional[str] = None
-    max_turns: Optional[int] = None
-    allowed_tools: Optional[List[str]] = None
-    disallowed_tools: Optional[List[str]] = None
-    system_prompt: Optional[dict] = None
-    setting_sources: Optional[List[str]] = None
-    enabled_agents: Optional[List[str]] = None
-    cwd: Optional[str] = None
-    add_dirs: Optional[List[str]] = None
-    env: Optional[dict] = None
-    extra_args: Optional[dict] = None
+    # Allow extra fields dynamically
+    class Config:
+        extra = "allow"
 
 
 class ExportedProfile(BaseModel):
-    """Profile data for export (excludes timestamps and builtin flag)"""
+    """
+    Profile data for export - uses dynamic dict for config to capture all fields.
+    Only system fields (is_builtin, created_at, updated_at) are excluded.
+    """
     id: str
     name: str
     description: Optional[str] = None
-    config: ExportedProfileConfig
+    config: Dict[str, Any] = Field(default_factory=dict)  # Dynamic config - all fields preserved
 
 
 class ExportData(BaseModel):
@@ -86,20 +87,31 @@ class ImportOptions(BaseModel):
 # Export Endpoints
 # ============================================================================
 
+def _export_profile(p: dict) -> ExportedProfile:
+    """Helper to export a single profile, excluding system fields"""
+    config = p.get("config", {})
+    # Config is already a dict, just pass it through (all fields preserved)
+    return ExportedProfile(
+        id=p["id"],
+        name=p["name"],
+        description=p.get("description"),
+        config=config  # Dynamic - all config fields are preserved
+    )
+
+
+def _export_subagent(s: dict) -> dict:
+    """Helper to export a single subagent, excluding system fields"""
+    # Create a copy excluding system fields
+    exported = {k: v for k, v in s.items() if k not in SYSTEM_FIELDS}
+    return exported
+
+
 @router.get("/profiles", response_model=ExportData)
 async def export_profiles(token: str = Depends(require_admin)):
-    """Export all profiles as JSON"""
+    """Export all profiles as JSON (all config fields are preserved dynamically)"""
     profiles = database.get_all_profiles()
 
-    exported_profiles = []
-    for p in profiles:
-        config = p.get("config", {})
-        exported_profiles.append(ExportedProfile(
-            id=p["id"],
-            name=p["name"],
-            description=p.get("description"),
-            config=ExportedProfileConfig(**config)
-        ))
+    exported_profiles = [_export_profile(p) for p in profiles]
 
     return ExportData(
         version="1.0",
@@ -111,7 +123,7 @@ async def export_profiles(token: str = Depends(require_admin)):
 
 @router.get("/profiles/{profile_id}", response_model=ExportData)
 async def export_single_profile(profile_id: str, token: str = Depends(require_admin)):
-    """Export a single profile as JSON"""
+    """Export a single profile as JSON (all config fields are preserved dynamically)"""
     profile = database.get_profile(profile_id)
     if not profile:
         raise HTTPException(
@@ -119,49 +131,32 @@ async def export_single_profile(profile_id: str, token: str = Depends(require_ad
             detail=f"Profile not found: {profile_id}"
         )
 
-    config = profile.get("config", {})
-    exported_profile = ExportedProfile(
-        id=profile["id"],
-        name=profile["name"],
-        description=profile.get("description"),
-        config=ExportedProfileConfig(**config)
-    )
-
     return ExportData(
         version="1.0",
         export_type="profiles",
         exported_at=datetime.utcnow().isoformat() + "Z",
-        profiles=[exported_profile]
+        profiles=[_export_profile(profile)]
     )
 
 
-@router.get("/subagents", response_model=ExportData)
+@router.get("/subagents")
 async def export_subagents(token: str = Depends(require_admin)):
-    """Export all subagents as JSON"""
+    """Export all subagents as JSON (all fields are preserved dynamically)"""
     subagents = database.get_all_subagents()
 
-    exported_subagents = []
-    for s in subagents:
-        exported_subagents.append(ExportedSubagent(
-            id=s["id"],
-            name=s["name"],
-            description=s["description"],
-            prompt=s["prompt"],
-            tools=s.get("tools"),
-            model=s.get("model")
-        ))
+    exported_subagents = [_export_subagent(s) for s in subagents]
 
-    return ExportData(
-        version="1.0",
-        export_type="subagents",
-        exported_at=datetime.utcnow().isoformat() + "Z",
-        subagents=exported_subagents
-    )
+    return {
+        "version": "1.0",
+        "export_type": "subagents",
+        "exported_at": datetime.utcnow().isoformat() + "Z",
+        "subagents": exported_subagents
+    }
 
 
-@router.get("/subagents/{subagent_id}", response_model=ExportData)
+@router.get("/subagents/{subagent_id}")
 async def export_single_subagent(subagent_id: str, token: str = Depends(require_admin)):
-    """Export a single subagent as JSON"""
+    """Export a single subagent as JSON (all fields are preserved dynamically)"""
     subagent = database.get_subagent(subagent_id)
     if not subagent:
         raise HTTPException(
@@ -169,57 +164,30 @@ async def export_single_subagent(subagent_id: str, token: str = Depends(require_
             detail=f"Subagent not found: {subagent_id}"
         )
 
-    exported_subagent = ExportedSubagent(
-        id=subagent["id"],
-        name=subagent["name"],
-        description=subagent["description"],
-        prompt=subagent["prompt"],
-        tools=subagent.get("tools"),
-        model=subagent.get("model")
-    )
-
-    return ExportData(
-        version="1.0",
-        export_type="subagents",
-        exported_at=datetime.utcnow().isoformat() + "Z",
-        subagents=[exported_subagent]
-    )
+    return {
+        "version": "1.0",
+        "export_type": "subagents",
+        "exported_at": datetime.utcnow().isoformat() + "Z",
+        "subagents": [_export_subagent(subagent)]
+    }
 
 
-@router.get("/all", response_model=ExportData)
+@router.get("/all")
 async def export_all(token: str = Depends(require_admin)):
-    """Export all profiles and subagents as JSON"""
+    """Export all profiles and subagents as JSON (all fields are preserved dynamically)"""
     profiles = database.get_all_profiles()
     subagents = database.get_all_subagents()
 
-    exported_profiles = []
-    for p in profiles:
-        config = p.get("config", {})
-        exported_profiles.append(ExportedProfile(
-            id=p["id"],
-            name=p["name"],
-            description=p.get("description"),
-            config=ExportedProfileConfig(**config)
-        ))
+    exported_profiles = [_export_profile(p) for p in profiles]
+    exported_subagents = [_export_subagent(s) for s in subagents]
 
-    exported_subagents = []
-    for s in subagents:
-        exported_subagents.append(ExportedSubagent(
-            id=s["id"],
-            name=s["name"],
-            description=s["description"],
-            prompt=s["prompt"],
-            tools=s.get("tools"),
-            model=s.get("model")
-        ))
-
-    return ExportData(
-        version="1.0",
-        export_type="all",
-        exported_at=datetime.utcnow().isoformat() + "Z",
-        profiles=exported_profiles,
-        subagents=exported_subagents
-    )
+    return {
+        "version": "1.0",
+        "export_type": "all",
+        "exported_at": datetime.utcnow().isoformat() + "Z",
+        "profiles": [p.model_dump() for p in exported_profiles],
+        "subagents": exported_subagents
+    }
 
 
 # ============================================================================
@@ -407,7 +375,8 @@ async def import_data_json(
         for profile in data.profiles:
             try:
                 existing = database.get_profile(profile.id)
-                config = profile.config.model_dump(exclude_none=True)
+                # config is already a Dict[str, Any], no conversion needed
+                config = profile.config
 
                 if existing:
                     if overwrite_existing:
