@@ -141,3 +141,31 @@ export function formatTurns(count: number, abbreviated = false): string {
 	}
 	return count === 1 ? '1 turn' : `${count} turns`;
 }
+
+/**
+ * Format time of day (e.g., "9:45 AM")
+ */
+export function formatTimeOfDay(dateStr: string): string {
+	const date = new Date(dateStr);
+	return date.toLocaleTimeString('en-US', {
+		hour: 'numeric',
+		minute: '2-digit',
+		hour12: true
+	});
+}
+
+/**
+ * Get status display info for a session
+ */
+export function getStatusDisplay(status: string, isStreaming: boolean): { label: string; color: string } | null {
+	if (isStreaming) {
+		return { label: 'Processing', color: 'bg-orange-500' };
+	}
+	if (status === 'active') {
+		return { label: 'Active Session', color: 'bg-teal-500' };
+	}
+	if (status === 'error') {
+		return { label: 'Error', color: 'bg-destructive' };
+	}
+	return null;
+}

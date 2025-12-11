@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { createEventDispatcher } from 'svelte';
 	import type { Session } from '$lib/api/client';
-	import { formatRelativeTime, formatCost, formatTurns } from '$lib/utils/dateGroups';
+	import { formatRelativeTime, formatCost, formatTimeOfDay, getStatusDisplay } from '$lib/utils/dateGroups';
 
 	export let session: Session;
 	export let isOpen = false;
@@ -90,12 +90,8 @@
 		return title.length > maxLength ? title.substring(0, maxLength) + '...' : title;
 	}
 
-	// Determine status color - only show green when actively streaming
-	$: statusColor = isStreaming
-		? 'bg-primary animate-pulse'
-		: session.status === 'error'
-			? 'bg-destructive'
-			: 'bg-muted-foreground/30';
+	// Get status display info
+	$: statusDisplay = getStatusDisplay(session.status, isStreaming);
 
 	// Check if high cost
 	$: isHighCost = (session.total_cost_usd ?? 0) > 10;
@@ -127,7 +123,7 @@
 
 	<!-- Main card content - slides to reveal delete indicator -->
 	<div
-		class="group relative flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer select-none {isActive ? 'bg-white/10 border border-white/20' : 'hover:bg-white/5'} {selectionMode && isSelected ? 'bg-white/10' : ''}"
+		class="group relative flex flex-col gap-1.5 px-3 py-2.5 rounded-xl cursor-pointer select-none {isActive ? 'bg-white/10 border border-white/20' : 'hover:bg-white/5'} {selectionMode && isSelected ? 'bg-white/10' : ''}"
 		class:transition-transform={!directionLocked}
 		style="transform: translateX(-{currentSwipeX}px)"
 		on:click={handleCardClick}
@@ -138,49 +134,71 @@
 		role="button"
 		tabindex="0"
 	>
-		<!-- Checkbox for selection mode -->
-		{#if selectionMode}
-			<input
-				type="checkbox"
-				checked={isSelected}
-				on:click|stopPropagation={() => dispatch('select')}
-				class="w-4 h-4 rounded border-border text-primary focus:ring-primary cursor-pointer flex-shrink-0"
-			/>
-		{/if}
-
-		<!-- Content -->
-		<div class="flex-1 min-w-0">
-			<!-- Title -->
-			<p class="text-sm text-foreground truncate leading-snug">
-				{truncateTitle(session.title)}
-			</p>
-
-			<!-- Meta row -->
-			<div class="flex items-center gap-1.5 mt-0.5 text-xs text-muted-foreground">
-				<!-- Time -->
-				<span>{formatRelativeTime(session.updated_at, abbreviated)}</span>
-
-				<span class="opacity-50">·</span>
-
-				<!-- Turn count -->
-				<span>{formatTurns(session.turn_count, abbreviated)}</span>
-
-				<!-- Cost (if exists) -->
-				{#if session.total_cost_usd}
-					<span class="opacity-50">·</span>
-					<span class:text-warning={isHighCost} class:text-success={!isHighCost}>
-						{formatCost(session.total_cost_usd, abbreviated)}
-					</span>
+		<!-- Top row: Status + Title + Time -->
+		<div class="flex items-center justify-between gap-2">
+			<div class="flex items-center gap-2 min-w-0 flex-1">
+				<!-- Checkbox for selection mode -->
+				{#if selectionMode}
+					<input
+						type="checkbox"
+						checked={isSelected}
+						on:click|stopPropagation={() => dispatch('select')}
+						class="w-4 h-4 rounded border-border text-primary focus:ring-primary cursor-pointer flex-shrink-0"
+					/>
 				{/if}
+
+				<!-- Status indicator dot + label -->
+				{#if statusDisplay}
+					<span class="w-2 h-2 rounded-full flex-shrink-0 {statusDisplay.color} {isStreaming ? 'animate-pulse' : ''}"></span>
+					<span class="text-xs text-muted-foreground flex-shrink-0">{statusDisplay.label}</span>
+				{/if}
+
+				<!-- Title -->
+				<p class="text-sm font-medium text-foreground truncate leading-snug">
+					{truncateTitle(session.title)}
+				</p>
 			</div>
+
+			<!-- Time of day -->
+			<span class="text-xs text-muted-foreground flex-shrink-0">
+				{formatTimeOfDay(session.updated_at)}
+			</span>
 		</div>
 
-		<!-- Active/Status indicator on right side (like reference image) -->
-		<div class="flex items-center gap-2 flex-shrink-0">
-			<!-- Activity indicator (green dot when active/streaming) -->
-			{#if isActive || isStreaming}
-				<span class="w-2.5 h-2.5 rounded-full bg-primary {isStreaming ? 'animate-pulse' : ''}"></span>
+		<!-- Middle row: Description/subtitle (using title if long, or placeholder) -->
+		<p class="text-xs text-muted-foreground truncate leading-relaxed">
+			{#if session.title && session.title.length > 30}
+				{session.title}
+			{:else}
+				<!-- Placeholder - could be enhanced to show first message preview -->
+				Session with {session.turn_count} {session.turn_count === 1 ? 'turn' : 'turns'}
 			{/if}
+		</p>
+
+		<!-- Bottom row: Message count badge + Time ago + Cost -->
+		<div class="flex items-center gap-2 mt-0.5">
+			<!-- Message count badge -->
+			<div class="flex items-center gap-1 bg-primary/20 text-primary px-1.5 py-0.5 rounded-md">
+				<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+				</svg>
+				<span class="text-xs font-medium">{session.turn_count}</span>
+			</div>
+
+			<!-- Time ago -->
+			<span class="text-xs text-muted-foreground">
+				{formatRelativeTime(session.updated_at, abbreviated)}
+			</span>
+
+			<!-- Cost -->
+			{#if session.total_cost_usd}
+				<span class="text-xs {isHighCost ? 'text-warning' : 'text-success'}">
+					{formatCost(session.total_cost_usd, abbreviated)}
+				</span>
+			{/if}
+
+			<!-- Spacer -->
+			<div class="flex-1"></div>
 
 			<!-- Close/Delete button (desktop hover) -->
 			{#if !selectionMode}
@@ -201,10 +219,10 @@
 						class="opacity-0 group-hover:opacity-100 p-1 text-muted-foreground hover:text-foreground transition-opacity hidden sm:block"
 						title="Delete session"
 					>
-					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-					</svg>
-				</button>
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+						</svg>
+					</button>
 				{/if}
 			{/if}
 		</div>
