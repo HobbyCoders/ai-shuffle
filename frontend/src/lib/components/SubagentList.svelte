@@ -9,7 +9,7 @@
 	 * - Deleting subagents
 	 */
 	import { api } from '$lib/api/client';
-	import SubagentEditor from './SubagentEditor.svelte';
+	import SubagentEditorV2 from './SubagentEditorV2.svelte';
 
 	interface Subagent {
 		name: string;
@@ -280,9 +280,10 @@
 
 <!-- Editor modal -->
 {#if showEditor}
-	<SubagentEditor
+	<SubagentEditorV2
 		{profileId}
 		subagent={editingSubagent}
+		isGlobal={false}
 		onClose={handleEditorClose}
 		onSave={handleEditorSave}
 	/>
