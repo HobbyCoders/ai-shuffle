@@ -3034,10 +3034,10 @@
 		<div class="p-3 border-t border-white/10">
 			<div class="flex items-center justify-between">
 				<div class="flex items-center gap-2">
-					<div class="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
-						<span class="text-sm text-primary">{$username?.[0]?.toUpperCase() || 'U'}</span>
+					<div class="w-8 h-8 rounded-full bg-gradient-to-br from-primary/80 to-primary flex items-center justify-center shadow-glow">
+						<span class="text-sm font-semibold text-primary-foreground">{($apiUser?.name || $username)?.[0]?.toUpperCase() || 'U'}</span>
 					</div>
-					<span class="text-sm text-muted-foreground">{$username}</span>
+					<span class="text-sm text-foreground">{$apiUser?.name || $username}</span>
 				</div>
 				<button on:click={handleLogout} class="text-xs text-muted-foreground hover:text-foreground px-3 py-1.5 rounded-lg hover:bg-white/10 transition-colors">Logout</button>
 			</div>
