@@ -3915,7 +3915,7 @@
 										bind:value={tabInputs[tabId]}
 										on:input={() => handleInputChange(tabId)}
 										on:keydown={(e) => handleKeyDown(e, tabId)}
-										placeholder={currentTab.isStreaming ? "Type to interrupt and send..." : "Message Claude... (/ commands, @ files)"}
+										placeholder="Send message to Claude..."
 										class="w-full bg-transparent border-0 px-2 sm:px-3 py-2 text-foreground placeholder-muted-foreground/60 resize-none focus:outline-none focus:ring-0 min-h-[44px] max-h-[200px] leading-relaxed text-sm sm:text-base"
 										rows="1"
 										disabled={!$claudeAuthenticated}
