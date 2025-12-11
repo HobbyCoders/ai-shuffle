@@ -3031,15 +3031,8 @@
 			{@const currentTab = $activeTab}
 			{@const tabId = currentTab.id}
 			<div class="h-14 flex items-center px-3 sm:px-4 gap-2 relative">
-				<!-- Mobile Menu Button (absolute left) -->
-				<button class="lg:hidden p-2 text-muted-foreground hover:text-foreground floating-pill transition-colors absolute left-3" on:click={() => (sidebarOpen = true)}>
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
-					</svg>
-				</button>
-
-				<!-- Centered Pills Container -->
-				<div class="flex-1 flex items-center justify-center gap-2">
+				<!-- Pills Container (aligned to start) -->
+				<div class="flex-1 flex items-center justify-start gap-2">
 				<!-- Profile Selector (floating pill style with dropdown) -->
 				{#if $apiUser?.profile_id}
 					<!-- API user with locked profile - show as locked indicator -->
@@ -3321,13 +3314,8 @@
 				</div>
 			</div>
 		{:else}
-			<!-- Empty state context bar (no active tab) - just show mobile menu button -->
+			<!-- Empty state context bar (no active tab) -->
 			<div class="h-14 flex items-center px-3 sm:px-4">
-				<button class="lg:hidden p-2 text-muted-foreground hover:text-foreground floating-pill transition-colors" on:click={() => (sidebarOpen = true)}>
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
-					</svg>
-				</button>
 			</div>
 		{/if}
 
