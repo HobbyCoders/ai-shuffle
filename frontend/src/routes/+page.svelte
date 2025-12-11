@@ -2399,8 +2399,8 @@
 				<!-- User Profile Footer -->
 				<div class="mt-auto p-3 border-t border-white/5">
 					<div class="flex items-center gap-3">
-						<div class="w-10 h-10 rounded-full bg-gradient-to-br from-primary/80 to-primary flex items-center justify-center text-white font-semibold shadow-glow">
-							{($apiUser?.name || $username)?.[0]?.toUpperCase() || 'U'}
+						<div class="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center font-semibold">
+							<span class="text-sm text-primary">{($apiUser?.name || $username)?.[0]?.toUpperCase() || 'U'}</span>
 						</div>
 						<div class="flex-1 min-w-0">
 							<p class="text-sm font-medium text-foreground truncate">{$apiUser?.name || $username || 'User'}</p>
@@ -3034,8 +3034,8 @@
 		<div class="p-3 border-t border-white/10">
 			<div class="flex items-center justify-between">
 				<div class="flex items-center gap-2">
-					<div class="w-8 h-8 rounded-full bg-gradient-to-br from-primary/80 to-primary flex items-center justify-center shadow-glow">
-						<span class="text-sm font-semibold text-white">{($apiUser?.name || $username)?.[0]?.toUpperCase() || 'U'}</span>
+					<div class="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
+						<span class="text-sm font-medium text-primary">{($apiUser?.name || $username)?.[0]?.toUpperCase() || 'U'}</span>
 					</div>
 					<span class="text-sm text-foreground">{$apiUser?.name || $username}</span>
 				</div>
