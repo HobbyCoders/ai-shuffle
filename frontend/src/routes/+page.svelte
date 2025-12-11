@@ -2748,66 +2748,127 @@
 						</div>
 					{/if}
 
-					<!-- History Header (Mobile) -->
-					<div class="flex items-center justify-between px-2 mb-2">
-						<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">History</div>
-						<button
-							on:click={() => tabs.loadSessions()}
-							class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
-							title="Refresh sessions"
-							disabled={$sessionsLoading}
-						>
-							<svg
-								class="w-3.5 h-3.5 {$sessionsLoading ? 'animate-spin' : ''}"
-								fill="none"
-								stroke="currentColor"
-								viewBox="0 0 24 24"
-							>
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-							</svg>
-						</button>
-					</div>
-
-					<!-- Grouped Sessions (Mobile) -->
-					<div class="space-y-3">
-						{#each groupedSessions as group}
-							<div>
-								<!-- Group Header -->
-								<button
-									on:click={() => toggleGroupCollapse(group.key)}
-									class="flex items-center gap-2 px-2 py-1.5 w-full text-left active:bg-accent/50 rounded transition-colors"
-								>
-									<svg
-										class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
-										fill="none"
-										stroke="currentColor"
-										viewBox="0 0 24 24"
-									>
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-									</svg>
-									<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
-									<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
-								</button>
-
-								<!-- Group Content -->
-								{#if !collapsedGroups.has(group.key)}
-									<div class="mt-1 space-y-1">
-										{#each group.sessions as session}
-											<SessionCard
-												{session}
-												abbreviated={true}
-												on:click={() => { openSession(session.id); sidebarOpen = false; }}
-												on:delete={() => deleteSession(null, session.id)}
-											/>
-										{/each}
-									</div>
-								{/if}
+					<!-- Search Results (when searching - Mobile) -->
+					{#if sessionSearchQuery.trim()}
+						<div class="flex items-center justify-between px-2 mb-2">
+							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">
+								{isSearching ? 'Searching...' : `Results (${searchResults.length})`}
 							</div>
-						{/each}
-						{#if filteredSessions.length === 0}
-							<p class="text-xs text-muted-foreground px-2">{sessionSearchQuery ? 'No matching sessions' : 'No chat history yet'}</p>
-						{/if}
-					</div>
+							<button
+								on:click={clearSearch}
+								class="text-xs text-muted-foreground hover:text-foreground transition-colors"
+							>
+								Clear
+							</button>
+						</div>
+
+						<div class="space-y-1">
+							{#if isSearching}
+								<div class="flex items-center justify-center py-8">
+									<svg class="w-5 h-5 animate-spin text-muted-foreground" fill="none" viewBox="0 0 24 24">
+										<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+										<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+									</svg>
+								</div>
+							{:else if searchResults.length === 0}
+								<p class="text-xs text-muted-foreground px-2 py-4 text-center">No sessions found matching "{sessionSearchQuery}"</p>
+							{:else}
+								{#each searchResults as result}
+									<button
+										on:click={() => { openSession(result.id); sidebarOpen = false; }}
+										class="w-full text-left px-3 py-2.5 rounded-lg hover:bg-accent active:bg-accent/70 transition-colors group"
+									>
+										<div class="flex items-start gap-2">
+											<div class="flex-1 min-w-0">
+												<div class="text-sm font-medium text-foreground truncate">
+													{result.title || 'Untitled session'}
+												</div>
+												{#if result.match_type === 'content' && result.match_snippet}
+													<div class="text-xs text-muted-foreground mt-1 line-clamp-2">
+														{result.match_snippet}
+													</div>
+												{/if}
+												<div class="flex items-center gap-2 mt-1">
+													<span class="text-xs text-muted-foreground/70">
+														{new Date(result.updated_at).toLocaleDateString()}
+													</span>
+													{#if result.match_type === 'content'}
+														<span class="text-xs bg-accent px-1.5 py-0.5 rounded text-muted-foreground">
+															Content match
+														</span>
+													{/if}
+												</div>
+											</div>
+											<svg class="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+											</svg>
+										</div>
+									</button>
+								{/each}
+							{/if}
+						</div>
+					{:else}
+						<!-- History Header (Mobile) -->
+						<div class="flex items-center justify-between px-2 mb-2">
+							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">History</div>
+							<button
+								on:click={() => tabs.loadSessions()}
+								class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+								title="Refresh sessions"
+								disabled={$sessionsLoading}
+							>
+								<svg
+									class="w-3.5 h-3.5 {$sessionsLoading ? 'animate-spin' : ''}"
+									fill="none"
+									stroke="currentColor"
+									viewBox="0 0 24 24"
+								>
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+								</svg>
+							</button>
+						</div>
+
+						<!-- Grouped Sessions (Mobile) -->
+						<div class="space-y-3">
+							{#each groupedSessions as group}
+								<div>
+									<!-- Group Header -->
+									<button
+										on:click={() => toggleGroupCollapse(group.key)}
+										class="flex items-center gap-2 px-2 py-1.5 w-full text-left active:bg-accent/50 rounded transition-colors"
+									>
+										<svg
+											class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
+											fill="none"
+											stroke="currentColor"
+											viewBox="0 0 24 24"
+										>
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+										</svg>
+										<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
+										<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
+									</button>
+
+									<!-- Group Content -->
+									{#if !collapsedGroups.has(group.key)}
+										<div class="mt-1 space-y-1">
+											{#each group.sessions as session}
+												<SessionCard
+													{session}
+													abbreviated={true}
+													on:click={() => { openSession(session.id); sidebarOpen = false; }}
+													on:delete={() => deleteSession(null, session.id)}
+												/>
+											{/each}
+										</div>
+									{/if}
+								</div>
+							{/each}
+							{#if filteredSessions.length === 0}
+								<p class="text-xs text-muted-foreground px-2">No chat history yet</p>
+							{/if}
+						</div>
+					{/if}
 				{:else if sidebarTab === 'admin'}
 					<!-- Admin Tab Content (Mobile) -->
 					<!-- Open Tabs Section (Mobile Admin) -->
@@ -2833,78 +2894,139 @@
 						</div>
 					{/if}
 
-					<!-- API User Filter -->
-					<div class="flex items-center justify-between px-2 mb-2">
-						<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">API User Sessions</div>
-						<button
-							on:click={() => tabs.loadAdminSessions($adminSessionsFilter)}
-							class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
-							title="Refresh sessions"
-						>
-							<svg
-								class="w-3.5 h-3.5"
-								fill="none"
-								stroke="currentColor"
-								viewBox="0 0 24 24"
-							>
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-							</svg>
-						</button>
-					</div>
-					<div class="mb-3">
-						<label class="text-xs text-muted-foreground uppercase tracking-wider px-2 block mb-1">Filter by User</label>
-						<select
-							class="w-full bg-accent border border-border rounded-md px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-							value={$adminSessionsFilter ?? ''}
-							on:change={(e) => tabs.setAdminSessionsFilter(e.currentTarget.value || null)}
-						>
-							<option value="">All API Users</option>
-							{#each $apiUsers as user}
-								<option value={user.id}>{user.name}</option>
-							{/each}
-						</select>
-					</div>
-
-					<!-- Grouped Admin Sessions (Mobile) -->
-					<div class="space-y-3">
-						{#each groupedAdminSessions as group}
-							<div>
-								<!-- Group Header -->
-								<button
-									on:click={() => toggleGroupCollapse(group.key)}
-									class="flex items-center gap-2 px-2 py-1.5 w-full text-left active:bg-accent/50 rounded transition-colors"
-								>
-									<svg
-										class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
-										fill="none"
-										stroke="currentColor"
-										viewBox="0 0 24 24"
-									>
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-									</svg>
-									<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
-									<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
-								</button>
-
-								<!-- Group Content -->
-								{#if !collapsedGroups.has(group.key)}
-									<div class="mt-1 space-y-1">
-										{#each group.sessions as session}
-											<SessionCard
-												{session}
-												abbreviated={true}
-												on:click={() => { openSession(session.id); sidebarOpen = false; }}
-												on:delete={() => deleteSession(null, session.id)}
-											/>
-										{/each}
-									</div>
-								{/if}
+					<!-- Search Results (when searching - Mobile Admin) -->
+					{#if sessionSearchQuery.trim()}
+						<div class="flex items-center justify-between px-2 mb-2">
+							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">
+								{isSearching ? 'Searching...' : `Results (${searchResults.length})`}
 							</div>
-						{/each}
-						{#if filteredAdminSessions.length === 0}
-							<p class="text-xs text-muted-foreground px-2">{sessionSearchQuery ? 'No matching sessions' : 'No API user sessions found'}</p>
-						{/if}
-					</div>
+							<button
+								on:click={clearSearch}
+								class="text-xs text-muted-foreground hover:text-foreground transition-colors"
+							>
+								Clear
+							</button>
+						</div>
+
+						<div class="space-y-1">
+							{#if isSearching}
+								<div class="flex items-center justify-center py-8">
+									<svg class="w-5 h-5 animate-spin text-muted-foreground" fill="none" viewBox="0 0 24 24">
+										<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+										<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+									</svg>
+								</div>
+							{:else if searchResults.length === 0}
+								<p class="text-xs text-muted-foreground px-2 py-4 text-center">No sessions found matching "{sessionSearchQuery}"</p>
+							{:else}
+								{#each searchResults as result}
+									<button
+										on:click={() => { openSession(result.id); sidebarOpen = false; }}
+										class="w-full text-left px-3 py-2.5 rounded-lg hover:bg-accent active:bg-accent/70 transition-colors group"
+									>
+										<div class="flex items-start gap-2">
+											<div class="flex-1 min-w-0">
+												<div class="text-sm font-medium text-foreground truncate">
+													{result.title || 'Untitled session'}
+												</div>
+												{#if result.match_type === 'content' && result.match_snippet}
+													<div class="text-xs text-muted-foreground mt-1 line-clamp-2">
+														{result.match_snippet}
+													</div>
+												{/if}
+												<div class="flex items-center gap-2 mt-1">
+													<span class="text-xs text-muted-foreground/70">
+														{new Date(result.updated_at).toLocaleDateString()}
+													</span>
+													{#if result.match_type === 'content'}
+														<span class="text-xs bg-accent px-1.5 py-0.5 rounded text-muted-foreground">
+															Content match
+														</span>
+													{/if}
+												</div>
+											</div>
+											<svg class="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+											</svg>
+										</div>
+									</button>
+								{/each}
+							{/if}
+						</div>
+					{:else}
+						<!-- API User Filter -->
+						<div class="flex items-center justify-between px-2 mb-2">
+							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">API User Sessions</div>
+							<button
+								on:click={() => tabs.loadAdminSessions($adminSessionsFilter)}
+								class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+								title="Refresh sessions"
+							>
+								<svg
+									class="w-3.5 h-3.5"
+									fill="none"
+									stroke="currentColor"
+									viewBox="0 0 24 24"
+								>
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+								</svg>
+							</button>
+						</div>
+						<div class="mb-3">
+							<label class="text-xs text-muted-foreground uppercase tracking-wider px-2 block mb-1">Filter by User</label>
+							<select
+								class="w-full bg-accent border border-border rounded-md px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+								value={$adminSessionsFilter ?? ''}
+								on:change={(e) => tabs.setAdminSessionsFilter(e.currentTarget.value || null)}
+							>
+								<option value="">All API Users</option>
+								{#each $apiUsers as user}
+									<option value={user.id}>{user.name}</option>
+								{/each}
+							</select>
+						</div>
+
+						<!-- Grouped Admin Sessions (Mobile) -->
+						<div class="space-y-3">
+							{#each groupedAdminSessions as group}
+								<div>
+									<!-- Group Header -->
+									<button
+										on:click={() => toggleGroupCollapse(group.key)}
+										class="flex items-center gap-2 px-2 py-1.5 w-full text-left active:bg-accent/50 rounded transition-colors"
+									>
+										<svg
+											class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
+											fill="none"
+											stroke="currentColor"
+											viewBox="0 0 24 24"
+										>
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+										</svg>
+										<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
+										<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
+									</button>
+
+									<!-- Group Content -->
+									{#if !collapsedGroups.has(group.key)}
+										<div class="mt-1 space-y-1">
+											{#each group.sessions as session}
+												<SessionCard
+													{session}
+													abbreviated={true}
+													on:click={() => { openSession(session.id); sidebarOpen = false; }}
+													on:delete={() => deleteSession(null, session.id)}
+												/>
+											{/each}
+										</div>
+									{/if}
+								</div>
+							{/each}
+							{#if filteredAdminSessions.length === 0}
+								<p class="text-xs text-muted-foreground px-2">No API user sessions found</p>
+							{/if}
+						</div>
+					{/if}
 				{/if}
 			</div>
 
