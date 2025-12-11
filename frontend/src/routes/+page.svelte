@@ -3017,8 +3017,8 @@
 			<div class="h-14 flex items-center px-3 sm:px-4 gap-2 relative">
 				<!-- Left: Context Pill -->
 				<div class="flex items-center gap-2">
-					<!-- Context usage dropdown (only show if any tokens > 0) -->
-					{#if currentTab.totalTokensIn > 0 || currentTab.totalTokensOut > 0 || currentTab.totalCacheCreationTokens > 0 || currentTab.totalCacheReadTokens > 0}
+					<!-- Context usage dropdown (always show) -->
+					{#if currentTab}
 						{@const autocompactBuffer = 45000}
 						{@const contextUsed = (currentTab.contextUsed ?? (currentTab.totalTokensIn + currentTab.totalCacheCreationTokens + currentTab.totalCacheReadTokens)) + autocompactBuffer}
 						{@const contextMax = 200000}
@@ -3351,7 +3351,7 @@
 									<!-- Content -->
 									<div class="min-w-0">
 										<div class="flex items-center gap-2 mb-1">
-											<span class="font-semibold text-sm text-foreground">You</span>
+											<span class="font-semibold text-sm text-blue-400">You</span>
 											<span class="text-xs text-muted-foreground">{formatTime()}</span>
 										</div>
 										<div class="overflow-hidden">
@@ -3367,7 +3367,7 @@
 									<!-- Content -->
 									<div class="min-w-0">
 										<div class="flex items-center gap-2 mb-1">
-											<span class="font-semibold text-sm text-foreground">Claude</span>
+											<span class="font-semibold text-sm text-orange-400">Claude</span>
 											<span class="text-xs text-muted-foreground">{formatTime()}</span>
 											{#if message.streaming}
 												<span class="flex gap-0.5">

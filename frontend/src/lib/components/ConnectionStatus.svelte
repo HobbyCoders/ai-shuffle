@@ -83,7 +83,7 @@
 <div class="relative">
 	<button
 		onclick={toggleDetails}
-		class="flex items-center gap-1.5 px-2 py-1 text-xs {statusConfig.color} hover:bg-accent rounded-md transition-colors"
+		class="flex items-center justify-center p-1.5 text-xs {statusConfig.color} hover:bg-accent rounded-md transition-colors"
 		title={statusConfig.label}
 	>
 		{#if statusConfig.icon === 'spinner'}
@@ -96,7 +96,6 @@
 			<!-- Dot for connected/disconnected -->
 			<span class="w-2 h-2 {statusConfig.bgColor} rounded-full {statusConfig.pulse ? 'animate-pulse' : ''}"></span>
 		{/if}
-		<span class="hidden sm:inline">{statusConfig.label}</span>
 	</button>
 
 	<!-- Details Popover -->

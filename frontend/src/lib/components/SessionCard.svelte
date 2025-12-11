@@ -91,7 +91,7 @@
 	}
 
 	// Get status display info
-	$: statusDisplay = getStatusDisplay(session.status, isStreaming);
+	$: statusDisplay = getStatusDisplay(session.status, isStreaming, isOpen);
 
 	// Check if high cost
 	$: isHighCost = (session.total_cost_usd ?? 0) > 10;
