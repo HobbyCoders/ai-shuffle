@@ -702,17 +702,11 @@
 			return;
 		}
 
-		// Append file references to the end of the message
-		const files = tabUploadedFiles[tabId] || [];
-		let finalPrompt = prompt;
-		if (files.length > 0) {
-			const fileRefs = files.map(f => `@${f.path}`).join(' ');
-			finalPrompt = prompt.trim() + '\n\n' + fileRefs;
-		}
+		// File references are now inline in the message text, no need to append
+		const finalPrompt = prompt;
 
 		tabInputs[tabId] = '';
 		tabInputs = tabInputs; // Trigger Svelte reactivity
-		tabUploadedFiles[tabId] = [];
 
 		// Reset textarea height to original size after clearing input
 		const textarea = textareas[tabId];
@@ -779,6 +773,45 @@
 		showFileAutocomplete = showFileAutocomplete;
 	}
 
+	// Parse input text and return segments for rendering with inline file chips
+	type InputSegment = { type: 'text'; content: string } | { type: 'file'; content: string; path: string; filename: string };
+
+	function renderInputWithChips(input: string): InputSegment[] {
+		if (!input) return [];
+
+		const segments: InputSegment[] = [];
+		// Match @filepath patterns - filepath ends at whitespace or end of string
+		const fileRefRegex = /@([^\s@]+)/g;
+		let lastIndex = 0;
+		let match;
+
+		while ((match = fileRefRegex.exec(input)) !== null) {
+			// Add text before this match
+			if (match.index > lastIndex) {
+				segments.push({ type: 'text', content: input.slice(lastIndex, match.index) });
+			}
+
+			// Add file chip
+			const fullPath = match[1];
+			const filename = fullPath.split('/').pop() || fullPath;
+			segments.push({
+				type: 'file',
+				content: match[0], // @filepath
+				path: fullPath,
+				filename
+			});
+
+			lastIndex = match.index + match[0].length;
+		}
+
+		// Add remaining text
+		if (lastIndex < input.length) {
+			segments.push({ type: 'text', content: input.slice(lastIndex) });
+		}
+
+		return segments;
+	}
+
 	// Handle command selection from autocomplete
 	async function handleCommandSelect(tabId: string, command: Command) {
 		showCommandAutocomplete[tabId] = false;
@@ -842,20 +875,8 @@
 			return;
 		}
 
-		// For files, add to the uploaded files list as a chip (no text in input)
-		const fileRef: FileUploadResponse = {
-			filename: file.name,
-			path: file.path,
-			full_path: file.path,
-			size: file.size || 0
-		};
-
-		// Add to tracked files
-		if (!tabUploadedFiles[tabId]) tabUploadedFiles[tabId] = [];
-		tabUploadedFiles[tabId] = [...tabUploadedFiles[tabId], fileRef];
-
-		// Remove the @query from input (file reference shown as chip only)
-		const newInput = input.substring(0, atStartIndex).trimEnd();
+		// For files, replace @query with @filepath inline (keep in text, render as chip visually)
+		const newInput = input.substring(0, atStartIndex) + '@' + file.path + ' ';
 		tabInputs[tabId] = newInput;
 		tabInputs = tabInputs;
 
@@ -1756,9 +1777,11 @@
 		try {
 			for (const file of Array.from(files)) {
 				const result = await api.uploadFile(`/projects/${$activeTab.project}/upload`, file);
-				if (!tabUploadedFiles[tabId]) tabUploadedFiles[tabId] = [];
-				tabUploadedFiles[tabId] = [...tabUploadedFiles[tabId], result];
-				// File references are shown as chips only, @FilePath appended when message is sent
+				// Insert @filepath reference inline in the text
+				const currentInput = tabInputs[tabId] || '';
+				const separator = currentInput && !currentInput.endsWith(' ') ? ' ' : '';
+				tabInputs[tabId] = currentInput + separator + '@' + result.path + ' ';
+				tabInputs = tabInputs;
 			}
 		} catch (error: any) {
 			console.error('Upload failed:', error);
@@ -1767,13 +1790,6 @@
 			isUploading = false;
 			input.value = '';
 		}
-	}
-
-	function removeUploadedFile(tabId: string, index: number) {
-		const files = tabUploadedFiles[tabId] || [];
-		if (!files[index]) return;
-		// File references are shown as chips only, just remove from the array
-		tabUploadedFiles[tabId] = files.filter((_, i) => i !== index);
 	}
 
 	// Voice recording functions
@@ -3719,28 +3735,8 @@
 						<div class="floating-island transition-all duration-200 focus-within:border-primary/40 focus-within:shadow-primary/10 focus-within:shadow-xl">
 							<!-- Main Input Row -->
 							<div class="flex items-start gap-1 p-2 sm:p-2.5">
-								<!-- Textarea Container with inline file chips -->
-								<div class="flex-1 relative min-w-0 flex flex-wrap items-center gap-1">
-									<!-- Inline File Chips -->
-									{#if (tabUploadedFiles[tabId] || []).length > 0}
-										{#each tabUploadedFiles[tabId] as file, index}
-											<div class="flex items-center gap-1 bg-primary/15 text-xs px-2 py-1 rounded-full group shrink-0">
-												<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-												</svg>
-												<span class="text-foreground truncate max-w-[80px]" title={file.path}>{file.filename}</span>
-												<button
-													type="button"
-													on:click={() => removeUploadedFile(tabId, index)}
-													class="text-muted-foreground hover:text-destructive transition-colors"
-												>
-													<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-													</svg>
-												</button>
-											</div>
-										{/each}
-									{/if}
+								<!-- Input Container with visual overlay for file chips -->
+								<div class="flex-1 relative min-w-0">
 									<!-- Command Autocomplete -->
 									<CommandAutocomplete
 										bind:this={commandAutocompleteRefs[tabId]}
@@ -3767,19 +3763,36 @@
 										}}
 									/>
 
-									<!-- Textarea - grows to fill remaining space -->
-									<div class="flex-1 min-w-[120px] basis-full sm:basis-auto">
-										<textarea
-											bind:this={textareas[tabId]}
-											bind:value={tabInputs[tabId]}
-											on:input={() => handleInputChange(tabId)}
-											on:keydown={(e) => handleKeyDown(e, tabId)}
-											placeholder={currentTab.isStreaming ? "Queue a message while Claude works..." : "Message Claude... (/ commands, @ files)"}
-											class="w-full bg-transparent border-0 px-1 sm:px-2 py-1.5 text-foreground placeholder-muted-foreground/60 resize-none focus:outline-none focus:ring-0 min-h-[36px] max-h-[200px] leading-relaxed text-sm sm:text-base"
-											rows="1"
-											disabled={!$claudeAuthenticated}
-										></textarea>
+									<!-- Visual overlay that renders text with inline file chips -->
+									<div
+										class="absolute inset-0 px-2 sm:px-3 py-2 pointer-events-none overflow-hidden text-sm sm:text-base leading-relaxed whitespace-pre-wrap break-words"
+										aria-hidden="true"
+									>
+										{#each renderInputWithChips(tabInputs[tabId] || '') as segment}
+											{#if segment.type === 'text'}
+												<span class="text-transparent">{segment.content}</span>
+											{:else if segment.type === 'file'}
+												<span class="inline-flex items-center gap-0.5 bg-primary/20 text-primary text-xs px-1.5 py-0.5 rounded-md align-middle pointer-events-auto" title={segment.path}>
+													<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+													</svg>
+													<span class="max-w-[100px] truncate">{segment.filename}</span>
+												</span>
+											{/if}
+										{/each}
 									</div>
+
+									<!-- Actual textarea (text invisible where chips are, visible elsewhere) -->
+									<textarea
+										bind:this={textareas[tabId]}
+										bind:value={tabInputs[tabId]}
+										on:input={() => handleInputChange(tabId)}
+										on:keydown={(e) => handleKeyDown(e, tabId)}
+										placeholder={currentTab.isStreaming ? "Queue a message while Claude works..." : "Message Claude... (/ commands, @ files)"}
+										class="relative w-full bg-transparent border-0 px-2 sm:px-3 py-2 text-foreground placeholder-muted-foreground/60 resize-none focus:outline-none focus:ring-0 min-h-[44px] max-h-[200px] leading-relaxed text-sm sm:text-base file-input-text"
+										rows="1"
+										disabled={!$claudeAuthenticated}
+									></textarea>
 								</div>
 
 								<!-- Voice/Send/Stop/Queue Buttons -->
@@ -4942,5 +4955,10 @@
 			transform: translateX(0);
 			opacity: 1;
 		}
+	}
+
+	/* File input text styling - make @filepath references have matching width to overlay chips */
+	.file-input-text {
+		caret-color: hsl(var(--foreground));
 	}
 </style>
