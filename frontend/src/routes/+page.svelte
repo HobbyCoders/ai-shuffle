@@ -967,7 +967,7 @@
 						link.href = '${dataUrl}';
 						link.download = '${alt || 'generated-image'}.png';
 						link.click();
-					})()" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download">
+					})()" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download image">
 						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 						</svg>
@@ -978,7 +978,7 @@
 						setTimeout(function() {
 							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
 						}, 2000);
-					})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+					})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy image URL">
 						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
 						</svg>
@@ -1001,7 +1001,7 @@
 							link.href = '${dataUrl}';
 							link.download = 'generated-image.png';
 							link.click();
-						})()" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download">
+						})()" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download image">
 							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 							</svg>
@@ -1012,7 +1012,7 @@
 							setTimeout(function() {
 								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
 							}, 2000);
-						})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+						})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy image URL">
 							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
 							</svg>
@@ -1030,7 +1030,7 @@
 			return `<div class="generated-media-container relative my-4 inline-block">
 				<img src="${imageUrl}" alt="${alt || 'Generated image'}" class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border" />
 				<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
-					<a href="${imageUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download">
+					<a href="${imageUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download image">
 						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 						</svg>
@@ -1041,7 +1041,7 @@
 						setTimeout(function() {
 							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
 						}, 2000);
-					})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+					})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy image URL">
 						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
 						</svg>
@@ -1059,7 +1059,7 @@
 					Your browser does not support the video tag.
 				</video>
 				<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
-					<a href="${videoUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download">
+					<a href="${videoUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download video">
 						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 						</svg>
@@ -1070,7 +1070,7 @@
 						setTimeout(function() {
 							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
 						}, 2000);
-					})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+					})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy video URL">
 						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
 						</svg>
@@ -1097,7 +1097,7 @@
 					<div class="generated-media-container relative inline-block">
 						<img src="${imageUrl}" alt="Generated image" class="max-w-full max-h-96 rounded-lg shadow-md border border-border" />
 						<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
-							<a href="${imageUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download">
+							<a href="${imageUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download image">
 								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 								</svg>
@@ -1108,7 +1108,7 @@
 								setTimeout(function() {
 									btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
 								}, 2000);
-							})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+							})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy image URL">
 								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
 								</svg>
@@ -1133,7 +1133,7 @@
 								link.href = '${dataUrl}';
 								link.download = 'generated-image.png';
 								link.click();
-							})()" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download">
+							})()" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download image">
 								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 								</svg>
@@ -1144,7 +1144,7 @@
 								setTimeout(function() {
 									btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
 								}, 2000);
-							})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+							})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy image URL">
 								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
 								</svg>
@@ -1166,7 +1166,7 @@
 							Your browser does not support the video tag.
 						</video>
 						<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
-							<a href="${videoUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download">
+							<a href="${videoUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download video">
 								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 								</svg>
@@ -1177,7 +1177,7 @@
 								setTimeout(function() {
 									btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
 								}, 2000);
-							})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+							})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy video URL">
 								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
 								</svg>
@@ -1231,7 +1231,7 @@
 				return `<div class="generated-media-container relative mt-3 inline-block">
 					<img src="${imageUrl}" alt="Generated image" class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border" />
 					<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
-						<a href="${imageUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download">
+						<a href="${imageUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download image">
 							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 							</svg>
@@ -1242,7 +1242,7 @@
 							setTimeout(function() {
 								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
 							}, 2000);
-						})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+						})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy image URL">
 							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
 							</svg>
@@ -1263,7 +1263,7 @@
 							link.href = '${dataUrl}';
 							link.download = 'generated-image.png';
 							link.click();
-						})()" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download">
+						})()" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download image">
 							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 							</svg>
@@ -1274,7 +1274,7 @@
 							setTimeout(function() {
 								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
 							}, 2000);
-						})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+						})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy image URL">
 							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
 							</svg>
@@ -1301,7 +1301,7 @@
 						Your browser does not support the video tag.
 					</video>
 					<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
-						<a href="${videoUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download">
+						<a href="${videoUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download video">
 							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 							</svg>
@@ -1312,7 +1312,7 @@
 							setTimeout(function() {
 								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
 							}, 2000);
-						})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+						})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy video URL">
 							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
 							</svg>
