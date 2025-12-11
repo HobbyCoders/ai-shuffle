@@ -587,11 +587,14 @@ async def chat_websocket(
                                     except (asyncio.CancelledError, asyncio.TimeoutError):
                                         pass
 
-                    elif msg_type == "queue_message":
-                        # Queue a message to be sent to Claude while streaming
-                        # This supports "streaming input" - user can send messages while Claude works
+                    elif msg_type == "interrupt_and_query":
+                        # Interrupt current streaming and immediately send a new query
+                        # This is the proper way to handle user input during streaming
                         session_id = data.get("session_id") or current_session_id
                         prompt = data.get("prompt", "").strip()
+                        profile_id = data.get("profile", "claude-code")
+                        project_id = data.get("project")
+                        overrides = data.get("overrides")
 
                         if not prompt:
                             await send_json({"type": "error", "message": "Empty prompt"})
@@ -601,42 +604,45 @@ async def chat_websocket(
                             await send_json({"type": "error", "message": "No active session"})
                             continue
 
-                        from app.core.query_engine import queue_user_message, get_queued_message_count
+                        from app.core.query_engine import interrupt_session
 
-                        # Queue the message
-                        success = await queue_user_message(session_id, prompt)
+                        # Step 1: Interrupt the SDK-level streaming
+                        interrupted = await interrupt_session(session_id)
+                        logger.info(f"Interrupt session {session_id} before new query: {interrupted}")
 
-                        if success:
-                            # Store user message in database
-                            database.add_session_message(
-                                session_id=session_id,
-                                role="user",
-                                content=prompt
-                            )
+                        # Step 2: Cancel the asyncio task
+                        if session_id in _active_chat_sessions:
+                            task = _active_chat_sessions[session_id]
+                            if not task.done():
+                                task.cancel()
+                                try:
+                                    await asyncio.wait_for(task, timeout=2.0)
+                                except (asyncio.CancelledError, asyncio.TimeoutError):
+                                    pass
 
-                            # Broadcast user message to other devices
-                            await sync_engine.broadcast_message_added(
-                                session_id=session_id,
-                                message={
-                                    "role": "user",
-                                    "content": prompt
-                                },
-                                source_device_id=device_id
-                            )
+                        # Step 3: Store user message
+                        database.add_session_message(
+                            session_id=session_id,
+                            role="user",
+                            content=prompt
+                        )
 
-                            # Notify frontend of successful queue
-                            await send_json({
-                                "type": "message_queued",
-                                "session_id": session_id,
-                                "prompt": prompt,
-                                "queue_position": get_queued_message_count(session_id)
-                            })
-                            logger.info(f"Queued message for session {session_id}")
-                        else:
-                            await send_json({
-                                "type": "error",
-                                "message": "Cannot queue message - session not streaming or not found"
-                            })
+                        # Step 4: Broadcast user message to other devices
+                        await sync_engine.broadcast_message_added(
+                            session_id=session_id,
+                            message={
+                                "role": "user",
+                                "content": prompt
+                            },
+                            source_device_id=device_id
+                        )
+
+                        # Step 5: Start new query task
+                        query_task = asyncio.create_task(
+                            run_query(prompt, session_id, profile_id, project_id, overrides)
+                        )
+                        _active_chat_sessions[session_id] = query_task
+                        logger.info(f"Started new query after interrupt for session {session_id}")
 
                     elif msg_type == "load_session":
                         # Load a session's message history from JSONL file

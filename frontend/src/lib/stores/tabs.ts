@@ -2582,8 +2582,8 @@ function createTabsStore() {
 
 		/**
 		 * Send message in a specific tab.
-		 * If the tab is currently streaming, this will queue the message to be
-		 * processed after Claude finishes the current response (streaming input).
+		 * If the tab is currently streaming, this will interrupt the current response
+		 * and then send the new message.
 		 */
 		sendMessage(tabId: string, prompt: string) {
 			const tab = getTab(tabId);
@@ -2615,14 +2615,16 @@ function createTabsStore() {
 				})
 			}));
 
-			// If currently streaming, queue the message instead of starting a new query
-			// This enables "streaming input" - user can send messages while Claude is working
+			// If currently streaming, send interrupt_and_query to stop current response
+			// and immediately process the new message
 			if (tab.isStreaming && tab.sessionId) {
-				console.log(`[Tab ${tabId}] Queueing message while streaming: ${prompt.substring(0, 50)}...`);
+				console.log(`[Tab ${tabId}] Interrupting and sending new message: ${prompt.substring(0, 50)}...`);
 				ws.send(JSON.stringify({
-					type: 'queue_message',
+					type: 'interrupt_and_query',
 					prompt,
-					session_id: tab.sessionId
+					session_id: tab.sessionId,
+					profile: tab.profile,
+					project: tab.project || undefined
 				}));
 				return;
 			}

@@ -3915,7 +3915,7 @@
 										bind:value={tabInputs[tabId]}
 										on:input={() => handleInputChange(tabId)}
 										on:keydown={(e) => handleKeyDown(e, tabId)}
-										placeholder={currentTab.isStreaming ? "Queue a message while Claude works..." : "Message Claude... (/ commands, @ files)"}
+										placeholder={currentTab.isStreaming ? "Type to interrupt and send..." : "Message Claude... (/ commands, @ files)"}
 										class="w-full bg-transparent border-0 px-2 sm:px-3 py-2 text-foreground placeholder-muted-foreground/60 resize-none focus:outline-none focus:ring-0 min-h-[44px] max-h-[200px] leading-relaxed text-sm sm:text-base"
 										rows="1"
 										disabled={!$claudeAuthenticated}
@@ -3943,28 +3943,29 @@
 										{/if}
 									</button>
 									{#if currentTab.isStreaming}
-										<!-- When streaming: show queue button if text entered, always show stop button -->
+										<!-- When streaming: show send button if text entered (interrupts then sends), otherwise show stop button -->
 										{#if (tabInputs[tabId] || '').trim()}
 											<button
 												type="submit"
-												class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-amber-500/15 text-amber-600 hover:bg-amber-500/25 rounded-xl transition-all"
-												title="Queue message (will be sent when Claude finishes)"
+												class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-primary hover:bg-primary/90 text-primary-foreground rounded-xl transition-all"
+												title="Send message (interrupts current response)"
 											>
 												<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
+												</svg>
+											</button>
+										{:else}
+											<button
+												type="button"
+												on:click={() => tabs.stopGeneration(tabId)}
+												class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-destructive/15 text-destructive hover:bg-destructive/25 rounded-xl transition-all"
+												title="Stop generating"
+											>
+												<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+													<rect x="6" y="6" width="12" height="12" rx="2" />
 												</svg>
 											</button>
 										{/if}
-										<button
-											type="button"
-											on:click={() => tabs.stopGeneration(tabId)}
-											class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-destructive/15 text-destructive hover:bg-destructive/25 rounded-xl transition-all"
-											title="Stop generating"
-										>
-											<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-												<rect x="6" y="6" width="12" height="12" rx="2" />
-											</svg>
-										</button>
 									{:else}
 										<!-- Send Button -->
 										<button
