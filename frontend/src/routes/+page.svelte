@@ -3031,8 +3031,92 @@
 			{@const currentTab = $activeTab}
 			{@const tabId = currentTab.id}
 			<div class="h-14 flex items-center px-3 sm:px-4 gap-2 relative">
-				<!-- Pills Container (aligned to start) -->
-				<div class="flex-1 flex items-center justify-start gap-2">
+				<!-- Left: Context Pill -->
+				<div class="flex items-center gap-2">
+					<!-- Context usage dropdown (only show if any tokens > 0) -->
+					{#if currentTab.totalTokensIn > 0 || currentTab.totalTokensOut > 0 || currentTab.totalCacheCreationTokens > 0 || currentTab.totalCacheReadTokens > 0}
+						{@const autocompactBuffer = 45000}
+						{@const contextUsed = (currentTab.contextUsed ?? (currentTab.totalTokensIn + currentTab.totalCacheCreationTokens + currentTab.totalCacheReadTokens)) + autocompactBuffer}
+						{@const contextMax = 200000}
+						{@const contextPercent = Math.min((contextUsed / contextMax) * 100, 100)}
+						<div class="relative group">
+							<button
+								class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-white/10 transition-colors"
+								title="Context usage: {formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}"
+							>
+								<!-- Circular progress indicator -->
+								<svg class="w-4 h-4 -rotate-90" viewBox="0 0 20 20">
+									<circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="2" opacity="0.2" />
+									<circle
+										cx="10" cy="10" r="8" fill="none"
+										stroke={contextPercent > 80 ? '#ef4444' : contextPercent > 60 ? '#f59e0b' : '#22c55e'}
+										stroke-width="2"
+										stroke-dasharray={2 * Math.PI * 8}
+										stroke-dashoffset={2 * Math.PI * 8 * (1 - contextPercent / 100)}
+										stroke-linecap="round"
+									/>
+								</svg>
+								<span>{Math.round(contextPercent)}%</span>
+								<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+								</svg>
+							</button>
+							<!-- Token dropdown -->
+							<div class="absolute left-0 top-full mt-1 w-52 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+								<div class="py-2 px-3 space-y-2">
+									<!-- Context header -->
+									<div class="flex items-center justify-between text-xs pb-1 border-b border-border">
+										<span class="text-muted-foreground">Context</span>
+										<span class="text-foreground font-medium">{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}</span>
+									</div>
+									<div class="flex items-center justify-between text-xs">
+										<span class="flex items-center gap-1.5 text-muted-foreground">
+											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4" />
+											</svg>
+											Input
+										</span>
+										<span class="text-foreground font-medium">{formatTokenCount(currentTab.totalTokensIn)}</span>
+									</div>
+									<div class="flex items-center justify-between text-xs">
+										<span class="flex items-center gap-1.5 text-muted-foreground">
+											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8v12m0 0l4-4m-4 4l-4-4" />
+											</svg>
+											Output
+										</span>
+										<span class="text-foreground font-medium">{formatTokenCount(currentTab.totalTokensOut)}</span>
+									</div>
+									{#if currentTab.totalCacheCreationTokens > 0}
+										<div class="flex items-center justify-between text-xs">
+											<span class="flex items-center gap-1.5 text-muted-foreground">
+												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+												</svg>
+												Cache Creation
+											</span>
+											<span class="text-foreground font-medium">{formatTokenCount(currentTab.totalCacheCreationTokens)}</span>
+										</div>
+									{/if}
+									{#if currentTab.totalCacheReadTokens > 0}
+										<div class="flex items-center justify-between text-xs">
+											<span class="flex items-center gap-1.5 text-blue-400">
+												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+												</svg>
+												Cache Read
+											</span>
+											<span class="text-blue-400 font-medium">{formatTokenCount(currentTab.totalCacheReadTokens)}</span>
+										</div>
+									{/if}
+								</div>
+							</div>
+						</div>
+					{/if}
+				</div>
+
+				<!-- Center: Profile and Project Pills -->
+				<div class="flex-1 flex items-center justify-center gap-2">
 				<!-- Profile Selector (floating pill style with dropdown) -->
 				{#if $apiUser?.profile_id}
 					<!-- API user with locked profile - show as locked indicator -->
@@ -3226,88 +3310,10 @@
 						{/if}
 					</div>
 				{/if}
-					<!-- Context usage dropdown (only show if any tokens > 0) -->
-					{#if currentTab.totalTokensIn > 0 || currentTab.totalTokensOut > 0 || currentTab.totalCacheCreationTokens > 0 || currentTab.totalCacheReadTokens > 0}
-						{@const autocompactBuffer = 45000}
-						{@const contextUsed = (currentTab.contextUsed ?? (currentTab.totalTokensIn + currentTab.totalCacheCreationTokens + currentTab.totalCacheReadTokens)) + autocompactBuffer}
-						{@const contextMax = 200000}
-						{@const contextPercent = Math.min((contextUsed / contextMax) * 100, 100)}
-						<div class="relative group">
-							<button
-								class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-white/10 transition-colors"
-								title="Context usage: {formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}"
-							>
-								<!-- Circular progress indicator -->
-								<svg class="w-4 h-4 -rotate-90" viewBox="0 0 20 20">
-									<circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="2" opacity="0.2" />
-									<circle
-										cx="10" cy="10" r="8" fill="none"
-										stroke={contextPercent > 80 ? '#ef4444' : contextPercent > 60 ? '#f59e0b' : '#22c55e'}
-										stroke-width="2"
-										stroke-dasharray={2 * Math.PI * 8}
-										stroke-dashoffset={2 * Math.PI * 8 * (1 - contextPercent / 100)}
-										stroke-linecap="round"
-									/>
-								</svg>
-								<span>{Math.round(contextPercent)}%</span>
-								<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-								</svg>
-							</button>
-							<!-- Token dropdown -->
-							<div class="absolute right-0 top-full mt-1 w-52 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
-								<div class="py-2 px-3 space-y-2">
-									<!-- Context header -->
-									<div class="flex items-center justify-between text-xs pb-1 border-b border-border">
-										<span class="text-muted-foreground">Context</span>
-										<span class="text-foreground font-medium">{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}</span>
-									</div>
-									<div class="flex items-center justify-between text-xs">
-										<span class="flex items-center gap-1.5 text-muted-foreground">
-											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4" />
-											</svg>
-											Input
-										</span>
-										<span class="text-foreground font-medium">{formatTokenCount(currentTab.totalTokensIn)}</span>
-									</div>
-									<div class="flex items-center justify-between text-xs">
-										<span class="flex items-center gap-1.5 text-muted-foreground">
-											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8v12m0 0l4-4m-4 4l-4-4" />
-											</svg>
-											Output
-										</span>
-										<span class="text-foreground font-medium">{formatTokenCount(currentTab.totalTokensOut)}</span>
-									</div>
-									{#if currentTab.totalCacheCreationTokens > 0}
-										<div class="flex items-center justify-between text-xs">
-											<span class="flex items-center gap-1.5 text-muted-foreground">
-												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-												</svg>
-												Cache Creation
-											</span>
-											<span class="text-foreground font-medium">{formatTokenCount(currentTab.totalCacheCreationTokens)}</span>
-										</div>
-									{/if}
-									{#if currentTab.totalCacheReadTokens > 0}
-										<div class="flex items-center justify-between text-xs">
-											<span class="flex items-center gap-1.5 text-blue-400">
-												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-												</svg>
-												Cache Read
-											</span>
-											<span class="text-blue-400 font-medium">{formatTokenCount(currentTab.totalCacheReadTokens)}</span>
-										</div>
-									{/if}
-								</div>
-							</div>
-						</div>
-					{/if}
+				</div>
 
-					<!-- Connection Status -->
+				<!-- Right: Connection Status -->
+				<div class="flex items-center gap-2">
 					<div class="floating-pill px-3 py-1.5">
 						<ConnectionStatus wsConnected={currentTab.wsConnected} />
 					</div>
