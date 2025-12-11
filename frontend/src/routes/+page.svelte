@@ -3719,6 +3719,141 @@
 					{/if}
 
 					<form on:submit|preventDefault={() => handleSubmit(tabId)} class="relative">
+						<!-- Top Controls Row (Pills + Attach) -->
+						<div class="mb-2 flex flex-wrap items-center justify-center gap-1.5">
+							<!-- Model/Mode Pills (Admin only) -->
+							{#if currentTab && $isAdmin}
+								{@const currentProfile = $profiles.find(p => p.id === currentTab.profile)}
+								{@const profileModel = currentProfile?.config?.model || 'sonnet'}
+								{@const profilePermissionMode = currentProfile?.config?.permission_mode || 'default'}
+								{@const effectiveModel = currentTab.modelOverride || profileModel}
+								{@const effectiveMode = currentTab.permissionModeOverride || profilePermissionMode}
+								{@const modelLabels = { sonnet: 'Sonnet', 'sonnet-1m': 'Sonnet 1M', opus: 'Opus', haiku: 'Haiku' } as Record<string, string>}
+								{@const modeLabels = { default: 'Ask', acceptEdits: 'Auto-Accept', plan: 'Plan', bypassPermissions: 'Bypass' } as Record<string, string>}
+								<!-- Model Selector Pill -->
+								<div class="relative">
+									<button
+										type="button"
+										on:click={() => { showModelPopup = !showModelPopup; showModePopup = false; }}
+										class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {currentTab.modelOverride ? 'bg-primary/15 text-primary border border-primary/30' : 'bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50'}"
+										disabled={currentTab.isStreaming}
+									>
+										<span>{modelLabels[effectiveModel] || effectiveModel}</span>
+										<svg class="w-2.5 h-2.5 opacity-60 transition-transform {showModelPopup ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
+										</svg>
+									</button>
+									{#if showModelPopup}
+										<div class="fixed inset-0 z-40" on:click={() => showModelPopup = false}></div>
+										<div class="absolute top-full left-1/2 -translate-x-1/2 mt-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[90px]">
+											{#each [['sonnet', 'Sonnet'], ['sonnet-1m', 'Sonnet 1M'], ['opus', 'Opus'], ['haiku', 'Haiku']] as [value, label]}
+												<button
+													type="button"
+													on:click={() => {
+														if (value === profileModel) {
+															tabs.setTabModelOverride(tabId, null);
+														} else {
+															tabs.setTabModelOverride(tabId, value);
+														}
+														showModelPopup = false;
+													}}
+													class="w-full px-3 py-1.5 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-3 {effectiveModel === value ? 'bg-accent/50 text-foreground font-medium' : 'text-muted-foreground'}"
+												>
+													<span>{label}</span>
+													{#if effectiveModel === value}
+														<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
+														</svg>
+													{/if}
+												</button>
+											{/each}
+										</div>
+									{/if}
+								</div>
+
+								<!-- Permission Mode Selector Pill -->
+								<div class="relative">
+									<button
+										type="button"
+										on:click={() => { showModePopup = !showModePopup; showModelPopup = false; }}
+										class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {currentTab.permissionModeOverride ? 'bg-primary/15 text-primary border border-primary/30' : 'bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50'}"
+										disabled={currentTab.isStreaming}
+									>
+										<span>{modeLabels[effectiveMode] || effectiveMode}</span>
+										<svg class="w-2.5 h-2.5 opacity-60 transition-transform {showModePopup ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
+										</svg>
+									</button>
+									{#if showModePopup}
+										<div class="fixed inset-0 z-40" on:click={() => showModePopup = false}></div>
+										<div class="absolute top-full left-1/2 -translate-x-1/2 mt-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[100px]">
+											{#each [['default', 'Ask'], ['acceptEdits', 'Auto-Accept'], ['plan', 'Plan'], ['bypassPermissions', 'Bypass']] as [value, label]}
+												<button
+													type="button"
+													on:click={() => {
+														if (value === profilePermissionMode) {
+															tabs.setTabPermissionModeOverride(tabId, null);
+														} else {
+															tabs.setTabPermissionModeOverride(tabId, value);
+														}
+														showModePopup = false;
+													}}
+													class="w-full px-3 py-1.5 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-3 {effectiveMode === value ? 'bg-accent/50 text-foreground font-medium' : 'text-muted-foreground'}"
+												>
+													<span>{label}</span>
+													{#if effectiveMode === value}
+														<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
+														</svg>
+													{/if}
+												</button>
+											{/each}
+										</div>
+									{/if}
+								</div>
+							{/if}
+
+							<!-- Attach File Button -->
+							<button
+								type="button"
+								on:click={triggerFileUpload}
+								class="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-full bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50 transition-all disabled:opacity-40"
+								disabled={currentTab.isStreaming || !$claudeAuthenticated || isUploading}
+								title={currentTab.project ? 'Attach file' : 'Select a project to attach files'}
+							>
+								{#if isUploading}
+									<svg class="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+										<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+									</svg>
+								{:else}
+									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+									</svg>
+								{/if}
+								<span>Attach</span>
+							</button>
+
+							<!-- Reset Button (Admin only) -->
+							{#if currentTab && $isAdmin && (currentTab.modelOverride || currentTab.permissionModeOverride)}
+								<button
+									type="button"
+									on:click={() => {
+										tabs.setTabModelOverride(tabId, null);
+										tabs.setTabPermissionModeOverride(tabId, null);
+									}}
+									class="inline-flex items-center gap-1 px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground rounded-full hover:bg-accent/50 transition-all disabled:opacity-40"
+									title="Reset to defaults"
+									disabled={currentTab.isStreaming}
+								>
+									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+									</svg>
+									<span class="hidden sm:inline">Reset</span>
+								</button>
+							{/if}
+						</div>
+
 						<!-- Floating Island Input Container -->
 						<div class="floating-island transition-all duration-200 focus-within:border-primary/40 focus-within:shadow-primary/10 focus-within:shadow-xl">
 
@@ -3845,141 +3980,6 @@
 									{/if}
 								</div>
 							</div>
-						</div>
-
-						<!-- Bottom Controls Row (Pills + Attach) -->
-						<div class="mt-2 flex flex-wrap items-center justify-center gap-1.5">
-							<!-- Model/Mode Pills (Admin only) -->
-							{#if currentTab && $isAdmin}
-								{@const currentProfile = $profiles.find(p => p.id === currentTab.profile)}
-								{@const profileModel = currentProfile?.config?.model || 'sonnet'}
-								{@const profilePermissionMode = currentProfile?.config?.permission_mode || 'default'}
-								{@const effectiveModel = currentTab.modelOverride || profileModel}
-								{@const effectiveMode = currentTab.permissionModeOverride || profilePermissionMode}
-								{@const modelLabels = { sonnet: 'Sonnet', 'sonnet-1m': 'Sonnet 1M', opus: 'Opus', haiku: 'Haiku' } as Record<string, string>}
-								{@const modeLabels = { default: 'Ask', acceptEdits: 'Auto-Accept', plan: 'Plan', bypassPermissions: 'Bypass' } as Record<string, string>}
-								<!-- Model Selector Pill -->
-								<div class="relative">
-									<button
-										type="button"
-										on:click={() => { showModelPopup = !showModelPopup; showModePopup = false; }}
-										class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {currentTab.modelOverride ? 'bg-primary/15 text-primary border border-primary/30' : 'bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50'}"
-										disabled={currentTab.isStreaming}
-									>
-										<span>{modelLabels[effectiveModel] || effectiveModel}</span>
-										<svg class="w-2.5 h-2.5 opacity-60 transition-transform {showModelPopup ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
-										</svg>
-									</button>
-									{#if showModelPopup}
-										<div class="fixed inset-0 z-40" on:click={() => showModelPopup = false}></div>
-										<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[90px]">
-											{#each [['sonnet', 'Sonnet'], ['sonnet-1m', 'Sonnet 1M'], ['opus', 'Opus'], ['haiku', 'Haiku']] as [value, label]}
-												<button
-													type="button"
-													on:click={() => {
-														if (value === profileModel) {
-															tabs.setTabModelOverride(tabId, null);
-														} else {
-															tabs.setTabModelOverride(tabId, value);
-														}
-														showModelPopup = false;
-													}}
-													class="w-full px-3 py-1.5 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-3 {effectiveModel === value ? 'bg-accent/50 text-foreground font-medium' : 'text-muted-foreground'}"
-												>
-													<span>{label}</span>
-													{#if effectiveModel === value}
-														<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
-														</svg>
-													{/if}
-												</button>
-											{/each}
-										</div>
-									{/if}
-								</div>
-
-								<!-- Permission Mode Selector Pill -->
-								<div class="relative">
-									<button
-										type="button"
-										on:click={() => { showModePopup = !showModePopup; showModelPopup = false; }}
-										class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {currentTab.permissionModeOverride ? 'bg-primary/15 text-primary border border-primary/30' : 'bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50'}"
-										disabled={currentTab.isStreaming}
-									>
-										<span>{modeLabels[effectiveMode] || effectiveMode}</span>
-										<svg class="w-2.5 h-2.5 opacity-60 transition-transform {showModePopup ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
-										</svg>
-									</button>
-									{#if showModePopup}
-										<div class="fixed inset-0 z-40" on:click={() => showModePopup = false}></div>
-										<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[100px]">
-											{#each [['default', 'Ask'], ['acceptEdits', 'Auto-Accept'], ['plan', 'Plan'], ['bypassPermissions', 'Bypass']] as [value, label]}
-												<button
-													type="button"
-													on:click={() => {
-														if (value === profilePermissionMode) {
-															tabs.setTabPermissionModeOverride(tabId, null);
-														} else {
-															tabs.setTabPermissionModeOverride(tabId, value);
-														}
-														showModePopup = false;
-													}}
-													class="w-full px-3 py-1.5 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-3 {effectiveMode === value ? 'bg-accent/50 text-foreground font-medium' : 'text-muted-foreground'}"
-												>
-													<span>{label}</span>
-													{#if effectiveMode === value}
-														<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
-														</svg>
-													{/if}
-												</button>
-											{/each}
-										</div>
-									{/if}
-								</div>
-							{/if}
-
-							<!-- Attach File Button -->
-							<button
-								type="button"
-								on:click={triggerFileUpload}
-								class="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-full bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50 transition-all disabled:opacity-40"
-								disabled={currentTab.isStreaming || !$claudeAuthenticated || isUploading}
-								title={currentTab.project ? 'Attach file' : 'Select a project to attach files'}
-							>
-								{#if isUploading}
-									<svg class="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-										<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-									</svg>
-								{:else}
-									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-									</svg>
-								{/if}
-								<span>Attach</span>
-							</button>
-
-							<!-- Reset Button (Admin only) -->
-							{#if currentTab && $isAdmin && (currentTab.modelOverride || currentTab.permissionModeOverride)}
-								<button
-									type="button"
-									on:click={() => {
-										tabs.setTabModelOverride(tabId, null);
-										tabs.setTabPermissionModeOverride(tabId, null);
-									}}
-									class="inline-flex items-center gap-1 px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground rounded-full hover:bg-accent/50 transition-all disabled:opacity-40"
-									title="Reset to defaults"
-									disabled={currentTab.isStreaming}
-								>
-									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-									</svg>
-									<span class="hidden sm:inline">Reset</span>
-								</button>
-							{/if}
 						</div>
 					</form>
 				</div>
