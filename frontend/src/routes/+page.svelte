@@ -1957,7 +1957,7 @@
 	<!-- Floating Expandable Sidebar Panel (Desktop) -->
 	{#if activeSidebarSection !== 'none'}
 		<button class="hidden lg:block fixed inset-0 z-30 bg-black/20 backdrop-blur-[2px]" on:click={closeSidebar} aria-label="Close sidebar"></button>
-		<aside class="hidden lg:flex fixed top-3 bottom-3 left-[4.5rem] z-40 w-[280px] floating-panel rounded-2xl flex-col panel-slide-in">
+		<aside class="hidden lg:flex fixed top-3 bottom-3 left-[4.5rem] z-40 w-[340px] floating-panel rounded-2xl flex-col panel-slide-in">
 			<!-- Search Bar (always visible for Sessions panel) -->
 			{#if activeSidebarSection === 'sessions'}
 				<div class="p-3">
