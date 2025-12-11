@@ -3025,16 +3025,16 @@
 		{#if $activeTab}
 			{@const currentTab = $activeTab}
 			{@const tabId = currentTab.id}
-			<div class="h-14 flex items-center justify-between px-3 sm:px-4 gap-2">
-				<!-- Left side: Mobile menu + Profile/Project pills -->
-				<div class="flex items-center gap-2">
-					<!-- Mobile Menu Button -->
-					<button class="lg:hidden p-2 text-muted-foreground hover:text-foreground floating-pill transition-colors" on:click={() => (sidebarOpen = true)}>
-						<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
-						</svg>
-					</button>
+			<div class="h-14 flex items-center px-3 sm:px-4 gap-2 relative">
+				<!-- Mobile Menu Button (absolute left) -->
+				<button class="lg:hidden p-2 text-muted-foreground hover:text-foreground floating-pill transition-colors absolute left-3" on:click={() => (sidebarOpen = true)}>
+					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+					</svg>
+				</button>
 
+				<!-- Centered Pills Container -->
+				<div class="flex-1 flex items-center justify-center gap-2">
 				<!-- Profile Selector (floating pill style with dropdown) -->
 				{#if $apiUser?.profile_id}
 					<!-- API user with locked profile - show as locked indicator -->
@@ -3228,10 +3228,6 @@
 						{/if}
 					</div>
 				{/if}
-				</div>
-
-				<!-- Right side: Context usage & connection status floating pills -->
-				<div class="flex items-center gap-2">
 					<!-- Context usage dropdown (only show if any tokens > 0) -->
 					{#if currentTab.totalTokensIn > 0 || currentTab.totalTokensOut > 0 || currentTab.totalCacheCreationTokens > 0 || currentTab.totalCacheReadTokens > 0}
 						{@const autocompactBuffer = 45000}
@@ -3313,7 +3309,7 @@
 						</div>
 					{/if}
 
-					<!-- Connection Status (always far right) -->
+					<!-- Connection Status -->
 					<div class="floating-pill px-3 py-1.5">
 						<ConnectionStatus wsConnected={currentTab.wsConnected} />
 					</div>
