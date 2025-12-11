@@ -85,15 +85,13 @@
 	// Show delete indicator when past threshold
 	$: isPastThreshold = currentSwipeX >= DELETE_THRESHOLD;
 
-	// Get display title - prefer first_user_message, fall back to title
-	$: displayTitle = session.first_user_message || session.title || 'New Chat';
-	$: truncatedTitle = displayTitle.length > 40 ? displayTitle.substring(0, 40) + '...' : displayTitle;
+	function truncateTitle(title: string | null, maxLength: number = 40): string {
+		if (!title) return 'New Chat';
+		return title.length > maxLength ? title.substring(0, maxLength) + '...' : title;
+	}
 
-	// Get description - use last_assistant_message if available
-	$: description = session.last_assistant_message || `Session with ${session.turn_count} ${session.turn_count === 1 ? 'turn' : 'turns'}`;
-
-	// Get status display info - pass isOpen to show correct label
-	$: statusDisplay = getStatusDisplay(session.status, isStreaming, isOpen);
+	// Get status display info
+	$: statusDisplay = getStatusDisplay(session.status, isStreaming);
 
 	// Check if high cost
 	$: isHighCost = (session.total_cost_usd ?? 0) > 10;
@@ -155,9 +153,9 @@
 					<span class="text-xs text-muted-foreground flex-shrink-0">{statusDisplay.label}</span>
 				{/if}
 
-				<!-- Title (first user message) -->
+				<!-- Title -->
 				<p class="text-sm font-medium text-foreground truncate leading-snug">
-					{truncatedTitle}
+					{truncateTitle(session.title)}
 				</p>
 			</div>
 
@@ -167,9 +165,14 @@
 			</span>
 		</div>
 
-		<!-- Middle row: Description/subtitle (last assistant message, 2 lines) -->
-		<p class="text-xs text-muted-foreground leading-relaxed line-clamp-2">
-			{description}
+		<!-- Middle row: Description/subtitle (using title if long, or placeholder) -->
+		<p class="text-xs text-muted-foreground truncate leading-relaxed">
+			{#if session.title && session.title.length > 30}
+				{session.title}
+			{:else}
+				<!-- Placeholder - could be enhanced to show first message preview -->
+				Session with {session.turn_count} {session.turn_count === 1 ? 'turn' : 'turns'}
+			{/if}
 		</p>
 
 		<!-- Bottom row: Message count badge + Time ago + Cost -->

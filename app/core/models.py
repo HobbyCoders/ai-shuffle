@@ -287,8 +287,6 @@ class Session(SessionBase):
     # Context window tokens = last_input + cache_creation + cache_read (current context size)
     context_tokens: int = 0
     turn_count: int = 0
-    first_user_message: Optional[str] = None  # Preview of first user message (used as title)
-    last_assistant_message: Optional[str] = None  # Preview of last assistant response
     created_at: datetime
     updated_at: datetime
 

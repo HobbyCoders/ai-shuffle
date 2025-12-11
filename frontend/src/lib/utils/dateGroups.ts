@@ -156,15 +156,13 @@ export function formatTimeOfDay(dateStr: string): string {
 
 /**
  * Get status display info for a session
- * @param isOpen - Whether this session is currently open in a tab
  */
-export function getStatusDisplay(status: string, isStreaming: boolean, isOpen: boolean = false): { label: string; color: string } | null {
+export function getStatusDisplay(status: string, isStreaming: boolean): { label: string; color: string } | null {
 	if (isStreaming) {
 		return { label: 'Processing', color: 'bg-orange-500' };
 	}
 	if (status === 'active') {
-		// Show "Active Session" for open tabs, "Previous Session" for history items
-		return { label: isOpen ? 'Active Session' : 'Previous Session', color: 'bg-teal-500' };
+		return { label: 'Active Session', color: 'bg-teal-500' };
 	}
 	if (status === 'error') {
 		return { label: 'Error', color: 'bg-destructive' };

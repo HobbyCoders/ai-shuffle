@@ -15,8 +15,6 @@
 		label: string;
 	}
 
-	import type { Snippet } from 'svelte';
-
 	interface Props {
 		open: boolean;
 		title: string;
@@ -31,7 +29,7 @@
 		saving?: boolean;
 		showFooter?: boolean;
 		size?: 'sm' | 'md' | 'lg' | 'xl' | 'full';
-		children?: Snippet;
+		twoColumn?: boolean;
 	}
 
 	let {
@@ -48,7 +46,7 @@
 		saving = false,
 		showFooter = true,
 		size = 'lg',
-		children
+		twoColumn = false
 	}: Props = $props();
 
 	// Handle escape key
@@ -151,8 +149,15 @@
 			</header>
 
 			<!-- Body - scrollable content area -->
-			<div class="flex-1 overflow-y-auto overflow-x-hidden p-6">
-				{@render children?.()}
+			<div class="flex-1 overflow-y-auto overflow-x-hidden {twoColumn ? 'p-0' : 'p-6'}">
+				{#if twoColumn}
+					<div class="grid grid-cols-1 md:grid-cols-2 gap-0 md:divide-x divide-border min-h-full">
+						<slot name="left" />
+						<slot name="right" />
+					</div>
+				{:else}
+					<slot />
+				{/if}
 			</div>
 
 			<!-- Footer -->

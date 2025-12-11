@@ -32,7 +32,6 @@
 	import SubagentMessage from '$lib/components/SubagentMessage.svelte';
 	import QuickActions from '$lib/components/QuickActions.svelte';
 	import SubagentManager from '$lib/components/SubagentManager.svelte';
-	import SettingsModal from '$lib/components/SettingsModal.svelte';
 	import SessionCard from '$lib/components/SessionCard.svelte';
 	import ConnectionStatus from '$lib/components/ConnectionStatus.svelte';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
@@ -284,9 +283,6 @@
 
 	// Subagent manager state
 	let showSubagentManager = false;
-
-	// Settings modal state
-	let showSettingsModal = false;
 
 	// Mobile tools menu state
 	let showToolsMenu = false;
@@ -950,7 +946,7 @@
 	}
 
 	function handleSpotlightOpenSettings() {
-		showSettingsModal = true;
+		showProfileModal = true;
 		showSpotlight = false;
 	}
 
@@ -1961,12 +1957,12 @@
 		</div>
 		<div class="mt-auto flex flex-col items-center pb-3 gap-1">
 			{#if $isAdmin}
-				<button on:click={() => showSettingsModal = true} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-white/10 text-muted-foreground hover:text-foreground" title="Settings">
+				<a href="/settings" class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-white/10 text-muted-foreground hover:text-foreground" title="Settings">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
 					</svg>
-				</button>
+				</a>
 			{/if}
 			<button on:click={handleLogout} class="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center hover:bg-primary/30 transition-all" title="Logout ({$apiUser ? $apiUser.name : $username})">
 				<span class="text-sm font-medium text-primary">{($apiUser?.name || $username)?.[0]?.toUpperCase() || 'U'}</span>
@@ -4046,36 +4042,21 @@
 	onOpenSettings={handleSpotlightOpenSettings}
 />
 
-<!-- Subagent Manager Modal -->
-<SubagentManager open={showSubagentManager} onClose={() => showSubagentManager = false} onUpdate={() => loadSubagents()} />
-
-<!-- Settings Modal -->
-<SettingsModal open={showSettingsModal} onClose={() => showSettingsModal = false} />
+<!-- Subagent Manager Panel -->
+{#if showSubagentManager}
+	<SubagentManager onClose={() => showSubagentManager = false} onUpdate={() => loadSubagents()} />
+{/if}
 
 <!-- Profile Modal -->
 {#if showProfileModal}
-	<div class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center" on:click={() => (showProfileModal = false)}>
-		<div
-			class="
-				bg-card border border-border rounded-2xl shadow-2xl
-				w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col
-				max-sm:fixed max-sm:inset-3 max-sm:bottom-[4.5rem] max-sm:max-w-none max-sm:max-h-none max-sm:rounded-2xl
-			"
-			on:click|stopPropagation
-		>
-			<div class="shrink-0 px-6 py-4 border-b border-border flex items-center justify-between">
-				<div class="flex items-center gap-3">
-					<div class="w-10 h-10 rounded-xl bg-primary/15 flex items-center justify-center">
-						<svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
-						</svg>
-					</div>
-					<h2 class="text-xl font-semibold text-foreground">
-						{showNewProfileForm ? (editingProfile ? 'Edit Profile' : 'New Profile') : 'Profiles'}
-					</h2>
-				</div>
+	<div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" on:click={() => (showProfileModal = false)}>
+		<div class="bg-card rounded-xl w-full max-w-lg max-h-[80vh] overflow-y-auto shadow-l border border-border" on:click|stopPropagation>
+			<div class="p-4 border-b border-border flex items-center justify-between">
+				<h2 class="text-lg font-semibold text-foreground">
+					{showNewProfileForm ? (editingProfile ? 'Edit Profile' : 'New Profile') : 'Profiles'}
+				</h2>
 				<button
-					class="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+					class="text-muted-foreground hover:text-foreground"
 					on:click={() => {
 						showProfileModal = false;
 						showNewProfileForm = false;
@@ -4088,7 +4069,7 @@
 				</button>
 			</div>
 
-			<div class="flex-1 overflow-y-auto p-6">
+			<div class="p-4">
 				{#if showNewProfileForm}
 					<div class="space-y-4">
 						<div class="grid grid-cols-2 gap-4">
@@ -4759,26 +4740,12 @@
 
 <!-- Project Modal -->
 {#if showProjectModal}
-	<div class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center" on:click={() => (showProjectModal = false)}>
-		<div
-			class="
-				bg-card border border-border rounded-2xl shadow-2xl
-				w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col
-				max-sm:fixed max-sm:inset-3 max-sm:bottom-[4.5rem] max-sm:max-w-none max-sm:max-h-none max-sm:rounded-2xl
-			"
-			on:click|stopPropagation
-		>
-			<div class="shrink-0 px-6 py-4 border-b border-border flex items-center justify-between">
-				<div class="flex items-center gap-3">
-					<div class="w-10 h-10 rounded-xl bg-primary/15 flex items-center justify-center">
-						<svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-						</svg>
-					</div>
-					<h2 class="text-xl font-semibold text-foreground">Projects</h2>
-				</div>
+	<div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" on:click={() => (showProjectModal = false)}>
+		<div class="bg-card rounded-xl w-full max-w-lg max-h-[80vh] overflow-y-auto" on:click|stopPropagation>
+			<div class="p-4 border-b border-border flex items-center justify-between">
+				<h2 class="text-lg font-semibold text-foreground">Projects</h2>
 				<button
-					class="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+					class="text-muted-foreground hover:text-foreground"
 					on:click={() => {
 						showProjectModal = false;
 						showNewProjectForm = false;
@@ -4790,7 +4757,7 @@
 				</button>
 			</div>
 
-			<div class="flex-1 overflow-y-auto p-6">
+			<div class="p-4">
 				{#if showNewProjectForm}
 					<div class="space-y-4">
 						<div>
