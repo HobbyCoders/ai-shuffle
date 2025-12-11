@@ -3001,7 +3001,8 @@
 		{#if $activeTab}
 			{@const currentTab = $activeTab}
 			{@const tabId = currentTab.id}
-			<div class="h-14 flex items-center px-3 sm:px-4 gap-2 relative">
+			<div class="h-14 flex items-center justify-center relative">
+				<div class="w-full max-w-5xl mx-auto px-4 sm:px-8 flex items-center gap-2">
 				<!-- Left: Context Pill -->
 				<div class="flex items-center gap-2">
 					<!-- Context usage dropdown (always show) -->
@@ -3289,10 +3290,13 @@
 						<ConnectionStatus wsConnected={currentTab.wsConnected} />
 					</div>
 				</div>
+				</div>
 			</div>
 		{:else}
 			<!-- Empty state context bar (no active tab) -->
-			<div class="h-14 flex items-center px-3 sm:px-4">
+			<div class="h-14 flex items-center justify-center">
+				<div class="w-full max-w-5xl mx-auto px-4 sm:px-8">
+				</div>
 			</div>
 		{/if}
 
