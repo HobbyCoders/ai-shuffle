@@ -3717,34 +3717,30 @@
 					<form on:submit|preventDefault={() => handleSubmit(tabId)} class="relative">
 						<!-- Floating Island Input Container -->
 						<div class="floating-island transition-all duration-200 focus-within:border-primary/40 focus-within:shadow-primary/10 focus-within:shadow-xl">
-
-							<!-- Uploaded Files (inside container) -->
-							{#if (tabUploadedFiles[tabId] || []).length > 0}
-								<div class="px-3 pt-3 pb-0 flex flex-wrap gap-1.5">
-									{#each tabUploadedFiles[tabId] as file, index}
-										<div class="flex items-center gap-1.5 bg-accent/50 text-xs px-2 py-1 rounded-lg group">
-											<svg class="w-3.5 h-3.5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-											</svg>
-											<span class="text-foreground truncate max-w-[100px]" title={file.path}>{file.filename}</span>
-											<button
-												type="button"
-												on:click={() => removeUploadedFile(tabId, index)}
-												class="text-muted-foreground hover:text-destructive opacity-60 group-hover:opacity-100 transition-opacity"
-											>
-												<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-												</svg>
-											</button>
-										</div>
-									{/each}
-								</div>
-							{/if}
-
 							<!-- Main Input Row -->
-							<div class="flex items-center gap-1 p-2 sm:p-2.5">
-								<!-- Textarea Container -->
-								<div class="flex-1 relative min-w-0">
+							<div class="flex items-start gap-1 p-2 sm:p-2.5">
+								<!-- Textarea Container with inline file chips -->
+								<div class="flex-1 relative min-w-0 flex flex-wrap items-center gap-1">
+									<!-- Inline File Chips -->
+									{#if (tabUploadedFiles[tabId] || []).length > 0}
+										{#each tabUploadedFiles[tabId] as file, index}
+											<div class="flex items-center gap-1 bg-primary/15 text-xs px-2 py-1 rounded-full group shrink-0">
+												<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+												</svg>
+												<span class="text-foreground truncate max-w-[80px]" title={file.path}>{file.filename}</span>
+												<button
+													type="button"
+													on:click={() => removeUploadedFile(tabId, index)}
+													class="text-muted-foreground hover:text-destructive transition-colors"
+												>
+													<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+													</svg>
+												</button>
+											</div>
+										{/each}
+									{/if}
 									<!-- Command Autocomplete -->
 									<CommandAutocomplete
 										bind:this={commandAutocompleteRefs[tabId]}
@@ -3771,16 +3767,19 @@
 										}}
 									/>
 
-									<textarea
-										bind:this={textareas[tabId]}
-										bind:value={tabInputs[tabId]}
-										on:input={() => handleInputChange(tabId)}
-										on:keydown={(e) => handleKeyDown(e, tabId)}
-										placeholder={currentTab.isStreaming ? "Queue a message while Claude works..." : "Message Claude... (/ commands, @ files)"}
-										class="w-full bg-transparent border-0 px-2 sm:px-3 py-2 text-foreground placeholder-muted-foreground/60 resize-none focus:outline-none focus:ring-0 min-h-[44px] max-h-[200px] leading-relaxed text-sm sm:text-base"
-										rows="1"
-										disabled={!$claudeAuthenticated}
-									></textarea>
+									<!-- Textarea - grows to fill remaining space -->
+									<div class="flex-1 min-w-[120px] basis-full sm:basis-auto">
+										<textarea
+											bind:this={textareas[tabId]}
+											bind:value={tabInputs[tabId]}
+											on:input={() => handleInputChange(tabId)}
+											on:keydown={(e) => handleKeyDown(e, tabId)}
+											placeholder={currentTab.isStreaming ? "Queue a message while Claude works..." : "Message Claude... (/ commands, @ files)"}
+											class="w-full bg-transparent border-0 px-1 sm:px-2 py-1.5 text-foreground placeholder-muted-foreground/60 resize-none focus:outline-none focus:ring-0 min-h-[36px] max-h-[200px] leading-relaxed text-sm sm:text-base"
+											rows="1"
+											disabled={!$claudeAuthenticated}
+										></textarea>
+									</div>
 								</div>
 
 								<!-- Voice/Send/Stop/Queue Buttons -->
