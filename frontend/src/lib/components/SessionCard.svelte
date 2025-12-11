@@ -208,30 +208,38 @@
 			</div>
 		</div>
 
-		<!-- Close/Delete button (desktop hover) -->
-		{#if !selectionMode}
-			{#if showCloseButton}
-				<button
-					on:click|stopPropagation={() => !isStreaming && dispatch('close')}
-					class="opacity-0 group-hover:opacity-100 p-1 text-muted-foreground transition-opacity flex-shrink-0 hidden sm:block {isStreaming ? 'cursor-not-allowed opacity-30' : 'hover:text-destructive'}"
-					title={isStreaming ? "Can't close while streaming" : "Close tab"}
-					disabled={isStreaming}
-				>
-					<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-					</svg>
-				</button>
-			{:else}
-				<button
-					on:click|stopPropagation={() => dispatch('delete')}
-					class="opacity-0 group-hover:opacity-100 p-1 text-muted-foreground hover:text-destructive transition-opacity flex-shrink-0 hidden sm:block"
-					title="Delete session"
-				>
+		<!-- Active/Status indicator on right side (like reference image) -->
+		<div class="flex items-center gap-2 flex-shrink-0">
+			<!-- Activity indicator (green dot when active/streaming) -->
+			{#if isActive || isStreaming}
+				<span class="w-2.5 h-2.5 rounded-full bg-primary {isStreaming ? 'animate-pulse' : ''}"></span>
+			{/if}
+
+			<!-- Close/Delete button (desktop hover) -->
+			{#if !selectionMode}
+				{#if showCloseButton}
+					<button
+						on:click|stopPropagation={() => !isStreaming && dispatch('close')}
+						class="opacity-0 group-hover:opacity-100 p-1 text-muted-foreground transition-opacity hidden sm:block {isStreaming ? 'cursor-not-allowed opacity-30' : 'hover:text-foreground'}"
+						title={isStreaming ? "Can't close while streaming" : "Close tab"}
+						disabled={isStreaming}
+					>
+						<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+						</svg>
+					</button>
+				{:else}
+					<button
+						on:click|stopPropagation={() => dispatch('delete')}
+						class="opacity-0 group-hover:opacity-100 p-1 text-muted-foreground hover:text-foreground transition-opacity hidden sm:block"
+						title="Delete session"
+					>
 					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 					</svg>
 				</button>
+				{/if}
 			{/if}
-		{/if}
+		</div>
 	</div>
 </div>
