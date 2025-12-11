@@ -25,7 +25,6 @@
 	import { api, type FileUploadResponse, searchSessions, type SessionSearchResult } from '$lib/api/client';
 	import { marked } from 'marked';
 	import TerminalModal from '$lib/components/TerminalModal.svelte';
-	import RewindModal from '$lib/components/RewindModal.svelte';
 	import SystemMessage from '$lib/components/SystemMessage.svelte';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
@@ -39,7 +38,7 @@
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import TodoList from '$lib/components/TodoList.svelte';
 	import { groups, organizeByGroups } from '$lib/stores/groups';
-	import { executeCommand, isSlashCommand, syncAfterRewind, listCommands, type Command } from '$lib/api/commands';
+	import { executeCommand, isSlashCommand, listCommands, type Command } from '$lib/api/commands';
 	import { groupSessionsByDate, type DateGroup } from '$lib/utils/dateGroups';
 
 	// Configure marked for better code highlighting
@@ -278,10 +277,6 @@
 	let showTerminalModal = false;
 	let terminalCommand = '/resume';
 	let terminalSessionId = '';
-
-	// Rewind modal state (V2 - direct JSONL manipulation)
-	let showRewindModal = false;
-	let rewindSessionId = '';
 
 	// Spotlight search state (Cmd+K)
 	let showSpotlight = false;
@@ -887,71 +882,6 @@
 		terminalSessionId = tab.sessionId;
 		terminalCommand = command;
 		showTerminalModal = true;
-	}
-
-	// Open the rewind modal (V2 - direct JSONL manipulation)
-	function openRewindModal(tabId: string) {
-		const tab = $allTabs.find(t => t.id === tabId);
-		if (!tab?.sessionId) {
-			alert('Please start a conversation first before using rewind.');
-			return;
-		}
-		rewindSessionId = tab.sessionId;
-		showRewindModal = true;
-	}
-
-	// Handle rewind completion from RewindModal V2
-	async function handleRewindCompleteV2(success: boolean, messagesRemoved: number, messageContent?: string) {
-		console.log('Rewind V2 complete:', { success, messagesRemoved, messageContent });
-
-		if (success && messagesRemoved > 0 && $activeTabId && rewindSessionId) {
-			// Reload the session to reflect changes
-			await tabs.loadSessionInTab($activeTabId, rewindSessionId);
-
-			// Populate the input field with the rewound message so user can edit and resend
-			if (messageContent) {
-				tabInputs[$activeTabId] = messageContent;
-				tabInputs = tabInputs; // Trigger Svelte reactivity
-
-				// Focus the textarea after a short delay
-				setTimeout(() => {
-					const textarea = textareas[$activeTabId];
-					if (textarea) {
-						textarea.focus();
-						// Move cursor to end
-						textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
-					}
-				}, 100);
-			}
-		}
-
-		rewindSessionId = '';
-	}
-
-	// Close the rewind modal
-	function closeRewindModal() {
-		showRewindModal = false;
-		rewindSessionId = '';
-	}
-
-	// Handle rewind completion from TerminalModal (legacy - for /resume)
-	async function handleRewindComplete(checkpointMessage: string | null, selectedOption: number | null) {
-		console.log('Rewind complete (legacy):', { checkpointMessage, selectedOption });
-
-		// Sync our chat if conversation was restored (options 1 or 2)
-		if (terminalSessionId && checkpointMessage && (selectedOption === 1 || selectedOption === 2)) {
-			try {
-				const result = await syncAfterRewind(terminalSessionId, checkpointMessage, selectedOption);
-				console.log('Chat sync result:', result);
-
-				// Reload the session to reflect changes
-				if ($activeTabId && result.success && result.deleted_count > 0) {
-					await tabs.loadSessionInTab($activeTabId, terminalSessionId);
-				}
-			} catch (error) {
-				console.error('Failed to sync chat after rewind:', error);
-			}
-		}
 	}
 
 	// Close the terminal modal
@@ -3300,21 +3230,6 @@
 					</div>
 				{/if}
 
-				<!-- Rewind Button (after breadcrumb, only when session is active) -->
-				{#if currentTab.sessionId}
-					<button
-						on:click={() => openRewindModal(tabId)}
-						class="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors disabled:opacity-50 ml-2"
-						title="Rewind conversation"
-						disabled={currentTab.isStreaming}
-					>
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0019 16V8a1 1 0 00-1.6-.8l-5.333 4zM4.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0011 16V8a1 1 0 00-1.6-.8l-5.334 4z" />
-						</svg>
-						<span class="hidden sm:inline">Rewind</span>
-					</button>
-				{/if}
-
 				<!-- Spacer -->
 				<div class="flex-1"></div>
 
@@ -4951,16 +4866,6 @@
 		sessionId={terminalSessionId}
 		command={terminalCommand}
 		onClose={closeTerminalModal}
-		onRewindComplete={handleRewindComplete}
-	/>
-{/if}
-
-<!-- Rewind Modal V2 - Direct JSONL manipulation (bulletproof) -->
-{#if showRewindModal && rewindSessionId}
-	<RewindModal
-		sessionId={rewindSessionId}
-		onClose={closeRewindModal}
-		onRewindComplete={handleRewindCompleteV2}
 	/>
 {/if}
 
