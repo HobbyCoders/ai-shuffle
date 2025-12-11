@@ -2995,12 +2995,12 @@
 	<!-- Mobile Bottom Navigation - Floating Dock -->
 	<nav class="lg:hidden fixed bottom-3 left-3 right-3 z-50 floating-panel rounded-2xl safe-bottom">
 		<div class="flex items-center justify-around h-12">
-			<button on:click={handleNewTab} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="New Chat">
+			<button on:click={() => { sidebarOpen = false; handleNewTab(); }} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="New Chat">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
 				</svg>
 			</button>
-			<button on:click={() => sidebarOpen = true} class="relative flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Chats">
+			<button on:click={() => sidebarOpen = !sidebarOpen} class="relative flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Chats">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
 				</svg>
@@ -3009,12 +3009,12 @@
 				{/if}
 			</button>
 			{#if $isAdmin}
-				<button on:click={() => showToolsMenu = !showToolsMenu} class="relative flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Tools">
+				<button on:click={() => { sidebarOpen = false; showToolsMenu = !showToolsMenu; }} class="relative flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Tools">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
 					</svg>
 				</button>
-				<a href="/settings" class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Settings">
+				<a href="/settings" on:click={() => sidebarOpen = false} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Settings">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
