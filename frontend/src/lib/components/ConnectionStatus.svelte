@@ -99,8 +99,8 @@
 		{/if}
 	</button>
 
-	<!-- Desktop: Hover dropdown (hidden on mobile) - pops UP -->
-	<div class="hidden sm:block absolute right-0 bottom-full mb-1 w-52 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+	<!-- Desktop: Hover dropdown (hidden on mobile) -->
+	<div class="hidden sm:block absolute right-0 top-full mt-1 w-52 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
 		<div class="py-2 px-3 space-y-2">
 			<!-- Status -->
 			<div class="flex items-center justify-between text-xs pb-1 border-b border-border">
@@ -147,7 +147,7 @@
 		</div>
 	</div>
 
-	<!-- Mobile: Click-to-open panel (only shown on mobile when toggled) - pops UP -->
+	<!-- Mobile: Click-to-open panel (only shown on mobile when toggled) -->
 	{#if showMobilePanel}
 		<!-- Backdrop -->
 		<button
@@ -156,8 +156,8 @@
 			aria-label="Close details"
 		></button>
 
-		<!-- Panel - positioned above the pill -->
-		<div class="sm:hidden absolute right-0 bottom-full mb-2 w-56 z-50 bg-card border border-border rounded-lg shadow-lg">
+		<!-- Panel - fixed position on mobile for better visibility -->
+		<div class="sm:hidden fixed right-4 left-4 top-16 z-50 bg-card border border-border rounded-lg shadow-lg">
 			<div class="p-4 space-y-3">
 				<!-- Status -->
 				<div class="flex items-center justify-between text-sm pb-2 border-b border-border">
