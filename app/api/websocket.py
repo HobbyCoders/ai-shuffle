@@ -662,20 +662,39 @@ async def chat_websocket(
                                 sdk_session_id = session.get("sdk_session_id")
                                 messages = []
 
+                                # Get working dir from project if available
+                                working_dir = "/workspace"
+                                project_id = session.get("project_id")
+                                if project_id:
+                                    project = database.get_project(project_id)
+                                    if project:
+                                        from app.core.config import settings
+                                        working_dir = str(settings.workspace_dir / project["path"])
+
                                 if sdk_session_id:
                                     try:
-                                        from app.core.jsonl_parser import parse_session_history
-                                        # Get working dir from project if available
-                                        working_dir = "/workspace"
-                                        project_id = session.get("project_id")
-                                        if project_id:
-                                            project = database.get_project(project_id)
-                                            if project:
-                                                from app.core.config import settings
-                                                working_dir = str(settings.workspace_dir / project["path"])
+                                        from app.core.jsonl_parser import parse_session_history, get_session_cost_from_jsonl
 
                                         messages = parse_session_history(sdk_session_id, working_dir)
                                         logger.info(f"Loaded {len(messages)} messages from JSONL for session {session_id}")
+
+                                        # Load context tokens from JSONL (same as sessions.py HTTP endpoint)
+                                        usage_data = get_session_cost_from_jsonl(sdk_session_id, working_dir)
+                                        if usage_data:
+                                            cache_creation = usage_data.get("cache_creation_tokens", 0)
+                                            cache_read = usage_data.get("cache_read_tokens", 0)
+                                            last_input = usage_data.get("last_input_tokens", 0)
+
+                                            session["cache_creation_tokens"] = cache_creation
+                                            session["cache_read_tokens"] = cache_read
+                                            session["context_tokens"] = last_input + cache_creation + cache_read
+
+                                            # Also update total tokens if DB doesn't have them
+                                            if session.get("total_tokens_in", 0) == 0 and session.get("total_tokens_out", 0) == 0:
+                                                session["total_tokens_in"] = usage_data.get("total_tokens_in", 0)
+                                                session["total_tokens_out"] = usage_data.get("total_tokens_out", 0)
+
+                                            logger.info(f"Loaded context tokens for session {session_id}: context={session['context_tokens']}")
                                     except Exception as e:
                                         logger.error(f"Failed to parse JSONL for session {session_id}: {e}")
                                         messages = []

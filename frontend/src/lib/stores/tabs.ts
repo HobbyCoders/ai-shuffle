@@ -1295,12 +1295,36 @@ function createTabsStore() {
 				}
 
 				console.log(`[Tab ${tabId}] Updating tab state - isStreaming:`, isStreaming, 'messageCount:', finalMessages.length, 'todoCount:', latestTodos.length);
+
+				// Extract token counts from session data if available (for context pill)
+				const session = data.session as Record<string, unknown> | undefined;
+				const tokenUpdates: Partial<ChatTab> = {};
+				if (session) {
+					if (typeof session.total_tokens_in === 'number') {
+						tokenUpdates.totalTokensIn = session.total_tokens_in;
+					}
+					if (typeof session.total_tokens_out === 'number') {
+						tokenUpdates.totalTokensOut = session.total_tokens_out;
+					}
+					if (typeof session.cache_creation_tokens === 'number') {
+						tokenUpdates.totalCacheCreationTokens = session.cache_creation_tokens;
+					}
+					if (typeof session.cache_read_tokens === 'number') {
+						tokenUpdates.totalCacheReadTokens = session.cache_read_tokens;
+					}
+					if (typeof session.context_tokens === 'number') {
+						tokenUpdates.contextUsed = session.context_tokens;
+					}
+					console.log(`[Tab ${tabId}] Token counts from session:`, tokenUpdates);
+				}
+
 				updateTab(tabId, {
 					sessionId: data.session_id as string,
 					messages: finalMessages,
 					isStreaming: isStreaming,
 					todos: latestTodos,
-					error: null  // Clear any previous error
+					error: null,  // Clear any previous error
+					...tokenUpdates
 				});
 
 				// Update tab title based on first message
