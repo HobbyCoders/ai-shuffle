@@ -939,27 +939,49 @@
 		return `$${cost.toFixed(4)}`;
 	}
 
-	function renderMarkdown(content: string): string {
-		// Process base64 images with download capability
-		// Match data URLs in image tags or standalone base64 image data
+	function renderMarkdown(content: string, isStreaming: boolean = false): string {
+		// If streaming, hide media content to prevent flickering - show placeholder instead
+		if (isStreaming) {
+			// Replace image markdown with placeholder
+			let processedContent = content.replace(/!\[([^\]]*)\]\((data:image\/[^;]+;base64,[^)]+)\)/g,
+				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">Image loading...</div>');
+			processedContent = processedContent.replace(/!\[([^\]]*)\]\((\/api\/generated-images\/[^)]+)\)/g,
+				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">Image loading...</div>');
+			processedContent = processedContent.replace(/\[([^\]]*)\]\((\/api\/generated-videos\/[^)]+)\)/g,
+				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">Video loading...</div>');
+			processedContent = processedContent.replace(/"image_base64"\s*:\s*"([A-Za-z0-9+/=]{100,})"/g,
+				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">Image loading...</div>');
+			return marked(processedContent, { breaks: true }) as string;
+		}
+
+		// Process base64 images with download capability and overlay buttons
 		const base64ImagePattern = /!\[([^\]]*)\]\((data:image\/[^;]+;base64,[^)]+)\)/g;
 
-		// Replace base64 image markdown with custom HTML that includes download button
+		// Replace base64 image markdown with custom HTML that includes overlay buttons
 		let processedContent = content.replace(base64ImagePattern, (match, alt, dataUrl) => {
-			const downloadId = `img-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-			return `<div class="generated-image-container my-4">
+			return `<div class="generated-media-container relative my-4 inline-block">
 				<img src="${dataUrl}" alt="${alt || 'Generated image'}" class="max-w-full rounded-lg shadow-md border border-border" />
-				<div class="flex gap-2 mt-2">
+				<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
 					<button onclick="(function(){
 						const link = document.createElement('a');
 						link.href = '${dataUrl}';
 						link.download = '${alt || 'generated-image'}.png';
 						link.click();
-					})()" class="text-xs px-3 py-1 bg-primary text-primary-foreground rounded hover:opacity-90 flex items-center gap-1">
-						<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					})()" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download">
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 						</svg>
-						Download
+					</button>
+					<button onclick="(function(btn){
+						navigator.clipboard.writeText('${dataUrl}');
+						btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
+						setTimeout(function() {
+							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
+						}, 2000);
+					})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+						</svg>
 					</button>
 				</div>
 			</div>`;
@@ -970,19 +992,30 @@
 		processedContent = processedContent.replace(jsonImagePattern, (match, base64Data) => {
 			// Only replace if it looks like substantial base64 data (not a short string)
 			if (base64Data.length > 100) {
-				return `<div class="generated-image-container my-4">
-					<img src="data:image/png;base64,${base64Data}" alt="Generated image" class="max-w-full rounded-lg shadow-md border border-border" />
-					<div class="flex gap-2 mt-2">
+				const dataUrl = `data:image/png;base64,${base64Data}`;
+				return `<div class="generated-media-container relative my-4 inline-block">
+					<img src="${dataUrl}" alt="Generated image" class="max-w-full rounded-lg shadow-md border border-border" />
+					<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
 						<button onclick="(function(){
 							const link = document.createElement('a');
-							link.href = 'data:image/png;base64,${base64Data}';
+							link.href = '${dataUrl}';
 							link.download = 'generated-image.png';
 							link.click();
-						})()" class="text-xs px-3 py-1 bg-primary text-primary-foreground rounded hover:opacity-90 flex items-center gap-1">
-							<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						})()" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 							</svg>
-							Download
+						</button>
+						<button onclick="(function(btn){
+							navigator.clipboard.writeText('${dataUrl}');
+							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
+							setTimeout(function() {
+								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
+							}, 2000);
+						})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+							</svg>
 						</button>
 					</div>
 				</div>`;
@@ -990,21 +1023,59 @@
 			return match;
 		});
 
-		// Render generated-images markdown as clean image display (buttons are in message header)
+		// Render generated-images markdown with overlay buttons
 		const generatedImagePattern = /!\[([^\]]*)\]\((\/api\/generated-images\/[^)]+)\)/g;
 		processedContent = processedContent.replace(generatedImagePattern, (match, alt, imageUrl) => {
-			return `<div class="generated-image-container my-4">
+			const filename = imageUrl.split('/').pop() || 'generated-image.png';
+			return `<div class="generated-media-container relative my-4 inline-block">
 				<img src="${imageUrl}" alt="${alt || 'Generated image'}" class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border" />
+				<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
+					<a href="${imageUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download">
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+						</svg>
+					</a>
+					<button onclick="(function(btn){
+						navigator.clipboard.writeText(window.location.origin + '${imageUrl}');
+						btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
+						setTimeout(function() {
+							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
+						}, 2000);
+					})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+						</svg>
+					</button>
+				</div>
 			</div>`;
 		});
 
-		// Render generated-videos markdown links as video player (buttons are in message header)
+		// Render generated-videos markdown links as video player with overlay buttons
 		const generatedVideoPattern = /\[([^\]]*)\]\((\/api\/generated-videos\/[^)]+)\)/g;
 		processedContent = processedContent.replace(generatedVideoPattern, (match, text, videoUrl) => {
-			return `<div class="generated-video-container my-4">
+			const filename = videoUrl.split('/').pop() || 'generated-video.mp4';
+			return `<div class="generated-media-container relative my-4 inline-block">
 				<video src="${videoUrl}" controls class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border">
 					Your browser does not support the video tag.
 				</video>
+				<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
+					<a href="${videoUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download">
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+						</svg>
+					</a>
+					<button onclick="(function(btn){
+						navigator.clipboard.writeText(window.location.origin + '${videoUrl}');
+						btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
+						setTimeout(function() {
+							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
+						}, 2000);
+					})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+						</svg>
+					</button>
+				</div>
 			</div>`;
 		});
 
@@ -1023,24 +1094,26 @@
 				const filename = data.filename || 'generated-image.png';
 				return `<div class="generated-image-result">
 					<div class="mb-2 text-xs text-green-500">✓ Image generated successfully</div>
-					<img src="${imageUrl}" alt="Generated image" class="max-w-full max-h-96 rounded-lg shadow-md border border-border" />
-					<div class="flex gap-2 mt-3">
-						<a href="${imageUrl}" download="${filename}" class="text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 flex items-center gap-1.5 font-medium no-underline">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-							</svg>
-							Download Image
-						</a>
-						<button onclick="(function(){
-							navigator.clipboard.writeText(window.location.origin + '${imageUrl}');
-							this.textContent = 'Copied!';
-							setTimeout(() => this.textContent = 'Copy URL', 2000);
-						}).call(this)" class="text-xs px-3 py-1.5 bg-muted text-foreground rounded-md hover:bg-accent flex items-center gap-1.5">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-							</svg>
-							Copy URL
-						</button>
+					<div class="generated-media-container relative inline-block">
+						<img src="${imageUrl}" alt="Generated image" class="max-w-full max-h-96 rounded-lg shadow-md border border-border" />
+						<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
+							<a href="${imageUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download">
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+								</svg>
+							</a>
+							<button onclick="(function(btn){
+								navigator.clipboard.writeText(window.location.origin + '${imageUrl}');
+								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
+								setTimeout(function() {
+									btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
+								}, 2000);
+							})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+								</svg>
+							</button>
+						</div>
 					</div>
 				</div>`;
 			}
@@ -1052,29 +1125,31 @@
 				const dataUrl = `data:${mimeType};base64,${data.image_base64}`;
 				return `<div class="generated-image-result">
 					<div class="mb-2 text-xs text-green-500">✓ Image generated successfully</div>
-					<img src="${dataUrl}" alt="Generated image" class="max-w-full max-h-96 rounded-lg shadow-md border border-border" />
-					<div class="flex gap-2 mt-3">
-						<button onclick="(function(){
-							const link = document.createElement('a');
-							link.href = '${dataUrl}';
-							link.download = 'generated-image.png';
-							link.click();
-						})()" class="text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 flex items-center gap-1.5 font-medium">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-							</svg>
-							Download Image
-						</button>
-						<button onclick="(function(){
-							navigator.clipboard.writeText('${dataUrl}');
-							this.textContent = 'Copied!';
-							setTimeout(() => this.textContent = 'Copy Data URL', 2000);
-						}).call(this)" class="text-xs px-3 py-1.5 bg-muted text-foreground rounded-md hover:bg-accent flex items-center gap-1.5">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-							</svg>
-							Copy Data URL
-						</button>
+					<div class="generated-media-container relative inline-block">
+						<img src="${dataUrl}" alt="Generated image" class="max-w-full max-h-96 rounded-lg shadow-md border border-border" />
+						<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
+							<button onclick="(function(){
+								const link = document.createElement('a');
+								link.href = '${dataUrl}';
+								link.download = 'generated-image.png';
+								link.click();
+							})()" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download">
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+								</svg>
+							</button>
+							<button onclick="(function(btn){
+								navigator.clipboard.writeText('${dataUrl}');
+								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
+								setTimeout(function() {
+									btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
+								}, 2000);
+							})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+								</svg>
+							</button>
+						</div>
 					</div>
 				</div>`;
 			}
@@ -1086,26 +1161,28 @@
 				const duration = data.duration_seconds ? `${data.duration_seconds}s` : '';
 				return `<div class="generated-video-result">
 					<div class="mb-2 text-xs text-green-500">✓ Video generated successfully${duration ? ` (${duration})` : ''}</div>
-					<video src="${videoUrl}" controls class="max-w-full max-h-96 rounded-lg shadow-md border border-border">
-						Your browser does not support the video tag.
-					</video>
-					<div class="flex gap-2 mt-3">
-						<a href="${videoUrl}" download="${filename}" class="text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 flex items-center gap-1.5 font-medium no-underline">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-							</svg>
-							Download Video
-						</a>
-						<button onclick="(function(){
-							navigator.clipboard.writeText(window.location.origin + '${videoUrl}');
-							this.textContent = 'Copied!';
-							setTimeout(() => this.textContent = 'Copy URL', 2000);
-						}).call(this)" class="text-xs px-3 py-1.5 bg-muted text-foreground rounded-md hover:bg-accent flex items-center gap-1.5">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-							</svg>
-							Copy URL
-						</button>
+					<div class="generated-media-container relative inline-block">
+						<video src="${videoUrl}" controls class="max-w-full max-h-96 rounded-lg shadow-md border border-border">
+							Your browser does not support the video tag.
+						</video>
+						<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
+							<a href="${videoUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download">
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+								</svg>
+							</a>
+							<button onclick="(function(btn){
+								navigator.clipboard.writeText(window.location.origin + '${videoUrl}');
+								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
+								setTimeout(function() {
+									btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
+								}, 2000);
+							})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+								</svg>
+							</button>
+						</div>
 					</div>
 				</div>`;
 			}
@@ -1151,38 +1228,24 @@
 			if (data.success && data.image_url) {
 				const imageUrl = data.image_url;
 				const filename = data.filename || 'generated-image.png';
-				return `<div class="generated-image-standalone mt-3">
+				return `<div class="generated-media-container relative mt-3 inline-block">
 					<img src="${imageUrl}" alt="Generated image" class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border" />
-					<div class="flex items-center gap-2 mt-2">
-						<a href="${imageUrl}" download="${filename}" class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors no-underline" title="Download image">
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
+						<a href="${imageUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 							</svg>
-							<span>Download</span>
 						</a>
 						<button onclick="(function(btn){
 							navigator.clipboard.writeText(window.location.origin + '${imageUrl}');
-							var iconSpan = btn.querySelector('.copy-icon');
-							var checkSpan = btn.querySelector('.check-icon');
-							var textSpan = btn.querySelector('.btn-text');
-							iconSpan.style.display = 'none';
-							checkSpan.style.display = 'block';
-							textSpan.textContent = 'Copied';
-							textSpan.classList.add('text-green-500');
+							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
 							setTimeout(function() {
-								iconSpan.style.display = 'block';
-								checkSpan.style.display = 'none';
-								textSpan.textContent = 'Copy URL';
-								textSpan.classList.remove('text-green-500');
+								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
 							}, 2000);
-						})(this)" class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors" title="Copy image URL">
-							<svg class="w-3.5 h-3.5 copy-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
 							</svg>
-							<svg class="w-3.5 h-3.5 check-icon text-green-500" style="display:none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-							</svg>
-							<span class="btn-text">Copy URL</span>
 						</button>
 					</div>
 				</div>`;
@@ -1192,43 +1255,29 @@
 			if (data.success && data.image_base64 && data.mime_type) {
 				const mimeType = data.mime_type || 'image/png';
 				const dataUrl = `data:${mimeType};base64,${data.image_base64}`;
-				return `<div class="generated-image-standalone mt-3">
+				return `<div class="generated-media-container relative mt-3 inline-block">
 					<img src="${dataUrl}" alt="Generated image" class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border" />
-					<div class="flex items-center gap-2 mt-2">
+					<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
 						<button onclick="(function(){
 							const link = document.createElement('a');
 							link.href = '${dataUrl}';
 							link.download = 'generated-image.png';
 							link.click();
-						})()" class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors" title="Download image">
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						})()" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 							</svg>
-							<span>Download</span>
 						</button>
 						<button onclick="(function(btn){
 							navigator.clipboard.writeText('${dataUrl}');
-							var iconSpan = btn.querySelector('.copy-icon');
-							var checkSpan = btn.querySelector('.check-icon');
-							var textSpan = btn.querySelector('.btn-text');
-							iconSpan.style.display = 'none';
-							checkSpan.style.display = 'block';
-							textSpan.textContent = 'Copied';
-							textSpan.classList.add('text-green-500');
+							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
 							setTimeout(function() {
-								iconSpan.style.display = 'block';
-								checkSpan.style.display = 'none';
-								textSpan.textContent = 'Copy URL';
-								textSpan.classList.remove('text-green-500');
+								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
 							}, 2000);
-						})(this)" class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors" title="Copy image URL">
-							<svg class="w-3.5 h-3.5 copy-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
 							</svg>
-							<svg class="w-3.5 h-3.5 check-icon text-green-500" style="display:none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-							</svg>
-							<span class="btn-text">Copy URL</span>
 						</button>
 					</div>
 				</div>`;
@@ -1247,42 +1296,26 @@
 			if (data.success && data.video_url) {
 				const videoUrl = data.video_url;
 				const filename = data.filename || 'generated-video.mp4';
-				const duration = data.duration_seconds ? `${data.duration_seconds}s` : '';
-				return `<div class="generated-video-standalone mt-3">
+				return `<div class="generated-media-container relative mt-3 inline-block">
 					<video src="${videoUrl}" controls class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border">
 						Your browser does not support the video tag.
 					</video>
-					<div class="flex items-center gap-2 mt-2">
-						${duration ? `<span class="text-xs text-muted-foreground">${duration}</span>` : ''}
-						<a href="${videoUrl}" download="${filename}" class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors no-underline" title="Download video">
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
+						<a href="${videoUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 							</svg>
-							<span>Download</span>
 						</a>
 						<button onclick="(function(btn){
 							navigator.clipboard.writeText(window.location.origin + '${videoUrl}');
-							var iconSpan = btn.querySelector('.copy-icon');
-							var checkSpan = btn.querySelector('.check-icon');
-							var textSpan = btn.querySelector('.btn-text');
-							iconSpan.style.display = 'none';
-							checkSpan.style.display = 'block';
-							textSpan.textContent = 'Copied';
-							textSpan.classList.add('text-green-500');
+							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
 							setTimeout(function() {
-								iconSpan.style.display = 'block';
-								checkSpan.style.display = 'none';
-								textSpan.textContent = 'Copy URL';
-								textSpan.classList.remove('text-green-500');
+								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
 							}, 2000);
-						})(this)" class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors" title="Copy video URL">
-							<svg class="w-3.5 h-3.5 copy-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
 							</svg>
-							<svg class="w-3.5 h-3.5 check-icon text-green-500" style="display:none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-							</svg>
-							<span class="btn-text">Copy URL</span>
 						</button>
 					</div>
 				</div>`;
@@ -1306,7 +1339,6 @@
 
 	// Copy text to clipboard with feedback
 	let copiedMessageId: string | null = null;
-	let copiedUrlMessageId: string | null = null;
 
 	async function copyToClipboard(text: string, messageId: string) {
 		try {
@@ -1318,51 +1350,6 @@
 		} catch (e) {
 			console.error('Failed to copy to clipboard:', e);
 		}
-	}
-
-	async function copyUrlToClipboard(url: string, messageId: string) {
-		try {
-			const fullUrl = window.location.origin + url;
-			await navigator.clipboard.writeText(fullUrl);
-			copiedUrlMessageId = messageId;
-			setTimeout(() => {
-				copiedUrlMessageId = null;
-			}, 2000);
-		} catch (e) {
-			console.error('Failed to copy URL to clipboard:', e);
-		}
-	}
-
-	// Extract generated image URL from message content
-	function extractGeneratedImageUrl(content: string): string | null {
-		const match = content.match(/!\[[^\]]*\]\((\/api\/generated-images\/[^)]+)\)/);
-		return match ? match[1] : null;
-	}
-
-	// Extract generated video URL from message content
-	function extractGeneratedVideoUrl(content: string): string | null {
-		const match = content.match(/\[[^\]]*\]\((\/api\/generated-videos\/[^)]+)\)/);
-		return match ? match[1] : null;
-	}
-
-	// Get filename from generated image URL
-	function getFilenameFromUrl(url: string): string {
-		const pathMatch = url.match(/path=([^&]+)/);
-		if (pathMatch) {
-			const path = decodeURIComponent(pathMatch[1]);
-			return path.split('/').pop() || 'generated-image.png';
-		}
-		return url.split('/').pop() || 'generated-image.png';
-	}
-
-	// Get filename from generated video URL
-	function getVideoFilenameFromUrl(url: string): string {
-		const pathMatch = url.match(/path=([^&]+)/);
-		if (pathMatch) {
-			const path = decodeURIComponent(pathMatch[1]);
-			return path.split('/').pop() || 'generated-video.mp4';
-		}
-		return url.split('/').pop() || 'generated-video.mp4';
 	}
 
 	function formatTime(date?: Date): string {
@@ -3379,74 +3366,6 @@
 											{#if message.content && !message.streaming}
 												<!-- Action buttons container -->
 												<div class="ml-auto flex items-center gap-1">
-													<!-- Download and Copy URL buttons for generated images -->
-													{#if extractGeneratedImageUrl(message.content)}
-														{@const imageUrl = extractGeneratedImageUrl(message.content)}
-														{@const filename = getFilenameFromUrl(imageUrl || '')}
-														<a
-															href={imageUrl}
-															download={filename}
-															class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors no-underline"
-															title="Download image"
-														>
-															<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-															</svg>
-															<span>Download</span>
-														</a>
-														<button
-															class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
-															on:click={() => copyUrlToClipboard(imageUrl || '', message.id)}
-															title="Copy image URL"
-														>
-															{#if copiedUrlMessageId === message.id}
-																<svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-																</svg>
-																<span class="text-green-500">Copied</span>
-															{:else}
-																<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-																</svg>
-																<span>Copy URL</span>
-															{/if}
-														</button>
-														<span class="w-px h-4 bg-border"></span>
-													{/if}
-													<!-- Download and Copy URL buttons for generated videos -->
-													{#if extractGeneratedVideoUrl(message.content)}
-														{@const videoUrl = extractGeneratedVideoUrl(message.content)}
-														{@const filename = getVideoFilenameFromUrl(videoUrl || '')}
-														<a
-															href={videoUrl}
-															download={filename}
-															class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors no-underline"
-															title="Download video"
-														>
-															<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-															</svg>
-															<span>Download</span>
-														</a>
-														<button
-															class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
-															on:click={() => copyUrlToClipboard(videoUrl || '', message.id)}
-															title="Copy video URL"
-														>
-															{#if copiedUrlMessageId === message.id}
-																<svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-																</svg>
-																<span class="text-green-500">Copied</span>
-															{:else}
-																<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-																</svg>
-																<span>Copy URL</span>
-															{/if}
-														</button>
-														<span class="w-px h-4 bg-border"></span>
-													{/if}
 													<!-- Copy response button -->
 													<button
 														class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
@@ -3471,7 +3390,7 @@
 										<div class="overflow-hidden">
 											<div class="prose prose-sm max-w-none break-words overflow-x-auto">
 												{#if message.content}
-													{@html renderMarkdown(message.content)}
+													{@html renderMarkdown(message.content, message.streaming)}
 													{#if message.streaming}
 														<span class="inline-block w-2 h-4 ml-0.5 bg-primary animate-pulse"></span>
 													{/if}
@@ -4823,6 +4742,14 @@
 	.scrollbar-hide {
 		-ms-overflow-style: none;
 		scrollbar-width: none;
+	}
+
+	/* Media overlay buttons - show on hover */
+	:global(.generated-media-container:hover .media-overlay-buttons) {
+		opacity: 1 !important;
+	}
+	:global(.media-overlay-buttons) {
+		transition: opacity 0.2s ease-in-out;
 	}
 
 	/* Floating Panel Styles */
