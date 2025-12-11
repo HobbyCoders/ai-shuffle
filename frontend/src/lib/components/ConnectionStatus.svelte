@@ -97,7 +97,6 @@
 			<!-- Dot for connected/disconnected -->
 			<span class="w-2 h-2 {statusConfig.bgColor} rounded-full {statusConfig.pulse ? 'animate-pulse' : ''}"></span>
 		{/if}
-		<span class="hidden sm:inline">{statusConfig.label}</span>
 	</button>
 
 	<!-- Desktop: Hover dropdown (hidden on mobile) -->
