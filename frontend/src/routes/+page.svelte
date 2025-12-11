@@ -2685,64 +2685,56 @@
 		</aside>
 	{/if}
 
-	<!-- Mobile Sidebar (full width overlay) -->
-	<aside class="lg:hidden fixed inset-y-0 left-0 z-50 w-72 bg-card border-r border-border transform transition-transform duration-200 {sidebarOpen ? 'translate-x-0' : '-translate-x-full'}">
-		<div class="h-full flex flex-col">
-			<div class="p-4 border-b border-border flex items-center justify-between">
-				<div class="flex items-center gap-2">
-					<div class="w-8 h-8 rounded-lg bg-primary flex items-center justify-center shadow-s">
-						<svg class="w-5 h-5 text-primary-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-						</svg>
-					</div>
-					<span class="font-semibold text-foreground">AI Hub</span>
-				</div>
-				<button class="text-muted-foreground hover:text-foreground p-1" on:click={() => (sidebarOpen = false)}>
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+	<!-- Mobile Session Panel (fullscreen glassmorph overlay) -->
+	<aside class="lg:hidden fixed inset-x-3 top-3 bottom-[4.5rem] z-50 floating-panel rounded-2xl flex flex-col transform transition-all duration-300 {sidebarOpen ? 'opacity-100 scale-100' : 'opacity-0 scale-95 pointer-events-none'}">
+		<!-- Header -->
+		<div class="p-4 border-b border-white/10 flex items-center justify-between">
+			<div class="flex items-center gap-3">
+				<div class="w-8 h-8 rounded-xl bg-primary/20 flex items-center justify-center">
+					<svg class="w-4 h-4 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
 					</svg>
-				</button>
+				</div>
+				<span class="font-semibold text-foreground">Chats</span>
 			</div>
-			<div class="p-3 space-y-2">
-				<!-- Mobile Search (tap to expand) -->
-				{#if sessionSearchExpanded}
-					<div class="relative">
-						<svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-						</svg>
-						<input
-							type="text"
-							bind:value={sessionSearchQuery}
-							placeholder="Search sessions..."
-							class="w-full pl-9 pr-8 py-2 text-sm bg-accent border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-						/>
-						<button on:click={clearSearch} class="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-muted-foreground hover:text-foreground">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-							</svg>
-						</button>
-					</div>
-				{:else}
-					<button
-						on:click={() => sessionSearchExpanded = true}
-						class="w-full flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground bg-accent/50 hover:bg-accent rounded-lg transition-colors"
-					>
+			<button class="w-8 h-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-lg transition-colors" on:click={() => (sidebarOpen = false)}>
+				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+				</svg>
+			</button>
+		</div>
+
+		<!-- Search -->
+		<div class="p-3">
+			<div class="relative">
+				<svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+				</svg>
+				<input
+					type="text"
+					bind:value={sessionSearchQuery}
+					placeholder="Search sessions..."
+					class="w-full pl-9 pr-8 py-2.5 text-sm bg-white/5 border border-white/10 rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 transition-colors"
+				/>
+				{#if sessionSearchQuery}
+					<button on:click={clearSearch} class="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-muted-foreground hover:text-foreground">
 						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 						</svg>
-						<span>Search sessions...</span>
 					</button>
 				{/if}
 			</div>
-			<!-- Mobile Tab Toggle (My Chats / Admin) -->
-			{#if $isAdmin}
-				<div class="px-3 pb-2">
-					<div class="flex bg-muted rounded-lg p-0.5">
-						<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}">My Chats</button>
-						<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}">Admin</button>
-					</div>
+		</div>
+
+		<!-- Tab Toggle (My Chats / Admin) -->
+		{#if $isAdmin}
+			<div class="px-3 pb-2">
+				<div class="flex bg-white/5 rounded-xl p-1">
+					<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-2 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-white/5'}">My Chats</button>
+					<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-2 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-white/5'}">Admin</button>
 				</div>
-			{/if}
+			</div>
+		{/if}
 
 			<div class="flex-1 overflow-y-auto px-3 pb-3">
 				{#if sidebarTab === 'my-chats'}
@@ -2928,99 +2920,96 @@
 					</div>
 				{/if}
 			</div>
-			<div class="p-3 border-t border-border">
-				<div class="flex items-center justify-between">
-					<div class="flex items-center gap-2">
-						<div class="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center shadow-s">
-							<span class="text-sm text-primary">{$username?.[0]?.toUpperCase() || 'U'}</span>
-						</div>
-						<span class="text-sm text-muted-foreground">{$username}</span>
+
+		<!-- User Footer -->
+		<div class="p-3 border-t border-white/10">
+			<div class="flex items-center justify-between">
+				<div class="flex items-center gap-2">
+					<div class="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
+						<span class="text-sm text-primary">{$username?.[0]?.toUpperCase() || 'U'}</span>
 					</div>
-					<button on:click={handleLogout} class="text-muted-foreground hover:text-foreground text-sm">Logout</button>
+					<span class="text-sm text-muted-foreground">{$username}</span>
 				</div>
+				<button on:click={handleLogout} class="text-xs text-muted-foreground hover:text-foreground px-3 py-1.5 rounded-lg hover:bg-white/10 transition-colors">Logout</button>
 			</div>
 		</div>
 	</aside>
 
 	<!-- Mobile Sidebar Backdrop -->
 	{#if sidebarOpen}
-		<button class="lg:hidden fixed inset-0 z-40 bg-black/50" on:click={() => (sidebarOpen = false)} aria-label="Close sidebar"></button>
+		<button class="lg:hidden fixed inset-0 z-40 bg-black/40 backdrop-blur-sm" on:click={() => (sidebarOpen = false)} aria-label="Close sidebar"></button>
 	{/if}
 
 	<!-- Mobile Tools Menu Popup -->
 	{#if showToolsMenu}
-		<button class="lg:hidden fixed inset-0 z-50 bg-black/30" on:click={() => showToolsMenu = false} aria-label="Close tools menu"></button>
-		<div class="lg:hidden fixed bottom-16 left-1/2 -translate-x-1/2 z-50 bg-card border border-border rounded-xl shadow-lg p-2 min-w-[200px]">
-			<div class="flex flex-col gap-1">
+		<button class="lg:hidden fixed inset-0 z-50 bg-black/30 backdrop-blur-sm" on:click={() => showToolsMenu = false} aria-label="Close tools menu"></button>
+		<div class="lg:hidden fixed bottom-[4.5rem] left-1/2 -translate-x-1/2 z-50 floating-panel rounded-2xl p-2 min-w-[200px]">
+			<div class="flex flex-col gap-0.5">
 				<button
 					on:click={() => { showToolsMenu = false; showProjectModal = true; }}
-					class="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-accent transition-colors text-left"
+					class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-white/10 transition-colors text-left"
 				>
 					<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 					</svg>
-					<span class="text-sm font-medium">Projects</span>
+					<span class="text-sm font-medium text-foreground">Projects</span>
 				</button>
 				<button
 					on:click={() => { showToolsMenu = false; showProfileModal = true; }}
-					class="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-accent transition-colors text-left"
+					class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-white/10 transition-colors text-left"
 				>
 					<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
 					</svg>
-					<span class="text-sm font-medium">Profiles</span>
+					<span class="text-sm font-medium text-foreground">Profiles</span>
 				</button>
 				<button
 					on:click={() => { showToolsMenu = false; showSubagentManager = true; }}
-					class="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-accent transition-colors text-left"
+					class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-white/10 transition-colors text-left"
 				>
 					<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
 					</svg>
-					<span class="text-sm font-medium">Subagents</span>
+					<span class="text-sm font-medium text-foreground">Subagents</span>
 				</button>
 			</div>
 		</div>
 	{/if}
 
-	<!-- Mobile Bottom Navigation -->
-	<nav class="lg:hidden fixed bottom-0 left-0 right-0 z-50 bg-card border-t border-border safe-bottom">
-		<div class="flex items-center justify-around h-14">
-			<button on:click={handleNewTab} class="flex flex-col items-center justify-center w-16 h-full text-muted-foreground hover:text-foreground transition-colors">
+	<!-- Mobile Bottom Navigation - Floating Dock -->
+	<nav class="lg:hidden fixed bottom-3 left-3 right-3 z-50 floating-panel rounded-2xl safe-bottom">
+		<div class="flex items-center justify-around h-12">
+			<button on:click={handleNewTab} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="New Chat">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
 				</svg>
-				<span class="text-xs mt-0.5">New</span>
 			</button>
-			<button on:click={() => sidebarOpen = true} class="relative flex flex-col items-center justify-center w-16 h-full text-muted-foreground hover:text-foreground transition-colors">
+			<button on:click={() => sidebarOpen = true} class="relative flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Chats">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
 				</svg>
-				<span class="text-xs mt-0.5">Chats</span>
 				{#if $allTabs.length > 1}
-					<span class="absolute top-1 right-2 w-4 h-4 bg-primary text-primary-foreground text-[10px] font-bold rounded-full flex items-center justify-center">{$allTabs.length}</span>
+					<span class="absolute -top-1 -right-1 w-4 h-4 bg-primary text-primary-foreground text-[10px] font-bold rounded-full flex items-center justify-center">{$allTabs.length}</span>
 				{/if}
 			</button>
 			{#if $isAdmin}
-				<button on:click={() => showToolsMenu = !showToolsMenu} class="relative flex flex-col items-center justify-center w-16 h-full text-muted-foreground hover:text-foreground transition-colors">
+				<button on:click={() => showToolsMenu = !showToolsMenu} class="relative flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Tools">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
 					</svg>
-					<span class="text-xs mt-0.5">Tools</span>
 				</button>
-				<a href="/settings" class="flex flex-col items-center justify-center w-16 h-full text-muted-foreground hover:text-foreground transition-colors">
+				<a href="/settings" class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Settings">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
 					</svg>
-					<span class="text-xs mt-0.5">Settings</span>
 				</a>
 			{/if}
 		</div>
 	</nav>
 
 	<!-- Main Content -->
-	<main class="flex-1 flex flex-col min-w-0 bg-background pb-14 lg:pb-0 lg:ml-[4.5rem]">
+	<main class="flex-1 flex flex-col min-w-0 bg-background pb-[4.5rem] lg:pb-0 lg:ml-[4.5rem]">
 		<!-- Context Bar - Floating Pills Design -->
 		{#if $activeTab}
 			{@const currentTab = $activeTab}
