@@ -99,14 +99,38 @@
 
 	// Check if high cost
 	$: isHighCost = (session.total_cost_usd ?? 0) > 10;
+
+	// Generate a consistent color based on session id
+	const avatarColors = [
+		'from-violet-500 to-purple-600',
+		'from-blue-500 to-cyan-500',
+		'from-emerald-500 to-teal-500',
+		'from-orange-500 to-amber-500',
+		'from-pink-500 to-rose-500',
+		'from-indigo-500 to-blue-500',
+		'from-cyan-500 to-blue-500',
+		'from-fuchsia-500 to-pink-500',
+	];
+
+	function getAvatarColor(id: string): string {
+		let hash = 0;
+		for (let i = 0; i < id.length; i++) {
+			hash = ((hash << 5) - hash) + id.charCodeAt(i);
+			hash |= 0;
+		}
+		return avatarColors[Math.abs(hash) % avatarColors.length];
+	}
+
+	$: avatarGradient = getAvatarColor(session.id);
+	$: avatarLetter = (session.title || 'N')[0].toUpperCase();
 </script>
 
-<div class="relative rounded-lg">
+<div class="relative rounded-xl">
 	<!-- Swipe indicator - sits behind the card -->
 	{#if currentSwipeX > 0}
 		{#if isOpen}
 			<!-- Close indicator for open tabs (neutral color) -->
-			<div class="absolute inset-0 flex justify-end items-center rounded-lg overflow-hidden {isPastThreshold ? 'bg-muted-foreground' : 'bg-muted-foreground/50'}">
+			<div class="absolute inset-0 flex justify-end items-center rounded-xl overflow-hidden {isPastThreshold ? 'bg-muted-foreground' : 'bg-muted-foreground/50'}">
 				<div class="w-[100px] flex items-center justify-center">
 					<svg class="w-5 h-5 text-background" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
@@ -115,7 +139,7 @@
 			</div>
 		{:else}
 			<!-- Delete indicator for history items (red) -->
-			<div class="absolute inset-0 flex justify-end items-center rounded-lg overflow-hidden {isPastThreshold ? 'bg-destructive' : 'bg-destructive/50'}">
+			<div class="absolute inset-0 flex justify-end items-center rounded-xl overflow-hidden {isPastThreshold ? 'bg-destructive' : 'bg-destructive/50'}">
 				<div class="w-[100px] flex items-center justify-center">
 					<svg class="w-5 h-5 text-destructive-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -127,7 +151,7 @@
 
 	<!-- Main card content - slides to reveal delete indicator -->
 	<div
-		class="group relative flex items-start gap-3 px-3 py-2.5 rounded-lg cursor-pointer select-none bg-card {isActive ? 'bg-primary/20 border border-primary/30' : 'hover:bg-accent'} {selectionMode && isSelected ? 'bg-accent/50' : ''}"
+		class="group relative flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer select-none {isActive ? 'bg-white/10 border border-white/20' : 'hover:bg-white/5'} {selectionMode && isSelected ? 'bg-white/10' : ''}"
 		class:transition-transform={!directionLocked}
 		style="transform: translateX(-{currentSwipeX}px)"
 		on:click={handleCardClick}
@@ -144,12 +168,18 @@
 				type="checkbox"
 				checked={isSelected}
 				on:click|stopPropagation={() => dispatch('select')}
-				class="w-4 h-4 mt-0.5 rounded border-border text-primary focus:ring-primary cursor-pointer flex-shrink-0"
+				class="w-4 h-4 rounded border-border text-primary focus:ring-primary cursor-pointer flex-shrink-0"
 			/>
 		{/if}
 
-		<!-- Status indicator -->
-		<span class="w-2 h-2 mt-1.5 rounded-full flex-shrink-0 {statusColor}"></span>
+		<!-- Avatar with gradient and status indicator -->
+		<div class="relative flex-shrink-0">
+			<div class="w-10 h-10 rounded-xl bg-gradient-to-br {avatarGradient} flex items-center justify-center text-white font-semibold text-sm shadow-sm">
+				{avatarLetter}
+			</div>
+			<!-- Status indicator dot -->
+			<span class="absolute -bottom-0.5 -left-0.5 w-3 h-3 rounded-full border-2 border-card {statusColor}"></span>
+		</div>
 
 		<!-- Content -->
 		<div class="flex-1 min-w-0">

@@ -1974,35 +1974,35 @@
 </svelte:head>
 
 <div class="h-dvh flex bg-background text-foreground">
-	<!-- Icon Rail (Desktop) - 48px wide -->
-	<nav class="hidden lg:flex flex-col w-12 bg-card border-r border-border z-50 flex-shrink-0">
+	<!-- Floating Icon Rail (Desktop) - 48px wide -->
+	<nav class="hidden lg:flex fixed left-3 top-3 bottom-3 flex-col w-12 z-50 floating-panel rounded-2xl">
 		<div class="flex flex-col items-center pt-3 gap-1">
-			<button on:click={handleNewTab} class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors hover:bg-accent group" title="New Chat">
+			<button on:click={handleNewTab} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-white/10 group" title="New Chat">
 				<svg class="w-5 h-5 text-primary group-hover:scale-110 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
 				</svg>
 			</button>
-			<div class="w-6 h-px bg-border my-2"></div>
-			<button on:click={() => toggleSidebarSection('sessions')} class="relative w-10 h-10 rounded-lg flex items-center justify-center transition-colors {activeSidebarSection === 'sessions' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}" title="Sessions">
+			<div class="w-6 h-px bg-white/10 my-2"></div>
+			<button on:click={() => toggleSidebarSection('sessions')} class="relative w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'sessions' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-white/10 text-muted-foreground hover:text-foreground'}" title="Sessions">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
 				</svg>
 				{#if $allTabs.length > 1}
-					<span class="absolute -top-1 -right-1 w-4 h-4 bg-primary text-primary-foreground text-[10px] font-bold rounded-full flex items-center justify-center">{$allTabs.length}</span>
+					<span class="absolute -top-1 -right-1 w-4 h-4 bg-primary text-primary-foreground text-[10px] font-bold rounded-full flex items-center justify-center shadow-glow">{$allTabs.length}</span>
 				{/if}
 			</button>
 			{#if $isAdmin}
-				<button on:click={() => toggleSidebarSection('projects')} class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors {activeSidebarSection === 'projects' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}" title="Projects">
+				<button on:click={() => toggleSidebarSection('projects')} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'projects' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-white/10 text-muted-foreground hover:text-foreground'}" title="Projects">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 					</svg>
 				</button>
-				<button on:click={() => toggleSidebarSection('profiles')} class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors {activeSidebarSection === 'profiles' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}" title="Profiles">
+				<button on:click={() => toggleSidebarSection('profiles')} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'profiles' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-white/10 text-muted-foreground hover:text-foreground'}" title="Profiles">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
 					</svg>
 				</button>
-				<button on:click={() => toggleSidebarSection('subagents')} class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors {activeSidebarSection === 'subagents' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}" title="Subagents">
+				<button on:click={() => toggleSidebarSection('subagents')} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'subagents' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-white/10 text-muted-foreground hover:text-foreground'}" title="Subagents">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
 					</svg>
@@ -2011,48 +2011,26 @@
 		</div>
 		<div class="mt-auto flex flex-col items-center pb-3 gap-1">
 			{#if $isAdmin}
-				<a href="/settings" class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors hover:bg-accent text-muted-foreground hover:text-foreground" title="Settings">
+				<a href="/settings" class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-white/10 text-muted-foreground hover:text-foreground" title="Settings">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
 					</svg>
 				</a>
 			{/if}
-			<button on:click={handleLogout} class="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center hover:bg-primary/30 transition-colors" title="Logout ({$apiUser ? $apiUser.name : $username})">
+			<button on:click={handleLogout} class="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center hover:bg-primary/30 transition-all" title="Logout ({$apiUser ? $apiUser.name : $username})">
 				<span class="text-sm font-medium text-primary">{($apiUser?.name || $username)?.[0]?.toUpperCase() || 'U'}</span>
 			</button>
 		</div>
 	</nav>
 
-	<!-- Expandable Sidebar Panel (Desktop) -->
+	<!-- Floating Expandable Sidebar Panel (Desktop) -->
 	{#if activeSidebarSection !== 'none'}
-		<button class="hidden lg:block fixed inset-0 z-30 bg-black/20" on:click={closeSidebar} aria-label="Close sidebar"></button>
-		<aside class="hidden lg:flex fixed inset-y-0 left-12 z-40 w-72 bg-card border-r border-border flex-col shadow-l sidebar-slide-in">
-			<div class="p-4 border-b border-border flex items-center justify-between">
-				<span class="font-semibold text-foreground">{activeSidebarSection === 'sessions' ? 'Sessions' : activeSidebarSection === 'projects' ? 'Projects' : activeSidebarSection === 'profiles' ? 'Profiles' : 'Subagents'}</span>
-				<div class="flex items-center gap-1">
-					{#if activeSidebarSection === 'sessions'}
-						<button on:click={() => sessionSearchExpanded = !sessionSearchExpanded} class="p-1.5 rounded-md transition-colors {sessionSearchExpanded ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}" title="Search sessions">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-							</svg>
-						</button>
-					{/if}
-					<button on:click={toggleSidebarPin} class="p-1.5 rounded-md transition-colors {sidebarPinned ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}" title={sidebarPinned ? 'Unpin sidebar' : 'Pin sidebar open'}>
-						<svg class="w-4 h-4" fill={sidebarPinned ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
-						</svg>
-					</button>
-					<button on:click={() => { activeSidebarSection = 'none'; sidebarPinned = false; clearSearch(); }} class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors" title="Close">
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-						</svg>
-					</button>
-				</div>
-			</div>
-			<!-- Search Bar (Desktop) -->
-			{#if activeSidebarSection === 'sessions' && sessionSearchExpanded}
-				<div class="px-3 py-2 border-b border-border">
+		<button class="hidden lg:block fixed inset-0 z-30 bg-black/20 backdrop-blur-[2px]" on:click={closeSidebar} aria-label="Close sidebar"></button>
+		<aside class="hidden lg:flex fixed top-3 bottom-3 left-[4.5rem] z-40 w-[280px] floating-panel rounded-2xl flex-col panel-slide-in">
+			<!-- Search Bar (always visible for Sessions panel) -->
+			{#if activeSidebarSection === 'sessions'}
+				<div class="p-3">
 					<div class="relative">
 						<svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -2060,16 +2038,33 @@
 						<input
 							type="text"
 							bind:value={sessionSearchQuery}
-							placeholder="Search sessions..."
-							class="w-full pl-9 pr-8 py-1.5 text-sm bg-accent border border-border rounded-md text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+							placeholder="Search conversations..."
+							class="w-full pl-9 pr-8 py-2.5 text-sm bg-white/5 border border-white/10 rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 transition-all"
 						/>
 						{#if sessionSearchQuery}
-							<button on:click={clearSearch} class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-muted-foreground hover:text-foreground">
+							<button on:click={clearSearch} class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-muted-foreground hover:text-foreground transition-colors">
 								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 								</svg>
 							</button>
 						{/if}
+					</div>
+				</div>
+			{:else}
+				<!-- Header for non-Sessions panels -->
+				<div class="p-4 border-b border-white/5 flex items-center justify-between">
+					<span class="font-semibold text-foreground">{activeSidebarSection === 'projects' ? 'Projects' : activeSidebarSection === 'profiles' ? 'Profiles' : 'Subagents'}</span>
+					<div class="flex items-center gap-1">
+						<button on:click={toggleSidebarPin} class="p-1.5 rounded-lg transition-all {sidebarPinned ? 'bg-primary text-primary-foreground shadow-glow' : 'text-muted-foreground hover:text-foreground hover:bg-white/10'}" title={sidebarPinned ? 'Unpin sidebar' : 'Pin sidebar open'}>
+							<svg class="w-4 h-4" fill={sidebarPinned ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
+							</svg>
+						</button>
+						<button on:click={() => { activeSidebarSection = 'none'; sidebarPinned = false; clearSearch(); }} class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/10 transition-all" title="Close">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+							</svg>
+						</button>
 					</div>
 				</div>
 			{/if}
@@ -2078,9 +2073,9 @@
 			{#if activeSidebarSection === 'sessions'}
 				<div class="flex-1 overflow-hidden flex flex-col">
 					{#if $isAdmin}
-						<div class="px-3 pt-3 flex gap-1">
-							<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}">My Chats</button>
-							<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}">Admin</button>
+						<div class="px-3 flex gap-1">
+							<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-white/5'}">My Chats</button>
+							<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-white/5'}">Admin</button>
 						</div>
 					{/if}
 					{#if sidebarTab === 'my-chats'}
@@ -2483,6 +2478,24 @@
 						{/if}
 					</div>
 				{/if}
+				</div>
+				<!-- User Profile Footer -->
+				<div class="mt-auto p-3 border-t border-white/5">
+					<div class="flex items-center gap-3">
+						<div class="w-10 h-10 rounded-full bg-gradient-to-br from-primary/80 to-primary flex items-center justify-center text-primary-foreground font-semibold shadow-glow">
+							{($apiUser?.name || $username)?.[0]?.toUpperCase() || 'U'}
+						</div>
+						<div class="flex-1 min-w-0">
+							<p class="text-sm font-medium text-foreground truncate">{$apiUser?.name || $username || 'User'}</p>
+							<p class="text-xs text-muted-foreground truncate">{$isAdmin ? 'Administrator' : 'User'}</p>
+						</div>
+						<a href="/settings" class="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/10 transition-all" title="Settings">
+							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+							</svg>
+						</a>
+					</div>
 				</div>
 			{/if}
 
@@ -3077,7 +3090,7 @@
 	</nav>
 
 	<!-- Main Content -->
-	<main class="flex-1 flex flex-col min-w-0 bg-background pb-14 lg:pb-0">
+	<main class="flex-1 flex flex-col min-w-0 bg-background pb-14 lg:pb-0 lg:ml-[4.5rem]">
 		<!-- Context Bar -->
 		{#if $activeTab}
 			{@const currentTab = $activeTab}
@@ -4963,9 +4976,48 @@
 		-ms-overflow-style: none;
 		scrollbar-width: none;
 	}
+
+	/* Floating Panel Styles */
+	.floating-panel {
+		background: oklch(0.16 0.012 260 / 0.85);
+		backdrop-filter: blur(20px);
+		-webkit-backdrop-filter: blur(20px);
+		border: 1px solid oklch(1 0 0 / 0.08);
+		box-shadow:
+			0 0 0 1px oklch(0 0 0 / 0.3),
+			0 8px 32px oklch(0 0 0 / 0.4),
+			0 2px 8px oklch(0 0 0 / 0.2),
+			inset 0 1px 0 oklch(1 0 0 / 0.05);
+	}
+
+	/* Glow effect for active buttons */
+	.shadow-glow {
+		box-shadow:
+			0 0 12px oklch(0.72 0.14 180 / 0.4),
+			0 0 4px oklch(0.72 0.14 180 / 0.3);
+	}
+
+	/* Panel slide-in animation */
+	.panel-slide-in {
+		animation: panelSlideIn 0.25s cubic-bezier(0.32, 0.72, 0, 1);
+	}
+
+	@keyframes panelSlideIn {
+		from {
+			transform: translateX(-16px);
+			opacity: 0;
+		}
+		to {
+			transform: translateX(0);
+			opacity: 1;
+		}
+	}
+
+	/* Legacy sidebar animation - keep for mobile */
 	.sidebar-slide-in {
 		animation: slideInFromLeft 0.2s ease-out;
 	}
+
 	@keyframes slideInFromLeft {
 		from {
 			transform: translateX(-100%);
