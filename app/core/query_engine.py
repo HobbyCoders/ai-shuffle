@@ -46,6 +46,11 @@ logger = logging.getLogger(__name__)
 MAX_TOOL_OUTPUT_SIZE = 500_000  # ~500KB to leave room for JSON overhead
 MAX_DISPLAY_OUTPUT_SIZE = 2000  # What we show in the UI
 
+# Default SDK buffer size for reading CLI output (50MB)
+# The SDK's default is 1MB which is too small for images/PDFs (base64 encoded)
+# This must match the max_buffer_size in ClaudeAgentOptions
+DEFAULT_SDK_BUFFER_SIZE = 50 * 1024 * 1024  # 50MB
+
 
 def truncate_large_payload(content: Any, max_size: int = MAX_TOOL_OUTPUT_SIZE) -> str:
     """
@@ -1061,8 +1066,10 @@ def build_options_from_profile(
         env=_build_env_with_ai_tools(config.get("env"), ai_tools_config),
         extra_args=config.get("extra_args") or {},
 
-        # Buffer settings
-        max_buffer_size=config.get("max_buffer_size"),
+        # Buffer settings - Default to 50MB to handle large file reads (images, PDFs)
+        # The SDK's default is 1MB which causes "JSON message exceeded maximum buffer size" errors
+        # when reading images or PDFs (their base64 content easily exceeds 1MB)
+        max_buffer_size=config.get("max_buffer_size") or DEFAULT_SDK_BUFFER_SIZE,
 
         # User identification
         user=config.get("user"),
