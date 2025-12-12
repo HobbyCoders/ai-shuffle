@@ -835,10 +835,20 @@
 		});
 
 		// Render file download cards for shared files
-		// Syntax: 📎[filename.ext](/api/files/filename.ext)
+		// Syntax: 📎[filename.ext](/api/files/filename.ext) or 📎[filename.ext](/api/files/by-path?path=...)
 		const fileDownloadPattern = /📎\[([^\]]+)\]\((\/api\/files\/[^)]+)\)/g;
-		processedContent = processedContent.replace(fileDownloadPattern, (match, filename, fileUrl) => {
-			filename = filename || fileUrl.split('/').pop() || 'file';
+		processedContent = processedContent.replace(fileDownloadPattern, (match, displayName, fileUrl) => {
+			// Use the display name from markdown, fallback to extracting from URL
+			let filename = displayName;
+			if (!filename) {
+				// Try to extract from by-path URL or simple URL
+				const pathMatch = fileUrl.match(/[?&]path=([^&]+)/);
+				if (pathMatch) {
+					filename = decodeURIComponent(pathMatch[1]).split('/').pop() || 'file';
+				} else {
+					filename = fileUrl.split('/').pop() || 'file';
+				}
+			}
 			const ext = filename.split('.').pop()?.toLowerCase() || '';
 
 			// File type icons mapping

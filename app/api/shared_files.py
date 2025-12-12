@@ -223,13 +223,12 @@ async def get_file_info(path: str = Query(..., description="Full path to the fil
 @router.get("/{filename}")
 async def get_shared_file(filename: str):
     """
-    Serve a shared file by filename, searching in shared-files directories.
+    Serve a shared file by filename from the root workspace shared-files directory.
 
-    Searches for the file in:
-    1. Root workspace shared-files directory
-    2. All project subdirectory shared-files directories
+    This is a simple fallback for files in the main workspace.
+    For project-specific files, use /api/files/by-path?path=... instead.
 
-    Security: Only serves files from shared-files directories,
+    Security: Only serves files from the shared-files directory,
     preventing path traversal attacks.
     """
     # Sanitize filename - remove any path components
@@ -242,30 +241,12 @@ async def get_shared_file(filename: str):
             detail="Invalid filename"
         )
 
-    workspace = settings.effective_workspace_dir
+    # Only look in root workspace shared-files directory
+    shared_files_dir = settings.effective_workspace_dir / "shared-files"
+    file_path = shared_files_dir / safe_filename
 
-    # Search locations: root workspace first, then subdirectories
-    search_paths = []
-
-    # 1. Root workspace shared-files
-    root_shared = workspace / "shared-files" / safe_filename
-    search_paths.append(root_shared)
-
-    # 2. Search all subdirectories for shared-files folders
-    if workspace.exists():
-        for subdir in workspace.iterdir():
-            if subdir.is_dir() and not subdir.name.startswith('.'):
-                candidate = subdir / "shared-files" / safe_filename
-                search_paths.append(candidate)
-
-    # Find the first existing file
-    file_path = None
-    for path in search_paths:
-        if path.exists() and path.is_file():
-            file_path = path
-            break
-
-    if not file_path:
+    # Check if file exists
+    if not file_path.exists() or not file_path.is_file():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="File not found"

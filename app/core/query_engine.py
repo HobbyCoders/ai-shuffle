@@ -324,12 +324,15 @@ When you need to share a file for the user to download (e.g., generated reports,
 1. Save the file to the `shared-files` directory in the current working directory:
    ```bash
    mkdir -p shared-files
-   # Then save your file there
+   # Then save your file there (e.g., shared-files/report.pdf)
    ```
 
-2. Display the download link using: `📎[filename.ext](/api/files/filename.ext)`
+2. Display the download link using the full path: `📎[filename.ext](/api/files/by-path?path=/full/path/to/shared-files/filename.ext)`
 
-Example: `📎[monthly-report.pdf](/api/files/monthly-report.pdf)`
+Example: If working directory is `/workspace/my-project`, after saving to `shared-files/report.pdf`:
+```
+📎[report.pdf](/api/files/by-path?path=/workspace/my-project/shared-files/report.pdf)
+```
 """
 
 
