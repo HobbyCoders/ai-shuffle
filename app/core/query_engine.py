@@ -309,7 +309,15 @@ You ARE allowed full access to:
 - Standard system commands that don't target protected paths
 - /tmp/ for temporary operations
 
-## Sharing Files for Download
+## Displaying Media and Files in Chat
+
+The chat UI can render images, videos, and file download cards. Use these markdown formats:
+
+**Images:** `![Description](/api/generated-images/filename.png)`
+**Videos:** `[Description](/api/generated-videos/filename.mp4)`
+**Files:** `📎[filename.ext](/api/files/filename.ext)`
+
+### Sharing Files for Download
 
 When you need to share a file for the user to download (e.g., generated reports, exports, compiled outputs):
 
@@ -319,17 +327,9 @@ When you need to share a file for the user to download (e.g., generated reports,
    # Then save your file there
    ```
 
-2. Display the download link in chat using this syntax:
-   ```
-   📎[filename.ext](/api/files/filename.ext)
-   ```
+2. Display the download link using: `📎[filename.ext](/api/files/filename.ext)`
 
-Example: After creating a report, display it as:
-```
-📎[monthly-report.pdf](/api/files/monthly-report.pdf)
-```
-
-The chat UI will render this as a download card with the file icon, name, and download/copy buttons.
+Example: `📎[monthly-report.pdf](/api/files/monthly-report.pdf)`
 """
 
 
@@ -710,20 +710,7 @@ console.log(JSON.stringify(result));
 
 """
 
-    # =========================================================================
-    # FOOTER
-    # =========================================================================
-    tools_section += """---
-## Displaying Generated Content
-
-After generating content, display it in chat:
-
-**Images:** `![Description](result.image_url)`
-**Videos:** `[Description](result.video_url)`
-**Files:** `📎[filename.ext](/api/files/filename.ext)`
-
-The chat UI renders these with Download and Copy URL buttons.
-</ai-tools>"""
+    tools_section += "</ai-tools>"
 
     return tools_section
 
