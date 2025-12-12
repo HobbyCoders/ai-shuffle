@@ -173,12 +173,61 @@ function getOrCreateDeviceId(): string {
 	return deviceId;
 }
 
+// Track pending tabs state for flush on unload
+let pendingTabsState: TabsState | null = null;
+
+/**
+ * Immediately flush any pending tabs save to backend (sync, for beforeunload)
+ */
+function flushPendingTabsSave() {
+	if (!pendingTabsState || isInitializing) return;
+
+	// Cancel the debounce timer
+	if (saveTabsTimer) {
+		clearTimeout(saveTabsTimer);
+		saveTabsTimer = null;
+	}
+
+	// Build the persisted state
+	const persistedState: PersistedTabsState = {
+		tabs: pendingTabsState.tabs.map(tab => ({
+			id: tab.id,
+			title: tab.title,
+			sessionId: tab.sessionId,
+			profile: tab.profile,
+			project: tab.project,
+			modelOverride: tab.modelOverride,
+			permissionModeOverride: tab.permissionModeOverride
+		})),
+		activeTabId: pendingTabsState.activeTabId
+	};
+
+	// Use sendBeacon for reliable delivery during page unload
+	const data = JSON.stringify({ key: 'open_tabs', value: persistedState });
+	navigator.sendBeacon('/api/v1/preferences/open_tabs', new Blob([data], { type: 'application/json' }));
+
+	pendingTabsState = null;
+}
+
+// Register beforeunload handler to flush pending saves when browser closes
+if (typeof window !== 'undefined') {
+	window.addEventListener('beforeunload', flushPendingTabsSave);
+	document.addEventListener('visibilitychange', () => {
+		if (document.visibilityState === 'hidden') {
+			flushPendingTabsSave();
+		}
+	});
+}
+
 /**
  * Save tabs state to backend (debounced)
  */
 async function saveTabsToServer(state: TabsState) {
 	// Don't save during initialization
 	if (isInitializing) return;
+
+	// Store pending state for flush on unload
+	pendingTabsState = state;
 
 	// Clear existing timer
 	if (saveTabsTimer) {
@@ -187,9 +236,11 @@ async function saveTabsToServer(state: TabsState) {
 
 	// Debounce the save
 	saveTabsTimer = setTimeout(async () => {
+		if (!pendingTabsState) return;
+
 		try {
 			const persistedState: PersistedTabsState = {
-				tabs: state.tabs.map(tab => ({
+				tabs: pendingTabsState.tabs.map(tab => ({
 					id: tab.id,
 					title: tab.title,
 					sessionId: tab.sessionId,
@@ -198,7 +249,7 @@ async function saveTabsToServer(state: TabsState) {
 					modelOverride: tab.modelOverride,
 					permissionModeOverride: tab.permissionModeOverride
 				})),
-				activeTabId: state.activeTabId
+				activeTabId: pendingTabsState.activeTabId
 			};
 
 			await api.put('/preferences/open_tabs', {
@@ -209,6 +260,9 @@ async function saveTabsToServer(state: TabsState) {
 		} catch (error) {
 			console.error('[Tabs] Failed to save tabs state:', error);
 		}
+
+		pendingTabsState = null;
+		saveTabsTimer = null;
 	}, SAVE_DEBOUNCE_MS);
 }
 

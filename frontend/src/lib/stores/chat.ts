@@ -75,7 +75,45 @@ function getPersistedProject(): string {
 let selectionSyncTimeout: ReturnType<typeof setTimeout> | null = null;
 const SELECTION_SYNC_DEBOUNCE_MS = 300;
 
+// Track pending selection for flush on unload
+let pendingSelection: { profile: string; project: string } | null = null;
+
+/**
+ * Immediately flush any pending selection save to backend (sync, for beforeunload)
+ */
+function flushPendingSelectionSave() {
+	if (!pendingSelection) return;
+
+	// Cancel the debounce timer
+	if (selectionSyncTimeout) {
+		clearTimeout(selectionSyncTimeout);
+		selectionSyncTimeout = null;
+	}
+
+	// Use sendBeacon for reliable delivery during page unload
+	const data = JSON.stringify({
+		key: 'selection',
+		value: { selectedProfile: pendingSelection.profile, selectedProject: pendingSelection.project }
+	});
+	navigator.sendBeacon('/api/v1/preferences/selection', new Blob([data], { type: 'application/json' }));
+
+	pendingSelection = null;
+}
+
+// Register beforeunload handler to flush pending saves when browser closes
+if (typeof window !== 'undefined') {
+	window.addEventListener('beforeunload', flushPendingSelectionSave);
+	document.addEventListener('visibilitychange', () => {
+		if (document.visibilityState === 'hidden') {
+			flushPendingSelectionSave();
+		}
+	});
+}
+
 async function syncSelectionToBackend(profile: string, project: string) {
+	// Store pending selection for flush on unload
+	pendingSelection = { profile, project };
+
 	// Clear existing timer
 	if (selectionSyncTimeout) {
 		clearTimeout(selectionSyncTimeout);
@@ -83,6 +121,8 @@ async function syncSelectionToBackend(profile: string, project: string) {
 
 	// Debounce the sync to avoid excessive API calls
 	selectionSyncTimeout = setTimeout(async () => {
+		if (!pendingSelection) return;
+
 		try {
 			await fetch('/api/v1/preferences/selection', {
 				method: 'PUT',
@@ -90,12 +130,15 @@ async function syncSelectionToBackend(profile: string, project: string) {
 				credentials: 'include',
 				body: JSON.stringify({
 					key: 'selection',
-					value: { selectedProfile: profile, selectedProject: project }
+					value: { selectedProfile: pendingSelection.profile, selectedProject: pendingSelection.project }
 				})
 			});
 		} catch (e) {
 			console.error('[Chat] Failed to sync selection to backend:', e);
 		}
+
+		pendingSelection = null;
+		selectionSyncTimeout = null;
 	}, SELECTION_SYNC_DEBOUNCE_MS);
 }
 
