@@ -704,7 +704,7 @@
 			processedContent = processedContent.replace(/"image_base64"\s*:\s*"([A-Za-z0-9+/=]{100,})"/g,
 				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">Image loading...</div>');
 			// Replace file download links with placeholder
-			processedContent = processedContent.replace(/(?:📎\[([^\]]+)\]|\[📥\s*([^\]]+)\])\((\/api\/files\/[^)]+)\)/g,
+			processedContent = processedContent.replace(/📎\[([^\]]+)\]\((\/api\/files\/[^)]+)\)/g,
 				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">File preparing...</div>');
 			return marked(processedContent, { breaks: true }) as string;
 		}
@@ -835,10 +835,10 @@
 		});
 
 		// Render file download cards for shared files
-		// Syntax: 📎[filename.ext](/api/files/filename.ext) or [📥 filename.ext](/api/files/...)
-		const fileDownloadPattern = /(?:📎\[([^\]]+)\]|(?:\[📥\s*)?([^\]]+)\])\((\/api\/files\/[^)]+)\)/g;
-		processedContent = processedContent.replace(fileDownloadPattern, (match, name1, name2, fileUrl) => {
-			const filename = name1 || name2 || fileUrl.split('/').pop() || 'file';
+		// Syntax: 📎[filename.ext](/api/files/filename.ext)
+		const fileDownloadPattern = /📎\[([^\]]+)\]\((\/api\/files\/[^)]+)\)/g;
+		processedContent = processedContent.replace(fileDownloadPattern, (match, filename, fileUrl) => {
+			filename = filename || fileUrl.split('/').pop() || 'file';
 			const ext = filename.split('.').pop()?.toLowerCase() || '';
 
 			// File type icons mapping
