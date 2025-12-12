@@ -803,23 +803,33 @@ async def claude_login_poll(token: str = Depends(require_admin)):
 @router.post("/claude/complete")
 async def claude_login_complete(request: Request, token: str = Depends(require_admin)):
     """
-    Complete the Claude OAuth login by providing the authorization code.
+    Complete the Claude OAuth login by providing the authorization code and state.
 
     After starting the login with /auth/claude/login and getting an OAuth URL,
     the user visits the URL in their browser, authenticates, and receives a code.
-    They then call this endpoint with that code to complete the login flow.
+    They then call this endpoint with that code and the state to complete the login flow.
 
-    Expects JSON body with 'code' field containing the auth code from the browser.
+    Expects JSON body with:
+    - 'code': The authorization code from the OAuth callback
+    - 'state': The state parameter from the original /auth/claude/login response
     """
     try:
         body = await request.json()
         auth_code = body.get("code")
+        state = body.get("state")
+
         if not auth_code:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Authorization code is required"
             )
-        return auth_service.complete_claude_oauth_login(auth_code)
+        if not state:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="State parameter is required"
+            )
+
+        return await auth_service.complete_claude_oauth_login(auth_code, state)
     except HTTPException:
         raise
     except Exception as e:

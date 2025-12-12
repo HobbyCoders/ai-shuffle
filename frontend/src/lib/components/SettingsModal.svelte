@@ -50,6 +50,7 @@
 	let githubLoginLoading = $state(false);
 	let claudeLoginLoading = $state(false);
 	let claudeOAuthUrl: string | null = $state(null);
+	let claudeOAuthState: string | null = $state(null);  // PKCE state for OAuth flow
 	let claudeAuthCode = $state('');
 	let claudeCompletingLogin = $state(false);
 	let githubUser: string | null = $state(null);
@@ -527,17 +528,19 @@
 	async function handleClaudeLogin(forceReauth: boolean = false) {
 		claudeLoginLoading = true;
 		claudeOAuthUrl = null;
+		claudeOAuthState = null;
 		claudeAuthCode = '';
 		error = '';
 		try {
-			const result = await api.post<{success: boolean, oauth_url?: string, already_authenticated?: boolean, message: string, error?: string}>('/auth/claude/login', { force_reauth: forceReauth });
+			const result = await api.post<{success: boolean, oauth_url?: string, state?: string, already_authenticated?: boolean, message: string, error?: string}>('/auth/claude/login', { force_reauth: forceReauth });
 			if (result.already_authenticated) {
 				await auth.checkAuth();
 				claudeLoginLoading = false;
 				return;
 			}
-			if (result.oauth_url) {
+			if (result.oauth_url && result.state) {
 				claudeOAuthUrl = result.oauth_url;
+				claudeOAuthState = result.state;
 			} else {
 				error = result.error || result.message || 'Failed to start OAuth login';
 			}
@@ -556,12 +559,20 @@
 			error = 'Please enter the authorization code';
 			return;
 		}
+		if (!claudeOAuthState) {
+			error = 'OAuth state missing. Please restart the login process.';
+			return;
+		}
 		claudeCompletingLogin = true;
 		error = '';
 		try {
-			const result = await api.post<{success: boolean, message: string, authenticated?: boolean, error?: string}>('/auth/claude/complete', { code: claudeAuthCode.trim() });
+			const result = await api.post<{success: boolean, message: string, authenticated?: boolean, error?: string}>('/auth/claude/complete', {
+				code: claudeAuthCode.trim(),
+				state: claudeOAuthState
+			});
 			if (result.success && result.authenticated) {
 				claudeOAuthUrl = null;
+				claudeOAuthState = null;
 				claudeAuthCode = '';
 				await auth.checkAuth();
 			} else {
@@ -575,6 +586,7 @@
 
 	function cancelClaudeLogin() {
 		claudeOAuthUrl = null;
+		claudeOAuthState = null;
 		claudeAuthCode = '';
 	}
 

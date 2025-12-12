@@ -18,6 +18,7 @@ import bcrypt
 
 from app.db import database
 from app.core.config import settings
+from app.core.oauth import direct_oauth
 
 logger = logging.getLogger(__name__)
 
@@ -101,9 +102,7 @@ class AuthService:
         self.config_dir = home / '.claude'
         self.gh_config_dir = home / '.config' / 'gh'
 
-        # Store active OAuth login process for multi-step flow
-        self._claude_login_process = None
-        self._claude_login_master_fd = None
+        # Note: OAuth state is now managed by direct_oauth module (app/core/oauth.py)
 
     # =========================================================================
     # Web UI Authentication
@@ -590,95 +589,29 @@ class AuthService:
             }
 
     # =========================================================================
-    # Claude Code OAuth Login (in-app)
+    # Claude Code OAuth Login (Direct OAuth - no PTY/CLI interaction needed)
     # =========================================================================
-
-    def _cleanup_claude_login_process(self):
-        """Clean up any existing claude login process"""
-        if self._claude_login_process:
-            try:
-                self._claude_login_process.kill()
-                self._claude_login_process.wait(timeout=2)
-            except:
-                pass
-            self._claude_login_process = None
-
-        if self._claude_login_master_fd:
-            try:
-                import os as os_module
-                os_module.close(self._claude_login_master_fd)
-            except:
-                pass
-            self._claude_login_master_fd = None
-
-    def _read_pty_output(self, timeout: float = 5.0) -> str:
-        """Read available output from the PTY master fd"""
-        import select
-        import os as os_module
-        import time
-
-        output = ""
-        start = time.time()
-
-        while time.time() - start < timeout:
-            if not self._claude_login_master_fd:
-                break
-
-            ready, _, _ = select.select([self._claude_login_master_fd], [], [], 0.3)
-            if ready:
-                try:
-                    data = os_module.read(self._claude_login_master_fd, 4096)
-                    if data:
-                        chunk = data.decode('utf-8', errors='replace')
-                        output += chunk
-                        logger.debug(f"PTY read: {repr(chunk)}")
-                except OSError:
-                    break
-            else:
-                # No more data available right now
-                if output:
-                    break
-
-        return output
-
-    def _write_pty_input(self, text: str) -> bool:
-        """Write input to the PTY master fd"""
-        import os as os_module
-
-        if self._claude_login_master_fd:
-            try:
-                bytes_written = os_module.write(self._claude_login_master_fd, text.encode('utf-8'))
-                logger.info(f"PTY write: {repr(text)} ({bytes_written} bytes)")
-                return bytes_written > 0
-            except OSError as e:
-                logger.error(f"Failed to write to PTY: {e}")
-                return False
-        logger.warning("No PTY master fd available for writing")
-        return False
 
     def start_claude_oauth_login(self, force_reauth: bool = False) -> Dict[str, Any]:
         """
-        Start Claude Code OAuth login process.
+        Start Claude Code OAuth login using direct OAuth 2.0 + PKCE flow.
 
-        The claude CLI login flow is interactive with multiple steps:
-        1. Theme selection - we send "1"
-        2. Login method selection - we send "1" (browser-based OAuth)
-        3. CLI displays an OAuth URL (browser fails to open in Docker)
-        4. User opens URL in browser and authenticates with Anthropic
-        5. User copies the resulting code
-        6. User calls /auth/claude/complete with the code
-        7. We send the code to the CLI process
-        8. CLI shows confirmation - we send Enter
-        9. Security notes - we send Enter
-        10. Folder permission (/app) - we send "1"
-        11. CLI creates ~/.claude/.credentials.json
+        This directly implements the OAuth flow against Anthropic's endpoints,
+        bypassing the need for CLI/PTY interaction. Much more reliable and
+        works on all platforms.
 
-        For Docker: We run this in the container and manage the process
-        For Windows/native: User should run 'claude' in their terminal
+        The flow:
+        1. Generate PKCE code verifier and challenge
+        2. Return OAuth URL for user to visit
+        3. User authenticates and gets authorization code
+        4. User calls complete_claude_oauth_login with code + state
+        5. We exchange code for tokens and write credentials file
 
         Args:
             force_reauth: If True, delete existing credentials and force re-authentication.
-                         Use this when OAuth token has expired or user wants to re-login.
+
+        Returns:
+            Dict with oauth_url and state on success, or error details on failure.
         """
         try:
             # If force_reauth, delete existing credentials first
@@ -699,330 +632,55 @@ class AuthService:
                     "message": "Already authenticated with Claude Code"
                 }
 
-            # Clean up any existing login process
-            self._cleanup_claude_login_process()
+            # Start the direct OAuth flow
+            result = direct_oauth.start_oauth_flow()
 
-            home_env = os.environ.get('HOME', str(Path.home()))
+            logger.info(f"Started direct OAuth flow, state: {result['state'][:8]}...")
 
-            # Ensure config directory exists
-            self.config_dir.mkdir(parents=True, exist_ok=True)
-
-            # Find claude executable
-            claude_cmd = find_claude_executable()
-            if not claude_cmd:
-                return {
-                    "success": False,
-                    "message": "Claude CLI not found",
-                    "error": "Could not find 'claude' command. Please ensure Claude Code CLI is installed."
-                }
-
-            # Check if we're in Docker (typical indicators)
-            in_docker = (
-                os.path.exists('/.dockerenv') or
-                os.environ.get('DOCKER_CONTAINER') == 'true' or
-                os.path.exists('/app/main.py')  # Our Docker layout
-            )
-
-            if in_docker:
-                import re
-                import time
-                import pty
-                import os as os_module
-                import fcntl
-
-                try:
-                    # Create PTY for interactive communication
-                    master_fd, slave_fd = pty.openpty()
-
-                    # Start claude (not 'claude login' - just 'claude' will prompt for login if needed)
-                    process = subprocess.Popen(
-                        [claude_cmd],
-                        stdin=slave_fd,
-                        stdout=slave_fd,
-                        stderr=slave_fd,
-                        close_fds=True,
-                        env={**os.environ, 'HOME': home_env, 'TERM': 'xterm-256color'}
-                    )
-
-                    os_module.close(slave_fd)
-
-                    # Store references for later use
-                    self._claude_login_process = process
-                    self._claude_login_master_fd = master_fd
-
-                    all_output = ""
-
-                    def read_all_available():
-                        """Read all available output from PTY without blocking"""
-                        nonlocal all_output
-                        import select
-                        result = ""
-                        while True:
-                            ready, _, _ = select.select([master_fd], [], [], 0.1)
-                            if not ready:
-                                break
-                            try:
-                                data = os_module.read(master_fd, 4096)
-                                if data:
-                                    chunk = data.decode('utf-8', errors='replace')
-                                    result += chunk
-                                    all_output += chunk
-                                else:
-                                    break
-                            except OSError:
-                                break
-                        return result
-
-                    # Wait for CLI to start and show welcome screen
-                    time.sleep(2.0)
-                    output = read_all_available()
-                    logger.info(f"Initial output ({len(output)} chars): {repr(output[:600])}")
-
-                    # Wait for theme selection menu to fully render
-                    # Look for specific markers that indicate the menu is ready
-                    max_wait = 10
-                    start_time = time.time()
-                    while time.time() - start_time < max_wait:
-                        if 'Dark mode' in all_output and '1.' in all_output:
-                            logger.info("Theme menu detected (Dark mode option visible)")
-                            break
-                        if 'Choose' in all_output and 'style' in all_output:
-                            logger.info("Theme menu detected (Choose style text visible)")
-                            break
-                        time.sleep(0.5)
-                        output = read_all_available()
-                        if output:
-                            logger.info(f"More output: {repr(output[:200])}")
-
-                    # Step 1: Theme selection - press Enter to accept default
-                    logger.info("Sending Enter for theme selection")
-                    self._write_pty_input("\r")  # Use \r (carriage return) instead of \n
-                    time.sleep(1.5)
-                    output = read_all_available()
-                    logger.info(f"After theme Enter ({len(output)} chars): {repr(output[:400])}")
-
-                    # Wait for login method menu
-                    time.sleep(1.0)
-                    output = read_all_available()
-                    if output:
-                        logger.info(f"Login menu output: {repr(output[:400])}")
-
-                    # Step 2: If we see login options, press Enter
-                    if 'login' in all_output.lower() or 'sign in' in all_output.lower() or 'Anthropic' in all_output:
-                        logger.info("Sending Enter for login method")
-                        self._write_pty_input("\r")
-                        time.sleep(2.0)
-                        output = read_all_available()
-                        logger.info(f"After login Enter ({len(output)} chars): {repr(output[:400])}")
-
-                    # Keep trying Enter and reading until we see a URL
-                    for attempt in range(5):
-                        # Check for URL in all accumulated output
-                        url_match = re.search(r'(https://[^\s\x00-\x1f\]\)\"\']+)', all_output)
-                        if url_match:
-                            oauth_url = url_match.group(1).rstrip(')').rstrip(']').rstrip('"').rstrip("'")
-                            # Skip non-auth URLs
-                            if 'github.com' not in oauth_url and 'npmjs' not in oauth_url:
-                                logger.info(f"Found URL: {oauth_url}")
-                                break
-
-                        logger.info(f"Attempt {attempt + 1}: No URL yet, pressing Enter")
-                        self._write_pty_input("\r")
-                        time.sleep(1.5)
-                        output = read_all_available()
-                        logger.info(f"Attempt {attempt + 1} output: {repr(output[:300])}")
-
-                    # Step 3: Extract the OAuth URL from all accumulated output
-                    # Look for anthropic console URL or other auth URLs
-                    url_match = re.search(r'(https://console\.anthropic\.com[^\s\x00-\x1f\]\)]*|https://[^\s\x00-\x1f\]\)]*oauth[^\s\x00-\x1f\]\)]*|https://[^\s\x00-\x1f\]\)]*auth[^\s\x00-\x1f\]\)]*)', all_output)
-
-                    if not url_match:
-                        # Try a more generic URL pattern
-                        url_match = re.search(r'(https://[^\s\x00-\x1f\]\)]+)', all_output)
-
-                    if url_match:
-                        oauth_url = url_match.group(1).rstrip(')').rstrip(']')
-                        logger.info(f"Extracted OAuth URL: {oauth_url}")
-                        return {
-                            "success": True,
-                            "oauth_url": oauth_url,
-                            "message": "Open this URL in your browser, authenticate, then copy the code and use /auth/claude/complete to finish.",
-                            "requires_code": True,
-                            "process_active": True
-                        }
-                    else:
-                        # Still no URL - clean up and report error
-                        self._cleanup_claude_login_process()
-                        # Strip ANSI codes for cleaner error message
-                        clean_output = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', all_output)
-                        logger.warning(f"Could not find URL in claude output: {repr(all_output[:1000])}")
-                        return {
-                            "success": False,
-                            "message": "Could not extract OAuth URL",
-                            "error": clean_output[:500] if clean_output else "No URL found in claude output",
-                            "instructions": "Run 'claude' manually in the container terminal: docker exec -it <container> claude"
-                        }
-
-                except (ImportError, OSError) as e:
-                    self._cleanup_claude_login_process()
-                    logger.error(f"PTY error: {e}")
-                    return {
-                        "success": False,
-                        "message": "Failed to start interactive login",
-                        "error": str(e),
-                        "instructions": "Run 'claude' manually in the container terminal"
-                    }
-
-            else:
-                # Not in Docker - provide instructions for manual login
-                return {
-                    "success": False,
-                    "message": "Manual login required",
-                    "error": "In-app OAuth login is only available in Docker deployments",
-                    "instructions": [
-                        "1. Open a terminal/command prompt",
-                        "2. Run: claude",
-                        "3. Follow the prompts (select theme, login method)",
-                        "4. Click the URL that appears",
-                        "5. Complete authentication in your browser",
-                        "6. Copy the code and paste it back in the terminal",
-                        "7. Refresh this page to verify authentication"
-                    ]
-                }
+            return {
+                "success": True,
+                "oauth_url": result["oauth_url"],
+                "state": result["state"],
+                "message": "Open this URL in your browser to authenticate with Claude.",
+                "requires_code": True,
+            }
 
         except Exception as e:
-            self._cleanup_claude_login_process()
-            logger.error(f"Claude OAuth login error: {e}")
+            logger.error(f"Claude OAuth login error: {e}", exc_info=True)
             return {
                 "success": False,
                 "message": "Login failed",
                 "error": str(e)
             }
 
-    def complete_claude_oauth_login(self, auth_code: str) -> Dict[str, Any]:
+    async def complete_claude_oauth_login(self, auth_code: str, state: str) -> Dict[str, Any]:
         """
-        Complete the Claude OAuth login by sending the auth code to the waiting process.
+        Complete the Claude OAuth login by exchanging the authorization code for tokens.
 
-        After the user visits the OAuth URL and gets a code, they call this endpoint
-        to complete the authentication flow.
+        This is the second step of the direct OAuth flow. After the user visits
+        the OAuth URL and authenticates, they receive an authorization code which
+        is exchanged for access/refresh tokens.
+
+        Args:
+            auth_code: The authorization code from the OAuth callback
+            state: The state parameter from the original OAuth request (for PKCE validation)
+
+        Returns:
+            Dict with success status and message.
         """
-        import time
-        import re
-        import os as os_module
-        import select
+        try:
+            # Complete the OAuth flow (exchanges code, writes credentials)
+            result = await direct_oauth.complete_oauth_flow(auth_code, state)
 
-        if not self._claude_login_process or not self._claude_login_master_fd:
-            return {
-                "success": False,
-                "message": "No active login process",
-                "error": "Please start the login process first with /auth/claude/login"
-            }
+            if result["success"]:
+                # Also ensure onboarding is marked complete
+                self._ensure_onboarding_complete()
+                logger.info("Direct OAuth login completed successfully")
 
-        # Check if process is still running
-        if self._claude_login_process.poll() is not None:
-            self._cleanup_claude_login_process()
-            return {
-                "success": False,
-                "message": "Login process has ended",
-                "error": "The login process is no longer running. Please start again."
-            }
-
-        all_output = ""
-
-        def read_all():
-            """Read all available output"""
-            nonlocal all_output
-            result = ""
-            while True:
-                ready, _, _ = select.select([self._claude_login_master_fd], [], [], 0.1)
-                if not ready:
-                    break
-                try:
-                    data = os_module.read(self._claude_login_master_fd, 4096)
-                    if data:
-                        chunk = data.decode('utf-8', errors='replace')
-                        result += chunk
-                        all_output += chunk
-                    else:
-                        break
-                except OSError:
-                    break
             return result
 
-        try:
-            # First, read any pending output (the "paste code here" prompt)
-            output = read_all()
-            logger.info(f"Before sending code: {repr(output[:300] if len(output) > 300 else output)}")
-
-            # Send the auth code with carriage return
-            logger.info(f"Sending auth code: {auth_code[:10]}...")
-            self._write_pty_input(f"{auth_code}\r")
-            time.sleep(2.0)  # Give CLI time to process the code
-
-            # Read response
-            output = read_all()
-            logger.info(f"After auth code ({len(output)} chars): {repr(output[:500] if len(output) > 500 else output)}")
-
-            # Check if login was successful by looking for success indicators
-            if 'logged in' in all_output.lower() or 'success' in all_output.lower() or 'authenticated' in all_output.lower():
-                logger.info("Login appears successful!")
-
-            # Check for error indicators
-            if 'error' in all_output.lower() or 'invalid' in all_output.lower() or 'failed' in all_output.lower():
-                logger.warning(f"Possible error in output: {all_output[-200:]}")
-
-            # Keep pressing Enter and reading to get through remaining prompts
-            for i in range(5):
-                logger.info(f"Sending Enter #{i+1}")
-                self._write_pty_input("\r")
-                time.sleep(1.0)
-                output = read_all()
-                logger.info(f"After Enter #{i+1} ({len(output)} chars): {repr(output[:300] if len(output) > 300 else output)}")
-
-                # Check for folder permission prompt
-                if 'folder' in output.lower() or '/app' in output or 'trust' in output.lower() or 'allow' in output.lower():
-                    logger.info("Folder permission prompt detected, sending Enter")
-                    self._write_pty_input("\r")
-                    time.sleep(1.0)
-                    output = read_all()
-                    logger.info(f"After folder permission: {repr(output[:300] if len(output) > 300 else output)}")
-
-                # Check if we're done (process exited or credentials exist)
-                if self.is_claude_authenticated():
-                    logger.info("Credentials file detected!")
-                    break
-
-                # Check if process exited
-                if self._claude_login_process.poll() is not None:
-                    logger.info("Process exited")
-                    break
-
-            # Give time for credentials to be written
-            time.sleep(1.0)
-
-            # Clean up the process
-            self._cleanup_claude_login_process()
-
-            # Check if authentication succeeded
-            if self.is_claude_authenticated():
-                # Also set hasCompletedOnboarding to prevent CLI from showing onboarding
-                self._ensure_onboarding_complete()
-                return {
-                    "success": True,
-                    "message": "Successfully authenticated with Claude Code",
-                    "authenticated": True
-                }
-            else:
-                return {
-                    "success": False,
-                    "message": "Authentication may have failed",
-                    "error": "Credentials file not found after login process. Check the output for errors.",
-                    "last_output": output
-                }
-
         except Exception as e:
-            self._cleanup_claude_login_process()
-            logger.error(f"Error completing Claude login: {e}")
+            logger.error(f"Error completing Claude OAuth login: {e}", exc_info=True)
             return {
                 "success": False,
                 "message": "Failed to complete login",
