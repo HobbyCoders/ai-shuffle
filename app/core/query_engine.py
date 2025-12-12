@@ -321,9 +321,9 @@ The chat UI can render images, videos, and file download cards. Use these markdo
 
 When you need to share a file for the user to download (e.g., generated reports, exports, compiled outputs):
 
-1. Save the file to the `shared-files` directory in the workspace:
+1. Save the file to the `shared-files` directory in the current working directory:
    ```bash
-   mkdir -p /workspace/shared-files
+   mkdir -p shared-files
    # Then save your file there
    ```
 
