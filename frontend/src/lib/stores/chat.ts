@@ -56,6 +56,7 @@ interface ChatState {
 }
 
 // Load persisted values from localStorage - empty string means no selection
+// Note: These are also synced to backend for cross-device persistence
 function getPersistedProfile(): string {
 	if (typeof window !== 'undefined') {
 		return localStorage.getItem('aihub_selectedProfile') || '';
@@ -68,6 +69,59 @@ function getPersistedProject(): string {
 		return localStorage.getItem('aihub_selectedProject') || '';
 	}
 	return '';
+}
+
+// Sync selected profile/project to backend for cross-device persistence
+let selectionSyncTimeout: ReturnType<typeof setTimeout> | null = null;
+const SELECTION_SYNC_DEBOUNCE_MS = 300;
+
+async function syncSelectionToBackend(profile: string, project: string) {
+	// Clear existing timer
+	if (selectionSyncTimeout) {
+		clearTimeout(selectionSyncTimeout);
+	}
+
+	// Debounce the sync to avoid excessive API calls
+	selectionSyncTimeout = setTimeout(async () => {
+		try {
+			await fetch('/api/v1/preferences/selection', {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				credentials: 'include',
+				body: JSON.stringify({
+					key: 'selection',
+					value: { selectedProfile: profile, selectedProject: project }
+				})
+			});
+		} catch (e) {
+			console.error('[Chat] Failed to sync selection to backend:', e);
+		}
+	}, SELECTION_SYNC_DEBOUNCE_MS);
+}
+
+// Load selection from backend (called on init)
+async function loadSelectionFromBackend(): Promise<{ selectedProfile: string; selectedProject: string } | null> {
+	if (typeof window === 'undefined') return null;
+
+	try {
+		const response = await fetch('/api/v1/preferences/selection', {
+			credentials: 'include'
+		});
+
+		if (response.ok) {
+			const data = await response.json();
+			if (data && data.value) {
+				return {
+					selectedProfile: data.value.selectedProfile || '',
+					selectedProject: data.value.selectedProject || ''
+				};
+			}
+		}
+	} catch (e) {
+		console.error('[Chat] Failed to load selection from backend:', e);
+	}
+
+	return null;
 }
 
 /**
@@ -819,6 +873,27 @@ function createChatStore() {
 		 */
 		init() {
 			connect();
+			// Load selection from backend and sync to localStorage
+			loadSelectionFromBackend().then((backendSelection) => {
+				if (backendSelection) {
+					// Backend has data - use it as authoritative source
+					if (backendSelection.selectedProfile) {
+						localStorage.setItem('aihub_selectedProfile', backendSelection.selectedProfile);
+						update(s => ({ ...s, selectedProfile: backendSelection.selectedProfile }));
+					}
+					if (backendSelection.selectedProject) {
+						localStorage.setItem('aihub_selectedProject', backendSelection.selectedProject);
+						update(s => ({ ...s, selectedProject: backendSelection.selectedProject }));
+					}
+				} else {
+					// No backend data - sync localStorage to backend
+					const profile = getPersistedProfile();
+					const project = getPersistedProject();
+					if (profile || project) {
+						syncSelectionToBackend(profile, project);
+					}
+				}
+			});
 		},
 
 		/**
@@ -882,14 +957,22 @@ function createChatStore() {
 			if (typeof window !== 'undefined') {
 				localStorage.setItem('aihub_selectedProfile', profileId);
 			}
-			update(s => ({ ...s, selectedProfile: profileId }));
+			update(s => {
+				// Sync to backend for persistence
+				syncSelectionToBackend(profileId, s.selectedProject);
+				return { ...s, selectedProfile: profileId };
+			});
 		},
 
 		setProject(projectId: string) {
 			if (typeof window !== 'undefined') {
 				localStorage.setItem('aihub_selectedProject', projectId);
 			}
-			update(s => ({ ...s, selectedProject: projectId }));
+			update(s => {
+				// Sync to backend for persistence
+				syncSelectionToBackend(s.selectedProfile, projectId);
+				return { ...s, selectedProject: projectId };
+			});
 		},
 
 		startNewChat() {

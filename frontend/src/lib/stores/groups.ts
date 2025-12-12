@@ -150,7 +150,7 @@ function createGroupsStore() {
 
 	// Load from backend asynchronously and merge/update
 	if (browser) {
-		loadFromBackend().then((backendState) => {
+		loadFromBackend().then(async (backendState) => {
 			if (backendState) {
 				// Backend has data, use it (more authoritative)
 				set(backendState);
@@ -162,7 +162,18 @@ function createGroupsStore() {
 				if (localState.projects.groups.length > 0 ||
 					localState.profiles.groups.length > 0 ||
 					localState.subagents.groups.length > 0) {
-					saveToBackend(localState);
+					// Wait for the save to complete before marking as loaded
+					// This prevents race conditions where changes might be lost
+					try {
+						await fetch(`/api/v1/preferences/${API_PREFERENCE_KEY}`, {
+							method: 'PUT',
+							headers: { 'Content-Type': 'application/json' },
+							credentials: 'include',
+							body: JSON.stringify({ key: API_PREFERENCE_KEY, value: localState })
+						});
+					} catch (e) {
+						console.error('[Groups] Failed to sync initial state to backend:', e);
+					}
 				}
 				backendLoaded = true;
 			}

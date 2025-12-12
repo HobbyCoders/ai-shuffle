@@ -229,6 +229,7 @@ async function loadTabsFromServer(): Promise<PersistedTabsState | null> {
 }
 
 // Load persisted values - empty string means no selection (user must choose)
+// These also check backend for cross-device persistence
 function getPersistedProfile(): string {
 	if (typeof window !== 'undefined') {
 		return localStorage.getItem('aihub_selectedProfile') || '';
@@ -241,6 +242,38 @@ function getPersistedProject(): string {
 		return localStorage.getItem('aihub_selectedProject') || '';
 	}
 	return '';
+}
+
+// Load selection from backend (used during init to sync with backend)
+async function loadSelectionFromBackend(): Promise<{ selectedProfile: string; selectedProject: string } | null> {
+	if (typeof window === 'undefined') return null;
+
+	try {
+		const response = await fetch('/api/v1/preferences/selection', {
+			credentials: 'include'
+		});
+
+		if (response.ok) {
+			const data = await response.json();
+			if (data && data.value) {
+				// Update localStorage with backend values
+				if (data.value.selectedProfile) {
+					localStorage.setItem('aihub_selectedProfile', data.value.selectedProfile);
+				}
+				if (data.value.selectedProject) {
+					localStorage.setItem('aihub_selectedProject', data.value.selectedProject);
+				}
+				return {
+					selectedProfile: data.value.selectedProfile || '',
+					selectedProject: data.value.selectedProject || ''
+				};
+			}
+		}
+	} catch (e) {
+		console.error('[Tabs] Failed to load selection from backend:', e);
+	}
+
+	return null;
 }
 
 function generateTabId(): string {
@@ -2408,14 +2441,17 @@ function createTabsStore() {
 			isInitializing = true;
 
 			try {
+				// First, load selection from backend to sync localStorage
+				// This ensures we have the latest profile/project selection before restoring tabs
+				const backendSelection = await loadSelectionFromBackend();
+
 				// Try to load persisted tabs from server
 				const persistedState = await loadTabsFromServer();
 
 				if (persistedState && persistedState.tabs) {
-					// Get localStorage defaults for profile/project
-					// This ensures tabs without saved selections fall back to last-used values
-					const defaultProfile = getPersistedProfile();
-					const defaultProject = getPersistedProject();
+					// Get defaults for profile/project - prefer backend, fallback to localStorage
+					const defaultProfile = backendSelection?.selectedProfile || getPersistedProfile();
+					const defaultProject = backendSelection?.selectedProject || getPersistedProject();
 
 					// Restore tabs from server (could be empty array)
 					const restoredTabs: ChatTab[] = persistedState.tabs.map(pt => ({
