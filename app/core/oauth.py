@@ -112,16 +112,22 @@ class DirectOAuth:
         """
         # Generate PKCE challenge
         pkce = self.generate_pkce_challenge()
-        state = self.generate_state()
 
-        # Store the challenge for later verification
+        # For PKCE, we use the verifier as the state (like OpenCode does)
+        # This simplifies the flow - the verifier is needed for token exchange
+        state = pkce.verifier
+
+        # Store the challenge for later verification (keyed by verifier)
         self._pending_challenges[state] = pkce
 
         # Build authorization URL
+        # Note: "code=true" tells Claude.ai to show the code directly on the page
+        # instead of doing a redirect (which would fail without a real callback server)
         params = {
+            "code": "true",  # IMPORTANT: Show code on page instead of redirect
             "client_id": OAUTH_CLIENT_ID,
-            "redirect_uri": OAUTH_REDIRECT_URI,
             "response_type": "code",
+            "redirect_uri": OAUTH_REDIRECT_URI,
             "scope": " ".join(OAUTH_SCOPES),
             "code_challenge": pkce.challenge,
             "code_challenge_method": pkce.method,
@@ -146,8 +152,8 @@ class DirectOAuth:
         Exchange an authorization code for access/refresh tokens.
 
         Args:
-            code: The authorization code from the OAuth callback
-            state: The state parameter from the original request
+            code: The authorization code from the OAuth callback (may contain #state suffix)
+            state: The state parameter from the original request (this is the PKCE verifier)
 
         Returns:
             Tuple of (tokens, error_message)
@@ -157,14 +163,26 @@ class DirectOAuth:
         if not pkce:
             return None, "Invalid or expired state parameter. Please start the login process again."
 
+        # The code from the OAuth callback might have #state appended
+        # Split it to get just the code part (like OpenCode does)
+        code_parts = code.split("#")
+        actual_code = code_parts[0]
+        code_state = code_parts[1] if len(code_parts) > 1 else None
+
+        logger.debug(f"Code parts: code={actual_code[:20]}..., state_from_code={code_state}")
+
         # Prepare token exchange request
         payload = {
             "grant_type": "authorization_code",
-            "code": code,
+            "code": actual_code,
             "client_id": OAUTH_CLIENT_ID,
             "redirect_uri": OAUTH_REDIRECT_URI,
             "code_verifier": pkce.verifier,
         }
+
+        # Include state from code if present (some OAuth flows include it)
+        if code_state:
+            payload["state"] = code_state
 
         headers = {
             "Content-Type": "application/json",
