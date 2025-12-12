@@ -703,6 +703,9 @@
 				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">Video loading...</div>');
 			processedContent = processedContent.replace(/"image_base64"\s*:\s*"([A-Za-z0-9+/=]{100,})"/g,
 				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">Image loading...</div>');
+			// Replace file download links with placeholder
+			processedContent = processedContent.replace(/(?:📎\[([^\]]+)\]|\[📥\s*([^\]]+)\])\((\/api\/files\/[^)]+)\)/g,
+				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">File preparing...</div>');
 			return marked(processedContent, { breaks: true }) as string;
 		}
 
@@ -831,6 +834,55 @@
 			</div>`;
 		});
 
+		// Render file download cards for shared files
+		// Syntax: 📎[filename.ext](/api/files/filename.ext) or [📥 filename.ext](/api/files/...)
+		const fileDownloadPattern = /(?:📎\[([^\]]+)\]|(?:\[📥\s*)?([^\]]+)\])\((\/api\/files\/[^)]+)\)/g;
+		processedContent = processedContent.replace(fileDownloadPattern, (match, name1, name2, fileUrl) => {
+			const filename = name1 || name2 || fileUrl.split('/').pop() || 'file';
+			const ext = filename.split('.').pop()?.toLowerCase() || '';
+
+			// File type icons mapping
+			const iconMap: Record<string, string> = {
+				'pdf': '📄', 'doc': '📝', 'docx': '📝', 'odt': '📝', 'rtf': '📝',
+				'xls': '📊', 'xlsx': '📊', 'ods': '📊', 'csv': '📊',
+				'ppt': '📽️', 'pptx': '📽️', 'odp': '📽️',
+				'txt': '📃', 'md': '📃', 'log': '📃',
+				'json': '🔧', 'xml': '🔧', 'yaml': '🔧', 'yml': '🔧', 'toml': '🔧',
+				'py': '🐍', 'js': '💛', 'ts': '💙', 'mjs': '💛',
+				'sh': '⚙️', 'bash': '⚙️', 'bat': '⚙️', 'ps1': '⚙️',
+				'html': '🌐', 'css': '🎨', 'sql': '🗃️', 'sqlite': '🗃️', 'db': '🗃️',
+				'zip': '📦', 'tar': '📦', 'gz': '📦', 'tgz': '📦', '7z': '📦', 'rar': '📦',
+				'exe': '⚡', 'dmg': '💿', 'deb': '📦', 'rpm': '📦', 'apk': '📱'
+			};
+			const icon = iconMap[ext] || '📁';
+
+			return `<div class="file-download-card my-4 inline-flex items-center gap-3 p-3 bg-muted/50 hover:bg-muted/70 rounded-lg border border-border transition-colors max-w-md">
+				<div class="file-icon text-2xl flex-shrink-0">${icon}</div>
+				<div class="file-info flex-grow min-w-0">
+					<div class="file-name font-medium text-sm truncate" title="${filename}">${filename}</div>
+					<div class="file-type text-xs text-muted-foreground uppercase">${ext || 'file'}</div>
+				</div>
+				<div class="file-actions flex gap-1 flex-shrink-0">
+					<a href="${fileUrl}" download="${filename}" class="p-2 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors no-underline" title="Download file">
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+						</svg>
+					</a>
+					<button onclick="(function(btn){
+						navigator.clipboard.writeText(window.location.origin + '${fileUrl}');
+						btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
+						setTimeout(function() {
+							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
+						}, 2000);
+					})(this)" class="p-2 rounded-md bg-secondary text-secondary-foreground hover:bg-secondary/80 transition-colors" title="Copy URL">
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+						</svg>
+					</button>
+				</div>
+			</div>`;
+		});
+
 		return marked(processedContent, { breaks: true }) as string;
 	}
 
@@ -938,6 +990,60 @@
 					</div>
 				</div>`;
 			}
+
+			// Handle file download results
+			if (data.success && data.file_url) {
+				const fileUrl = data.file_url;
+				const filename = data.filename || 'file';
+				const fileSize = data.size_formatted || '';
+				const ext = filename.split('.').pop()?.toLowerCase() || '';
+
+				// File type icons
+				const iconMap: Record<string, string> = {
+					'pdf': '📄', 'doc': '📝', 'docx': '📝', 'odt': '📝', 'rtf': '📝',
+					'xls': '📊', 'xlsx': '📊', 'ods': '📊', 'csv': '📊',
+					'ppt': '📽️', 'pptx': '📽️', 'odp': '📽️',
+					'txt': '📃', 'md': '📃', 'log': '📃',
+					'json': '🔧', 'xml': '🔧', 'yaml': '🔧', 'yml': '🔧', 'toml': '🔧',
+					'py': '🐍', 'js': '💛', 'ts': '💙', 'mjs': '💛',
+					'sh': '⚙️', 'bash': '⚙️', 'bat': '⚙️', 'ps1': '⚙️',
+					'html': '🌐', 'css': '🎨', 'sql': '🗃️', 'sqlite': '🗃️', 'db': '🗃️',
+					'zip': '📦', 'tar': '📦', 'gz': '📦', 'tgz': '📦', '7z': '📦', 'rar': '📦',
+					'exe': '⚡', 'dmg': '💿', 'deb': '📦', 'rpm': '📦', 'apk': '📱'
+				};
+				const icon = iconMap[ext] || '📁';
+
+				return `<div class="generated-file-result">
+					<div class="mb-2 text-xs text-green-500">✓ File ready for download</div>
+					<div class="file-download-card inline-flex items-center gap-3 p-3 bg-muted/50 hover:bg-muted/70 rounded-lg border border-border transition-colors max-w-md">
+						<div class="file-icon text-2xl flex-shrink-0">${icon}</div>
+						<div class="file-info flex-grow min-w-0">
+							<div class="file-name font-medium text-sm truncate" title="${filename}">${filename}</div>
+							<div class="file-meta text-xs text-muted-foreground">
+								<span class="uppercase">${ext || 'file'}</span>${fileSize ? ` • ${fileSize}` : ''}
+							</div>
+						</div>
+						<div class="file-actions flex gap-1 flex-shrink-0">
+							<a href="${fileUrl}" download="${filename}" class="p-2 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors no-underline" title="Download file">
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+								</svg>
+							</a>
+							<button onclick="(function(btn){
+								navigator.clipboard.writeText(window.location.origin + '${fileUrl}');
+								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
+								setTimeout(function() {
+									btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
+								}, 2000);
+							})(this)" class="p-2 rounded-md bg-secondary text-secondary-foreground hover:bg-secondary/80 transition-colors" title="Copy URL">
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+								</svg>
+							</button>
+						</div>
+					</div>
+				</div>`;
+			}
 		} catch {
 			// Not JSON, continue with default rendering
 		}
@@ -966,9 +1072,19 @@
 		}
 	}
 
-	// Check if tool result contains media (image or video)
+	// Check if tool result contains a downloadable file
+	function toolResultHasFile(content: string): boolean {
+		try {
+			const data = JSON.parse(content);
+			return data.success && data.file_url;
+		} catch {
+			return false;
+		}
+	}
+
+	// Check if tool result contains media (image, video, or file)
 	function toolResultHasMedia(content: string): boolean {
-		return toolResultHasImage(content) || toolResultHasVideo(content);
+		return toolResultHasImage(content) || toolResultHasVideo(content) || toolResultHasFile(content);
 	}
 
 	// Render standalone image display (for main chat, outside tool groups)
