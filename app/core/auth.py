@@ -190,10 +190,21 @@ class AuthService:
     # =========================================================================
 
     def is_claude_authenticated(self) -> bool:
-        """Check if Claude CLI is authenticated"""
-        creds_file = self.config_dir / '.credentials.json'
+        """
+        Check if Claude CLI is authenticated with valid (non-expired) credentials.
 
-        logger.debug(f"Checking for credentials at: {creds_file}")
+        Uses the direct_oauth module to check token expiry, not just file existence.
+        """
+        # Use the oauth module's check which validates token expiry
+        if direct_oauth.has_valid_credentials():
+            logger.debug("Valid Claude credentials found")
+            # Ensure onboarding is marked complete when credentials exist
+            self._ensure_onboarding_complete()
+            return True
+
+        # Fall back to checking if credentials file exists at all
+        # (in case user authenticated via CLI directly)
+        creds_file = self.config_dir / '.credentials.json'
 
         if not creds_file.exists():
             logger.debug("Credentials file does not exist")
@@ -204,8 +215,10 @@ class AuthService:
             logger.debug("Credentials file is empty")
             return False
 
-        logger.debug("Credentials file exists and has content")
-        # Ensure onboarding is marked complete when credentials exist
+        # File exists but may have expired tokens - still return True
+        # so the UI knows credentials exist (even if expired)
+        # The UI can show a "reconnect" option
+        logger.debug("Credentials file exists (token may be expired)")
         self._ensure_onboarding_complete()
         return True
 
