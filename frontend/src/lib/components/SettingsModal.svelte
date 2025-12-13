@@ -20,7 +20,7 @@
 	let { open, onClose }: Props = $props();
 
 	// Tab management
-	type SettingsTab = 'general' | 'security' | 'authentication' | 'api-users' | 'integrations';
+	type SettingsTab = 'general' | 'security' | 'authentication' | 'api-users' | 'integrations' | 'cleanup';
 	let activeTab: SettingsTab = $state('general');
 
 	// Data state
@@ -149,6 +149,48 @@
 	let passwordChangeError = $state('');
 	let passwordChangeSuccess = $state('');
 
+	// Cleanup settings state
+	interface CleanupConfig {
+		cleanup_interval_minutes: number;
+		sdk_session_max_age_minutes: number;
+		websocket_max_age_minutes: number;
+		sync_log_retention_hours: number;
+		cleanup_images_enabled: boolean;
+		cleanup_images_max_age_days: number;
+		cleanup_videos_enabled: boolean;
+		cleanup_videos_max_age_days: number;
+		cleanup_shared_files_enabled: boolean;
+		cleanup_shared_files_max_age_days: number;
+		cleanup_project_ids: string[];
+		sleep_mode_enabled: boolean;
+		sleep_timeout_minutes: number;
+	}
+	interface CleanupStatus {
+		is_sleeping: boolean;
+		idle_seconds: number;
+		last_activity: string;
+		sleep_mode_enabled: boolean;
+		sleep_timeout_minutes: number;
+		cleanup_interval_minutes: number;
+	}
+	interface CleanupPreview {
+		images: { name: string; size: number; project: string; age_days: number }[];
+		videos: { name: string; size: number; project: string; age_days: number }[];
+		shared_files: { name: string; size: number; project: string; age_days: number }[];
+		total_count: number;
+		total_bytes: number;
+		total_bytes_formatted: string;
+	}
+	let cleanupConfig: CleanupConfig | null = $state(null);
+	let cleanupStatus: CleanupStatus | null = $state(null);
+	let cleanupPreview: CleanupPreview | null = $state(null);
+	let loadingCleanup = $state(false);
+	let savingCleanup = $state(false);
+	let runningCleanup = $state(false);
+	let cleanupSuccess = $state('');
+	let cleanupError = $state('');
+	let showCleanupPreview = $state(false);
+
 	// API User form data
 	let formData = $state({
 		name: '',
@@ -164,7 +206,8 @@
 		{ id: 'security', label: 'Security', icon: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z' },
 		{ id: 'authentication', label: 'Authentication', icon: 'M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z' },
 		{ id: 'api-users', label: 'API Users', icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z' },
-		{ id: 'integrations', label: 'Integrations', icon: 'M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z' }
+		{ id: 'integrations', label: 'Integrations', icon: 'M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z' },
+		{ id: 'cleanup', label: 'Background Cleanup', icon: 'M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16' }
 	];
 
 	// Load data when modal opens
@@ -179,7 +222,8 @@
 			loadData(),
 			loadAuthStatus(),
 			loadWorkspaceConfig(),
-			loadIntegrationSettings()
+			loadIntegrationSettings(),
+			loadCleanupSettings()
 		]);
 	}
 
@@ -441,6 +485,84 @@
 		} finally {
 			savingSttModel = false;
 		}
+	}
+
+	// Cleanup settings functions
+	async function loadCleanupSettings() {
+		loadingCleanup = true;
+		try {
+			const [config, status] = await Promise.all([
+				api.get<CleanupConfig>('/settings/cleanup'),
+				api.get<CleanupStatus>('/settings/cleanup/status')
+			]);
+			cleanupConfig = config;
+			cleanupStatus = status;
+		} catch (e) {
+			console.error('Failed to load cleanup settings:', e);
+		} finally {
+			loadingCleanup = false;
+		}
+	}
+
+	async function saveCleanupConfig() {
+		if (!cleanupConfig) return;
+		savingCleanup = true;
+		cleanupError = '';
+		cleanupSuccess = '';
+		try {
+			const result = await api.post<CleanupConfig>('/settings/cleanup', cleanupConfig);
+			cleanupConfig = result;
+			cleanupSuccess = 'Settings saved successfully';
+			setTimeout(() => cleanupSuccess = '', 3000);
+		} catch (e: any) {
+			cleanupError = e.detail || 'Failed to save settings';
+		} finally {
+			savingCleanup = false;
+		}
+	}
+
+	async function loadCleanupPreview() {
+		try {
+			cleanupPreview = await api.get<CleanupPreview>('/settings/cleanup/preview');
+			showCleanupPreview = true;
+		} catch (e: any) {
+			cleanupError = e.detail || 'Failed to load preview';
+		}
+	}
+
+	async function runCleanupNow() {
+		runningCleanup = true;
+		cleanupError = '';
+		cleanupSuccess = '';
+		try {
+			const result = await api.post<{
+				success: boolean;
+				images_deleted: number;
+				videos_deleted: number;
+				shared_files_deleted: number;
+				bytes_freed: number;
+				bytes_freed_formatted: string;
+			}>('/settings/cleanup/run');
+			const total = result.images_deleted + result.videos_deleted + result.shared_files_deleted;
+			if (total > 0) {
+				cleanupSuccess = `Cleanup complete: ${total} files deleted (${result.bytes_freed_formatted} freed)`;
+			} else {
+				cleanupSuccess = 'Cleanup complete: No files to delete';
+			}
+			showCleanupPreview = false;
+			cleanupPreview = null;
+			setTimeout(() => cleanupSuccess = '', 5000);
+		} catch (e: any) {
+			cleanupError = e.detail || 'Cleanup failed';
+		} finally {
+			runningCleanup = false;
+		}
+	}
+
+	function formatIdleTime(seconds: number): string {
+		if (seconds < 60) return `${Math.round(seconds)}s`;
+		if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+		return `${Math.round(seconds / 3600)}h ${Math.round((seconds % 3600) / 60)}m`;
 	}
 
 	// Workspace functions
@@ -1405,6 +1527,429 @@
 								</div>
 							</div>
 						</section>
+					</div>
+				{/if}
+
+				<!-- Background Cleanup Tab -->
+				{#if activeTab === 'cleanup'}
+					<div class="space-y-6">
+						<div>
+							<h3 class="text-lg font-semibold text-foreground mb-1">Background Cleanup</h3>
+							<p class="text-sm text-muted-foreground">Configure automatic cleanup of sessions, connections, and generated files.</p>
+						</div>
+
+						{#if loadingCleanup}
+							<div class="flex items-center gap-2 text-muted-foreground">
+								<span class="inline-block animate-spin">&#9696;</span>
+								<span>Loading cleanup settings...</span>
+							</div>
+						{:else if cleanupConfig}
+							<!-- Status Banner -->
+							<section class="bg-muted/30 rounded-xl p-4">
+								<div class="flex items-center justify-between">
+									<div class="flex items-center gap-3">
+										<div class="w-10 h-10 rounded-lg flex items-center justify-center {cleanupStatus?.is_sleeping ? 'bg-amber-500/15' : 'bg-success/15'}">
+											{#if cleanupStatus?.is_sleeping}
+												<svg class="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+												</svg>
+											{:else}
+												<svg class="w-5 h-5 text-success" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+												</svg>
+											{/if}
+										</div>
+										<div>
+											<h4 class="font-semibold text-foreground">
+												{cleanupStatus?.is_sleeping ? 'Sleeping' : 'Active'}
+											</h4>
+											<p class="text-xs text-muted-foreground">
+												{#if cleanupStatus}
+													Idle for {formatIdleTime(cleanupStatus.idle_seconds)}
+													{#if cleanupConfig.sleep_mode_enabled}
+														• Sleeps after {cleanupConfig.sleep_timeout_minutes}m
+													{/if}
+												{/if}
+											</p>
+										</div>
+									</div>
+									<div class="text-xs text-muted-foreground">
+										Cleanup runs every {cleanupConfig.cleanup_interval_minutes}m
+									</div>
+								</div>
+							</section>
+
+							<!-- Sleep Mode Settings -->
+							<section class="bg-muted/30 rounded-xl p-5">
+								<div class="flex items-center gap-3 mb-4">
+									<div class="w-10 h-10 bg-purple-500/15 rounded-lg flex items-center justify-center">
+										<svg class="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+										</svg>
+									</div>
+									<div>
+										<h4 class="font-semibold text-foreground">Sleep Mode</h4>
+										<p class="text-xs text-muted-foreground">Pause background tasks when the app is idle to save resources.</p>
+									</div>
+								</div>
+
+								<div class="space-y-4">
+									<div class="flex items-center justify-between">
+										<div>
+											<span class="text-sm font-medium text-foreground">Enable Sleep Mode</span>
+											<p class="text-xs text-muted-foreground">Automatically pause cleanup when inactive</p>
+										</div>
+										<label class="relative inline-flex items-center cursor-pointer">
+											<input type="checkbox" bind:checked={cleanupConfig.sleep_mode_enabled} class="sr-only peer" />
+											<div class="w-11 h-6 bg-muted rounded-full peer peer-checked:bg-primary transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-5"></div>
+										</label>
+									</div>
+
+									{#if cleanupConfig.sleep_mode_enabled}
+										<div class="grid grid-cols-2 gap-4">
+											<div>
+												<label class="block text-sm font-medium text-foreground mb-1.5">Sleep After (minutes)</label>
+												<input type="number" min="1" max="60" bind:value={cleanupConfig.sleep_timeout_minutes} class="input" />
+											</div>
+											<div>
+												<label class="block text-sm font-medium text-foreground mb-1.5">Cleanup Interval (minutes)</label>
+												<input type="number" min="1" max="60" bind:value={cleanupConfig.cleanup_interval_minutes} class="input" />
+											</div>
+										</div>
+									{/if}
+								</div>
+							</section>
+
+							<!-- File Cleanup Settings -->
+							<section class="bg-muted/30 rounded-xl p-5">
+								<div class="flex items-center gap-3 mb-4">
+									<div class="w-10 h-10 bg-red-500/15 rounded-lg flex items-center justify-center">
+										<svg class="w-5 h-5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+										</svg>
+									</div>
+									<div>
+										<h4 class="font-semibold text-foreground">Generated Files Cleanup</h4>
+										<p class="text-xs text-muted-foreground">Automatically delete old generated images, videos, and shared files.</p>
+									</div>
+								</div>
+
+								<div class="space-y-4">
+									<!-- Images -->
+									<div class="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
+										<div class="flex items-center gap-3">
+											<span class="w-8 h-8 bg-green-500/15 rounded flex items-center justify-center">
+												<svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+												</svg>
+											</span>
+											<div>
+												<span class="text-sm font-medium text-foreground">Generated Images</span>
+												<p class="text-xs text-muted-foreground">Clean up AI-generated images</p>
+											</div>
+										</div>
+										<div class="flex items-center gap-3">
+											{#if cleanupConfig.cleanup_images_enabled}
+												<div class="flex items-center gap-2">
+													<span class="text-xs text-muted-foreground">older than</span>
+													<input type="number" min="1" max="365" bind:value={cleanupConfig.cleanup_images_max_age_days} class="input w-16 text-center text-sm" />
+													<span class="text-xs text-muted-foreground">days</span>
+												</div>
+											{/if}
+											<label class="relative inline-flex items-center cursor-pointer">
+												<input type="checkbox" bind:checked={cleanupConfig.cleanup_images_enabled} class="sr-only peer" />
+												<div class="w-9 h-5 bg-muted rounded-full peer peer-checked:bg-primary transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4"></div>
+											</label>
+										</div>
+									</div>
+
+									<!-- Videos -->
+									<div class="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
+										<div class="flex items-center gap-3">
+											<span class="w-8 h-8 bg-blue-500/15 rounded flex items-center justify-center">
+												<svg class="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+												</svg>
+											</span>
+											<div>
+												<span class="text-sm font-medium text-foreground">Generated Videos</span>
+												<p class="text-xs text-muted-foreground">Clean up AI-generated videos</p>
+											</div>
+										</div>
+										<div class="flex items-center gap-3">
+											{#if cleanupConfig.cleanup_videos_enabled}
+												<div class="flex items-center gap-2">
+													<span class="text-xs text-muted-foreground">older than</span>
+													<input type="number" min="1" max="365" bind:value={cleanupConfig.cleanup_videos_max_age_days} class="input w-16 text-center text-sm" />
+													<span class="text-xs text-muted-foreground">days</span>
+												</div>
+											{/if}
+											<label class="relative inline-flex items-center cursor-pointer">
+												<input type="checkbox" bind:checked={cleanupConfig.cleanup_videos_enabled} class="sr-only peer" />
+												<div class="w-9 h-5 bg-muted rounded-full peer peer-checked:bg-primary transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4"></div>
+											</label>
+										</div>
+									</div>
+
+									<!-- Shared Files -->
+									<div class="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
+										<div class="flex items-center gap-3">
+											<span class="w-8 h-8 bg-amber-500/15 rounded flex items-center justify-center">
+												<svg class="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+												</svg>
+											</span>
+											<div>
+												<span class="text-sm font-medium text-foreground">Shared Files</span>
+												<p class="text-xs text-muted-foreground">Clean up downloadable files</p>
+											</div>
+										</div>
+										<div class="flex items-center gap-3">
+											{#if cleanupConfig.cleanup_shared_files_enabled}
+												<div class="flex items-center gap-2">
+													<span class="text-xs text-muted-foreground">older than</span>
+													<input type="number" min="1" max="365" bind:value={cleanupConfig.cleanup_shared_files_max_age_days} class="input w-16 text-center text-sm" />
+													<span class="text-xs text-muted-foreground">days</span>
+												</div>
+											{/if}
+											<label class="relative inline-flex items-center cursor-pointer">
+												<input type="checkbox" bind:checked={cleanupConfig.cleanup_shared_files_enabled} class="sr-only peer" />
+												<div class="w-9 h-5 bg-muted rounded-full peer peer-checked:bg-primary transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4"></div>
+											</label>
+										</div>
+									</div>
+
+									<!-- Project Selection -->
+									{#if cleanupConfig.cleanup_images_enabled || cleanupConfig.cleanup_videos_enabled || cleanupConfig.cleanup_shared_files_enabled}
+										<div class="pt-2 border-t border-border">
+											<label class="block text-sm font-medium text-foreground mb-2">Projects to Clean</label>
+											<div class="flex flex-wrap gap-2">
+												<button
+													onclick={() => cleanupConfig && (cleanupConfig.cleanup_project_ids = [])}
+													class="px-3 py-1.5 text-xs rounded-lg border transition-all {cleanupConfig.cleanup_project_ids.length === 0 ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:border-primary/50'}"
+												>
+													All Projects
+												</button>
+												{#each projects as project}
+													<button
+														onclick={() => {
+															if (!cleanupConfig) return;
+															const ids = cleanupConfig.cleanup_project_ids;
+															if (ids.includes(project.id)) {
+																cleanupConfig.cleanup_project_ids = ids.filter(id => id !== project.id);
+															} else {
+																cleanupConfig.cleanup_project_ids = [...ids, project.id];
+															}
+														}}
+														class="px-3 py-1.5 text-xs rounded-lg border transition-all {cleanupConfig.cleanup_project_ids.includes(project.id) ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:border-primary/50'}"
+													>
+														{project.name}
+													</button>
+												{/each}
+											</div>
+											<p class="text-xs text-muted-foreground mt-2">
+												{cleanupConfig.cleanup_project_ids.length === 0 ? 'Cleaning all projects' : `Cleaning ${cleanupConfig.cleanup_project_ids.length} selected project(s)`}
+											</p>
+										</div>
+									{/if}
+								</div>
+							</section>
+
+							<!-- Session Cleanup Settings -->
+							<section class="bg-muted/30 rounded-xl p-5">
+								<div class="flex items-center gap-3 mb-4">
+									<div class="w-10 h-10 bg-cyan-500/15 rounded-lg flex items-center justify-center">
+										<svg class="w-5 h-5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+										</svg>
+									</div>
+									<div>
+										<h4 class="font-semibold text-foreground">Session Cleanup</h4>
+										<p class="text-xs text-muted-foreground">Configure timeouts for inactive sessions and connections.</p>
+									</div>
+								</div>
+
+								<div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+									<div>
+										<label class="block text-sm font-medium text-foreground mb-1.5">SDK Session Timeout</label>
+										<div class="flex items-center gap-2">
+											<input type="number" min="5" max="480" bind:value={cleanupConfig.sdk_session_max_age_minutes} class="input flex-1" />
+											<span class="text-xs text-muted-foreground">minutes</span>
+										</div>
+										<p class="text-xs text-muted-foreground mt-1">Inactive Claude sessions</p>
+									</div>
+									<div>
+										<label class="block text-sm font-medium text-foreground mb-1.5">WebSocket Timeout</label>
+										<div class="flex items-center gap-2">
+											<input type="number" min="1" max="60" bind:value={cleanupConfig.websocket_max_age_minutes} class="input flex-1" />
+											<span class="text-xs text-muted-foreground">minutes</span>
+										</div>
+										<p class="text-xs text-muted-foreground mt-1">Inactive device connections</p>
+									</div>
+									<div>
+										<label class="block text-sm font-medium text-foreground mb-1.5">Sync Log Retention</label>
+										<div class="flex items-center gap-2">
+											<input type="number" min="1" max="168" bind:value={cleanupConfig.sync_log_retention_hours} class="input flex-1" />
+											<span class="text-xs text-muted-foreground">hours</span>
+										</div>
+										<p class="text-xs text-muted-foreground mt-1">Multi-device sync logs</p>
+									</div>
+								</div>
+							</section>
+
+							<!-- Messages -->
+							{#if cleanupError}
+								<div class="bg-destructive/10 border border-destructive/30 text-destructive px-4 py-3 rounded-lg text-sm">
+									{cleanupError}
+									<button onclick={() => cleanupError = ''} class="ml-2 hover:opacity-70">&times;</button>
+								</div>
+							{/if}
+							{#if cleanupSuccess}
+								<div class="bg-success/10 border border-success/30 text-success px-4 py-3 rounded-lg text-sm">
+									{cleanupSuccess}
+								</div>
+							{/if}
+
+							<!-- Action Buttons -->
+							<div class="flex gap-3">
+								<button
+									onclick={saveCleanupConfig}
+									disabled={savingCleanup}
+									class="btn btn-primary flex-1"
+								>
+									{#if savingCleanup}
+										<span class="inline-block animate-spin mr-2">&#9696;</span>
+									{/if}
+									Save Settings
+								</button>
+								<button
+									onclick={loadCleanupPreview}
+									disabled={!(cleanupConfig.cleanup_images_enabled || cleanupConfig.cleanup_videos_enabled || cleanupConfig.cleanup_shared_files_enabled)}
+									class="btn btn-secondary"
+								>
+									Preview Cleanup
+								</button>
+							</div>
+						{/if}
+					</div>
+				{/if}
+
+				<!-- Cleanup Preview Modal -->
+				{#if showCleanupPreview && cleanupPreview}
+					<div class="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
+						<div class="bg-card border border-border rounded-2xl w-full max-w-2xl shadow-2xl max-h-[80vh] flex flex-col">
+							<div class="p-4 border-b border-border flex items-center justify-between shrink-0">
+								<h3 class="text-lg font-bold text-foreground">Cleanup Preview</h3>
+								<button class="text-muted-foreground hover:text-foreground transition-colors" onclick={() => showCleanupPreview = false}>
+									<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+									</svg>
+								</button>
+							</div>
+
+							<div class="p-4 overflow-y-auto flex-1">
+								{#if cleanupPreview.total_count === 0}
+									<div class="text-center py-8 text-muted-foreground">
+										<svg class="w-12 h-12 mx-auto mb-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+										</svg>
+										<p>No files to clean up</p>
+										<p class="text-xs mt-1">All files are newer than the configured max age</p>
+									</div>
+								{:else}
+									<div class="mb-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+										<p class="text-amber-400 font-medium">
+											{cleanupPreview.total_count} files ({cleanupPreview.total_bytes_formatted}) will be deleted
+										</p>
+									</div>
+
+									<div class="space-y-4">
+										{#if cleanupPreview.images.length > 0}
+											<div>
+												<h4 class="text-sm font-semibold text-foreground mb-2 flex items-center gap-2">
+													<span class="w-5 h-5 bg-green-500/15 rounded flex items-center justify-center">
+														<svg class="w-3 h-3 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+														</svg>
+													</span>
+													Images ({cleanupPreview.images.length})
+												</h4>
+												<div class="space-y-1 max-h-32 overflow-y-auto">
+													{#each cleanupPreview.images as file}
+														<div class="flex items-center justify-between text-xs px-2 py-1 bg-muted/30 rounded">
+															<span class="text-foreground truncate flex-1">{file.name}</span>
+															<span class="text-muted-foreground ml-2">{file.age_days}d old</span>
+														</div>
+													{/each}
+												</div>
+											</div>
+										{/if}
+
+										{#if cleanupPreview.videos.length > 0}
+											<div>
+												<h4 class="text-sm font-semibold text-foreground mb-2 flex items-center gap-2">
+													<span class="w-5 h-5 bg-blue-500/15 rounded flex items-center justify-center">
+														<svg class="w-3 h-3 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+														</svg>
+													</span>
+													Videos ({cleanupPreview.videos.length})
+												</h4>
+												<div class="space-y-1 max-h-32 overflow-y-auto">
+													{#each cleanupPreview.videos as file}
+														<div class="flex items-center justify-between text-xs px-2 py-1 bg-muted/30 rounded">
+															<span class="text-foreground truncate flex-1">{file.name}</span>
+															<span class="text-muted-foreground ml-2">{file.age_days}d old</span>
+														</div>
+													{/each}
+												</div>
+											</div>
+										{/if}
+
+										{#if cleanupPreview.shared_files.length > 0}
+											<div>
+												<h4 class="text-sm font-semibold text-foreground mb-2 flex items-center gap-2">
+													<span class="w-5 h-5 bg-amber-500/15 rounded flex items-center justify-center">
+														<svg class="w-3 h-3 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+														</svg>
+													</span>
+													Shared Files ({cleanupPreview.shared_files.length})
+												</h4>
+												<div class="space-y-1 max-h-32 overflow-y-auto">
+													{#each cleanupPreview.shared_files as file}
+														<div class="flex items-center justify-between text-xs px-2 py-1 bg-muted/30 rounded">
+															<span class="text-foreground truncate flex-1">{file.name}</span>
+															<span class="text-muted-foreground ml-2">{file.age_days}d old</span>
+														</div>
+													{/each}
+												</div>
+											</div>
+										{/if}
+									</div>
+								{/if}
+							</div>
+
+							<div class="p-4 border-t border-border flex gap-3 shrink-0">
+								{#if cleanupPreview.total_count > 0}
+									<button
+										onclick={runCleanupNow}
+										disabled={runningCleanup}
+										class="btn btn-primary flex-1"
+									>
+										{#if runningCleanup}
+											<span class="inline-block animate-spin mr-2">&#9696;</span>
+											Cleaning...
+										{:else}
+											Delete {cleanupPreview.total_count} Files
+										{/if}
+									</button>
+								{/if}
+								<button onclick={() => showCleanupPreview = false} class="btn btn-secondary {cleanupPreview.total_count === 0 ? 'flex-1' : ''}">
+									{cleanupPreview.total_count === 0 ? 'Close' : 'Cancel'}
+								</button>
+							</div>
+						</div>
 					</div>
 				{/if}
 			</div>

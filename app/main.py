@@ -21,6 +21,7 @@ from app.core.profiles import run_migrations
 from app.core.auth import auth_service
 from app.core.query_engine import cleanup_stale_sessions
 from app.core.sync_engine import sync_engine
+from app.core.cleanup_manager import cleanup_manager
 
 # Import API routers
 from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files
@@ -56,6 +57,18 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
         return response
 
+
+class ActivityTrackingMiddleware(BaseHTTPMiddleware):
+    """Track user activity to manage sleep mode"""
+
+    async def dispatch(self, request: Request, call_next):
+        # Record activity for API requests (indicates user interaction)
+        # Skip static file requests to avoid unnecessary tracking
+        if request.url.path.startswith("/api/"):
+            cleanup_manager.record_activity()
+
+        return await call_next(request)
+
 # Configure logging
 logging.basicConfig(
     level=getattr(logging, settings.log_level.upper()),
@@ -75,33 +88,23 @@ async def periodic_cleanup():
     accumulated sessions/connections that were never properly closed.
 
     IMPORTANT: Only cleans up inactive sessions - active/streaming sessions are preserved.
+
+    Configuration is loaded from cleanup_manager which reads from database settings.
     """
     logger.info("Background cleanup scheduler started")
 
     while True:
         try:
-            # Wait 5 minutes between cleanup cycles
-            await asyncio.sleep(300)
+            # Get cleanup interval from configuration (default 5 minutes)
+            interval_minutes = cleanup_manager.get_config("cleanup_interval_minutes")
+            await asyncio.sleep(interval_minutes * 60)
 
-            logger.debug("Running periodic cleanup cycle...")
-
-            # Clean up stale SDK sessions (inactive for >1 hour, not streaming)
-            # This is safe - cleanup_stale_sessions checks is_streaming flag
-            await cleanup_stale_sessions(max_age_seconds=3600)
-
-            # Clean up stale WebSocket/sync connections (inactive for >5 minutes)
-            await sync_engine.cleanup_stale_connections(max_age_seconds=300)
-
-            # Clean up expired database records (these are auth-related, not chat sessions)
-            database.cleanup_expired_sessions()  # Expired auth tokens
-            database.cleanup_expired_lockouts()  # Expired login lockouts
-            database.cleanup_expired_api_key_sessions()  # Expired API sessions
-
-            # Clean up old logs (>24 hours) - these are just log records, safe to remove
-            database.cleanup_old_sync_logs(max_age_hours=24)
-            database.cleanup_old_login_attempts(max_age_hours=24)
-
-            logger.debug("Periodic cleanup cycle completed")
+            # Run cleanup cycle through cleanup manager
+            # This handles sleep mode checking, configurable timeouts, and file cleanup
+            await cleanup_manager.run_cleanup_cycle(
+                cleanup_sessions_callback=cleanup_stale_sessions,
+                cleanup_connections_callback=sync_engine.cleanup_stale_connections
+            )
 
         except asyncio.CancelledError:
             logger.info("Background cleanup scheduler stopped")
@@ -183,6 +186,9 @@ app = FastAPI(
 
 # Security headers middleware (runs first on response)
 app.add_middleware(SecurityHeadersMiddleware)
+
+# Activity tracking middleware for sleep mode
+app.add_middleware(ActivityTrackingMiddleware)
 
 # Request body size limit middleware
 class LimitRequestBodyMiddleware(BaseHTTPMiddleware):

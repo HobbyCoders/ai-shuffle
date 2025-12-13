@@ -1493,3 +1493,198 @@ async def transcribe_audio(
             status_code=500,
             detail=f"Transcription failed: {str(e)}"
         )
+
+
+# ============================================================================
+# Background Cleanup Settings
+# ============================================================================
+
+from app.core.cleanup_manager import cleanup_manager, CleanupStats, FileCleanupPreview
+
+
+class CleanupConfigResponse(BaseModel):
+    """Response containing cleanup configuration"""
+    # Cleanup schedule
+    cleanup_interval_minutes: int
+    sdk_session_max_age_minutes: int
+    websocket_max_age_minutes: int
+    sync_log_retention_hours: int
+    # File cleanup
+    cleanup_images_enabled: bool
+    cleanup_images_max_age_days: int
+    cleanup_videos_enabled: bool
+    cleanup_videos_max_age_days: int
+    cleanup_shared_files_enabled: bool
+    cleanup_shared_files_max_age_days: int
+    cleanup_project_ids: list[str]
+    # Sleep mode
+    sleep_mode_enabled: bool
+    sleep_timeout_minutes: int
+
+
+class CleanupConfigUpdateRequest(BaseModel):
+    """Request to update cleanup configuration"""
+    # All fields optional - only update what's provided
+    cleanup_interval_minutes: Optional[int] = None
+    sdk_session_max_age_minutes: Optional[int] = None
+    websocket_max_age_minutes: Optional[int] = None
+    sync_log_retention_hours: Optional[int] = None
+    cleanup_images_enabled: Optional[bool] = None
+    cleanup_images_max_age_days: Optional[int] = None
+    cleanup_videos_enabled: Optional[bool] = None
+    cleanup_videos_max_age_days: Optional[int] = None
+    cleanup_shared_files_enabled: Optional[bool] = None
+    cleanup_shared_files_max_age_days: Optional[int] = None
+    cleanup_project_ids: Optional[list[str]] = None
+    sleep_mode_enabled: Optional[bool] = None
+    sleep_timeout_minutes: Optional[int] = None
+
+
+class CleanupStatusResponse(BaseModel):
+    """Response containing cleanup manager status"""
+    is_sleeping: bool
+    idle_seconds: float
+    last_activity: str
+    sleep_mode_enabled: bool
+    sleep_timeout_minutes: int
+    cleanup_interval_minutes: int
+
+
+class FileCleanupPreviewResponse(BaseModel):
+    """Response containing preview of files to be cleaned"""
+    images: list[dict]
+    videos: list[dict]
+    shared_files: list[dict]
+    total_count: int
+    total_bytes: int
+    total_bytes_formatted: str
+
+
+class CleanupRunResponse(BaseModel):
+    """Response after running cleanup"""
+    success: bool
+    images_deleted: int
+    videos_deleted: int
+    shared_files_deleted: int
+    bytes_freed: int
+    bytes_freed_formatted: str
+
+
+def format_bytes(size: int) -> str:
+    """Format bytes to human-readable string"""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+@router.get("/cleanup", response_model=CleanupConfigResponse)
+async def get_cleanup_config(token: str = Depends(require_auth)):
+    """
+    Get current cleanup configuration.
+    """
+    config = cleanup_manager.get_all_config()
+    return CleanupConfigResponse(
+        cleanup_interval_minutes=config.get("cleanup_interval_minutes", 5),
+        sdk_session_max_age_minutes=config.get("sdk_session_max_age_minutes", 60),
+        websocket_max_age_minutes=config.get("websocket_max_age_minutes", 5),
+        sync_log_retention_hours=config.get("sync_log_retention_hours", 24),
+        cleanup_images_enabled=config.get("cleanup_images_enabled", False),
+        cleanup_images_max_age_days=config.get("cleanup_images_max_age_days", 7),
+        cleanup_videos_enabled=config.get("cleanup_videos_enabled", False),
+        cleanup_videos_max_age_days=config.get("cleanup_videos_max_age_days", 7),
+        cleanup_shared_files_enabled=config.get("cleanup_shared_files_enabled", False),
+        cleanup_shared_files_max_age_days=config.get("cleanup_shared_files_max_age_days", 7),
+        cleanup_project_ids=config.get("cleanup_project_ids", []),
+        sleep_mode_enabled=config.get("sleep_mode_enabled", True),
+        sleep_timeout_minutes=config.get("sleep_timeout_minutes", 10),
+    )
+
+
+@router.post("/cleanup", response_model=CleanupConfigResponse)
+async def update_cleanup_config(
+    request: CleanupConfigUpdateRequest,
+    token: str = Depends(require_admin)
+):
+    """
+    Update cleanup configuration (admin only).
+    """
+    # Update only provided fields
+    updates = request.model_dump(exclude_none=True)
+
+    for key, value in updates.items():
+        # Validate ranges
+        if key.endswith("_minutes") and value < 1:
+            raise HTTPException(status_code=400, detail=f"{key} must be at least 1")
+        if key.endswith("_hours") and value < 1:
+            raise HTTPException(status_code=400, detail=f"{key} must be at least 1")
+        if key.endswith("_days") and value < 1:
+            raise HTTPException(status_code=400, detail=f"{key} must be at least 1")
+
+        cleanup_manager.set_config(key, value)
+
+    # Return updated config
+    return await get_cleanup_config(token)
+
+
+@router.get("/cleanup/status", response_model=CleanupStatusResponse)
+async def get_cleanup_status(token: str = Depends(require_auth)):
+    """
+    Get cleanup manager status (sleep state, idle time, etc.).
+    """
+    status = cleanup_manager.get_status()
+    return CleanupStatusResponse(
+        is_sleeping=status["is_sleeping"],
+        idle_seconds=status["idle_seconds"],
+        last_activity=status["last_activity"],
+        sleep_mode_enabled=status["sleep_mode_enabled"],
+        sleep_timeout_minutes=status["sleep_timeout_minutes"],
+        cleanup_interval_minutes=status["cleanup_interval_minutes"],
+    )
+
+
+@router.get("/cleanup/preview", response_model=FileCleanupPreviewResponse)
+async def preview_file_cleanup(token: str = Depends(require_auth)):
+    """
+    Preview files that would be deleted based on current configuration.
+
+    Returns a list of files organized by type (images, videos, shared files)
+    with their sizes and ages.
+    """
+    preview = cleanup_manager.preview_file_cleanup()
+    return FileCleanupPreviewResponse(
+        images=preview.images,
+        videos=preview.videos,
+        shared_files=preview.shared_files,
+        total_count=preview.total_count,
+        total_bytes=preview.total_bytes,
+        total_bytes_formatted=format_bytes(preview.total_bytes),
+    )
+
+
+@router.post("/cleanup/run", response_model=CleanupRunResponse)
+async def run_file_cleanup_now(token: str = Depends(require_admin)):
+    """
+    Run file cleanup immediately (admin only).
+
+    Deletes files based on current configuration settings.
+    """
+    stats = await cleanup_manager.run_file_cleanup()
+    return CleanupRunResponse(
+        success=True,
+        images_deleted=stats.images_deleted,
+        videos_deleted=stats.videos_deleted,
+        shared_files_deleted=stats.shared_files_deleted,
+        bytes_freed=stats.bytes_freed,
+        bytes_freed_formatted=format_bytes(stats.bytes_freed),
+    )
+
+
+@router.post("/cleanup/wake")
+async def wake_from_sleep(token: str = Depends(require_auth)):
+    """
+    Manually wake the app from sleep mode.
+    """
+    cleanup_manager.record_activity()
+    return {"success": True, "is_sleeping": cleanup_manager.is_sleeping()}
