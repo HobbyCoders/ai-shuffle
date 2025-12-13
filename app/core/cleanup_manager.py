@@ -37,7 +37,7 @@ DEFAULT_CONFIG = {
     "cleanup_videos_max_age_days": 7,
     "cleanup_shared_files_enabled": False,
     "cleanup_shared_files_max_age_days": 7,
-    "cleanup_project_ids": "[]",  # JSON array of project IDs, empty = all projects
+    "cleanup_project_ids": [],  # List of project IDs, empty = all projects
 
     # Sleep mode
     "sleep_mode_enabled": True,
@@ -119,11 +119,11 @@ class CleanupManager:
                 value = database.get_system_setting(db_key)
                 if value is not None:
                     # Parse JSON for list/dict types
-                    if key == "cleanup_project_ids":
+                    if isinstance(default, (list, dict)):
                         try:
                             self._config_cache[key] = json.loads(value)
                         except json.JSONDecodeError:
-                            self._config_cache[key] = []
+                            self._config_cache[key] = default
                     elif isinstance(default, bool):
                         self._config_cache[key] = value.lower() in ('true', '1', 'yes')
                     elif isinstance(default, int):
