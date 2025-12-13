@@ -184,7 +184,7 @@
 	let cleanupConfig: CleanupConfig | null = $state(null);
 	let cleanupStatus: CleanupStatus | null = $state(null);
 	let cleanupPreview: CleanupPreview | null = $state(null);
-	let loadingCleanup = $state(false);
+	let loadingCleanup = $state(true);
 	let savingCleanup = $state(false);
 	let runningCleanup = $state(false);
 	let cleanupSuccess = $state('');
@@ -1543,7 +1543,15 @@
 								<span class="inline-block animate-spin">&#9696;</span>
 								<span>Loading cleanup settings...</span>
 							</div>
-						{:else if cleanupConfig}
+						{:else if !cleanupConfig}
+							<div class="bg-destructive/10 border border-destructive/30 text-destructive px-4 py-3 rounded-lg">
+								<p class="font-medium">Failed to load cleanup settings</p>
+								<p class="text-sm mt-1">Please try refreshing the page or check the browser console for errors.</p>
+								<button onclick={loadCleanupSettings} class="btn btn-secondary mt-3">
+									Retry
+								</button>
+							</div>
+						{:else}
 							<!-- Status Banner -->
 							<section class="bg-muted/30 rounded-xl p-4">
 								<div class="flex items-center justify-between">
