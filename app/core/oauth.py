@@ -78,6 +78,11 @@ class DirectOAuth:
         # Store active PKCE challenges (keyed by state)
         self._pending_challenges: Dict[str, PKCEChallenge] = {}
 
+        # Cache for credential validity check (to avoid disk I/O on every health check)
+        self._cred_cache_valid: Optional[bool] = None
+        self._cred_cache_time: float = 0
+        self._cred_cache_ttl: float = 60  # Cache for 60 seconds
+
     @staticmethod
     def generate_pkce_challenge() -> PKCEChallenge:
         """
@@ -354,9 +359,16 @@ class DirectOAuth:
 
     def has_valid_credentials(self) -> bool:
         """Check if valid credentials exist (not expired)"""
+        # Return cached result if still valid
+        now = time.time()
+        if self._cred_cache_valid is not None and (now - self._cred_cache_time) < self._cred_cache_ttl:
+            return self._cred_cache_valid
+
         credentials_file = self.config_dir / ".credentials.json"
 
         if not credentials_file.exists():
+            self._cred_cache_valid = False
+            self._cred_cache_time = now
             return False
 
         try:
@@ -364,6 +376,8 @@ class DirectOAuth:
             oauth_data = data.get("claudeAiOauth", {})
 
             if not oauth_data.get("accessToken"):
+                self._cred_cache_valid = False
+                self._cred_cache_time = now
                 return False
 
             # Check expiration (with 5 minute buffer)
@@ -371,14 +385,25 @@ class DirectOAuth:
             now_ms = int(time.time() * 1000)
 
             if expires_at and expires_at < (now_ms + 300000):  # 5 min buffer
-                logger.info("Credentials exist but are expired or expiring soon")
+                logger.debug("Credentials exist but are expired or expiring soon")
+                self._cred_cache_valid = False
+                self._cred_cache_time = now
                 return False
 
+            self._cred_cache_valid = True
+            self._cred_cache_time = now
             return True
 
         except (json.JSONDecodeError, KeyError) as e:
             logger.warning(f"Invalid credentials file: {e}")
+            self._cred_cache_valid = False
+            self._cred_cache_time = now
             return False
+
+    def invalidate_credentials_cache(self):
+        """Invalidate the credentials cache (call after login/logout)"""
+        self._cred_cache_valid = None
+        self._cred_cache_time = 0
 
     async def refresh_tokens(self) -> Tuple[Optional[OAuthTokens], Optional[str]]:
         """

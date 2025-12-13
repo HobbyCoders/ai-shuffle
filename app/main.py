@@ -61,10 +61,13 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 class ActivityTrackingMiddleware(BaseHTTPMiddleware):
     """Track user activity to manage sleep mode"""
 
+    # Paths that should NOT trigger activity tracking (internal/automated requests)
+    SKIP_PATHS = {"/health", "/api/v1/health"}
+
     async def dispatch(self, request: Request, call_next):
         # Record activity for API requests (indicates user interaction)
-        # Skip static file requests to avoid unnecessary tracking
-        if request.url.path.startswith("/api/"):
+        # Skip static file requests and health checks to avoid unnecessary tracking
+        if request.url.path.startswith("/api/") and request.url.path not in self.SKIP_PATHS:
             cleanup_manager.record_activity()
 
         return await call_next(request)

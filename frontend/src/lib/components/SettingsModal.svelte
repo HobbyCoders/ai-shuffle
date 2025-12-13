@@ -1832,7 +1832,6 @@
 								</button>
 								<button
 									onclick={loadCleanupPreview}
-									disabled={!(cleanupConfig.cleanup_images_enabled || cleanupConfig.cleanup_videos_enabled || cleanupConfig.cleanup_shared_files_enabled)}
 									class="btn btn-secondary"
 								>
 									Preview Cleanup
@@ -1862,7 +1861,11 @@
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
 										</svg>
 										<p>No files to clean up</p>
-										<p class="text-xs mt-1">All files are newer than the configured max age</p>
+										{#if !(cleanupConfig?.cleanup_images_enabled || cleanupConfig?.cleanup_videos_enabled || cleanupConfig?.cleanup_shared_files_enabled)}
+											<p class="text-xs mt-1">Enable file cleanup options above to scan for old files</p>
+										{:else}
+											<p class="text-xs mt-1">All files are newer than the configured max age</p>
+										{/if}
 									</div>
 								{:else}
 									<div class="mb-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg">
