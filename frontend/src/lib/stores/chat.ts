@@ -14,6 +14,7 @@
 import { writable, derived, get } from 'svelte/store';
 import type { Session, Profile } from '$lib/api/client';
 import { api } from '$lib/api/client';
+import { isNotificationsEnabled, notifySessionComplete } from '$lib/services/notifications';
 
 export type MessageType = 'text' | 'tool_use' | 'tool_result';
 
@@ -53,6 +54,7 @@ interface ChatState {
 	connectionState: 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
 	deviceId: string;
 	connectedDevices: number;
+	streamStartTime: number | null; // Track when streaming started for notifications
 }
 
 // Load persisted values from localStorage - empty string means no selection
@@ -197,7 +199,8 @@ function createChatStore() {
 		wsConnected: false,
 		connectionState: 'disconnected',
 		deviceId: getOrCreateDeviceId(),
-		connectedDevices: 0
+		connectedDevices: 0,
+		streamStartTime: null
 	});
 
 	let ws: WebSocket | null = null;
@@ -611,6 +614,7 @@ function createChatStore() {
 					...s,
 					sessionId,
 					isStreaming: true,
+					streamStartTime: Date.now(),
 					messages: [...s.messages, {
 						id: assistantMsgId,
 						role: 'assistant',
@@ -737,6 +741,7 @@ function createChatStore() {
 			case 'done': {
 				// Query complete
 				const metadata = data.metadata as Record<string, unknown>;
+				const currentState = get({ subscribe });
 
 				update(s => {
 					// Mark all streaming messages as complete
@@ -764,9 +769,24 @@ function createChatStore() {
 						...s,
 						messages,
 						isStreaming: false,
+						streamStartTime: null,
 						sessionId: data.session_id as string || s.sessionId
 					};
 				});
+
+				// Trigger browser notification if enabled and session took > 10 seconds
+				if (isNotificationsEnabled() && currentState.streamStartTime) {
+					const duration = (Date.now() - currentState.streamStartTime) / 1000;
+					if (duration > 10) {
+						// Find session title from sessions list
+						const session = currentState.sessions.find(s => s.id === currentState.sessionId);
+						notifySessionComplete(
+							session?.title || null,
+							currentState.sessionId || '',
+							duration
+						);
+					}
+				}
 
 				// Refresh sessions list
 				loadSessionsInternal();
@@ -795,7 +815,7 @@ function createChatStore() {
 						}
 					}
 
-					return { ...s, messages, isStreaming: false };
+					return { ...s, messages, isStreaming: false, streamStartTime: null };
 				});
 				break;
 			}
@@ -815,6 +835,7 @@ function createChatStore() {
 						...s,
 						messages,
 						isStreaming: false,
+						streamStartTime: null,
 						error: data.message as string
 					};
 				});

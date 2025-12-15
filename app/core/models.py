@@ -653,3 +653,63 @@ class Template(TemplateBase):
     is_builtin: bool = False
     created_at: datetime
     updated_at: datetime
+
+
+# ============================================================================
+# Webhook Models
+# ============================================================================
+
+class WebhookBase(BaseModel):
+    """Base webhook fields"""
+    url: str = Field(..., min_length=1)
+    events: List[str] = Field(default_factory=list)
+    secret: Optional[str] = None
+
+
+class WebhookCreate(WebhookBase):
+    """Webhook creation request"""
+    pass
+
+
+class WebhookUpdate(BaseModel):
+    """Webhook update request - all fields optional"""
+    url: Optional[str] = Field(None, min_length=1)
+    events: Optional[List[str]] = None
+    secret: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class Webhook(WebhookBase):
+    """Full webhook response"""
+    id: str
+    is_active: bool = True
+    created_at: datetime
+    last_triggered_at: Optional[datetime] = None
+    failure_count: int = 0
+
+
+class WebhookEventData(BaseModel):
+    """Data payload within a webhook event"""
+    session_id: Optional[str] = None
+    title: Optional[str] = None
+    profile_id: Optional[str] = None
+    total_cost: Optional[float] = None
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    duration_seconds: Optional[float] = None
+    error_message: Optional[str] = None
+
+
+class WebhookEvent(BaseModel):
+    """Webhook event payload structure"""
+    event: str  # Event type: session.complete, session.error, etc.
+    timestamp: str  # ISO format timestamp
+    data: WebhookEventData
+
+
+class WebhookTestResponse(BaseModel):
+    """Response from testing a webhook"""
+    success: bool
+    status_code: Optional[int] = None
+    response_time_ms: Optional[int] = None
+    error: Optional[str] = None

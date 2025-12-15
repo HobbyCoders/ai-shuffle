@@ -5,12 +5,19 @@
 	import { page } from '$app/stores';
 	import { auth, isAuthenticated, setupRequired, claudeAuthenticated } from '$lib/stores/auth';
 	import { theme } from '$lib/stores/theme';
+	import { pwa, hasUpdate, isOnline } from '$lib/stores/pwa';
+	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
+	import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
+	import OfflineBanner from '$lib/components/OfflineBanner.svelte';
 
 	let initialized = false;
 
 	onMount(async () => {
 		// Initialize theme on mount
 		theme.init();
+
+		// Initialize PWA features
+		pwa.init();
 
 		try {
 			await auth.checkAuth();
@@ -64,5 +71,14 @@
 		</div>
 	</div>
 {:else}
+	<!-- PWA Components -->
+	{#if !$isOnline}
+		<OfflineBanner />
+	{/if}
+	{#if $hasUpdate}
+		<UpdatePrompt />
+	{/if}
+	<InstallPrompt />
+
 	<slot />
 {/if}

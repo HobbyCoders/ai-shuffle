@@ -12,6 +12,14 @@
 	import type { ApiUser, ApiUserWithKey, Profile, WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
 	import type { Project } from '$lib/stores/chat';
 	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig, changePassword } from '$lib/api/auth';
+	import {
+		isSupported as isNotificationsSupported,
+		getPermission,
+		requestPermission,
+		isNotificationsEnabled,
+		setNotificationsEnabled
+	} from '$lib/services/notifications';
+	import WebhookManager from './WebhookManager.svelte';
 
 	interface Props {
 		open: boolean;
@@ -21,7 +29,7 @@
 	let { open, onClose }: Props = $props();
 
 	// Tab management
-	type SettingsTab = 'general' | 'security' | 'authentication' | 'api-users' | 'integrations' | 'cleanup';
+	type SettingsTab = 'general' | 'security' | 'authentication' | 'api-users' | 'integrations' | 'notifications' | 'cleanup';
 	let activeTab: SettingsTab = $state('general');
 
 	// Data state
@@ -192,6 +200,12 @@
 	let cleanupError = $state('');
 	let showCleanupPreview = $state(false);
 
+	// Browser notification state
+	let browserNotificationsEnabled = $state(false);
+	let browserNotificationsSupported = $state(false);
+	let notificationPermission = $state<NotificationPermission | 'unsupported'>('default');
+	let requestingPermission = $state(false);
+
 	// API User form data
 	let formData = $state({
 		name: '',
@@ -208,6 +222,7 @@
 		{ id: 'authentication', label: 'Authentication', icon: 'M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z' },
 		{ id: 'api-users', label: 'API Users', icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z' },
 		{ id: 'integrations', label: 'Integrations', icon: 'M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z' },
+		{ id: 'notifications', label: 'Notifications', icon: 'M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9' },
 		{ id: 'cleanup', label: 'Background Cleanup', icon: 'M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16' }
 	];
 
@@ -217,6 +232,44 @@
 			loadAllData();
 		}
 	});
+
+	// Initialize notification settings on mount
+	$effect(() => {
+		if (open) {
+			loadNotificationSettings();
+		}
+	});
+
+	function loadNotificationSettings() {
+		browserNotificationsSupported = isNotificationsSupported();
+		notificationPermission = getPermission();
+		browserNotificationsEnabled = isNotificationsEnabled();
+	}
+
+	async function toggleBrowserNotifications() {
+		if (!browserNotificationsSupported) return;
+
+		if (!browserNotificationsEnabled) {
+			// Enabling - need to request permission if not granted
+			if (notificationPermission === 'default') {
+				requestingPermission = true;
+				const result = await requestPermission();
+				requestingPermission = false;
+				notificationPermission = result;
+
+				if (result !== 'granted') {
+					return; // Don't enable if permission denied
+				}
+			} else if (notificationPermission === 'denied') {
+				// Can't enable if previously denied
+				return;
+			}
+		}
+
+		// Toggle the setting
+		browserNotificationsEnabled = !browserNotificationsEnabled;
+		setNotificationsEnabled(browserNotificationsEnabled);
+	}
 
 	async function loadAllData() {
 		await Promise.all([
@@ -1601,6 +1654,86 @@
 								</div>
 							</div>
 						</section>
+					</div>
+				{/if}
+
+				<!-- Notifications Tab -->
+				{#if activeTab === 'notifications'}
+					<div class="space-y-6">
+						<div>
+							<h3 class="text-lg font-semibold text-foreground mb-1">Notifications</h3>
+							<p class="text-sm text-muted-foreground">Configure browser notifications and webhooks for external integrations.</p>
+						</div>
+
+						<!-- Browser Notifications Section -->
+						<section class="bg-muted/30 rounded-xl p-5">
+							<div class="flex items-center gap-3 mb-4">
+								<div class="w-10 h-10 bg-indigo-500/15 rounded-lg flex items-center justify-center">
+									<svg class="w-5 h-5 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+									</svg>
+								</div>
+								<div>
+									<h4 class="font-semibold text-foreground">Browser Notifications</h4>
+									<p class="text-xs text-muted-foreground">Get notified when long-running sessions complete.</p>
+								</div>
+							</div>
+
+							<div class="space-y-4">
+								{#if !browserNotificationsSupported}
+									<div class="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-amber-300 text-sm">
+										Browser notifications are not supported in this browser.
+									</div>
+								{:else if notificationPermission === 'denied'}
+									<div class="bg-red-500/10 border border-red-500/20 rounded-lg p-3 text-red-300 text-sm">
+										<p class="font-medium">Notifications blocked</p>
+										<p class="text-xs mt-1">You have blocked notifications for this site. Please enable them in your browser settings to receive notifications.</p>
+									</div>
+								{:else}
+									<div class="flex items-center justify-between">
+										<div>
+											<span class="text-sm font-medium text-foreground">Enable Notifications</span>
+											<p class="text-xs text-muted-foreground">Show desktop notifications when sessions complete</p>
+										</div>
+										<button
+											onclick={toggleBrowserNotifications}
+											disabled={requestingPermission}
+											class="relative inline-flex items-center cursor-pointer"
+										>
+											{#if requestingPermission}
+												<div class="w-11 h-6 bg-muted rounded-full flex items-center justify-center">
+													<span class="inline-block animate-spin text-xs">&#9696;</span>
+												</div>
+											{:else}
+												<div class="w-11 h-6 bg-muted rounded-full peer peer-checked:bg-primary transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all {browserNotificationsEnabled ? 'bg-primary after:translate-x-5' : ''}"></div>
+											{/if}
+										</button>
+									</div>
+									{#if browserNotificationsEnabled}
+										<p class="text-xs text-green-400">Notifications are enabled. You'll be notified when sessions complete.</p>
+									{/if}
+								{/if}
+							</div>
+						</section>
+
+						<!-- Webhooks Section (Admin Only) -->
+						{#if $isAdmin}
+							<section class="bg-muted/30 rounded-xl p-5">
+								<div class="flex items-center gap-3 mb-4">
+									<div class="w-10 h-10 bg-purple-500/15 rounded-lg flex items-center justify-center">
+										<svg class="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+										</svg>
+									</div>
+									<div>
+										<h4 class="font-semibold text-foreground">Webhooks</h4>
+										<p class="text-xs text-muted-foreground">Send events to external services when sessions complete or error.</p>
+									</div>
+								</div>
+
+								<WebhookManager />
+							</section>
+						{/if}
 					</div>
 				{/if}
 

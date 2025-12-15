@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 # Schema version for migrations
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 
 def get_connection() -> sqlite3.Connection:
@@ -384,6 +384,20 @@ def _create_schema(cursor: sqlite3.Cursor):
         )
     """)
 
+    # Webhooks for external integrations
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS webhooks (
+            id TEXT PRIMARY KEY,
+            url TEXT NOT NULL,
+            secret TEXT,
+            events JSON NOT NULL DEFAULT '[]',
+            is_active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_triggered_at TIMESTAMP,
+            failure_count INTEGER DEFAULT 0
+        )
+    """)
+
     # Create indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_templates_category ON templates(category)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_templates_profile ON templates(profile_id)")
@@ -414,6 +428,7 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags(session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_tag ON session_tags(tag_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_webhooks_active ON webhooks(is_active)")
 
 
 def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
@@ -2677,3 +2692,134 @@ def set_template_builtin(template_id: str, is_builtin: bool) -> bool:
             (is_builtin, datetime.utcnow().isoformat(), template_id)
         )
         return cursor.rowcount > 0
+
+
+# ============================================================================
+# Webhook Operations
+# ============================================================================
+
+def get_all_webhooks() -> List[Dict[str, Any]]:
+    """Get all webhooks"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM webhooks ORDER BY created_at DESC")
+        rows = rows_to_list(cursor.fetchall())
+        for row in rows:
+            if row.get("events"):
+                row["events"] = json.loads(row["events"]) if isinstance(row["events"], str) else row["events"]
+        return rows
+
+
+def get_active_webhooks() -> List[Dict[str, Any]]:
+    """Get all active webhooks"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM webhooks WHERE is_active = TRUE ORDER BY created_at DESC")
+        rows = rows_to_list(cursor.fetchall())
+        for row in rows:
+            if row.get("events"):
+                row["events"] = json.loads(row["events"]) if isinstance(row["events"], str) else row["events"]
+        return rows
+
+
+def get_webhook(webhook_id: str) -> Optional[Dict[str, Any]]:
+    """Get a webhook by ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM webhooks WHERE id = ?", (webhook_id,))
+        row = row_to_dict(cursor.fetchone())
+        if row and row.get("events"):
+            row["events"] = json.loads(row["events"]) if isinstance(row["events"], str) else row["events"]
+        return row
+
+
+def create_webhook(
+    webhook_id: str,
+    url: str,
+    events: List[str],
+    secret: Optional[str] = None,
+    is_active: bool = True
+) -> Optional[Dict[str, Any]]:
+    """Create a new webhook"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO webhooks (id, url, secret, events, is_active, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (webhook_id, url, secret, json.dumps(events), is_active, now)
+        )
+    return get_webhook(webhook_id)
+
+
+def update_webhook(
+    webhook_id: str,
+    url: Optional[str] = None,
+    events: Optional[List[str]] = None,
+    secret: Optional[str] = None,
+    is_active: Optional[bool] = None
+) -> Optional[Dict[str, Any]]:
+    """Update a webhook"""
+    existing = get_webhook(webhook_id)
+    if not existing:
+        return None
+
+    updates = []
+    values = []
+
+    if url is not None:
+        updates.append("url = ?")
+        values.append(url)
+    if events is not None:
+        updates.append("events = ?")
+        values.append(json.dumps(events))
+    if secret is not None:
+        updates.append("secret = ?")
+        values.append(secret if secret else None)
+    if is_active is not None:
+        updates.append("is_active = ?")
+        values.append(is_active)
+
+    if updates:
+        values.append(webhook_id)
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE webhooks SET {', '.join(updates)} WHERE id = ?",
+                values
+            )
+
+    return get_webhook(webhook_id)
+
+
+def delete_webhook(webhook_id: str) -> bool:
+    """Delete a webhook"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM webhooks WHERE id = ?", (webhook_id,))
+        return cursor.rowcount > 0
+
+
+def update_webhook_triggered(webhook_id: str, success: bool) -> None:
+    """Update the last_triggered_at timestamp and failure_count for a webhook"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if success:
+            # Reset failure count on success
+            cursor.execute(
+                "UPDATE webhooks SET last_triggered_at = ?, failure_count = 0 WHERE id = ?",
+                (now, webhook_id)
+            )
+        else:
+            # Increment failure count
+            cursor.execute(
+                "UPDATE webhooks SET last_triggered_at = ?, failure_count = failure_count + 1 WHERE id = ?",
+                (now, webhook_id)
+            )
+
+
+def get_webhooks_for_event(event_type: str) -> List[Dict[str, Any]]:
+    """Get all active webhooks subscribed to a specific event type"""
+    webhooks = get_active_webhooks()
+    return [w for w in webhooks if event_type in w.get("events", [])]
