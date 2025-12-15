@@ -716,6 +716,45 @@ def _get_decrypted_api_key(setting_name: str) -> Optional[str]:
     return value
 
 
+def _build_allowed_tools(
+    base_allowed: list,
+    hooks: Optional[Dict[str, list]]
+) -> list:
+    """
+    Build the allowed_tools list, adding tool names for any configured hooks.
+
+    When we have hooks that handle specific tools (like AskUserQuestion),
+    we must explicitly allow those tools so the model can call them.
+    The hook then intercepts and handles the tool call.
+
+    Args:
+        base_allowed: Base list of allowed tools from profile config
+        hooks: Dict of hook configurations (e.g., {"PreToolUse": [HookMatcher(...)]})
+
+    Returns:
+        List of allowed tool names
+    """
+    allowed = list(base_allowed) if base_allowed else []
+
+    if not hooks:
+        return allowed
+
+    # Check for PreToolUse hooks and extract tool names from matchers
+    pre_tool_hooks = hooks.get("PreToolUse", [])
+    for hook_matcher in pre_tool_hooks:
+        if hasattr(hook_matcher, "matcher") and hook_matcher.matcher:
+            # The matcher can be a tool name like "AskUserQuestion"
+            # or a pattern like "Bash|Edit" - we add all parts
+            tool_names = hook_matcher.matcher.split("|")
+            for tool_name in tool_names:
+                tool_name = tool_name.strip()
+                if tool_name and tool_name not in allowed:
+                    allowed.append(tool_name)
+                    logger.info(f"Added tool '{tool_name}' to allowed_tools (required for hook handler)")
+
+    return allowed
+
+
 def _build_env_with_ai_tools(
     base_env: Optional[Dict[str, str]],
     ai_tools_config: Optional[Dict[str, Any]]
@@ -987,7 +1026,9 @@ def build_options_from_profile(
         max_turns=overrides.get("max_turns") or config.get("max_turns"),
 
         # Tool configuration
-        allowed_tools=config.get("allowed_tools") or [],
+        # When hooks include AskUserQuestion handler, ensure the tool is allowed
+        # so the model can actually call it (the hook intercepts and handles it)
+        allowed_tools=_build_allowed_tools(config.get("allowed_tools") or [], hooks),
         disallowed_tools=config.get("disallowed_tools") or [],
 
         # System prompt
