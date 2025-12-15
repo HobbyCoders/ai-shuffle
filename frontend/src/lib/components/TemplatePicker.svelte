@@ -100,7 +100,7 @@
 			type="text"
 			bind:value={searchQuery}
 			placeholder="Search templates..."
-			class="w-full pl-10 pr-4 py-2 rounded-lg bg-white/5 border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 text-sm"
+			class="w-full pl-10 pr-4 py-2 rounded-lg bg-muted/50 border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 text-sm"
 		/>
 	</div>
 
@@ -133,9 +133,9 @@
 								<button
 									type="button"
 									on:click={() => selectTemplate(template)}
-									class="flex items-start gap-3 p-3 rounded-lg bg-white/5 border border-border hover:border-primary/50 hover:bg-white/10 transition-colors text-left group"
+									class="flex items-start gap-3 p-3 rounded-lg bg-muted/50 border border-border hover:border-primary/50 hover:bg-hover-overlay transition-colors text-left group"
 								>
-									<div class="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center text-lg flex-shrink-0 group-hover:bg-primary/20 transition-colors">
+									<div class="w-8 h-8 rounded-lg bg-accent flex items-center justify-center text-lg flex-shrink-0 group-hover:bg-primary/20 transition-colors">
 										{getIconDisplay(template.icon)}
 									</div>
 									<div class="flex-1 min-w-0">
@@ -158,7 +158,7 @@
 		<button
 			type="button"
 			on:click={() => dispatch('close')}
-			class="w-full px-4 py-2 rounded-lg bg-white/5 text-muted-foreground hover:text-foreground hover:bg-white/10 transition-colors text-sm flex items-center justify-center gap-2"
+			class="w-full px-4 py-2 rounded-lg bg-muted/50 text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors text-sm flex items-center justify-center gap-2"
 		>
 			<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />

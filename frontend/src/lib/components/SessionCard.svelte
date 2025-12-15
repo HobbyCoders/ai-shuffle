@@ -136,7 +136,7 @@
 
 	<!-- Main card content - slides to reveal delete indicator -->
 	<div
-		class="group relative flex flex-col gap-1.5 px-3 py-2.5 rounded-xl cursor-pointer select-none {isActive ? 'bg-white/10 border border-white/20' : 'hover:bg-white/5'} {selectionMode && isSelected ? 'bg-white/10' : ''}"
+		class="group relative flex flex-col gap-1.5 px-3 py-2.5 rounded-xl cursor-pointer select-none {isActive ? 'bg-accent border border-border' : 'hover:bg-accent/50'} {selectionMode && isSelected ? 'bg-accent' : ''}"
 		class:transition-transform={!directionLocked}
 		style="transform: translateX(-{currentSwipeX}px)"
 		on:click={handleCardClick}
@@ -254,7 +254,7 @@
 			<!-- Tag button (shows on hover) -->
 			<button
 				on:click={handleTagClick}
-				class="opacity-0 group-hover:opacity-100 p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-white/10 transition-all"
+				class="opacity-0 group-hover:opacity-100 p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-all"
 				title="Manage tags"
 			>
 				<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

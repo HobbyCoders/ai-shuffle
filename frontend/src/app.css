@@ -73,6 +73,11 @@
 		/* Glow effect */
 		--glow-color: oklch(0.72 0.14 180 / 0.4);
 		--glow-color-soft: oklch(0.72 0.14 180 / 0.3);
+
+		/* Interactive hover overlay */
+		--hover-overlay: oklch(1 0 0 / 0.1);
+		--active-overlay: oklch(1 0 0 / 0.15);
+		--border-subtle: oklch(1 0 0 / 0.1);
 	}
 
 	/* ========================================
@@ -144,6 +149,11 @@
 		/* Glow effect */
 		--glow-color: oklch(0.55 0.16 180 / 0.3);
 		--glow-color-soft: oklch(0.55 0.16 180 / 0.2);
+
+		/* Interactive hover overlay */
+		--hover-overlay: oklch(0 0 0 / 0.05);
+		--active-overlay: oklch(0 0 0 / 0.08);
+		--border-subtle: oklch(0 0 0 / 0.08);
 	}
 
 	/* Theme transition for smooth changes */

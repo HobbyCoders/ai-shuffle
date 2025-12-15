@@ -207,7 +207,7 @@
 			<h2 class="text-lg font-semibold text-foreground">Manage Templates</h2>
 			<button
 				on:click={() => dispatch('close')}
-				class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/10 transition-colors"
+				class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
 			>
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
@@ -230,7 +230,7 @@
 
 			{#if showCreateForm || editingTemplate}
 				<!-- Create/Edit form -->
-				<div class="space-y-4 p-4 rounded-lg bg-white/5 border border-border">
+				<div class="space-y-4 p-4 rounded-lg bg-muted/50 border border-border">
 					<h3 class="font-medium text-foreground">
 						{editingTemplate ? 'Edit Template' : 'Create New Template'}
 					</h3>
@@ -242,14 +242,14 @@
 								type="text"
 								bind:value={formName}
 								placeholder="e.g., Code Review"
-								class="w-full px-3 py-2 rounded-lg bg-white/5 border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+								class="w-full px-3 py-2 rounded-lg bg-muted/50 border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
 							/>
 						</div>
 						<div class="space-y-2">
 							<label class="text-sm font-medium text-muted-foreground">Category</label>
 							<select
 								bind:value={formCategory}
-								class="w-full px-3 py-2 rounded-lg bg-white/5 border border-border text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+								class="w-full px-3 py-2 rounded-lg bg-muted/50 border border-border text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
 							>
 								{#each TEMPLATE_CATEGORIES as cat}
 									<option value={cat.id}>{cat.name}</option>
@@ -264,7 +264,7 @@
 							type="text"
 							bind:value={formDescription}
 							placeholder="Brief description of when to use this template"
-							class="w-full px-3 py-2 rounded-lg bg-white/5 border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+							class="w-full px-3 py-2 rounded-lg bg-muted/50 border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
 						/>
 					</div>
 
@@ -274,7 +274,7 @@
 							bind:value={formPrompt}
 							placeholder="Enter the prompt that will be used to start the conversation..."
 							rows="4"
-							class="w-full px-3 py-2 rounded-lg bg-white/5 border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
+							class="w-full px-3 py-2 rounded-lg bg-muted/50 border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
 						></textarea>
 					</div>
 
@@ -286,7 +286,7 @@
 									<button
 										type="button"
 										on:click={() => formIcon = icon.emoji}
-										class="w-8 h-8 rounded-lg flex items-center justify-center text-lg transition-colors {formIcon === icon.emoji ? 'bg-primary text-primary-foreground' : 'bg-white/5 hover:bg-white/10'}"
+										class="w-8 h-8 rounded-lg flex items-center justify-center text-lg transition-colors {formIcon === icon.emoji ? 'bg-primary text-primary-foreground' : 'bg-muted/50 hover:bg-hover-overlay'}"
 										title={icon.name}
 									>
 										{icon.emoji ? getIconDisplay(icon.emoji) : '-'}
@@ -298,7 +298,7 @@
 							<label class="text-sm font-medium text-muted-foreground">Profile (optional)</label>
 							<select
 								bind:value={formProfileId}
-								class="w-full px-3 py-2 rounded-lg bg-white/5 border border-border text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+								class="w-full px-3 py-2 rounded-lg bg-muted/50 border border-border text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
 							>
 								<option value="">All Profiles</option>
 								{#each profiles as profile}
@@ -312,7 +312,7 @@
 					<div class="flex justify-end gap-2 pt-2">
 						<button
 							on:click={cancelForm}
-							class="px-4 py-2 rounded-lg bg-white/5 text-foreground font-medium text-sm hover:bg-white/10 transition-colors"
+							class="px-4 py-2 rounded-lg bg-muted/50 text-foreground font-medium text-sm hover:bg-hover-overlay transition-colors"
 						>
 							Cancel
 						</button>
@@ -329,7 +329,7 @@
 				<!-- Create button -->
 				<button
 					on:click={startCreate}
-					class="w-full px-4 py-3 rounded-lg border border-dashed border-border text-muted-foreground hover:text-foreground hover:border-primary/50 hover:bg-white/5 transition-colors flex items-center justify-center gap-2"
+					class="w-full px-4 py-3 rounded-lg border border-dashed border-border text-muted-foreground hover:text-foreground hover:border-primary/50 hover:bg-accent/50 transition-colors flex items-center justify-center gap-2"
 				>
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
@@ -354,8 +354,8 @@
 						<div class="space-y-2">
 							<h4 class="text-sm font-medium text-muted-foreground">{getCategoryName(category)}</h4>
 							{#each categoryTemplates as template (template.id)}
-								<div class="flex items-start gap-3 p-3 rounded-lg bg-white/5 border border-border hover:border-border/80 transition-colors {editingTemplate?.id === template.id ? 'ring-2 ring-primary/50' : ''}">
-									<div class="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center text-lg flex-shrink-0">
+								<div class="flex items-start gap-3 p-3 rounded-lg bg-muted/50 border border-border hover:border-border/80 transition-colors {editingTemplate?.id === template.id ? 'ring-2 ring-primary/50' : ''}">
+									<div class="w-8 h-8 rounded-lg bg-accent flex items-center justify-center text-lg flex-shrink-0">
 										{getIconDisplay(template.icon) || '\uD83D\uDCDD'}
 									</div>
 									<div class="flex-1 min-w-0">
@@ -374,7 +374,7 @@
 										{#if !template.is_builtin}
 											<button
 												on:click={() => startEdit(template)}
-												class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/10 transition-colors"
+												class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
 												title="Edit"
 											>
 												<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -394,7 +394,7 @@
 												</button>
 												<button
 													on:click={() => confirmDelete = null}
-													class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/10 transition-colors"
+													class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
 													title="Cancel"
 												>
 													<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -426,7 +426,7 @@
 		<div class="flex justify-end px-5 py-4 border-t border-border">
 			<button
 				on:click={() => dispatch('close')}
-				class="px-4 py-2 rounded-lg bg-white/5 text-foreground font-medium text-sm hover:bg-white/10 transition-colors"
+				class="px-4 py-2 rounded-lg bg-muted/50 text-foreground font-medium text-sm hover:bg-hover-overlay transition-colors"
 			>
 				Close
 			</button>

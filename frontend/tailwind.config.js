@@ -60,6 +60,13 @@ export default {
 				s: 'var(--shadow-s)',
 				m: 'var(--shadow-m)',
 				l: 'var(--shadow-l)'
+			},
+			backgroundColor: {
+				'hover-overlay': 'var(--hover-overlay)',
+				'active-overlay': 'var(--active-overlay)'
+			},
+			borderColor: {
+				'subtle': 'var(--border-subtle)'
 			}
 		}
 	},

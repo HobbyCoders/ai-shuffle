@@ -1788,13 +1788,13 @@
 	<!-- Floating Icon Rail (Desktop) - 48px wide -->
 	<nav class="hidden lg:flex fixed left-3 top-3 bottom-3 flex-col w-12 z-50 floating-panel rounded-2xl">
 		<div class="flex flex-col items-center pt-3 gap-1">
-			<button on:click={handleNewTab} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-white/10 group" title="New Chat">
+			<button on:click={handleNewTab} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-hover-overlay group" title="New Chat">
 				<svg class="w-5 h-5 text-primary group-hover:scale-110 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
 				</svg>
 			</button>
-			<div class="w-6 h-px bg-white/10 my-2"></div>
-			<button on:click={() => toggleSidebarSection('sessions')} class="relative w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'sessions' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-white/10 text-muted-foreground hover:text-foreground'}" title="Sessions">
+			<div class="w-6 h-px bg-border-subtle my-2"></div>
+			<button on:click={() => toggleSidebarSection('sessions')} class="relative w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'sessions' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-hover-overlay text-muted-foreground hover:text-foreground'}" title="Sessions">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
 				</svg>
@@ -1803,17 +1803,17 @@
 				{/if}
 			</button>
 			{#if $isAdmin}
-				<button on:click={() => toggleSidebarSection('projects')} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'projects' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-white/10 text-muted-foreground hover:text-foreground'}" title="Projects">
+				<button on:click={() => toggleSidebarSection('projects')} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'projects' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-hover-overlay text-muted-foreground hover:text-foreground'}" title="Projects">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 					</svg>
 				</button>
-				<button on:click={() => toggleSidebarSection('profiles')} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'profiles' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-white/10 text-muted-foreground hover:text-foreground'}" title="Profiles">
+				<button on:click={() => toggleSidebarSection('profiles')} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'profiles' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-hover-overlay text-muted-foreground hover:text-foreground'}" title="Profiles">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
 					</svg>
 				</button>
-				<button on:click={() => toggleSidebarSection('subagents')} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'subagents' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-white/10 text-muted-foreground hover:text-foreground'}" title="Subagents">
+				<button on:click={() => toggleSidebarSection('subagents')} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'subagents' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-hover-overlay text-muted-foreground hover:text-foreground'}" title="Subagents">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
 					</svg>
@@ -1823,20 +1823,20 @@
 		<div class="mt-auto flex flex-col items-center pb-3 gap-1">
 			<!-- Analytics (Admin only) -->
 			{#if $isAdmin}
-				<a href="/analytics" class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-white/10 text-muted-foreground hover:text-foreground" title="Analytics">
+				<a href="/analytics" class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-hover-overlay text-muted-foreground hover:text-foreground" title="Analytics">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
 					</svg>
 				</a>
 			{/if}
 			<!-- Keyboard Shortcuts -->
-			<button on:click={() => showKeyboardShortcuts = true} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-white/10 text-muted-foreground hover:text-foreground" title="Keyboard Shortcuts (?)">
+			<button on:click={() => showKeyboardShortcuts = true} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-hover-overlay text-muted-foreground hover:text-foreground" title="Keyboard Shortcuts (?)">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
 				</svg>
 			</button>
 			{#if $isAdmin}
-				<button on:click={() => showSettingsModal = true} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-white/10 text-muted-foreground hover:text-foreground" title="Settings">
+				<button on:click={() => showSettingsModal = true} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-hover-overlay text-muted-foreground hover:text-foreground" title="Settings">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -1864,7 +1864,7 @@
 							type="text"
 							bind:value={sessionSearchQuery}
 							placeholder="Search conversations..."
-							class="w-full pl-9 pr-8 py-2.5 text-sm bg-white/5 border border-white/10 rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 transition-all"
+							class="w-full pl-9 pr-8 py-2.5 text-sm bg-muted/50 border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 transition-all"
 						/>
 						{#if sessionSearchQuery}
 							<button on:click={clearSearch} class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-muted-foreground hover:text-foreground transition-colors">
@@ -1877,15 +1877,15 @@
 				</div>
 			{:else}
 				<!-- Header for non-Sessions panels -->
-				<div class="p-4 border-b border-white/5 flex items-center justify-between">
+				<div class="p-4 border-b border-border/50 flex items-center justify-between">
 					<span class="font-semibold text-foreground">{activeSidebarSection === 'projects' ? 'Projects' : activeSidebarSection === 'profiles' ? 'Profiles' : 'Subagents'}</span>
 					<div class="flex items-center gap-1">
-						<button on:click={toggleSidebarPin} class="p-1.5 rounded-lg transition-all {sidebarPinned ? 'bg-primary text-primary-foreground shadow-glow' : 'text-muted-foreground hover:text-foreground hover:bg-white/10'}" title={sidebarPinned ? 'Unpin sidebar' : 'Pin sidebar open'}>
+						<button on:click={toggleSidebarPin} class="p-1.5 rounded-lg transition-all {sidebarPinned ? 'bg-primary text-primary-foreground shadow-glow' : 'text-muted-foreground hover:text-foreground hover:bg-hover-overlay'}" title={sidebarPinned ? 'Unpin sidebar' : 'Pin sidebar open'}>
 							<svg class="w-4 h-4" fill={sidebarPinned ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
 							</svg>
 						</button>
-						<button on:click={() => { activeSidebarSection = 'none'; sidebarPinned = false; clearSearch(); }} class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/10 transition-all" title="Close">
+						<button on:click={() => { activeSidebarSection = 'none'; sidebarPinned = false; clearSearch(); }} class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-all" title="Close">
 							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 							</svg>
@@ -1899,8 +1899,8 @@
 				<div class="flex-1 overflow-hidden flex flex-col">
 					{#if $isAdmin}
 						<div class="px-3 flex gap-1">
-							<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-white/5'}">My Chats</button>
-							<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-white/5'}">Admin</button>
+							<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}">My Chats</button>
+							<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}">Admin</button>
 						</div>
 					{/if}
 					{#if sidebarTab === 'my-chats'}
@@ -2361,7 +2361,7 @@
 				{/if}
 				</div>
 				<!-- User Profile Footer -->
-				<div class="mt-auto p-3 border-t border-white/5">
+				<div class="mt-auto p-3 border-t border-border/50">
 					<div class="flex items-center gap-3">
 						<div class="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center font-semibold">
 							<span class="text-sm text-primary">{($apiUser?.name || $username)?.[0]?.toUpperCase() || 'U'}</span>
@@ -2371,7 +2371,7 @@
 							<p class="text-xs text-muted-foreground truncate">{$isAdmin ? 'Administrator' : 'User'}</p>
 						</div>
 						{#if $isAdmin}
-							<button on:click={() => showSettingsModal = true} class="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/10 transition-all" title="Settings">
+							<button on:click={() => showSettingsModal = true} class="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-all" title="Settings">
 								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -2785,7 +2785,7 @@
 	<!-- Mobile Session Panel (fullscreen glassmorph overlay) -->
 	<aside class="lg:hidden fixed inset-x-3 top-3 bottom-[4.5rem] z-50 floating-panel rounded-2xl flex flex-col transform transition-all duration-300 {sidebarOpen ? 'opacity-100 scale-100' : 'opacity-0 scale-95 pointer-events-none'}">
 		<!-- Header -->
-		<div class="p-4 border-b border-white/10 flex items-center justify-between">
+		<div class="p-4 border-b border-border flex items-center justify-between">
 			<div class="flex items-center gap-3">
 				<div class="w-8 h-8 rounded-xl bg-primary/20 flex items-center justify-center">
 					<svg class="w-4 h-4 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2794,7 +2794,7 @@
 				</div>
 				<span class="font-semibold text-foreground">Chats</span>
 			</div>
-			<button class="w-8 h-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-lg transition-colors" on:click={() => (sidebarOpen = false)}>
+			<button class="w-8 h-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-hover-overlay rounded-lg transition-colors" on:click={() => (sidebarOpen = false)}>
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 				</svg>
@@ -2811,7 +2811,7 @@
 					type="text"
 					bind:value={sessionSearchQuery}
 					placeholder="Search sessions..."
-					class="w-full pl-9 pr-8 py-2.5 text-sm bg-white/5 border border-white/10 rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 transition-colors"
+					class="w-full pl-9 pr-8 py-2.5 text-sm bg-muted/50 border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 transition-colors"
 				/>
 				{#if sessionSearchQuery}
 					<button on:click={clearSearch} class="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-muted-foreground hover:text-foreground">
@@ -2826,9 +2826,9 @@
 		<!-- Tab Toggle (My Chats / Admin) -->
 		{#if $isAdmin}
 			<div class="px-3 pb-2">
-				<div class="flex bg-white/5 rounded-xl p-1">
-					<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-2 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-white/5'}">My Chats</button>
-					<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-2 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-white/5'}">Admin</button>
+				<div class="flex bg-muted/50 rounded-xl p-1">
+					<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-2 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}">My Chats</button>
+					<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-2 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}">Admin</button>
 				</div>
 			</div>
 		{/if}
@@ -3157,7 +3157,7 @@
 			</div>
 
 		<!-- User Footer -->
-		<div class="p-3 border-t border-white/10">
+		<div class="p-3 border-t border-border">
 			<div class="flex items-center justify-between">
 				<div class="flex items-center gap-2">
 					<div class="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
@@ -3165,7 +3165,7 @@
 					</div>
 					<span class="text-sm text-foreground">{$apiUser?.name || $username}</span>
 				</div>
-				<button on:click={handleLogout} class="text-xs text-muted-foreground hover:text-foreground px-3 py-1.5 rounded-lg hover:bg-white/10 transition-colors">Logout</button>
+				<button on:click={handleLogout} class="text-xs text-muted-foreground hover:text-foreground px-3 py-1.5 rounded-lg hover:bg-hover-overlay transition-colors">Logout</button>
 			</div>
 		</div>
 	</aside>
@@ -3182,7 +3182,7 @@
 			<div class="flex flex-col gap-0.5">
 				<button
 					on:click={() => { showToolsMenu = false; showProjectModal = true; }}
-					class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-white/10 transition-colors text-left"
+					class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-hover-overlay transition-colors text-left"
 				>
 					<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
@@ -3191,7 +3191,7 @@
 				</button>
 				<button
 					on:click={() => { showToolsMenu = false; showProfileModal = true; }}
-					class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-white/10 transition-colors text-left"
+					class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-hover-overlay transition-colors text-left"
 				>
 					<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
@@ -3200,7 +3200,7 @@
 				</button>
 				<button
 					on:click={() => { showToolsMenu = false; showSubagentManager = true; }}
-					class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-white/10 transition-colors text-left"
+					class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-hover-overlay transition-colors text-left"
 				>
 					<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
@@ -3214,12 +3214,12 @@
 	<!-- Mobile Bottom Navigation - Floating Dock -->
 	<nav class="lg:hidden fixed bottom-3 left-3 right-3 z-50 floating-panel rounded-2xl safe-bottom">
 		<div class="flex items-center justify-around h-12">
-			<button on:click={() => { sidebarOpen = false; showToolsMenu = false; handleNewTab(); }} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="New Chat">
+			<button on:click={() => { sidebarOpen = false; showToolsMenu = false; handleNewTab(); }} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-hover-overlay rounded-xl transition-colors" title="New Chat">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
 				</svg>
 			</button>
-			<button on:click={() => { showToolsMenu = false; sidebarOpen = !sidebarOpen; }} class="relative flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Chats">
+			<button on:click={() => { showToolsMenu = false; sidebarOpen = !sidebarOpen; }} class="relative flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-hover-overlay rounded-xl transition-colors" title="Chats">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
 				</svg>
@@ -3228,17 +3228,17 @@
 				{/if}
 			</button>
 			{#if $isAdmin}
-				<button on:click={() => { sidebarOpen = false; showToolsMenu = !showToolsMenu; }} class="relative flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Tools">
+				<button on:click={() => { sidebarOpen = false; showToolsMenu = !showToolsMenu; }} class="relative flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-hover-overlay rounded-xl transition-colors" title="Tools">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
 					</svg>
 				</button>
-				<a href="/analytics" class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Analytics">
+				<a href="/analytics" class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-hover-overlay rounded-xl transition-colors" title="Analytics">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
 					</svg>
 				</a>
-				<button on:click={() => { sidebarOpen = false; showToolsMenu = false; showSettingsModal = true; }} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Settings">
+				<button on:click={() => { sidebarOpen = false; showToolsMenu = false; showSettingsModal = true; }} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-hover-overlay rounded-xl transition-colors" title="Settings">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -3266,7 +3266,7 @@
 						{@const contextPercent = Math.min((contextUsed / contextMax) * 100, 100)}
 						<div class="relative group">
 							<button
-								class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-white/10 transition-colors"
+								class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
 								title="Context usage: {formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}"
 							>
 								<!-- Circular progress indicator -->
@@ -3356,7 +3356,7 @@
 					{@const hasProfileGroups = headerProfilesOrganized.groupOrder.length > 0}
 					<div class="relative group">
 						<button
-							class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-sm text-foreground hover:bg-white/10 transition-colors"
+							class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-sm text-foreground hover:bg-hover-overlay transition-colors"
 						>
 							<svg class="w-4 h-4 {currentTab.profile ? 'text-muted-foreground' : 'text-amber-500'}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
@@ -3446,7 +3446,7 @@
 				{:else}
 					<div class="relative group">
 						<button
-							class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-sm text-foreground {currentTab.sessionId ? 'cursor-default opacity-75' : 'hover:bg-white/10'} transition-colors"
+							class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-sm text-foreground {currentTab.sessionId ? 'cursor-default opacity-75' : 'hover:bg-hover-overlay'} transition-colors"
 							title={currentTab.sessionId ? 'Project is locked for this chat' : 'Select project'}
 						>
 							<svg class="w-4 h-4 {currentTab.project ? 'text-muted-foreground' : 'text-amber-500'}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -4513,42 +4513,38 @@
 
 	/* Floating Panel Styles */
 	.floating-panel {
-		background: oklch(0.16 0.012 260 / 0.85);
+		background: var(--panel-bg);
 		backdrop-filter: blur(20px);
 		-webkit-backdrop-filter: blur(20px);
-		border: 1px solid oklch(1 0 0 / 0.08);
+		border: 1px solid var(--panel-border);
 		box-shadow:
-			0 0 0 1px oklch(0 0 0 / 0.3),
-			0 8px 32px oklch(0 0 0 / 0.4),
-			0 2px 8px oklch(0 0 0 / 0.2),
-			inset 0 1px 0 oklch(1 0 0 / 0.05);
+			0 0 0 1px var(--panel-shadow-inset) inset,
+			0 8px 32px var(--panel-shadow-outer),
+			0 2px 8px var(--panel-shadow-inner);
 	}
 
 	/* Floating Pill Styles (for header elements) */
 	.floating-pill {
-		background: oklch(0.16 0.012 260 / 0.7);
+		background: var(--panel-bg);
 		backdrop-filter: blur(16px);
 		-webkit-backdrop-filter: blur(16px);
-		border: 1px solid oklch(1 0 0 / 0.06);
+		border: 1px solid var(--panel-border);
 		border-radius: 9999px;
 		box-shadow:
-			0 0 0 1px oklch(0 0 0 / 0.2),
-			0 2px 8px oklch(0 0 0 / 0.15),
-			inset 0 1px 0 oklch(1 0 0 / 0.04);
+			0 2px 8px var(--panel-shadow-inner);
 	}
 
 	/* Floating Island Styles (for input area) */
 	.floating-island {
-		background: oklch(0.16 0.012 260 / 0.85);
+		background: var(--panel-bg);
 		backdrop-filter: blur(20px);
 		-webkit-backdrop-filter: blur(20px);
-		border: 1px solid oklch(1 0 0 / 0.08);
+		border: 1px solid var(--panel-border);
 		border-radius: 1.5rem;
 		box-shadow:
-			0 0 0 1px oklch(0 0 0 / 0.25),
-			0 8px 32px oklch(0 0 0 / 0.35),
-			0 4px 16px oklch(0 0 0 / 0.2),
-			inset 0 1px 0 oklch(1 0 0 / 0.05);
+			0 0 0 1px var(--panel-shadow-inset) inset,
+			0 8px 32px var(--panel-shadow-outer),
+			0 4px 16px var(--panel-shadow-inner);
 	}
 
 	/* Glow effect for active buttons */

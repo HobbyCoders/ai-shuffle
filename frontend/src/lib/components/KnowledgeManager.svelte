@@ -197,7 +197,7 @@
 			</div>
 			<button
 				on:click={() => dispatch('close')}
-				class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/10 transition-colors"
+				class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
 			>
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
@@ -259,7 +259,7 @@
 							type="text"
 							bind:value={searchQuery}
 							placeholder="Search knowledge base..."
-							class="w-full pl-10 pr-4 py-2 rounded-lg bg-white/5 border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+							class="w-full pl-10 pr-4 py-2 rounded-lg bg-muted/50 border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
 							on:keypress={(e) => e.key === 'Enter' && handleSearch()}
 						/>
 					</div>
@@ -273,7 +273,7 @@
 				</div>
 
 				{#if showSearchResults}
-					<div class="bg-white/5 rounded-lg border border-border p-4 space-y-3">
+					<div class="bg-muted/50 rounded-lg border border-border p-4 space-y-3">
 						<div class="flex items-center justify-between">
 							<span class="text-sm text-muted-foreground">
 								{searchResults.length} result{searchResults.length !== 1 ? 's' : ''} for "{searchQuery}"
@@ -288,7 +288,7 @@
 						{#if searchResults.length > 0}
 							<div class="space-y-2 max-h-48 overflow-y-auto">
 								{#each searchResults as result}
-									<div class="p-3 rounded-lg bg-white/5 border border-border">
+									<div class="p-3 rounded-lg bg-muted/50 border border-border">
 										<div class="flex items-center gap-2 mb-1">
 											<span class="text-xs font-mono px-1.5 py-0.5 rounded bg-primary/20 text-primary">
 												{result.filename}
@@ -329,7 +329,7 @@
 				{:else}
 					<div class="space-y-2">
 						{#each documents as doc (doc.id)}
-							<div class="flex items-center gap-3 p-3 rounded-lg bg-white/5 border border-border group">
+							<div class="flex items-center gap-3 p-3 rounded-lg bg-muted/50 border border-border group">
 								<span class="w-8 h-8 rounded-lg bg-primary/20 text-primary text-xs font-mono flex items-center justify-center flex-shrink-0">
 									{getFileIcon(doc.content_type)}
 								</span>
@@ -342,7 +342,7 @@
 								<div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
 									<button
 										on:click={() => showPreview(doc)}
-										class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/10 transition-colors"
+										class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
 										title="Preview"
 									>
 										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -363,7 +363,7 @@
 										</button>
 										<button
 											on:click={() => confirmDelete = null}
-											class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/10 transition-colors"
+											class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
 											title="Cancel"
 										>
 											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -403,7 +403,7 @@
 		<div class="flex justify-end px-5 py-4 border-t border-border">
 			<button
 				on:click={() => dispatch('close')}
-				class="px-4 py-2 rounded-lg bg-white/5 text-foreground font-medium text-sm hover:bg-white/10 transition-colors"
+				class="px-4 py-2 rounded-lg bg-muted/50 text-foreground font-medium text-sm hover:bg-hover-overlay transition-colors"
 			>
 				Close
 			</button>
@@ -419,7 +419,7 @@
 				<h3 class="font-medium text-foreground">{previewDocument.filename}</h3>
 				<button
 					on:click={() => previewDocument = null}
-					class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/10 transition-colors"
+					class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
 				>
 					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />

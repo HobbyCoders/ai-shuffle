@@ -73,7 +73,7 @@
 	aria-label="Tag picker"
 >
 	<!-- Header -->
-	<div class="px-3 py-2 border-b border-border bg-white/5">
+	<div class="px-3 py-2 border-b border-border bg-muted/50">
 		<div class="flex items-center justify-between">
 			<span class="text-xs font-medium text-muted-foreground">Tags</span>
 			<button
@@ -107,7 +107,7 @@
 			{#each allTags as tag (tag.id)}
 				<button
 					on:click={() => toggleTag(tag.id)}
-					class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left hover:bg-white/5 transition-colors"
+					class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left hover:bg-accent/50 transition-colors"
 				>
 					<span
 						class="w-3 h-3 rounded-full flex-shrink-0"
