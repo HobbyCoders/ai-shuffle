@@ -43,48 +43,48 @@
 		switch (connectionStatus) {
 			case 'connected':
 				return {
-					color: 'text-green-500',
-					bgColor: 'bg-green-500',
+					color: 'text-success',
+					bgColor: 'bg-success',
 					label: 'Connected',
 					icon: 'dot',
 					pulse: false
 				};
 			case 'connecting':
 				return {
-					color: 'text-yellow-500',
-					bgColor: 'bg-yellow-500',
+					color: 'text-warning',
+					bgColor: 'bg-warning',
 					label: 'Connecting...',
 					icon: 'spinner',
 					pulse: true
 				};
 			case 'reconnecting':
 				return {
-					color: 'text-orange-500',
-					bgColor: 'bg-orange-500',
+					color: 'text-warning',
+					bgColor: 'bg-warning',
 					label: 'Reconnecting...',
 					icon: 'spinner',
 					pulse: true
 				};
 			case 'disconnected':
 				return {
-					color: 'text-red-500',
-					bgColor: 'bg-red-500',
+					color: 'text-destructive',
+					bgColor: 'bg-destructive',
 					label: 'Disconnected',
 					icon: 'dot',
 					pulse: false
 				};
 			case 'unauthorized':
 				return {
-					color: 'text-amber-500',
-					bgColor: 'bg-amber-500',
+					color: 'text-warning',
+					bgColor: 'bg-warning',
 					label: 'Unauthorized',
 					icon: 'lock',
 					pulse: false
 				};
 			default:
 				return {
-					color: 'text-gray-500',
-					bgColor: 'bg-gray-500',
+					color: 'text-muted-foreground',
+					bgColor: 'bg-muted-foreground',
 					label: 'Unknown',
 					icon: 'dot',
 					pulse: false

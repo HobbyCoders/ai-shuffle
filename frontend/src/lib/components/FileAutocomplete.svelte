@@ -260,9 +260,9 @@
 </script>
 
 {#if visible && (filteredFiles.length > 0 || loading)}
-  <div class="absolute bottom-full left-0 right-0 mb-2 bg-gray-800 border border-gray-700 rounded-lg shadow-xl max-h-64 overflow-hidden z-50">
-    <div class="px-3 py-2 border-b border-gray-700 bg-gray-750 flex items-center justify-between">
-      <span class="text-xs text-gray-400">
+  <div class="absolute bottom-full left-0 right-0 mb-2 bg-popover border border-border rounded-lg shadow-xl max-h-64 overflow-hidden z-50">
+    <div class="px-3 py-2 border-b border-border bg-muted flex items-center justify-between">
+      <span class="text-xs text-muted-foreground">
         {#if loading}
           Loading files...
         {:else}
@@ -275,7 +275,7 @@
       {#if currentPath}
         <button
           type="button"
-          class="text-xs text-blue-400 hover:text-blue-300"
+          class="text-xs text-primary hover:opacity-80"
           onclick={goToRoot}
         >
           ← root
@@ -289,18 +289,18 @@
           <li>
             <button
               type="button"
-              class="w-full px-3 py-2 flex items-center gap-3 text-left hover:bg-gray-700 transition-colors {index === selectedIndex ? 'bg-gray-700' : ''}"
+              class="w-full px-3 py-2 flex items-center gap-3 text-left hover:bg-accent transition-colors {index === selectedIndex ? 'bg-accent' : ''}"
               onclick={() => handleSelect(file)}
               onmouseenter={() => selectedIndex = index}
             >
               <!-- Icon -->
               <div class="flex-shrink-0">
                 {#if file.type === 'directory'}
-                  <svg class="w-4 h-4 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg class="w-4 h-4 text-warning" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
                   </svg>
                 {:else}
-                  <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                   </svg>
                 {/if}
@@ -308,14 +308,14 @@
 
               <!-- Name -->
               <div class="flex-1 min-w-0">
-                <span class="text-sm text-gray-200 truncate block">
+                <span class="text-sm text-foreground truncate block">
                   {file.name}{file.type === 'directory' ? '/' : ''}
                 </span>
               </div>
 
               <!-- Size (for files) -->
               {#if file.type === 'file' && file.size}
-                <span class="text-xs text-gray-500 flex-shrink-0">
+                <span class="text-xs text-muted-foreground flex-shrink-0">
                   {formatSize(file.size)}
                 </span>
               {/if}
@@ -323,7 +323,7 @@
               <!-- Type badge -->
               <div class="flex-shrink-0">
                 {#if file.type === 'directory'}
-                  <span class="px-1.5 py-0.5 text-xs bg-yellow-900/50 text-yellow-300 rounded">
+                  <span class="px-1.5 py-0.5 text-xs bg-warning/20 text-warning rounded">
                     folder
                   </span>
                 {/if}
@@ -334,16 +334,10 @@
       </ul>
     {/if}
 
-    <div class="px-3 py-1.5 border-t border-gray-700 bg-gray-750 text-xs text-gray-500">
-      <kbd class="px-1 py-0.5 bg-gray-700 rounded mr-1">Tab</kbd> navigate/select
-      <kbd class="px-1 py-0.5 bg-gray-700 rounded mx-1">Enter</kbd> select
-      <kbd class="px-1 py-0.5 bg-gray-700 rounded mx-1">Esc</kbd> close
+    <div class="px-3 py-1.5 border-t border-border bg-muted text-xs text-muted-foreground">
+      <kbd class="px-1 py-0.5 bg-secondary rounded mr-1">Tab</kbd> navigate/select
+      <kbd class="px-1 py-0.5 bg-secondary rounded mx-1">Enter</kbd> select
+      <kbd class="px-1 py-0.5 bg-secondary rounded mx-1">Esc</kbd> close
     </div>
   </div>
 {/if}
-
-<style>
-  .bg-gray-750 {
-    background-color: rgb(42, 42, 54);
-  }
-</style>

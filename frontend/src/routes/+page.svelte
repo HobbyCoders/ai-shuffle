@@ -3893,7 +3893,7 @@
 
 			<!-- Permission Queue (shown when there are pending permissions) -->
 			{#if currentTab.pendingPermissions && currentTab.pendingPermissions.length > 0}
-				<div class="border-t border-amber-500/30 bg-amber-900/5 p-3 sm:p-4">
+				<div class="border-t border-warning/30 bg-warning/5 p-3 sm:p-4">
 					<div class="max-w-5xl mx-auto">
 						<PermissionQueue
 							requests={currentTab.pendingPermissions}
@@ -3905,7 +3905,7 @@
 
 			<!-- User Question Queue (shown when there are pending questions from AskUserQuestion tool) -->
 			{#if currentTab.pendingQuestions && currentTab.pendingQuestions.length > 0}
-				<div class="border-t border-blue-500/30 bg-blue-900/5 p-3 sm:p-4">
+				<div class="border-t border-info/30 bg-info/5 p-3 sm:p-4">
 					<div class="max-w-5xl mx-auto">
 						{#each currentTab.pendingQuestions as question (question.request_id)}
 							<UserQuestion

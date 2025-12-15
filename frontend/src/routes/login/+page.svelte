@@ -116,8 +116,8 @@
 	<div class="card p-6 sm:p-8 w-full max-w-md">
 		<div class="text-center mb-6 sm:mb-8">
 			<div class="text-4xl mb-3">🤖</div>
-			<h1 class="text-xl sm:text-2xl font-bold text-white mb-2">AI Hub</h1>
-			<p class="text-gray-400 text-sm sm:text-base">
+			<h1 class="text-xl sm:text-2xl font-bold text-foreground mb-2">AI Hub</h1>
+			<p class="text-muted-foreground text-sm sm:text-base">
 				{#if requires2FA}
 					Enter your verification code
 				{:else if isRegistering}
@@ -132,7 +132,7 @@
 			<!-- 2FA Verification Form -->
 			<form on:submit|preventDefault={handle2FAVerify} class="space-y-4">
 				<div>
-					<label for="twoFactorCode" class="block text-sm font-medium text-gray-300 mb-1">
+					<label for="twoFactorCode" class="block text-sm font-medium text-muted-foreground mb-1">
 						{useRecoveryCode ? 'Recovery Code' : 'Authenticator Code'}
 					</label>
 					<input
@@ -152,15 +152,15 @@
 						type="checkbox"
 						id="useRecoveryCode"
 						bind:checked={useRecoveryCode}
-						class="rounded border-gray-600 bg-gray-700 text-[var(--color-primary)]"
+						class="rounded border-border bg-input text-primary"
 					/>
-					<label for="useRecoveryCode" class="text-sm text-gray-400">
+					<label for="useRecoveryCode" class="text-sm text-muted-foreground">
 						Use a recovery code instead
 					</label>
 				</div>
 
 				{#if twoFactorError}
-					<div class="bg-red-900/50 border border-red-500 text-red-300 px-3 sm:px-4 py-3 rounded-lg text-sm">
+					<div class="bg-destructive/10 border border-destructive text-destructive px-3 sm:px-4 py-3 rounded-lg text-sm">
 						{twoFactorError}
 					</div>
 				{/if}
@@ -190,7 +190,7 @@
 			<!-- Regular Login/Register Form -->
 			<form on:submit|preventDefault={isRegistering ? handleRegister : handleLogin} class="space-y-4">
 				<div>
-					<label for="username" class="block text-sm font-medium text-gray-300 mb-1">
+					<label for="username" class="block text-sm font-medium text-muted-foreground mb-1">
 						Username
 					</label>
 					<input
@@ -206,7 +206,7 @@
 				</div>
 
 				<div>
-					<label for="password" class="block text-sm font-medium text-gray-300 mb-1">
+					<label for="password" class="block text-sm font-medium text-muted-foreground mb-1">
 						Password
 					</label>
 					<input
@@ -223,7 +223,7 @@
 
 				{#if isRegistering}
 				<div>
-					<label for="apiKey" class="block text-sm font-medium text-gray-300 mb-1">
+					<label for="apiKey" class="block text-sm font-medium text-muted-foreground mb-1">
 						API Key
 					</label>
 					<input
@@ -235,14 +235,14 @@
 						required
 						autocomplete="off"
 					/>
-					<p class="text-xs text-gray-500 mt-1">
+					<p class="text-xs text-muted-foreground mt-1">
 						Enter the API key provided by your administrator
 					</p>
 				</div>
 			{/if}
 
 			{#if $authError}
-				<div class="bg-red-900/50 border border-red-500 text-red-300 px-3 sm:px-4 py-3 rounded-lg text-sm">
+				<div class="bg-destructive/10 border border-destructive text-destructive px-3 sm:px-4 py-3 rounded-lg text-sm">
 					{$authError}
 				</div>
 			{/if}
