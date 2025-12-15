@@ -274,11 +274,19 @@ class SessionCreate(SessionBase):
     pass
 
 
+class SessionTag(BaseModel):
+    """Tag attached to a session (minimal tag info)"""
+    id: str
+    name: str
+    color: str
+
+
 class Session(SessionBase):
     """Full session response"""
     id: str
     sdk_session_id: Optional[str] = None
     status: str = "active"
+    is_favorite: bool = False
     total_cost_usd: float = 0.0
     total_tokens_in: int = 0
     total_tokens_out: int = 0
@@ -287,6 +295,7 @@ class Session(SessionBase):
     # Context window tokens = last_input + cache_creation + cache_read (current context size)
     context_tokens: int = 0
     turn_count: int = 0
+    tags: List[SessionTag] = Field(default_factory=list)  # Tags attached to this session
     created_at: datetime
     updated_at: datetime
 
@@ -500,3 +509,36 @@ class RewindStatus(BaseModel):
     """Current rewind status"""
     has_pending: bool
     pending_rewind: Optional[Dict[str, Any]] = None
+
+
+# ============================================================================
+# Tag Models
+# ============================================================================
+
+class TagBase(BaseModel):
+    """Base tag fields"""
+    name: str = Field(..., min_length=1, max_length=50)
+    color: str = Field(default="#6366f1", pattern=r'^#[0-9a-fA-F]{6}$')
+
+
+class TagCreate(TagBase):
+    """Tag creation request"""
+    pass
+
+
+class TagUpdate(BaseModel):
+    """Tag update request"""
+    name: Optional[str] = Field(None, min_length=1, max_length=50)
+    color: Optional[str] = Field(None, pattern=r'^#[0-9a-fA-F]{6}$')
+
+
+class Tag(TagBase):
+    """Full tag response"""
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class SessionTagsUpdate(BaseModel):
+    """Update tags for a session"""
+    tag_ids: List[str] = Field(default_factory=list)

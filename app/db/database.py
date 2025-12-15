@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 # Schema version for migrations
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 13
 
 
 def get_connection() -> sqlite3.Connection:
@@ -132,6 +132,7 @@ def _create_schema(cursor: sqlite3.Cursor):
             sdk_session_id TEXT,
             title TEXT,
             status TEXT DEFAULT 'active',
+            is_favorite BOOLEAN DEFAULT FALSE,
             total_cost_usd REAL DEFAULT 0,
             total_tokens_in INTEGER DEFAULT 0,
             total_tokens_out INTEGER DEFAULT 0,
@@ -236,6 +237,12 @@ def _create_schema(cursor: sqlite3.Cursor):
     except sqlite3.OperationalError:
         pass  # Column already exists
 
+    # Add is_favorite column to sessions (migration for existing DBs)
+    try:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN is_favorite BOOLEAN DEFAULT FALSE")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
     # Login attempts tracking for brute force protection
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS login_attempts (
@@ -327,10 +334,34 @@ def _create_schema(cursor: sqlite3.Cursor):
         )
     """)
 
+    # Tags for organizing sessions
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tags (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            color TEXT NOT NULL DEFAULT '#6366f1',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Junction table for session-tag relationships
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_tags (
+            session_id TEXT NOT NULL,
+            tag_id TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (session_id, tag_id),
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+        )
+    """)
+
     # Create indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_profile ON sessions(profile_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_favorite ON sessions(is_favorite)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_usage_log_created ON usage_log(created_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at)")
@@ -350,6 +381,9 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_subagents_name ON subagents(name)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_permission_rules_profile ON permission_rules(profile_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_permission_rules_tool ON permission_rules(tool_name)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags(session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_tag ON session_tags(tag_id)")
 
 
 def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
@@ -704,33 +738,44 @@ def get_sessions(
     status: Optional[str] = None,
     api_user_id: Optional[str] = None,
     api_users_only: bool = False,
+    favorites_only: bool = False,
+    tag_id: Optional[str] = None,
     limit: int = 50,
     offset: int = 0
 ) -> List[Dict[str, Any]]:
     """Get sessions with optional filters"""
-    query = "SELECT * FROM sessions WHERE 1=1"
-    params = []
+    if tag_id:
+        # Join with session_tags when filtering by tag
+        query = """SELECT DISTINCT s.* FROM sessions s
+                   INNER JOIN session_tags st ON s.id = st.session_id
+                   WHERE st.tag_id = ?"""
+        params = [tag_id]
+    else:
+        query = "SELECT * FROM sessions WHERE 1=1"
+        params = []
 
     if project_id:
-        query += " AND project_id = ?"
+        query += " AND s.project_id = ?" if tag_id else " AND project_id = ?"
         params.append(project_id)
     if profile_id:
-        query += " AND profile_id = ?"
+        query += " AND s.profile_id = ?" if tag_id else " AND profile_id = ?"
         params.append(profile_id)
     if status:
-        query += " AND status = ?"
+        query += " AND s.status = ?" if tag_id else " AND status = ?"
         params.append(status)
+    if favorites_only:
+        query += " AND s.is_favorite = TRUE" if tag_id else " AND is_favorite = TRUE"
     if api_users_only:
         # Filter for sessions that have an API user (exclude admin sessions)
-        query += " AND api_user_id IS NOT NULL"
+        query += " AND s.api_user_id IS NOT NULL" if tag_id else " AND api_user_id IS NOT NULL"
     elif api_user_id is not None:
         if api_user_id:
-            query += " AND api_user_id = ?"
+            query += " AND s.api_user_id = ?" if tag_id else " AND api_user_id = ?"
             params.append(api_user_id)
         else:
-            query += " AND api_user_id IS NULL"
+            query += " AND s.api_user_id IS NULL" if tag_id else " AND api_user_id IS NULL"
 
-    query += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+    query += " ORDER BY s.updated_at DESC LIMIT ? OFFSET ?" if tag_id else " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
 
     with get_db() as conn:
@@ -812,6 +857,35 @@ def delete_session(session_id: str) -> bool:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         return cursor.rowcount > 0
+
+
+def toggle_session_favorite(session_id: str) -> Optional[Dict[str, Any]]:
+    """Toggle the is_favorite flag for a session and return the updated session"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Toggle the favorite status
+        cursor.execute(
+            """UPDATE sessions SET is_favorite = NOT is_favorite, updated_at = ?
+               WHERE id = ?""",
+            (datetime.utcnow().isoformat(), session_id)
+        )
+        if cursor.rowcount == 0:
+            return None
+    return get_session(session_id)
+
+
+def set_session_favorite(session_id: str, is_favorite: bool) -> Optional[Dict[str, Any]]:
+    """Set the is_favorite flag for a session and return the updated session"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """UPDATE sessions SET is_favorite = ?, updated_at = ?
+               WHERE id = ?""",
+            (is_favorite, datetime.utcnow().isoformat(), session_id)
+        )
+        if cursor.rowcount == 0:
+            return None
+    return get_session(session_id)
 
 
 # ============================================================================
@@ -1957,3 +2031,159 @@ def get_all_system_settings() -> Dict[str, str]:
         cursor.execute("SELECT key, value FROM system_settings")
         rows = cursor.fetchall()
         return {row["key"]: row["value"] for row in rows}
+
+
+# ============================================================================
+# Tag Operations
+# ============================================================================
+
+def get_tag(tag_id: str) -> Optional[Dict[str, Any]]:
+    """Get a tag by ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM tags WHERE id = ?", (tag_id,))
+        return row_to_dict(cursor.fetchone())
+
+
+def get_all_tags() -> List[Dict[str, Any]]:
+    """Get all tags ordered by name"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM tags ORDER BY name ASC")
+        return rows_to_list(cursor.fetchall())
+
+
+def create_tag(
+    tag_id: str,
+    name: str,
+    color: str = "#6366f1"
+) -> Dict[str, Any]:
+    """Create a new tag"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO tags (id, name, color, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (tag_id, name, color, now, now)
+        )
+    return get_tag(tag_id)
+
+
+def update_tag(
+    tag_id: str,
+    name: Optional[str] = None,
+    color: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Update a tag"""
+    existing = get_tag(tag_id)
+    if not existing:
+        return None
+
+    updates = []
+    values = []
+    if name is not None:
+        updates.append("name = ?")
+        values.append(name)
+    if color is not None:
+        updates.append("color = ?")
+        values.append(color)
+
+    if updates:
+        updates.append("updated_at = ?")
+        values.append(datetime.utcnow().isoformat())
+        values.append(tag_id)
+
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE tags SET {', '.join(updates)} WHERE id = ?",
+                values
+            )
+
+    return get_tag(tag_id)
+
+
+def delete_tag(tag_id: str) -> bool:
+    """Delete a tag (session_tags will cascade delete)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
+        return cursor.rowcount > 0
+
+
+# ============================================================================
+# Session Tag Operations
+# ============================================================================
+
+def get_session_tags(session_id: str) -> List[Dict[str, Any]]:
+    """Get all tags for a session"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT t.* FROM tags t
+               INNER JOIN session_tags st ON t.id = st.tag_id
+               WHERE st.session_id = ?
+               ORDER BY t.name ASC""",
+            (session_id,)
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def add_session_tag(session_id: str, tag_id: str) -> bool:
+    """Add a tag to a session"""
+    try:
+        now = datetime.utcnow().isoformat()
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """INSERT OR IGNORE INTO session_tags (session_id, tag_id, created_at)
+                   VALUES (?, ?, ?)""",
+                (session_id, tag_id, now)
+            )
+            return cursor.rowcount > 0
+    except Exception:
+        return False
+
+
+def remove_session_tag(session_id: str, tag_id: str) -> bool:
+    """Remove a tag from a session"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM session_tags WHERE session_id = ? AND tag_id = ?",
+            (session_id, tag_id)
+        )
+        return cursor.rowcount > 0
+
+
+def set_session_tags(session_id: str, tag_ids: List[str]) -> List[Dict[str, Any]]:
+    """Set all tags for a session (replaces existing)"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Remove existing tags
+        cursor.execute("DELETE FROM session_tags WHERE session_id = ?", (session_id,))
+        # Add new tags
+        for tag_id in tag_ids:
+            cursor.execute(
+                """INSERT OR IGNORE INTO session_tags (session_id, tag_id, created_at)
+                   VALUES (?, ?, ?)""",
+                (session_id, tag_id, now)
+            )
+    return get_session_tags(session_id)
+
+
+def get_sessions_by_tag(tag_id: str, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+    """Get all sessions with a specific tag"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT s.* FROM sessions s
+               INNER JOIN session_tags st ON s.id = st.session_id
+               WHERE st.tag_id = ?
+               ORDER BY s.updated_at DESC
+               LIMIT ? OFFSET ?""",
+            (tag_id, limit, offset)
+        )
+        return rows_to_list(cursor.fetchall())

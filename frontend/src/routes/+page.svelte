@@ -18,11 +18,13 @@
 		selectionMode,
 		adminSelectionMode,
 		sessionsLoading,
+		sessionsTagFilter,
+		adminSessionsTagFilter,
 		type ChatMessage,
 		type ChatTab,
 		type ApiUser
 	} from '$lib/stores/tabs';
-	import { api, type FileUploadResponse, searchSessions, type SessionSearchResult } from '$lib/api/client';
+	import { api, type FileUploadResponse, searchSessions, type SessionSearchResult, exportSession, toggleSessionFavorite, getTags, type Tag, type SessionTag } from '$lib/api/client';
 	import { marked } from 'marked';
 	import TerminalModal from '$lib/components/TerminalModal.svelte';
 	import SystemMessage from '$lib/components/SystemMessage.svelte';
@@ -40,6 +42,9 @@
 	import SettingsModal from '$lib/components/SettingsModal.svelte';
 	import ProfileModal from '$lib/components/ProfileModal.svelte';
 	import KeyboardShortcutsModal from '$lib/components/KeyboardShortcutsModal.svelte';
+	import ImportSessionModal from '$lib/components/ImportSessionModal.svelte';
+	import TagManager from '$lib/components/TagManager.svelte';
+	import SessionTagPicker from '$lib/components/SessionTagPicker.svelte';
 	import { groups, organizeByGroups } from '$lib/stores/groups';
 	import { executeCommand, isSlashCommand, listCommands, type Command } from '$lib/api/commands';
 	import { groupSessionsByDate, type DateGroup } from '$lib/utils/dateGroups';
@@ -122,7 +127,25 @@
 	// Session sidebar state
 	let sessionSearchQuery = '';
 	let sessionSearchExpanded = false;
+	let showFavoritesOnly = false;
 	let collapsedGroups: Set<string> = new Set(['yesterday', 'week', 'month', 'older']); // Only 'today' expanded by default
+
+	// Tag management state
+	let showTagManager = false;
+	let showTagPicker = false;
+	let tagPickerSessionId: string | null = null;
+	let tagPickerPosition = { x: 0, y: 0 };
+	let tagPickerCurrentTags: SessionTag[] = [];
+	let allTags: Tag[] = [];
+
+	// Load all tags when component mounts
+	async function loadAllTags() {
+		try {
+			allTags = await getTags();
+		} catch (e) {
+			console.error('Failed to load tags:', e);
+		}
+	}
 
 	// Search state
 	let searchResults: SessionSearchResult[] = [];
@@ -163,7 +186,7 @@
 	$: debouncedSearch(sessionSearchQuery);
 
 	// Computed: filtered and grouped sessions (when not searching)
-	$: filteredSessions = $sessions;
+	$: filteredSessions = showFavoritesOnly ? $sessions.filter(s => s.is_favorite) : $sessions;
 	$: groupedSessions = groupSessionsByDate(filteredSessions);
 
 	// Admin sessions grouped (when not searching)
@@ -294,6 +317,9 @@
 	// Keyboard shortcuts modal state
 	let showKeyboardShortcuts = false;
 
+	// Import session modal state
+	let showImportModal = false;
+
 	// Shortcut registrations (for cleanup)
 	let shortcutRegistrations: ShortcutRegistration[] = [];
 
@@ -337,6 +363,7 @@
 		tabs.loadProfiles();
 		tabs.loadSessions();
 		tabs.loadProjects();
+		loadAllTags();
 		// Load admin-specific data if user is admin
 		if ($isAdmin) {
 			tabs.loadApiUsers();
@@ -356,7 +383,8 @@
 				tabs.loadProjects(),
 				loadSubagents(),
 				loadTools(),
-				loadAvailableAITools()
+				loadAvailableAITools(),
+				loadAllTags()
 			];
 			// Load admin-specific data if user is admin
 			if ($isAdmin) {
@@ -466,6 +494,8 @@
 						showSpotlight = false;
 					} else if (showSettingsModal) {
 						showSettingsModal = false;
+					} else if (showImportModal) {
+						showImportModal = false;
 					} else if (showProfileModal) {
 						showProfileModal = false;
 					} else if (showSubagentManager) {
@@ -1406,6 +1436,70 @@
 		}
 	}
 
+	async function handleToggleFavorite(sessionId: string) {
+		try {
+			await toggleSessionFavorite(sessionId);
+			// Refresh the sessions list to get updated favorite status
+			await tabs.loadSessions();
+		} catch (e: any) {
+			console.error('Failed to toggle favorite:', e);
+		}
+	}
+
+	// Tag picker handlers
+	function openTagPicker(sessionId: string, tags: SessionTag[], position: { x: number; y: number }) {
+		tagPickerSessionId = sessionId;
+		tagPickerCurrentTags = tags || [];
+		// Adjust position to stay within viewport
+		const viewportWidth = window.innerWidth;
+		const viewportHeight = window.innerHeight;
+		tagPickerPosition = {
+			x: Math.min(position.x, viewportWidth - 240), // 240px is roughly picker width
+			y: Math.min(position.y, viewportHeight - 300) // 300px is roughly picker height
+		};
+		showTagPicker = true;
+	}
+
+	function closeTagPicker() {
+		showTagPicker = false;
+		tagPickerSessionId = null;
+	}
+
+	async function handleTagsUpdated(event: CustomEvent<SessionTag[]>) {
+		// Update the session in the local sessions list with new tags
+		const updatedTags = event.detail;
+		if (tagPickerSessionId) {
+			// Reload sessions to get the updated tags
+			await tabs.loadSessions($sessionsTagFilter);
+		}
+	}
+
+	function handleOpenTagManager() {
+		showTagPicker = false;
+		showTagManager = true;
+	}
+
+	async function handleTagManagerClose() {
+		showTagManager = false;
+		// Reload tags list
+		await loadAllTags();
+		// Reload sessions to reflect any tag changes
+		await tabs.loadSessions($sessionsTagFilter);
+	}
+
+	async function handleImportSuccess(event: CustomEvent<{ sessionId: string; title: string; messageCount: number }>) {
+		const { sessionId, title } = event.detail;
+
+		// Refresh the sessions list
+		await tabs.loadSessions();
+
+		// Close the sidebar
+		closeSidebar();
+
+		// Open the imported session
+		openSession(sessionId);
+	}
+
 	async function handleBatchDelete(isAdmin: boolean = false) {
 		const count = isAdmin ? $selectedAdminSessionIds.size : $selectedSessionIds.size;
 		if (count === 0) return;
@@ -1759,7 +1853,7 @@
 								<div class="space-y-1">
 									{#each $allTabs as tab}
 										{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
-										{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
+										{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', is_favorite: false, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, tags: [], profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
 										<SessionCard
 											session={tabSession}
 											isOpen={true}
@@ -1768,6 +1862,7 @@
 											showCloseButton={true}
 											on:click={() => { tabs.setActiveTab(tab.id); closeSidebar(); }}
 											on:close={(e) => handleCloseTab(e, tab.id)}
+											on:openTagPicker={(e) => openTagPicker(tabSession.id, tabSession.tags, e.detail)}
 										/>
 									{/each}
 								</div>
@@ -1865,8 +1960,59 @@
 						{:else}
 							<!-- History Header (when not searching) -->
 							<div class="flex items-center justify-between px-2 mb-2">
-								<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">History</div>
 								<div class="flex items-center gap-2">
+									<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">
+										{showFavoritesOnly ? 'Favorites' : 'History'}
+									</div>
+									<!-- Favorites filter toggle -->
+									<button
+										on:click={() => showFavoritesOnly = !showFavoritesOnly}
+										class="p-0.5 rounded transition-colors {showFavoritesOnly ? 'text-yellow-400 hover:text-yellow-500' : 'text-muted-foreground/50 hover:text-yellow-400'}"
+										title={showFavoritesOnly ? 'Show all sessions' : 'Show favorites only'}
+									>
+										<svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill={showFavoritesOnly ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="2">
+											<path stroke-linecap="round" stroke-linejoin="round" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+										</svg>
+									</button>
+									<!-- Tag filter dropdown -->
+									{#if allTags.length > 0}
+										<select
+											class="text-xs bg-transparent border-none text-muted-foreground hover:text-foreground cursor-pointer focus:outline-none max-w-[80px]"
+											value={$sessionsTagFilter || ''}
+											on:change={(e) => tabs.setSessionsTagFilter(e.currentTarget.value || null)}
+										>
+											<option value="">All tags</option>
+											{#each allTags as tag}
+												<option value={tag.id}>{tag.name}</option>
+											{/each}
+										</select>
+									{/if}
+									<!-- Manage tags button -->
+									<button
+										on:click={() => showTagManager = true}
+										class="p-0.5 rounded transition-colors text-muted-foreground/50 hover:text-foreground"
+										title="Manage tags"
+									>
+										<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+										</svg>
+									</button>
+								</div>
+								<div class="flex items-center gap-2">
+									<button
+										on:click={() => showImportModal = true}
+										class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+										title="Import session"
+									>
+										<svg
+											class="w-3.5 h-3.5"
+											fill="none"
+											stroke="currentColor"
+											viewBox="0 0 24 24"
+										>
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+										</svg>
+									</button>
 									<button
 										on:click={() => tabs.loadSessions()}
 										class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
@@ -1926,6 +2072,8 @@
 														on:click={() => { openSession(session.id); closeSidebar(); }}
 														on:delete={() => deleteSession(null, session.id)}
 														on:select={() => tabs.toggleSessionSelection(session.id, false)}
+														on:favorite={() => handleToggleFavorite(session.id)}
+														on:openTagPicker={(e) => openTagPicker(session.id, session.tags, e.detail)}
 													/>
 												{/each}
 											</div>
@@ -1935,7 +2083,9 @@
 								{#if $sessionsLoading}
 									<p class="text-xs text-muted-foreground px-2 animate-pulse">Loading sessions...</p>
 								{:else if filteredSessions.length === 0}
-									<p class="text-xs text-muted-foreground px-2">No chat history yet</p>
+									<p class="text-xs text-muted-foreground px-2">
+										{showFavoritesOnly ? 'No favorites yet. Click the star on any session to add it to favorites.' : 'No chat history yet'}
+									</p>
 								{/if}
 							</div>
 						{/if}
@@ -1954,7 +2104,7 @@
 								<div class="space-y-1">
 									{#each $allTabs as tab}
 										{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
-										{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
+										{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', is_favorite: false, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, tags: [], profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
 										<SessionCard
 											session={tabSession}
 											isOpen={true}
@@ -2631,7 +2781,7 @@
 							<div class="space-y-1">
 								{#each $allTabs as tab}
 									{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
-									{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
+									{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', is_favorite: false, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, tags: [], profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
 									<SessionCard
 										session={tabSession}
 										isOpen={true}
@@ -2710,21 +2860,37 @@
 						<!-- History Header (Mobile) -->
 						<div class="flex items-center justify-between px-2 mb-2">
 							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">History</div>
-							<button
-								on:click={() => tabs.loadSessions()}
-								class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
-								title="Refresh sessions"
-								disabled={$sessionsLoading}
-							>
-								<svg
-									class="w-3.5 h-3.5 {$sessionsLoading ? 'animate-spin' : ''}"
-									fill="none"
-									stroke="currentColor"
-									viewBox="0 0 24 24"
+							<div class="flex items-center gap-2">
+								<button
+									on:click={() => { sidebarOpen = false; showImportModal = true; }}
+									class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+									title="Import session"
 								>
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-								</svg>
-							</button>
+									<svg
+										class="w-3.5 h-3.5"
+										fill="none"
+										stroke="currentColor"
+										viewBox="0 0 24 24"
+									>
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+									</svg>
+								</button>
+								<button
+									on:click={() => tabs.loadSessions()}
+									class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+									title="Refresh sessions"
+									disabled={$sessionsLoading}
+								>
+									<svg
+										class="w-3.5 h-3.5 {$sessionsLoading ? 'animate-spin' : ''}"
+										fill="none"
+										stroke="currentColor"
+										viewBox="0 0 24 24"
+									>
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+									</svg>
+								</button>
+							</div>
 						</div>
 
 						<!-- Grouped Sessions (Mobile) -->
@@ -2777,7 +2943,7 @@
 							<div class="space-y-1">
 								{#each $allTabs as tab}
 									{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
-									{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
+									{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', is_favorite: false, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, tags: [], profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
 									<SessionCard
 										session={tabSession}
 										isOpen={true}
@@ -3302,8 +3468,44 @@
 				{/if}
 				</div>
 
-				<!-- Right: Theme Toggle and Connection Status -->
+				<!-- Right: Export, Theme Toggle and Connection Status -->
 				<div class="flex items-center gap-2">
+					<!-- Export Button (only show when session is saved) -->
+					{#if currentTab.sessionId}
+						<div class="relative group">
+							<button
+								class="w-8 h-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-all"
+								title="Export session"
+							>
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+								</svg>
+							</button>
+							<!-- Export dropdown -->
+							<div class="absolute right-0 top-full mt-1 w-40 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+								<div class="py-1">
+									<button
+										on:click={() => currentTab.sessionId && exportSession(currentTab.sessionId, 'markdown')}
+										class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
+									>
+										<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+										</svg>
+										Export Markdown
+									</button>
+									<button
+										on:click={() => currentTab.sessionId && exportSession(currentTab.sessionId, 'json')}
+										class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
+									>
+										<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+										</svg>
+										Export JSON
+									</button>
+								</div>
+							</div>
+						</div>
+					{/if}
 					<!-- Theme Toggle Button -->
 					<button
 						on:click={() => theme.toggle()}
@@ -3962,6 +4164,33 @@
 
 <!-- Keyboard Shortcuts Modal -->
 <KeyboardShortcutsModal open={showKeyboardShortcuts} onClose={() => showKeyboardShortcuts = false} />
+
+<!-- Import Session Modal -->
+<ImportSessionModal
+	show={showImportModal}
+	on:close={() => showImportModal = false}
+	on:imported={handleImportSuccess}
+/>
+
+<!-- Tag Manager Modal -->
+{#if showTagManager}
+	<TagManager
+		on:close={handleTagManagerClose}
+		on:tagsUpdated={() => loadAllTags()}
+	/>
+{/if}
+
+<!-- Session Tag Picker -->
+{#if showTagPicker && tagPickerSessionId}
+	<SessionTagPicker
+		sessionId={tagPickerSessionId}
+		currentTags={tagPickerCurrentTags}
+		position={tagPickerPosition}
+		on:close={closeTagPicker}
+		on:tagsUpdated={handleTagsUpdated}
+		on:openTagManager={handleOpenTagManager}
+	/>
+{/if}
 
 <!-- Profile Modal -->
 <ProfileModal

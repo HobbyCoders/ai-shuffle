@@ -17,7 +17,20 @@
 		delete: void;
 		close: void;
 		select: void;
+		favorite: void;
+		openTagPicker: { x: number; y: number };
 	}>();
+
+	// Check if session has tags (with fallback for older sessions)
+	$: hasTags = session.tags && session.tags.length > 0;
+	$: displayTags = session.tags?.slice(0, 3) || []; // Show max 3 tags
+	$: moreTags = (session.tags?.length || 0) - 3;
+
+	function handleTagClick(e: MouseEvent) {
+		e.stopPropagation();
+		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+		dispatch('openTagPicker', { x: rect.left, y: rect.bottom + 4 });
+	}
 
 	// Swipe state - swipe to delete directly
 	let touchStartX = 0;
@@ -147,6 +160,17 @@
 					/>
 				{/if}
 
+				<!-- Favorite star button -->
+				<button
+					on:click|stopPropagation={() => dispatch('favorite')}
+					class="flex-shrink-0 p-0.5 rounded transition-colors {session.is_favorite ? 'text-yellow-400 hover:text-yellow-500' : 'text-muted-foreground/40 hover:text-yellow-400 opacity-0 group-hover:opacity-100'}"
+					title={session.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
+				>
+					<svg class="w-4 h-4" viewBox="0 0 24 24" fill={session.is_favorite ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="2">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+					</svg>
+				</button>
+
 				<!-- Status indicator dot + label -->
 				{#if statusDisplay}
 					<span class="w-2 h-2 rounded-full flex-shrink-0 {statusDisplay.color} {isStreaming ? 'animate-pulse' : ''}"></span>
@@ -175,8 +199,8 @@
 			{/if}
 		</p>
 
-		<!-- Bottom row: Message count badge + Time ago + Cost -->
-		<div class="flex items-center gap-2 mt-0.5">
+		<!-- Bottom row: Message count badge + Tags + Time ago + Cost -->
+		<div class="flex items-center gap-2 mt-0.5 flex-wrap">
 			<!-- Message count badge -->
 			<div class="flex items-center gap-1 bg-primary/20 text-primary px-1.5 py-0.5 rounded-md">
 				<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -184,6 +208,35 @@
 				</svg>
 				<span class="text-xs font-medium">{session.turn_count}</span>
 			</div>
+
+			<!-- Tags -->
+			{#if hasTags}
+				<div class="flex items-center gap-1">
+					{#each displayTags as tag (tag.id)}
+						<span
+							class="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium text-white/90"
+							style="background-color: {tag.color}"
+							title={tag.name}
+						>
+							{tag.name.length > 8 ? tag.name.slice(0, 8) + '...' : tag.name}
+						</span>
+					{/each}
+					{#if moreTags > 0}
+						<span class="text-xs text-muted-foreground">+{moreTags}</span>
+					{/if}
+				</div>
+			{/if}
+
+			<!-- Tag button (shows on hover) -->
+			<button
+				on:click={handleTagClick}
+				class="opacity-0 group-hover:opacity-100 p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-white/10 transition-all"
+				title="Manage tags"
+			>
+				<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+				</svg>
+			</button>
 
 			<!-- Time ago -->
 			<span class="text-xs text-muted-foreground">

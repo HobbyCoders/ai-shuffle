@@ -145,6 +145,21 @@ export interface Profile {
 	updated_at: string;
 }
 
+// Tag types
+export interface Tag {
+	id: string;
+	name: string;
+	color: string;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface SessionTag {
+	id: string;
+	name: string;
+	color: string;
+}
+
 // Session types
 export interface Session {
 	id: string;
@@ -152,6 +167,7 @@ export interface Session {
 	project_id: string | null;
 	title: string | null;
 	status: string;
+	is_favorite: boolean;
 	total_cost_usd: number;
 	total_tokens_in: number;
 	total_tokens_out: number;
@@ -159,6 +175,7 @@ export interface Session {
 	cache_read_tokens: number;  // Tokens read from cache (doesn't count toward context)
 	context_tokens: number;  // Current context window size (input + cache_creation + cache_read)
 	turn_count: number;
+	tags: SessionTag[];  // Tags attached to this session
 	created_at: string;
 	updated_at: string;
 }
@@ -347,4 +364,113 @@ export interface WorkspaceValidation {
 	path: string;
 	exists: boolean;
 	writable: boolean;
+}
+
+/**
+ * Toggle the favorite status of a session
+ */
+export async function toggleSessionFavorite(sessionId: string): Promise<Session> {
+	return api.patch<Session>(`/sessions/${sessionId}/favorite`);
+}
+
+/**
+ * Export a session in the specified format and trigger download
+ */
+export async function exportSession(
+	sessionId: string,
+	format: 'markdown' | 'json' = 'markdown'
+): Promise<void> {
+	const response = await fetch(`${API_BASE}/sessions/${sessionId}/export?format=${format}`, {
+		method: 'GET',
+		credentials: 'include'
+	});
+
+	if (!response.ok) {
+		const error = await response.json().catch(() => ({ detail: 'Export failed' }));
+		throw {
+			detail: error.detail || 'Export failed',
+			status: response.status
+		} as ApiError;
+	}
+
+	// Get filename from Content-Disposition header
+	const contentDisposition = response.headers.get('Content-Disposition');
+	let filename = `session-export.${format === 'json' ? 'json' : 'md'}`;
+	if (contentDisposition) {
+		const match = contentDisposition.match(/filename="?([^"]+)"?/);
+		if (match) {
+			filename = match[1];
+		}
+	}
+
+	// Create blob and trigger download
+	const blob = await response.blob();
+	const url = URL.createObjectURL(blob);
+	const a = document.createElement('a');
+	a.href = url;
+	a.download = filename;
+	document.body.appendChild(a);
+	a.click();
+	document.body.removeChild(a);
+	URL.revokeObjectURL(url);
+}
+
+// ============================================================================
+// Tag API Functions
+// ============================================================================
+
+/**
+ * Get all tags
+ */
+export async function getTags(): Promise<Tag[]> {
+	return api.get<Tag[]>('/tags');
+}
+
+/**
+ * Create a new tag
+ */
+export async function createTag(name: string, color: string): Promise<Tag> {
+	return api.post<Tag>('/tags', { name, color });
+}
+
+/**
+ * Update a tag
+ */
+export async function updateTag(tagId: string, data: { name?: string; color?: string }): Promise<Tag> {
+	return api.patch<Tag>(`/tags/${tagId}`, data);
+}
+
+/**
+ * Delete a tag
+ */
+export async function deleteTag(tagId: string): Promise<void> {
+	await api.delete(`/tags/${tagId}`);
+}
+
+/**
+ * Get tags for a session
+ */
+export async function getSessionTags(sessionId: string): Promise<Tag[]> {
+	return api.get<Tag[]>(`/tags/session/${sessionId}`);
+}
+
+/**
+ * Set all tags for a session (replaces existing)
+ */
+export async function setSessionTags(sessionId: string, tagIds: string[]): Promise<Tag[]> {
+	return api.put<Tag[]>(`/tags/session/${sessionId}`, { tag_ids: tagIds });
+}
+
+/**
+ * Add a tag to a session
+ */
+export async function addSessionTag(sessionId: string, tagId: string): Promise<void> {
+	await api.post(`/tags/session/${sessionId}/${tagId}`);
+}
+
+/**
+ * Remove a tag from a session
+ */
+export async function removeSessionTag(sessionId: string, tagId: string): Promise<void> {
+	await api.delete(`/tags/session/${sessionId}/${tagId}`);
 }
