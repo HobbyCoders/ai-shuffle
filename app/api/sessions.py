@@ -43,9 +43,10 @@ def check_session_access(request: Request, session: dict) -> None:
 
 
 def enrich_sessions_with_tags(sessions: List[dict]) -> List[dict]:
-    """Add tags array to each session"""
+    """Add tags array and has_forks field to each session"""
     for session in sessions:
         session["tags"] = database.get_session_tags(session["id"])
+        session["has_forks"] = database.session_has_forks(session["id"])
     return sessions
 
 
@@ -260,6 +261,7 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
 
     session["messages"] = messages
     session["tags"] = database.get_session_tags(session_id)
+    session["has_forks"] = database.session_has_forks(session_id)
 
     logger.info(f"Returning session {session_id} with {len(messages)} messages")
     try:
@@ -1008,5 +1010,201 @@ async def import_session(
         session_id=new_session_id,
         title=title,
         message_count=len(messages_data),
+        status="success"
+    )
+
+
+# ============================================================================
+# Session Fork Endpoint
+# ============================================================================
+
+class ForkSessionRequest(BaseModel):
+    """Request body for forking a session"""
+    message_index: int
+
+
+class ForkSessionResponse(BaseModel):
+    """Response for session fork"""
+    session_id: str
+    title: Optional[str]
+    parent_session_id: str
+    fork_point_message_index: int
+    message_count: int
+    status: str
+
+
+@router.post("/{session_id}/fork", response_model=ForkSessionResponse)
+async def fork_session(
+    request: Request,
+    session_id: str,
+    body: ForkSessionRequest,
+    token: str = Depends(require_auth)
+):
+    """
+    Fork a session from a specific message index.
+
+    Creates a new session that contains messages up to and including the
+    specified message index. The new session references the original as its parent.
+
+    Args:
+        session_id: The session ID to fork from
+        body: Request body containing message_index (0-based index to fork after)
+
+    Returns:
+        Information about the forked session
+    """
+    import logging
+    import uuid
+    import json
+    from pathlib import Path
+    from app.core.config import settings
+    from app.core.jsonl_parser import get_session_jsonl_path, parse_jsonl_file
+
+    logger = logging.getLogger(__name__)
+
+    # Get the original session
+    original_session = database.get_session(session_id)
+    if not original_session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}"
+        )
+
+    check_session_access(request, original_session)
+
+    sdk_session_id = original_session.get("sdk_session_id")
+    if not sdk_session_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot fork session without SDK session ID"
+        )
+
+    # Get working directory
+    working_dir = "/workspace"
+    project_id = original_session.get("project_id")
+    if project_id:
+        project = database.get_project(project_id)
+        if project:
+            working_dir = str(settings.workspace_dir / project["path"])
+
+    # Find the original JSONL file
+    original_jsonl_path = get_session_jsonl_path(sdk_session_id, working_dir)
+    if not original_jsonl_path:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot fork session: JSONL file not found"
+        )
+
+    # Parse original JSONL to get messages up to fork point
+    original_entries = list(parse_jsonl_file(original_jsonl_path))
+
+    # Count actual display messages (filter out queue-operation, file-history-snapshot, etc.)
+    display_entries = []
+    for entry in original_entries:
+        entry_type = entry.get("type")
+        # Skip non-message entries
+        if entry_type in ("queue-operation", "file-history-snapshot"):
+            continue
+        # Skip meta messages
+        if entry.get("isMeta"):
+            continue
+        # Skip sidechain messages
+        if entry.get("isSidechain"):
+            continue
+        display_entries.append(entry)
+
+    # Validate message_index
+    if body.message_index < 0 or body.message_index >= len(display_entries):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid message_index: {body.message_index}. Session has {len(display_entries)} messages (0-{len(display_entries)-1})"
+        )
+
+    # Find the actual index in original_entries that corresponds to the message_index in display_entries
+    display_count = 0
+    fork_entry_index = 0
+    for i, entry in enumerate(original_entries):
+        entry_type = entry.get("type")
+        if entry_type in ("queue-operation", "file-history-snapshot"):
+            continue
+        if entry.get("isMeta"):
+            continue
+        if entry.get("isSidechain"):
+            continue
+
+        if display_count == body.message_index:
+            fork_entry_index = i
+            break
+        display_count += 1
+
+    # Generate new IDs
+    new_session_id = f"ses-{uuid.uuid4().hex[:16]}"
+    new_sdk_session_id = str(uuid.uuid4())
+
+    # Get API user if applicable
+    api_user = get_api_user_from_request(request)
+    api_user_id = api_user['id'] if api_user else None
+
+    # Create title for fork
+    original_title = original_session.get('title') or 'Untitled'
+    fork_title = f"Fork of {original_title}"
+
+    # Create the forked session in database
+    forked_session = database.create_session(
+        session_id=new_session_id,
+        profile_id=original_session.get('profile_id'),
+        project_id=original_session.get('project_id'),
+        title=fork_title,
+        api_user_id=api_user_id,
+        parent_session_id=session_id,
+        fork_point_message_index=body.message_index
+    )
+
+    # Update with SDK session ID
+    database.update_session(
+        session_id=new_session_id,
+        sdk_session_id=new_sdk_session_id
+    )
+
+    # Create new JSONL file with entries up to and including fork point
+    try:
+        # Get Claude projects directory
+        claude_projects_dir = settings.get_claude_projects_dir
+
+        # Convert working dir to Claude's project directory format
+        project_dir_name = working_dir.replace("/", "-")
+        project_dir = claude_projects_dir / project_dir_name
+
+        # Ensure project directory exists
+        project_dir.mkdir(parents=True, exist_ok=True)
+
+        new_jsonl_path = project_dir / f"{new_sdk_session_id}.jsonl"
+
+        # Write entries up to and including fork point
+        with open(new_jsonl_path, 'w', encoding='utf-8') as f:
+            for i, entry in enumerate(original_entries):
+                if i > fork_entry_index:
+                    break
+                f.write(json.dumps(entry) + '\n')
+
+        logger.info(f"Created forked JSONL file: {new_jsonl_path} with {fork_entry_index + 1} entries")
+
+    except Exception as e:
+        logger.error(f"Failed to create JSONL file for forked session: {e}")
+        # Delete the session we just created since fork failed
+        database.delete_session(new_session_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create forked session: {str(e)}"
+        )
+
+    logger.info(f"Forked session {session_id} to {new_session_id} at message index {body.message_index}")
+
+    return ForkSessionResponse(
+        session_id=new_session_id,
+        title=fork_title,
+        parent_session_id=session_id,
+        fork_point_message_index=body.message_index,
+        message_count=fork_entry_index + 1,
         status="success"
     )

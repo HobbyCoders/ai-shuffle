@@ -24,7 +24,7 @@
 		type ChatTab,
 		type ApiUser
 	} from '$lib/stores/tabs';
-	import { api, type FileUploadResponse, searchSessions, type SessionSearchResult, exportSession, toggleSessionFavorite, getTags, type Tag, type SessionTag } from '$lib/api/client';
+	import { api, type FileUploadResponse, searchSessions, type SessionSearchResult, exportSession, toggleSessionFavorite, getTags, forkSession, type Tag, type SessionTag, type ForkSessionResponse } from '$lib/api/client';
 	import { marked } from 'marked';
 	import TerminalModal from '$lib/components/TerminalModal.svelte';
 	import SystemMessage from '$lib/components/SystemMessage.svelte';
@@ -45,6 +45,7 @@
 	import ImportSessionModal from '$lib/components/ImportSessionModal.svelte';
 	import TagManager from '$lib/components/TagManager.svelte';
 	import SessionTagPicker from '$lib/components/SessionTagPicker.svelte';
+	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
 	import { groups, organizeByGroups } from '$lib/stores/groups';
 	import { executeCommand, isSlashCommand, listCommands, type Command } from '$lib/api/commands';
 	import { groupSessionsByDate, type DateGroup } from '$lib/utils/dateGroups';
@@ -320,6 +321,9 @@
 	// Import session modal state
 	let showImportModal = false;
 
+	// Advanced search modal state (Cmd+Shift+F)
+	let showAdvancedSearch = false;
+
 	// Shortcut registrations (for cleanup)
 	let shortcutRegistrations: ShortcutRegistration[] = [];
 
@@ -490,6 +494,8 @@
 					// Close modals in priority order
 					if (showKeyboardShortcuts) {
 						showKeyboardShortcuts = false;
+					} else if (showAdvancedSearch) {
+						showAdvancedSearch = false;
 					} else if (showSpotlight) {
 						showSpotlight = false;
 					} else if (showSettingsModal) {
@@ -516,6 +522,17 @@
 				cmdOrCtrl: true,
 				category: 'navigation',
 				action: () => { showSettingsModal = true; }
+			}),
+
+			// Advanced search (Cmd+Shift+F)
+			registerShortcut({
+				id: 'advanced-search',
+				description: 'Advanced search',
+				key: 'f',
+				cmdOrCtrl: true,
+				shift: true,
+				category: 'navigation',
+				action: () => { showAdvancedSearch = !showAdvancedSearch; }
 			})
 		];
 
@@ -1370,6 +1387,37 @@
 			}, 2000);
 		} catch (e) {
 			console.error('Failed to copy to clipboard:', e);
+		}
+	}
+
+	// Fork session from a specific message
+	let forkingMessageId: string | null = null;
+
+	async function handleForkSession(sessionId: string | undefined, messageIndex: number, messageId: string) {
+		if (!sessionId) {
+			alert('Cannot fork: no session ID');
+			return;
+		}
+		if (forkingMessageId) return; // Prevent double-clicks
+
+		forkingMessageId = messageId;
+		try {
+			const result = await forkSession(sessionId, messageIndex);
+			if (result.status === 'success') {
+				// Refresh sessions list
+				await tabs.loadSessions();
+				// Open the new forked session
+				await tabs.openSession(result.session_id);
+				alert(`Session forked successfully! New session: "${result.title}"`);
+			} else {
+				alert('Fork failed: ' + result.status);
+			}
+		} catch (e: unknown) {
+			const error = e as { detail?: string };
+			console.error('Failed to fork session:', e);
+			alert('Failed to fork session: ' + (error.detail || 'Unknown error'));
+		} finally {
+			forkingMessageId = null;
 		}
 	}
 
@@ -3584,7 +3632,7 @@
 				{:else}
 					<!-- Messages -->
 					<div class="max-w-5xl mx-auto px-4 sm:px-8 py-4 space-y-4">
-						{#each currentTab.messages as message}
+						{#each currentTab.messages as message, messageIndex}
 							{#if message.role === 'user'}
 								<!-- User Message - Anvil Style -->
 								<div class="w-full">
@@ -3637,6 +3685,27 @@
 															<span>Copy</span>
 														{/if}
 													</button>
+													<!-- Fork from here button -->
+													{#if currentTab.sessionId}
+														<button
+															class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
+															on:click={() => handleForkSession(currentTab.sessionId, messageIndex, message.id)}
+															title="Fork conversation from this point"
+															disabled={forkingMessageId === message.id}
+														>
+															{#if forkingMessageId === message.id}
+																<svg class="w-3.5 h-3.5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+																</svg>
+																<span>Forking...</span>
+															{:else}
+																<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2" />
+																</svg>
+																<span>Fork</span>
+															{/if}
+														</button>
+													{/if}
 												</div>
 											{/if}
 										</div>
@@ -4177,6 +4246,16 @@
 
 <!-- Keyboard Shortcuts Modal -->
 <KeyboardShortcutsModal open={showKeyboardShortcuts} onClose={() => showKeyboardShortcuts = false} />
+
+<!-- Advanced Search Modal (Cmd+Shift+F) -->
+<AdvancedSearch
+	visible={showAdvancedSearch}
+	onClose={() => showAdvancedSearch = false}
+	onSelectSession={(sessionId) => {
+		tabs.openSession(sessionId);
+		showAdvancedSearch = false;
+	}}
+/>
 
 <!-- Import Session Modal -->
 <ImportSessionModal

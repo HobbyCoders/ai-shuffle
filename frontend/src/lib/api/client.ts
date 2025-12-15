@@ -176,6 +176,10 @@ export interface Session {
 	context_tokens: number;  // Current context window size (input + cache_creation + cache_read)
 	turn_count: number;
 	tags: SessionTag[];  // Tags attached to this session
+	// Fork/branch fields
+	parent_session_id: string | null;  // ID of parent session if this is a fork
+	fork_point_message_index: number | null;  // Message index where fork occurred
+	has_forks: boolean;  // True if this session has forked children
 	created_at: string;
 	updated_at: string;
 }
@@ -476,6 +480,28 @@ export async function removeSessionTag(sessionId: string, tagId: string): Promis
 }
 
 // ============================================================================
+// Session Fork API Functions
+// ============================================================================
+
+export interface ForkSessionResponse {
+	session_id: string;
+	title: string | null;
+	parent_session_id: string;
+	fork_point_message_index: number;
+	message_count: number;
+	status: string;
+}
+
+/**
+ * Fork a session from a specific message index
+ * @param sessionId The session to fork from
+ * @param messageIndex The 0-based message index to fork after
+ */
+export async function forkSession(sessionId: string, messageIndex: number): Promise<ForkSessionResponse> {
+	return api.post<ForkSessionResponse>(`/sessions/${sessionId}/fork`, { message_index: messageIndex });
+}
+
+// ============================================================================
 // Analytics API Types and Functions
 // ============================================================================
 
@@ -582,4 +608,148 @@ export async function exportAnalyticsCSV(startDate: string, endDate: string): Pr
 	a.click();
 	document.body.removeChild(a);
 	URL.revokeObjectURL(url);
+}
+
+// ============================================================================
+// Advanced Search API Types and Functions
+// ============================================================================
+
+export interface SearchMatch {
+	message_index: number;
+	snippet: string;
+	role: string;
+	timestamp: string | null;
+}
+
+export interface AdvancedSearchResult {
+	session_id: string;
+	session_title: string | null;
+	created_at: string;
+	updated_at: string;
+	profile_id: string | null;
+	profile_name: string | null;
+	project_id: string | null;
+	matches: SearchMatch[];
+	match_count: number;
+}
+
+export interface AdvancedSearchParams {
+	q: string;
+	start_date?: string;
+	end_date?: string;
+	profile_id?: string;
+	project_id?: string;
+	in_code_only?: boolean;
+	regex?: boolean;
+	limit?: number;
+	offset?: number;
+}
+
+/**
+ * Advanced search across all sessions with filters
+ */
+export async function advancedSearch(params: AdvancedSearchParams): Promise<AdvancedSearchResult[]> {
+	const searchParams = new URLSearchParams({ q: params.q });
+	if (params.start_date) searchParams.set('start_date', params.start_date);
+	if (params.end_date) searchParams.set('end_date', params.end_date);
+	if (params.profile_id) searchParams.set('profile_id', params.profile_id);
+	if (params.project_id) searchParams.set('project_id', params.project_id);
+	if (params.in_code_only) searchParams.set('in_code_only', 'true');
+	if (params.regex) searchParams.set('regex', 'true');
+	if (params.limit) searchParams.set('limit', params.limit.toString());
+	if (params.offset) searchParams.set('offset', params.offset.toString());
+
+	return api.get<AdvancedSearchResult[]>(`/search?${searchParams.toString()}`);
+}
+
+/**
+ * Get search suggestions based on session titles
+ */
+export async function getSearchSuggestions(query: string, limit: number = 10): Promise<{ suggestions: string[] }> {
+	const params = new URLSearchParams({ q: query, limit: limit.toString() });
+	return api.get<{ suggestions: string[] }>(`/search/suggestions?${params.toString()}`);
+}
+
+// ============================================================================
+// Template API Types and Functions
+// ============================================================================
+
+export interface Template {
+	id: string;
+	name: string;
+	description: string | null;
+	prompt: string;
+	profile_id: string | null;
+	icon: string | null;
+	category: string | null;
+	is_builtin: boolean;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface TemplateCreate {
+	name: string;
+	description?: string | null;
+	prompt: string;
+	profile_id?: string | null;
+	icon?: string | null;
+	category?: string | null;
+}
+
+export interface TemplateUpdate {
+	name?: string;
+	description?: string | null;
+	prompt?: string;
+	profile_id?: string | null;
+	icon?: string | null;
+	category?: string | null;
+}
+
+/**
+ * Get all templates, optionally filtered by profile or category
+ */
+export async function getTemplates(options: {
+	profileId?: string;
+	category?: string;
+} = {}): Promise<Template[]> {
+	const params = new URLSearchParams();
+	if (options.profileId) params.set('profile_id', options.profileId);
+	if (options.category) params.set('category', options.category);
+	const qs = params.toString();
+	return api.get<Template[]>(`/templates${qs ? '?' + qs : ''}`);
+}
+
+/**
+ * Get a single template by ID
+ */
+export async function getTemplate(templateId: string): Promise<Template> {
+	return api.get<Template>(`/templates/${templateId}`);
+}
+
+/**
+ * Get all template categories
+ */
+export async function getTemplateCategories(): Promise<string[]> {
+	return api.get<string[]>('/templates/categories');
+}
+
+/**
+ * Create a new template
+ */
+export async function createTemplate(data: TemplateCreate): Promise<Template> {
+	return api.post<Template>('/templates', data);
+}
+
+/**
+ * Update an existing template
+ */
+export async function updateTemplate(templateId: string, data: TemplateUpdate): Promise<Template> {
+	return api.patch<Template>(`/templates/${templateId}`, data);
+}
+
+/**
+ * Delete a template
+ */
+export async function deleteTemplate(templateId: string): Promise<void> {
+	await api.delete(`/templates/${templateId}`);
 }

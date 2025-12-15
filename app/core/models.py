@@ -296,6 +296,10 @@ class Session(SessionBase):
     context_tokens: int = 0
     turn_count: int = 0
     tags: List[SessionTag] = Field(default_factory=list)  # Tags attached to this session
+    # Fork/branch fields
+    parent_session_id: Optional[str] = None  # ID of parent session if this is a fork
+    fork_point_message_index: Optional[int] = None  # Message index where fork occurred
+    has_forks: bool = False  # True if this session has forked children
     created_at: datetime
     updated_at: datetime
 
@@ -612,3 +616,40 @@ class AnalyticsSummaryResponse(BaseModel):
     usage_stats: UsageStats
     top_profiles: List[CostBreakdownItem] = []
     recent_trend: List[UsageTrend] = []
+
+
+# ============================================================================
+# Template Models
+# ============================================================================
+
+class TemplateBase(BaseModel):
+    """Base template fields"""
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = None
+    prompt: str = Field(..., min_length=1)
+    profile_id: Optional[str] = None  # Link to specific profile, null for all
+    icon: Optional[str] = None  # Emoji or icon name
+    category: Optional[str] = None  # For grouping (e.g., "coding", "writing")
+
+
+class TemplateCreate(TemplateBase):
+    """Template creation request"""
+    pass
+
+
+class TemplateUpdate(BaseModel):
+    """Template update request - all fields optional"""
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    description: Optional[str] = None
+    prompt: Optional[str] = Field(None, min_length=1)
+    profile_id: Optional[str] = None
+    icon: Optional[str] = None
+    category: Optional[str] = None
+
+
+class Template(TemplateBase):
+    """Full template response"""
+    id: str
+    is_builtin: bool = False
+    created_at: datetime
+    updated_at: datetime

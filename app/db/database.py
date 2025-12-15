@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 # Schema version for migrations
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 15
 
 
 def get_connection() -> sqlite3.Connection:
@@ -243,6 +243,16 @@ def _create_schema(cursor: sqlite3.Cursor):
     except sqlite3.OperationalError:
         pass  # Column already exists
 
+    # Add fork columns to sessions (migration for existing DBs)
+    try:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN fork_point_message_index INTEGER")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
     # Login attempts tracking for brute force protection
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS login_attempts (
@@ -357,7 +367,26 @@ def _create_schema(cursor: sqlite3.Cursor):
         )
     """)
 
+    # Session templates for starter prompts
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS templates (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            prompt TEXT NOT NULL,
+            profile_id TEXT,
+            icon TEXT,
+            category TEXT,
+            is_builtin BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL
+        )
+    """)
+
     # Create indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_templates_category ON templates(category)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_templates_profile ON templates(profile_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_profile ON sessions(profile_id)")
@@ -384,6 +413,7 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags(session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_tag ON session_tags(tag_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)")
 
 
 def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
@@ -789,16 +819,18 @@ def create_session(
     profile_id: str,
     project_id: Optional[str] = None,
     title: Optional[str] = None,
-    api_user_id: Optional[str] = None
+    api_user_id: Optional[str] = None,
+    parent_session_id: Optional[str] = None,
+    fork_point_message_index: Optional[int] = None
 ) -> Dict[str, Any]:
     """Create a new session"""
     now = datetime.utcnow().isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (session_id, profile_id, project_id, title, api_user_id, now, now)
+            """INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, now, now)
         )
     return get_session(session_id)
 
@@ -886,6 +918,30 @@ def set_session_favorite(session_id: str, is_favorite: bool) -> Optional[Dict[st
         if cursor.rowcount == 0:
             return None
     return get_session(session_id)
+
+
+def session_has_forks(session_id: str) -> bool:
+    """Check if a session has any forked children"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) as count FROM sessions WHERE parent_session_id = ?",
+            (session_id,)
+        )
+        row = cursor.fetchone()
+        return row["count"] > 0 if row else False
+
+
+def get_session_forks(session_id: str) -> List[Dict[str, Any]]:
+    """Get all forked children of a session"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT * FROM sessions WHERE parent_session_id = ?
+               ORDER BY created_at DESC""",
+            (session_id,)
+        )
+        return rows_to_list(cursor.fetchall())
 
 
 # ============================================================================
@@ -2470,3 +2526,154 @@ def get_analytics_top_sessions(
                 "created_at": row["created_at"]
             })
         return result
+
+
+# ============================================================================
+# Template Operations
+# ============================================================================
+
+def get_template(template_id: str) -> Optional[Dict[str, Any]]:
+    """Get a template by ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM templates WHERE id = ?", (template_id,))
+        return row_to_dict(cursor.fetchone())
+
+
+def get_all_templates(
+    profile_id: Optional[str] = None,
+    category: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Get all templates with optional filters"""
+    query = "SELECT * FROM templates WHERE 1=1"
+    params = []
+
+    if profile_id:
+        # Return templates for this profile OR templates with no profile (global)
+        query += " AND (profile_id = ? OR profile_id IS NULL)"
+        params.append(profile_id)
+
+    if category:
+        query += " AND category = ?"
+        params.append(category)
+
+    query += " ORDER BY is_builtin DESC, category ASC, name ASC"
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        return rows_to_list(cursor.fetchall())
+
+
+def create_template(
+    template_id: str,
+    name: str,
+    prompt: str,
+    description: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    icon: Optional[str] = None,
+    category: Optional[str] = None,
+    is_builtin: bool = False
+) -> Dict[str, Any]:
+    """Create a new template"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO templates (id, name, description, prompt, profile_id, icon, category, is_builtin, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (template_id, name, description, prompt, profile_id, icon, category, is_builtin, now, now)
+        )
+    return get_template(template_id)
+
+
+def update_template(
+    template_id: str,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    prompt: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    icon: Optional[str] = None,
+    category: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Update a template"""
+    existing = get_template(template_id)
+    if not existing:
+        return None
+
+    # Don't allow updating builtin templates
+    if existing.get("is_builtin"):
+        return None
+
+    updates = []
+    values = []
+
+    if name is not None:
+        updates.append("name = ?")
+        values.append(name)
+    if description is not None:
+        updates.append("description = ?")
+        values.append(description if description else None)
+    if prompt is not None:
+        updates.append("prompt = ?")
+        values.append(prompt)
+    if profile_id is not None:
+        updates.append("profile_id = ?")
+        values.append(profile_id if profile_id else None)
+    if icon is not None:
+        updates.append("icon = ?")
+        values.append(icon if icon else None)
+    if category is not None:
+        updates.append("category = ?")
+        values.append(category if category else None)
+
+    if updates:
+        updates.append("updated_at = ?")
+        values.append(datetime.utcnow().isoformat())
+        values.append(template_id)
+
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE templates SET {', '.join(updates)} WHERE id = ?",
+                values
+            )
+
+    return get_template(template_id)
+
+
+def delete_template(template_id: str) -> bool:
+    """Delete a template"""
+    existing = get_template(template_id)
+    if not existing:
+        return False
+
+    # Don't allow deleting builtin templates
+    if existing.get("is_builtin"):
+        return False
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM templates WHERE id = ?", (template_id,))
+        return cursor.rowcount > 0
+
+
+def get_template_categories() -> List[str]:
+    """Get all unique template categories"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT DISTINCT category FROM templates WHERE category IS NOT NULL ORDER BY category ASC"
+        )
+        return [row["category"] for row in cursor.fetchall()]
+
+
+def set_template_builtin(template_id: str, is_builtin: bool) -> bool:
+    """Set the is_builtin flag for a template"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE templates SET is_builtin = ?, updated_at = ? WHERE id = ?",
+            (is_builtin, datetime.utcnow().isoformat(), template_id)
+        )
+        return cursor.rowcount > 0
