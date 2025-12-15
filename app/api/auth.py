@@ -15,12 +15,16 @@ from fastapi import APIRouter, HTTPException, Response, Request, Depends, status
 
 from app.core.models import (
     SetupRequest, LoginRequest, AuthStatus, HealthResponse, ApiKeyLoginRequest,
-    ApiUserRegisterRequest, ApiUserLoginRequest, ChangePasswordRequest
+    ApiUserRegisterRequest, ApiUserLoginRequest, ChangePasswordRequest,
+    TwoFactorLoginRequest
 )
 import bcrypt
+import json
 from app.core.auth import auth_service
 from app.core.config import settings
 from app.core import encryption
+from app.core import totp_service
+from app.core import audit_service
 from app.db import database as db
 
 logger = logging.getLogger(__name__)
@@ -333,6 +337,7 @@ async def login(req: Request, login_data: LoginRequest, response: Response):
     if not token:
         # Record failed attempt
         record_login_result(req, login_data.username, success=False)
+        audit_service.log_login_failure(req, login_data.username, "invalid_credentials")
         client_ip = get_client_ip(req)
         logger.warning(f"Failed login attempt for user '{login_data.username}' from IP {client_ip}")
         raise HTTPException(
@@ -340,8 +345,29 @@ async def login(req: Request, login_data: LoginRequest, response: Response):
             detail="Invalid credentials"
         )
 
+    # Check if 2FA is enabled
+    admin = db.get_admin()
+    if admin and admin.get("totp_enabled"):
+        # Create a pending 2FA session instead of completing login
+        pending_token = secrets.token_urlsafe(32)
+        expires_at = datetime.utcnow() + timedelta(minutes=5)  # 5 min to complete 2FA
+        db.create_pending_2fa_session(pending_token, login_data.username, expires_at)
+
+        client_ip = get_client_ip(req)
+        logger.info(f"2FA required for user '{login_data.username}' from IP {client_ip}")
+
+        return {
+            "status": "2fa_required",
+            "message": "Two-factor authentication required",
+            "requires_2fa": True,
+            "pending_2fa_token": pending_token,
+            "is_admin": True
+        }
+
+    # No 2FA - complete login normally
     # Record successful login
     record_login_result(req, login_data.username, success=True)
+    audit_service.log_login_success(req, login_data.username, "admin", "password")
     client_ip = get_client_ip(req)
     logger.info(f"Successful admin login for user '{login_data.username}' from IP {client_ip}")
 
@@ -655,6 +681,115 @@ async def logout(request: Request, response: Response):
 
     response.delete_cookie(key="session")
     return {"status": "ok", "message": "Logged out"}
+
+
+@router.post("/verify-2fa")
+async def verify_2fa(
+    req: Request,
+    verify_data: TwoFactorLoginRequest,
+    response: Response
+):
+    """
+    Complete login by verifying 2FA code.
+
+    After password authentication returns requires_2fa=True, the client
+    must call this endpoint with the pending_2fa_token and a valid
+    TOTP code or recovery code.
+    """
+    # Get pending token from request body or header
+    pending_token = req.headers.get("X-2FA-Token")
+    if not pending_token:
+        try:
+            body = await req.json()
+            pending_token = body.get("pending_2fa_token")
+        except Exception:
+            pass
+
+    if not pending_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing pending 2FA token"
+        )
+
+    # Validate pending session
+    pending_session = db.get_pending_2fa_session(pending_token)
+    if not pending_session:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired 2FA session. Please login again."
+        )
+
+    username = pending_session["username"]
+
+    # Get admin to verify 2FA
+    admin = db.get_admin()
+    if not admin or admin["username"] != username:
+        db.delete_pending_2fa_session(pending_token)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid session"
+        )
+
+    # Verify the code
+    verified = False
+    method = "totp"
+
+    if verify_data.use_recovery_code:
+        # Try recovery code
+        method = "recovery_code"
+        is_valid, used_hash = totp_service.verify_recovery_code(
+            admin.get("recovery_codes", "[]"),
+            verify_data.code
+        )
+        if is_valid and used_hash:
+            # Remove used recovery code
+            updated_codes = totp_service.remove_used_recovery_code(
+                admin["recovery_codes"],
+                used_hash
+            )
+            db.update_admin_recovery_codes(updated_codes)
+            remaining = totp_service.get_recovery_codes_count(updated_codes)
+            audit_service.log_recovery_code_used(req, username, remaining)
+            verified = True
+            logger.info(f"Recovery code used for user '{username}', {remaining} codes remaining")
+    else:
+        # Try TOTP code
+        if totp_service.verify_totp(admin.get("totp_secret", ""), verify_data.code):
+            verified = True
+
+    if not verified:
+        audit_service.log_2fa_verification_failure(req, username, method)
+        client_ip = get_client_ip(req)
+        logger.warning(f"Failed 2FA verification for user '{username}' from IP {client_ip}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid verification code"
+        )
+
+    # 2FA verified - complete login
+    db.delete_pending_2fa_session(pending_token)
+
+    # Create session
+    token = auth_service.create_session()
+
+    # Record successful login
+    record_login_result(req, username, success=True)
+    audit_service.log_login_success(req, username, "admin", f"password+{method}")
+    audit_service.log_2fa_verification_success(req, username, method)
+    client_ip = get_client_ip(req)
+    logger.info(f"Successful 2FA login for user '{username}' from IP {client_ip}")
+
+    # Set session cookie
+    response.set_cookie(
+        key="session",
+        value=token,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+        max_age=settings.session_expire_days * 24 * 60 * 60
+    )
+
+    return {"status": "ok", "message": "Logged in", "is_admin": True}
 
 
 @router.post("/change-password")

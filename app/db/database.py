@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 # Schema version for migrations
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 18
 
 
 def get_connection() -> sqlite3.Connection:
@@ -398,6 +398,77 @@ def _create_schema(cursor: sqlite3.Cursor):
         )
     """)
 
+    # Audit log for security events
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id TEXT PRIMARY KEY,
+            user_id TEXT,
+            user_type TEXT DEFAULT 'admin',
+            event_type TEXT NOT NULL,
+            ip_address TEXT,
+            user_agent TEXT,
+            details JSON,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Knowledge base documents for per-project context injection
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS knowledge_documents (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            content TEXT NOT NULL,
+            content_type TEXT DEFAULT 'text/plain',
+            file_size INTEGER DEFAULT 0,
+            chunk_count INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Knowledge base chunks for chunked content (enables future vector search)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS knowledge_chunks (
+            id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            metadata JSON DEFAULT '{}',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (document_id) REFERENCES knowledge_documents(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Pending 2FA sessions (for login flow)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pending_2fa_sessions (
+            token TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Add 2FA columns to admin table (migration for existing DBs)
+    try:
+        cursor.execute("ALTER TABLE admin ADD COLUMN totp_secret TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        cursor.execute("ALTER TABLE admin ADD COLUMN totp_enabled BOOLEAN DEFAULT FALSE")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        cursor.execute("ALTER TABLE admin ADD COLUMN recovery_codes TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        cursor.execute("ALTER TABLE admin ADD COLUMN totp_verified_at TIMESTAMP")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
     # Create indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_templates_category ON templates(category)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_templates_profile ON templates(profile_id)")
@@ -429,6 +500,49 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_tag ON session_tags(tag_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_webhooks_active ON webhooks(is_active)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_documents_project ON knowledge_documents(project_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_document ON knowledge_chunks(document_id)")
+
+    # Rate limit configurations
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS rate_limits (
+            id TEXT PRIMARY KEY,
+            user_id TEXT,
+            api_key_id TEXT,
+            requests_per_minute INTEGER DEFAULT 20,
+            requests_per_hour INTEGER DEFAULT 200,
+            requests_per_day INTEGER DEFAULT 1000,
+            concurrent_requests INTEGER DEFAULT 3,
+            priority INTEGER DEFAULT 0,
+            is_unlimited BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (api_key_id) REFERENCES api_users(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Request log for rate limit tracking
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS request_log (
+            id TEXT PRIMARY KEY,
+            user_id TEXT,
+            api_key_id TEXT,
+            endpoint TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            duration_ms INTEGER,
+            status TEXT DEFAULT 'success'
+        )
+    """)
+
+    # Create rate limit indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rate_limits_user ON rate_limits(user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rate_limits_api_key ON rate_limits(api_key_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_request_log_user ON request_log(user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_request_log_api_key ON request_log(api_key_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_request_log_timestamp ON request_log(timestamp)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_user ON audit_log(user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_event ON audit_log(event_type)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at)")
 
 
 def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
@@ -484,6 +598,171 @@ def update_admin_password(password_hash: str) -> bool:
             (password_hash,)
         )
         return cursor.rowcount > 0
+
+
+def update_admin_totp(totp_secret: Optional[str], totp_enabled: bool, recovery_codes: Optional[str] = None) -> bool:
+    """Update admin 2FA settings"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if totp_enabled:
+            cursor.execute(
+                """UPDATE admin SET totp_secret = ?, totp_enabled = ?, recovery_codes = ?,
+                   totp_verified_at = ? WHERE id = 1""",
+                (totp_secret, totp_enabled, recovery_codes, datetime.utcnow().isoformat())
+            )
+        else:
+            cursor.execute(
+                "UPDATE admin SET totp_secret = NULL, totp_enabled = FALSE, recovery_codes = NULL, totp_verified_at = NULL WHERE id = 1",
+                ()
+            )
+        return cursor.rowcount > 0
+
+
+def get_admin_2fa_status() -> Dict[str, Any]:
+    """Get admin 2FA status (without revealing secret)"""
+    admin = get_admin()
+    if not admin:
+        return {"enabled": False, "has_recovery_codes": False}
+    return {
+        "enabled": bool(admin.get("totp_enabled")),
+        "has_recovery_codes": bool(admin.get("recovery_codes")),
+        "verified_at": admin.get("totp_verified_at")
+    }
+
+
+def update_admin_recovery_codes(recovery_codes: str) -> bool:
+    """Update admin recovery codes"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE admin SET recovery_codes = ? WHERE id = 1",
+            (recovery_codes,)
+        )
+        return cursor.rowcount > 0
+
+
+# ============================================================================
+# Audit Log Operations
+# ============================================================================
+
+def create_audit_log(
+    event_id: str,
+    event_type: str,
+    user_id: Optional[str] = None,
+    user_type: str = "admin",
+    ip_address: Optional[str] = None,
+    user_agent: Optional[str] = None,
+    details: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Create an audit log entry"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO audit_log (id, user_id, user_type, event_type, ip_address, user_agent, details)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (event_id, user_id, user_type, event_type, ip_address, user_agent, json.dumps(details) if details else None)
+        )
+        return {
+            "id": event_id,
+            "user_id": user_id,
+            "user_type": user_type,
+            "event_type": event_type,
+            "ip_address": ip_address,
+            "user_agent": user_agent,
+            "details": details
+        }
+
+
+def get_audit_logs(
+    user_id: Optional[str] = None,
+    event_type: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0
+) -> List[Dict[str, Any]]:
+    """Get audit logs with optional filters"""
+    query = "SELECT * FROM audit_log WHERE 1=1"
+    params = []
+
+    if user_id:
+        query += " AND user_id = ?"
+        params.append(user_id)
+    if event_type:
+        query += " AND event_type = ?"
+        params.append(event_type)
+
+    query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        rows = rows_to_list(cursor.fetchall())
+        for row in rows:
+            if row.get("details"):
+                row["details"] = json.loads(row["details"]) if isinstance(row["details"], str) else row["details"]
+        return rows
+
+
+def get_audit_log_count(user_id: Optional[str] = None, event_type: Optional[str] = None) -> int:
+    """Get total count of audit logs"""
+    query = "SELECT COUNT(*) as count FROM audit_log WHERE 1=1"
+    params = []
+
+    if user_id:
+        query += " AND user_id = ?"
+        params.append(user_id)
+    if event_type:
+        query += " AND event_type = ?"
+        params.append(event_type)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+        return row["count"]
+
+
+# ============================================================================
+# Pending 2FA Session Operations
+# ============================================================================
+
+def create_pending_2fa_session(token: str, username: str, expires_at: datetime) -> Dict[str, Any]:
+    """Create a pending 2FA session token"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO pending_2fa_sessions (token, username, expires_at) VALUES (?, ?, ?)",
+            (token, username, expires_at.isoformat())
+        )
+        return {"token": token, "username": username, "expires_at": expires_at}
+
+
+def get_pending_2fa_session(token: str) -> Optional[Dict[str, Any]]:
+    """Get a pending 2FA session by token"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM pending_2fa_sessions WHERE token = ? AND expires_at > ?",
+            (token, datetime.utcnow().isoformat())
+        )
+        return row_to_dict(cursor.fetchone())
+
+
+def delete_pending_2fa_session(token: str):
+    """Delete a pending 2FA session"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM pending_2fa_sessions WHERE token = ?", (token,))
+
+
+def cleanup_expired_2fa_sessions():
+    """Remove expired pending 2FA sessions"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM pending_2fa_sessions WHERE expires_at < ?",
+            (datetime.utcnow().isoformat(),)
+        )
 
 
 # ============================================================================
@@ -2823,3 +3102,410 @@ def get_webhooks_for_event(event_type: str) -> List[Dict[str, Any]]:
     """Get all active webhooks subscribed to a specific event type"""
     webhooks = get_active_webhooks()
     return [w for w in webhooks if event_type in w.get("events", [])]
+
+
+# ============================================================================
+# Rate Limit Operations
+# ============================================================================
+
+def get_rate_limit(rate_limit_id: str) -> Optional[Dict[str, Any]]:
+    """Get a rate limit configuration by ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM rate_limits WHERE id = ?", (rate_limit_id,))
+        return row_to_dict(cursor.fetchone())
+
+
+def get_rate_limit_for_user(user_id: Optional[str], api_key_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """
+    Get the most specific rate limit configuration for a user.
+    Priority: api_key_id specific > user_id specific > default (null/null)
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # Try API key specific first
+        if api_key_id:
+            cursor.execute("SELECT * FROM rate_limits WHERE api_key_id = ?", (api_key_id,))
+            result = cursor.fetchone()
+            if result:
+                return row_to_dict(result)
+
+        # Try user specific
+        if user_id:
+            cursor.execute("SELECT * FROM rate_limits WHERE user_id = ? AND api_key_id IS NULL", (user_id,))
+            result = cursor.fetchone()
+            if result:
+                return row_to_dict(result)
+
+        # Fall back to default (user_id and api_key_id both NULL)
+        cursor.execute("SELECT * FROM rate_limits WHERE user_id IS NULL AND api_key_id IS NULL")
+        result = cursor.fetchone()
+        return row_to_dict(result) if result else None
+
+
+def get_all_rate_limits() -> List[Dict[str, Any]]:
+    """Get all rate limit configurations"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM rate_limits ORDER BY priority DESC, created_at ASC")
+        return rows_to_list(cursor.fetchall())
+
+
+def create_rate_limit(
+    rate_limit_id: str,
+    user_id: Optional[str] = None,
+    api_key_id: Optional[str] = None,
+    requests_per_minute: int = 20,
+    requests_per_hour: int = 200,
+    requests_per_day: int = 1000,
+    concurrent_requests: int = 3,
+    priority: int = 0,
+    is_unlimited: bool = False
+) -> Dict[str, Any]:
+    """Create a new rate limit configuration"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO rate_limits
+               (id, user_id, api_key_id, requests_per_minute, requests_per_hour,
+                requests_per_day, concurrent_requests, priority, is_unlimited, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (rate_limit_id, user_id, api_key_id, requests_per_minute, requests_per_hour,
+             requests_per_day, concurrent_requests, priority, is_unlimited, now, now)
+        )
+    return get_rate_limit(rate_limit_id)
+
+
+def update_rate_limit(
+    rate_limit_id: str,
+    requests_per_minute: Optional[int] = None,
+    requests_per_hour: Optional[int] = None,
+    requests_per_day: Optional[int] = None,
+    concurrent_requests: Optional[int] = None,
+    priority: Optional[int] = None,
+    is_unlimited: Optional[bool] = None
+) -> Optional[Dict[str, Any]]:
+    """Update a rate limit configuration"""
+    existing = get_rate_limit(rate_limit_id)
+    if not existing:
+        return None
+
+    updates = ["updated_at = ?"]
+    values = [datetime.utcnow().isoformat()]
+
+    if requests_per_minute is not None:
+        updates.append("requests_per_minute = ?")
+        values.append(requests_per_minute)
+    if requests_per_hour is not None:
+        updates.append("requests_per_hour = ?")
+        values.append(requests_per_hour)
+    if requests_per_day is not None:
+        updates.append("requests_per_day = ?")
+        values.append(requests_per_day)
+    if concurrent_requests is not None:
+        updates.append("concurrent_requests = ?")
+        values.append(concurrent_requests)
+    if priority is not None:
+        updates.append("priority = ?")
+        values.append(priority)
+    if is_unlimited is not None:
+        updates.append("is_unlimited = ?")
+        values.append(is_unlimited)
+
+    values.append(rate_limit_id)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"UPDATE rate_limits SET {', '.join(updates)} WHERE id = ?",
+            values
+        )
+
+    return get_rate_limit(rate_limit_id)
+
+
+def delete_rate_limit(rate_limit_id: str) -> bool:
+    """Delete a rate limit configuration"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM rate_limits WHERE id = ?", (rate_limit_id,))
+        return cursor.rowcount > 0
+
+
+# ============================================================================
+# Request Log Operations
+# ============================================================================
+
+def log_request(
+    request_id: str,
+    user_id: Optional[str],
+    api_key_id: Optional[str],
+    endpoint: str,
+    status: str = "success",
+    duration_ms: Optional[int] = None
+) -> Dict[str, Any]:
+    """Log a request for rate limit tracking"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO request_log (id, user_id, api_key_id, endpoint, timestamp, duration_ms, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (request_id, user_id, api_key_id, endpoint, now, duration_ms, status)
+        )
+    return {
+        "id": request_id,
+        "user_id": user_id,
+        "api_key_id": api_key_id,
+        "endpoint": endpoint,
+        "timestamp": now,
+        "duration_ms": duration_ms,
+        "status": status
+    }
+
+
+def get_request_count(
+    user_id: Optional[str],
+    api_key_id: Optional[str],
+    since: datetime,
+    endpoint: Optional[str] = None
+) -> int:
+    """Get the count of requests since a given time"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        query = "SELECT COUNT(*) as count FROM request_log WHERE timestamp >= ?"
+        params = [since.isoformat()]
+
+        if api_key_id:
+            query += " AND api_key_id = ?"
+            params.append(api_key_id)
+        elif user_id:
+            query += " AND (user_id = ? OR api_key_id IN (SELECT id FROM api_users WHERE name = ?))"
+            params.extend([user_id, user_id])
+
+        if endpoint:
+            query += " AND endpoint = ?"
+            params.append(endpoint)
+
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+        return row["count"] if row else 0
+
+
+def cleanup_old_request_logs(older_than: datetime) -> int:
+    """Remove request logs older than a given time"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM request_log WHERE timestamp < ?",
+            (older_than.isoformat(),)
+        )
+        return cursor.rowcount
+
+
+# ============================================================================
+# Knowledge Base Operations
+# ============================================================================
+
+def get_knowledge_documents(project_id: str) -> List[Dict[str, Any]]:
+    """Get all knowledge documents for a project"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM knowledge_documents WHERE project_id = ? ORDER BY created_at DESC",
+            (project_id,)
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def get_knowledge_document(document_id: str) -> Optional[Dict[str, Any]]:
+    """Get a knowledge document by ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM knowledge_documents WHERE id = ?", (document_id,))
+        return row_to_dict(cursor.fetchone())
+
+
+def create_knowledge_document(
+    document_id: str,
+    project_id: str,
+    filename: str,
+    content: str,
+    content_type: str = "text/plain",
+    file_size: int = 0,
+    chunk_count: int = 0
+) -> Optional[Dict[str, Any]]:
+    """Create a new knowledge document"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO knowledge_documents
+               (id, project_id, filename, content, content_type, file_size, chunk_count, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (document_id, project_id, filename, content, content_type, file_size, chunk_count, now, now)
+        )
+    return get_knowledge_document(document_id)
+
+
+def update_knowledge_document(
+    document_id: str,
+    content: Optional[str] = None,
+    chunk_count: Optional[int] = None
+) -> Optional[Dict[str, Any]]:
+    """Update a knowledge document"""
+    existing = get_knowledge_document(document_id)
+    if not existing:
+        return None
+
+    updates = ["updated_at = ?"]
+    values = [datetime.utcnow().isoformat()]
+
+    if content is not None:
+        updates.append("content = ?")
+        values.append(content)
+        updates.append("file_size = ?")
+        values.append(len(content))
+    if chunk_count is not None:
+        updates.append("chunk_count = ?")
+        values.append(chunk_count)
+
+    values.append(document_id)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"UPDATE knowledge_documents SET {', '.join(updates)} WHERE id = ?",
+            values
+        )
+
+    return get_knowledge_document(document_id)
+
+
+def delete_knowledge_document(document_id: str) -> bool:
+    """Delete a knowledge document (chunks will be cascade deleted)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM knowledge_documents WHERE id = ?", (document_id,))
+        return cursor.rowcount > 0
+
+
+def get_knowledge_chunks(document_id: str) -> List[Dict[str, Any]]:
+    """Get all chunks for a document"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM knowledge_chunks WHERE document_id = ? ORDER BY chunk_index",
+            (document_id,)
+        )
+        rows = rows_to_list(cursor.fetchall())
+        for row in rows:
+            if row.get("metadata"):
+                row["metadata"] = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]
+        return rows
+
+
+def get_all_knowledge_chunks_for_project(project_id: str) -> List[Dict[str, Any]]:
+    """Get all chunks for all documents in a project"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT kc.*, kd.filename
+               FROM knowledge_chunks kc
+               JOIN knowledge_documents kd ON kc.document_id = kd.id
+               WHERE kd.project_id = ?
+               ORDER BY kd.created_at, kc.chunk_index""",
+            (project_id,)
+        )
+        rows = rows_to_list(cursor.fetchall())
+        for row in rows:
+            if row.get("metadata"):
+                row["metadata"] = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]
+        return rows
+
+
+def create_knowledge_chunk(
+    chunk_id: str,
+    document_id: str,
+    chunk_index: int,
+    content: str,
+    metadata: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, Any]]:
+    """Create a new knowledge chunk"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO knowledge_chunks (id, document_id, chunk_index, content, metadata, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (chunk_id, document_id, chunk_index, content, json.dumps(metadata or {}), now)
+        )
+        cursor.execute("SELECT * FROM knowledge_chunks WHERE id = ?", (chunk_id,))
+        row = row_to_dict(cursor.fetchone())
+        if row and row.get("metadata"):
+            row["metadata"] = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]
+        return row
+
+
+def delete_knowledge_chunks_for_document(document_id: str) -> int:
+    """Delete all chunks for a document. Returns count of deleted chunks."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM knowledge_chunks WHERE document_id = ?", (document_id,))
+        return cursor.rowcount
+
+
+def search_knowledge_chunks(project_id: str, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Simple keyword-based search for relevant knowledge chunks.
+    Returns chunks that contain the query terms (case-insensitive).
+
+    For future: This can be enhanced with vector embeddings for semantic search.
+    """
+    query_lower = query.lower()
+    query_terms = query_lower.split()
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT kc.*, kd.filename
+               FROM knowledge_chunks kc
+               JOIN knowledge_documents kd ON kc.document_id = kd.id
+               WHERE kd.project_id = ?""",
+            (project_id,)
+        )
+        rows = rows_to_list(cursor.fetchall())
+
+        scored_chunks = []
+        for row in rows:
+            content_lower = row["content"].lower()
+            score = sum(1 for term in query_terms if term in content_lower)
+            if score > 0:
+                row["relevance_score"] = score
+                if row.get("metadata"):
+                    row["metadata"] = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]
+                scored_chunks.append(row)
+
+        scored_chunks.sort(key=lambda x: x["relevance_score"], reverse=True)
+        return scored_chunks[:limit]
+
+
+def get_knowledge_stats_for_project(project_id: str) -> Dict[str, Any]:
+    """Get knowledge base statistics for a project"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT COUNT(*) as document_count,
+                      COALESCE(SUM(file_size), 0) as total_size,
+                      COALESCE(SUM(chunk_count), 0) as total_chunks
+               FROM knowledge_documents WHERE project_id = ?""",
+            (project_id,)
+        )
+        row = cursor.fetchone()
+        return {
+            "document_count": row["document_count"] if row else 0,
+            "total_size": row["total_size"] if row else 0,
+            "total_chunks": row["total_chunks"] if row else 0
+        }

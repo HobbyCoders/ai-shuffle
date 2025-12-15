@@ -38,6 +38,7 @@ from app.core.permission_handler import permission_handler
 from app.core.platform import detect_deployment_mode, DeploymentMode
 from app.core.user_question_handler import user_question_handler
 from app.core import encryption
+from app.core import knowledge_service
 
 logger = logging.getLogger(__name__)
 
@@ -2449,8 +2450,27 @@ async def stream_to_websocket(
     interrupted = False
     include_partial = options.include_partial_messages  # Track if streaming events are enabled
 
+    # Inject knowledge base context if project has knowledge documents
+    # This prepends relevant context to the user's prompt based on keyword matching
+    enhanced_prompt = prompt
+    if project_id:
+        try:
+            relevant_context = knowledge_service.get_relevant_context(
+                project_id=project_id,
+                query=prompt,
+                max_chunks=5,
+                max_chars=4000
+            )
+            if relevant_context:
+                formatted_context = knowledge_service.format_context_for_prompt(relevant_context)
+                enhanced_prompt = formatted_context + "\n\n" + prompt
+                logger.info(f"[WS] Injected knowledge base context ({len(relevant_context)} chars) for session {session_id}")
+        except Exception as e:
+            logger.warning(f"[WS] Failed to retrieve knowledge context: {e}")
+            # Continue without knowledge context
+
     try:
-        await state.client.query(prompt)
+        await state.client.query(enhanced_prompt)
 
         async for message in state.client.receive_response():
             # Check for interrupt request as a failsafe

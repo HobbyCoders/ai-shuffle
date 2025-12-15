@@ -24,7 +24,10 @@ from app.core.sync_engine import sync_engine
 from app.core.cleanup_manager import cleanup_manager
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks
+from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, knowledge, rate_limits
+
+# Import middleware
+from app.middleware.rate_limit import RateLimitMiddleware
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -213,6 +216,9 @@ class LimitRequestBodyMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(LimitRequestBodyMiddleware)
 
+# Rate limit middleware - enforce per-user rate limits
+app.add_middleware(RateLimitMiddleware)
+
 # CORS middleware - configure origins via CORS_ORIGINS environment variable
 # Use "*" only for development; in production, specify exact origins
 cors_origins = [origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()]
@@ -262,6 +268,9 @@ app.include_router(analytics.router)
 app.include_router(search.router)
 app.include_router(templates.router)
 app.include_router(webhooks.router)
+app.include_router(security.router)
+app.include_router(knowledge.router)
+app.include_router(rate_limits.router)
 
 # Serve static files (Svelte build) if they exist
 static_dir = Path(__file__).parent / "static"

@@ -41,11 +41,14 @@
 	import TodoList from '$lib/components/TodoList.svelte';
 	import SettingsModal from '$lib/components/SettingsModal.svelte';
 	import ProfileModal from '$lib/components/ProfileModal.svelte';
+	import AgentImportModal from '$lib/components/AgentImportModal.svelte';
+	import { exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
 	import KeyboardShortcutsModal from '$lib/components/KeyboardShortcutsModal.svelte';
 	import ImportSessionModal from '$lib/components/ImportSessionModal.svelte';
 	import TagManager from '$lib/components/TagManager.svelte';
 	import SessionTagPicker from '$lib/components/SessionTagPicker.svelte';
 	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
+	import KnowledgeManager from '$lib/components/KnowledgeManager.svelte';
 	import { groups, organizeByGroups } from '$lib/stores/groups';
 	import { executeCommand, isSlashCommand, listCommands, type Command } from '$lib/api/commands';
 	import { groupSessionsByDate, type DateGroup } from '$lib/utils/dateGroups';
@@ -289,6 +292,7 @@
 	let showProfileModal = false;
 	let showProjectModal = false;
 	let showNewProjectForm = false;
+	let showKnowledgeModal = false;
 	let editingProfile: any = null;
 	let fileInput: HTMLInputElement;
 	let isUploading = false;
@@ -1583,22 +1587,23 @@
 		}
 	}
 
-	// Profile export
-	async function exportProfile(profileId: string) {
+	// Profile/Agent export
+	async function handleExportProfile(profileId: string) {
 		try {
-			const data = await api.get<any>(`/export-import/profiles/${profileId}`);
-			const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-			const url = URL.createObjectURL(blob);
-			const a = document.createElement('a');
-			a.href = url;
-			a.download = `profile-${profileId}-${new Date().toISOString().split('T')[0]}.json`;
-			document.body.appendChild(a);
-			a.click();
-			document.body.removeChild(a);
-			URL.revokeObjectURL(url);
+			await exportAgent(profileId);
 		} catch (e: any) {
 			alert('Export failed: ' + (e.detail || 'Unknown error'));
 		}
+	}
+
+	// Agent import modal state
+	let showAgentImportModal = false;
+
+	// Handle agent import success
+	async function handleAgentImported(e: CustomEvent) {
+		await tabs.loadProfiles();
+		showAgentImportModal = false;
+		showProfileModal = false;  // Close profile modal too if open
 	}
 
 	async function createProject() {
@@ -3529,8 +3534,20 @@
 				{/if}
 				</div>
 
-				<!-- Right: Export, Theme Toggle and Connection Status -->
+				<!-- Right: Knowledge Base, Export, Theme Toggle and Connection Status -->
 				<div class="flex items-center gap-2">
+					<!-- Knowledge Base Button (only show when project is selected) -->
+					{#if currentTab.project}
+						<button
+							on:click={() => showKnowledgeModal = true}
+							class="w-8 h-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-all"
+							title="Knowledge Base"
+						>
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+							</svg>
+						</button>
+					{/if}
 					<!-- Export Button (only show when session is saved) -->
 					{#if currentTab.sessionId}
 						<div class="relative group">
@@ -4314,27 +4331,18 @@
 			await tabs.deleteProfile(profileId);
 		}
 	}}
-	on:export={(e) => exportProfile(e.detail)}
+	on:export={(e) => handleExportProfile(e.detail)}
 	on:import={async (e) => {
+		// Handle file-based import - parse the file and use our new API
 		const file = e.detail;
 		try {
 			const content = await file.text();
-			const data = JSON.parse(content);
-			if (!data.profiles || data.profiles.length === 0) {
-				alert('No profiles found in file');
-				return;
-			}
-			const result = await api.post<any>('/export-import/import/json?overwrite_existing=false', data);
-			if (result.profiles_imported > 0) {
-				alert(`Imported ${result.profiles_imported} profile(s)`);
-				await tabs.loadProfiles();
-			} else if (result.profiles_skipped > 0) {
-				alert('Profile already exists. Use a different ID or delete the existing one first.');
-			} else if (result.errors?.length > 0) {
-				alert('Import failed: ' + result.errors.join(', '));
-			}
+			const parsed = parseAgentExportFile(content);
+			const profile = await importAgent(parsed);
+			await tabs.loadProfiles();
+			alert(`Successfully imported agent: ${profile.name}`);
 		} catch (err: any) {
-			alert('Import failed: ' + (err.detail || err.message || 'Invalid JSON file'));
+			alert('Import failed: ' + (err.detail || err.message || 'Invalid file format'));
 		}
 	}}
 	on:assignGroup={(e) => groups.assignToGroup('profiles', e.detail.profileId, e.detail.groupName)}
@@ -4344,6 +4352,21 @@
 		groups.assignToGroup('profiles', e.detail.profileId, e.detail.groupName);
 	}}
 />
+
+<!-- Agent Import Modal -->
+<AgentImportModal
+	show={showAgentImportModal}
+	on:close={() => showAgentImportModal = false}
+	on:imported={handleAgentImported}
+/>
+
+<!-- Knowledge Base Modal -->
+{#if showKnowledgeModal && $activeTab?.project}
+	<KnowledgeManager
+		projectId={$activeTab.project}
+		on:close={() => showKnowledgeModal = false}
+	/>
+{/if}
 
 <!-- Project Modal -->
 {#if showProjectModal}

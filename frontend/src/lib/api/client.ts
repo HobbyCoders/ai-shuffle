@@ -753,3 +753,219 @@ export async function updateTemplate(templateId: string, data: TemplateUpdate): 
 export async function deleteTemplate(templateId: string): Promise<void> {
 	await api.delete(`/templates/${templateId}`);
 }
+
+// ============================================================================
+// Agent Export/Import API Types and Functions
+// ============================================================================
+
+export interface AgentExportData {
+	name: string;
+	description: string | null;
+	model: string | null;
+	permission_mode: string | null;
+	system_prompt_type: string | null;
+	system_prompt_preset: string | null;
+	system_prompt_content: string | null;
+	system_prompt_append: string | null;
+	system_prompt_inject_env: boolean | null;
+	allowed_tools: string[] | null;
+	disallowed_tools: string[] | null;
+	enabled_agents: string[] | null;
+	ai_tools: Record<string, boolean> | null;
+	max_turns: number | null;
+	max_buffer_size: number | null;
+	include_partial_messages: boolean | null;
+	continue_conversation: boolean | null;
+	fork_session: boolean | null;
+	setting_sources: string[] | null;
+}
+
+export interface AgentExport {
+	version: string;
+	type: string;
+	exported_at: string;
+	agent: AgentExportData;
+}
+
+export interface AgentImportRequest extends AgentExport {
+	new_id?: string;
+	new_name?: string;
+}
+
+/**
+ * Export an agent/profile as JSON and trigger download
+ */
+export async function exportAgent(profileId: string): Promise<void> {
+	const response = await fetch(`${API_BASE}/profiles/${profileId}/export`, {
+		method: 'GET',
+		credentials: 'include'
+	});
+
+	if (!response.ok) {
+		const error = await response.json().catch(() => ({ detail: 'Export failed' }));
+		throw {
+			detail: error.detail || 'Export failed',
+			status: response.status
+		} as ApiError;
+	}
+
+	// Get filename from Content-Disposition header
+	const contentDisposition = response.headers.get('Content-Disposition');
+	let filename = `${profileId}-agent.json`;
+	if (contentDisposition) {
+		const match = contentDisposition.match(/filename="?([^"]+)"?/);
+		if (match) {
+			filename = match[1];
+		}
+	}
+
+	// Create blob and trigger download
+	const blob = await response.blob();
+	const url = URL.createObjectURL(blob);
+	const a = document.createElement('a');
+	a.href = url;
+	a.download = filename;
+	document.body.appendChild(a);
+	a.click();
+	document.body.removeChild(a);
+	URL.revokeObjectURL(url);
+}
+
+/**
+ * Get agent export data without downloading (for preview)
+ */
+export async function getAgentExportData(profileId: string): Promise<AgentExport> {
+	return api.get<AgentExport>(`/profiles/${profileId}/export`);
+}
+
+/**
+ * Import an agent from JSON data
+ */
+export async function importAgent(data: AgentImportRequest): Promise<Profile> {
+	return api.post<Profile>('/profiles/import', data);
+}
+
+/**
+ * Parse and validate agent export file
+ */
+export function parseAgentExportFile(content: string): AgentExport {
+	const parsed = JSON.parse(content);
+
+	// Basic validation
+	if (typeof parsed !== 'object' || parsed === null) {
+		throw new Error('Invalid JSON structure');
+	}
+
+	if (parsed.type !== 'ai-hub-agent') {
+		throw new Error(`Invalid file type: ${parsed.type}. Expected 'ai-hub-agent'`);
+	}
+
+	if (!parsed.version) {
+		throw new Error('Missing version field');
+	}
+
+	if (!parsed.agent || typeof parsed.agent !== 'object') {
+		throw new Error('Missing or invalid agent data');
+	}
+
+	if (!parsed.agent.name) {
+		throw new Error('Agent name is required');
+	}
+
+	return parsed as AgentExport;
+}
+
+// ============================================================================
+// Knowledge Base Types
+// ============================================================================
+
+export interface KnowledgeDocumentSummary {
+	id: string;
+	project_id: string;
+	filename: string;
+	content_type: string;
+	file_size: number;
+	chunk_count: number;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface KnowledgeDocument extends KnowledgeDocumentSummary {
+	content: string;
+}
+
+export interface KnowledgeSearchResult {
+	id: string;
+	document_id: string;
+	filename: string;
+	chunk_index: number;
+	content: string;
+	relevance_score: number;
+	metadata?: Record<string, unknown>;
+}
+
+export interface KnowledgeStats {
+	document_count: number;
+	total_size: number;
+	total_chunks: number;
+}
+
+// ============================================================================
+// Knowledge Base API Functions
+// ============================================================================
+
+/**
+ * Get all knowledge documents for a project
+ */
+export async function getKnowledgeDocuments(projectId: string): Promise<KnowledgeDocumentSummary[]> {
+	return api.get<KnowledgeDocumentSummary[]>(`/projects/${projectId}/knowledge`);
+}
+
+/**
+ * Get knowledge base statistics for a project
+ */
+export async function getKnowledgeStats(projectId: string): Promise<KnowledgeStats> {
+	return api.get<KnowledgeStats>(`/projects/${projectId}/knowledge/stats`);
+}
+
+/**
+ * Upload a document to the knowledge base
+ */
+export async function uploadKnowledgeDocument(projectId: string, file: File): Promise<KnowledgeDocumentSummary> {
+	return api.uploadFile(`/projects/${projectId}/knowledge`, file);
+}
+
+/**
+ * Get a specific knowledge document with full content
+ */
+export async function getKnowledgeDocument(projectId: string, documentId: string): Promise<KnowledgeDocument> {
+	return api.get<KnowledgeDocument>(`/projects/${projectId}/knowledge/${documentId}`);
+}
+
+/**
+ * Delete a knowledge document
+ */
+export async function deleteKnowledgeDocument(projectId: string, documentId: string): Promise<void> {
+	await api.delete(`/projects/${projectId}/knowledge/${documentId}`);
+}
+
+/**
+ * Search the knowledge base
+ */
+export async function searchKnowledge(projectId: string, query: string, limit?: number): Promise<KnowledgeSearchResult[]> {
+	const params = new URLSearchParams({ q: query });
+	if (limit) params.append('limit', limit.toString());
+	return api.get<KnowledgeSearchResult[]>(`/projects/${projectId}/knowledge/search?${params}`);
+}
+
+/**
+ * Get a preview of a document's content
+ */
+export async function getKnowledgeDocumentPreview(
+	projectId: string,
+	documentId: string,
+	maxLength?: number
+): Promise<{ id: string; filename: string; preview: string; total_length: number; truncated: boolean }> {
+	const params = maxLength ? `?max_length=${maxLength}` : '';
+	return api.get(`/projects/${projectId}/knowledge/${documentId}/preview${params}`);
+}
