@@ -24,7 +24,7 @@ from app.core.sync_engine import sync_engine
 from app.core.cleanup_manager import cleanup_manager
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags
+from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -258,6 +258,7 @@ app.include_router(generated_images.router)
 app.include_router(generated_videos.router)
 app.include_router(shared_files.router)
 app.include_router(tags.router)
+app.include_router(analytics.router)
 
 # Serve static files (Svelte build) if they exist
 static_dir = Path(__file__).parent / "static"

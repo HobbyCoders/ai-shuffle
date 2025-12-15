@@ -542,3 +542,73 @@ class Tag(TagBase):
 class SessionTagsUpdate(BaseModel):
     """Update tags for a session"""
     tag_ids: List[str] = Field(default_factory=list)
+
+
+# ============================================================================
+# Analytics Models
+# ============================================================================
+
+class UsageStats(BaseModel):
+    """Aggregated usage statistics for a date range"""
+    total_tokens_in: int = 0
+    total_tokens_out: int = 0
+    total_cost_usd: float = 0.0
+    session_count: int = 0
+    query_count: int = 0
+
+
+class CostBreakdownItem(BaseModel):
+    """A single item in a cost breakdown"""
+    key: str  # profile_id, api_user_id, or date string
+    name: Optional[str] = None  # Display name (profile name, user name, etc.)
+    total_cost_usd: float = 0.0
+    total_tokens_in: int = 0
+    total_tokens_out: int = 0
+    query_count: int = 0
+
+
+class CostBreakdownResponse(BaseModel):
+    """Cost breakdown response with grouping"""
+    group_by: str  # 'profile', 'user', 'date'
+    start_date: str
+    end_date: str
+    items: List[CostBreakdownItem] = []
+    total_cost_usd: float = 0.0
+
+
+class UsageTrend(BaseModel):
+    """A single data point in a usage trend time series"""
+    date: str  # ISO date string (YYYY-MM-DD or YYYY-WNN for weeks)
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: float = 0.0
+    query_count: int = 0
+
+
+class UsageTrendsResponse(BaseModel):
+    """Usage trends response with time series data"""
+    interval: str  # 'day', 'week', 'month'
+    start_date: str
+    end_date: str
+    data_points: List[UsageTrend] = []
+
+
+class TopSession(BaseModel):
+    """A session with high usage/cost"""
+    session_id: str
+    title: Optional[str] = None
+    profile_id: Optional[str] = None
+    profile_name: Optional[str] = None
+    total_cost_usd: float = 0.0
+    total_tokens_in: int = 0
+    total_tokens_out: int = 0
+    created_at: Optional[str] = None
+
+
+class AnalyticsSummaryResponse(BaseModel):
+    """Combined analytics summary response"""
+    start_date: str
+    end_date: str
+    usage_stats: UsageStats
+    top_profiles: List[CostBreakdownItem] = []
+    recent_trend: List[UsageTrend] = []

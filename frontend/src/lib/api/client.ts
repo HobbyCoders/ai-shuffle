@@ -474,3 +474,112 @@ export async function addSessionTag(sessionId: string, tagId: string): Promise<v
 export async function removeSessionTag(sessionId: string, tagId: string): Promise<void> {
 	await api.delete(`/tags/session/${sessionId}/${tagId}`);
 }
+
+// ============================================================================
+// Analytics API Types and Functions
+// ============================================================================
+
+export interface AnalyticsSummary {
+	total_input_tokens: number;
+	total_output_tokens: number;
+	total_cost: number;
+	session_count: number;
+	average_cost_per_session: number;
+}
+
+export interface CostBreakdownItem {
+	name: string;
+	cost: number;
+	tokens: number;
+	percentage: number;
+}
+
+export interface TrendDataPoint {
+	date: string;
+	input_tokens: number;
+	output_tokens: number;
+	cost: number;
+}
+
+export interface TopSession {
+	id: string;
+	title: string | null;
+	profile_id: string;
+	total_cost_usd: number;
+	total_tokens_in: number;
+	total_tokens_out: number;
+	created_at: string;
+	updated_at: string;
+}
+
+/**
+ * Get analytics summary for a date range
+ */
+export async function getAnalyticsSummary(startDate: string, endDate: string): Promise<AnalyticsSummary> {
+	const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
+	return api.get<AnalyticsSummary>(`/analytics/summary?${params.toString()}`);
+}
+
+/**
+ * Get cost breakdown grouped by profile or user
+ */
+export async function getCostBreakdown(startDate: string, endDate: string, groupBy: 'profile' | 'user' = 'profile'): Promise<CostBreakdownItem[]> {
+	const params = new URLSearchParams({ start_date: startDate, end_date: endDate, group_by: groupBy });
+	return api.get<CostBreakdownItem[]>(`/analytics/costs?${params.toString()}`);
+}
+
+/**
+ * Get usage trends over time
+ */
+export async function getUsageTrends(startDate: string, endDate: string): Promise<TrendDataPoint[]> {
+	const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
+	return api.get<TrendDataPoint[]>(`/analytics/trends?${params.toString()}`);
+}
+
+/**
+ * Get top sessions by cost
+ */
+export async function getTopSessions(startDate: string, endDate: string, limit: number = 10): Promise<TopSession[]> {
+	const params = new URLSearchParams({ start_date: startDate, end_date: endDate, limit: limit.toString() });
+	return api.get<TopSession[]>(`/analytics/top-sessions?${params.toString()}`);
+}
+
+/**
+ * Export analytics data as CSV
+ */
+export async function exportAnalyticsCSV(startDate: string, endDate: string): Promise<void> {
+	const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
+	const response = await fetch(`${API_BASE}/analytics/export?${params.toString()}`, {
+		method: 'GET',
+		credentials: 'include'
+	});
+
+	if (!response.ok) {
+		const error = await response.json().catch(() => ({ detail: 'Export failed' }));
+		throw {
+			detail: error.detail || 'Export failed',
+			status: response.status
+		} as ApiError;
+	}
+
+	// Get filename from Content-Disposition header
+	const contentDisposition = response.headers.get('Content-Disposition');
+	let filename = `analytics-${startDate}-to-${endDate}.csv`;
+	if (contentDisposition) {
+		const match = contentDisposition.match(/filename="?([^"]+)"?/);
+		if (match) {
+			filename = match[1];
+		}
+	}
+
+	// Create blob and trigger download
+	const blob = await response.blob();
+	const url = URL.createObjectURL(blob);
+	const a = document.createElement('a');
+	a.href = url;
+	a.download = filename;
+	document.body.appendChild(a);
+	a.click();
+	document.body.removeChild(a);
+	URL.revokeObjectURL(url);
+}

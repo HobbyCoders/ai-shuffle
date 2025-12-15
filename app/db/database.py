@@ -2187,3 +2187,286 @@ def get_sessions_by_tag(tag_id: str, limit: int = 50, offset: int = 0) -> List[D
             (tag_id, limit, offset)
         )
         return rows_to_list(cursor.fetchall())
+
+
+# ============================================================================
+# Analytics Operations
+# ============================================================================
+
+def get_analytics_usage_stats(start_date: Optional[str] = None, end_date: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Get aggregate usage statistics for a date range.
+
+    Args:
+        start_date: Start date (ISO format YYYY-MM-DD), inclusive
+        end_date: End date (ISO format YYYY-MM-DD), inclusive
+
+    Returns:
+        Dictionary with total_tokens_in, total_tokens_out, total_cost_usd, session_count, query_count
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # Build date filter clause
+        date_filter = ""
+        params = []
+        if start_date:
+            date_filter += " AND DATE(created_at) >= ?"
+            params.append(start_date)
+        if end_date:
+            date_filter += " AND DATE(created_at) <= ?"
+            params.append(end_date)
+
+        # Get usage log aggregates
+        cursor.execute(f"""
+            SELECT
+                COALESCE(SUM(tokens_in), 0) as total_tokens_in,
+                COALESCE(SUM(tokens_out), 0) as total_tokens_out,
+                COALESCE(SUM(cost_usd), 0) as total_cost_usd,
+                COUNT(*) as query_count
+            FROM usage_log
+            WHERE 1=1 {date_filter}
+        """, params)
+        usage_row = cursor.fetchone()
+
+        # Get session count for the same period
+        cursor.execute(f"""
+            SELECT COUNT(DISTINCT session_id) as session_count
+            FROM usage_log
+            WHERE session_id IS NOT NULL {date_filter}
+        """, params)
+        session_row = cursor.fetchone()
+
+        return {
+            "total_tokens_in": usage_row["total_tokens_in"],
+            "total_tokens_out": usage_row["total_tokens_out"],
+            "total_cost_usd": round(usage_row["total_cost_usd"], 6),
+            "query_count": usage_row["query_count"],
+            "session_count": session_row["session_count"]
+        }
+
+
+def get_analytics_cost_breakdown(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    group_by: str = "profile"
+) -> List[Dict[str, Any]]:
+    """
+    Get cost breakdown grouped by profile, user, or date.
+
+    Args:
+        start_date: Start date (ISO format YYYY-MM-DD), inclusive
+        end_date: End date (ISO format YYYY-MM-DD), inclusive
+        group_by: Grouping - 'profile', 'user', or 'date'
+
+    Returns:
+        List of dictionaries with key, name, total_cost_usd, total_tokens_in, total_tokens_out, query_count
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # Build date filter clause
+        date_filter = ""
+        params = []
+        if start_date:
+            date_filter += " AND DATE(ul.created_at) >= ?"
+            params.append(start_date)
+        if end_date:
+            date_filter += " AND DATE(ul.created_at) <= ?"
+            params.append(end_date)
+
+        if group_by == "profile":
+            cursor.execute(f"""
+                SELECT
+                    COALESCE(ul.profile_id, 'unknown') as key,
+                    p.name as name,
+                    COALESCE(SUM(ul.tokens_in), 0) as total_tokens_in,
+                    COALESCE(SUM(ul.tokens_out), 0) as total_tokens_out,
+                    COALESCE(SUM(ul.cost_usd), 0) as total_cost_usd,
+                    COUNT(*) as query_count
+                FROM usage_log ul
+                LEFT JOIN profiles p ON ul.profile_id = p.id
+                WHERE 1=1 {date_filter}
+                GROUP BY ul.profile_id, p.name
+                ORDER BY total_cost_usd DESC
+            """, params)
+
+        elif group_by == "user":
+            # Join with sessions to get api_user_id, then with api_users for name
+            cursor.execute(f"""
+                SELECT
+                    COALESCE(s.api_user_id, 'admin') as key,
+                    CASE
+                        WHEN s.api_user_id IS NULL THEN 'Admin'
+                        ELSE COALESCE(au.name, 'Unknown User')
+                    END as name,
+                    COALESCE(SUM(ul.tokens_in), 0) as total_tokens_in,
+                    COALESCE(SUM(ul.tokens_out), 0) as total_tokens_out,
+                    COALESCE(SUM(ul.cost_usd), 0) as total_cost_usd,
+                    COUNT(*) as query_count
+                FROM usage_log ul
+                LEFT JOIN sessions s ON ul.session_id = s.id
+                LEFT JOIN api_users au ON s.api_user_id = au.id
+                WHERE 1=1 {date_filter}
+                GROUP BY s.api_user_id, au.name
+                ORDER BY total_cost_usd DESC
+            """, params)
+
+        elif group_by == "date":
+            cursor.execute(f"""
+                SELECT
+                    DATE(ul.created_at) as key,
+                    DATE(ul.created_at) as name,
+                    COALESCE(SUM(ul.tokens_in), 0) as total_tokens_in,
+                    COALESCE(SUM(ul.tokens_out), 0) as total_tokens_out,
+                    COALESCE(SUM(ul.cost_usd), 0) as total_cost_usd,
+                    COUNT(*) as query_count
+                FROM usage_log ul
+                WHERE 1=1 {date_filter}
+                GROUP BY DATE(ul.created_at)
+                ORDER BY DATE(ul.created_at) DESC
+            """, params)
+
+        else:
+            return []
+
+        rows = cursor.fetchall()
+        result = []
+        for row in rows:
+            result.append({
+                "key": str(row["key"]) if row["key"] else "unknown",
+                "name": row["name"],
+                "total_tokens_in": row["total_tokens_in"],
+                "total_tokens_out": row["total_tokens_out"],
+                "total_cost_usd": round(row["total_cost_usd"], 6),
+                "query_count": row["query_count"]
+            })
+        return result
+
+
+def get_analytics_usage_trends(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    interval: str = "day"
+) -> List[Dict[str, Any]]:
+    """
+    Get usage trends over time.
+
+    Args:
+        start_date: Start date (ISO format YYYY-MM-DD), inclusive
+        end_date: End date (ISO format YYYY-MM-DD), inclusive
+        interval: Time interval - 'day', 'week', or 'month'
+
+    Returns:
+        List of dictionaries with date, tokens_in, tokens_out, cost_usd, query_count
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # Build date filter clause
+        date_filter = ""
+        params = []
+        if start_date:
+            date_filter += " AND DATE(created_at) >= ?"
+            params.append(start_date)
+        if end_date:
+            date_filter += " AND DATE(created_at) <= ?"
+            params.append(end_date)
+
+        # Choose date grouping based on interval
+        if interval == "week":
+            # SQLite strftime: %Y-W%W gives year and week number
+            date_expr = "strftime('%Y-W%W', created_at)"
+        elif interval == "month":
+            date_expr = "strftime('%Y-%m', created_at)"
+        else:  # day
+            date_expr = "DATE(created_at)"
+
+        cursor.execute(f"""
+            SELECT
+                {date_expr} as date,
+                COALESCE(SUM(tokens_in), 0) as tokens_in,
+                COALESCE(SUM(tokens_out), 0) as tokens_out,
+                COALESCE(SUM(cost_usd), 0) as cost_usd,
+                COUNT(*) as query_count
+            FROM usage_log
+            WHERE 1=1 {date_filter}
+            GROUP BY {date_expr}
+            ORDER BY date ASC
+        """, params)
+
+        rows = cursor.fetchall()
+        result = []
+        for row in rows:
+            result.append({
+                "date": row["date"],
+                "tokens_in": row["tokens_in"],
+                "tokens_out": row["tokens_out"],
+                "cost_usd": round(row["cost_usd"], 6),
+                "query_count": row["query_count"]
+            })
+        return result
+
+
+def get_analytics_top_sessions(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 10
+) -> List[Dict[str, Any]]:
+    """
+    Get top sessions by cost.
+
+    Args:
+        start_date: Start date (ISO format YYYY-MM-DD), inclusive
+        end_date: End date (ISO format YYYY-MM-DD), inclusive
+        limit: Maximum number of sessions to return
+
+    Returns:
+        List of dictionaries with session_id, title, profile_id, profile_name, total_cost_usd, etc.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # Build date filter clause
+        date_filter = ""
+        params = []
+        if start_date:
+            date_filter += " AND DATE(s.created_at) >= ?"
+            params.append(start_date)
+        if end_date:
+            date_filter += " AND DATE(s.created_at) <= ?"
+            params.append(end_date)
+
+        params.append(limit)
+
+        cursor.execute(f"""
+            SELECT
+                s.id as session_id,
+                s.title,
+                s.profile_id,
+                p.name as profile_name,
+                s.total_cost_usd,
+                s.total_tokens_in,
+                s.total_tokens_out,
+                s.created_at
+            FROM sessions s
+            LEFT JOIN profiles p ON s.profile_id = p.id
+            WHERE s.total_cost_usd > 0 {date_filter}
+            ORDER BY s.total_cost_usd DESC
+            LIMIT ?
+        """, params)
+
+        rows = cursor.fetchall()
+        result = []
+        for row in rows:
+            result.append({
+                "session_id": row["session_id"],
+                "title": row["title"],
+                "profile_id": row["profile_id"],
+                "profile_name": row["profile_name"],
+                "total_cost_usd": round(row["total_cost_usd"], 6) if row["total_cost_usd"] else 0,
+                "total_tokens_in": row["total_tokens_in"] or 0,
+                "total_tokens_out": row["total_tokens_out"] or 0,
+                "created_at": row["created_at"]
+            })
+        return result
