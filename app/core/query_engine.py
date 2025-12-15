@@ -716,28 +716,24 @@ def _get_decrypted_api_key(setting_name: str) -> Optional[str]:
     return value
 
 
-def _build_allowed_tools(
-    base_allowed: list,
-    hooks: Optional[Dict[str, list]]
-) -> list:
+def _get_hook_tool_names(hooks: Optional[Dict[str, list]]) -> list:
     """
-    Build the allowed_tools list, adding tool names for any configured hooks.
+    Extract tool names from hook matchers.
 
     When we have hooks that handle specific tools (like AskUserQuestion),
-    we must explicitly allow those tools so the model can call them.
+    we need to know which tools to enable so the model can call them.
     The hook then intercepts and handles the tool call.
 
     Args:
-        base_allowed: Base list of allowed tools from profile config
         hooks: Dict of hook configurations (e.g., {"PreToolUse": [HookMatcher(...)]})
 
     Returns:
-        List of allowed tool names
+        List of tool names that have hooks configured
     """
-    allowed = list(base_allowed) if base_allowed else []
+    tools = []
 
     if not hooks:
-        return allowed
+        return tools
 
     # Check for PreToolUse hooks and extract tool names from matchers
     pre_tool_hooks = hooks.get("PreToolUse", [])
@@ -748,11 +744,51 @@ def _build_allowed_tools(
             tool_names = hook_matcher.matcher.split("|")
             for tool_name in tool_names:
                 tool_name = tool_name.strip()
-                if tool_name and tool_name not in allowed:
-                    allowed.append(tool_name)
-                    logger.info(f"Added tool '{tool_name}' to allowed_tools (required for hook handler)")
+                if tool_name and tool_name not in tools:
+                    tools.append(tool_name)
+                    logger.info(f"Found hooked tool: '{tool_name}'")
 
-    return allowed
+    return tools
+
+
+def _build_extra_args(
+    base_extra_args: Dict[str, str],
+    hooks: Optional[Dict[str, list]]
+) -> Dict[str, str]:
+    """
+    Build extra_args dict, adding --allowed-tools for any hooked tools.
+
+    When we have hooks that handle specific tools (like AskUserQuestion),
+    we must pass them via --allowed-tools CLI flag so the model can call them.
+    The SDK's allowed_tools option only filters existing tools, it doesn't add new ones.
+
+    Args:
+        base_extra_args: Base extra args from profile config
+        hooks: Dict of hook configurations (e.g., {"PreToolUse": [HookMatcher(...)]})
+
+    Returns:
+        Dict of extra args to pass to CLI
+    """
+    extra_args = dict(base_extra_args) if base_extra_args else {}
+
+    # Get tool names from hooks
+    hook_tools = _get_hook_tool_names(hooks)
+
+    if hook_tools:
+        # Merge with any existing allowed-tools
+        existing = extra_args.get("allowed-tools", "")
+        existing_tools = [t.strip() for t in existing.split(",") if t.strip()] if existing else []
+
+        # Add hook tools that aren't already in the list
+        for tool in hook_tools:
+            if tool not in existing_tools:
+                existing_tools.append(tool)
+                logger.info(f"Adding '{tool}' to --allowed-tools (required for hook handler)")
+
+        if existing_tools:
+            extra_args["allowed-tools"] = ",".join(existing_tools)
+
+    return extra_args
 
 
 def _build_env_with_ai_tools(
@@ -1026,9 +1062,7 @@ def build_options_from_profile(
         max_turns=overrides.get("max_turns") or config.get("max_turns"),
 
         # Tool configuration
-        # When hooks include AskUserQuestion handler, ensure the tool is allowed
-        # so the model can actually call it (the hook intercepts and handles it)
-        allowed_tools=_build_allowed_tools(config.get("allowed_tools") or [], hooks),
+        allowed_tools=config.get("allowed_tools") or [],
         disallowed_tools=config.get("disallowed_tools") or [],
 
         # System prompt
@@ -1046,7 +1080,7 @@ def build_options_from_profile(
 
         # Environment and arguments - inject AI tool credentials if enabled
         env=_build_env_with_ai_tools(config.get("env"), ai_tools_config),
-        extra_args=config.get("extra_args") or {},
+        extra_args=_build_extra_args(config.get("extra_args") or {}, hooks),
 
         # Buffer settings - Default to 50MB to handle large file reads (images, PDFs)
         # The SDK's default is 1MB which causes "JSON message exceeded maximum buffer size" errors
