@@ -4,10 +4,14 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { auth, isAuthenticated, setupRequired, claudeAuthenticated } from '$lib/stores/auth';
+	import { theme } from '$lib/stores/theme';
 
 	let initialized = false;
 
 	onMount(async () => {
+		// Initialize theme on mount
+		theme.init();
+
 		try {
 			await auth.checkAuth();
 			initialized = true;
@@ -35,6 +39,21 @@
 	<meta name="mobile-web-app-capable" content="yes" />
 	<meta name="apple-mobile-web-app-capable" content="yes" />
 	<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+	<!-- Prevent flash of wrong theme by applying theme class before paint -->
+	{@html `<script>
+		(function() {
+			var stored = localStorage.getItem('ai-hub-theme');
+			var theme = stored || 'system';
+			var resolved = theme;
+			if (theme === 'system') {
+				resolved = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+			}
+			document.documentElement.classList.add(resolved);
+			document.documentElement.classList.remove(resolved === 'dark' ? 'light' : 'dark');
+			var meta = document.querySelector('meta[name="theme-color"]');
+			if (meta) meta.setAttribute('content', resolved === 'dark' ? '#0f0f0f' : '#ffffff');
+		})();
+	</script>`}
 </svelte:head>
 
 {#if !initialized}

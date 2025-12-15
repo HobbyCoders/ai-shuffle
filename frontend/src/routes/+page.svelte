@@ -39,9 +39,12 @@
 	import TodoList from '$lib/components/TodoList.svelte';
 	import SettingsModal from '$lib/components/SettingsModal.svelte';
 	import ProfileModal from '$lib/components/ProfileModal.svelte';
+	import KeyboardShortcutsModal from '$lib/components/KeyboardShortcutsModal.svelte';
 	import { groups, organizeByGroups } from '$lib/stores/groups';
 	import { executeCommand, isSlashCommand, listCommands, type Command } from '$lib/api/commands';
 	import { groupSessionsByDate, type DateGroup } from '$lib/utils/dateGroups';
+	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
+	import { theme, isDark } from '$lib/stores/theme';
 
 	// Configure marked for better code highlighting
 	marked.setOptions({
@@ -288,6 +291,12 @@
 	// Settings modal state
 	let showSettingsModal = false;
 
+	// Keyboard shortcuts modal state
+	let showKeyboardShortcuts = false;
+
+	// Shortcut registrations (for cleanup)
+	let shortcutRegistrations: ShortcutRegistration[] = [];
+
 	// Mobile tools menu state
 	let showToolsMenu = false;
 
@@ -371,24 +380,128 @@
 
 		window.addEventListener('pageshow', handlePageShow);
 
-		// Spotlight search keyboard shortcut (Cmd+K / Ctrl+K)
-		const handleSpotlightKeydown = (event: KeyboardEvent) => {
-			if ((event.metaKey || event.ctrlKey) && event.key === 'k') {
-				event.preventDefault();
-				showSpotlight = !showSpotlight;
-			}
-		};
+		// Register keyboard shortcuts
+		shortcutRegistrations = [
+			// Spotlight search (Cmd+K)
+			registerShortcut({
+				id: 'spotlight',
+				description: 'Open spotlight search',
+				key: 'k',
+				cmdOrCtrl: true,
+				category: 'navigation',
+				action: () => { showSpotlight = !showSpotlight; }
+			}),
 
-		window.addEventListener('keydown', handleSpotlightKeydown);
+			// New chat (Cmd+N)
+			registerShortcut({
+				id: 'new-chat',
+				description: 'Start new chat',
+				key: 'n',
+				cmdOrCtrl: true,
+				category: 'chat',
+				action: () => { handleNewTab(); }
+			}),
+
+			// Send message (Cmd+Enter)
+			registerShortcut({
+				id: 'send-message',
+				description: 'Send message',
+				key: 'Enter',
+				cmdOrCtrl: true,
+				category: 'chat',
+				allowInInput: true,
+				action: () => {
+					if ($activeTabId) {
+						handleSubmit($activeTabId);
+					}
+				}
+			}),
+
+			// Stop generation (Cmd+Shift+S)
+			registerShortcut({
+				id: 'stop-generation',
+				description: 'Stop generation',
+				key: 's',
+				cmdOrCtrl: true,
+				shift: true,
+				category: 'chat',
+				action: () => {
+					if ($activeTabId && $activeTab?.isStreaming) {
+						tabs.stopGeneration($activeTabId);
+					}
+				}
+			}),
+
+			// Show keyboard shortcuts (Cmd+/)
+			registerShortcut({
+				id: 'show-shortcuts',
+				description: 'Show keyboard shortcuts',
+				key: '/',
+				cmdOrCtrl: true,
+				category: 'general',
+				action: () => { showKeyboardShortcuts = !showKeyboardShortcuts; }
+			}),
+
+			// Show keyboard shortcuts (? key)
+			registerShortcut({
+				id: 'show-shortcuts-question',
+				description: 'Show keyboard shortcuts',
+				key: '?',
+				category: 'general',
+				action: () => { showKeyboardShortcuts = true; }
+			}),
+
+			// Close modals (Escape)
+			registerShortcut({
+				id: 'close-modal',
+				description: 'Close modal / cancel',
+				key: 'Escape',
+				category: 'general',
+				allowInInput: true,
+				action: () => {
+					// Close modals in priority order
+					if (showKeyboardShortcuts) {
+						showKeyboardShortcuts = false;
+					} else if (showSpotlight) {
+						showSpotlight = false;
+					} else if (showSettingsModal) {
+						showSettingsModal = false;
+					} else if (showProfileModal) {
+						showProfileModal = false;
+					} else if (showSubagentManager) {
+						showSubagentManager = false;
+					} else if (showProjectModal) {
+						showProjectModal = false;
+					} else if (showTerminalModal) {
+						showTerminalModal = false;
+					}
+				}
+			}),
+
+			// Open settings (Cmd+,)
+			registerShortcut({
+				id: 'open-settings',
+				description: 'Open settings',
+				key: ',',
+				cmdOrCtrl: true,
+				category: 'navigation',
+				action: () => { showSettingsModal = true; }
+			})
+		];
 
 		return () => {
 			window.removeEventListener('pageshow', handlePageShow);
-			window.removeEventListener('keydown', handleSpotlightKeydown);
+			// Unregister all shortcuts
+			shortcutRegistrations.forEach(reg => reg.unregister());
+			shortcutRegistrations = [];
 		};
 	});
 
 	onDestroy(() => {
 		tabs.destroy();
+		// Also clean up shortcuts on destroy
+		shortcutRegistrations.forEach(reg => reg.unregister());
+		shortcutRegistrations = [];
 	});
 
 	// Initialize tabInputs for all tabs to ensure proper binding
@@ -1561,6 +1674,12 @@
 			{/if}
 		</div>
 		<div class="mt-auto flex flex-col items-center pb-3 gap-1">
+			<!-- Keyboard Shortcuts -->
+			<button on:click={() => showKeyboardShortcuts = true} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-white/10 text-muted-foreground hover:text-foreground" title="Keyboard Shortcuts (?)">
+				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+				</svg>
+			</button>
 			{#if $isAdmin}
 				<button on:click={() => showSettingsModal = true} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-white/10 text-muted-foreground hover:text-foreground" title="Settings">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -3183,8 +3302,26 @@
 				{/if}
 				</div>
 
-				<!-- Right: Connection Status -->
+				<!-- Right: Theme Toggle and Connection Status -->
 				<div class="flex items-center gap-2">
+					<!-- Theme Toggle Button -->
+					<button
+						on:click={() => theme.toggle()}
+						class="w-8 h-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-all"
+						title={$isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+					>
+						{#if $isDark}
+							<!-- Sun icon for switching to light mode -->
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+							</svg>
+						{:else}
+							<!-- Moon icon for switching to dark mode -->
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+							</svg>
+						{/if}
+					</button>
 					<ConnectionStatus wsConnected={currentTab.wsConnected} />
 				</div>
 				</div>
@@ -3822,6 +3959,9 @@
 
 <!-- Settings Modal -->
 <SettingsModal open={showSettingsModal} onClose={() => showSettingsModal = false} />
+
+<!-- Keyboard Shortcuts Modal -->
+<KeyboardShortcutsModal open={showKeyboardShortcuts} onClose={() => showKeyboardShortcuts = false} />
 
 <!-- Profile Modal -->
 <ProfileModal

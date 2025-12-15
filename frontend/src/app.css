@@ -3,8 +3,12 @@
 @tailwind utilities;
 
 @layer base {
-	:root {
-		/* Warmer dark background with subtle blue undertone */
+	/* ========================================
+	   DARK THEME (Default)
+	   ======================================== */
+	:root,
+	.dark {
+		/* Background colors */
 		--background: oklch(0.14 0.008 260);
 		--foreground: oklch(0.95 0.01 260);
 
@@ -14,7 +18,7 @@
 		--popover: oklch(0.20 0.01 260);
 		--popover-foreground: oklch(0.95 0.01 260);
 
-		/* Primary: Teal accent (distinctive from Claude purple) */
+		/* Primary: Teal accent */
 		--primary: oklch(0.72 0.14 180);
 		--primary-foreground: oklch(0.15 0.02 180);
 
@@ -39,12 +43,104 @@
 		--input: oklch(0.20 0.01 260);
 		--ring: oklch(0.72 0.14 180);
 
-		/* Refined shadow system */
+		/* Shadow system */
 		--shadow-s: 0 1px 2px rgba(0,0,0,0.3), 0 1px 3px rgba(0,0,0,0.15);
 		--shadow-m: 0 4px 6px rgba(0,0,0,0.25), 0 2px 4px rgba(0,0,0,0.15);
 		--shadow-l: 0 10px 15px rgba(0,0,0,0.2), 0 4px 6px rgba(0,0,0,0.1);
 
+		/* Border radius */
 		--radius: 0.75rem;
+
+		/* Scrollbar colors */
+		--scrollbar-thumb: oklch(0.35 0.01 260);
+		--scrollbar-thumb-hover: oklch(0.45 0.01 260);
+
+		/* Glass effects */
+		--glass-bg: oklch(0.18 0.01 260 / 0.8);
+		--glass-border: oklch(0.4 0.01 260 / 0.15);
+
+		/* Floating panel */
+		--panel-bg: oklch(0.16 0.012 260 / 0.85);
+		--panel-border: oklch(0.4 0.01 260 / 0.15);
+		--panel-shadow-inset: oklch(0.95 0 0 / 0.03);
+		--panel-shadow-outer: oklch(0 0 0 / 0.4);
+		--panel-shadow-inner: oklch(0 0 0 / 0.2);
+
+		/* Glow effect */
+		--glow-color: oklch(0.72 0.14 180 / 0.4);
+		--glow-color-soft: oklch(0.72 0.14 180 / 0.3);
+	}
+
+	/* ========================================
+	   LIGHT THEME
+	   ======================================== */
+	.light {
+		/* Background colors */
+		--background: oklch(0.98 0.005 260);
+		--foreground: oklch(0.15 0.01 260);
+
+		/* Elevated surfaces */
+		--card: oklch(1 0 0);
+		--card-foreground: oklch(0.15 0.01 260);
+		--popover: oklch(1 0 0);
+		--popover-foreground: oklch(0.15 0.01 260);
+
+		/* Primary: Teal accent (slightly adjusted for light bg) */
+		--primary: oklch(0.55 0.16 180);
+		--primary-foreground: oklch(0.98 0.005 180);
+
+		/* Secondary/Muted */
+		--secondary: oklch(0.95 0.005 260);
+		--secondary-foreground: oklch(0.25 0.01 260);
+		--muted: oklch(0.93 0.008 260);
+		--muted-foreground: oklch(0.45 0.015 260);
+
+		/* Accent for hover states */
+		--accent: oklch(0.90 0.01 260);
+		--accent-foreground: oklch(0.15 0.01 260);
+
+		/* Semantic colors (adjusted for light theme) */
+		--destructive: oklch(0.55 0.22 25);
+		--destructive-foreground: oklch(0.98 0 0);
+		--success: oklch(0.55 0.18 145);
+		--warning: oklch(0.65 0.18 85);
+
+		/* Borders and inputs */
+		--border: oklch(0.85 0.01 260);
+		--input: oklch(0.96 0.005 260);
+		--ring: oklch(0.55 0.16 180);
+
+		/* Shadow system (lighter for light theme) */
+		--shadow-s: 0 1px 2px rgba(0,0,0,0.05), 0 1px 3px rgba(0,0,0,0.08);
+		--shadow-m: 0 4px 6px rgba(0,0,0,0.08), 0 2px 4px rgba(0,0,0,0.06);
+		--shadow-l: 0 10px 15px rgba(0,0,0,0.1), 0 4px 6px rgba(0,0,0,0.05);
+
+		/* Border radius */
+		--radius: 0.75rem;
+
+		/* Scrollbar colors */
+		--scrollbar-thumb: oklch(0.75 0.01 260);
+		--scrollbar-thumb-hover: oklch(0.65 0.01 260);
+
+		/* Glass effects */
+		--glass-bg: oklch(1 0 0 / 0.8);
+		--glass-border: oklch(0.5 0.01 260 / 0.15);
+
+		/* Floating panel */
+		--panel-bg: oklch(1 0 0 / 0.9);
+		--panel-border: oklch(0.8 0.01 260 / 0.3);
+		--panel-shadow-inset: oklch(1 0 0 / 0.5);
+		--panel-shadow-outer: oklch(0 0 0 / 0.1);
+		--panel-shadow-inner: oklch(0 0 0 / 0.05);
+
+		/* Glow effect */
+		--glow-color: oklch(0.55 0.16 180 / 0.3);
+		--glow-color-soft: oklch(0.55 0.16 180 / 0.2);
+	}
+
+	/* Theme transition for smooth changes */
+	html {
+		transition: background-color 0.3s ease, color 0.3s ease;
 	}
 
 	/* Smoother transitions */
@@ -76,10 +172,10 @@
 	}
 }
 
-/* Scrollbar styling */
+/* Scrollbar styling using CSS variables */
 * {
 	scrollbar-width: thin;
-	scrollbar-color: oklch(0.35 0.01 260) transparent;
+	scrollbar-color: var(--scrollbar-thumb) transparent;
 }
 
 *::-webkit-scrollbar {
@@ -93,12 +189,12 @@
 }
 
 *::-webkit-scrollbar-thumb {
-	background: oklch(0.35 0.01 260);
+	background: var(--scrollbar-thumb);
 	border-radius: 4px;
 }
 
 *::-webkit-scrollbar-thumb:hover {
-	background: oklch(0.45 0.01 260);
+	background: var(--scrollbar-thumb-hover);
 }
 
 *::-webkit-scrollbar-corner {
@@ -107,7 +203,7 @@
 
 /* Glass effect for modals/popovers */
 .glass {
-	background: oklch(0.18 0.01 260 / 0.8);
+	background: var(--glass-bg);
 	backdrop-filter: blur(12px);
 	-webkit-backdrop-filter: blur(12px);
 }
@@ -137,7 +233,7 @@ code {
 }
 
 .btn-primary {
-	background: linear-gradient(135deg, var(--primary), oklch(0.68 0.16 175));
+	background: linear-gradient(135deg, var(--primary), oklch(from var(--primary) calc(l - 0.04) calc(c + 0.02) calc(h - 5)));
 	color: var(--primary-foreground);
 	box-shadow: var(--shadow-s);
 }
@@ -394,14 +490,14 @@ button, a, .clickable {
 
 /* Floating Panel System - Glass morphism sidebar */
 .floating-panel {
-	background: oklch(0.16 0.012 260 / 0.85);
+	background: var(--panel-bg);
 	backdrop-filter: blur(20px);
 	-webkit-backdrop-filter: blur(20px);
-	border: 1px solid oklch(0.4 0.01 260 / 0.15);
+	border: 1px solid var(--panel-border);
 	box-shadow:
-		0 0 0 1px oklch(0.95 0 0 / 0.03) inset,
-		0 8px 32px oklch(0 0 0 / 0.4),
-		0 2px 8px oklch(0 0 0 / 0.2);
+		0 0 0 1px var(--panel-shadow-inset) inset,
+		0 8px 32px var(--panel-shadow-outer),
+		0 2px 8px var(--panel-shadow-inner);
 }
 
 /* Panel slide-in animation */
@@ -423,6 +519,15 @@ button, a, .clickable {
 /* Glow effect for active items */
 .shadow-glow {
 	box-shadow:
-		0 0 12px oklch(0.72 0.14 180 / 0.4),
-		0 0 4px oklch(0.72 0.14 180 / 0.3);
+		0 0 12px var(--glow-color),
+		0 0 4px var(--glow-color-soft);
+}
+
+/* Theme toggle button animation */
+.theme-toggle-icon {
+	transition: transform 0.3s ease, opacity 0.3s ease;
+}
+
+.theme-toggle-icon.rotating {
+	transform: rotate(180deg);
 }

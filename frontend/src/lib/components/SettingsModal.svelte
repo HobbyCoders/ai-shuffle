@@ -8,6 +8,7 @@
 	import { onMount } from 'svelte';
 	import { auth, username, isAdmin, claudeAuthenticated, githubAuthenticated } from '$lib/stores/auth';
 	import { api } from '$lib/api/client';
+	import { theme, themePreference, isDark, type Theme } from '$lib/stores/theme';
 	import type { ApiUser, ApiUserWithKey, Profile, WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
 	import type { Project } from '$lib/stores/chat';
 	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig, changePassword } from '$lib/api/auth';
@@ -961,6 +962,79 @@
 							<h3 class="text-lg font-semibold text-foreground mb-1">General Settings</h3>
 							<p class="text-sm text-muted-foreground">Configure your workspace and application preferences.</p>
 						</div>
+
+						<!-- Theme Settings -->
+						<section class="bg-muted/30 rounded-xl p-5">
+							<h4 class="text-base font-semibold text-foreground mb-4 flex items-center gap-2">
+								{#if $isDark}
+									<svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+									</svg>
+								{:else}
+									<svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+									</svg>
+								{/if}
+								Appearance
+							</h4>
+
+							<p class="text-sm text-muted-foreground mb-4">
+								Choose your preferred color theme for the interface.
+							</p>
+
+							<div class="space-y-3">
+								<div class="grid grid-cols-3 gap-3">
+									<!-- Light Theme Option -->
+									<button
+										onclick={() => theme.setTheme('light')}
+										class="flex flex-col items-center gap-2 p-3 rounded-lg border-2 transition-all {$themePreference === 'light' ? 'border-primary bg-primary/10' : 'border-border hover:border-muted-foreground/50'}"
+									>
+										<div class="w-10 h-10 rounded-lg bg-white border border-gray-200 flex items-center justify-center shadow-sm">
+											<svg class="w-5 h-5 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+											</svg>
+										</div>
+										<span class="text-sm font-medium text-foreground">Light</span>
+									</button>
+
+									<!-- Dark Theme Option -->
+									<button
+										onclick={() => theme.setTheme('dark')}
+										class="flex flex-col items-center gap-2 p-3 rounded-lg border-2 transition-all {$themePreference === 'dark' ? 'border-primary bg-primary/10' : 'border-border hover:border-muted-foreground/50'}"
+									>
+										<div class="w-10 h-10 rounded-lg bg-gray-800 border border-gray-700 flex items-center justify-center shadow-sm">
+											<svg class="w-5 h-5 text-blue-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+											</svg>
+										</div>
+										<span class="text-sm font-medium text-foreground">Dark</span>
+									</button>
+
+									<!-- System Theme Option -->
+									<button
+										onclick={() => theme.setTheme('system')}
+										class="flex flex-col items-center gap-2 p-3 rounded-lg border-2 transition-all {$themePreference === 'system' ? 'border-primary bg-primary/10' : 'border-border hover:border-muted-foreground/50'}"
+									>
+										<div class="w-10 h-10 rounded-lg bg-gradient-to-br from-white to-gray-800 border border-gray-400 flex items-center justify-center shadow-sm">
+											<svg class="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+											</svg>
+										</div>
+										<span class="text-sm font-medium text-foreground">System</span>
+									</button>
+								</div>
+
+								<p class="text-xs text-muted-foreground">
+									{#if $themePreference === 'system'}
+										Automatically matches your operating system's theme setting.
+									{:else if $themePreference === 'light'}
+										Light theme with a bright background.
+									{:else}
+										Dark theme with a dark background.
+									{/if}
+								</p>
+							</div>
+						</section>
 
 						<!-- Workspace Configuration -->
 						<section class="bg-muted/30 rounded-xl p-5">
