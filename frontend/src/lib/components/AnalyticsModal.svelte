@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import UniversalModal from './UniversalModal.svelte';
 	import {
@@ -20,39 +19,36 @@
 	import CostBreakdown from '$lib/components/analytics/CostBreakdown.svelte';
 	import TopSessionsTable from '$lib/components/analytics/TopSessionsTable.svelte';
 
-	interface Props {
-		open: boolean;
-		onClose: () => void;
-		onSessionClick?: (sessionId: string) => void;
-	}
-
-	let { open, onClose, onSessionClick }: Props = $props();
+	// Props - using Svelte 4 syntax for compatibility with child components
+	export let open: boolean = false;
+	export let onClose: () => void = () => {};
+	export let onSessionClick: ((sessionId: string) => void) | undefined = undefined;
 
 	// Date range state
-	let startDate = $state('');
-	let endDate = $state('');
+	let startDate = '';
+	let endDate = '';
 
 	// Data state
-	let summary: AnalyticsSummary | null = $state(null);
-	let costBreakdown: CostBreakdownItem[] = $state([]);
-	let usageTrends: TrendDataPoint[] = $state([]);
-	let topSessions: TopSession[] = $state([]);
+	let summary: AnalyticsSummary | null = null;
+	let costBreakdown: CostBreakdownItem[] = [];
+	let usageTrends: TrendDataPoint[] = [];
+	let topSessions: TopSession[] = [];
 
 	// Loading states
-	let summaryLoading = $state(true);
-	let costBreakdownLoading = $state(true);
-	let trendsLoading = $state(true);
-	let topSessionsLoading = $state(true);
-	let exportLoading = $state(false);
+	let summaryLoading = true;
+	let costBreakdownLoading = true;
+	let trendsLoading = true;
+	let topSessionsLoading = true;
+	let exportLoading = false;
 
 	// Error state
-	let error: string | null = $state(null);
+	let error: string | null = null;
 
 	// Cost breakdown grouping
-	let costGroupBy: 'profile' | 'user' = $state('profile');
+	let costGroupBy: 'profile' | 'user' = 'profile';
 
 	// Track if we've initialized
-	let initialized = $state(false);
+	let initialized = false;
 
 	// Initialize dates with 30-day range
 	function initializeDates() {
@@ -180,18 +176,17 @@
 		onClose();
 	}
 
-	// Initialize when modal opens
-	$effect(() => {
-		if (open && !initialized) {
-			initializeDates();
-			loadAnalytics();
-			initialized = true;
-		}
-		// Reset when modal closes
-		if (!open) {
-			initialized = false;
-		}
-	});
+	// Initialize when modal opens - reactive statement
+	$: if (open && !initialized) {
+		initializeDates();
+		loadAnalytics();
+		initialized = true;
+	}
+
+	// Reset when modal closes
+	$: if (!open) {
+		initialized = false;
+	}
 </script>
 
 <UniversalModal
@@ -215,7 +210,7 @@
 				/>
 
 				<button
-					onclick={handleExport}
+					on:click={handleExport}
 					disabled={exportLoading}
 					class="btn btn-secondary flex items-center gap-2 px-4 py-2 rounded-lg bg-muted hover:bg-accent text-foreground border border-border transition-colors disabled:opacity-50"
 				>
