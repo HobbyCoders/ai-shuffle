@@ -396,7 +396,6 @@
 				tabs.loadProjects(),
 				loadSubagents(),
 				loadTools(),
-				loadAvailableAITools(),
 				loadAllTags()
 			];
 			// Load admin-specific data if user is admin

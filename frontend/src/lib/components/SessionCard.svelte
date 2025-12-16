@@ -22,9 +22,11 @@
 	}>();
 
 	// Check if session has tags (with fallback for older sessions)
-	$: hasTags = session.tags && session.tags.length > 0;
-	$: displayTags = session.tags?.slice(0, 3) || []; // Show max 3 tags
-	$: moreTags = (session.tags?.length || 0) - 3;
+	// Filter out any malformed tags that might be missing required fields
+	$: validTags = (session.tags || []).filter(tag => tag && tag.id && tag.name);
+	$: hasTags = validTags.length > 0;
+	$: displayTags = validTags.slice(0, 3); // Show max 3 tags
+	$: moreTags = validTags.length - 3;
 
 	function handleTagClick(e: MouseEvent) {
 		e.stopPropagation();

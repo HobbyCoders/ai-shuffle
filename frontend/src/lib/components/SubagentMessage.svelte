@@ -10,9 +10,14 @@
 
 	let { message }: Props = $props();
 
+	// Filter valid children (ensure they have required id field)
+	const validChildren = $derived(() =>
+		(message.agentChildren || []).filter(c => c && c.id)
+	);
+
 	// Count children by type
 	const childCounts = $derived(() => {
-		const children = message.agentChildren || [];
+		const children = validChildren();
 		const toolUseChildren = children.filter(c => c.type === 'tool_use');
 		const completedTools = toolUseChildren.filter(c => c.toolStatus === 'complete').length;
 
@@ -174,8 +179,8 @@
 			{/if}
 
 			<!-- Agent children (tool calls and text messages) -->
-			{#if message.agentChildren && message.agentChildren.length > 0}
-				{#each message.agentChildren as child (child.id)}
+			{#if validChildren().length > 0}
+				{#each validChildren() as child (child.id)}
 					{#if child.type === 'tool_use'}
 						<div class="px-4 py-2 border-b border-border/50 last:border-b-0">
 							<details class="group/tool">
