@@ -50,6 +50,7 @@
 	import SessionTagPicker from '$lib/components/SessionTagPicker.svelte';
 	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
 	import KnowledgeManager from '$lib/components/KnowledgeManager.svelte';
+	import GitModal from '$lib/components/git/GitModal.svelte';
 	import { groups, organizeByGroups } from '$lib/stores/groups';
 	import { executeCommand, isSlashCommand, listCommands, type Command } from '$lib/api/commands';
 	import { groupSessionsByDate, type DateGroup } from '$lib/utils/dateGroups';
@@ -293,6 +294,7 @@
 	let showProjectModal = false;
 	let showNewProjectForm = false;
 	let showKnowledgeModal = false;
+	let showGitModal = false;
 	let editingProfile: any = null;
 	let fileInput: HTMLInputElement;
 	let isUploading = false;
@@ -517,6 +519,10 @@
 						showProjectModal = false;
 					} else if (showTerminalModal) {
 						showTerminalModal = false;
+					} else if (showGitModal) {
+						showGitModal = false;
+					} else if (showKnowledgeModal) {
+						showKnowledgeModal = false;
 					}
 				}
 			}),
@@ -540,6 +546,21 @@
 				shift: true,
 				category: 'navigation',
 				action: () => { showAdvancedSearch = !showAdvancedSearch; }
+			}),
+
+			// Git modal (Cmd+Shift+G)
+			registerShortcut({
+				id: 'git-modal',
+				description: 'Open Git & GitHub',
+				key: 'g',
+				cmdOrCtrl: true,
+				shift: true,
+				category: 'navigation',
+				action: () => {
+					if ($activeTab?.project) {
+						showGitModal = !showGitModal;
+					}
+				}
 			})
 		];
 
@@ -3551,6 +3572,18 @@
 							</svg>
 						</button>
 					{/if}
+					<!-- Git Button (only show when project is selected) -->
+					{#if currentTab.project}
+						<button
+							on:click={() => showGitModal = true}
+							class="w-8 h-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-all"
+							title="Git & GitHub (Cmd+Shift+G)"
+						>
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 3v12m0 0c0 2.5 2 3 3.5 3s3.5-.5 3.5-3m-7 0c0-2.5 2-3 3.5-3s3.5.5 3.5 3m0 0v-6m0 0c0-2.5-2-3-3.5-3S6 6.5 6 9" />
+							</svg>
+						</button>
+					{/if}
 					<!-- Export Button (only show when session is saved) -->
 					{#if currentTab.sessionId}
 						<div class="relative group">
@@ -4360,6 +4393,19 @@
 	<KnowledgeManager
 		projectId={$activeTab.project}
 		on:close={() => showKnowledgeModal = false}
+	/>
+{/if}
+
+<!-- Git Modal -->
+{#if showGitModal && $activeTab?.project}
+	<GitModal
+		open={showGitModal}
+		projectId={$activeTab.project}
+		onClose={() => showGitModal = false}
+		onOpenSession={(sessionId) => {
+			tabs.openSession(sessionId);
+			showGitModal = false;
+		}}
 	/>
 {/if}
 

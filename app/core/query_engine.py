@@ -923,7 +923,16 @@ def build_options_from_profile(
     overrides = overrides or {}
 
     # Determine working directory first (needed for env details injection)
-    if project:
+    # Check if session has associated worktree - worktree takes priority
+    if resume_session_id:
+        worktree = database.get_worktree_by_session(resume_session_id)
+        if worktree and worktree.get("status") == "active":
+            working_dir = str(settings.workspace_dir / worktree["worktree_path"])
+        elif project:
+            working_dir = str(settings.workspace_dir / project["path"])
+        else:
+            working_dir = str(settings.workspace_dir)
+    elif project:
         working_dir = str(settings.workspace_dir / project["path"])
     elif config.get("cwd"):
         working_dir = config.get("cwd")
