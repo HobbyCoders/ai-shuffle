@@ -437,7 +437,7 @@
 {#if show}
 	<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
 	<div
-		class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-2 sm:p-4"
+		class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-4"
 		on:click={close}
 		on:keydown={(e) => e.key === 'Escape' && close()}
 		role="dialog"
@@ -446,20 +446,25 @@
 	>
 		<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
 		<div
-			class="bg-card rounded-xl w-full max-w-4xl max-h-[90vh] overflow-hidden shadow-xl border border-border flex flex-col"
+			class="bg-card rounded-2xl w-full max-w-4xl max-h-[95vh] sm:max-h-[90vh] overflow-hidden shadow-2xl border border-border flex flex-col"
 			on:click|stopPropagation
 		>
 			<!-- Header -->
-			<div class="px-4 py-3 border-b border-border flex items-center justify-between shrink-0">
-				<h2 class="text-lg font-semibold text-foreground">
-					{#if showForm}
-						{editingProfile ? 'Edit Profile' : 'New Profile'}
-					{:else}
-						Profiles
+			<div class="px-4 sm:px-6 py-4 border-b border-border flex items-center justify-between shrink-0 bg-gradient-to-r from-primary/5 to-transparent">
+				<div>
+					<h2 class="text-lg font-semibold text-foreground">
+						{#if showForm}
+							{editingProfile ? 'Edit Profile' : 'New Profile'}
+						{:else}
+							Profiles
+						{/if}
+					</h2>
+					{#if showForm && editingProfile}
+						<p class="text-xs text-muted-foreground font-mono">{editingProfile.id}</p>
 					{/if}
-				</h2>
+				</div>
 				<button
-					class="p-1.5 text-muted-foreground hover:text-foreground rounded-lg hover:bg-muted transition-colors"
+					class="p-2 text-muted-foreground hover:text-foreground rounded-lg hover:bg-muted transition-colors"
 					on:click={close}
 					aria-label="Close"
 				>
@@ -478,18 +483,43 @@
 						<div class="flex md:hidden overflow-x-auto scrollbar-hide">
 							{#each tabs as tab}
 								<button
-									class="flex items-center gap-2 px-4 py-3 text-sm font-medium whitespace-nowrap transition-colors border-b-2 {activeTab === tab.id ? 'border-primary text-primary bg-primary/5' : 'border-transparent text-muted-foreground hover:text-foreground'}"
+									class="flex-1 flex items-center justify-center gap-2 px-4 py-3 text-sm font-medium whitespace-nowrap transition-all relative {activeTab === tab.id ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}"
 									on:click={() => activeTab = tab.id}
 								>
-									{tab.label}
+									{#if tab.icon === 'settings'}
+										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+										</svg>
+									{:else if tab.icon === 'wrench'}
+										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+										</svg>
+									{:else if tab.icon === 'users'}
+										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+										</svg>
+									{:else if tab.icon === 'message'}
+										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+										</svg>
+									{:else if tab.icon === 'cog'}
+										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
+										</svg>
+									{/if}
+									<span class="hidden sm:inline">{tab.label}</span>
+									{#if activeTab === tab.id}
+										<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-primary"></div>
+									{/if}
 								</button>
 							{/each}
 						</div>
 						<!-- Desktop: Vertical tabs -->
-						<div class="hidden md:flex flex-col w-40 py-2">
+						<div class="hidden md:flex flex-col w-44 p-3 space-y-1">
 							{#each tabs as tab}
 								<button
-									class="flex items-center gap-3 px-4 py-2.5 text-sm font-medium transition-colors {activeTab === tab.id ? 'bg-primary/10 text-primary border-r-2 border-primary' : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}"
+									class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all {activeTab === tab.id ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}"
 									on:click={() => activeTab = tab.id}
 								>
 									{#if tab.icon === 'settings'}
@@ -1018,17 +1048,17 @@
 				</div>
 
 				<!-- Form Footer -->
-				<div class="px-4 py-3 border-t border-border flex justify-end gap-2 shrink-0 bg-card">
+				<div class="px-4 sm:px-6 py-4 border-t border-border flex justify-end gap-2 shrink-0 bg-muted/30">
 					<button
 						on:click={() => { showForm = false; resetForm(); }}
-						class="px-4 py-2 text-sm bg-muted text-foreground rounded-lg hover:bg-accent transition-colors"
+						class="px-4 py-2.5 text-sm font-medium text-foreground bg-background border border-border rounded-xl hover:bg-muted transition-colors"
 					>
 						Cancel
 					</button>
 					<button
 						on:click={saveProfile}
 						disabled={!profileForm.id || !profileForm.name}
-						class="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+						class="px-6 py-2.5 text-sm font-medium bg-primary text-primary-foreground rounded-xl hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
 					>
 						{editingProfile ? 'Save Changes' : 'Create Profile'}
 					</button>
