@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { git, commits, gitLoading, gitHead } from '$lib/stores/git';
+    import { git, commits, gitLoading, gitStatus } from '$lib/stores/git';
     import type { CommitNode } from '$lib/stores/git';
 
     interface Props {
@@ -217,7 +217,8 @@
                         {/each}
 
                         <!-- Nodes -->
-                        {#each layout.nodes as node}
+                        {#each layout.nodes as node, index}
+                            {@const isHead = node.branches?.includes('HEAD') || (index === 0 && node.branches?.includes($gitStatus?.current_branch || ''))}
                             <g
                                 transform="translate({node.x}, {node.y})"
                                 class="cursor-pointer"
@@ -226,13 +227,13 @@
                                 <!-- Node circle -->
                                 <circle
                                     r={NODE_RADIUS}
-                                    fill={node.sha === $gitHead ? 'var(--primary)' : node.color}
+                                    fill={isHead ? 'var(--primary)' : node.color}
                                     stroke={selectedCommit?.sha === node.sha ? 'var(--foreground)' : 'transparent'}
                                     stroke-width="2"
                                 />
 
                                 <!-- HEAD indicator -->
-                                {#if node.sha === $gitHead}
+                                {#if isHead}
                                     <circle
                                         r={NODE_RADIUS + 4}
                                         fill="none"

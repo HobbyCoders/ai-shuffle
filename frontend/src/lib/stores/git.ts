@@ -26,7 +26,6 @@ interface GitState {
     branches: gitApi.Branch[];
     commits: gitApi.CommitNode[];
     worktrees: gitApi.Worktree[];
-    head: string | null;
     loading: boolean;
     error: string | null;
 }
@@ -42,7 +41,6 @@ function createGitStore() {
         branches: [],
         commits: [],
         worktrees: [],
-        head: null,
         loading: false,
         error: null
     });
@@ -57,29 +55,37 @@ function createGitStore() {
             update(s => ({ ...s, projectId, loading: true, error: null }));
 
             try {
-                // Load status, branches, and graph in parallel
-                const [status, branches, graph, worktrees] = await Promise.all([
-                    gitApi.getGitStatus(projectId),
-                    gitApi.getBranches(projectId),
-                    gitApi.getCommitGraph(projectId, 50),
-                    gitApi.getWorktrees(projectId)
-                ]);
+                // Load status first to check if it's a git repo
+                const status = await gitApi.getGitStatus(projectId);
 
-                update(s => ({
-                    ...s,
-                    status,
-                    branches,
-                    commits: graph.commits,
-                    head: graph.head,
-                    worktrees,
-                    loading: false
-                }));
+                // Update status immediately
+                update(s => ({ ...s, status }));
+
+                // If it's a git repo, load the rest in parallel
+                if (status.is_git_repo) {
+                    const [branches, graphResponse, worktrees] = await Promise.all([
+                        gitApi.getBranches(projectId),
+                        gitApi.getCommitGraph(projectId, 50),
+                        gitApi.getWorktrees(projectId)
+                    ]);
+
+                    update(s => ({
+                        ...s,
+                        branches,
+                        commits: graphResponse.commits,
+                        worktrees,
+                        loading: false
+                    }));
+                } else {
+                    update(s => ({ ...s, loading: false }));
+                }
             } catch (e) {
-                const error = e as { detail?: string };
+                console.error('Failed to load git repository:', e);
+                const error = e as { detail?: string; message?: string };
                 update(s => ({
                     ...s,
                     loading: false,
-                    error: error.detail || 'Failed to load repository'
+                    error: error.detail || error.message || 'Failed to load repository'
                 }));
             }
         },
@@ -124,8 +130,8 @@ function createGitStore() {
             if (!state.projectId) return;
 
             try {
-                const graph = await gitApi.getCommitGraph(state.projectId, limit);
-                update(s => ({ ...s, commits: graph.commits, head: graph.head }));
+                const graphResponse = await gitApi.getCommitGraph(state.projectId, limit);
+                update(s => ({ ...s, commits: graphResponse.commits }));
             } catch (e) {
                 const error = e as { detail?: string };
                 update(s => ({ ...s, error: error.detail || 'Failed to load commit graph' }));
@@ -325,7 +331,6 @@ function createGitStore() {
                 branches: [],
                 commits: [],
                 worktrees: [],
-                head: null,
                 loading: false,
                 error: null
             });
@@ -340,7 +345,6 @@ function createGitStore() {
             branches: [],
             commits: [],
             worktrees: [],
-            head: null,
             loading: false,
             error: null
         };
@@ -361,7 +365,6 @@ export const worktrees = derived(git, $git => $git.worktrees);
 export const gitStatus = derived(git, $git => $git.status);
 export const gitLoading = derived(git, $git => $git.loading);
 export const gitError = derived(git, $git => $git.error);
-export const gitHead = derived(git, $git => $git.head);
 
 // Derived store for current branch
 export const currentBranch = derived(git, $git =>

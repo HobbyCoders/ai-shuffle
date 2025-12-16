@@ -57,10 +57,9 @@ export interface CommitNode {
     y?: number;
 }
 
-export interface CommitGraph {
+export interface CommitGraphResponse {
     commits: CommitNode[];
-    branches: string[];
-    head: string;
+    total: number;
 }
 
 // ============================================================================
@@ -100,11 +99,17 @@ export async function getGitStatus(projectId: string): Promise<GitStatus> {
 // Branch API
 // ============================================================================
 
+export interface BranchListResponse {
+    branches: Branch[];
+    current_branch: string | null;
+}
+
 /**
  * Get all branches for a project
  */
 export async function getBranches(projectId: string): Promise<Branch[]> {
-    return api.get<Branch[]>(`${BASE}/${projectId}/git/branches`);
+    const response = await api.get<BranchListResponse>(`${BASE}/${projectId}/git/branches`);
+    return response.branches;
 }
 
 /**
@@ -146,20 +151,26 @@ export async function fetchRemote(projectId: string): Promise<{ success: boolean
 /**
  * Get the commit graph for a project
  */
-export async function getCommitGraph(projectId: string, limit?: number): Promise<CommitGraph> {
+export async function getCommitGraph(projectId: string, limit?: number): Promise<CommitGraphResponse> {
     const params = limit ? `?limit=${limit}` : '';
-    return api.get<CommitGraph>(`${BASE}/${projectId}/git/graph${params}`);
+    return api.get<CommitGraphResponse>(`${BASE}/${projectId}/git/graph${params}`);
 }
 
 // ============================================================================
 // Worktree API
 // ============================================================================
 
+export interface WorktreeListResponse {
+    worktrees: Worktree[];
+    total: number;
+}
+
 /**
  * Get all worktrees for a project
  */
 export async function getWorktrees(projectId: string): Promise<Worktree[]> {
-    return api.get<Worktree[]>(`${BASE}/${projectId}/git/worktrees`);
+    const response = await api.get<WorktreeListResponse>(`${BASE}/${projectId}/git/worktrees`);
+    return response.worktrees;
 }
 
 /**
