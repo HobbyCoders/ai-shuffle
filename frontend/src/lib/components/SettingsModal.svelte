@@ -1,9 +1,12 @@
 <script lang="ts">
 	/**
-	 * SettingsModal - A tabbed modal for all application settings
+	 * SettingsModal - Redesigned with sidebar navigation and grouped categories
 	 *
-	 * Converted from the full-page settings to a modal interface
-	 * with tabs: General, Security, Authentication, API Users, Integrations
+	 * Categories:
+	 * - Account: General settings, Security, Authentication
+	 * - API & Users: API Users management, Rate Limits
+	 * - AI Models: API Keys, Image/Video/Audio model selection
+	 * - System: Notifications, Background Cleanup
 	 */
 	import { onMount } from 'svelte';
 	import { auth, username, isAdmin, claudeAuthenticated, githubAuthenticated } from '$lib/stores/auth';
@@ -30,9 +33,71 @@
 
 	let { open, onClose }: Props = $props();
 
-	// Tab management
-	type SettingsTab = 'general' | 'security' | 'authentication' | 'api-users' | 'integrations' | 'notifications' | 'cleanup' | 'rate-limits';
-	let activeTab: SettingsTab = $state('general');
+	// Navigation state
+	type Category = 'account' | 'api-users' | 'ai-models' | 'system';
+	type Section =
+		| 'general' | 'security' | 'authentication'
+		| 'users' | 'rate-limits'
+		| 'api-keys' | 'models'
+		| 'notifications' | 'cleanup';
+
+	let activeCategory: Category = $state('account');
+	let activeSection: Section = $state('general');
+	let mobileMenuOpen = $state(false);
+
+	// Category definitions
+	const categories: { id: Category; label: string; icon: string; sections: { id: Section; label: string }[] }[] = [
+		{
+			id: 'account',
+			label: 'Account',
+			icon: 'M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z',
+			sections: [
+				{ id: 'general', label: 'General' },
+				{ id: 'security', label: 'Security' },
+				{ id: 'authentication', label: 'Connections' }
+			]
+		},
+		{
+			id: 'api-users',
+			label: 'API & Users',
+			icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z',
+			sections: [
+				{ id: 'users', label: 'API Users' },
+				{ id: 'rate-limits', label: 'Rate Limits' }
+			]
+		},
+		{
+			id: 'ai-models',
+			label: 'AI Models',
+			icon: 'M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z',
+			sections: [
+				{ id: 'api-keys', label: 'API Keys' },
+				{ id: 'models', label: 'Models' }
+			]
+		},
+		{
+			id: 'system',
+			label: 'System',
+			icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z',
+			sections: [
+				{ id: 'notifications', label: 'Notifications' },
+				{ id: 'cleanup', label: 'Cleanup' }
+			]
+		}
+	];
+
+	function selectCategory(cat: Category) {
+		activeCategory = cat;
+		const category = categories.find(c => c.id === cat);
+		if (category && category.sections.length > 0) {
+			activeSection = category.sections[0].id;
+		}
+		mobileMenuOpen = false;
+	}
+
+	function selectSection(section: Section) {
+		activeSection = section;
+	}
 
 	// Data state
 	let apiUsers: ApiUser[] = $state([]);
@@ -61,7 +126,7 @@
 	let githubLoginLoading = $state(false);
 	let claudeLoginLoading = $state(false);
 	let claudeOAuthUrl: string | null = $state(null);
-	let claudeOAuthState: string | null = $state(null);  // PKCE state for OAuth flow
+	let claudeOAuthState: string | null = $state(null);
 	let claudeAuthCode = $state('');
 	let claudeCompletingLogin = $state(false);
 	let githubUser: string | null = $state(null);
@@ -217,18 +282,6 @@
 		web_login_allowed: true
 	});
 
-	// Tab definitions
-	const tabs: { id: SettingsTab; label: string; icon: string }[] = [
-		{ id: 'general', label: 'General', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z' },
-		{ id: 'security', label: 'Security', icon: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z' },
-		{ id: 'authentication', label: 'Authentication', icon: 'M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z' },
-		{ id: 'api-users', label: 'API Users', icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z' },
-		{ id: 'rate-limits', label: 'Rate Limits', icon: 'M13 10V3L4 14h7v7l9-11h-7z' },
-		{ id: 'integrations', label: 'Integrations', icon: 'M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z' },
-		{ id: 'notifications', label: 'Notifications', icon: 'M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9' },
-		{ id: 'cleanup', label: 'Background Cleanup', icon: 'M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16' }
-	];
-
 	// Load data when modal opens
 	$effect(() => {
 		if (open && $isAdmin) {
@@ -253,7 +306,6 @@
 		if (!browserNotificationsSupported) return;
 
 		if (!browserNotificationsEnabled) {
-			// Enabling - need to request permission if not granted
 			if (notificationPermission === 'default') {
 				requestingPermission = true;
 				const result = await requestPermission();
@@ -261,15 +313,13 @@
 				notificationPermission = result;
 
 				if (result !== 'granted') {
-					return; // Don't enable if permission denied
+					return;
 				}
 			} else if (notificationPermission === 'denied') {
-				// Can't enable if previously denied
 				return;
 			}
 		}
 
-		// Toggle the setting
 		browserNotificationsEnabled = !browserNotificationsEnabled;
 		setNotificationsEnabled(browserNotificationsEnabled);
 	}
@@ -426,6 +476,7 @@
 			openaiApiKeyMasked = result.masked_key;
 			openaiApiKey = '';
 			openaiKeySuccess = 'OpenAI API key saved successfully';
+			setTimeout(() => openaiKeySuccess = '', 3000);
 		} catch (e: any) {
 			openaiKeyError = e.detail || 'Failed to save API key';
 		} finally {
@@ -457,6 +508,7 @@
 			imageApiKeyMasked = result.masked_key;
 			imageApiKey = '';
 			imageConfigSuccess = 'Image generation configured successfully';
+			setTimeout(() => imageConfigSuccess = '', 3000);
 		} catch (e: any) {
 			imageConfigError = e.detail || 'Failed to save configuration';
 		} finally {
@@ -475,7 +527,8 @@
 			});
 			imageModel = result.model;
 			imageProvider = result.provider;
-			imageConfigSuccess = 'Image model updated successfully';
+			imageConfigSuccess = 'Image model updated';
+			setTimeout(() => imageConfigSuccess = '', 3000);
 			await loadIntegrationSettings();
 		} catch (e: any) {
 			imageConfigError = e.detail || 'Failed to update image model';
@@ -496,7 +549,8 @@
 			});
 			videoModel = result.model;
 			videoProvider = result.provider;
-			videoConfigSuccess = 'Video model updated successfully';
+			videoConfigSuccess = 'Video model updated';
+			setTimeout(() => videoConfigSuccess = '', 3000);
 			await loadIntegrationSettings();
 		} catch (e: any) {
 			videoConfigError = e.detail || 'Failed to update video model';
@@ -797,7 +851,7 @@
 		changingPassword = true;
 		try {
 			await changePassword(currentPassword, newPassword);
-			passwordChangeSuccess = 'Password changed successfully. All encrypted data has been re-encrypted.';
+			passwordChangeSuccess = 'Password changed successfully';
 			currentPassword = '';
 			newPassword = '';
 			confirmPassword = '';
@@ -920,6 +974,8 @@
 		if (e.key === 'Escape' && open) {
 			if (showCreateForm) {
 				resetForm();
+			} else if (showCleanupPreview) {
+				showCleanupPreview = false;
 			} else {
 				onClose();
 			}
@@ -943,655 +999,631 @@
 			aria-label="Close settings"
 		></button>
 
-		<!-- Modal Container -->
+		<!-- Modal Container - Full screen on mobile, large modal on desktop -->
 		<div
 			class="
-				relative w-full max-w-4xl mx-auto
-				bg-card border border-border rounded-2xl shadow-2xl
+				relative bg-card border border-border shadow-2xl
 				flex flex-col overflow-hidden
-				max-h-[90vh] sm:max-h-[85vh]
-				max-sm:fixed max-sm:inset-3 max-sm:bottom-[4.5rem] max-sm:w-auto max-sm:max-w-none max-sm:max-h-none max-sm:rounded-2xl
-				transform transition-all duration-200 ease-out
 				animate-modal-in
+				w-full h-full
+				sm:w-[95vw] sm:h-[90vh] sm:max-w-5xl sm:rounded-2xl
 			"
 			onclick={(e) => e.stopPropagation()}
 		>
 			<!-- Header -->
-			<header class="shrink-0 px-6 py-4 border-b border-border bg-card">
-				<div class="flex items-center justify-between">
-					<div class="flex items-center gap-3">
-						<div class="w-10 h-10 rounded-xl bg-primary/15 flex items-center justify-center">
-							<svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-							</svg>
-						</div>
-						<h2 id="settings-modal-title" class="text-xl font-semibold text-foreground">Settings</h2>
-					</div>
+			<header class="shrink-0 px-4 sm:px-6 py-4 border-b border-border bg-card flex items-center justify-between gap-4">
+				<div class="flex items-center gap-3 min-w-0">
+					<!-- Mobile menu button -->
 					<button
-						onclick={onClose}
-						class="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-						aria-label="Close"
+						class="sm:hidden p-2 -ml-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+						onclick={() => mobileMenuOpen = !mobileMenuOpen}
 					>
 						<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
 						</svg>
 					</button>
+					<div class="w-9 h-9 rounded-xl bg-primary/15 flex items-center justify-center shrink-0">
+						<svg class="w-4.5 h-4.5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+						</svg>
+					</div>
+					<div class="min-w-0">
+						<h2 id="settings-modal-title" class="text-lg font-semibold text-foreground truncate">Settings</h2>
+						<p class="text-xs text-muted-foreground hidden sm:block">
+							{categories.find(c => c.id === activeCategory)?.label} &rsaquo; {categories.find(c => c.id === activeCategory)?.sections.find(s => s.id === activeSection)?.label}
+						</p>
+					</div>
 				</div>
-
-				<!-- Tab Navigation -->
-				<nav class="flex gap-1 mt-4 -mb-4 px-0 overflow-x-auto scrollbar-none" aria-label="Settings tabs">
-					{#each tabs as tab}
-						<button
-							onclick={() => activeTab = tab.id}
-							class="
-								px-4 py-2.5 text-sm font-medium rounded-t-lg transition-all whitespace-nowrap
-								border-b-2 -mb-[1px] flex items-center gap-2
-								{activeTab === tab.id
-									? 'text-primary border-primary bg-primary/5'
-									: 'text-muted-foreground hover:text-foreground border-transparent hover:border-muted-foreground/30'}
-							"
-							aria-current={activeTab === tab.id ? 'page' : undefined}
-						>
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d={tab.icon} />
-							</svg>
-							<span class="hidden sm:inline">{tab.label}</span>
-						</button>
-					{/each}
-				</nav>
+				<button
+					onclick={onClose}
+					class="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shrink-0"
+					aria-label="Close"
+				>
+					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+					</svg>
+				</button>
 			</header>
 
-			<!-- Body -->
-			<div class="flex-1 overflow-y-auto p-6">
-				{#if error}
-					<div class="bg-destructive/10 border border-destructive/50 text-destructive px-4 py-3 rounded-lg mb-4">
-						{error}
-						<button onclick={() => error = ''} class="ml-2 hover:opacity-70">&times;</button>
+			<!-- Main content area -->
+			<div class="flex-1 flex overflow-hidden relative">
+				<!-- Mobile Menu Overlay -->
+				{#if mobileMenuOpen}
+					<div class="absolute inset-0 z-20 sm:hidden">
+						<button class="absolute inset-0 bg-black/40" onclick={() => mobileMenuOpen = false}></button>
+						<nav class="absolute left-0 top-0 bottom-0 w-64 bg-card border-r border-border p-4 overflow-y-auto animate-slide-in">
+							<div class="space-y-6">
+								{#each categories as category}
+									<div>
+										<button
+											onclick={() => selectCategory(category.id)}
+											class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left transition-all {activeCategory === category.id ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}"
+										>
+											<svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d={category.icon} />
+											</svg>
+											<span class="font-medium">{category.label}</span>
+										</button>
+										{#if activeCategory === category.id}
+											<div class="ml-8 mt-1 space-y-1">
+												{#each category.sections as section}
+													<button
+														onclick={() => { selectSection(section.id); mobileMenuOpen = false; }}
+														class="w-full text-left px-3 py-1.5 rounded-lg text-sm transition-all {activeSection === section.id ? 'text-primary font-medium' : 'text-muted-foreground hover:text-foreground'}"
+													>
+														{section.label}
+													</button>
+												{/each}
+											</div>
+										{/if}
+									</div>
+								{/each}
+							</div>
+						</nav>
 					</div>
 				{/if}
 
-				<!-- General Tab -->
-				{#if activeTab === 'general'}
+				<!-- Desktop Sidebar -->
+				<nav class="hidden sm:flex w-56 shrink-0 border-r border-border bg-muted/30 flex-col p-4 overflow-y-auto">
 					<div class="space-y-6">
-						<div>
-							<h3 class="text-lg font-semibold text-foreground mb-1">General Settings</h3>
-							<p class="text-sm text-muted-foreground">Configure your workspace and application preferences.</p>
-						</div>
-
-						<!-- Theme Settings -->
-						<section class="bg-muted/30 rounded-xl p-5">
-							<h4 class="text-base font-semibold text-foreground mb-4 flex items-center gap-2">
-								{#if $isDark}
-									<svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+						{#each categories as category}
+							<div>
+								<button
+									onclick={() => selectCategory(category.id)}
+									class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left transition-all {activeCategory === category.id ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}"
+								>
+									<svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d={category.icon} />
 									</svg>
-								{:else}
-									<svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
-									</svg>
+									<span class="font-medium text-sm">{category.label}</span>
+								</button>
+								{#if activeCategory === category.id}
+									<div class="ml-8 mt-1 space-y-0.5">
+										{#each category.sections as section}
+											<button
+												onclick={() => selectSection(section.id)}
+												class="w-full text-left px-3 py-1.5 rounded-lg text-sm transition-all {activeSection === section.id ? 'text-primary font-medium bg-primary/5' : 'text-muted-foreground hover:text-foreground hover:bg-muted/30'}"
+											>
+												{section.label}
+											</button>
+										{/each}
+									</div>
 								{/if}
-								Appearance
-							</h4>
+							</div>
+						{/each}
+					</div>
+				</nav>
 
-							<p class="text-sm text-muted-foreground mb-4">
-								Choose your preferred color theme for the interface.
-							</p>
+				<!-- Content Area -->
+				<div class="flex-1 overflow-y-auto p-4 sm:p-6">
+					{#if error}
+						<div class="bg-destructive/10 border border-destructive/50 text-destructive px-4 py-3 rounded-lg mb-4 flex items-center justify-between">
+							<span>{error}</span>
+							<button onclick={() => error = ''} class="hover:opacity-70 text-lg leading-none">&times;</button>
+						</div>
+					{/if}
 
-							<div class="space-y-3">
-								<div class="grid grid-cols-3 gap-3">
-									<!-- Light Theme Option -->
+					<!-- ACCOUNT > GENERAL -->
+					{#if activeSection === 'general'}
+						<div class="space-y-6 max-w-2xl">
+							<div>
+								<h3 class="text-lg font-semibold text-foreground">General Settings</h3>
+								<p class="text-sm text-muted-foreground mt-1">Customize your experience.</p>
+							</div>
+
+							<!-- Theme -->
+							<div class="settings-card">
+								<h4 class="settings-card-title">
+									<svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										{#if $isDark}
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+										{:else}
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+										{/if}
+									</svg>
+									Appearance
+								</h4>
+								<div class="grid grid-cols-3 gap-3 mt-4">
 									<button
 										onclick={() => theme.setTheme('light')}
-										class="flex flex-col items-center gap-2 p-3 rounded-lg border-2 transition-all {$themePreference === 'light' ? 'border-primary bg-primary/10' : 'border-border hover:border-muted-foreground/50'}"
+										class="theme-option {$themePreference === 'light' ? 'active' : ''}"
 									>
 										<div class="w-10 h-10 rounded-lg bg-white border border-gray-200 flex items-center justify-center shadow-sm">
 											<svg class="w-5 h-5 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
 											</svg>
 										</div>
-										<span class="text-sm font-medium text-foreground">Light</span>
+										<span class="text-sm font-medium">Light</span>
 									</button>
-
-									<!-- Dark Theme Option -->
 									<button
 										onclick={() => theme.setTheme('dark')}
-										class="flex flex-col items-center gap-2 p-3 rounded-lg border-2 transition-all {$themePreference === 'dark' ? 'border-primary bg-primary/10' : 'border-border hover:border-muted-foreground/50'}"
+										class="theme-option {$themePreference === 'dark' ? 'active' : ''}"
 									>
 										<div class="w-10 h-10 rounded-lg bg-gray-800 border border-gray-700 flex items-center justify-center shadow-sm">
 											<svg class="w-5 h-5 text-blue-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
 											</svg>
 										</div>
-										<span class="text-sm font-medium text-foreground">Dark</span>
+										<span class="text-sm font-medium">Dark</span>
 									</button>
-
-									<!-- System Theme Option -->
 									<button
 										onclick={() => theme.setTheme('system')}
-										class="flex flex-col items-center gap-2 p-3 rounded-lg border-2 transition-all {$themePreference === 'system' ? 'border-primary bg-primary/10' : 'border-border hover:border-muted-foreground/50'}"
+										class="theme-option {$themePreference === 'system' ? 'active' : ''}"
 									>
 										<div class="w-10 h-10 rounded-lg bg-gradient-to-br from-white to-gray-800 border border-gray-400 flex items-center justify-center shadow-sm">
 											<svg class="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
 											</svg>
 										</div>
-										<span class="text-sm font-medium text-foreground">System</span>
+										<span class="text-sm font-medium">System</span>
 									</button>
 								</div>
-
-								<p class="text-xs text-muted-foreground">
-									{#if $themePreference === 'system'}
-										Automatically matches your operating system's theme setting.
-									{:else if $themePreference === 'light'}
-										Light theme with a bright background.
-									{:else}
-										Dark theme with a dark background.
-									{/if}
-								</p>
 							</div>
-						</section>
 
-						<!-- Workspace Configuration -->
-						<section class="bg-muted/30 rounded-xl p-5">
-							<h4 class="text-base font-semibold text-foreground mb-4 flex items-center gap-2">
-								<svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-								</svg>
-								Workspace Folder
-							</h4>
-
-							{#if workspaceConfig === null}
-								<div class="flex items-center gap-2 text-muted-foreground">
-									<span class="inline-block animate-spin">&#9696;</span>
-									<span>Loading workspace configuration...</span>
-								</div>
-							{:else if workspaceConfig?.is_local_mode}
-								<p class="text-sm text-muted-foreground mb-4">
-									Configure where your projects and files are stored on your computer.
-								</p>
-								<div class="space-y-4">
-									<div>
-										<label for="workspacePath" class="block text-sm font-medium text-foreground mb-1.5">
-											Workspace Path
-										</label>
+							<!-- Workspace -->
+							<div class="settings-card">
+								<h4 class="settings-card-title">
+									<svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+									</svg>
+									Workspace
+								</h4>
+								{#if workspaceConfig === null}
+									<div class="flex items-center gap-2 text-muted-foreground mt-3">
+										<span class="inline-block animate-spin">&#9696;</span>
+										<span>Loading...</span>
+									</div>
+								{:else if workspaceConfig?.is_local_mode}
+									<div class="mt-4 space-y-3">
 										<div class="flex gap-2">
 											<input
 												type="text"
-												id="workspacePath"
 												bind:value={workspacePath}
 												oninput={handleWorkspaceInput}
 												class="input font-mono text-sm flex-1"
-												placeholder="Enter workspace path"
+												placeholder="/path/to/workspace"
 											/>
 											<button
 												onclick={saveWorkspace}
 												disabled={savingWorkspace || validatingWorkspace || !workspaceValidation?.valid || workspacePath === workspaceConfig?.workspace_path}
-												class="btn btn-primary whitespace-nowrap"
+												class="btn btn-primary"
 											>
-												{#if savingWorkspace}
-													<span class="inline-block animate-spin mr-2">&#9696;</span>
-												{/if}
-												Save
+												{savingWorkspace ? '...' : 'Save'}
 											</button>
 										</div>
-										<p class="text-muted-foreground text-xs mt-1.5">Full path to your projects folder</p>
-									</div>
-
-									{#if validatingWorkspace}
-										<div class="text-muted-foreground text-sm flex items-center gap-2">
-											<span class="inline-block animate-spin">&#9696;</span>
-											Validating path...
-										</div>
-									{:else if workspaceValidation && workspacePath !== workspaceConfig?.workspace_path}
-										{#if workspaceValidation.valid}
-											<div class="bg-success/10 border border-success/30 text-success px-3 py-2 rounded-lg text-sm flex items-center gap-2">
-												<span>✓</span>
-												<span>{workspaceValidation.exists ? 'Directory exists and is writable' : 'Directory will be created'}</span>
-											</div>
-										{:else}
-											<div class="bg-destructive/10 border border-destructive/30 text-destructive px-3 py-2 rounded-lg text-sm">
-												{workspaceError || 'Invalid path'}
-											</div>
+										{#if workspaceSuccess}
+											<p class="text-sm text-success">{workspaceSuccess}</p>
+										{:else if workspaceError}
+											<p class="text-sm text-destructive">{workspaceError}</p>
+										{:else if validatingWorkspace}
+											<p class="text-sm text-muted-foreground">Validating...</p>
+										{:else if workspaceValidation && workspacePath !== workspaceConfig?.workspace_path}
+											<p class="text-sm {workspaceValidation.valid ? 'text-success' : 'text-destructive'}">
+												{workspaceValidation.valid ? (workspaceValidation.exists ? '✓ Directory exists' : '✓ Will be created') : 'Invalid path'}
+											</p>
 										{/if}
-									{/if}
-
-									{#if workspaceSuccess}
-										<div class="bg-success/10 border border-success/30 text-success px-3 py-2 rounded-lg text-sm flex items-center gap-2">
-											<span>✓</span>
-											<span>{workspaceSuccess}</span>
-										</div>
-									{/if}
-								</div>
-							{:else}
-								<div class="flex items-start gap-3">
-									<span class="text-blue-400 text-xl">🐳</span>
-									<div>
-										<h5 class="text-blue-300 font-medium mb-1">Docker Mode</h5>
-										<p class="text-muted-foreground text-sm mb-2">
-											AI Hub is running in Docker. The workspace is managed by Docker volume mounts.
-										</p>
-										<p class="text-muted-foreground/70 text-xs">
-											Current workspace: <code class="bg-muted px-2 py-0.5 rounded">{workspaceConfig?.workspace_path || '/workspace'}</code>
-										</p>
 									</div>
-								</div>
-							{/if}
-						</section>
-					</div>
-				{/if}
-
-				<!-- Security Tab -->
-				{#if activeTab === 'security'}
-					<div class="space-y-6">
-						<div>
-							<h3 class="text-lg font-semibold text-foreground mb-1">Security Settings</h3>
-							<p class="text-sm text-muted-foreground">Manage your account security and encryption settings.</p>
+								{:else}
+									<div class="mt-4 flex items-start gap-3 p-3 bg-blue-500/10 rounded-lg">
+										<span class="text-xl">🐳</span>
+										<div>
+											<p class="text-sm font-medium text-blue-400">Docker Mode</p>
+											<p class="text-xs text-muted-foreground mt-1">Workspace: <code class="bg-muted px-1.5 py-0.5 rounded">{workspaceConfig?.workspace_path}</code></p>
+										</div>
+									</div>
+								{/if}
+							</div>
 						</div>
+					{/if}
 
-						<!-- Change Password -->
-						<section class="bg-muted/30 rounded-xl p-5">
-							<div class="flex items-center gap-3 mb-4">
-								<div class="w-10 h-10 bg-primary/15 rounded-lg flex items-center justify-center">
+					<!-- ACCOUNT > SECURITY -->
+					{#if activeSection === 'security'}
+						<div class="space-y-6 max-w-2xl">
+							<div>
+								<h3 class="text-lg font-semibold text-foreground">Security</h3>
+								<p class="text-sm text-muted-foreground mt-1">Manage your account security.</p>
+							</div>
+
+							<!-- Change Password -->
+							<div class="settings-card">
+								<h4 class="settings-card-title">
 									<svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
 									</svg>
-								</div>
-								<div>
-									<h4 class="font-semibold text-foreground">Change Password</h4>
-									<p class="text-xs text-muted-foreground">Update your admin password. This will re-encrypt all stored API keys.</p>
-								</div>
-							</div>
-
-							<div class="space-y-4 max-w-md">
-								<div>
-									<label for="currentPassword" class="block text-sm font-medium text-foreground mb-1.5">Current Password</label>
-									<input type="password" id="currentPassword" bind:value={currentPassword} class="input" placeholder="Enter current password" autocomplete="current-password" />
-								</div>
-								<div>
-									<label for="newPassword" class="block text-sm font-medium text-foreground mb-1.5">New Password</label>
-									<input type="password" id="newPassword" bind:value={newPassword} class="input" placeholder="Enter new password (min 8 characters)" autocomplete="new-password" />
-								</div>
-								<div>
-									<label for="confirmPassword" class="block text-sm font-medium text-foreground mb-1.5">Confirm New Password</label>
-									<input type="password" id="confirmPassword" bind:value={confirmPassword} class="input" placeholder="Confirm new password" autocomplete="new-password" />
-								</div>
-
-								{#if passwordChangeError}
-									<div class="bg-destructive/10 border border-destructive/30 text-destructive px-3 py-2 rounded-lg text-sm">{passwordChangeError}</div>
-								{/if}
-								{#if passwordChangeSuccess}
-									<div class="bg-success/10 border border-success/30 text-success px-3 py-2 rounded-lg text-sm">{passwordChangeSuccess}</div>
-								{/if}
-
-								<button onclick={handlePasswordChange} class="btn btn-primary" disabled={changingPassword}>
-									{#if changingPassword}
-										<span class="inline-block animate-spin mr-2">&#9696;</span>
-										Changing Password...
-									{:else}
-										Change Password
+									Change Password
+								</h4>
+								<div class="mt-4 space-y-3">
+									<input type="password" bind:value={currentPassword} class="input" placeholder="Current password" autocomplete="current-password" />
+									<input type="password" bind:value={newPassword} class="input" placeholder="New password (min 8 characters)" autocomplete="new-password" />
+									<input type="password" bind:value={confirmPassword} class="input" placeholder="Confirm new password" autocomplete="new-password" />
+									{#if passwordChangeError}
+										<p class="text-sm text-destructive">{passwordChangeError}</p>
 									{/if}
-								</button>
+									{#if passwordChangeSuccess}
+										<p class="text-sm text-success">{passwordChangeSuccess}</p>
+									{/if}
+									<button onclick={handlePasswordChange} class="btn btn-primary" disabled={changingPassword}>
+										{changingPassword ? 'Changing...' : 'Change Password'}
+									</button>
+								</div>
 							</div>
-						</section>
 
-						<!-- Two-Factor Authentication -->
-						<section class="bg-muted/30 rounded-xl p-5">
-							<div class="flex items-center gap-3 mb-4">
-								<div class="w-10 h-10 bg-blue-500/15 rounded-lg flex items-center justify-center">
+							<!-- 2FA -->
+							<div class="settings-card">
+								<h4 class="settings-card-title">
 									<svg class="w-5 h-5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
 									</svg>
-								</div>
-								<div>
-									<h4 class="font-semibold text-foreground">Two-Factor Authentication</h4>
-									<p class="text-xs text-muted-foreground">Add an extra layer of security to your account.</p>
-								</div>
-							</div>
-							<TwoFactorSetup />
-						</section>
-
-						<!-- Encryption Info -->
-						<section class="bg-muted/30 rounded-xl p-5">
-							<div class="flex items-center gap-3">
-								<div class="w-10 h-10 bg-success/15 rounded-lg flex items-center justify-center">
-									<svg class="w-5 h-5 text-success" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-									</svg>
-								</div>
-								<div>
-									<h4 class="font-semibold text-foreground">Encryption</h4>
-									<p class="text-xs text-muted-foreground">Your API keys are encrypted at rest using your admin password.</p>
+									Two-Factor Authentication
+								</h4>
+								<div class="mt-4">
+									<TwoFactorSetup />
 								</div>
 							</div>
-						</section>
-					</div>
-				{/if}
 
-				<!-- Authentication Tab -->
-				{#if activeTab === 'authentication'}
-					<div class="space-y-4">
-						<div>
-							<h3 class="text-lg font-semibold text-foreground mb-1">Service Authentication</h3>
-							<p class="text-sm text-muted-foreground">Connect services to enable AI features and repository management.</p>
-						</div>
-
-						<div class="grid gap-4 sm:grid-cols-2">
-							<!-- Claude Code -->
-							<div class="bg-muted/30 rounded-xl p-4">
-								<div class="flex items-center gap-3 mb-3">
-									<div class="w-9 h-9 bg-orange-500/15 rounded-lg flex items-center justify-center shrink-0">
-										<svg class="w-4 h-4 text-orange-400" viewBox="0 0 24 24" fill="currentColor">
-											<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+							<!-- Encryption Info -->
+							<div class="settings-card">
+								<div class="flex items-center gap-3">
+									<div class="w-10 h-10 bg-success/15 rounded-lg flex items-center justify-center shrink-0">
+										<svg class="w-5 h-5 text-success" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
 										</svg>
 									</div>
-									<div class="flex-1 min-w-0">
-										<div class="flex items-center justify-between gap-2">
-											<span class="font-semibold text-foreground text-sm">Claude Code</span>
-											{#if $claudeAuthenticated}
-												<span class="text-[10px] px-2 py-0.5 rounded-full bg-success/15 text-success font-medium shrink-0">Connected</span>
-											{:else}
-												<span class="text-[10px] px-2 py-0.5 rounded-full bg-warning/15 text-warning font-medium shrink-0">Not Connected</span>
-											{/if}
-										</div>
-										<p class="text-xs text-muted-foreground truncate">AI-powered code assistance</p>
+									<div>
+										<h4 class="font-medium text-foreground">Encryption</h4>
+										<p class="text-xs text-muted-foreground">Your API keys are encrypted at rest using your password.</p>
 									</div>
 								</div>
-
-								{#if $claudeAuthenticated}
-									<div class="flex gap-2">
-										<button onclick={handleClaudeReconnect} disabled={claudeLoginLoading} class="btn btn-primary text-xs py-1.5 flex-1">
-											{#if claudeLoginLoading}
-												<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full mr-1"></span>
-											{/if}
-											Reconnect
-										</button>
-										<button onclick={handleClaudeLogout} class="btn btn-secondary text-xs py-1.5 flex-1">Disconnect</button>
-									</div>
-								{:else if claudeOAuthUrl}
-									<div class="space-y-2">
-										<a href={claudeOAuthUrl} target="_blank" rel="noopener noreferrer" class="btn btn-primary text-xs py-1.5 w-full flex items-center justify-center gap-1.5">
-											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-											</svg>
-											1. Open Login
-										</a>
-										<div class="flex gap-2">
-											<input type="text" bind:value={claudeAuthCode} placeholder="2. Paste code" class="input text-xs py-1.5 flex-1" />
-											<button onclick={completeClaudeLogin} disabled={claudeCompletingLogin || !claudeAuthCode.trim()} class="btn btn-primary text-xs py-1.5 px-3">
-												{#if claudeCompletingLogin}
-													<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
-												{:else}
-													OK
-												{/if}
-											</button>
-										</div>
-										<button onclick={cancelClaudeLogin} class="text-[10px] text-muted-foreground hover:text-foreground w-full text-center">Cancel</button>
-									</div>
-								{:else}
-									<button onclick={() => handleClaudeLogin()} disabled={claudeLoginLoading} class="btn btn-primary text-xs py-1.5 w-full">
-										{#if claudeLoginLoading}
-											<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full mr-1"></span>
-										{/if}
-										Connect
-									</button>
-								{/if}
-							</div>
-
-							<!-- GitHub -->
-							<div class="bg-muted/30 rounded-xl p-4">
-								<div class="flex items-center gap-3 mb-3">
-									<div class="w-9 h-9 bg-white/10 rounded-lg flex items-center justify-center shrink-0">
-										<svg class="w-4 h-4 text-white" viewBox="0 0 24 24" fill="currentColor">
-											<path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
-										</svg>
-									</div>
-									<div class="flex-1 min-w-0">
-										<div class="flex items-center justify-between gap-2">
-											<span class="font-semibold text-foreground text-sm">GitHub</span>
-											{#if $githubAuthenticated}
-												<span class="text-[10px] px-2 py-0.5 rounded-full bg-success/15 text-success font-medium shrink-0">Connected</span>
-											{:else}
-												<span class="text-[10px] px-2 py-0.5 rounded-full bg-warning/15 text-warning font-medium shrink-0">Not Connected</span>
-											{/if}
-										</div>
-										<p class="text-xs text-muted-foreground truncate">
-											{#if $githubAuthenticated && githubUser}{githubUser}{:else}Repository management{/if}
-										</p>
-									</div>
-								</div>
-
-								{#if $githubAuthenticated}
-									<button onclick={handleGitHubLogout} class="btn btn-secondary text-xs py-1.5 w-full">Disconnect</button>
-								{:else}
-									<div class="space-y-2">
-										<input type="password" bind:value={githubToken} placeholder="Personal Access Token" class="input text-xs py-1.5" />
-										<button onclick={handleGitHubLogin} disabled={githubLoginLoading} class="btn btn-primary text-xs py-1.5 w-full">
-											{#if githubLoginLoading}
-												<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full mr-1"></span>
-											{/if}
-											Connect
-										</button>
-										<p class="text-[10px] text-muted-foreground text-center">
-											<a href="https://github.com/settings/tokens/new?scopes=repo,read:org,gist,workflow" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">Create token</a> (repo, read:org, gist, workflow)
-										</p>
-									</div>
-								{/if}
 							</div>
 						</div>
-					</div>
-				{/if}
+					{/if}
 
-				<!-- API Users Tab -->
-				{#if activeTab === 'api-users'}
-					<div class="space-y-4">
-						<div class="flex items-center justify-between">
+					<!-- ACCOUNT > AUTHENTICATION (Connections) -->
+					{#if activeSection === 'authentication'}
+						<div class="space-y-6 max-w-2xl">
 							<div>
-								<h3 class="text-lg font-semibold text-foreground mb-1">API Users</h3>
-								<p class="text-sm text-muted-foreground">Create API users for programmatic access.</p>
+								<h3 class="text-lg font-semibold text-foreground">Connections</h3>
+								<p class="text-sm text-muted-foreground mt-1">Connect external services.</p>
 							</div>
-							<button onclick={openCreateForm} class="btn btn-primary flex items-center gap-2 text-sm">
-								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-								</svg>
-								<span class="hidden sm:inline">Create</span>
-							</button>
-						</div>
 
-						{#if loading}
-							<div class="text-center py-8">
-								<div class="animate-spin w-8 h-8 border-2 border-primary border-t-transparent rounded-full mx-auto"></div>
-							</div>
-						{:else if apiUsers.length === 0}
-							<div class="bg-muted/30 rounded-xl p-8 text-center">
-								<div class="w-12 h-12 bg-muted rounded-full flex items-center justify-center mx-auto mb-4">
-									<svg class="w-6 h-6 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
-									</svg>
-								</div>
-								<p class="text-foreground font-medium mb-1">No API users yet</p>
-								<p class="text-sm text-muted-foreground">Create an API user to allow external applications to access AI Hub.</p>
-							</div>
-						{:else}
-							<div class="space-y-2">
-								{#each apiUsers as user}
-									<div class="bg-muted/30 rounded-xl p-4">
-										<div class="flex items-start justify-between">
-											<div class="flex-1 min-w-0">
-												<div class="flex items-center gap-2 mb-1 flex-wrap">
-													<span class="font-medium text-foreground">{user.name}</span>
-													{#if user.username}
-														<span class="text-xs px-2 py-0.5 rounded-full bg-primary/15 text-primary">@{user.username}</span>
-													{/if}
-													<span class="text-xs px-2 py-0.5 rounded-full {user.is_active ? 'bg-success/15 text-success' : 'bg-destructive/15 text-destructive'}">
-														{user.is_active ? 'Active' : 'Inactive'}
-													</span>
-												</div>
-												{#if user.description}
-													<p class="text-sm text-muted-foreground mb-2">{user.description}</p>
+							<div class="grid gap-4">
+								<!-- Claude Code -->
+								<div class="settings-card">
+									<div class="flex items-center gap-3">
+										<div class="w-10 h-10 bg-orange-500/15 rounded-lg flex items-center justify-center shrink-0">
+											<svg class="w-5 h-5 text-orange-400" viewBox="0 0 24 24" fill="currentColor">
+												<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+											</svg>
+										</div>
+										<div class="flex-1 min-w-0">
+											<div class="flex items-center gap-2">
+												<span class="font-medium text-foreground">Claude Code</span>
+												{#if $claudeAuthenticated}
+													<span class="text-xs px-2 py-0.5 rounded-full bg-success/15 text-success">Connected</span>
+												{:else}
+													<span class="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground">Not Connected</span>
 												{/if}
-												<div class="flex flex-wrap gap-3 text-xs text-muted-foreground">
-													<span>Profile: <span class="text-foreground/80">{profiles.find(p => p.id === user.profile_id)?.name || 'Any'}</span></span>
-													<span>Last used: {formatDate(user.last_used_at)}</span>
-												</div>
 											</div>
-											<div class="flex items-center gap-1 ml-3">
-												<button onclick={() => openEditForm(user)} class="p-1.5 text-muted-foreground hover:text-foreground rounded-lg hover:bg-accent transition-colors" title="Edit">
-													<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-													</svg>
-												</button>
-												<button onclick={() => regenerateKey(user.id)} class="p-1.5 text-muted-foreground hover:text-warning rounded-lg hover:bg-accent transition-colors" title="Regenerate Key">
-													<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-													</svg>
-												</button>
-												<button onclick={() => toggleActive(user)} class="p-1.5 text-muted-foreground hover:text-primary rounded-lg hover:bg-accent transition-colors" title={user.is_active ? 'Deactivate' : 'Activate'}>
-													<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														{#if user.is_active}
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
-														{:else}
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-														{/if}
-													</svg>
-												</button>
-												<button onclick={() => deleteUser(user.id)} class="p-1.5 text-muted-foreground hover:text-destructive rounded-lg hover:bg-accent transition-colors" title="Delete">
-													<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-													</svg>
-												</button>
-											</div>
+											<p class="text-xs text-muted-foreground">AI-powered code assistance</p>
 										</div>
 									</div>
-								{/each}
-							</div>
-						{/if}
-
-						<!-- API Usage Info -->
-						<section class="bg-muted/30 rounded-xl p-4 mt-4">
-							<h4 class="text-sm font-semibold text-foreground mb-2">API Usage</h4>
-							<p class="text-xs text-muted-foreground mb-2">Use the API key in the Authorization header:</p>
-							<pre class="bg-muted p-3 rounded-lg text-xs overflow-x-auto"><code class="text-foreground/90">curl -H "Authorization: Bearer aih_your_key" ...</code></pre>
-						</section>
-					</div>
-				{/if}
-
-				<!-- Integrations Tab -->
-				{#if activeTab === 'integrations'}
-					<div class="space-y-4">
-						<div>
-							<h3 class="text-lg font-semibold text-foreground mb-1">Integrations</h3>
-							<p class="text-sm text-muted-foreground">Configure API keys and select default models.</p>
-						</div>
-
-						{#if audioConfigSuccess || imageConfigSuccess || videoConfigSuccess}
-							<div class="bg-success/10 border border-success/30 text-success px-3 py-2 rounded-lg text-xs flex items-center gap-2">
-								<span>✓</span>
-								<span>{audioConfigSuccess || imageConfigSuccess || videoConfigSuccess}</span>
-							</div>
-						{/if}
-
-						<!-- API Keys -->
-						<section class="bg-muted/30 rounded-xl p-4">
-							<h4 class="text-sm font-semibold text-foreground mb-3 flex items-center gap-2">
-								<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
-								</svg>
-								API Keys
-							</h4>
-
-							<div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-								<!-- OpenAI -->
-								<div class="p-3 bg-card rounded-lg border border-border">
-									<div class="flex items-center justify-between mb-2">
-										<span class="text-xs font-medium text-foreground flex items-center gap-1.5">
-											<span class="w-5 h-5 bg-emerald-500/15 rounded flex items-center justify-center">
-												<svg class="w-3 h-3 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
-													<path d="M22.28 9.82a5.98 5.98 0 00-.52-4.91 6.05 6.05 0 00-6.51-2.9A6.07 6.07 0 004.98 4.18a5.98 5.98 0 00-4 2.9 6.05 6.05 0 00.74 7.1 5.98 5.98 0 00.51 4.91 6.05 6.05 0 006.51 2.9A5.98 5.98 0 0013.26 24a6.06 6.06 0 005.77-4.21 5.99 5.99 0 004-2.9 6.06 6.06 0 00-.75-7.07z"/>
-												</svg>
-											</span>
-											OpenAI
-										</span>
-										{#if openaiApiKeyMasked}
-											<span class="text-[9px] px-1.5 py-0.5 rounded bg-success/15 text-success">✓</span>
+									<div class="mt-4">
+										{#if $claudeAuthenticated}
+											<div class="flex gap-2">
+												<button onclick={handleClaudeReconnect} disabled={claudeLoginLoading} class="btn btn-primary text-sm flex-1">
+													{claudeLoginLoading ? 'Connecting...' : 'Reconnect'}
+												</button>
+												<button onclick={handleClaudeLogout} class="btn btn-secondary text-sm flex-1">Disconnect</button>
+											</div>
+										{:else if claudeOAuthUrl}
+											<div class="space-y-2">
+												<a href={claudeOAuthUrl} target="_blank" rel="noopener noreferrer" class="btn btn-primary text-sm w-full">
+													1. Open Login Page
+												</a>
+												<div class="flex gap-2">
+													<input type="text" bind:value={claudeAuthCode} placeholder="2. Paste code here" class="input text-sm flex-1" />
+													<button onclick={completeClaudeLogin} disabled={claudeCompletingLogin || !claudeAuthCode.trim()} class="btn btn-primary text-sm">
+														{claudeCompletingLogin ? '...' : 'OK'}
+													</button>
+												</div>
+												<button onclick={cancelClaudeLogin} class="text-xs text-muted-foreground hover:text-foreground w-full">Cancel</button>
+											</div>
+										{:else}
+											<button onclick={() => handleClaudeLogin()} disabled={claudeLoginLoading} class="btn btn-primary text-sm w-full">
+												{claudeLoginLoading ? 'Starting...' : 'Connect Claude'}
+											</button>
 										{/if}
 									</div>
+								</div>
+
+								<!-- GitHub -->
+								<div class="settings-card">
+									<div class="flex items-center gap-3">
+										<div class="w-10 h-10 bg-white/10 rounded-lg flex items-center justify-center shrink-0">
+											<svg class="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
+												<path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+											</svg>
+										</div>
+										<div class="flex-1 min-w-0">
+											<div class="flex items-center gap-2">
+												<span class="font-medium text-foreground">GitHub</span>
+												{#if $githubAuthenticated}
+													<span class="text-xs px-2 py-0.5 rounded-full bg-success/15 text-success">Connected</span>
+												{:else}
+													<span class="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground">Not Connected</span>
+												{/if}
+											</div>
+											<p class="text-xs text-muted-foreground">{$githubAuthenticated && githubUser ? githubUser : 'Repository management'}</p>
+										</div>
+									</div>
+									<div class="mt-4">
+										{#if $githubAuthenticated}
+											<button onclick={handleGitHubLogout} class="btn btn-secondary text-sm w-full">Disconnect</button>
+										{:else}
+											<div class="space-y-2">
+												<input type="password" bind:value={githubToken} placeholder="Personal Access Token" class="input text-sm" />
+												<button onclick={handleGitHubLogin} disabled={githubLoginLoading} class="btn btn-primary text-sm w-full">
+													{githubLoginLoading ? 'Connecting...' : 'Connect GitHub'}
+												</button>
+												<p class="text-xs text-muted-foreground text-center">
+													<a href="https://github.com/settings/tokens/new?scopes=repo,read:org,gist,workflow" target="_blank" class="text-primary hover:underline">Create token</a> with repo, read:org, gist, workflow
+												</p>
+											</div>
+										{/if}
+									</div>
+								</div>
+							</div>
+						</div>
+					{/if}
+
+					<!-- API & USERS > USERS -->
+					{#if activeSection === 'users'}
+						<div class="space-y-6">
+							<div class="flex items-center justify-between">
+								<div>
+									<h3 class="text-lg font-semibold text-foreground">API Users</h3>
+									<p class="text-sm text-muted-foreground mt-1">Create users for programmatic access.</p>
+								</div>
+								<button onclick={openCreateForm} class="btn btn-primary text-sm">
+									<svg class="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+									</svg>
+									Create
+								</button>
+							</div>
+
+							{#if loading}
+								<div class="text-center py-12">
+									<div class="animate-spin w-8 h-8 border-2 border-primary border-t-transparent rounded-full mx-auto"></div>
+								</div>
+							{:else if apiUsers.length === 0}
+								<div class="settings-card text-center py-8">
+									<div class="w-12 h-12 bg-muted rounded-full flex items-center justify-center mx-auto mb-3">
+										<svg class="w-6 h-6 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
+										</svg>
+									</div>
+									<p class="font-medium text-foreground">No API users yet</p>
+									<p class="text-sm text-muted-foreground mt-1">Create one to enable external access.</p>
+								</div>
+							{:else}
+								<div class="space-y-3">
+									{#each apiUsers as user}
+										<div class="settings-card">
+											<div class="flex items-start justify-between gap-4">
+												<div class="min-w-0 flex-1">
+													<div class="flex items-center gap-2 flex-wrap">
+														<span class="font-medium text-foreground">{user.name}</span>
+														{#if user.username}
+															<span class="text-xs px-2 py-0.5 rounded-full bg-primary/15 text-primary">@{user.username}</span>
+														{/if}
+														<span class="text-xs px-2 py-0.5 rounded-full {user.is_active ? 'bg-success/15 text-success' : 'bg-destructive/15 text-destructive'}">
+															{user.is_active ? 'Active' : 'Inactive'}
+														</span>
+													</div>
+													{#if user.description}
+														<p class="text-sm text-muted-foreground mt-1">{user.description}</p>
+													{/if}
+													<div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground mt-2">
+														<span>Profile: {profiles.find(p => p.id === user.profile_id)?.name || 'Any'}</span>
+														<span>Last used: {formatDate(user.last_used_at)}</span>
+													</div>
+												</div>
+												<div class="flex items-center gap-1 shrink-0">
+													<button onclick={() => openEditForm(user)} class="icon-btn" title="Edit">
+														<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+														</svg>
+													</button>
+													<button onclick={() => regenerateKey(user.id)} class="icon-btn" title="Regenerate Key">
+														<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+														</svg>
+													</button>
+													<button onclick={() => toggleActive(user)} class="icon-btn" title={user.is_active ? 'Deactivate' : 'Activate'}>
+														{#if user.is_active}
+															<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+															</svg>
+														{:else}
+															<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+															</svg>
+														{/if}
+													</button>
+													<button onclick={() => deleteUser(user.id)} class="icon-btn text-destructive" title="Delete">
+														<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+														</svg>
+													</button>
+												</div>
+											</div>
+										</div>
+									{/each}
+								</div>
+							{/if}
+
+							<!-- API Usage Hint -->
+							<div class="settings-card">
+								<h4 class="text-sm font-medium text-foreground mb-2">API Usage</h4>
+								<pre class="bg-muted p-3 rounded-lg text-xs overflow-x-auto"><code>curl -H "Authorization: Bearer aih_your_key" ...</code></pre>
+							</div>
+						</div>
+					{/if}
+
+					<!-- API & USERS > RATE LIMITS -->
+					{#if activeSection === 'rate-limits'}
+						<div class="space-y-6">
+							<div>
+								<h3 class="text-lg font-semibold text-foreground">Rate Limits</h3>
+								<p class="text-sm text-muted-foreground mt-1">Configure API rate limiting.</p>
+							</div>
+							<RateLimitManager />
+						</div>
+					{/if}
+
+					<!-- AI MODELS > API KEYS -->
+					{#if activeSection === 'api-keys'}
+						<div class="space-y-6 max-w-2xl">
+							<div>
+								<h3 class="text-lg font-semibold text-foreground">API Keys</h3>
+								<p class="text-sm text-muted-foreground mt-1">Configure provider API keys for AI features.</p>
+							</div>
+
+							<!-- OpenAI -->
+							<div class="settings-card">
+								<div class="flex items-center gap-3">
+									<div class="w-10 h-10 bg-emerald-500/15 rounded-lg flex items-center justify-center shrink-0">
+										<svg class="w-5 h-5 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
+											<path d="M22.28 9.82a5.98 5.98 0 00-.52-4.91 6.05 6.05 0 00-6.51-2.9A6.07 6.07 0 004.98 4.18a5.98 5.98 0 00-4 2.9 6.05 6.05 0 00.74 7.1 5.98 5.98 0 00.51 4.91 6.05 6.05 0 006.51 2.9A5.98 5.98 0 0013.26 24a6.06 6.06 0 005.77-4.21 5.99 5.99 0 004-2.9 6.06 6.06 0 00-.75-7.07z"/>
+										</svg>
+									</div>
+									<div class="flex-1 min-w-0">
+										<div class="flex items-center gap-2">
+											<span class="font-medium text-foreground">OpenAI</span>
+											{#if openaiApiKeyMasked}
+												<span class="text-xs px-2 py-0.5 rounded-full bg-success/15 text-success">Configured</span>
+											{/if}
+										</div>
+										<p class="text-xs text-muted-foreground">TTS, STT, GPT Image, Sora</p>
+									</div>
+								</div>
+								<div class="mt-4 space-y-2">
 									{#if openaiApiKeyMasked}
-										<code class="text-[10px] text-muted-foreground font-mono">{openaiApiKeyMasked}</code>
+										<p class="text-xs text-muted-foreground font-mono">{openaiApiKeyMasked}</p>
 									{/if}
-									<div class="flex gap-1.5 mt-2">
-										<input type="password" bind:value={openaiApiKey} placeholder={openaiApiKeyMasked ? "New key..." : "sk-..."} class="input text-[10px] py-1 px-2 font-mono flex-1 min-w-0" />
-										<button onclick={saveOpenaiApiKey} disabled={savingOpenaiKey || !openaiApiKey.trim()} class="btn btn-primary text-[10px] py-1 px-2">
+									<div class="flex gap-2">
+										<input type="password" bind:value={openaiApiKey} placeholder={openaiApiKeyMasked ? 'Enter new key...' : 'sk-...'} class="input text-sm font-mono flex-1" />
+										<button onclick={saveOpenaiApiKey} disabled={savingOpenaiKey || !openaiApiKey.trim()} class="btn btn-primary text-sm">
 											{savingOpenaiKey ? '...' : 'Save'}
 										</button>
 									</div>
-									<p class="text-[9px] text-muted-foreground mt-1.5">
-										<a href="https://platform.openai.com/api-keys" target="_blank" class="text-primary hover:underline">Get key</a> · TTS, STT, GPT Image, Sora
-									</p>
-								</div>
-
-								<!-- Google Gemini -->
-								<div class="p-3 bg-card rounded-lg border border-border">
-									<div class="flex items-center justify-between mb-2">
-										<span class="text-xs font-medium text-foreground flex items-center gap-1.5">
-											<span class="w-5 h-5 bg-blue-500/15 rounded flex items-center justify-center">
-												<svg class="w-3 h-3 text-blue-400" viewBox="0 0 24 24" fill="currentColor">
-													<path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
-												</svg>
-											</span>
-											Google Gemini
-										</span>
-										{#if imageApiKeyMasked}
-											<span class="text-[9px] px-1.5 py-0.5 rounded bg-success/15 text-success">✓</span>
-										{/if}
-									</div>
-									{#if imageApiKeyMasked}
-										<code class="text-[10px] text-muted-foreground font-mono">{imageApiKeyMasked}</code>
+									{#if openaiKeySuccess}
+										<p class="text-xs text-success">{openaiKeySuccess}</p>
+									{:else if openaiKeyError}
+										<p class="text-xs text-destructive">{openaiKeyError}</p>
 									{/if}
-									<div class="flex gap-1.5 mt-2">
-										<input type="password" bind:value={imageApiKey} placeholder={imageApiKeyMasked ? "New key..." : "AIza..."} class="input text-[10px] py-1 px-2 font-mono flex-1 min-w-0" />
-										<button onclick={saveImageConfig} disabled={savingImageConfig || (!imageApiKey.trim() && !imageApiKeyMasked)} class="btn btn-primary text-[10px] py-1 px-2">
-											{savingImageConfig ? '...' : 'Save'}
-										</button>
-									</div>
-									<p class="text-[9px] text-muted-foreground mt-1.5">
-										<a href="https://aistudio.google.com/apikey" target="_blank" class="text-primary hover:underline">Get key</a> · Nano Banana, Imagen 4, Veo
+									<p class="text-xs text-muted-foreground">
+										<a href="https://platform.openai.com/api-keys" target="_blank" class="text-primary hover:underline">Get API key</a>
 									</p>
 								</div>
 							</div>
-						</section>
 
-						<!-- AI Models -->
-						<section class="bg-muted/30 rounded-xl p-4">
-							<h4 class="text-sm font-semibold text-foreground mb-1 flex items-center gap-2">
-								<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
-								</svg>
-								AI Generation Models
-							</h4>
-							<p class="text-[10px] text-muted-foreground mb-3">Select default models. Claude can switch providers dynamically.</p>
+							<!-- Google Gemini -->
+							<div class="settings-card">
+								<div class="flex items-center gap-3">
+									<div class="w-10 h-10 bg-blue-500/15 rounded-lg flex items-center justify-center shrink-0">
+										<svg class="w-5 h-5 text-blue-400" viewBox="0 0 24 24" fill="currentColor">
+											<path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+										</svg>
+									</div>
+									<div class="flex-1 min-w-0">
+										<div class="flex items-center gap-2">
+											<span class="font-medium text-foreground">Google Gemini</span>
+											{#if imageApiKeyMasked}
+												<span class="text-xs px-2 py-0.5 rounded-full bg-success/15 text-success">Configured</span>
+											{/if}
+										</div>
+										<p class="text-xs text-muted-foreground">Imagen, Veo, Gemini Flash</p>
+									</div>
+								</div>
+								<div class="mt-4 space-y-2">
+									{#if imageApiKeyMasked}
+										<p class="text-xs text-muted-foreground font-mono">{imageApiKeyMasked}</p>
+									{/if}
+									<div class="flex gap-2">
+										<input type="password" bind:value={imageApiKey} placeholder={imageApiKeyMasked ? 'Enter new key...' : 'AIza...'} class="input text-sm font-mono flex-1" />
+										<button onclick={saveImageConfig} disabled={savingImageConfig || (!imageApiKey.trim() && !imageApiKeyMasked)} class="btn btn-primary text-sm">
+											{savingImageConfig ? '...' : 'Save'}
+										</button>
+									</div>
+									{#if imageConfigSuccess}
+										<p class="text-xs text-success">{imageConfigSuccess}</p>
+									{:else if imageConfigError}
+										<p class="text-xs text-destructive">{imageConfigError}</p>
+									{/if}
+									<p class="text-xs text-muted-foreground">
+										<a href="https://aistudio.google.com/apikey" target="_blank" class="text-primary hover:underline">Get API key</a>
+									</p>
+								</div>
+							</div>
+						</div>
+					{/if}
+
+					<!-- AI MODELS > MODELS -->
+					{#if activeSection === 'models'}
+						<div class="space-y-6">
+							<div>
+								<h3 class="text-lg font-semibold text-foreground">AI Models</h3>
+								<p class="text-sm text-muted-foreground mt-1">Select default models for generation tasks.</p>
+							</div>
+
+							{#if audioConfigSuccess || imageConfigSuccess || videoConfigSuccess}
+								<div class="bg-success/10 border border-success/30 text-success px-3 py-2 rounded-lg text-sm">
+									{audioConfigSuccess || imageConfigSuccess || videoConfigSuccess}
+								</div>
+							{/if}
 
 							<!-- Image Models -->
-							<div class="mb-4">
-								<div class="flex items-center gap-2 mb-2">
-									<span class="w-5 h-5 bg-purple-500/15 rounded flex items-center justify-center">
-										<svg class="w-3 h-3 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-										</svg>
-									</span>
-									<span class="text-xs font-medium text-foreground">Image Generation</span>
-								</div>
-								<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+							<div class="settings-card">
+								<h4 class="settings-card-title">
+									<svg class="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+									</svg>
+									Image Generation
+								</h4>
+								<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 mt-4">
 									{#each imageModels as model}
 										<button
 											onclick={() => { selectedImageModel = model.id; updateImageModel(); }}
 											disabled={!model.available || updatingImageModel}
-											class="h-[68px] p-2 rounded-lg border text-left transition-all flex flex-col justify-between {model.id === imageModel ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/50 hover:bg-muted/50'} {!model.available ? 'opacity-40 cursor-not-allowed' : ''}"
+											class="model-card {model.id === imageModel ? 'active' : ''} {!model.available ? 'opacity-40 cursor-not-allowed' : ''}"
 										>
-											<div class="text-[10px] font-medium text-foreground leading-tight">{model.name}</div>
-											<div>
-												<div class="text-[9px] text-primary font-medium">${model.price_per_image}/img</div>
-												<div class="text-[8px] text-muted-foreground truncate">{model.provider_name}</div>
+											<div class="text-xs font-medium text-foreground leading-tight">{model.name}</div>
+											<div class="mt-auto">
+												<div class="text-xs text-primary font-medium">${model.price_per_image}/img</div>
+												<div class="text-[10px] text-muted-foreground truncate">{model.provider_name}</div>
 											</div>
 										</button>
 									{/each}
@@ -1599,188 +1631,150 @@
 							</div>
 
 							<!-- Video Models -->
-							<div class="mb-4">
-								<div class="flex items-center gap-2 mb-2">
-									<span class="w-5 h-5 bg-pink-500/15 rounded flex items-center justify-center">
-										<svg class="w-3 h-3 text-pink-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-										</svg>
-									</span>
-									<span class="text-xs font-medium text-foreground">Video Generation</span>
-								</div>
-								<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+							<div class="settings-card">
+								<h4 class="settings-card-title">
+									<svg class="w-5 h-5 text-pink-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+									</svg>
+									Video Generation
+								</h4>
+								<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 mt-4">
 									{#each videoModels as model}
 										<button
 											onclick={() => { selectedVideoModel = model.id; saveVideoModel(); }}
 											disabled={!model.available || savingVideoModel}
-											class="h-[68px] p-2 rounded-lg border text-left transition-all flex flex-col justify-between {model.id === videoModel ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/50 hover:bg-muted/50'} {!model.available ? 'opacity-40 cursor-not-allowed' : ''}"
+											class="model-card {model.id === videoModel ? 'active' : ''} {!model.available ? 'opacity-40 cursor-not-allowed' : ''}"
 										>
-											<div class="text-[10px] font-medium text-foreground leading-tight">{model.name}</div>
-											<div>
-												<div class="text-[9px] text-primary font-medium">${model.price_per_second}/sec</div>
-												<div class="text-[8px] text-muted-foreground truncate">{model.provider_name}</div>
+											<div class="text-xs font-medium text-foreground leading-tight">{model.name}</div>
+											<div class="mt-auto">
+												<div class="text-xs text-primary font-medium">${model.price_per_second}/sec</div>
+												<div class="text-[10px] text-muted-foreground truncate">{model.provider_name}</div>
 											</div>
 										</button>
 									{/each}
 								</div>
 							</div>
 
-							<!-- STT Models -->
-							<div class="mb-4">
-								<div class="flex items-center gap-2 mb-2">
-									<span class="w-5 h-5 bg-amber-500/15 rounded flex items-center justify-center">
-										<svg class="w-3 h-3 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<!-- Audio Models -->
+							<div class="grid gap-4 sm:grid-cols-2">
+								<!-- STT -->
+								<div class="settings-card">
+									<h4 class="settings-card-title text-sm">
+										<svg class="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
 										</svg>
-									</span>
-									<span class="text-xs font-medium text-foreground">Speech-to-Text</span>
+										Speech-to-Text
+									</h4>
+									<div class="grid gap-2 mt-3">
+										{#each sttModels as model}
+											<button
+												onclick={() => { selectedSttModel = model.id; saveSttModel(); }}
+												disabled={!model.available || savingSttModel}
+												class="model-card-sm {model.id === currentSttModel ? 'active' : ''} {!model.available ? 'opacity-40' : ''}"
+											>
+												<span class="text-xs font-medium">{model.name}</span>
+												<span class="text-xs text-primary">{model.price_display}</span>
+											</button>
+										{/each}
+									</div>
 								</div>
-								<div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
-									{#each sttModels as model}
-										<button
-											onclick={() => { selectedSttModel = model.id; saveSttModel(); }}
-											disabled={!model.available || savingSttModel}
-											class="h-[68px] p-2 rounded-lg border text-left transition-all flex flex-col justify-between {model.id === currentSttModel ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/50 hover:bg-muted/50'} {!model.available ? 'opacity-40 cursor-not-allowed' : ''}"
-										>
-											<div class="text-[10px] font-medium text-foreground leading-tight">{model.name}</div>
-											<div class="text-[9px] text-primary font-medium">{model.price_display}</div>
-										</button>
-									{/each}
-								</div>
-							</div>
 
-							<!-- TTS Models -->
-							<div>
-								<div class="flex items-center gap-2 mb-2">
-									<span class="w-5 h-5 bg-cyan-500/15 rounded flex items-center justify-center">
-										<svg class="w-3 h-3 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<!-- TTS -->
+								<div class="settings-card">
+									<h4 class="settings-card-title text-sm">
+										<svg class="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
 										</svg>
-									</span>
-									<span class="text-xs font-medium text-foreground">Text-to-Speech</span>
-								</div>
-								<div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
-									{#each ttsModels as model}
-										<button
-											onclick={() => { selectedTtsModel = model.id; saveTtsModel(); }}
-											disabled={!model.available || savingTtsModel}
-											class="h-[68px] p-2 rounded-lg border text-left transition-all flex flex-col justify-between {model.id === currentTtsModel ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/50 hover:bg-muted/50'} {!model.available ? 'opacity-40 cursor-not-allowed' : ''}"
-										>
-											<div class="text-[10px] font-medium text-foreground leading-tight">{model.name}</div>
-											<div class="text-[9px] text-primary font-medium">{model.price_display}</div>
-										</button>
-									{/each}
+										Text-to-Speech
+									</h4>
+									<div class="grid gap-2 mt-3">
+										{#each ttsModels as model}
+											<button
+												onclick={() => { selectedTtsModel = model.id; saveTtsModel(); }}
+												disabled={!model.available || savingTtsModel}
+												class="model-card-sm {model.id === currentTtsModel ? 'active' : ''} {!model.available ? 'opacity-40' : ''}"
+											>
+												<span class="text-xs font-medium">{model.name}</span>
+												<span class="text-xs text-primary">{model.price_display}</span>
+											</button>
+										{/each}
+									</div>
 								</div>
 							</div>
-						</section>
-					</div>
-				{/if}
-
-				<!-- Notifications Tab -->
-				{#if activeTab === 'notifications'}
-					<div class="space-y-6">
-						<div>
-							<h3 class="text-lg font-semibold text-foreground mb-1">Notifications</h3>
-							<p class="text-sm text-muted-foreground">Configure browser notifications and webhooks for external integrations.</p>
 						</div>
+					{/if}
 
-						<!-- Browser Notifications Section -->
-						<section class="bg-muted/30 rounded-xl p-5">
-							<div class="flex items-center gap-3 mb-4">
-								<div class="w-10 h-10 bg-indigo-500/15 rounded-lg flex items-center justify-center">
+					<!-- SYSTEM > NOTIFICATIONS -->
+					{#if activeSection === 'notifications'}
+						<div class="space-y-6 max-w-2xl">
+							<div>
+								<h3 class="text-lg font-semibold text-foreground">Notifications</h3>
+								<p class="text-sm text-muted-foreground mt-1">Configure alerts and webhooks.</p>
+							</div>
+
+							<!-- Browser Notifications -->
+							<div class="settings-card">
+								<h4 class="settings-card-title">
 									<svg class="w-5 h-5 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
 									</svg>
-								</div>
-								<div>
-									<h4 class="font-semibold text-foreground">Browser Notifications</h4>
-									<p class="text-xs text-muted-foreground">Get notified when long-running sessions complete.</p>
-								</div>
-							</div>
-
-							<div class="space-y-4">
-								{#if !browserNotificationsSupported}
-									<div class="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-amber-300 text-sm">
-										Browser notifications are not supported in this browser.
-									</div>
-								{:else if notificationPermission === 'denied'}
-									<div class="bg-red-500/10 border border-red-500/20 rounded-lg p-3 text-red-300 text-sm">
-										<p class="font-medium">Notifications blocked</p>
-										<p class="text-xs mt-1">You have blocked notifications for this site. Please enable them in your browser settings to receive notifications.</p>
-									</div>
-								{:else}
-									<div class="flex items-center justify-between">
-										<div>
-											<span class="text-sm font-medium text-foreground">Enable Notifications</span>
-											<p class="text-xs text-muted-foreground">Show desktop notifications when sessions complete</p>
+									Browser Notifications
+								</h4>
+								<div class="mt-4">
+									{#if !browserNotificationsSupported}
+										<p class="text-sm text-amber-400">Not supported in this browser.</p>
+									{:else if notificationPermission === 'denied'}
+										<p class="text-sm text-destructive">Blocked. Enable in browser settings.</p>
+									{:else}
+										<div class="flex items-center justify-between">
+											<div>
+												<p class="text-sm font-medium text-foreground">Desktop notifications</p>
+												<p class="text-xs text-muted-foreground">Get notified when sessions complete</p>
+											</div>
+											<button
+												onclick={toggleBrowserNotifications}
+												disabled={requestingPermission}
+												class="toggle {browserNotificationsEnabled ? 'active' : ''}"
+											>
+												<span class="toggle-knob"></span>
+											</button>
 										</div>
-										<button
-											onclick={toggleBrowserNotifications}
-											disabled={requestingPermission}
-											class="relative inline-flex items-center cursor-pointer"
-										>
-											{#if requestingPermission}
-												<div class="w-11 h-6 bg-muted rounded-full flex items-center justify-center">
-													<span class="inline-block animate-spin text-xs">&#9696;</span>
-												</div>
-											{:else}
-												<div class="w-11 h-6 bg-muted rounded-full peer peer-checked:bg-primary transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all {browserNotificationsEnabled ? 'bg-primary after:translate-x-5' : ''}"></div>
-											{/if}
-										</button>
-									</div>
-									{#if browserNotificationsEnabled}
-										<p class="text-xs text-green-400">Notifications are enabled. You'll be notified when sessions complete.</p>
 									{/if}
-								{/if}
+								</div>
 							</div>
-						</section>
 
-						<!-- Webhooks Section (Admin Only) -->
-						{#if $isAdmin}
-							<section class="bg-muted/30 rounded-xl p-5">
-								<div class="flex items-center gap-3 mb-4">
-									<div class="w-10 h-10 bg-purple-500/15 rounded-lg flex items-center justify-center">
+							<!-- Webhooks -->
+							{#if $isAdmin}
+								<div class="settings-card">
+									<h4 class="settings-card-title">
 										<svg class="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
 										</svg>
-									</div>
-									<div>
-										<h4 class="font-semibold text-foreground">Webhooks</h4>
-										<p class="text-xs text-muted-foreground">Send events to external services when sessions complete or error.</p>
+										Webhooks
+									</h4>
+									<div class="mt-4">
+										<WebhookManager />
 									</div>
 								</div>
-
-								<WebhookManager />
-							</section>
-						{/if}
-					</div>
-				{/if}
-
-				<!-- Background Cleanup Tab -->
-				{#if activeTab === 'cleanup'}
-					<div class="space-y-6">
-						<div>
-							<h3 class="text-lg font-semibold text-foreground mb-1">Background Cleanup</h3>
-							<p class="text-sm text-muted-foreground">Configure automatic cleanup of sessions, connections, and generated files.</p>
+							{/if}
 						</div>
+					{/if}
 
-						{#if loadingCleanup}
-							<div class="flex items-center gap-2 text-muted-foreground">
-								<span class="inline-block animate-spin">&#9696;</span>
-								<span>Loading cleanup settings...</span>
+					<!-- SYSTEM > CLEANUP -->
+					{#if activeSection === 'cleanup'}
+						<div class="space-y-6">
+							<div>
+								<h3 class="text-lg font-semibold text-foreground">Background Cleanup</h3>
+								<p class="text-sm text-muted-foreground mt-1">Automatic cleanup of sessions and files.</p>
 							</div>
-						{:else if !cleanupConfig}
-							<div class="bg-destructive/10 border border-destructive/30 text-destructive px-4 py-3 rounded-lg">
-								<p class="font-medium">Failed to load cleanup settings</p>
-								<p class="text-sm mt-1">Please try refreshing the page or check the browser console for errors.</p>
-								<button onclick={loadCleanupSettings} class="btn btn-secondary mt-3">
-									Retry
-								</button>
-							</div>
-						{:else}
-							<!-- Status Banner -->
-							<section class="bg-muted/30 rounded-xl p-4">
-								<div class="flex items-center justify-between">
+
+							{#if loadingCleanup}
+								<div class="text-center py-12">
+									<div class="animate-spin w-8 h-8 border-2 border-primary border-t-transparent rounded-full mx-auto"></div>
+								</div>
+							{:else if cleanupConfig}
+								<!-- Status -->
+								<div class="settings-card flex items-center justify-between">
 									<div class="flex items-center gap-3">
 										<div class="w-10 h-10 rounded-lg flex items-center justify-center {cleanupStatus?.is_sleeping ? 'bg-amber-500/15' : 'bg-success/15'}">
 											{#if cleanupStatus?.is_sleeping}
@@ -1794,429 +1788,177 @@
 											{/if}
 										</div>
 										<div>
-											<h4 class="font-semibold text-foreground">
-												{cleanupStatus?.is_sleeping ? 'Sleeping' : 'Active'}
-											</h4>
+											<p class="font-medium text-foreground">{cleanupStatus?.is_sleeping ? 'Sleeping' : 'Active'}</p>
 											<p class="text-xs text-muted-foreground">
-												{#if cleanupStatus}
-													Idle for {formatIdleTime(cleanupStatus.idle_seconds)}
-													{#if cleanupConfig.sleep_mode_enabled}
-														• Sleeps after {cleanupConfig.sleep_timeout_minutes}m
-													{/if}
-												{/if}
+												{#if cleanupStatus}Idle for {formatIdleTime(cleanupStatus.idle_seconds)}{/if}
 											</p>
 										</div>
 									</div>
-									<div class="text-xs text-muted-foreground">
-										Cleanup runs every {cleanupConfig.cleanup_interval_minutes}m
-									</div>
-								</div>
-							</section>
-
-							<!-- Sleep Mode Settings -->
-							<section class="bg-muted/30 rounded-xl p-5">
-								<div class="flex items-center gap-3 mb-4">
-									<div class="w-10 h-10 bg-purple-500/15 rounded-lg flex items-center justify-center">
-										<svg class="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
-										</svg>
-									</div>
-									<div>
-										<h4 class="font-semibold text-foreground">Sleep Mode</h4>
-										<p class="text-xs text-muted-foreground">Pause background tasks when the app is idle to save resources.</p>
-									</div>
+									<span class="text-xs text-muted-foreground">Every {cleanupConfig.cleanup_interval_minutes}m</span>
 								</div>
 
-								<div class="space-y-4">
+								<!-- Sleep Mode -->
+								<div class="settings-card">
 									<div class="flex items-center justify-between">
 										<div>
-											<span class="text-sm font-medium text-foreground">Enable Sleep Mode</span>
-											<p class="text-xs text-muted-foreground">Automatically pause cleanup when inactive</p>
+											<h4 class="font-medium text-foreground">Sleep Mode</h4>
+											<p class="text-xs text-muted-foreground">Pause cleanup when inactive</p>
 										</div>
-										<label class="relative inline-flex items-center cursor-pointer">
-											<input type="checkbox" bind:checked={cleanupConfig.sleep_mode_enabled} class="sr-only peer" />
-											<div class="w-11 h-6 bg-muted rounded-full peer peer-checked:bg-primary transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-5"></div>
-										</label>
+										<button
+											onclick={() => cleanupConfig && (cleanupConfig.sleep_mode_enabled = !cleanupConfig.sleep_mode_enabled)}
+											class="toggle {cleanupConfig.sleep_mode_enabled ? 'active' : ''}"
+										>
+											<span class="toggle-knob"></span>
+										</button>
 									</div>
-
 									{#if cleanupConfig.sleep_mode_enabled}
-										<div class="grid grid-cols-2 gap-4">
+										<div class="grid grid-cols-2 gap-3 mt-4">
 											<div>
-												<label class="block text-sm font-medium text-foreground mb-1.5">Sleep After (minutes)</label>
-												<input type="number" min="1" max="60" bind:value={cleanupConfig.sleep_timeout_minutes} class="input" />
+												<label class="text-xs text-muted-foreground">Sleep after (min)</label>
+												<input type="number" min="1" max="60" bind:value={cleanupConfig.sleep_timeout_minutes} class="input text-sm mt-1" />
 											</div>
 											<div>
-												<label class="block text-sm font-medium text-foreground mb-1.5">Cleanup Interval (minutes)</label>
-												<input type="number" min="1" max="60" bind:value={cleanupConfig.cleanup_interval_minutes} class="input" />
+												<label class="text-xs text-muted-foreground">Cleanup interval (min)</label>
+												<input type="number" min="1" max="60" bind:value={cleanupConfig.cleanup_interval_minutes} class="input text-sm mt-1" />
 											</div>
 										</div>
 									{/if}
 								</div>
-							</section>
 
-							<!-- File Cleanup Settings -->
-							<section class="bg-muted/30 rounded-xl p-5">
-								<div class="flex items-center gap-3 mb-4">
-									<div class="w-10 h-10 bg-red-500/15 rounded-lg flex items-center justify-center">
-										<svg class="w-5 h-5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-										</svg>
-									</div>
-									<div>
-										<h4 class="font-semibold text-foreground">Generated Files Cleanup</h4>
-										<p class="text-xs text-muted-foreground">Automatically delete old generated images, videos, and shared files.</p>
-									</div>
-								</div>
-
-								<div class="space-y-4">
-									<!-- Images -->
-									<div class="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
-										<div class="flex items-center gap-3">
-											<span class="w-8 h-8 bg-green-500/15 rounded flex items-center justify-center">
-												<svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-												</svg>
-											</span>
-											<div>
-												<span class="text-sm font-medium text-foreground">Generated Images</span>
-												<p class="text-xs text-muted-foreground">Clean up AI-generated images</p>
+								<!-- File Cleanup -->
+								<div class="settings-card">
+									<h4 class="font-medium text-foreground mb-4">File Cleanup</h4>
+									<div class="space-y-3">
+										<!-- Images -->
+										<div class="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
+											<div class="flex items-center gap-3">
+												<span class="w-8 h-8 bg-green-500/15 rounded flex items-center justify-center">
+													<svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+													</svg>
+												</span>
+												<span class="text-sm font-medium">Images</span>
 											</div>
-										</div>
-										<div class="flex items-center gap-3">
-											{#if cleanupConfig.cleanup_images_enabled}
-												<div class="flex items-center gap-2">
-													<span class="text-xs text-muted-foreground">older than</span>
+											<div class="flex items-center gap-2">
+												{#if cleanupConfig.cleanup_images_enabled}
 													<input type="number" min="1" max="365" bind:value={cleanupConfig.cleanup_images_max_age_days} class="input w-16 text-center text-sm" />
 													<span class="text-xs text-muted-foreground">days</span>
-												</div>
-											{/if}
-											<label class="relative inline-flex items-center cursor-pointer">
-												<input type="checkbox" bind:checked={cleanupConfig.cleanup_images_enabled} class="sr-only peer" />
-												<div class="w-9 h-5 bg-muted rounded-full peer peer-checked:bg-primary transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4"></div>
-											</label>
-										</div>
-									</div>
-
-									<!-- Videos -->
-									<div class="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
-										<div class="flex items-center gap-3">
-											<span class="w-8 h-8 bg-blue-500/15 rounded flex items-center justify-center">
-												<svg class="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-												</svg>
-											</span>
-											<div>
-												<span class="text-sm font-medium text-foreground">Generated Videos</span>
-												<p class="text-xs text-muted-foreground">Clean up AI-generated videos</p>
+												{/if}
+												<button
+													onclick={() => cleanupConfig && (cleanupConfig.cleanup_images_enabled = !cleanupConfig.cleanup_images_enabled)}
+													class="toggle-sm {cleanupConfig.cleanup_images_enabled ? 'active' : ''}"
+												>
+													<span class="toggle-knob-sm"></span>
+												</button>
 											</div>
 										</div>
-										<div class="flex items-center gap-3">
-											{#if cleanupConfig.cleanup_videos_enabled}
-												<div class="flex items-center gap-2">
-													<span class="text-xs text-muted-foreground">older than</span>
+
+										<!-- Videos -->
+										<div class="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
+											<div class="flex items-center gap-3">
+												<span class="w-8 h-8 bg-blue-500/15 rounded flex items-center justify-center">
+													<svg class="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+													</svg>
+												</span>
+												<span class="text-sm font-medium">Videos</span>
+											</div>
+											<div class="flex items-center gap-2">
+												{#if cleanupConfig.cleanup_videos_enabled}
 													<input type="number" min="1" max="365" bind:value={cleanupConfig.cleanup_videos_max_age_days} class="input w-16 text-center text-sm" />
 													<span class="text-xs text-muted-foreground">days</span>
-												</div>
-											{/if}
-											<label class="relative inline-flex items-center cursor-pointer">
-												<input type="checkbox" bind:checked={cleanupConfig.cleanup_videos_enabled} class="sr-only peer" />
-												<div class="w-9 h-5 bg-muted rounded-full peer peer-checked:bg-primary transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4"></div>
-											</label>
-										</div>
-									</div>
-
-									<!-- Shared Files -->
-									<div class="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
-										<div class="flex items-center gap-3">
-											<span class="w-8 h-8 bg-amber-500/15 rounded flex items-center justify-center">
-												<svg class="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-												</svg>
-											</span>
-											<div>
-												<span class="text-sm font-medium text-foreground">Shared Files</span>
-												<p class="text-xs text-muted-foreground">Clean up downloadable files</p>
+												{/if}
+												<button
+													onclick={() => cleanupConfig && (cleanupConfig.cleanup_videos_enabled = !cleanupConfig.cleanup_videos_enabled)}
+													class="toggle-sm {cleanupConfig.cleanup_videos_enabled ? 'active' : ''}"
+												>
+													<span class="toggle-knob-sm"></span>
+												</button>
 											</div>
 										</div>
-										<div class="flex items-center gap-3">
-											{#if cleanupConfig.cleanup_shared_files_enabled}
-												<div class="flex items-center gap-2">
-													<span class="text-xs text-muted-foreground">older than</span>
+
+										<!-- Shared Files -->
+										<div class="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
+											<div class="flex items-center gap-3">
+												<span class="w-8 h-8 bg-amber-500/15 rounded flex items-center justify-center">
+													<svg class="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+													</svg>
+												</span>
+												<span class="text-sm font-medium">Shared Files</span>
+											</div>
+											<div class="flex items-center gap-2">
+												{#if cleanupConfig.cleanup_shared_files_enabled}
 													<input type="number" min="1" max="365" bind:value={cleanupConfig.cleanup_shared_files_max_age_days} class="input w-16 text-center text-sm" />
 													<span class="text-xs text-muted-foreground">days</span>
-												</div>
-											{/if}
-											<label class="relative inline-flex items-center cursor-pointer">
-												<input type="checkbox" bind:checked={cleanupConfig.cleanup_shared_files_enabled} class="sr-only peer" />
-												<div class="w-9 h-5 bg-muted rounded-full peer peer-checked:bg-primary transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4"></div>
-											</label>
-										</div>
-									</div>
-
-									<!-- Project Selection -->
-									{#if cleanupConfig.cleanup_images_enabled || cleanupConfig.cleanup_videos_enabled || cleanupConfig.cleanup_shared_files_enabled}
-										<div class="pt-2 border-t border-border">
-											<label class="block text-sm font-medium text-foreground mb-2">Projects to Clean</label>
-											<div class="flex flex-wrap gap-2">
+												{/if}
 												<button
-													onclick={() => cleanupConfig && (cleanupConfig.cleanup_project_ids = [])}
-													class="px-3 py-1.5 text-xs rounded-lg border transition-all {cleanupConfig.cleanup_project_ids.length === 0 ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:border-primary/50'}"
+													onclick={() => cleanupConfig && (cleanupConfig.cleanup_shared_files_enabled = !cleanupConfig.cleanup_shared_files_enabled)}
+													class="toggle-sm {cleanupConfig.cleanup_shared_files_enabled ? 'active' : ''}"
 												>
-													All Projects
+													<span class="toggle-knob-sm"></span>
 												</button>
-												{#each projects as project}
-													<button
-														onclick={() => {
-															if (!cleanupConfig) return;
-															const ids = cleanupConfig.cleanup_project_ids;
-															if (ids.includes(project.id)) {
-																cleanupConfig.cleanup_project_ids = ids.filter(id => id !== project.id);
-															} else {
-																cleanupConfig.cleanup_project_ids = [...ids, project.id];
-															}
-														}}
-														class="px-3 py-1.5 text-xs rounded-lg border transition-all {cleanupConfig.cleanup_project_ids.includes(project.id) ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:border-primary/50'}"
-													>
-														{project.name}
-													</button>
-												{/each}
 											</div>
-											<p class="text-xs text-muted-foreground mt-2">
-												{cleanupConfig.cleanup_project_ids.length === 0 ? 'Cleaning all projects' : `Cleaning ${cleanupConfig.cleanup_project_ids.length} selected project(s)`}
-											</p>
 										</div>
-									{/if}
-								</div>
-							</section>
-
-							<!-- Session Cleanup Settings -->
-							<section class="bg-muted/30 rounded-xl p-5">
-								<div class="flex items-center gap-3 mb-4">
-									<div class="w-10 h-10 bg-cyan-500/15 rounded-lg flex items-center justify-center">
-										<svg class="w-5 h-5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-										</svg>
-									</div>
-									<div>
-										<h4 class="font-semibold text-foreground">Session Cleanup</h4>
-										<p class="text-xs text-muted-foreground">Configure timeouts for inactive sessions and connections.</p>
 									</div>
 								</div>
 
-								<div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-									<div>
-										<label class="block text-sm font-medium text-foreground mb-1.5">SDK Session Timeout</label>
-										<div class="flex items-center gap-2">
-											<input type="number" min="5" max="480" bind:value={cleanupConfig.sdk_session_max_age_minutes} class="input flex-1" />
-											<span class="text-xs text-muted-foreground">minutes</span>
+								<!-- Session Cleanup -->
+								<div class="settings-card">
+									<h4 class="font-medium text-foreground mb-4">Session Timeouts</h4>
+									<div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+										<div>
+											<label class="text-xs text-muted-foreground">SDK Session (min)</label>
+											<input type="number" min="5" max="480" bind:value={cleanupConfig.sdk_session_max_age_minutes} class="input text-sm mt-1" />
 										</div>
-										<p class="text-xs text-muted-foreground mt-1">Inactive Claude sessions</p>
-									</div>
-									<div>
-										<label class="block text-sm font-medium text-foreground mb-1.5">WebSocket Timeout</label>
-										<div class="flex items-center gap-2">
-											<input type="number" min="1" max="60" bind:value={cleanupConfig.websocket_max_age_minutes} class="input flex-1" />
-											<span class="text-xs text-muted-foreground">minutes</span>
+										<div>
+											<label class="text-xs text-muted-foreground">WebSocket (min)</label>
+											<input type="number" min="1" max="60" bind:value={cleanupConfig.websocket_max_age_minutes} class="input text-sm mt-1" />
 										</div>
-										<p class="text-xs text-muted-foreground mt-1">Inactive device connections</p>
-									</div>
-									<div>
-										<label class="block text-sm font-medium text-foreground mb-1.5">Sync Log Retention</label>
-										<div class="flex items-center gap-2">
-											<input type="number" min="1" max="168" bind:value={cleanupConfig.sync_log_retention_hours} class="input flex-1" />
-											<span class="text-xs text-muted-foreground">hours</span>
+										<div>
+											<label class="text-xs text-muted-foreground">Sync Logs (hrs)</label>
+											<input type="number" min="1" max="168" bind:value={cleanupConfig.sync_log_retention_hours} class="input text-sm mt-1" />
 										</div>
-										<p class="text-xs text-muted-foreground mt-1">Multi-device sync logs</p>
 									</div>
 								</div>
-							</section>
 
-							<!-- Messages -->
-							{#if cleanupError}
-								<div class="bg-destructive/10 border border-destructive/30 text-destructive px-4 py-3 rounded-lg text-sm">
-									{cleanupError}
-									<button onclick={() => cleanupError = ''} class="ml-2 hover:opacity-70">&times;</button>
-								</div>
-							{/if}
-							{#if cleanupSuccess}
-								<div class="bg-success/10 border border-success/30 text-success px-4 py-3 rounded-lg text-sm">
-									{cleanupSuccess}
-								</div>
-							{/if}
-
-							<!-- Action Buttons -->
-							<div class="flex gap-3">
-								<button
-									onclick={saveCleanupConfig}
-									disabled={savingCleanup}
-									class="btn btn-primary flex-1"
-								>
-									{#if savingCleanup}
-										<span class="inline-block animate-spin mr-2">&#9696;</span>
-									{/if}
-									Save Settings
-								</button>
-								<button
-									onclick={loadCleanupPreview}
-									class="btn btn-secondary"
-								>
-									Preview Cleanup
-								</button>
-							</div>
-						{/if}
-					</div>
-				{/if}
-
-				<!-- Rate Limits Tab -->
-				{#if activeTab === 'rate-limits'}
-					<RateLimitManager />
-				{/if}
-
-				<!-- Cleanup Preview Modal -->
-				{#if showCleanupPreview && cleanupPreview}
-					<div class="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
-						<div class="bg-card border border-border rounded-2xl w-full max-w-2xl shadow-2xl max-h-[80vh] flex flex-col">
-							<div class="p-4 border-b border-border flex items-center justify-between shrink-0">
-								<h3 class="text-lg font-bold text-foreground">Cleanup Preview</h3>
-								<button class="text-muted-foreground hover:text-foreground transition-colors" onclick={() => showCleanupPreview = false}>
-									<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-									</svg>
-								</button>
-							</div>
-
-							<div class="p-4 overflow-y-auto flex-1">
-								{#if cleanupPreview.total_count === 0}
-									<div class="text-center py-8 text-muted-foreground">
-										<svg class="w-12 h-12 mx-auto mb-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-										</svg>
-										<p>No files to clean up</p>
-										{#if !(cleanupConfig?.cleanup_images_enabled || cleanupConfig?.cleanup_videos_enabled || cleanupConfig?.cleanup_shared_files_enabled)}
-											<p class="text-xs mt-1">Enable file cleanup options above to scan for old files</p>
-										{:else}
-											<p class="text-xs mt-1">All files are newer than the configured max age</p>
-										{/if}
-									</div>
-								{:else}
-									<div class="mb-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg">
-										<p class="text-amber-400 font-medium">
-											{cleanupPreview.total_count} files ({cleanupPreview.total_bytes_formatted}) will be deleted
-										</p>
-									</div>
-
-									<div class="space-y-4">
-										{#if cleanupPreview.images.length > 0}
-											<div>
-												<h4 class="text-sm font-semibold text-foreground mb-2 flex items-center gap-2">
-													<span class="w-5 h-5 bg-green-500/15 rounded flex items-center justify-center">
-														<svg class="w-3 h-3 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-														</svg>
-													</span>
-													Images ({cleanupPreview.images.length})
-												</h4>
-												<div class="space-y-1 max-h-32 overflow-y-auto">
-													{#each cleanupPreview.images as file}
-														<div class="flex items-center justify-between text-xs px-2 py-1 bg-muted/30 rounded">
-															<span class="text-foreground truncate flex-1">{file.name}</span>
-															<span class="text-muted-foreground ml-2">{file.age_days}d old</span>
-														</div>
-													{/each}
-												</div>
-											</div>
-										{/if}
-
-										{#if cleanupPreview.videos.length > 0}
-											<div>
-												<h4 class="text-sm font-semibold text-foreground mb-2 flex items-center gap-2">
-													<span class="w-5 h-5 bg-blue-500/15 rounded flex items-center justify-center">
-														<svg class="w-3 h-3 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-														</svg>
-													</span>
-													Videos ({cleanupPreview.videos.length})
-												</h4>
-												<div class="space-y-1 max-h-32 overflow-y-auto">
-													{#each cleanupPreview.videos as file}
-														<div class="flex items-center justify-between text-xs px-2 py-1 bg-muted/30 rounded">
-															<span class="text-foreground truncate flex-1">{file.name}</span>
-															<span class="text-muted-foreground ml-2">{file.age_days}d old</span>
-														</div>
-													{/each}
-												</div>
-											</div>
-										{/if}
-
-										{#if cleanupPreview.shared_files.length > 0}
-											<div>
-												<h4 class="text-sm font-semibold text-foreground mb-2 flex items-center gap-2">
-													<span class="w-5 h-5 bg-amber-500/15 rounded flex items-center justify-center">
-														<svg class="w-3 h-3 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-														</svg>
-													</span>
-													Shared Files ({cleanupPreview.shared_files.length})
-												</h4>
-												<div class="space-y-1 max-h-32 overflow-y-auto">
-													{#each cleanupPreview.shared_files as file}
-														<div class="flex items-center justify-between text-xs px-2 py-1 bg-muted/30 rounded">
-															<span class="text-foreground truncate flex-1">{file.name}</span>
-															<span class="text-muted-foreground ml-2">{file.age_days}d old</span>
-														</div>
-													{/each}
-												</div>
-											</div>
-										{/if}
+								<!-- Messages & Actions -->
+								{#if cleanupError}
+									<div class="bg-destructive/10 border border-destructive/30 text-destructive px-4 py-3 rounded-lg text-sm">
+										{cleanupError}
 									</div>
 								{/if}
-							</div>
+								{#if cleanupSuccess}
+									<div class="bg-success/10 border border-success/30 text-success px-4 py-3 rounded-lg text-sm">
+										{cleanupSuccess}
+									</div>
+								{/if}
 
-							<div class="p-4 border-t border-border flex gap-3 shrink-0">
-								{#if cleanupPreview.total_count > 0}
-									<button
-										onclick={runCleanupNow}
-										disabled={runningCleanup}
-										class="btn btn-primary flex-1"
-									>
-										{#if runningCleanup}
-											<span class="inline-block animate-spin mr-2">&#9696;</span>
-											Cleaning...
-										{:else}
-											Delete {cleanupPreview.total_count} Files
-										{/if}
+								<div class="flex gap-3">
+									<button onclick={saveCleanupConfig} disabled={savingCleanup} class="btn btn-primary flex-1">
+										{savingCleanup ? 'Saving...' : 'Save Settings'}
 									</button>
-								{/if}
-								<button onclick={() => showCleanupPreview = false} class="btn btn-secondary {cleanupPreview.total_count === 0 ? 'flex-1' : ''}">
-									{cleanupPreview.total_count === 0 ? 'Close' : 'Cancel'}
-								</button>
-							</div>
+									<button onclick={loadCleanupPreview} class="btn btn-secondary">
+										Preview
+									</button>
+								</div>
+							{/if}
 						</div>
-					</div>
-				{/if}
+					{/if}
+				</div>
 			</div>
-
-			<!-- Footer -->
-			<footer class="shrink-0 px-6 py-4 border-t border-border bg-card/50 flex items-center justify-end">
-				<button
-					onclick={onClose}
-					class="px-6 py-2.5 rounded-xl text-sm font-medium bg-muted text-foreground border border-border hover:bg-accent transition-colors"
-				>
-					Close
-				</button>
-			</footer>
 		</div>
 	</div>
 
-	<!-- Create/Edit API User Modal (nested) -->
+	<!-- Create/Edit API User Modal -->
 	{#if showCreateForm}
 		<div class="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
-			<div class="bg-card border border-border rounded-2xl w-full max-w-lg shadow-2xl">
+			<div class="bg-card border border-border rounded-2xl w-full max-w-lg shadow-2xl animate-modal-in">
 				<div class="p-4 border-b border-border flex items-center justify-between">
-					<h3 class="text-lg font-bold text-foreground">
+					<h3 class="text-lg font-semibold text-foreground">
 						{editingUser ? 'Edit API User' : 'Create API User'}
 					</h3>
-					<button class="text-muted-foreground hover:text-foreground transition-colors" onclick={resetForm}>
+					<button class="icon-btn" onclick={resetForm}>
 						<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 						</svg>
@@ -2226,58 +1968,147 @@
 				<div class="p-4 space-y-4">
 					{#if newlyCreatedKey}
 						<div class="bg-success/10 border border-success/30 p-4 rounded-lg">
-							<p class="text-success font-medium mb-2">API User created successfully!</p>
-							<p class="text-sm text-muted-foreground mb-3">Copy this API key now - it won't be shown again:</p>
+							<p class="text-success font-medium mb-2">API User created!</p>
+							<p class="text-sm text-muted-foreground mb-3">Copy this key now - it won't be shown again:</p>
 							<div class="flex items-center gap-2">
-								<code class="flex-1 bg-muted px-3 py-2 rounded-lg text-sm text-foreground break-all font-mono">{newlyCreatedKey}</code>
+								<code class="flex-1 bg-muted px-3 py-2 rounded-lg text-sm break-all font-mono">{newlyCreatedKey}</code>
 								<button onclick={() => copyToClipboard(newlyCreatedKey || '')} class="btn btn-secondary shrink-0">Copy</button>
 							</div>
 						</div>
 						<button onclick={resetForm} class="btn btn-primary w-full">Done</button>
 					{:else}
 						<div>
-							<label class="block text-sm font-medium text-foreground mb-1.5">Name *</label>
-							<input bind:value={formData.name} class="input" placeholder="My Application" />
+							<label class="text-sm font-medium text-foreground">Name *</label>
+							<input bind:value={formData.name} class="input mt-1" placeholder="My Application" />
 						</div>
 						<div>
-							<label class="block text-sm font-medium text-foreground mb-1.5">Description</label>
-							<textarea bind:value={formData.description} class="input" rows="2" placeholder="Optional description"></textarea>
+							<label class="text-sm font-medium text-foreground">Description</label>
+							<textarea bind:value={formData.description} class="input mt-1" rows="2" placeholder="Optional description"></textarea>
 						</div>
-						<div>
-							<label class="block text-sm font-medium text-foreground mb-1.5">Project</label>
-							<select bind:value={formData.project_id} class="input">
-								<option value="">Default Workspace</option>
-								{#each projects as project}
-									<option value={project.id}>{project.name}</option>
-								{/each}
-							</select>
+						<div class="grid grid-cols-2 gap-3">
+							<div>
+								<label class="text-sm font-medium text-foreground">Project</label>
+								<select bind:value={formData.project_id} class="input mt-1">
+									<option value="">Default</option>
+									{#each projects as project}
+										<option value={project.id}>{project.name}</option>
+									{/each}
+								</select>
+							</div>
+							<div>
+								<label class="text-sm font-medium text-foreground">Profile</label>
+								<select bind:value={formData.profile_id} class="input mt-1">
+									<option value="">Any</option>
+									{#each profiles as profile}
+										<option value={profile.id}>{profile.name}</option>
+									{/each}
+								</select>
+							</div>
 						</div>
-						<div>
-							<label class="block text-sm font-medium text-foreground mb-1.5">Profile</label>
-							<select bind:value={formData.profile_id} class="input">
-								<option value="">Any Profile</option>
-								{#each profiles as profile}
-									<option value={profile.id}>{profile.name}</option>
-								{/each}
-							</select>
-						</div>
-						<div class="flex items-center gap-3 py-2">
-							<label class="relative inline-flex items-center cursor-pointer">
-								<input type="checkbox" bind:checked={formData.web_login_allowed} class="sr-only peer" />
-								<div class="w-9 h-5 bg-muted rounded-full peer peer-checked:bg-primary transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4"></div>
-							</label>
+						<div class="flex items-center justify-between py-2">
 							<div>
 								<span class="text-sm font-medium text-foreground">Allow Web Login</span>
-								<p class="text-xs text-muted-foreground">When disabled, user can only access via API key</p>
+								<p class="text-xs text-muted-foreground">When disabled, API key access only</p>
 							</div>
+							<button
+								onclick={() => formData.web_login_allowed = !formData.web_login_allowed}
+								class="toggle {formData.web_login_allowed ? 'active' : ''}"
+							>
+								<span class="toggle-knob"></span>
+							</button>
 						</div>
 						<div class="flex gap-2 pt-2">
 							<button onclick={handleSubmit} class="btn btn-primary flex-1">
-								{editingUser ? 'Save Changes' : 'Create User'}
+								{editingUser ? 'Save' : 'Create'}
 							</button>
 							<button onclick={resetForm} class="btn btn-secondary flex-1">Cancel</button>
 						</div>
 					{/if}
+				</div>
+			</div>
+		</div>
+	{/if}
+
+	<!-- Cleanup Preview Modal -->
+	{#if showCleanupPreview && cleanupPreview}
+		<div class="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
+			<div class="bg-card border border-border rounded-2xl w-full max-w-2xl shadow-2xl max-h-[80vh] flex flex-col animate-modal-in">
+				<div class="p-4 border-b border-border flex items-center justify-between shrink-0">
+					<h3 class="text-lg font-semibold text-foreground">Cleanup Preview</h3>
+					<button class="icon-btn" onclick={() => showCleanupPreview = false}>
+						<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+						</svg>
+					</button>
+				</div>
+
+				<div class="p-4 overflow-y-auto flex-1">
+					{#if cleanupPreview.total_count === 0}
+						<div class="text-center py-8 text-muted-foreground">
+							<p>No files to clean up</p>
+						</div>
+					{:else}
+						<div class="mb-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+							<p class="text-amber-400 font-medium">
+								{cleanupPreview.total_count} files ({cleanupPreview.total_bytes_formatted}) will be deleted
+							</p>
+						</div>
+
+						<div class="space-y-4">
+							{#if cleanupPreview.images.length > 0}
+								<div>
+									<h4 class="text-sm font-medium text-foreground mb-2">Images ({cleanupPreview.images.length})</h4>
+									<div class="space-y-1 max-h-32 overflow-y-auto">
+										{#each cleanupPreview.images as file}
+											<div class="flex items-center justify-between text-xs px-2 py-1 bg-muted/30 rounded">
+												<span class="truncate flex-1">{file.name}</span>
+												<span class="text-muted-foreground ml-2">{file.age_days}d</span>
+											</div>
+										{/each}
+									</div>
+								</div>
+							{/if}
+
+							{#if cleanupPreview.videos.length > 0}
+								<div>
+									<h4 class="text-sm font-medium text-foreground mb-2">Videos ({cleanupPreview.videos.length})</h4>
+									<div class="space-y-1 max-h-32 overflow-y-auto">
+										{#each cleanupPreview.videos as file}
+											<div class="flex items-center justify-between text-xs px-2 py-1 bg-muted/30 rounded">
+												<span class="truncate flex-1">{file.name}</span>
+												<span class="text-muted-foreground ml-2">{file.age_days}d</span>
+											</div>
+										{/each}
+									</div>
+								</div>
+							{/if}
+
+							{#if cleanupPreview.shared_files.length > 0}
+								<div>
+									<h4 class="text-sm font-medium text-foreground mb-2">Shared Files ({cleanupPreview.shared_files.length})</h4>
+									<div class="space-y-1 max-h-32 overflow-y-auto">
+										{#each cleanupPreview.shared_files as file}
+											<div class="flex items-center justify-between text-xs px-2 py-1 bg-muted/30 rounded">
+												<span class="truncate flex-1">{file.name}</span>
+												<span class="text-muted-foreground ml-2">{file.age_days}d</span>
+											</div>
+										{/each}
+									</div>
+								</div>
+							{/if}
+						</div>
+					{/if}
+				</div>
+
+				<div class="p-4 border-t border-border flex gap-3 shrink-0">
+					{#if cleanupPreview.total_count > 0}
+						<button onclick={runCleanupNow} disabled={runningCleanup} class="btn btn-primary flex-1">
+							{runningCleanup ? 'Cleaning...' : `Delete ${cleanupPreview.total_count} Files`}
+						</button>
+					{/if}
+					<button onclick={() => showCleanupPreview = false} class="btn btn-secondary {cleanupPreview.total_count === 0 ? 'flex-1' : ''}">
+						{cleanupPreview.total_count === 0 ? 'Close' : 'Cancel'}
+					</button>
 				</div>
 			</div>
 		</div>
@@ -2288,11 +2119,20 @@
 	@keyframes modal-in {
 		from {
 			opacity: 0;
-			transform: scale(0.95) translateY(10px);
+			transform: scale(0.96);
 		}
 		to {
 			opacity: 1;
-			transform: scale(1) translateY(0);
+			transform: scale(1);
+		}
+	}
+
+	@keyframes slide-in {
+		from {
+			transform: translateX(-100%);
+		}
+		to {
+			transform: translateX(0);
 		}
 	}
 
@@ -2300,12 +2140,148 @@
 		animation: modal-in 200ms cubic-bezier(0.16, 1, 0.3, 1);
 	}
 
-	.scrollbar-none {
-		scrollbar-width: none;
-		-ms-overflow-style: none;
+	.animate-slide-in {
+		animation: slide-in 200ms cubic-bezier(0.16, 1, 0.3, 1);
 	}
 
-	.scrollbar-none::-webkit-scrollbar {
-		display: none;
+	/* Settings Card */
+	.settings-card {
+		background-color: oklch(from var(--color-muted) l c h / 0.3);
+		border-radius: 0.75rem;
+		padding: 1rem;
+		border: 1px solid oklch(from var(--color-border) l c h / 0.5);
+	}
+
+	.settings-card-title {
+		font-weight: 500;
+		color: var(--color-foreground);
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
+	/* Theme Options */
+	.theme-option {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.75rem;
+		border-radius: 0.5rem;
+		border: 2px solid var(--color-border);
+		transition: all 0.2s;
+	}
+	.theme-option:hover {
+		border-color: oklch(from var(--color-muted-foreground) l c h / 0.5);
+	}
+	.theme-option.active {
+		border-color: var(--color-primary);
+		background-color: oklch(from var(--color-primary) l c h / 0.1);
+	}
+
+	/* Model Cards */
+	.model-card {
+		height: 4rem;
+		padding: 0.5rem;
+		border-radius: 0.5rem;
+		border: 1px solid var(--color-border);
+		text-align: left;
+		transition: all 0.2s;
+		display: flex;
+		flex-direction: column;
+		justify-content: space-between;
+	}
+	.model-card:hover:not(:disabled) {
+		border-color: oklch(from var(--color-primary) l c h / 0.5);
+		background-color: oklch(from var(--color-muted) l c h / 0.5);
+	}
+	.model-card.active {
+		border-color: var(--color-primary);
+		background-color: oklch(from var(--color-primary) l c h / 0.1);
+	}
+
+	.model-card-sm {
+		padding: 0.5rem 0.75rem;
+		border-radius: 0.5rem;
+		border: 1px solid var(--color-border);
+		transition: all 0.2s;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+	}
+	.model-card-sm:hover:not(:disabled) {
+		border-color: oklch(from var(--color-primary) l c h / 0.5);
+		background-color: oklch(from var(--color-muted) l c h / 0.5);
+	}
+	.model-card-sm.active {
+		border-color: var(--color-primary);
+		background-color: oklch(from var(--color-primary) l c h / 0.1);
+	}
+
+	/* Toggle Switch */
+	.toggle {
+		position: relative;
+		width: 2.75rem;
+		height: 1.5rem;
+		background-color: var(--color-muted);
+		border-radius: 9999px;
+		cursor: pointer;
+		transition: background-color 0.2s;
+	}
+	.toggle.active {
+		background-color: var(--color-primary);
+	}
+	.toggle-knob {
+		position: absolute;
+		top: 0.125rem;
+		left: 0.125rem;
+		width: 1.25rem;
+		height: 1.25rem;
+		background-color: white;
+		border-radius: 9999px;
+		transition: transform 0.2s;
+		box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+	}
+	.toggle.active .toggle-knob {
+		transform: translateX(1.25rem);
+	}
+
+	.toggle-sm {
+		position: relative;
+		width: 2.25rem;
+		height: 1.25rem;
+		background-color: var(--color-muted);
+		border-radius: 9999px;
+		cursor: pointer;
+		transition: background-color 0.2s;
+	}
+	.toggle-sm.active {
+		background-color: var(--color-primary);
+	}
+	.toggle-knob-sm {
+		position: absolute;
+		top: 0.125rem;
+		left: 0.125rem;
+		width: 1rem;
+		height: 1rem;
+		background-color: white;
+		border-radius: 9999px;
+		transition: transform 0.2s;
+		box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+	}
+	.toggle-sm.active .toggle-knob-sm {
+		transform: translateX(1rem);
+	}
+
+	/* Icon Button */
+	.icon-btn {
+		padding: 0.375rem;
+		color: var(--color-muted-foreground);
+		border-radius: 0.5rem;
+		transition: all 0.2s;
+	}
+	.icon-btn:hover {
+		color: var(--color-foreground);
+		background-color: var(--color-accent);
 	}
 </style>
