@@ -44,6 +44,7 @@
 	import AgentImportModal from '$lib/components/AgentImportModal.svelte';
 	import { exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
 	import KeyboardShortcutsModal from '$lib/components/KeyboardShortcutsModal.svelte';
+	import AnalyticsModal from '$lib/components/AnalyticsModal.svelte';
 	import ImportSessionModal from '$lib/components/ImportSessionModal.svelte';
 	import TagManager from '$lib/components/TagManager.svelte';
 	import SessionTagPicker from '$lib/components/SessionTagPicker.svelte';
@@ -320,6 +321,9 @@
 
 	// Keyboard shortcuts modal state
 	let showKeyboardShortcuts = false;
+
+	// Analytics modal state
+	let showAnalyticsModal = false;
 
 	// Import session modal state
 	let showImportModal = false;
@@ -1822,11 +1826,11 @@
 		<div class="mt-auto flex flex-col items-center pb-3 gap-1">
 			<!-- Analytics (Admin only) -->
 			{#if $isAdmin}
-				<a href="/analytics" class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-hover-overlay text-muted-foreground hover:text-foreground" title="Analytics">
+				<button on:click={() => showAnalyticsModal = true} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-hover-overlay text-muted-foreground hover:text-foreground" title="Analytics">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
 					</svg>
-				</a>
+				</button>
 			{/if}
 			<!-- Keyboard Shortcuts -->
 			<button on:click={() => showKeyboardShortcuts = true} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-hover-overlay text-muted-foreground hover:text-foreground" title="Keyboard Shortcuts (?)">
@@ -3232,11 +3236,11 @@
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
 					</svg>
 				</button>
-				<a href="/analytics" class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-hover-overlay rounded-xl transition-colors" title="Analytics">
+				<button on:click={() => showAnalyticsModal = true} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-hover-overlay rounded-xl transition-colors" title="Analytics">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
 					</svg>
-				</a>
+				</button>
 				<button on:click={() => { sidebarOpen = false; showToolsMenu = false; showSettingsModal = true; }} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-hover-overlay rounded-xl transition-colors" title="Settings">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
@@ -4244,6 +4248,16 @@
 
 <!-- Keyboard Shortcuts Modal -->
 <KeyboardShortcutsModal open={showKeyboardShortcuts} onClose={() => showKeyboardShortcuts = false} />
+
+<!-- Analytics Modal -->
+<AnalyticsModal
+	open={showAnalyticsModal}
+	onClose={() => showAnalyticsModal = false}
+	onSessionClick={(sessionId) => {
+		tabs.openSession(sessionId);
+		showAnalyticsModal = false;
+	}}
+/>
 
 <!-- Advanced Search Modal (Cmd+Shift+F) -->
 <AdvancedSearch

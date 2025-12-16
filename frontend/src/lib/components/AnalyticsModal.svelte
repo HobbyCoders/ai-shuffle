@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { auth, isAuthenticated, isAdmin } from '$lib/stores/auth';
+	import UniversalModal from './UniversalModal.svelte';
 	import {
 		getAnalyticsSummary,
 		getCostBreakdown,
@@ -20,28 +20,39 @@
 	import CostBreakdown from '$lib/components/analytics/CostBreakdown.svelte';
 	import TopSessionsTable from '$lib/components/analytics/TopSessionsTable.svelte';
 
+	interface Props {
+		open: boolean;
+		onClose: () => void;
+		onSessionClick?: (sessionId: string) => void;
+	}
+
+	let { open, onClose, onSessionClick }: Props = $props();
+
 	// Date range state
-	let startDate = '';
-	let endDate = '';
+	let startDate = $state('');
+	let endDate = $state('');
 
 	// Data state
-	let summary: AnalyticsSummary | null = null;
-	let costBreakdown: CostBreakdownItem[] = [];
-	let usageTrends: TrendDataPoint[] = [];
-	let topSessions: TopSession[] = [];
+	let summary: AnalyticsSummary | null = $state(null);
+	let costBreakdown: CostBreakdownItem[] = $state([]);
+	let usageTrends: TrendDataPoint[] = $state([]);
+	let topSessions: TopSession[] = $state([]);
 
 	// Loading states
-	let summaryLoading = true;
-	let costBreakdownLoading = true;
-	let trendsLoading = true;
-	let topSessionsLoading = true;
-	let exportLoading = false;
+	let summaryLoading = $state(true);
+	let costBreakdownLoading = $state(true);
+	let trendsLoading = $state(true);
+	let topSessionsLoading = $state(true);
+	let exportLoading = $state(false);
 
 	// Error state
-	let error: string | null = null;
+	let error: string | null = $state(null);
 
 	// Cost breakdown grouping
-	let costGroupBy: 'profile' | 'user' = 'profile';
+	let costGroupBy: 'profile' | 'user' = $state('profile');
+
+	// Track if we've initialized
+	let initialized = $state(false);
 
 	// Initialize dates with 30-day range
 	function initializeDates() {
@@ -161,77 +172,65 @@
 
 	// Navigate to session
 	function handleSessionClick(sessionId: string) {
-		goto(`/?session=${sessionId}`);
+		if (onSessionClick) {
+			onSessionClick(sessionId);
+		} else {
+			goto(`/?session=${sessionId}`);
+		}
+		onClose();
 	}
 
-	// Check auth on mount
-	onMount(async () => {
-		await auth.checkAuth();
-
-		if (!$isAuthenticated) {
-			goto('/login');
-			return;
+	// Initialize when modal opens
+	$effect(() => {
+		if (open && !initialized) {
+			initializeDates();
+			loadAnalytics();
+			initialized = true;
 		}
-
-		if (!$isAdmin) {
-			goto('/');
-			return;
+		// Reset when modal closes
+		if (!open) {
+			initialized = false;
 		}
-
-		initializeDates();
-		loadAnalytics();
 	});
 </script>
 
-<svelte:head>
-	<title>Analytics - AI Hub</title>
-</svelte:head>
+<UniversalModal
+	{open}
+	title="Analytics"
+	icon="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"
+	{onClose}
+	showFooter={false}
+	size="full"
+>
+	<div class="space-y-6">
+		<!-- Controls Row -->
+		<div class="flex flex-wrap items-center justify-between gap-3">
+			<p class="text-sm text-muted-foreground">Usage statistics and cost analysis</p>
 
-<div class="min-h-screen bg-background text-foreground">
-	<!-- Header -->
-	<header class="sticky top-0 z-10 bg-background/80 backdrop-blur-lg border-b border-border">
-		<div class="max-w-7xl mx-auto px-4 py-4">
-			<div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-				<div class="flex items-center gap-4">
-					<a href="/" class="p-2 -ml-2 rounded-lg hover:bg-muted transition-colors" title="Back to Chat">
-						<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+			<div class="flex flex-wrap items-center gap-3">
+				<DateRangePicker
+					bind:startDate
+					bind:endDate
+					on:change={handleDateChange}
+				/>
+
+				<button
+					onclick={handleExport}
+					disabled={exportLoading}
+					class="btn btn-secondary flex items-center gap-2 px-4 py-2 rounded-lg bg-muted hover:bg-accent text-foreground border border-border transition-colors disabled:opacity-50"
+				>
+					{#if exportLoading}
+						<div class="animate-spin w-4 h-4 border-2 border-current border-t-transparent rounded-full"></div>
+					{:else}
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
 						</svg>
-					</a>
-					<div>
-						<h1 class="text-xl font-bold text-foreground">Analytics</h1>
-						<p class="text-sm text-muted-foreground">Usage statistics and cost analysis</p>
-					</div>
-				</div>
-
-				<div class="flex flex-wrap items-center gap-3">
-					<DateRangePicker
-						bind:startDate
-						bind:endDate
-						on:change={handleDateChange}
-					/>
-
-					<button
-						on:click={handleExport}
-						disabled={exportLoading}
-						class="btn btn-secondary flex items-center gap-2"
-					>
-						{#if exportLoading}
-							<div class="animate-spin w-4 h-4 border-2 border-current border-t-transparent rounded-full"></div>
-						{:else}
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-							</svg>
-						{/if}
-						Export CSV
-					</button>
-				</div>
+					{/if}
+					Export CSV
+				</button>
 			</div>
 		</div>
-	</header>
 
-	<!-- Main content -->
-	<main class="max-w-7xl mx-auto px-4 py-6 space-y-6">
 		{#if error}
 			<div class="bg-destructive/10 border border-destructive text-destructive px-4 py-3 rounded-xl">
 				{error}
@@ -242,21 +241,17 @@
 		<SummaryCards {summary} loading={summaryLoading} />
 
 		<!-- Charts row -->
-		<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+		<div class="grid grid-cols-1 gap-6">
 			<!-- Usage Chart -->
-			<div class="lg:col-span-2">
-				<UsageChart data={usageTrends} loading={trendsLoading} />
-			</div>
+			<UsageChart data={usageTrends} loading={trendsLoading} />
 
 			<!-- Cost Breakdown -->
-			<div class="lg:col-span-2">
-				<CostBreakdown
-					data={costBreakdown}
-					loading={costBreakdownLoading}
-					groupBy={costGroupBy}
-					onGroupByChange={handleGroupByChange}
-				/>
-			</div>
+			<CostBreakdown
+				data={costBreakdown}
+				loading={costBreakdownLoading}
+				groupBy={costGroupBy}
+				onGroupByChange={handleGroupByChange}
+			/>
 		</div>
 
 		<!-- Top Sessions Table -->
@@ -265,5 +260,5 @@
 			loading={topSessionsLoading}
 			onSessionClick={handleSessionClick}
 		/>
-	</main>
-</div>
+	</div>
+</UniversalModal>
