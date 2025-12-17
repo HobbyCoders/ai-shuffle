@@ -1,9 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { Terminal } from '@xterm/xterm';
-  import { FitAddon } from '@xterm/addon-fit';
-  import { WebLinksAddon } from '@xterm/addon-web-links';
-  import '@xterm/xterm/css/xterm.css';
+  import type { Terminal as TerminalType } from '@xterm/xterm';
+  import type { FitAddon as FitAddonType } from '@xterm/addon-fit';
 
   interface Props {
     sessionId: string;
@@ -15,16 +13,24 @@
   let { sessionId, command = '/rewind', onClose, onRewindComplete }: Props = $props();
 
   let terminalContainer: HTMLDivElement;
-  let terminal: Terminal | null = null;
-  let fitAddon: FitAddon | null = null;
+  let terminal: TerminalType | null = null;
+  let fitAddon: FitAddonType | null = null;
   let ws: WebSocket | null = null;
   let isConnected = $state(false);
   let isReady = $state(false);
   let error = $state<string | null>(null);
 
   onMount(() => {
-    initTerminal();
-    connectWebSocket();
+    // Dynamically import xterm to avoid SSR issues (CommonJS module)
+    Promise.all([
+      import('@xterm/xterm'),
+      import('@xterm/addon-fit'),
+      import('@xterm/addon-web-links'),
+      import('@xterm/xterm/css/xterm.css')
+    ]).then(([{ Terminal }, { FitAddon }, { WebLinksAddon }]) => {
+      initTerminal(Terminal, FitAddon, WebLinksAddon);
+      connectWebSocket();
+    });
 
     // Handle window resize
     window.addEventListener('resize', handleResize);
@@ -38,7 +44,11 @@
     cleanup();
   });
 
-  function initTerminal() {
+  function initTerminal(
+    Terminal: typeof TerminalType,
+    FitAddon: typeof FitAddonType,
+    WebLinksAddon: any
+  ) {
     terminal = new Terminal({
       cursorBlink: true,
       fontSize: 14,

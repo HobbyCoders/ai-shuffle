@@ -1,7 +1,25 @@
 <script lang="ts">
-	import { onMount, onDestroy, tick } from 'svelte';
+	/**
+	 * AI Hub Main Page - The Deck Layout
+	 *
+	 * This is the main entry point using "The Deck" card-based layout system.
+	 * It manages authentication, session loading, WebSocket connections, and
+	 * routes between different activity modes (chat, agents, studio, files).
+	 */
+	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { auth, username, claudeAuthenticated, isAuthenticated, isAdmin, apiUser } from '$lib/stores/auth';
+
+	// Auth stores
+	import {
+		auth,
+		isAuthenticated,
+		isAdmin,
+		claudeAuthenticated,
+		username,
+		apiUser
+	} from '$lib/stores/auth';
+
+	// Tab store (manages sessions, WebSocket, etc.)
 	import {
 		tabs,
 		allTabs,
@@ -9,419 +27,247 @@
 		activeTab,
 		profiles,
 		projects,
-		sessions,
-		adminSessions,
-		apiUsers,
-		adminSessionsFilter,
-		selectedSessionIds,
-		selectedAdminSessionIds,
-		selectionMode,
-		adminSelectionMode,
-		sessionsLoading,
-		sessionsTagFilter,
-		adminSessionsTagFilter,
-		type ChatMessage,
-		type ChatTab,
-		type ApiUser
+		sessions
 	} from '$lib/stores/tabs';
-	import { api, type FileUploadResponse, searchSessions, type SessionSearchResult, exportSession, toggleSessionFavorite, getTags, forkSession, type Tag, type SessionTag, type ForkSessionResponse } from '$lib/api/client';
-	import { marked } from 'marked';
-	import TerminalModal from '$lib/components/TerminalModal.svelte';
-	import SystemMessage from '$lib/components/SystemMessage.svelte';
-	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
-	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
-	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
-	import SubagentMessage from '$lib/components/SubagentMessage.svelte';
-	import QuickActions from '$lib/components/QuickActions.svelte';
-	import SubagentManager from '$lib/components/SubagentManager.svelte';
-	import SessionCard from '$lib/components/SessionCard.svelte';
-	import ConnectionStatus from '$lib/components/ConnectionStatus.svelte';
-	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
-	import UserQuestion from '$lib/components/UserQuestion.svelte';
-	import TodoList from '$lib/components/TodoList.svelte';
+
+	// Deck stores
+	import {
+		deck,
+		activeMode,
+		visibleCards,
+		minimizedCards,
+		contextPanelCollapsed,
+		runningAgentsCount,
+		activeGenerationsCount,
+		groups
+	} from '$lib/stores';
+	import { agents, runningAgents, allAgents } from '$lib/stores/agents';
+	import { studio, recentGenerations } from '$lib/stores/studio';
+
+	// Deck components
+	import { DeckLayout } from '$lib/components/deck';
+	import { CardContainer } from '$lib/components/deck/cards';
+	import ChatCard from '$lib/components/deck/cards/ChatCard.svelte';
+	import AgentCard from '$lib/components/deck/cards/AgentCard.svelte';
+	import CanvasCard from '$lib/components/deck/cards/CanvasCard.svelte';
+	import TerminalCard from '$lib/components/deck/cards/TerminalCard.svelte';
+
+	// Essential modals
 	import SettingsModal from '$lib/components/SettingsModal.svelte';
-	import ProfileModal from '$lib/components/ProfileModal.svelte';
-	import AgentImportModal from '$lib/components/AgentImportModal.svelte';
-	import { exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
+	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import KeyboardShortcutsModal from '$lib/components/KeyboardShortcutsModal.svelte';
+	import ProfileModal from '$lib/components/ProfileModal.svelte';
+	import TerminalModal from '$lib/components/TerminalModal.svelte';
 	import AnalyticsModal from '$lib/components/AnalyticsModal.svelte';
 	import ImportSessionModal from '$lib/components/ImportSessionModal.svelte';
-	import TagManager from '$lib/components/TagManager.svelte';
-	import SessionTagPicker from '$lib/components/SessionTagPicker.svelte';
-	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
 	import KnowledgeManager from '$lib/components/KnowledgeManager.svelte';
 	import GitModal from '$lib/components/git/GitModal.svelte';
-	import { groups, organizeByGroups } from '$lib/stores/groups';
-	import { executeCommand, isSlashCommand, listCommands, type Command } from '$lib/api/commands';
-	import { groupSessionsByDate, type DateGroup } from '$lib/utils/dateGroups';
+	import SubagentManager from '$lib/components/SubagentManager.svelte';
+
+	// Permission & question handling
+	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
+	import UserQuestion from '$lib/components/UserQuestion.svelte';
+
+	// Keyboard shortcuts
 	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
 
-	// Configure marked for better code highlighting
-	marked.setOptions({
-		breaks: true,
-		gfm: true
-	});
+	// Types
+	import type { ActivityMode, DeckSession, DeckAgent, DeckGeneration, ActivityBadges, SessionInfo } from '$lib/components/deck/types';
+	import type { DeckCard, LayoutMode } from '$lib/components/deck/cards/types';
+	import type { Command } from '$lib/api/commands';
+	import type { Session } from '$lib/api/client';
 
-	// Subagent interface for enabled agents management
-	interface Subagent {
-		id: string;
-		name: string;
-		description: string;
-		model?: string;
-	}
+	// ==========================================================================
+	// State
+	// ==========================================================================
 
-	// Tool interfaces for tool configuration
-	interface ToolInfo {
-		name: string;
-		category: string;
-		description: string;
-		mcp_server?: string;
-	}
+	// Modal states
+	let showSettingsModal = $state(false);
+	let showSpotlight = $state(false);
+	let showKeyboardShortcuts = $state(false);
+	let showProfileModal = $state(false);
+	let showTerminalModal = $state(false);
+	let showAnalyticsModal = $state(false);
+	let showImportModal = $state(false);
+	let showKnowledgeModal = $state(false);
+	let showGitModal = $state(false);
+	let showSubagentManager = $state(false);
 
-	interface ToolCategory {
-		id: string;
-		name: string;
-		description: string;
-		tools: ToolInfo[];
-	}
+	// Terminal modal state
+	let terminalCommand = $state('/resume');
+	let terminalSessionId = $state('');
 
-	interface ToolsResponse {
-		categories: ToolCategory[];
-		all_tools: ToolInfo[];
-	}
-
-	// Subagents list for profile config
-	let allSubagents: Subagent[] = [];
-
-	// Available tools for profile config
-	let availableTools: ToolsResponse = { categories: [], all_tools: [] };
-	let toolsExpanded: Record<string, boolean> = {}; // Track expanded categories
-
-	// Load subagents
-	async function loadSubagents() {
-		try {
-			allSubagents = await api.get<Subagent[]>('/subagents');
-		} catch (e) {
-			console.error('Failed to load subagents:', e);
-			allSubagents = [];
-		}
-	}
-
-	// Load available tools
-	async function loadTools() {
-		try {
-			availableTools = await api.get<ToolsResponse>('/tools');
-		} catch (e) {
-			console.error('Failed to load tools:', e);
-			availableTools = { categories: [], all_tools: [] };
-		}
-	}
-
-	// Per-tab state (we track input per tab)
-	let tabInputs: Record<string, string> = {};
-	let tabUploadedFiles: Record<string, FileUploadResponse[]> = {};
-
-	let sidebarOpen = false;
-	let sidebarTab: 'my-chats' | 'admin' = 'my-chats';
-
-	// Icon Rail state
-	type SidebarSection = 'none' | 'sessions' | 'projects' | 'profiles' | 'subagents';
-	let activeSidebarSection: SidebarSection = 'none';
-	let sidebarPinned = false;
-
-	// Session sidebar state
-	let sessionSearchQuery = '';
-	let sessionSearchExpanded = false;
-	let showFavoritesOnly = false;
-	let collapsedGroups: Set<string> = new Set(['yesterday', 'week', 'month', 'older']); // Only 'today' expanded by default
-
-	// Tag management state
-	let showTagManager = false;
-	let showTagPicker = false;
-	let tagPickerSessionId: string | null = null;
-	let tagPickerPosition = { x: 0, y: 0 };
-	let tagPickerCurrentTags: SessionTag[] = [];
-	let allTags: Tag[] = [];
-
-	// Load all tags when component mounts
-	async function loadAllTags() {
-		try {
-			allTags = await getTags();
-		} catch (e) {
-			console.error('Failed to load tags:', e);
-		}
-	}
-
-	// Search state
-	let searchResults: SessionSearchResult[] = [];
-	let isSearching = false;
-	let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-
-	// Debounced search function
-	function debouncedSearch(query: string) {
-		// Clear existing timer
-		if (searchDebounceTimer) {
-			clearTimeout(searchDebounceTimer);
-		}
-
-		// If query is empty, clear results immediately
-		if (!query.trim()) {
-			searchResults = [];
-			isSearching = false;
-			return;
-		}
-
-		isSearching = true;
-
-		// Debounce the API call by 300ms
-		searchDebounceTimer = setTimeout(async () => {
-			try {
-				const adminOnly = sidebarTab === 'my-chats';
-				searchResults = await searchSessions(query, { adminOnly, limit: 20 });
-			} catch (error) {
-				console.error('Search failed:', error);
-				searchResults = [];
-			} finally {
-				isSearching = false;
-			}
-		}, 300);
-	}
-
-	// Trigger search when query changes
-	$: debouncedSearch(sessionSearchQuery);
-
-	// Computed: filtered and grouped sessions (when not searching)
-	$: filteredSessions = showFavoritesOnly ? $sessions.filter(s => s.is_favorite) : $sessions;
-	$: groupedSessions = groupSessionsByDate(filteredSessions);
-
-	// Admin sessions grouped (when not searching)
-	$: filteredAdminSessions = $adminSessions;
-	$: groupedAdminSessions = groupSessionsByDate(filteredAdminSessions);
-
-	function toggleGroupCollapse(key: string) {
-		if (collapsedGroups.has(key)) {
-			collapsedGroups.delete(key);
-		} else {
-			collapsedGroups.add(key);
-		}
-		collapsedGroups = collapsedGroups; // Trigger reactivity
-	}
-
-	function clearSearch() {
-		sessionSearchQuery = '';
-		sessionSearchExpanded = false;
-		searchResults = [];
-		isSearching = false;
-		if (searchDebounceTimer) {
-			clearTimeout(searchDebounceTimer);
-			searchDebounceTimer = null;
-		}
-	}
-
-	function toggleSidebarSection(section: SidebarSection) {
-		if (activeSidebarSection === section) {
-			if (!sidebarPinned) {
-				activeSidebarSection = 'none';
-			}
-		} else {
-			activeSidebarSection = section;
-		}
-	}
-
-	function closeSidebar() {
-		if (!sidebarPinned) {
-			activeSidebarSection = 'none';
-		}
-	}
-
-	function toggleSidebarPin() {
-		sidebarPinned = !sidebarPinned;
-	}
-
-	// Auto-scroll: Simple logic
-	// - Always scroll to bottom UNLESS user scrolls up to read
-	// - Re-enable auto-scroll when user scrolls back to bottom
-	// Using a Svelte action for reliable DOM access
-
-	function autoScroll(node: HTMLElement, tabId: string) {
-		let userScrolledUp = false;
-
-		function isNearBottom(): boolean {
-			const threshold = 100;
-			return node.scrollHeight - node.scrollTop - node.clientHeight < threshold;
-		}
-
-		function scrollToBottom() {
-			node.scrollTop = node.scrollHeight;
-		}
-
-		function handleScroll() {
-			userScrolledUp = !isNearBottom();
-		}
-
-		// Create a MutationObserver to watch for content changes
-		const observer = new MutationObserver(() => {
-			if (!userScrolledUp) {
-				scrollToBottom();
-			}
-		});
-
-		observer.observe(node, {
-			childList: true,
-			subtree: true,
-			characterData: true
-		});
-
-		node.addEventListener('scroll', handleScroll);
-
-		// Initial scroll to bottom
-		scrollToBottom();
-
-		return {
-			update(newTabId: string) {
-				// When tab changes, reset and scroll
-				userScrolledUp = false;
-				scrollToBottom();
-			},
-			destroy() {
-				observer.disconnect();
-				node.removeEventListener('scroll', handleScroll);
-			}
-		};
-	}
-
-	let showProfileModal = false;
-	let showProjectModal = false;
-	let showNewProjectForm = false;
-	let showKnowledgeModal = false;
-	let showGitModal = false;
-	let editingProfile: any = null;
-	let fileInput: HTMLInputElement;
-	let isUploading = false;
-	let textareas: Record<string, HTMLTextAreaElement> = {};
-
-	// Voice recording state
-	let isRecording = false;
-	let isTranscribing = false;
-	let mediaRecorder: MediaRecorder | null = null;
-	let audioChunks: Blob[] = [];
-	let recordingError = '';
-
-	// Terminal modal state for /resume and other interactive commands
-	let showTerminalModal = false;
-	let terminalCommand = '/resume';
-	let terminalSessionId = '';
-
-	// Spotlight search state (Cmd+K)
-	let showSpotlight = false;
-
-	// Subagent manager state
-	let showSubagentManager = false;
-
-	// Settings modal state
-	let showSettingsModal = false;
-
-	// Keyboard shortcuts modal state
-	let showKeyboardShortcuts = false;
-
-	// Analytics modal state
-	let showAnalyticsModal = false;
-
-	// Import session modal state
-	let showImportModal = false;
-
-	// Advanced search modal state (Cmd+Shift+F)
-	let showAdvancedSearch = false;
-
-	// Shortcut registrations (for cleanup)
+	// Keyboard shortcut registrations
 	let shortcutRegistrations: ShortcutRegistration[] = [];
 
-	// Mobile tools menu state
-	let showToolsMenu = false;
+	// Track auth state for reactive initialization
+	let wasAuthenticated = $state(false);
 
-	// Override popup menu state
-	let showModelPopup = false;
-	let showModePopup = false;
+	// Current card layout mode
+	let cardLayout: LayoutMode = $state('stack');
 
-	// Command autocomplete state
-	let showCommandAutocomplete: Record<string, boolean> = {};
-	let commandAutocompleteRefs: Record<string, CommandAutocomplete> = {};
+	// ==========================================================================
+	// Derived State
+	// ==========================================================================
 
-	// File autocomplete state (@ mentions)
-	let showFileAutocomplete: Record<string, boolean> = {};
-	let fileAutocompleteRefs: Record<string, FileAutocomplete> = {};
+	// Convert tabs to deck cards for display
+	let deckCards = $derived.by(() => {
+		return $allTabs.map((tab): DeckCard => ({
+			id: tab.id,
+			type: 'chat',
+			title: tab.title || 'New Chat',
+			pinned: false,
+			minimized: false,
+			createdAt: new Date(),
+			updatedAt: new Date()
+		}));
+	});
 
-	function getModelDisplay(model?: string): string {
-		switch (model) {
-			case 'haiku': return 'Haiku';
-			case 'sonnet': return 'Sonnet';
-			case 'sonnet-1m': return 'Sonnet 1M';
-			case 'opus': return 'Opus';
-			default: return 'Inherit';
+	// Active card ID from active tab
+	let activeCardId = $derived($activeTabId);
+
+	// Convert sessions to DeckSession format for context panel
+	let deckSessions = $derived.by(() => {
+		return $sessions.slice(0, 10).map((s): DeckSession => ({
+			id: s.id,
+			title: s.title || 'Untitled',
+			preview: undefined,
+			updatedAt: new Date(s.updated_at),
+			tokenCount: s.total_tokens_in + s.total_tokens_out,
+			cost: s.total_cost_usd,
+			active: $allTabs.some(t => t.sessionId === s.id)
+		}));
+	});
+
+	// Convert running agents to DeckAgent format
+	let deckAgents = $derived.by(() => {
+		return $runningAgents.map((a): DeckAgent => ({
+			id: a.id,
+			name: a.name,
+			status: a.status as 'running' | 'paused' | 'completed' | 'failed',
+			progress: a.progress,
+			branch: a.branch,
+			startedAt: a.startedAt,
+			currentTask: a.tasks.find(t => t.status === 'in_progress')?.name
+		}));
+	});
+
+	// Convert generations to DeckGeneration format
+	let deckGenerations = $derived.by(() => {
+		return $recentGenerations.slice(0, 5).map((g): DeckGeneration => ({
+			id: g.id,
+			type: g.type,
+			prompt: g.prompt,
+			status: g.status,
+			progress: g.progress,
+			thumbnailUrl: g.resultUrl,
+			resultUrl: g.resultUrl
+		}));
+	});
+
+	// Current session info for context panel
+	let currentSessionInfo = $derived.by((): SessionInfo | null => {
+		if (!$activeTab) return null;
+		return {
+			inputTokens: $activeTab.totalTokensIn || 0,
+			outputTokens: $activeTab.totalTokensOut || 0,
+			totalCost: 0, // Cost is tracked at session level, not in tab
+			modelName: $activeTab.modelOverride || 'Claude'
+		};
+	});
+
+	// Activity badges for the rail
+	let activityBadges = $derived.by((): ActivityBadges => {
+		const badges: ActivityBadges = {};
+
+		// Chat badge: number of open tabs
+		if ($allTabs.length > 0) {
+			badges.chat = { count: $allTabs.length };
 		}
-	}
 
-	// Project form
-	let newProjectId = '';
-	let newProjectName = '';
-	let newProjectDescription = '';
-
-	// Track auth state
-	let wasAuthenticated = false;
-
-	// Initialize tabs when authenticated
-	$: if ($isAuthenticated && !wasAuthenticated) {
-		wasAuthenticated = true;
-		tabs.init();
-		tabs.loadProfiles();
-		tabs.loadSessions();
-		tabs.loadProjects();
-		loadAllTags();
-		// Load admin-specific data if user is admin
-		if ($isAdmin) {
-			tabs.loadApiUsers();
-			tabs.loadAdminSessions();
+		// Agents badge: running agents
+		if ($runningAgentsCount > 0) {
+			badges.agents = { count: $runningAgentsCount, variant: 'success' };
 		}
-	} else if (!$isAuthenticated && wasAuthenticated) {
-		wasAuthenticated = false;
-	}
+
+		// Studio badge: active generations
+		if ($activeGenerationsCount > 0) {
+			badges.studio = { count: $activeGenerationsCount, variant: 'warning' };
+		}
+
+		return badges;
+	});
+
+	// ==========================================================================
+	// Lifecycle
+	// ==========================================================================
+
+	// Reactive initialization when authenticated
+	$effect(() => {
+		if ($isAuthenticated && !wasAuthenticated) {
+			wasAuthenticated = true;
+			initializeStores();
+		} else if (!$isAuthenticated && wasAuthenticated) {
+			wasAuthenticated = false;
+		}
+	});
 
 	onMount(() => {
 		if ($isAuthenticated) {
 			wasAuthenticated = true;
-			tabs.init();
-			const promises = [
-				tabs.loadProfiles(),
-				tabs.loadSessions(),
-				tabs.loadProjects(),
-				loadSubagents(),
-				loadTools(),
-				loadAvailableAITools(),
-				loadAllTags()
-			];
-			// Load admin-specific data if user is admin
-			if ($isAdmin) {
-				promises.push(tabs.loadApiUsers());
-				promises.push(tabs.loadAdminSessions());
-			}
-			Promise.all(promises);
+			initializeStores();
 		}
 
-		// Handle page restored from bfcache (back/forward navigation)
-		// This ensures sessions list is fresh after browser back/forward
+		// Handle page restored from bfcache
 		const handlePageShow = (event: PageTransitionEvent) => {
 			if (event.persisted && $isAuthenticated) {
-				console.log('[Page] Restored from bfcache, refreshing sessions');
 				tabs.loadSessions();
 				if ($isAdmin) {
 					tabs.loadAdminSessions();
 				}
 			}
 		};
-
 		window.addEventListener('pageshow', handlePageShow);
 
 		// Register keyboard shortcuts
+		registerKeyboardShortcuts();
+
+		return () => {
+			window.removeEventListener('pageshow', handlePageShow);
+			shortcutRegistrations.forEach(reg => reg.unregister());
+		};
+	});
+
+	onDestroy(() => {
+		tabs.destroy();
+		agents.destroy();
+		studio.destroy();
+		shortcutRegistrations.forEach(reg => reg.unregister());
+	});
+
+	// ==========================================================================
+	// Initialization
+	// ==========================================================================
+
+	async function initializeStores() {
+		tabs.init();
+		agents.init();
+
+		const promises = [
+			tabs.loadProfiles(),
+			tabs.loadSessions(),
+			tabs.loadProjects()
+		];
+
+		if ($isAdmin) {
+			promises.push(tabs.loadApiUsers());
+			promises.push(tabs.loadAdminSessions());
+		}
+
+		await Promise.all(promises);
+	}
+
+	function registerKeyboardShortcuts() {
 		shortcutRegistrations = [
 			// Spotlight search (Cmd+K)
 			registerShortcut({
@@ -440,23 +286,10 @@
 				key: 'n',
 				cmdOrCtrl: true,
 				category: 'chat',
-				action: () => { handleNewTab(); }
+				action: handleNewChat
 			}),
 
-			// Send message (Cmd+Enter)
-			registerShortcut({
-				id: 'send-message',
-				description: 'Send message',
-				key: 'Enter',
-				cmdOrCtrl: true,
-				category: 'chat',
-				allowInInput: true,
-				action: () => {
-					if ($activeTabId) {
-						handleSubmit($activeTabId);
-					}
-				}
-			}),
+			// Send message (Cmd+Enter) - handled by individual cards
 
 			// Stop generation (Cmd+Shift+S)
 			registerShortcut({
@@ -499,32 +332,7 @@
 				key: 'Escape',
 				category: 'general',
 				allowInInput: true,
-				action: () => {
-					// Close modals in priority order
-					if (showKeyboardShortcuts) {
-						showKeyboardShortcuts = false;
-					} else if (showAdvancedSearch) {
-						showAdvancedSearch = false;
-					} else if (showSpotlight) {
-						showSpotlight = false;
-					} else if (showSettingsModal) {
-						showSettingsModal = false;
-					} else if (showImportModal) {
-						showImportModal = false;
-					} else if (showProfileModal) {
-						showProfileModal = false;
-					} else if (showSubagentManager) {
-						showSubagentManager = false;
-					} else if (showProjectModal) {
-						showProjectModal = false;
-					} else if (showTerminalModal) {
-						showTerminalModal = false;
-					} else if (showGitModal) {
-						showGitModal = false;
-					} else if (showKnowledgeModal) {
-						showKnowledgeModal = false;
-					}
-				}
+				action: handleEscapeKey
 			}),
 
 			// Open settings (Cmd+,)
@@ -535,17 +343,6 @@
 				cmdOrCtrl: true,
 				category: 'navigation',
 				action: () => { showSettingsModal = true; }
-			}),
-
-			// Advanced search (Cmd+Shift+F)
-			registerShortcut({
-				id: 'advanced-search',
-				description: 'Advanced search',
-				key: 'f',
-				cmdOrCtrl: true,
-				shift: true,
-				category: 'navigation',
-				action: () => { showAdvancedSearch = !showAdvancedSearch; }
 			}),
 
 			// Git modal (Cmd+Shift+G)
@@ -563,275 +360,133 @@
 				}
 			})
 		];
+	}
 
-		return () => {
-			window.removeEventListener('pageshow', handlePageShow);
-			// Unregister all shortcuts
-			shortcutRegistrations.forEach(reg => reg.unregister());
-			shortcutRegistrations = [];
-		};
-	});
-
-	onDestroy(() => {
-		tabs.destroy();
-		// Also clean up shortcuts on destroy
-		shortcutRegistrations.forEach(reg => reg.unregister());
-		shortcutRegistrations = [];
-	});
-
-	// Initialize tabInputs for all tabs to ensure proper binding
-	$: {
-		for (const tab of $allTabs) {
-			if (tabInputs[tab.id] === undefined) {
-				tabInputs[tab.id] = '';
-			}
+	function handleEscapeKey() {
+		if (showKeyboardShortcuts) {
+			showKeyboardShortcuts = false;
+		} else if (showSpotlight) {
+			showSpotlight = false;
+		} else if (showSettingsModal) {
+			showSettingsModal = false;
+		} else if (showImportModal) {
+			showImportModal = false;
+		} else if (showProfileModal) {
+			showProfileModal = false;
+		} else if (showSubagentManager) {
+			showSubagentManager = false;
+		} else if (showTerminalModal) {
+			showTerminalModal = false;
+		} else if (showGitModal) {
+			showGitModal = false;
+		} else if (showKnowledgeModal) {
+			showKnowledgeModal = false;
+		} else if (showAnalyticsModal) {
+			showAnalyticsModal = false;
 		}
 	}
 
-	// Auto-set profile and project for API users based on their API key restrictions
-	$: if ($apiUser && $activeTabId && $activeTab) {
-		// If API user has a locked profile and current tab doesn't have it set
-		if ($apiUser.profile_id && $activeTab.profile !== $apiUser.profile_id) {
-			tabs.setTabProfile($activeTabId, $apiUser.profile_id);
-		}
-		// If API user has a locked project and current tab doesn't have it set
-		if ($apiUser.project_id && $activeTab.project !== $apiUser.project_id) {
-			tabs.setTabProject($activeTabId, $apiUser.project_id);
-		}
+	// ==========================================================================
+	// Event Handlers - Activity Rail
+	// ==========================================================================
+
+	function handleModeChange(mode: ActivityMode) {
+		deck.setMode(mode);
 	}
 
-	// Handle permission response from PermissionQueue component
-	function handlePermissionRespond(tabId: string, event: CustomEvent<{
-		request_id: string;
-		decision: 'allow' | 'deny';
-		remember?: 'none' | 'session' | 'profile';
-		pattern?: string;
-	}>) {
-		const { request_id, decision, remember, pattern } = event.detail;
-		tabs.sendPermissionResponse(tabId, request_id, decision, remember, pattern);
+	function handleSettingsClick() {
+		showSettingsModal = true;
 	}
 
-	// Handle user question response from UserQuestion component
-	function handleUserQuestionRespond(tabId: string, event: CustomEvent<{
-		request_id: string;
-		tool_use_id: string;
-		answers: Record<string, string | string[]>;
-	}>) {
-		const { request_id, tool_use_id, answers } = event.detail;
-		tabs.sendUserQuestionResponse(tabId, request_id, tool_use_id, answers);
+	// ==========================================================================
+	// Event Handlers - Context Panel
+	// ==========================================================================
+
+	function handleContextCollapsedChange(collapsed: boolean) {
+		deck.toggleContextPanel();
 	}
 
-	async function handleSubmit(tabId: string) {
-		const prompt = tabInputs[tabId] || '';
-		// Allow sending while streaming (streaming input) - tabs.sendMessage will queue the message
-		if (!prompt.trim() || !$activeTab || isUploading) return;
-
-		// API users use their API key restrictions - skip profile/project validation if they have restrictions
-		const isApiUserWithRestrictions = $apiUser && ($apiUser.profile_id || $apiUser.project_id);
-
-		// Require profile and project to be selected before sending messages (unless API user with restrictions)
-		if (!$activeTab.profile && !($apiUser?.profile_id)) {
-			tabs.setTabError(tabId, 'Please select a profile before starting a chat');
-			return;
-		}
-		if (!$activeTab.project && !($apiUser?.project_id)) {
-			tabs.setTabError(tabId, 'Please select a project before starting a chat');
-			return;
-		}
-
-		// Append file references to the end of the message
-		const files = tabUploadedFiles[tabId] || [];
-		let finalPrompt = prompt;
-		if (files.length > 0) {
-			const fileRefs = files.map(f => `@${f.path}`).join(' ');
-			finalPrompt = prompt.trim() + '\n\n' + fileRefs;
-		}
-
-		tabInputs[tabId] = '';
-		tabInputs = tabInputs; // Trigger Svelte reactivity
-		tabUploadedFiles[tabId] = [];
-
-		// Reset textarea height to original size after clearing input
-		const textarea = textareas[tabId];
-		if (textarea) {
-			textarea.style.height = '';
-		}
-
-		tabs.sendMessage(tabId, finalPrompt);
-	}
-
-	function handleKeyDown(e: KeyboardEvent, tabId: string) {
-		// Let the command autocomplete handle the event first if visible
-		const commandAutocomplete = commandAutocompleteRefs[tabId];
-		if (commandAutocomplete && showCommandAutocomplete[tabId]) {
-			const handled = commandAutocomplete.handleKeyDown(e);
-			if (handled) {
-				return; // Command autocomplete handled the event
-			}
-		}
-
-		// Let file autocomplete handle the event if visible
-		const fileAutocomplete = fileAutocompleteRefs[tabId];
-		if (fileAutocomplete && showFileAutocomplete[tabId]) {
-			const handled = fileAutocomplete.handleKeyDown(e);
-			if (handled) {
-				return; // File autocomplete handled the event
-			}
-		}
-
-		// Normal textarea behavior - on desktop, Enter sends; on mobile, let Enter create newlines
-		// Mobile detection: check for touch-primary device (no mouse/fine pointer)
-		// This is more reliable than screen width since it detects actual input capability
-		const isTouchDevice = window.matchMedia('(pointer: coarse)').matches;
-		const hasNoFinePointer = !window.matchMedia('(any-pointer: fine)').matches;
-		const isMobile = isTouchDevice || (hasNoFinePointer && ('ontouchstart' in window));
-
-		if (e.key === 'Enter' && !e.shiftKey && !isMobile) {
-			e.preventDefault();
-			handleSubmit(tabId);
-		}
-	}
-
-	// Check if input contains an active @ mention (at start or after whitespace)
-	// Returns true if there's an @ that could be a file reference (supports paths with spaces)
-	function hasActiveAtMention(input: string): boolean {
-		// Search backwards to find the last @ that's at start or preceded by whitespace
-		for (let i = input.length - 1; i >= 0; i--) {
-			if (input[i] === '@') {
-				if (i === 0 || /\s/.test(input[i - 1])) {
-					return true;
-				}
-			}
-		}
-		return false;
-	}
-
-	// Handle input changes for command and file autocomplete
-	function handleInputChange(tabId: string) {
-		const input = tabInputs[tabId] || '';
-
-		// Show command autocomplete when input starts with /
-		showCommandAutocomplete[tabId] = input.startsWith('/') && input.length > 0;
-		showCommandAutocomplete = showCommandAutocomplete;
-
-		// Show file autocomplete when there's an active @ mention
-		showFileAutocomplete[tabId] = hasActiveAtMention(input) && !!$activeTab?.project;
-		showFileAutocomplete = showFileAutocomplete;
-	}
-
-	// Handle command selection from autocomplete
-	async function handleCommandSelect(tabId: string, command: Command) {
-		showCommandAutocomplete[tabId] = false;
-		showCommandAutocomplete = showCommandAutocomplete;
-
-		if (command.type === 'interactive') {
-			// Open terminal modal for interactive commands
-			openTerminalModal(tabId, `/${command.name}`);
+	function handleSessionClick(session: DeckSession) {
+		// Load session in current tab or create new tab
+		if ($activeTabId) {
+			tabs.loadSessionInTab($activeTabId, session.id);
 		} else {
-			// For custom commands, fill in the command
-			tabInputs[tabId] = `/${command.name} `;
-			tabInputs = tabInputs;
-			// Focus the textarea
-			setTimeout(() => {
-				const textarea = textareas[tabId];
-				if (textarea) {
-					textarea.focus();
-					textarea.setSelectionRange(textarea.value.length, textarea.value.length);
-				}
-			}, 0);
+			tabs.createTab(session.id);
 		}
 	}
 
-	// Find the last @ position that's at start or preceded by whitespace
-	function findLastAtIndex(input: string): number {
-		for (let i = input.length - 1; i >= 0; i--) {
-			if (input[i] === '@') {
-				if (i === 0 || /\s/.test(input[i - 1])) {
-					return i;
-				}
-			}
-		}
-		return -1;
+	function handleAgentClick(agent: DeckAgent) {
+		// Switch to agents mode and show agent details
+		deck.setMode('agents');
+		// Could create an agent card or show in context panel
 	}
 
-	// Handle file selection from @ autocomplete
-	function handleFileSelect(tabId: string, file: FileItem) {
-		const input = tabInputs[tabId] || '';
-
-		// Find the last @ mention to replace
-		const atStartIndex = findLastAtIndex(input);
-		if (atStartIndex === -1) {
-			showFileAutocomplete[tabId] = false;
-			showFileAutocomplete = showFileAutocomplete;
-			return;
-		}
-
-		// For directories, replace with path and keep autocomplete open
-		if (file.type === 'directory') {
-			const newInput = input.substring(0, atStartIndex) + '@' + file.path;
-			tabInputs[tabId] = newInput;
-			tabInputs = tabInputs;
-			// Keep autocomplete open for directory navigation
-			setTimeout(() => {
-				const textarea = textareas[tabId];
-				if (textarea) {
-					textarea.focus();
-					textarea.setSelectionRange(textarea.value.length, textarea.value.length);
-				}
-			}, 0);
-			return;
-		}
-
-		// For files, add to the uploaded files list as a chip (no text in input)
-		const fileRef: FileUploadResponse = {
-			filename: file.name,
-			path: file.path,
-			full_path: file.path,
-			size: file.size || 0
-		};
-
-		// Add to tracked files
-		if (!tabUploadedFiles[tabId]) tabUploadedFiles[tabId] = [];
-		tabUploadedFiles[tabId] = [...tabUploadedFiles[tabId], fileRef];
-
-		// Remove the @query from input (file reference shown as chip only)
-		const newInput = input.substring(0, atStartIndex).trimEnd();
-		tabInputs[tabId] = newInput;
-		tabInputs = tabInputs;
-
-		// Close autocomplete and focus
-		showFileAutocomplete[tabId] = false;
-		showFileAutocomplete = showFileAutocomplete;
-
-		setTimeout(() => {
-			const textarea = textareas[tabId];
-			if (textarea) {
-				textarea.focus();
-				textarea.setSelectionRange(textarea.value.length, textarea.value.length);
-			}
-		}, 0);
+	function handleGenerationClick(generation: DeckGeneration) {
+		// Switch to studio mode
+		deck.setMode('studio');
+		studio.setActiveGeneration(generation.id);
 	}
 
-	// Open the terminal modal for interactive commands (like /resume)
-	function openTerminalModal(tabId: string, command: string = '/resume') {
-		const tab = $allTabs.find(t => t.id === tabId);
-		if (!tab?.sessionId) {
-			alert('Please start a conversation first before using this command.');
-			return;
-		}
-		terminalSessionId = tab.sessionId;
-		terminalCommand = command;
-		showTerminalModal = true;
+	// ==========================================================================
+	// Event Handlers - Dock
+	// ==========================================================================
+
+	function handleNewChat() {
+		tabs.createTab();
+		deck.setMode('chat');
 	}
 
-	// Close the terminal modal
-	function closeTerminalModal() {
-		showTerminalModal = false;
-		terminalSessionId = '';
+	function handleNewAgent() {
+		deck.setMode('agents');
+		showSubagentManager = true;
 	}
 
-	// Spotlight search handlers
-	function handleSpotlightSelectSession(session: { id: string }) {
+	function handleNewCreate() {
+		deck.setMode('studio');
+		// Could open a create prompt modal
+	}
+
+	// ==========================================================================
+	// Event Handlers - Cards
+	// ==========================================================================
+
+	function handleCardActivate(id: string) {
+		tabs.setActiveTab(id);
+	}
+
+	function handleCardClose(id: string) {
+		tabs.closeTab(id);
+	}
+
+	function handleCardMinimize(id: string) {
+		deck.minimizeCard(id);
+	}
+
+	function handleLayoutChange(layout: LayoutMode) {
+		cardLayout = layout;
+	}
+
+	function handleCardReorder(cards: DeckCard[]) {
+		// Cards reordered - could persist this if needed
+	}
+
+	// ==========================================================================
+	// Event Handlers - Chat Cards
+	// ==========================================================================
+
+	function handleSendMessage(tabId: string, message: string) {
+		tabs.sendMessage(tabId, message);
+	}
+
+	function handleStopStreaming(tabId: string) {
+		tabs.stopGeneration(tabId);
+	}
+
+	// ==========================================================================
+	// Event Handlers - Spotlight
+	// ==========================================================================
+
+	function handleSpotlightSelectSession(session: Session) {
 		if ($activeTabId) {
 			tabs.loadSessionInTab($activeTabId, session.id);
 		}
@@ -842,25 +497,18 @@
 		if (!$activeTabId) return;
 
 		if (command.type === 'interactive') {
-			openTerminalModal($activeTabId, `/${command.name}`);
-		} else {
-			// Fill in the command in the input
-			tabInputs[$activeTabId] = `/${command.name} `;
-			tabInputs = tabInputs;
-			// Focus the textarea
-			setTimeout(() => {
-				const textarea = textareas[$activeTabId!];
-				if (textarea) {
-					textarea.focus();
-					textarea.setSelectionRange(textarea.value.length, textarea.value.length);
-				}
-			}, 0);
+			terminalCommand = `/${command.name}`;
+			const tab = $allTabs.find(t => t.id === $activeTabId);
+			if (tab?.sessionId) {
+				terminalSessionId = tab.sessionId;
+				showTerminalModal = true;
+			}
 		}
 		showSpotlight = false;
 	}
 
 	function handleSpotlightNewChat() {
-		tabs.addTab();
+		tabs.createTab();
 		showSpotlight = false;
 	}
 
@@ -869,3761 +517,319 @@
 		showSpotlight = false;
 	}
 
+	// ==========================================================================
+	// Event Handlers - Permission & Questions
+	// ==========================================================================
+
+	function handlePermissionRespond(tabId: string, event: CustomEvent<{
+		request_id: string;
+		decision: 'allow' | 'deny';
+		remember?: 'none' | 'session' | 'profile';
+		pattern?: string;
+	}>) {
+		const { request_id, decision, remember, pattern } = event.detail;
+		tabs.sendPermissionResponse(tabId, request_id, decision, remember, pattern);
+	}
+
+	function handleUserQuestionRespond(tabId: string, event: CustomEvent<{
+		request_id: string;
+		tool_use_id: string;
+		answers: Record<string, string | string[]>;
+	}>) {
+		const { request_id, tool_use_id, answers } = event.detail;
+		tabs.sendUserQuestionResponse(tabId, request_id, tool_use_id, answers);
+	}
+
+	// ==========================================================================
+	// Utility
+	// ==========================================================================
+
 	async function handleLogout() {
 		await auth.logout();
 		goto('/login');
 	}
-
-	function formatCost(cost: number | undefined): string {
-		if (cost === undefined) return '';
-		return `$${cost.toFixed(4)}`;
-	}
-
-	function renderMarkdown(content: string, isStreaming: boolean = false): string {
-		// If streaming, hide media content to prevent flickering - show placeholder instead
-		if (isStreaming) {
-			// Replace image markdown with placeholder
-			let processedContent = content.replace(/!\[([^\]]*)\]\((data:image\/[^;]+;base64,[^)]+)\)/g,
-				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">Image loading...</div>');
-			processedContent = processedContent.replace(/!\[([^\]]*)\]\((\/api\/generated-images\/[^)]+)\)/g,
-				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">Image loading...</div>');
-			processedContent = processedContent.replace(/\[([^\]]*)\]\((\/api\/generated-videos\/[^)]+)\)/g,
-				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">Video loading...</div>');
-			processedContent = processedContent.replace(/"image_base64"\s*:\s*"([A-Za-z0-9+/=]{100,})"/g,
-				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">Image loading...</div>');
-			// Replace file download links with placeholder
-			processedContent = processedContent.replace(/📎\[([^\]]+)\]\((\/api\/files\/[^)]+)\)/g,
-				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">File preparing...</div>');
-			return marked(processedContent, { breaks: true }) as string;
-		}
-
-		// Process base64 images with download capability and overlay buttons
-		const base64ImagePattern = /!\[([^\]]*)\]\((data:image\/[^;]+;base64,[^)]+)\)/g;
-
-		// Replace base64 image markdown with custom HTML that includes overlay buttons
-		let processedContent = content.replace(base64ImagePattern, (match, alt, dataUrl) => {
-			return `<div class="generated-media-container relative my-4 inline-block">
-				<img src="${dataUrl}" alt="${alt || 'Generated image'}" class="max-w-full rounded-lg shadow-md border border-border" />
-				<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
-					<button onclick="(function(){
-						const link = document.createElement('a');
-						link.href = '${dataUrl}';
-						link.download = '${alt || 'generated-image'}.png';
-						link.click();
-					})()" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download image">
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-						</svg>
-					</button>
-					<button onclick="(function(btn){
-						navigator.clipboard.writeText('${dataUrl}');
-						btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
-						setTimeout(function() {
-							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
-						}, 2000);
-					})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy image URL">
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-						</svg>
-					</button>
-				</div>
-			</div>`;
-		});
-
-		// Also detect JSON tool results with image_base64 field
-		const jsonImagePattern = /"image_base64"\s*:\s*"([A-Za-z0-9+/=]+)"/g;
-		processedContent = processedContent.replace(jsonImagePattern, (match, base64Data) => {
-			// Only replace if it looks like substantial base64 data (not a short string)
-			if (base64Data.length > 100) {
-				const dataUrl = `data:image/png;base64,${base64Data}`;
-				return `<div class="generated-media-container relative my-4 inline-block">
-					<img src="${dataUrl}" alt="Generated image" class="max-w-full rounded-lg shadow-md border border-border" />
-					<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
-						<button onclick="(function(){
-							const link = document.createElement('a');
-							link.href = '${dataUrl}';
-							link.download = 'generated-image.png';
-							link.click();
-						})()" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download image">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-							</svg>
-						</button>
-						<button onclick="(function(btn){
-							navigator.clipboard.writeText('${dataUrl}');
-							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
-							setTimeout(function() {
-								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
-							}, 2000);
-						})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy image URL">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-							</svg>
-						</button>
-					</div>
-				</div>`;
-			}
-			return match;
-		});
-
-		// Render generated-images markdown with overlay buttons
-		const generatedImagePattern = /!\[([^\]]*)\]\((\/api\/generated-images\/[^)]+)\)/g;
-		processedContent = processedContent.replace(generatedImagePattern, (match, alt, imageUrl) => {
-			const filename = imageUrl.split('/').pop() || 'generated-image.png';
-			return `<div class="generated-media-container relative my-4 inline-block">
-				<img src="${imageUrl}" alt="${alt || 'Generated image'}" class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border" />
-				<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
-					<a href="${imageUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download image">
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-						</svg>
-					</a>
-					<button onclick="(function(btn){
-						navigator.clipboard.writeText(window.location.origin + '${imageUrl}');
-						btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
-						setTimeout(function() {
-							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
-						}, 2000);
-					})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy image URL">
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-						</svg>
-					</button>
-				</div>
-			</div>`;
-		});
-
-		// Render generated-videos markdown links as video player with overlay buttons
-		const generatedVideoPattern = /\[([^\]]*)\]\((\/api\/generated-videos\/[^)]+)\)/g;
-		processedContent = processedContent.replace(generatedVideoPattern, (match, text, videoUrl) => {
-			const filename = videoUrl.split('/').pop() || 'generated-video.mp4';
-			return `<div class="generated-media-container relative my-4 inline-block">
-				<video src="${videoUrl}" controls class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border">
-					Your browser does not support the video tag.
-				</video>
-				<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
-					<a href="${videoUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download video">
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-						</svg>
-					</a>
-					<button onclick="(function(btn){
-						navigator.clipboard.writeText(window.location.origin + '${videoUrl}');
-						btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
-						setTimeout(function() {
-							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
-						}, 2000);
-					})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy video URL">
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-						</svg>
-					</button>
-				</div>
-			</div>`;
-		});
-
-		// Render file download cards for shared files
-		// Syntax: 📎[filename.ext](/api/files/filename.ext) or 📎[filename.ext](/api/files/by-path?path=...)
-		const fileDownloadPattern = /📎\[([^\]]+)\]\((\/api\/files\/[^)]+)\)/g;
-		processedContent = processedContent.replace(fileDownloadPattern, (match, displayName, fileUrl) => {
-			// Use the display name from markdown, fallback to extracting from URL
-			let filename = displayName;
-			if (!filename) {
-				// Try to extract from by-path URL or simple URL
-				const pathMatch = fileUrl.match(/[?&]path=([^&]+)/);
-				if (pathMatch) {
-					filename = decodeURIComponent(pathMatch[1]).split('/').pop() || 'file';
-				} else {
-					filename = fileUrl.split('/').pop() || 'file';
-				}
-			}
-			const ext = filename.split('.').pop()?.toLowerCase() || '';
-
-			// File type icons mapping
-			const iconMap: Record<string, string> = {
-				'pdf': '📄', 'doc': '📝', 'docx': '📝', 'odt': '📝', 'rtf': '📝',
-				'xls': '📊', 'xlsx': '📊', 'ods': '📊', 'csv': '📊',
-				'ppt': '📽️', 'pptx': '📽️', 'odp': '📽️',
-				'txt': '📃', 'md': '📃', 'log': '📃',
-				'json': '🔧', 'xml': '🔧', 'yaml': '🔧', 'yml': '🔧', 'toml': '🔧',
-				'py': '🐍', 'js': '💛', 'ts': '💙', 'mjs': '💛',
-				'sh': '⚙️', 'bash': '⚙️', 'bat': '⚙️', 'ps1': '⚙️',
-				'html': '🌐', 'css': '🎨', 'sql': '🗃️', 'sqlite': '🗃️', 'db': '🗃️',
-				'zip': '📦', 'tar': '📦', 'gz': '📦', 'tgz': '📦', '7z': '📦', 'rar': '📦',
-				'exe': '⚡', 'dmg': '💿', 'deb': '📦', 'rpm': '📦', 'apk': '📱'
-			};
-			const icon = iconMap[ext] || '📁';
-
-			return `<div class="file-download-card my-4 inline-flex items-center gap-3 p-3 bg-muted/50 hover:bg-muted/70 rounded-lg border border-border transition-colors max-w-md">
-				<div class="file-icon text-2xl flex-shrink-0">${icon}</div>
-				<div class="file-info flex-grow min-w-0">
-					<div class="file-name font-medium text-sm truncate" title="${filename}">${filename}</div>
-					<div class="file-type text-xs text-muted-foreground uppercase">${ext || 'file'}</div>
-				</div>
-				<div class="file-actions flex gap-1 flex-shrink-0">
-					<a href="${fileUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download file">
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-						</svg>
-					</a>
-					<button onclick="(function(btn){
-						navigator.clipboard.writeText(window.location.origin + '${fileUrl}');
-						btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
-						setTimeout(function() {
-							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
-						}, 2000);
-					})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-						</svg>
-					</button>
-				</div>
-			</div>`;
-		});
-
-		return marked(processedContent, { breaks: true }) as string;
-	}
-
-	// Render tool result content, detecting and displaying images
-	function renderToolResult(content: string): string {
-		try {
-			// Try to parse as JSON to detect image data
-			const data = JSON.parse(content);
-
-			// Handle URL-based image results (new format - saves to disk)
-			if (data.success && data.image_url) {
-				const imageUrl = data.image_url;
-				const filename = data.filename || 'generated-image.png';
-				return `<div class="generated-image-result">
-					<div class="mb-2 text-xs text-green-500">✓ Image generated successfully</div>
-					<div class="generated-media-container relative inline-block">
-						<img src="${imageUrl}" alt="Generated image" class="max-w-full max-h-96 rounded-lg shadow-md border border-border" />
-						<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
-							<a href="${imageUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download image">
-								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-								</svg>
-							</a>
-							<button onclick="(function(btn){
-								navigator.clipboard.writeText(window.location.origin + '${imageUrl}');
-								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
-								setTimeout(function() {
-									btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
-								}, 2000);
-							})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy image URL">
-								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-								</svg>
-							</button>
-						</div>
-					</div>
-				</div>`;
-			}
-
-			// Handle base64 image results (legacy format)
-			if (data.success && data.image_base64 && data.mime_type) {
-				// This is an image generation result!
-				const mimeType = data.mime_type || 'image/png';
-				const dataUrl = `data:${mimeType};base64,${data.image_base64}`;
-				return `<div class="generated-image-result">
-					<div class="mb-2 text-xs text-green-500">✓ Image generated successfully</div>
-					<div class="generated-media-container relative inline-block">
-						<img src="${dataUrl}" alt="Generated image" class="max-w-full max-h-96 rounded-lg shadow-md border border-border" />
-						<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
-							<button onclick="(function(){
-								const link = document.createElement('a');
-								link.href = '${dataUrl}';
-								link.download = 'generated-image.png';
-								link.click();
-							})()" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download image">
-								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-								</svg>
-							</button>
-							<button onclick="(function(btn){
-								navigator.clipboard.writeText('${dataUrl}');
-								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
-								setTimeout(function() {
-									btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
-								}, 2000);
-							})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy image URL">
-								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-								</svg>
-							</button>
-						</div>
-					</div>
-				</div>`;
-			}
-
-			// Handle video generation results
-			if (data.success && data.video_url) {
-				const videoUrl = data.video_url;
-				const filename = data.filename || 'generated-video.mp4';
-				const duration = data.duration_seconds ? `${data.duration_seconds}s` : '';
-				return `<div class="generated-video-result">
-					<div class="mb-2 text-xs text-green-500">✓ Video generated successfully${duration ? ` (${duration})` : ''}</div>
-					<div class="generated-media-container relative inline-block">
-						<video src="${videoUrl}" controls class="max-w-full max-h-96 rounded-lg shadow-md border border-border">
-							Your browser does not support the video tag.
-						</video>
-						<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
-							<a href="${videoUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download video">
-								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-								</svg>
-							</a>
-							<button onclick="(function(btn){
-								navigator.clipboard.writeText(window.location.origin + '${videoUrl}');
-								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
-								setTimeout(function() {
-									btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
-								}, 2000);
-							})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy video URL">
-								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-								</svg>
-							</button>
-						</div>
-					</div>
-				</div>`;
-			}
-
-			// Handle file download results
-			if (data.success && data.file_url) {
-				const fileUrl = data.file_url;
-				const filename = data.filename || 'file';
-				const fileSize = data.size_formatted || '';
-				const ext = filename.split('.').pop()?.toLowerCase() || '';
-
-				// File type icons
-				const iconMap: Record<string, string> = {
-					'pdf': '📄', 'doc': '📝', 'docx': '📝', 'odt': '📝', 'rtf': '📝',
-					'xls': '📊', 'xlsx': '📊', 'ods': '📊', 'csv': '📊',
-					'ppt': '📽️', 'pptx': '📽️', 'odp': '📽️',
-					'txt': '📃', 'md': '📃', 'log': '📃',
-					'json': '🔧', 'xml': '🔧', 'yaml': '🔧', 'yml': '🔧', 'toml': '🔧',
-					'py': '🐍', 'js': '💛', 'ts': '💙', 'mjs': '💛',
-					'sh': '⚙️', 'bash': '⚙️', 'bat': '⚙️', 'ps1': '⚙️',
-					'html': '🌐', 'css': '🎨', 'sql': '🗃️', 'sqlite': '🗃️', 'db': '🗃️',
-					'zip': '📦', 'tar': '📦', 'gz': '📦', 'tgz': '📦', '7z': '📦', 'rar': '📦',
-					'exe': '⚡', 'dmg': '💿', 'deb': '📦', 'rpm': '📦', 'apk': '📱'
-				};
-				const icon = iconMap[ext] || '📁';
-
-				return `<div class="generated-file-result">
-					<div class="mb-2 text-xs text-green-500">✓ File ready for download</div>
-					<div class="file-download-card inline-flex items-center gap-3 p-3 bg-muted/50 hover:bg-muted/70 rounded-lg border border-border transition-colors max-w-md">
-						<div class="file-icon text-2xl flex-shrink-0">${icon}</div>
-						<div class="file-info flex-grow min-w-0">
-							<div class="file-name font-medium text-sm truncate" title="${filename}">${filename}</div>
-							<div class="file-meta text-xs text-muted-foreground">
-								<span class="uppercase">${ext || 'file'}</span>${fileSize ? ` • ${fileSize}` : ''}
-							</div>
-						</div>
-						<div class="file-actions flex gap-1 flex-shrink-0">
-							<a href="${fileUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download file">
-								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-								</svg>
-							</a>
-							<button onclick="(function(btn){
-								navigator.clipboard.writeText(window.location.origin + '${fileUrl}');
-								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
-								setTimeout(function() {
-									btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
-								}, 2000);
-							})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
-								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-								</svg>
-							</button>
-						</div>
-					</div>
-				</div>`;
-			}
-		} catch {
-			// Not JSON, continue with default rendering
-		}
-		// Return empty to use default <pre> rendering
-		return '';
-	}
-
-	// Check if tool result contains an image
-	function toolResultHasImage(content: string): boolean {
-		try {
-			const data = JSON.parse(content);
-			// Check for both URL-based (new) and base64 (legacy) formats
-			return data.success && (data.image_url || (data.image_base64 && data.mime_type));
-		} catch {
-			return false;
-		}
-	}
-
-	// Check if tool result contains a video
-	function toolResultHasVideo(content: string): boolean {
-		try {
-			const data = JSON.parse(content);
-			return data.success && data.video_url;
-		} catch {
-			return false;
-		}
-	}
-
-	// Check if tool result contains a downloadable file
-	function toolResultHasFile(content: string): boolean {
-		try {
-			const data = JSON.parse(content);
-			return data.success && data.file_url;
-		} catch {
-			return false;
-		}
-	}
-
-	// Check if tool result contains media (image, video, or file)
-	function toolResultHasMedia(content: string): boolean {
-		return toolResultHasImage(content) || toolResultHasVideo(content) || toolResultHasFile(content);
-	}
-
-	// Render standalone image display (for main chat, outside tool groups)
-	function renderStandaloneImage(content: string): string {
-		try {
-			const data = JSON.parse(content);
-
-			// Handle URL-based image results (new format)
-			if (data.success && data.image_url) {
-				const imageUrl = data.image_url;
-				const filename = data.filename || 'generated-image.png';
-				return `<div class="generated-media-container relative mt-3 inline-block">
-					<img src="${imageUrl}" alt="Generated image" class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border" />
-					<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
-						<a href="${imageUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download image">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-							</svg>
-						</a>
-						<button onclick="(function(btn){
-							navigator.clipboard.writeText(window.location.origin + '${imageUrl}');
-							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
-							setTimeout(function() {
-								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
-							}, 2000);
-						})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy image URL">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-							</svg>
-						</button>
-					</div>
-				</div>`;
-			}
-
-			// Handle base64 image results (legacy format)
-			if (data.success && data.image_base64 && data.mime_type) {
-				const mimeType = data.mime_type || 'image/png';
-				const dataUrl = `data:${mimeType};base64,${data.image_base64}`;
-				return `<div class="generated-media-container relative mt-3 inline-block">
-					<img src="${dataUrl}" alt="Generated image" class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border" />
-					<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
-						<button onclick="(function(){
-							const link = document.createElement('a');
-							link.href = '${dataUrl}';
-							link.download = 'generated-image.png';
-							link.click();
-						})()" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download image">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-							</svg>
-						</button>
-						<button onclick="(function(btn){
-							navigator.clipboard.writeText('${dataUrl}');
-							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
-							setTimeout(function() {
-								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
-							}, 2000);
-						})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy image URL">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-							</svg>
-						</button>
-					</div>
-				</div>`;
-			}
-		} catch {
-			// Not valid JSON
-		}
-		return '';
-	}
-
-	// Render standalone video display (for main chat, outside tool groups)
-	function renderStandaloneVideo(content: string): string {
-		try {
-			const data = JSON.parse(content);
-
-			if (data.success && data.video_url) {
-				const videoUrl = data.video_url;
-				const filename = data.filename || 'generated-video.mp4';
-				return `<div class="generated-media-container relative mt-3 inline-block">
-					<video src="${videoUrl}" controls class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border">
-						Your browser does not support the video tag.
-					</video>
-					<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
-						<a href="${videoUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download video">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-							</svg>
-						</a>
-						<button onclick="(function(btn){
-							navigator.clipboard.writeText(window.location.origin + '${videoUrl}');
-							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
-							setTimeout(function() {
-								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
-							}, 2000);
-						})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy video URL">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-							</svg>
-						</button>
-					</div>
-				</div>`;
-			}
-		} catch {
-			// Not valid JSON
-		}
-		return '';
-	}
-
-	// Render standalone media (image or video)
-	function renderStandaloneMedia(content: string): string {
-		if (toolResultHasImage(content)) {
-			return renderStandaloneImage(content);
-		}
-		if (toolResultHasVideo(content)) {
-			return renderStandaloneVideo(content);
-		}
-		return '';
-	}
-
-	// Copy text to clipboard with feedback
-	let copiedMessageId: string | null = null;
-
-	async function copyToClipboard(text: string, messageId: string) {
-		try {
-			await navigator.clipboard.writeText(text);
-			copiedMessageId = messageId;
-			setTimeout(() => {
-				copiedMessageId = null;
-			}, 2000);
-		} catch (e) {
-			console.error('Failed to copy to clipboard:', e);
-		}
-	}
-
-	// Fork session from a specific message
-	let forkingMessageId: string | null = null;
-
-	async function handleForkSession(sessionId: string | undefined, messageIndex: number, messageId: string) {
-		if (!sessionId) {
-			alert('Cannot fork: no session ID');
-			return;
-		}
-		if (forkingMessageId) return; // Prevent double-clicks
-
-		forkingMessageId = messageId;
-		try {
-			const result = await forkSession(sessionId, messageIndex);
-			if (result.status === 'success') {
-				// Refresh sessions list
-				await tabs.loadSessions();
-				// Open the new forked session
-				await tabs.openSession(result.session_id);
-				alert(`Session forked successfully! New session: "${result.title}"`);
-			} else {
-				alert('Fork failed: ' + result.status);
-			}
-		} catch (e: unknown) {
-			const error = e as { detail?: string };
-			console.error('Failed to fork session:', e);
-			alert('Failed to fork session: ' + (error.detail || 'Unknown error'));
-		} finally {
-			forkingMessageId = null;
-		}
-	}
-
-	function formatTime(date?: Date): string {
-		const d = date || new Date();
-		return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-	}
-
-	function formatDate(dateStr: string): string {
-		const date = new Date(dateStr);
-		const now = new Date();
-		const diff = now.getTime() - date.getTime();
-		const minutes = Math.floor(diff / 60000);
-		const hours = Math.floor(diff / 3600000);
-		const days = Math.floor(diff / 86400000);
-
-		if (minutes < 1) return 'Just now';
-		if (minutes < 5) return '5m ago';
-		if (minutes < 10) return '10m ago';
-		if (minutes < 30) return '30m ago';
-		if (minutes < 60) return '50m ago';
-		if (hours < 24) return `${hours}h ago`;
-		if (days === 1) return 'Yesterday';
-		if (days < 7) return `${days}d ago`;
-		return date.toLocaleDateString();
-	}
-
-	function formatSessionCost(cost: number | undefined | null): string {
-		if (cost === undefined || cost === null || cost === 0) return '';
-		return `$${cost.toFixed(4)}`;
-	}
-
-	function formatTokenCount(count: number): string {
-		if (count >= 1000000) {
-			return `${(count / 1000000).toFixed(1)}M`;
-		}
-		if (count >= 1000) {
-			return `${(count / 1000).toFixed(1)}k`;
-		}
-		return count.toString();
-	}
-
-	function truncateTitle(title: string | null, maxLength: number = 35): string {
-		if (!title) return 'New Chat';
-		return title.length > maxLength ? title.substring(0, maxLength) + '...' : title;
-	}
-
-	// Open session - creates new tab or switches to existing tab with that session
-	function openSession(sessionId: string) {
-		// Prevent clicking while sessions are loading (race condition with bfcache)
-		if ($sessionsLoading) {
-			console.log('[Page] Ignoring session click while loading');
-			return;
-		}
-		tabs.openSession(sessionId);
-		sidebarOpen = false;
-		// Auto-scroll is handled by the autoScroll action on the messages container
-	}
-
-	async function deleteSession(e: Event | null, sessionId: string) {
-		e?.stopPropagation();
-		if (confirm('Delete this session?')) {
-			await tabs.deleteSession(sessionId);
-		}
-	}
-
-	async function handleToggleFavorite(sessionId: string) {
-		try {
-			await toggleSessionFavorite(sessionId);
-			// Refresh the sessions list to get updated favorite status
-			await tabs.loadSessions();
-		} catch (e: any) {
-			console.error('Failed to toggle favorite:', e);
-		}
-	}
-
-	// Tag picker handlers
-	function openTagPicker(sessionId: string, tags: SessionTag[], position: { x: number; y: number }) {
-		tagPickerSessionId = sessionId;
-		tagPickerCurrentTags = tags || [];
-		// Adjust position to stay within viewport
-		const viewportWidth = window.innerWidth;
-		const viewportHeight = window.innerHeight;
-		tagPickerPosition = {
-			x: Math.min(position.x, viewportWidth - 240), // 240px is roughly picker width
-			y: Math.min(position.y, viewportHeight - 300) // 300px is roughly picker height
-		};
-		showTagPicker = true;
-	}
-
-	function closeTagPicker() {
-		showTagPicker = false;
-		tagPickerSessionId = null;
-	}
-
-	async function handleTagsUpdated(event: CustomEvent<SessionTag[]>) {
-		// Update the session in the local sessions list with new tags
-		const updatedTags = event.detail;
-		if (tagPickerSessionId) {
-			// Reload sessions to get the updated tags
-			await tabs.loadSessions($sessionsTagFilter);
-		}
-	}
-
-	function handleOpenTagManager() {
-		showTagPicker = false;
-		showTagManager = true;
-	}
-
-	async function handleTagManagerClose() {
-		showTagManager = false;
-		// Reload tags list
-		await loadAllTags();
-		// Reload sessions to reflect any tag changes
-		await tabs.loadSessions($sessionsTagFilter);
-	}
-
-	async function handleImportSuccess(event: CustomEvent<{ sessionId: string; title: string; messageCount: number }>) {
-		const { sessionId, title } = event.detail;
-
-		// Refresh the sessions list
-		await tabs.loadSessions();
-
-		// Close the sidebar
-		closeSidebar();
-
-		// Open the imported session
-		openSession(sessionId);
-	}
-
-	async function handleBatchDelete(isAdmin: boolean = false) {
-		const count = isAdmin ? $selectedAdminSessionIds.size : $selectedSessionIds.size;
-		if (count === 0) return;
-
-		if (confirm(`Delete ${count} selected session${count > 1 ? 's' : ''}?`)) {
-			await tabs.deleteSelectedSessions(isAdmin);
-		}
-	}
-
-	function handleToggleSelection(e: Event, sessionId: string, isAdmin: boolean = false) {
-		e.stopPropagation();
-		tabs.toggleSessionSelection(sessionId, isAdmin);
-	}
-
-	function handleNewTab() {
-		tabs.createTab();
-	}
-
-	function handleCloseTab(e: Event, tabId: string) {
-		e.stopPropagation();
-		tabs.closeTab(tabId);
-	}
-
-	function handleNewChatInTab() {
-		if ($activeTabId) {
-			tabs.startNewChatInTab($activeTabId);
-		}
-	}
-
-	async function deleteProfile(profileId: string) {
-		if (confirm('Delete this profile?')) {
-			await tabs.deleteProfile(profileId);
-		}
-	}
-
-	// Profile/Agent export
-	async function handleExportProfile(profileId: string) {
-		try {
-			await exportAgent(profileId);
-		} catch (e: any) {
-			alert('Export failed: ' + (e.detail || 'Unknown error'));
-		}
-	}
-
-	// Agent import modal state
-	let showAgentImportModal = false;
-
-	// Handle agent import success
-	async function handleAgentImported(e: CustomEvent) {
-		await tabs.loadProfiles();
-		showAgentImportModal = false;
-		showProfileModal = false;  // Close profile modal too if open
-	}
-
-	async function createProject() {
-		if (!newProjectId || !newProjectName) return;
-
-		await tabs.createProject({
-			id: newProjectId.toLowerCase().replace(/[^a-z0-9-]/g, '-'),
-			name: newProjectName,
-			description: newProjectDescription || undefined
-		});
-
-		newProjectId = '';
-		newProjectName = '';
-		newProjectDescription = '';
-		showNewProjectForm = false;
-	}
-
-	async function deleteProject(projectId: string) {
-		if (confirm('Delete this project?')) {
-			await tabs.deleteProject(projectId);
-		}
-	}
-
-	function triggerFileUpload() {
-		if (!$activeTab?.project) {
-			alert('Please select a project first to upload files.');
-			return;
-		}
-		fileInput?.click();
-	}
-
-	async function handleFileUpload(event: Event) {
-		const input = event.target as HTMLInputElement;
-		const files = input.files;
-		if (!files || files.length === 0 || !$activeTab?.project || !$activeTabId) return;
-
-		isUploading = true;
-		const tabId = $activeTabId;
-		try {
-			for (const file of Array.from(files)) {
-				const result = await api.uploadFile(`/projects/${$activeTab.project}/upload`, file);
-				if (!tabUploadedFiles[tabId]) tabUploadedFiles[tabId] = [];
-				tabUploadedFiles[tabId] = [...tabUploadedFiles[tabId], result];
-				// File references are shown as chips only, @FilePath appended when message is sent
-			}
-		} catch (error: any) {
-			console.error('Upload failed:', error);
-			alert(`Upload failed: ${error.detail || 'Unknown error'}`);
-		} finally {
-			isUploading = false;
-			input.value = '';
-		}
-	}
-
-	function removeUploadedFile(tabId: string, index: number) {
-		const files = tabUploadedFiles[tabId] || [];
-		if (!files[index]) return;
-		// File references are shown as chips only, just remove from the array
-		tabUploadedFiles[tabId] = files.filter((_, i) => i !== index);
-	}
-
-	// Voice recording functions
-	async function startRecording() {
-		recordingError = '';
-		try {
-			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-			mediaRecorder = new MediaRecorder(stream, {
-				mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4'
-			});
-			audioChunks = [];
-
-			mediaRecorder.ondataavailable = (event) => {
-				if (event.data.size > 0) {
-					audioChunks.push(event.data);
-				}
-			};
-
-			mediaRecorder.onstop = async () => {
-				// Stop all tracks to release the microphone
-				stream.getTracks().forEach(track => track.stop());
-
-				if (audioChunks.length === 0) {
-					recordingError = 'No audio recorded';
-					return;
-				}
-
-				const audioBlob = new Blob(audioChunks, { type: mediaRecorder?.mimeType || 'audio/webm' });
-				await transcribeAudio(audioBlob);
-			};
-
-			mediaRecorder.start();
-			isRecording = true;
-		} catch (error: any) {
-			console.error('Failed to start recording:', error);
-			if (error.name === 'NotAllowedError') {
-				recordingError = 'Microphone access denied. Please allow microphone access in your browser settings.';
-			} else if (error.name === 'NotFoundError') {
-				recordingError = 'No microphone found. Please connect a microphone and try again.';
-			} else {
-				recordingError = `Failed to start recording: ${error.message || 'Unknown error'}`;
-			}
-		}
-	}
-
-	function stopRecording() {
-		if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-			mediaRecorder.stop();
-		}
-		isRecording = false;
-	}
-
-	async function transcribeAudio(audioBlob: Blob) {
-		if (!$activeTabId) return;
-
-		isTranscribing = true;
-		recordingError = '';
-
-		try {
-			const formData = new FormData();
-			formData.append('file', audioBlob, 'recording.webm');
-
-			const response = await fetch('/api/v1/settings/transcribe', {
-				method: 'POST',
-				credentials: 'include',
-				body: formData
-			});
-
-			if (!response.ok) {
-				const error = await response.json().catch(() => ({ detail: 'Transcription failed' }));
-				throw new Error(error.detail || 'Transcription failed');
-			}
-
-			const result = await response.json();
-			const transcribedText = result.text?.trim();
-
-			if (transcribedText) {
-				// Append to current input
-				const tabId = $activeTabId;
-				const currentInput = tabInputs[tabId] || '';
-				tabInputs[tabId] = currentInput ? `${currentInput} ${transcribedText}` : transcribedText;
-
-				// Focus the textarea and trigger resize
-				await tick();
-				const textarea = textareas[tabId];
-				if (textarea) {
-					textarea.focus();
-					// Trigger auto-resize by resetting height and setting to scrollHeight
-					textarea.style.height = 'auto';
-					textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
-				}
-			}
-		} catch (error: any) {
-			console.error('Transcription failed:', error);
-			recordingError = error.message || 'Failed to transcribe audio';
-		} finally {
-			isTranscribing = false;
-		}
-	}
-
-	function toggleRecording() {
-		if (isRecording) {
-			stopRecording();
-		} else {
-			startRecording();
-		}
-	}
-
-	function setTabProfile(tabId: string, profileId: string) {
-		tabs.setTabProfile(tabId, profileId);
-	}
-
-	function setTabProject(tabId: string, projectId: string) {
-		tabs.setTabProject(tabId, projectId);
-	}
 </script>
 
-<svelte:head>
-	<title>AI Hub</title>
-</svelte:head>
-
-<div class="h-dvh flex bg-background text-foreground">
-	<!-- Floating Icon Rail (Desktop) - 48px wide -->
-	<nav class="hidden lg:flex fixed left-3 top-3 bottom-3 flex-col w-12 z-50 floating-panel rounded-2xl">
-		<div class="flex flex-col items-center pt-3 gap-1">
-			<button on:click={handleNewTab} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-hover-overlay group" title="New Chat">
-				<svg class="w-5 h-5 text-primary group-hover:scale-110 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+<!-- Authentication check -->
+{#if !$isAuthenticated}
+	<div class="h-screen flex items-center justify-center bg-background">
+		<div class="text-center">
+			<div class="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mx-auto mb-4">
+				<svg class="w-8 h-8 text-primary animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
 				</svg>
-			</button>
-			<div class="w-6 h-px bg-border-subtle my-2"></div>
-			<button on:click={() => toggleSidebarSection('sessions')} class="relative w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'sessions' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-hover-overlay text-muted-foreground hover:text-foreground'}" title="Sessions">
-				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-				</svg>
-				{#if $allTabs.length > 0}
-					<span class="absolute -top-1 -right-1 w-4 h-4 bg-primary text-primary-foreground text-[10px] font-bold rounded-full flex items-center justify-center shadow-glow">{$allTabs.length}</span>
-				{/if}
-			</button>
-			{#if $isAdmin}
-				<button on:click={() => toggleSidebarSection('projects')} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'projects' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-hover-overlay text-muted-foreground hover:text-foreground'}" title="Projects">
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-					</svg>
-				</button>
-				<button on:click={() => toggleSidebarSection('profiles')} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'profiles' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-hover-overlay text-muted-foreground hover:text-foreground'}" title="Profiles">
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-					</svg>
-				</button>
-				<button on:click={() => toggleSidebarSection('subagents')} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'subagents' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-hover-overlay text-muted-foreground hover:text-foreground'}" title="Subagents">
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-					</svg>
-				</button>
-			{/if}
+			</div>
+			<p class="text-muted-foreground">Loading...</p>
 		</div>
-		<div class="mt-auto flex flex-col items-center pb-3 gap-1">
-			<!-- Analytics (Admin only) -->
-			{#if $isAdmin}
-				<button on:click={() => showAnalyticsModal = true} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-hover-overlay text-muted-foreground hover:text-foreground" title="Analytics">
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-					</svg>
-				</button>
-			{/if}
-			<!-- Keyboard Shortcuts -->
-			<button on:click={() => showKeyboardShortcuts = true} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-hover-overlay text-muted-foreground hover:text-foreground" title="Keyboard Shortcuts (?)">
-				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-				</svg>
-			</button>
-			{#if $isAdmin}
-				<button on:click={() => showSettingsModal = true} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-hover-overlay text-muted-foreground hover:text-foreground" title="Settings">
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-					</svg>
-				</button>
-			{/if}
-			<button on:click={handleLogout} class="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center hover:bg-primary/30 transition-all" title="Logout ({$apiUser ? $apiUser.name : $username})">
-				<span class="text-sm font-medium text-primary">{($apiUser?.name || $username)?.[0]?.toUpperCase() || 'U'}</span>
-			</button>
-		</div>
-	</nav>
-
-	<!-- Floating Expandable Sidebar Panel (Desktop) -->
-	{#if activeSidebarSection !== 'none'}
-		<button class="hidden lg:block fixed inset-0 z-30 bg-black/20 backdrop-blur-[2px]" on:click={closeSidebar} aria-label="Close sidebar"></button>
-		<aside class="hidden lg:flex fixed top-3 bottom-3 left-[4.5rem] z-40 w-[340px] floating-panel rounded-2xl flex-col panel-slide-in">
-			<!-- Search Bar (always visible for Sessions panel) -->
-			{#if activeSidebarSection === 'sessions'}
-				<div class="p-3">
-					<div class="relative">
-						<svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-						</svg>
-						<input
-							type="text"
-							bind:value={sessionSearchQuery}
-							placeholder="Search conversations..."
-							class="w-full pl-9 pr-8 py-2.5 text-sm bg-muted/50 border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 transition-all"
-						/>
-						{#if sessionSearchQuery}
-							<button on:click={clearSearch} class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-muted-foreground hover:text-foreground transition-colors">
-								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-								</svg>
-							</button>
-						{/if}
-					</div>
-				</div>
-			{:else}
-				<!-- Header for non-Sessions panels -->
-				<div class="p-4 border-b border-border/50 flex items-center justify-between">
-					<span class="font-semibold text-foreground">{activeSidebarSection === 'projects' ? 'Projects' : activeSidebarSection === 'profiles' ? 'Profiles' : 'Subagents'}</span>
-					<div class="flex items-center gap-1">
-						<button on:click={toggleSidebarPin} class="p-1.5 rounded-lg transition-all {sidebarPinned ? 'bg-primary text-primary-foreground shadow-glow' : 'text-muted-foreground hover:text-foreground hover:bg-hover-overlay'}" title={sidebarPinned ? 'Unpin sidebar' : 'Pin sidebar open'}>
-							<svg class="w-4 h-4" fill={sidebarPinned ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
+	</div>
+{:else}
+	<!-- Main Deck Layout -->
+	<DeckLayout
+		activeMode={$activeMode}
+		badges={activityBadges}
+		contextCollapsed={$contextPanelCollapsed}
+		sessions={deckSessions}
+		agents={deckAgents}
+		generations={deckGenerations}
+		currentSession={currentSessionInfo}
+		onModeChange={handleModeChange}
+		onSettingsClick={handleSettingsClick}
+		onContextCollapsedChange={handleContextCollapsedChange}
+		onSessionClick={handleSessionClick}
+		onAgentClick={handleAgentClick}
+		onGenerationClick={handleGenerationClick}
+		onNewChat={handleNewChat}
+		onNewAgent={handleNewAgent}
+		onNewCreate={handleNewCreate}
+	>
+		<!-- Main Content Area -->
+		{#if $activeMode === 'chat'}
+			<!-- Chat Mode: Show chat cards -->
+			{#if deckCards.length === 0}
+				<!-- Empty state -->
+				<div class="h-full flex items-center justify-center">
+					<div class="text-center max-w-md px-4">
+						<div class="w-20 h-20 rounded-2xl bg-primary/10 flex items-center justify-center mx-auto mb-6">
+							<svg class="w-10 h-10 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
 							</svg>
-						</button>
-						<button on:click={() => { activeSidebarSection = 'none'; sidebarPinned = false; clearSearch(); }} class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-all" title="Close">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-							</svg>
-						</button>
-					</div>
-				</div>
-			{/if}
-
-			<!-- Sessions Panel Content -->
-			{#if activeSidebarSection === 'sessions'}
-				<div class="flex-1 overflow-hidden flex flex-col">
-					{#if $isAdmin}
-						<div class="px-3 flex gap-1">
-							<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}">My Chats</button>
-							<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}">Admin</button>
 						</div>
-					{/if}
-					{#if sidebarTab === 'my-chats'}
-					<div class="flex-1 overflow-y-auto px-3 pb-3 pt-2">
-						<!-- Open Tabs Section -->
-						{#if $allTabs.length > 0}
-							<div class="mb-4">
-								<div class="flex items-center justify-between px-2 mb-2">
-									<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">Open ({$allTabs.length})</div>
-								</div>
-								<div class="space-y-1">
-									{#each $allTabs as tab}
-										{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
-										{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', is_favorite: false, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, tags: [], profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
-										<SessionCard
-											session={tabSession}
-											isOpen={true}
-											isActive={tab.id === $activeTabId}
-											isStreaming={tab.isStreaming}
-											showCloseButton={true}
-											on:click={() => { tabs.setActiveTab(tab.id); closeSidebar(); }}
-											on:close={(e) => handleCloseTab(e, tab.id)}
-											on:openTagPicker={(e) => openTagPicker(tabSession.id, tabSession.tags, e.detail)}
-										/>
-									{/each}
-								</div>
-							</div>
-						{/if}
-
-						<!-- Selection Actions Bar -->
-						{#if $selectionMode && filteredSessions.length > 0}
-							<div class="flex items-center gap-2 px-2 py-2 mb-2 bg-accent rounded-lg">
-								<button
-									on:click={() => {
-										if ($selectedSessionIds.size === filteredSessions.length) {
-											tabs.deselectAllSessions(false);
-										} else {
-											tabs.selectAllSessions(false);
-										}
-									}}
-									class="text-xs text-muted-foreground hover:text-foreground transition-colors"
-								>
-									{$selectedSessionIds.size === filteredSessions.length ? 'Deselect All' : 'Select All'}
-								</button>
-								<span class="text-xs text-muted-foreground">
-									{$selectedSessionIds.size} selected
-								</span>
-								{#if $selectedSessionIds.size > 0}
-									<button
-										on:click={() => handleBatchDelete(false)}
-										class="ml-auto text-xs text-destructive hover:text-destructive/80 font-medium transition-colors"
-									>
-										Delete ({$selectedSessionIds.size})
-									</button>
-								{/if}
-							</div>
-						{/if}
-
-						<!-- Search Results (when searching) -->
-						{#if sessionSearchQuery.trim()}
-							<div class="flex items-center justify-between px-2 mb-2">
-								<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">
-									{isSearching ? 'Searching...' : `Results (${searchResults.length})`}
-								</div>
-								<button
-									on:click={clearSearch}
-									class="text-xs text-muted-foreground hover:text-foreground transition-colors"
-								>
-									Clear
-								</button>
-							</div>
-
-							<div class="space-y-1">
-								{#if isSearching}
-									<div class="flex items-center justify-center py-8">
-										<svg class="w-5 h-5 animate-spin text-muted-foreground" fill="none" viewBox="0 0 24 24">
-											<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-											<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-										</svg>
-									</div>
-								{:else if searchResults.length === 0}
-									<p class="text-xs text-muted-foreground px-2 py-4 text-center">No sessions found matching "{sessionSearchQuery}"</p>
-								{:else}
-									{#each searchResults as result}
-										<button
-											on:click={() => { openSession(result.id); closeSidebar(); }}
-											class="w-full text-left px-3 py-2.5 rounded-lg hover:bg-accent transition-colors group"
-										>
-											<div class="flex items-start gap-2">
-												<div class="flex-1 min-w-0">
-													<div class="text-sm font-medium text-foreground truncate">
-														{result.title || 'Untitled session'}
-													</div>
-													{#if result.match_type === 'content' && result.match_snippet}
-														<div class="text-xs text-muted-foreground mt-1 line-clamp-2">
-															{result.match_snippet}
-														</div>
-													{/if}
-													<div class="flex items-center gap-2 mt-1">
-														<span class="text-xs text-muted-foreground/70">
-															{new Date(result.updated_at).toLocaleDateString()}
-														</span>
-														{#if result.match_type === 'content'}
-															<span class="text-xs bg-accent px-1.5 py-0.5 rounded text-muted-foreground">
-																Content match
-															</span>
-														{/if}
-													</div>
-												</div>
-												<svg class="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-												</svg>
-											</div>
-										</button>
-									{/each}
-								{/if}
-							</div>
-						{:else}
-							<!-- History Header (when not searching) -->
-							<div class="flex items-center justify-between px-2 mb-2">
-								<div class="flex items-center gap-2">
-									<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">
-										{showFavoritesOnly ? 'Favorites' : 'History'}
-									</div>
-									<!-- Favorites filter toggle -->
-									<button
-										on:click={() => showFavoritesOnly = !showFavoritesOnly}
-										class="p-0.5 rounded transition-colors {showFavoritesOnly ? 'text-yellow-400 hover:text-yellow-500' : 'text-muted-foreground/50 hover:text-yellow-400'}"
-										title={showFavoritesOnly ? 'Show all sessions' : 'Show favorites only'}
-									>
-										<svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill={showFavoritesOnly ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="2">
-											<path stroke-linecap="round" stroke-linejoin="round" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
-										</svg>
-									</button>
-									<!-- Tag filter dropdown -->
-									{#if allTags.length > 0}
-										<select
-											class="text-xs bg-transparent border-none text-muted-foreground hover:text-foreground cursor-pointer focus:outline-none max-w-[80px]"
-											value={$sessionsTagFilter || ''}
-											on:change={(e) => tabs.setSessionsTagFilter(e.currentTarget.value || null)}
-										>
-											<option value="">All tags</option>
-											{#each allTags as tag}
-												<option value={tag.id}>{tag.name}</option>
-											{/each}
-										</select>
-									{/if}
-									<!-- Manage tags button -->
-									<button
-										on:click={() => showTagManager = true}
-										class="p-0.5 rounded transition-colors text-muted-foreground/50 hover:text-foreground"
-										title="Manage tags"
-									>
-										<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
-										</svg>
-									</button>
-								</div>
-								<div class="flex items-center gap-2">
-									<button
-										on:click={() => showImportModal = true}
-										class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
-										title="Import session"
-									>
-										<svg
-											class="w-3.5 h-3.5"
-											fill="none"
-											stroke="currentColor"
-											viewBox="0 0 24 24"
-										>
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-										</svg>
-									</button>
-									<button
-										on:click={() => tabs.loadSessions()}
-										class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
-										title="Refresh sessions"
-										disabled={$sessionsLoading}
-									>
-										<svg
-											class="w-3.5 h-3.5 {$sessionsLoading ? 'animate-spin' : ''}"
-											fill="none"
-											stroke="currentColor"
-											viewBox="0 0 24 24"
-										>
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-										</svg>
-									</button>
-									{#if filteredSessions.length > 0}
-										<button
-											on:click={() => tabs.toggleSelectionMode(false)}
-											class="text-xs text-muted-foreground hover:text-foreground transition-colors"
-											title={$selectionMode ? 'Exit selection mode' : 'Select multiple'}
-										>
-											{$selectionMode ? 'Cancel' : 'Select'}
-										</button>
-									{/if}
-								</div>
-							</div>
-
-							<!-- Grouped Sessions -->
-							<div class="space-y-3" class:opacity-50={$sessionsLoading} class:pointer-events-none={$sessionsLoading}>
-								{#each groupedSessions as group}
-									<div>
-										<!-- Group Header -->
-										<button
-											on:click={() => toggleGroupCollapse(group.key)}
-											class="flex items-center gap-2 px-2 py-1 w-full text-left hover:bg-accent/50 rounded transition-colors"
-										>
-											<svg
-												class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
-												fill="none"
-												stroke="currentColor"
-												viewBox="0 0 24 24"
-											>
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-											</svg>
-											<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
-											<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
-										</button>
-
-										<!-- Group Content -->
-										{#if !collapsedGroups.has(group.key)}
-											<div class="mt-1 space-y-1">
-												{#each group.sessions as session}
-													<SessionCard
-														{session}
-														selectionMode={$selectionMode}
-														isSelected={$selectedSessionIds.has(session.id)}
-														on:click={() => { openSession(session.id); closeSidebar(); }}
-														on:delete={() => deleteSession(null, session.id)}
-														on:select={() => tabs.toggleSessionSelection(session.id, false)}
-														on:favorite={() => handleToggleFavorite(session.id)}
-														on:openTagPicker={(e) => openTagPicker(session.id, session.tags, e.detail)}
-													/>
-												{/each}
-											</div>
-										{/if}
-									</div>
-								{/each}
-								{#if $sessionsLoading}
-									<p class="text-xs text-muted-foreground px-2 animate-pulse">Loading sessions...</p>
-								{:else if filteredSessions.length === 0}
-									<p class="text-xs text-muted-foreground px-2">
-										{showFavoritesOnly ? 'No favorites yet. Click the star on any session to add it to favorites.' : 'No chat history yet'}
-									</p>
-								{/if}
-							</div>
-						{/if}
-					</div>
-				{/if}
-
-				<!-- Admin Tab Content -->
-				{#if sidebarTab === 'admin' && $isAdmin}
-					<div class="flex-1 overflow-y-auto px-3 pb-3 pt-2">
-						<!-- Open Tabs Section (Admin) -->
-						{#if $allTabs.length > 0}
-							<div class="mb-4">
-								<div class="flex items-center justify-between px-2 mb-2">
-									<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">Open ({$allTabs.length})</div>
-								</div>
-								<div class="space-y-1">
-									{#each $allTabs as tab}
-										{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
-										{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', is_favorite: false, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, tags: [], profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
-										<SessionCard
-											session={tabSession}
-											isOpen={true}
-											isActive={tab.id === $activeTabId}
-											isStreaming={tab.isStreaming}
-											showCloseButton={true}
-											on:click={() => { tabs.setActiveTab(tab.id); closeSidebar(); }}
-											on:close={(e) => handleCloseTab(e, tab.id)}
-										/>
-									{/each}
-								</div>
-							</div>
-						{/if}
-
-						<!-- API User Filter -->
-						<div class="mb-3">
-							<label class="text-xs text-muted-foreground uppercase tracking-wider px-2 block mb-1">Filter by User</label>
-							<select
-								class="w-full bg-accent border border-border rounded-md px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-								value={$adminSessionsFilter ?? ''}
-								on:change={(e) => tabs.setAdminSessionsFilter(e.currentTarget.value || null)}
-							>
-								<option value="">All API Users</option>
-								{#each $apiUsers as user}
-									<option value={user.id}>{user.name}</option>
-								{/each}
-							</select>
-						</div>
-
-						<!-- Selection Actions Bar -->
-						{#if $adminSelectionMode && filteredAdminSessions.length > 0}
-							<div class="flex items-center gap-2 px-2 py-2 mb-2 bg-accent rounded-lg">
-								<button
-									on:click={() => {
-										if ($selectedAdminSessionIds.size === filteredAdminSessions.length) {
-											tabs.deselectAllSessions(true);
-										} else {
-											tabs.selectAllSessions(true);
-										}
-									}}
-									class="text-xs text-muted-foreground hover:text-foreground transition-colors"
-								>
-									{$selectedAdminSessionIds.size === filteredAdminSessions.length ? 'Deselect All' : 'Select All'}
-								</button>
-								<span class="text-xs text-muted-foreground">
-									{$selectedAdminSessionIds.size} selected
-								</span>
-								{#if $selectedAdminSessionIds.size > 0}
-									<button
-										on:click={() => handleBatchDelete(true)}
-										class="ml-auto text-xs text-destructive hover:text-destructive/80 font-medium transition-colors"
-									>
-										Delete ({$selectedAdminSessionIds.size})
-									</button>
-								{/if}
-							</div>
-						{/if}
-
-						<!-- Search Results (when searching in Admin tab) -->
-						{#if sessionSearchQuery.trim()}
-							<div class="flex items-center justify-between px-2 mb-2">
-								<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">
-									{isSearching ? 'Searching...' : `Results (${searchResults.length})`}
-								</div>
-								<button
-									on:click={clearSearch}
-									class="text-xs text-muted-foreground hover:text-foreground transition-colors"
-								>
-									Clear
-								</button>
-							</div>
-
-							<div class="space-y-1">
-								{#if isSearching}
-									<div class="flex items-center justify-center py-8">
-										<svg class="w-5 h-5 animate-spin text-muted-foreground" fill="none" viewBox="0 0 24 24">
-											<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-											<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-										</svg>
-									</div>
-								{:else if searchResults.length === 0}
-									<p class="text-xs text-muted-foreground px-2 py-4 text-center">No sessions found matching "{sessionSearchQuery}"</p>
-								{:else}
-									{#each searchResults as result}
-										<button
-											on:click={() => { openSession(result.id); closeSidebar(); }}
-											class="w-full text-left px-3 py-2.5 rounded-lg hover:bg-accent transition-colors group"
-										>
-											<div class="flex items-start gap-2">
-												<div class="flex-1 min-w-0">
-													<div class="text-sm font-medium text-foreground truncate">
-														{result.title || 'Untitled session'}
-													</div>
-													{#if result.match_type === 'content' && result.match_snippet}
-														<div class="text-xs text-muted-foreground mt-1 line-clamp-2">
-															{result.match_snippet}
-														</div>
-													{/if}
-													<div class="flex items-center gap-2 mt-1">
-														<span class="text-xs text-muted-foreground/70">
-															{new Date(result.updated_at).toLocaleDateString()}
-														</span>
-														{#if result.match_type === 'content'}
-															<span class="text-xs bg-accent px-1.5 py-0.5 rounded text-muted-foreground">
-																Content match
-															</span>
-														{/if}
-													</div>
-												</div>
-												<svg class="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-												</svg>
-											</div>
-										</button>
-									{/each}
-								{/if}
-							</div>
-						{:else}
-							<!-- Header with label and selection toggle (when not searching) -->
-							<div class="flex items-center justify-between px-2 mb-2">
-								<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">API User Sessions</div>
-								<div class="flex items-center gap-2">
-									<button
-										on:click={() => tabs.loadAdminSessions($adminSessionsFilter)}
-										class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
-										title="Refresh sessions"
-									>
-										<svg
-											class="w-3.5 h-3.5"
-											fill="none"
-											stroke="currentColor"
-											viewBox="0 0 24 24"
-										>
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-										</svg>
-									</button>
-									{#if filteredAdminSessions.length > 0}
-										<button
-											on:click={() => tabs.toggleSelectionMode(true)}
-											class="text-xs text-muted-foreground hover:text-foreground transition-colors"
-											title={$adminSelectionMode ? 'Exit selection mode' : 'Select multiple'}
-										>
-											{$adminSelectionMode ? 'Cancel' : 'Select'}
-										</button>
-									{/if}
-								</div>
-							</div>
-
-							<!-- Grouped Admin Sessions -->
-							<div class="space-y-3">
-								{#each groupedAdminSessions as group}
-									<div>
-										<!-- Group Header -->
-										<button
-											on:click={() => toggleGroupCollapse(group.key)}
-											class="flex items-center gap-2 px-2 py-1 w-full text-left hover:bg-accent/50 rounded transition-colors"
-										>
-											<svg
-												class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
-												fill="none"
-												stroke="currentColor"
-												viewBox="0 0 24 24"
-											>
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-											</svg>
-											<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
-											<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
-										</button>
-
-										<!-- Group Content -->
-										{#if !collapsedGroups.has(group.key)}
-											<div class="mt-1 space-y-1">
-												{#each group.sessions as session}
-													<SessionCard
-														{session}
-														selectionMode={$adminSelectionMode}
-														isSelected={$selectedAdminSessionIds.has(session.id)}
-														on:click={() => { openSession(session.id); closeSidebar(); }}
-														on:delete={() => deleteSession(null, session.id)}
-														on:select={() => tabs.toggleSessionSelection(session.id, true)}
-													/>
-												{/each}
-											</div>
-										{/if}
-									</div>
-								{/each}
-								{#if filteredAdminSessions.length === 0}
-									<p class="text-xs text-muted-foreground px-2">No API user sessions found</p>
-								{/if}
-							</div>
-						{/if}
-					</div>
-				{/if}
-				</div>
-				<!-- User Profile Footer -->
-				<div class="mt-auto p-3 border-t border-border/50">
-					<div class="flex items-center gap-3">
-						<div class="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center font-semibold">
-							<span class="text-sm text-primary">{($apiUser?.name || $username)?.[0]?.toUpperCase() || 'U'}</span>
-						</div>
-						<div class="flex-1 min-w-0">
-							<p class="text-sm font-medium text-foreground truncate">{$apiUser?.name || $username || 'User'}</p>
-							<p class="text-xs text-muted-foreground truncate">{$isAdmin ? 'Administrator' : 'User'}</p>
-						</div>
-						{#if $isAdmin}
-							<button on:click={() => showSettingsModal = true} class="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-all" title="Settings">
-								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-								</svg>
-							</button>
-						{/if}
-					</div>
-				</div>
-			{/if}
-
-			<!-- Projects Panel Content -->
-			{#if activeSidebarSection === 'projects'}
-				{@const projectsOrganized = organizeByGroups($projects, 'projects', $groups)}
-				<div class="flex-1 overflow-y-auto p-3 flex flex-col">
-					{#if $activeTab?.sessionId}
-						<div class="flex items-center gap-2 p-3 mb-4 bg-muted/50 rounded-lg border border-border">
-							<svg class="w-4 h-4 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-							</svg>
-							<p class="text-xs text-muted-foreground">Project is locked for this chat</p>
-						</div>
-					{/if}
-					<div class="flex-1 overflow-y-auto space-y-1 -mx-1 px-1">
-						<!-- Grouped projects -->
-						{#each projectsOrganized.groupOrder as group}
-							{@const groupProjects = projectsOrganized.grouped.get(group.name) || []}
-							{#if groupProjects.length > 0}
-								<div class="mb-2">
-									<div class="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground group/groupheader">
-										<button
-											class="flex items-center gap-2 flex-1 hover:text-foreground transition-colors"
-											on:click={() => groups.toggleGroupCollapsed('projects', group.name)}
-										>
-											<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-											</svg>
-											<span class="uppercase tracking-wide">{group.name}</span>
-											<span class="text-muted-foreground/60">({groupProjects.length})</span>
-										</button>
-										<div class="relative">
-											<button
-												class="p-1 rounded opacity-0 group-hover/groupheader:opacity-100 hover:bg-accent transition-all"
-												on:click|stopPropagation={(e) => {
-													const menu = e.currentTarget.nextElementSibling;
-													document.querySelectorAll('[data-group-menu]').forEach(m => m !== menu && m.classList.add('hidden'));
-													menu?.classList.toggle('hidden');
-												}}
-												title="Group options"
-											>
-												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
-												</svg>
-											</button>
-											<div data-group-menu class="hidden absolute right-0 top-full mt-1 w-32 bg-card border border-border rounded-lg shadow-lg z-50">
-												<div class="py-1">
-													<button
-														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
-														on:click|stopPropagation={() => {
-															const newName = prompt('Rename group:', group.name);
-															if (newName?.trim() && newName.trim() !== group.name) {
-																groups.renameGroup('projects', group.name, newName.trim());
-															}
-														}}
-													>
-														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-														</svg>
-														Rename
-													</button>
-													<button
-														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2 text-destructive"
-														on:click|stopPropagation={() => {
-															if (confirm(`Delete group "${group.name}"? Items will be moved to ungrouped.`)) {
-																groups.deleteGroup('projects', group.name);
-															}
-														}}
-													>
-														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-														</svg>
-														Delete
-													</button>
-												</div>
-											</div>
-										</div>
-									</div>
-									{#if !group.collapsed}
-										<div class="space-y-1 ml-2">
-											{#each groupProjects as project}
-												<button
-													class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg transition-colors text-left {$activeTab?.project === project.id ? 'ring-2 ring-primary' : ''} {$activeTab?.sessionId ? 'opacity-50 cursor-not-allowed' : 'hover:bg-accent/80'}"
-													on:click={() => { if ($activeTabId && !$activeTab?.sessionId) { setTabProject($activeTabId, project.id); closeSidebar(); } }}
-													disabled={!!$activeTab?.sessionId}
-												>
-													<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-													</svg>
-													<div class="flex-1 min-w-0">
-														<p class="text-sm text-foreground font-medium truncate">{project.name}</p>
-														<p class="text-xs text-muted-foreground truncate">/workspace/{project.path}/</p>
-													</div>
-												</button>
-											{/each}
-										</div>
-									{/if}
-								</div>
-							{/if}
-						{/each}
-						<!-- Ungrouped projects -->
-						{#if projectsOrganized.ungrouped.length > 0}
-							{#if projectsOrganized.groupOrder.length > 0}
-								<div class="px-2 py-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide">Other</div>
-							{/if}
-							<div class="space-y-1 {projectsOrganized.groupOrder.length > 0 ? 'ml-2' : ''}">
-								{#each projectsOrganized.ungrouped as project}
-									<button
-										class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg transition-colors text-left {$activeTab?.project === project.id ? 'ring-2 ring-primary' : ''} {$activeTab?.sessionId ? 'opacity-50 cursor-not-allowed' : 'hover:bg-accent/80'}"
-										on:click={() => { if ($activeTabId && !$activeTab?.sessionId) { setTabProject($activeTabId, project.id); closeSidebar(); } }}
-										disabled={!!$activeTab?.sessionId}
-									>
-										<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-										</svg>
-										<div class="flex-1 min-w-0">
-											<p class="text-sm text-foreground font-medium truncate">{project.name}</p>
-											<p class="text-xs text-muted-foreground truncate">/workspace/{project.path}/</p>
-										</div>
-									</button>
-								{/each}
-							</div>
-						{/if}
-						{#if $projects.length === 0}
-							<p class="text-xs text-muted-foreground px-2 py-4 text-center">No projects yet</p>
-						{/if}
-					</div>
-					<div class="mt-auto pt-3">
-						<button on:click={() => showProjectModal = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">{$projects.length === 0 ? '+ Create Project' : 'Manage Projects'}</button>
-					</div>
-				</div>
-			{/if}
-
-			<!-- Profiles Panel Content -->
-			{#if activeSidebarSection === 'profiles'}
-				{@const profilesOrganized = organizeByGroups($profiles, 'profiles', $groups)}
-				<div class="flex-1 overflow-y-auto p-3 flex flex-col">
-					<div class="flex-1 overflow-y-auto space-y-1 -mx-1 px-1">
-						<!-- Grouped profiles -->
-						{#each profilesOrganized.groupOrder as group}
-							{@const groupProfiles = profilesOrganized.grouped.get(group.name) || []}
-							{#if groupProfiles.length > 0}
-								<div class="mb-2">
-									<div class="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground group/groupheader">
-										<button
-											class="flex items-center gap-2 flex-1 hover:text-foreground transition-colors"
-											on:click={() => groups.toggleGroupCollapsed('profiles', group.name)}
-										>
-											<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-											</svg>
-											<span class="uppercase tracking-wide">{group.name}</span>
-											<span class="text-muted-foreground/60">({groupProfiles.length})</span>
-										</button>
-										<div class="relative">
-											<button
-												class="p-1 rounded opacity-0 group-hover/groupheader:opacity-100 hover:bg-accent transition-all"
-												on:click|stopPropagation={(e) => {
-													const menu = e.currentTarget.nextElementSibling;
-													document.querySelectorAll('[data-group-menu]').forEach(m => m !== menu && m.classList.add('hidden'));
-													menu?.classList.toggle('hidden');
-												}}
-												title="Group options"
-											>
-												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
-												</svg>
-											</button>
-											<div data-group-menu class="hidden absolute right-0 top-full mt-1 w-32 bg-card border border-border rounded-lg shadow-lg z-50">
-												<div class="py-1">
-													<button
-														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
-														on:click|stopPropagation={() => {
-															const newName = prompt('Rename group:', group.name);
-															if (newName?.trim() && newName.trim() !== group.name) {
-																groups.renameGroup('profiles', group.name, newName.trim());
-															}
-														}}
-													>
-														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-														</svg>
-														Rename
-													</button>
-													<button
-														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2 text-destructive"
-														on:click|stopPropagation={() => {
-															if (confirm(`Delete group "${group.name}"? Items will be moved to ungrouped.`)) {
-																groups.deleteGroup('profiles', group.name);
-															}
-														}}
-													>
-														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-														</svg>
-														Delete
-													</button>
-												</div>
-											</div>
-										</div>
-									</div>
-									{#if !group.collapsed}
-										<div class="space-y-1 ml-2">
-											{#each groupProfiles as profile}
-												<button
-													class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg hover:bg-accent/80 transition-colors text-left {$activeTab?.profile === profile.id ? 'ring-2 ring-primary' : ''}"
-													on:click={() => { if ($activeTabId) setTabProfile($activeTabId, profile.id); closeSidebar(); }}
-												>
-													<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-													</svg>
-													<div class="flex-1 min-w-0">
-														<p class="text-sm text-foreground font-medium truncate">{profile.name}</p>
-														<p class="text-xs text-muted-foreground truncate">{profile.description || 'No description'}</p>
-													</div>
-													{#if profile.is_builtin}
-														<span class="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded">Built-in</span>
-													{/if}
-												</button>
-											{/each}
-										</div>
-									{/if}
-								</div>
-							{/if}
-						{/each}
-						<!-- Ungrouped profiles -->
-						{#if profilesOrganized.ungrouped.length > 0}
-							{#if profilesOrganized.groupOrder.length > 0}
-								<div class="px-2 py-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide">Other</div>
-							{/if}
-							<div class="space-y-1 {profilesOrganized.groupOrder.length > 0 ? 'ml-2' : ''}">
-								{#each profilesOrganized.ungrouped as profile}
-									<button
-										class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg hover:bg-accent/80 transition-colors text-left {$activeTab?.profile === profile.id ? 'ring-2 ring-primary' : ''}"
-										on:click={() => { if ($activeTabId) setTabProfile($activeTabId, profile.id); closeSidebar(); }}
-									>
-										<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-										</svg>
-										<div class="flex-1 min-w-0">
-											<p class="text-sm text-foreground font-medium truncate">{profile.name}</p>
-											<p class="text-xs text-muted-foreground truncate">{profile.description || 'No description'}</p>
-										</div>
-										{#if profile.is_builtin}
-											<span class="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded">Built-in</span>
-										{/if}
-									</button>
-								{/each}
-							</div>
-						{/if}
-						{#if $profiles.length === 0}
-							<p class="text-xs text-muted-foreground px-2 py-4 text-center">No profiles yet</p>
-						{/if}
-					</div>
-					<div class="mt-auto pt-3">
-						<button on:click={() => showProfileModal = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">{$profiles.length === 0 ? '+ Create Profile' : 'Manage Profiles'}</button>
-					</div>
-				</div>
-			{/if}
-
-			<!-- Subagents Panel Content -->
-			{#if activeSidebarSection === 'subagents'}
-				{@const subagentsOrganized = organizeByGroups(allSubagents, 'subagents', $groups)}
-				<div class="flex-1 overflow-y-auto p-3 flex flex-col">
-					<div class="flex-1 overflow-y-auto space-y-1 -mx-1 px-1">
-						<!-- Grouped subagents -->
-						{#each subagentsOrganized.groupOrder as group}
-							{@const groupAgents = subagentsOrganized.grouped.get(group.name) || []}
-							{#if groupAgents.length > 0}
-								<div class="mb-2">
-									<div class="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground group/groupheader">
-										<button
-											class="flex items-center gap-2 flex-1 hover:text-foreground transition-colors"
-											on:click={() => groups.toggleGroupCollapsed('subagents', group.name)}
-										>
-											<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-											</svg>
-											<span class="uppercase tracking-wide">{group.name}</span>
-											<span class="text-muted-foreground/60">({groupAgents.length})</span>
-										</button>
-										<div class="relative">
-											<button
-												class="p-1 rounded opacity-0 group-hover/groupheader:opacity-100 hover:bg-accent transition-all"
-												on:click|stopPropagation={(e) => {
-													const menu = e.currentTarget.nextElementSibling;
-													document.querySelectorAll('[data-group-menu]').forEach(m => m !== menu && m.classList.add('hidden'));
-													menu?.classList.toggle('hidden');
-												}}
-												title="Group options"
-											>
-												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
-												</svg>
-											</button>
-											<div data-group-menu class="hidden absolute right-0 top-full mt-1 w-32 bg-card border border-border rounded-lg shadow-lg z-50">
-												<div class="py-1">
-													<button
-														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
-														on:click|stopPropagation={() => {
-															const newName = prompt('Rename group:', group.name);
-															if (newName?.trim() && newName.trim() !== group.name) {
-																groups.renameGroup('subagents', group.name, newName.trim());
-															}
-														}}
-													>
-														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-														</svg>
-														Rename
-													</button>
-													<button
-														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2 text-destructive"
-														on:click|stopPropagation={() => {
-															if (confirm(`Delete group "${group.name}"? Items will be moved to ungrouped.`)) {
-																groups.deleteGroup('subagents', group.name);
-															}
-														}}
-													>
-														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-														</svg>
-														Delete
-													</button>
-												</div>
-											</div>
-										</div>
-									</div>
-									{#if !group.collapsed}
-										<div class="space-y-1 ml-2">
-											{#each groupAgents as agent}
-												<div class="w-full p-3 bg-accent rounded-lg">
-													<div class="flex items-start gap-3">
-														<svg class="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-														</svg>
-														<div class="flex-1 min-w-0">
-															<div class="flex items-center gap-2">
-																<p class="text-sm text-foreground font-medium truncate">{agent.name}</p>
-																{#if agent.is_builtin}
-																	<span class="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded">Built-in</span>
-																{/if}
-															</div>
-															<p class="text-xs text-muted-foreground line-clamp-2">{agent.description}</p>
-															{#if agent.model}
-																<span class="text-[10px] text-primary mt-1 inline-block">{agent.model}</span>
-															{/if}
-														</div>
-													</div>
-												</div>
-											{/each}
-										</div>
-									{/if}
-								</div>
-							{/if}
-						{/each}
-						<!-- Ungrouped subagents -->
-						{#if subagentsOrganized.ungrouped.length > 0}
-							{#if subagentsOrganized.groupOrder.length > 0}
-								<div class="px-2 py-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide">Other</div>
-							{/if}
-							<div class="space-y-1 {subagentsOrganized.groupOrder.length > 0 ? 'ml-2' : ''}">
-								{#each subagentsOrganized.ungrouped as agent}
-									<div class="w-full p-3 bg-accent rounded-lg">
-										<div class="flex items-start gap-3">
-											<svg class="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-											</svg>
-											<div class="flex-1 min-w-0">
-												<div class="flex items-center gap-2">
-													<p class="text-sm text-foreground font-medium truncate">{agent.name}</p>
-													{#if agent.is_builtin}
-														<span class="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded">Built-in</span>
-													{/if}
-												</div>
-												<p class="text-xs text-muted-foreground line-clamp-2">{agent.description}</p>
-												{#if agent.model}
-													<span class="text-[10px] text-primary mt-1 inline-block">{agent.model}</span>
-												{/if}
-											</div>
-										</div>
-									</div>
-								{/each}
-							</div>
-						{/if}
-						{#if allSubagents.length === 0}
-							<div class="text-center py-8">
-								<svg class="w-12 h-12 mx-auto text-muted-foreground/30 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-								</svg>
-								<p class="text-xs text-muted-foreground">No subagents configured</p>
-							</div>
-						{/if}
-					</div>
-					<div class="mt-auto pt-3">
-						<button on:click={() => showSubagentManager = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">{allSubagents.length === 0 ? '+ Create Subagent' : 'Manage Subagents'}</button>
-					</div>
-				</div>
-			{/if}
-		</aside>
-	{/if}
-
-	<!-- Mobile Session Panel (fullscreen glassmorph overlay) -->
-	<aside class="lg:hidden fixed inset-x-3 top-3 bottom-[4.5rem] z-50 floating-panel rounded-2xl flex flex-col transform transition-all duration-300 {sidebarOpen ? 'opacity-100 scale-100' : 'opacity-0 scale-95 pointer-events-none'}">
-		<!-- Header -->
-		<div class="p-4 border-b border-border flex items-center justify-between">
-			<div class="flex items-center gap-3">
-				<div class="w-8 h-8 rounded-xl bg-primary/20 flex items-center justify-center">
-					<svg class="w-4 h-4 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-					</svg>
-				</div>
-				<span class="font-semibold text-foreground">Chats</span>
-			</div>
-			<button class="w-8 h-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-hover-overlay rounded-lg transition-colors" on:click={() => (sidebarOpen = false)}>
-				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-				</svg>
-			</button>
-		</div>
-
-		<!-- Search -->
-		<div class="p-3">
-			<div class="relative">
-				<svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-				</svg>
-				<input
-					type="text"
-					bind:value={sessionSearchQuery}
-					placeholder="Search sessions..."
-					class="w-full pl-9 pr-8 py-2.5 text-sm bg-muted/50 border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 transition-colors"
-				/>
-				{#if sessionSearchQuery}
-					<button on:click={clearSearch} class="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-muted-foreground hover:text-foreground">
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-						</svg>
-					</button>
-				{/if}
-			</div>
-		</div>
-
-		<!-- Tab Toggle (My Chats / Admin) -->
-		{#if $isAdmin}
-			<div class="px-3 pb-2">
-				<div class="flex bg-muted/50 rounded-xl p-1">
-					<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-2 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}">My Chats</button>
-					<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-2 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}">Admin</button>
-				</div>
-			</div>
-		{/if}
-
-			<div class="flex-1 overflow-y-auto px-3 pb-3">
-				{#if sidebarTab === 'my-chats'}
-					<!-- Open Tabs Section (Mobile) -->
-					{#if $allTabs.length > 0}
-						<div class="mb-4">
-							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium px-2 mb-2">Open ({$allTabs.length})</div>
-							<div class="space-y-1">
-								{#each $allTabs as tab}
-									{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
-									{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', is_favorite: false, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, tags: [], profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
-									<SessionCard
-										session={tabSession}
-										isOpen={true}
-										isActive={tab.id === $activeTabId}
-										isStreaming={tab.isStreaming}
-										showCloseButton={true}
-										abbreviated={true}
-										on:click={() => { tabs.setActiveTab(tab.id); sidebarOpen = false; }}
-										on:close={(e) => handleCloseTab(e, tab.id)}
-									/>
-								{/each}
-							</div>
-						</div>
-					{/if}
-
-					<!-- Search Results (when searching - Mobile) -->
-					{#if sessionSearchQuery.trim()}
-						<div class="flex items-center justify-between px-2 mb-2">
-							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">
-								{isSearching ? 'Searching...' : `Results (${searchResults.length})`}
-							</div>
-							<button
-								on:click={clearSearch}
-								class="text-xs text-muted-foreground hover:text-foreground transition-colors"
-							>
-								Clear
-							</button>
-						</div>
-
-						<div class="space-y-1">
-							{#if isSearching}
-								<div class="flex items-center justify-center py-8">
-									<svg class="w-5 h-5 animate-spin text-muted-foreground" fill="none" viewBox="0 0 24 24">
-										<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-										<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-									</svg>
-								</div>
-							{:else if searchResults.length === 0}
-								<p class="text-xs text-muted-foreground px-2 py-4 text-center">No sessions found matching "{sessionSearchQuery}"</p>
-							{:else}
-								{#each searchResults as result}
-									<button
-										on:click={() => { openSession(result.id); sidebarOpen = false; }}
-										class="w-full text-left px-3 py-2.5 rounded-lg hover:bg-accent active:bg-accent/70 transition-colors group"
-									>
-										<div class="flex items-start gap-2">
-											<div class="flex-1 min-w-0">
-												<div class="text-sm font-medium text-foreground truncate">
-													{result.title || 'Untitled session'}
-												</div>
-												{#if result.match_type === 'content' && result.match_snippet}
-													<div class="text-xs text-muted-foreground mt-1 line-clamp-2">
-														{result.match_snippet}
-													</div>
-												{/if}
-												<div class="flex items-center gap-2 mt-1">
-													<span class="text-xs text-muted-foreground/70">
-														{new Date(result.updated_at).toLocaleDateString()}
-													</span>
-													{#if result.match_type === 'content'}
-														<span class="text-xs bg-accent px-1.5 py-0.5 rounded text-muted-foreground">
-															Content match
-														</span>
-													{/if}
-												</div>
-											</div>
-											<svg class="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-											</svg>
-										</div>
-									</button>
-								{/each}
-							{/if}
-						</div>
-					{:else}
-						<!-- History Header (Mobile) -->
-						<div class="flex items-center justify-between px-2 mb-2">
-							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">History</div>
-							<div class="flex items-center gap-2">
-								<button
-									on:click={() => { sidebarOpen = false; showImportModal = true; }}
-									class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
-									title="Import session"
-								>
-									<svg
-										class="w-3.5 h-3.5"
-										fill="none"
-										stroke="currentColor"
-										viewBox="0 0 24 24"
-									>
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-									</svg>
-								</button>
-								<button
-									on:click={() => tabs.loadSessions()}
-									class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
-									title="Refresh sessions"
-									disabled={$sessionsLoading}
-								>
-									<svg
-										class="w-3.5 h-3.5 {$sessionsLoading ? 'animate-spin' : ''}"
-										fill="none"
-										stroke="currentColor"
-										viewBox="0 0 24 24"
-									>
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-									</svg>
-								</button>
-							</div>
-						</div>
-
-						<!-- Grouped Sessions (Mobile) -->
-						<div class="space-y-3">
-							{#each groupedSessions as group}
-								<div>
-									<!-- Group Header -->
-									<button
-										on:click={() => toggleGroupCollapse(group.key)}
-										class="flex items-center gap-2 px-2 py-1.5 w-full text-left active:bg-accent/50 rounded transition-colors"
-									>
-										<svg
-											class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
-											fill="none"
-											stroke="currentColor"
-											viewBox="0 0 24 24"
-										>
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-										</svg>
-										<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
-										<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
-									</button>
-
-									<!-- Group Content -->
-									{#if !collapsedGroups.has(group.key)}
-										<div class="mt-1 space-y-1">
-											{#each group.sessions as session}
-												<SessionCard
-													{session}
-													abbreviated={true}
-													on:click={() => { openSession(session.id); sidebarOpen = false; }}
-													on:delete={() => deleteSession(null, session.id)}
-												/>
-											{/each}
-										</div>
-									{/if}
-								</div>
-							{/each}
-							{#if filteredSessions.length === 0}
-								<p class="text-xs text-muted-foreground px-2">No chat history yet</p>
-							{/if}
-						</div>
-					{/if}
-				{:else if sidebarTab === 'admin'}
-					<!-- Admin Tab Content (Mobile) -->
-					<!-- Open Tabs Section (Mobile Admin) -->
-					{#if $allTabs.length > 0}
-						<div class="mb-4">
-							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium px-2 mb-2">Open ({$allTabs.length})</div>
-							<div class="space-y-1">
-								{#each $allTabs as tab}
-									{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
-									{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', is_favorite: false, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, tags: [], profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
-									<SessionCard
-										session={tabSession}
-										isOpen={true}
-										isActive={tab.id === $activeTabId}
-										isStreaming={tab.isStreaming}
-										showCloseButton={true}
-										abbreviated={true}
-										on:click={() => { tabs.setActiveTab(tab.id); sidebarOpen = false; }}
-										on:close={(e) => handleCloseTab(e, tab.id)}
-									/>
-								{/each}
-							</div>
-						</div>
-					{/if}
-
-					<!-- Search Results (when searching - Mobile Admin) -->
-					{#if sessionSearchQuery.trim()}
-						<div class="flex items-center justify-between px-2 mb-2">
-							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">
-								{isSearching ? 'Searching...' : `Results (${searchResults.length})`}
-							</div>
-							<button
-								on:click={clearSearch}
-								class="text-xs text-muted-foreground hover:text-foreground transition-colors"
-							>
-								Clear
-							</button>
-						</div>
-
-						<div class="space-y-1">
-							{#if isSearching}
-								<div class="flex items-center justify-center py-8">
-									<svg class="w-5 h-5 animate-spin text-muted-foreground" fill="none" viewBox="0 0 24 24">
-										<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-										<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-									</svg>
-								</div>
-							{:else if searchResults.length === 0}
-								<p class="text-xs text-muted-foreground px-2 py-4 text-center">No sessions found matching "{sessionSearchQuery}"</p>
-							{:else}
-								{#each searchResults as result}
-									<button
-										on:click={() => { openSession(result.id); sidebarOpen = false; }}
-										class="w-full text-left px-3 py-2.5 rounded-lg hover:bg-accent active:bg-accent/70 transition-colors group"
-									>
-										<div class="flex items-start gap-2">
-											<div class="flex-1 min-w-0">
-												<div class="text-sm font-medium text-foreground truncate">
-													{result.title || 'Untitled session'}
-												</div>
-												{#if result.match_type === 'content' && result.match_snippet}
-													<div class="text-xs text-muted-foreground mt-1 line-clamp-2">
-														{result.match_snippet}
-													</div>
-												{/if}
-												<div class="flex items-center gap-2 mt-1">
-													<span class="text-xs text-muted-foreground/70">
-														{new Date(result.updated_at).toLocaleDateString()}
-													</span>
-													{#if result.match_type === 'content'}
-														<span class="text-xs bg-accent px-1.5 py-0.5 rounded text-muted-foreground">
-															Content match
-														</span>
-													{/if}
-												</div>
-											</div>
-											<svg class="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-											</svg>
-										</div>
-									</button>
-								{/each}
-							{/if}
-						</div>
-					{:else}
-						<!-- API User Filter -->
-						<div class="flex items-center justify-between px-2 mb-2">
-							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">API User Sessions</div>
-							<button
-								on:click={() => tabs.loadAdminSessions($adminSessionsFilter)}
-								class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
-								title="Refresh sessions"
-							>
-								<svg
-									class="w-3.5 h-3.5"
-									fill="none"
-									stroke="currentColor"
-									viewBox="0 0 24 24"
-								>
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-								</svg>
-							</button>
-						</div>
-						<div class="mb-3">
-							<label class="text-xs text-muted-foreground uppercase tracking-wider px-2 block mb-1">Filter by User</label>
-							<select
-								class="w-full bg-accent border border-border rounded-md px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-								value={$adminSessionsFilter ?? ''}
-								on:change={(e) => tabs.setAdminSessionsFilter(e.currentTarget.value || null)}
-							>
-								<option value="">All API Users</option>
-								{#each $apiUsers as user}
-									<option value={user.id}>{user.name}</option>
-								{/each}
-							</select>
-						</div>
-
-						<!-- Grouped Admin Sessions (Mobile) -->
-						<div class="space-y-3">
-							{#each groupedAdminSessions as group}
-								<div>
-									<!-- Group Header -->
-									<button
-										on:click={() => toggleGroupCollapse(group.key)}
-										class="flex items-center gap-2 px-2 py-1.5 w-full text-left active:bg-accent/50 rounded transition-colors"
-									>
-										<svg
-											class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
-											fill="none"
-											stroke="currentColor"
-											viewBox="0 0 24 24"
-										>
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-										</svg>
-										<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
-										<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
-									</button>
-
-									<!-- Group Content -->
-									{#if !collapsedGroups.has(group.key)}
-										<div class="mt-1 space-y-1">
-											{#each group.sessions as session}
-												<SessionCard
-													{session}
-													abbreviated={true}
-													on:click={() => { openSession(session.id); sidebarOpen = false; }}
-													on:delete={() => deleteSession(null, session.id)}
-												/>
-											{/each}
-										</div>
-									{/if}
-								</div>
-							{/each}
-							{#if filteredAdminSessions.length === 0}
-								<p class="text-xs text-muted-foreground px-2">No API user sessions found</p>
-							{/if}
-						</div>
-					{/if}
-				{/if}
-			</div>
-
-		<!-- User Footer -->
-		<div class="p-3 border-t border-border">
-			<div class="flex items-center justify-between">
-				<div class="flex items-center gap-2">
-					<div class="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
-						<span class="text-sm font-medium text-primary">{($apiUser?.name || $username)?.[0]?.toUpperCase() || 'U'}</span>
-					</div>
-					<span class="text-sm text-foreground">{$apiUser?.name || $username}</span>
-				</div>
-				<button on:click={handleLogout} class="text-xs text-muted-foreground hover:text-foreground px-3 py-1.5 rounded-lg hover:bg-hover-overlay transition-colors">Logout</button>
-			</div>
-		</div>
-	</aside>
-
-	<!-- Mobile Sidebar Backdrop -->
-	{#if sidebarOpen}
-		<button class="lg:hidden fixed inset-0 z-40 bg-black/40 backdrop-blur-sm" on:click={() => (sidebarOpen = false)} aria-label="Close sidebar"></button>
-	{/if}
-
-	<!-- Mobile Tools Menu Popup -->
-	{#if showToolsMenu}
-		<button class="lg:hidden fixed inset-0 z-50 bg-black/30 backdrop-blur-sm" on:click={() => showToolsMenu = false} aria-label="Close tools menu"></button>
-		<div class="lg:hidden fixed bottom-[4.5rem] left-1/2 -translate-x-1/2 z-50 floating-panel rounded-2xl p-2 min-w-[200px]">
-			<div class="flex flex-col gap-0.5">
-				<button
-					on:click={() => { showToolsMenu = false; showProjectModal = true; }}
-					class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-hover-overlay transition-colors text-left"
-				>
-					<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-					</svg>
-					<span class="text-sm font-medium text-foreground">Projects</span>
-				</button>
-				<button
-					on:click={() => { showToolsMenu = false; showProfileModal = true; }}
-					class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-hover-overlay transition-colors text-left"
-				>
-					<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-					</svg>
-					<span class="text-sm font-medium text-foreground">Profiles</span>
-				</button>
-				<button
-					on:click={() => { showToolsMenu = false; showSubagentManager = true; }}
-					class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-hover-overlay transition-colors text-left"
-				>
-					<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-					</svg>
-					<span class="text-sm font-medium text-foreground">Subagents</span>
-				</button>
-			</div>
-		</div>
-	{/if}
-
-	<!-- Mobile Bottom Navigation - Floating Dock -->
-	<nav class="lg:hidden fixed bottom-3 left-3 right-3 z-50 floating-panel rounded-2xl safe-bottom">
-		<div class="flex items-center justify-around h-12">
-			<button on:click={() => { sidebarOpen = false; showToolsMenu = false; handleNewTab(); }} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-hover-overlay rounded-xl transition-colors" title="New Chat">
-				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-				</svg>
-			</button>
-			<button on:click={() => { showToolsMenu = false; sidebarOpen = !sidebarOpen; }} class="relative flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-hover-overlay rounded-xl transition-colors" title="Chats">
-				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-				</svg>
-				{#if $allTabs.length > 0}
-					<span class="absolute -top-1 -right-1 w-4 h-4 bg-primary text-primary-foreground text-[10px] font-bold rounded-full flex items-center justify-center">{$allTabs.length}</span>
-				{/if}
-			</button>
-			{#if $isAdmin}
-				<button on:click={() => { sidebarOpen = false; showToolsMenu = !showToolsMenu; }} class="relative flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-hover-overlay rounded-xl transition-colors" title="Tools">
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
-					</svg>
-				</button>
-				<button on:click={() => showAnalyticsModal = true} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-hover-overlay rounded-xl transition-colors" title="Analytics">
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-					</svg>
-				</button>
-				<button on:click={() => { sidebarOpen = false; showToolsMenu = false; showSettingsModal = true; }} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-hover-overlay rounded-xl transition-colors" title="Settings">
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-					</svg>
-				</button>
-			{/if}
-		</div>
-	</nav>
-
-	<!-- Main Content -->
-	<main class="flex-1 flex flex-col min-w-0 bg-background pb-[4.5rem] lg:pb-0 lg:ml-[4.5rem]">
-		<!-- Context Bar - Floating Pills Design -->
-		{#if $activeTab}
-			{@const currentTab = $activeTab}
-			{@const tabId = currentTab.id}
-			<div class="h-14 flex items-center justify-center relative">
-				<div class="w-full max-w-5xl mx-auto px-4 sm:px-8 flex items-center gap-2">
-				<!-- Left: Context Pill -->
-				<div class="flex items-center gap-2">
-					<!-- Context usage dropdown (always show) -->
-					{#if currentTab}
-						{@const autocompactBuffer = 45000}
-						{@const contextUsed = (currentTab.contextUsed ?? (currentTab.totalTokensIn + currentTab.totalCacheCreationTokens + currentTab.totalCacheReadTokens)) + autocompactBuffer}
-						{@const contextMax = 200000}
-						{@const contextPercent = Math.min((contextUsed / contextMax) * 100, 100)}
-						<div class="relative group">
-							<button
-								class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
-								title="Context usage: {formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}"
-							>
-								<!-- Circular progress indicator -->
-								<svg class="w-4 h-4 -rotate-90" viewBox="0 0 20 20">
-									<circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="2" opacity="0.2" />
-									<circle
-										cx="10" cy="10" r="8" fill="none"
-										stroke={contextPercent > 80 ? '#ef4444' : contextPercent > 60 ? '#f59e0b' : '#22c55e'}
-										stroke-width="2"
-										stroke-dasharray={2 * Math.PI * 8}
-										stroke-dashoffset={2 * Math.PI * 8 * (1 - contextPercent / 100)}
-										stroke-linecap="round"
-									/>
-								</svg>
-								<span>{Math.round(contextPercent)}%</span>
-							</button>
-							<!-- Token dropdown -->
-							<div class="absolute left-0 top-full mt-1 w-52 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
-								<div class="py-2 px-3 space-y-2">
-									<!-- Context header -->
-									<div class="flex items-center justify-between text-xs pb-1 border-b border-border">
-										<span class="text-muted-foreground">Context</span>
-										<span class="text-foreground font-medium">{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}</span>
-									</div>
-									<div class="flex items-center justify-between text-xs">
-										<span class="flex items-center gap-1.5 text-muted-foreground">
-											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4" />
-											</svg>
-											Input
-										</span>
-										<span class="text-foreground font-medium">{formatTokenCount(currentTab.totalTokensIn)}</span>
-									</div>
-									<div class="flex items-center justify-between text-xs">
-										<span class="flex items-center gap-1.5 text-muted-foreground">
-											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8v12m0 0l4-4m-4 4l-4-4" />
-											</svg>
-											Output
-										</span>
-										<span class="text-foreground font-medium">{formatTokenCount(currentTab.totalTokensOut)}</span>
-									</div>
-									{#if currentTab.totalCacheCreationTokens > 0}
-										<div class="flex items-center justify-between text-xs">
-											<span class="flex items-center gap-1.5 text-muted-foreground">
-												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-												</svg>
-												Cache Creation
-											</span>
-											<span class="text-foreground font-medium">{formatTokenCount(currentTab.totalCacheCreationTokens)}</span>
-										</div>
-									{/if}
-									{#if currentTab.totalCacheReadTokens > 0}
-										<div class="flex items-center justify-between text-xs">
-											<span class="flex items-center gap-1.5 text-blue-400">
-												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-												</svg>
-												Cache Read
-											</span>
-											<span class="text-blue-400 font-medium">{formatTokenCount(currentTab.totalCacheReadTokens)}</span>
-										</div>
-									{/if}
-								</div>
-							</div>
-						</div>
-					{/if}
-				</div>
-
-				<!-- Center: Profile and Project Pills -->
-				<div class="flex-1 flex items-center justify-center gap-2">
-				<!-- Profile Selector (floating pill style with dropdown) -->
-				{#if $apiUser?.profile_id}
-					<!-- API user with locked profile - show as locked indicator -->
-					<div class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-sm text-foreground">
-						<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-						</svg>
-						<span class="hidden sm:inline max-w-[120px] truncate">{$profiles.find((p) => p.id === $apiUser.profile_id)?.name || $apiUser.profile_id}</span>
-						<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24" title="Profile locked by API key">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-						</svg>
-					</div>
-				{:else}
-					{@const headerProfilesOrganized = organizeByGroups($profiles, 'profiles', $groups)}
-					{@const hasProfileGroups = headerProfilesOrganized.groupOrder.length > 0}
-					<div class="relative group">
+						<h2 class="text-xl font-semibold text-foreground mb-2">Welcome to AI Hub</h2>
+						<p class="text-muted-foreground mb-6">Start a conversation with Claude to begin exploring ideas, writing code, or getting help with any task.</p>
 						<button
-							class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-sm text-foreground hover:bg-hover-overlay transition-colors"
+							onclick={handleNewChat}
+							class="inline-flex items-center gap-2 px-6 py-3 bg-primary text-primary-foreground rounded-xl font-medium hover:bg-primary/90 transition-colors"
 						>
-							<svg class="w-4 h-4 {currentTab.profile ? 'text-muted-foreground' : 'text-amber-500'}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-							</svg>
-							<span class="hidden sm:inline max-w-[120px] truncate {!currentTab.profile ? 'text-amber-500' : ''}">{$profiles.find((p) => p.id === currentTab.profile)?.name || 'Select Profile'}</span>
-							<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-							</svg>
-						</button>
-						<!-- Profile dropdown -->
-						<div class="absolute left-0 top-full mt-1 w-56 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 max-h-80 overflow-y-auto">
-							<div class="py-1">
-								{#if $profiles.length === 0}
-									<p class="px-3 py-2 text-sm text-muted-foreground">No profiles yet</p>
-								{:else}
-									<!-- Grouped profiles -->
-									{#each headerProfilesOrganized.groupOrder as group}
-										{@const groupProfiles = headerProfilesOrganized.grouped.get(group.name) || []}
-										{#if groupProfiles.length > 0}
-											<div class="py-1">
-												<button
-													class="w-full flex items-center gap-2 px-3 py-1 text-xs font-medium text-muted-foreground hover:text-foreground uppercase tracking-wide bg-muted/30 transition-colors"
-													on:click|stopPropagation={() => groups.toggleGroupCollapsed('profiles', group.name)}
-												>
-													<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-													</svg>
-													<span>{group.name}</span>
-													<span class="text-muted-foreground/60 ml-auto">({groupProfiles.length})</span>
-												</button>
-												{#if !group.collapsed}
-													{#each groupProfiles as profile}
-														<button
-															on:click={() => setTabProfile(tabId, profile.id)}
-															class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.profile === profile.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
-														>
-															{profile.name}
-														</button>
-													{/each}
-												{/if}
-											</div>
-										{/if}
-									{/each}
-									<!-- Ungrouped profiles -->
-									{#if headerProfilesOrganized.ungrouped.length > 0}
-										{#if hasProfileGroups}
-											<div class="py-1">
-												<div class="px-3 py-1 text-xs font-medium text-muted-foreground uppercase tracking-wide bg-muted/30">
-													Other
-												</div>
-											</div>
-										{/if}
-										{#each headerProfilesOrganized.ungrouped as profile}
-											<button
-												on:click={() => setTabProfile(tabId, profile.id)}
-												class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.profile === profile.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
-											>
-												{profile.name}
-											</button>
-										{/each}
-									{/if}
-								{/if}
-								<div class="border-t border-border my-1"></div>
-								<button
-									on:click={() => (showProfileModal = true)}
-									class="w-full px-3 py-2 text-left text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-								>
-									{$profiles.length === 0 ? 'Create Profile...' : 'Manage Profiles...'}
-								</button>
-							</div>
-						</div>
-					</div>
-				{/if}
-
-				<!-- Project Selector (locked when session exists or for API users) -->
-				{#if $apiUser?.project_id}
-					<!-- API user with locked project - show as locked indicator -->
-					<div class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-sm text-foreground">
-						<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-						</svg>
-						<span class="hidden sm:inline max-w-[120px] truncate">{$projects.find((p) => p.id === $apiUser.project_id)?.name || $apiUser.project_id}</span>
-						<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24" title="Project locked by API key">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-						</svg>
-					</div>
-				{:else}
-					<div class="relative group">
-						<button
-							class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-sm text-foreground {currentTab.sessionId ? 'cursor-default opacity-75' : 'hover:bg-hover-overlay'} transition-colors"
-							title={currentTab.sessionId ? 'Project is locked for this chat' : 'Select project'}
-						>
-							<svg class="w-4 h-4 {currentTab.project ? 'text-muted-foreground' : 'text-amber-500'}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-							</svg>
-							<span class="hidden sm:inline max-w-[120px] truncate {!currentTab.project ? 'text-amber-500' : ''}">{$projects.find((p) => p.id === currentTab.project)?.name || 'Select Project'}</span>
-							{#if currentTab.sessionId}
-								<!-- Lock icon when session exists -->
-								<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-								</svg>
-							{:else}
-								<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-								</svg>
-							{/if}
-						</button>
-						<!-- Project dropdown (only show when no session) -->
-						{#if !currentTab.sessionId}
-							{@const headerProjectsOrganized = organizeByGroups($projects, 'projects', $groups)}
-							{@const hasGroups = headerProjectsOrganized.groupOrder.length > 0}
-							<div class="absolute left-0 top-full mt-1 w-56 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 max-h-80 overflow-y-auto">
-								<div class="py-1">
-									{#if $projects.length === 0}
-										<p class="px-3 py-2 text-sm text-muted-foreground">No projects yet</p>
-									{:else}
-										<!-- Grouped projects -->
-										{#each headerProjectsOrganized.groupOrder as group}
-											{@const groupProjects = headerProjectsOrganized.grouped.get(group.name) || []}
-											{#if groupProjects.length > 0}
-												<div class="py-1">
-													<button
-														class="w-full flex items-center gap-2 px-3 py-1 text-xs font-medium text-muted-foreground hover:text-foreground uppercase tracking-wide bg-muted/30 transition-colors"
-														on:click|stopPropagation={() => groups.toggleGroupCollapsed('projects', group.name)}
-													>
-														<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-														</svg>
-														<span>{group.name}</span>
-														<span class="text-muted-foreground/60 ml-auto">({groupProjects.length})</span>
-													</button>
-													{#if !group.collapsed}
-														{#each groupProjects as project}
-															<button
-																on:click={() => setTabProject(tabId, project.id)}
-																class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.project === project.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
-															>
-																{project.name}
-															</button>
-														{/each}
-													{/if}
-												</div>
-											{/if}
-										{/each}
-										<!-- Ungrouped projects -->
-										{#if headerProjectsOrganized.ungrouped.length > 0}
-											{#if hasGroups}
-												<div class="py-1">
-													<div class="px-3 py-1 text-xs font-medium text-muted-foreground uppercase tracking-wide bg-muted/30">
-														Other
-													</div>
-												</div>
-											{/if}
-											{#each headerProjectsOrganized.ungrouped as project}
-												<button
-													on:click={() => setTabProject(tabId, project.id)}
-													class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.project === project.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
-												>
-													{project.name}
-												</button>
-											{/each}
-										{/if}
-									{/if}
-									<div class="border-t border-border my-1"></div>
-									<button
-										on:click={() => (showProjectModal = true)}
-										class="w-full px-3 py-2 text-left text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-									>
-										{$projects.length === 0 ? 'Create Project...' : 'Manage Projects...'}
-									</button>
-								</div>
-							</div>
-						{/if}
-					</div>
-				{/if}
-				</div>
-
-				<!-- Right: Knowledge Base, Export, Theme Toggle and Connection Status -->
-				<div class="flex items-center gap-2">
-					<!-- Knowledge Base Button (only show when project is selected) -->
-					{#if currentTab.project}
-						<button
-							on:click={() => showKnowledgeModal = true}
-							class="w-8 h-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-all"
-							title="Knowledge Base"
-						>
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-							</svg>
-						</button>
-					{/if}
-					<!-- Git Button (only show when project is selected) -->
-					{#if currentTab.project}
-						<button
-							on:click={() => showGitModal = true}
-							class="w-8 h-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-all"
-							title="Git & GitHub (Cmd+Shift+G)"
-						>
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 3v12m0 0c0 2.5 2 3 3.5 3s3.5-.5 3.5-3m-7 0c0-2.5 2-3 3.5-3s3.5.5 3.5 3m0 0v-6m0 0c0-2.5-2-3-3.5-3S6 6.5 6 9" />
-							</svg>
-						</button>
-					{/if}
-					<!-- Export Button (only show when session is saved) -->
-					{#if currentTab.sessionId}
-						<div class="relative group">
-							<button
-								class="w-8 h-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-all"
-								title="Export session"
-							>
-								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-								</svg>
-							</button>
-							<!-- Export dropdown -->
-							<div class="absolute right-0 top-full mt-1 w-40 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
-								<div class="py-1">
-									<button
-										on:click={() => currentTab.sessionId && exportSession(currentTab.sessionId, 'markdown')}
-										class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
-									>
-										<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-										</svg>
-										Export Markdown
-									</button>
-									<button
-										on:click={() => currentTab.sessionId && exportSession(currentTab.sessionId, 'json')}
-										class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
-									>
-										<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
-										</svg>
-										Export JSON
-									</button>
-								</div>
-							</div>
-						</div>
-					{/if}
-					<ConnectionStatus wsConnected={currentTab.wsConnected} />
-				</div>
-				</div>
-			</div>
-		{:else}
-			<!-- Empty state context bar (no active tab) -->
-			<div class="h-14 flex items-center justify-center">
-				<div class="w-full max-w-5xl mx-auto px-4 sm:px-8">
-				</div>
-			</div>
-		{/if}
-
-		<!-- Active Tab Content -->
-		{#if $activeTab}
-			{@const currentTab = $activeTab}
-			{@const tabId = currentTab.id}
-
-			<!-- Messages Area -->
-			<div
-				use:autoScroll={tabId}
-				class="flex-1 overflow-y-auto"
-			>
-				{#if currentTab.messages.length === 0}
-					<!-- Empty State -->
-					<div class="h-full flex items-center justify-center">
-						<div class="text-center max-w-md px-6">
-							<div class="w-16 h-16 mx-auto mb-6 rounded-2xl bg-primary/10 flex items-center justify-center shadow-s">
-								<svg class="w-8 h-8 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path
-										stroke-linecap="round"
-										stroke-linejoin="round"
-										stroke-width="1.5"
-										d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"
-									/>
-								</svg>
-							</div>
-							<h2 class="text-xl font-semibold text-foreground mb-2">Start a Conversation</h2>
-							<p class="text-muted-foreground mb-4">Ask Claude anything - code, questions, ideas, or just chat.</p>
-							<div class="text-sm text-muted-foreground">
-								<span>Profile:</span>
-								<span class="text-foreground ml-1">{$profiles.find((p) => p.id === currentTab.profile)?.name || currentTab.profile}</span>
-							</div>
-						</div>
-					</div>
-				{:else}
-					<!-- Messages -->
-					<div class="max-w-5xl mx-auto px-4 sm:px-8 py-4 space-y-4">
-						{#each currentTab.messages as message, messageIndex}
-							{#if message.role === 'user'}
-								<!-- User Message - Anvil Style -->
-								<div class="w-full">
-									<!-- Content -->
-									<div class="min-w-0">
-										<div class="flex items-center gap-2 mb-1">
-											<span class="font-semibold text-sm text-blue-400">You</span>
-											<span class="text-xs text-muted-foreground">{formatTime()}</span>
-										</div>
-										<div class="overflow-hidden">
-											<p class="whitespace-pre-wrap break-words overflow-wrap-anywhere text-foreground">{message.content}</p>
-										</div>
-									</div>
-								</div>
-							{:else if message.type === 'text' || !message.type}
-								<!-- Assistant Message - Anvil Style -->
-								{@const currentProfile = $profiles.find(p => p.id === currentTab.profile)}
-								{@const hasPartialMessages = currentProfile?.config?.include_partial_messages !== false}
-								<div class="w-full">
-									<!-- Content -->
-									<div class="min-w-0">
-										<div class="flex items-center gap-2 mb-1">
-											<span class="font-semibold text-sm text-orange-400">Claude</span>
-											<span class="text-xs text-muted-foreground">{formatTime()}</span>
-											{#if message.streaming}
-												<span class="flex gap-0.5">
-													<span class="w-1.5 h-1.5 bg-primary rounded-full animate-bounce" style="animation-delay: 0ms"></span>
-													<span class="w-1.5 h-1.5 bg-primary rounded-full animate-bounce" style="animation-delay: 150ms"></span>
-													<span class="w-1.5 h-1.5 bg-primary rounded-full animate-bounce" style="animation-delay: 300ms"></span>
-												</span>
-											{/if}
-											{#if message.content && !message.streaming}
-												<!-- Action buttons container -->
-												<div class="ml-auto flex items-center gap-1">
-													<!-- Copy response button -->
-													<button
-														class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
-														on:click={() => copyToClipboard(message.content, message.id)}
-														title="Copy response"
-													>
-														{#if copiedMessageId === message.id}
-															<svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-															</svg>
-															<span class="text-green-500">Copied</span>
-														{:else}
-															<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-															</svg>
-															<span>Copy</span>
-														{/if}
-													</button>
-													<!-- Fork from here button -->
-													{#if currentTab.sessionId}
-														<button
-															class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
-															on:click={() => handleForkSession(currentTab.sessionId, messageIndex, message.id)}
-															title="Fork conversation from this point"
-															disabled={forkingMessageId === message.id}
-														>
-															{#if forkingMessageId === message.id}
-																<svg class="w-3.5 h-3.5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-																</svg>
-																<span>Forking...</span>
-															{:else}
-																<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2" />
-																</svg>
-																<span>Fork</span>
-															{/if}
-														</button>
-													{/if}
-												</div>
-											{/if}
-										</div>
-										<div class="overflow-hidden">
-											<div class="prose prose-sm max-w-none break-words overflow-x-auto">
-												{#if message.content}
-													{@html renderMarkdown(message.content, message.streaming)}
-													{#if message.streaming}
-														<span class="inline-block w-2 h-4 ml-0.5 bg-primary animate-pulse"></span>
-													{/if}
-												{:else if message.streaming && !hasPartialMessages}
-													<!-- Only show placeholder dots when partial messages is disabled -->
-													<div class="flex gap-1 py-2">
-														<span class="w-2 h-2 bg-muted-foreground rounded-full animate-pulse"></span>
-														<span class="w-2 h-2 bg-muted-foreground rounded-full animate-pulse" style="animation-delay: 200ms"></span>
-														<span class="w-2 h-2 bg-muted-foreground rounded-full animate-pulse" style="animation-delay: 400ms"></span>
-													</div>
-												{/if}
-											</div>
-										</div>
-										{#if message.metadata && !message.streaming}
-											<div class="mt-2 text-xs text-muted-foreground flex items-center gap-3">
-												{#if message.metadata.total_cost_usd}
-													<span>{formatCost(message.metadata.total_cost_usd as number)}</span>
-												{/if}
-												{#if message.metadata.duration_ms}
-													<span>{((message.metadata.duration_ms as number) / 1000).toFixed(1)}s</span>
-												{/if}
-											</div>
-										{/if}
-									</div>
-								</div>
-							{:else if message.type === 'tool_use' && message.toolName === 'TodoWrite'}
-								<!-- TodoWrite - Render as TodoList component -->
-								{#if message.toolInput?.todos && Array.isArray(message.toolInput.todos)}
-									<div class="w-full">
-										<div class="min-w-0">
-											<TodoList todos={message.toolInput.todos} />
-										</div>
-									</div>
-								{/if}
-							{:else if message.type === 'tool_use'}
-								<!-- Tool Use with grouped Result - Expandable Card -->
-								<div class="w-full">
-									<div class="min-w-0">
-										<details class="w-full border border-border rounded-lg overflow-hidden shadow-s group">
-											<summary class="w-full px-4 py-2 bg-muted/30 hover:bg-muted/50 flex items-center gap-2 cursor-pointer list-none transition-colors">
-												{#if message.toolStatus === 'running' || message.streaming}
-													<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-													</svg>
-												{:else if message.toolStatus === 'error'}
-													<svg class="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-													</svg>
-												{:else}
-													<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-													</svg>
-												{/if}
-												<svg class="w-4 h-4 text-yellow-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-												</svg>
-												<span class="text-sm font-medium text-foreground">{message.toolName}</span>
-												<span class="text-muted-foreground">•</span>
-												{#if message.toolStatus === 'running' || message.streaming}
-													<span class="text-primary text-sm">Executing...</span>
-												{:else if message.toolStatus === 'error'}
-													<span class="text-red-500 text-sm">Error</span>
-												{:else}
-													<span class="text-green-500 text-sm">Complete</span>
-												{/if}
-												<svg class="w-4 h-4 text-muted-foreground ml-auto transition-transform group-open:rotate-180 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-												</svg>
-											</summary>
-											<div class="bg-card border-t border-border">
-												{#if message.partialToolInput || message.toolInput}
-													<div class="px-4 py-3 border-b border-border/50">
-														<div class="text-xs text-muted-foreground mb-1 font-medium">Input</div>
-														{#if message.streaming && message.partialToolInput}
-															<!-- Show raw streaming input with cursor -->
-															<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32 whitespace-pre-wrap break-words font-mono">{message.partialToolInput}<span class="inline-block w-1.5 h-3 ml-0.5 bg-primary animate-pulse"></span></pre>
-														{:else if message.toolInput && Object.keys(message.toolInput).length > 0}
-															<!-- Show formatted JSON when complete -->
-															<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32 whitespace-pre-wrap break-words font-mono">{JSON.stringify(message.toolInput, null, 2)}</pre>
-														{:else if message.partialToolInput}
-															<!-- Fallback: show partial input if toolInput is empty but we have partial -->
-															<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32 whitespace-pre-wrap break-words font-mono">{message.partialToolInput}</pre>
-														{/if}
-													</div>
-												{/if}
-												{#if message.toolResult}
-													<div class="px-4 py-3">
-														<div class="text-xs text-muted-foreground mb-1 font-medium">Result</div>
-														{#if toolResultHasMedia(message.toolResult)}
-															<!-- Show compact message for media - full media displayed outside tool group -->
-															<span class="text-xs text-green-500">✓ {toolResultHasVideo(message.toolResult) ? 'Video' : 'Image'} generated successfully (see below)</span>
-														{:else}
-															<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.toolResult}</pre>
-														{/if}
-													</div>
-												{/if}
-											</div>
-										</details>
-									</div>
-								</div>
-							{:else if message.type === 'tool_result'}
-								<!-- Standalone Tool Result (fallback for ungrouped results) -->
-								<div class="w-full">
-									<div class="min-w-0">
-										<details class="w-full border border-border rounded-lg overflow-hidden shadow-s group">
-											<summary class="w-full px-4 py-2 bg-muted/30 hover:bg-muted/50 flex items-center gap-2 cursor-pointer list-none transition-colors">
-												<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-												</svg>
-												<svg class="w-4 h-4 text-blue-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-												</svg>
-												<span class="text-sm font-medium text-foreground">Tool Result</span>
-												<span class="text-muted-foreground">•</span>
-												<span class="text-xs font-mono text-muted-foreground truncate max-w-[200px]">{message.toolId}</span>
-												<span class="text-muted-foreground">•</span>
-												<span class="text-green-500 text-sm">Success</span>
-												<svg class="w-4 h-4 text-muted-foreground ml-auto transition-transform group-open:rotate-180 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-												</svg>
-											</summary>
-											<div class="px-4 py-3 bg-card border-t border-border">
-												{#if toolResultHasMedia(message.content)}
-													<!-- Show compact message for media - full media displayed outside tool group -->
-													<span class="text-xs text-green-500">✓ {toolResultHasVideo(message.content) ? 'Video' : 'Image'} generated successfully (see below)</span>
-												{:else}
-													<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.content}</pre>
-												{/if}
-											</div>
-										</details>
-									</div>
-								</div>
-							{:else if message.type === 'system'}
-								<!-- System Message (e.g., /context output, status updates) -->
-								<div class="w-full">
-									<div class="min-w-0">
-										<SystemMessage {message} />
-									</div>
-								</div>
-							{:else if message.type === 'subagent'}
-								<!-- Subagent Message - Collapsible container for all subagent work -->
-								<div class="w-full">
-									<div class="min-w-0">
-										<SubagentMessage {message} />
-									</div>
-								</div>
-							{/if}
-						{/each}
-
-						<!-- Error -->
-						{#if currentTab.error}
-							<div class="bg-destructive/10 border border-destructive/30 text-destructive px-4 py-3 rounded-lg flex items-center justify-between shadow-s">
-								<span class="text-sm">{currentTab.error}</span>
-								<button on:click={() => tabs.clearTabError(tabId)} class="text-destructive hover:opacity-80">&times;</button>
-							</div>
-						{/if}
-					</div>
-				{/if}
-			</div>
-
-			<!-- Permission Queue (shown when there are pending permissions) -->
-			{#if currentTab.pendingPermissions && currentTab.pendingPermissions.length > 0}
-				<div class="border-t border-warning/30 bg-warning/5 p-3 sm:p-4">
-					<div class="max-w-5xl mx-auto">
-						<PermissionQueue
-							requests={currentTab.pendingPermissions}
-							on:respond={(e) => handlePermissionRespond(tabId, e)}
-						/>
-					</div>
-				</div>
-			{/if}
-
-			<!-- User Question Queue (shown when there are pending questions from AskUserQuestion tool) -->
-			{#if currentTab.pendingQuestions && currentTab.pendingQuestions.length > 0}
-				<div class="border-t border-info/30 bg-info/5 p-3 sm:p-4">
-					<div class="max-w-5xl mx-auto">
-						{#each currentTab.pendingQuestions as question (question.request_id)}
-							<UserQuestion
-								data={question}
-								on:respond={(e) => handleUserQuestionRespond(tabId, e)}
-							/>
-						{/each}
-					</div>
-				</div>
-			{/if}
-
-			<!-- Input Area - Floating Island -->
-			<div class="px-3 py-1.5 sm:p-4">
-				<div class="max-w-4xl mx-auto">
-					<!-- Hidden file input -->
-					<input type="file" bind:this={fileInput} on:change={handleFileUpload} class="hidden" multiple accept="*/*" />
-
-					<!-- Recording Error Message -->
-					{#if recordingError}
-						<div class="mb-2 px-3 py-2 bg-destructive/10 border border-destructive/30 rounded-lg text-sm text-destructive flex items-center justify-between floating-panel">
-							<span>{recordingError}</span>
-							<button type="button" on:click={() => recordingError = ''} class="ml-2 hover:opacity-70">&times;</button>
-						</div>
-					{/if}
-
-					<form on:submit|preventDefault={() => handleSubmit(tabId)} class="relative">
-						<!-- Top Controls Row (Pills + Attach) -->
-						<div class="mb-2 flex flex-wrap items-center justify-center gap-1.5">
-							<!-- Model/Mode Pills (Admin only) -->
-							{#if currentTab && $isAdmin}
-								{@const currentProfile = $profiles.find(p => p.id === currentTab.profile)}
-								{@const profileModel = currentProfile?.config?.model || 'sonnet'}
-								{@const profilePermissionMode = currentProfile?.config?.permission_mode || 'default'}
-								{@const effectiveModel = currentTab.modelOverride || profileModel}
-								{@const effectiveMode = currentTab.permissionModeOverride || profilePermissionMode}
-								{@const modelLabels = { sonnet: 'Sonnet', 'sonnet-1m': 'Sonnet 1M', opus: 'Opus', haiku: 'Haiku' } as Record<string, string>}
-								{@const modeLabels = { default: 'Ask', acceptEdits: 'Auto-Accept', plan: 'Plan', bypassPermissions: 'Bypass' } as Record<string, string>}
-								<!-- Model Selector Pill -->
-								<div class="relative">
-									<button
-										type="button"
-										on:click={() => { showModelPopup = !showModelPopup; showModePopup = false; }}
-										class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {currentTab.modelOverride ? 'bg-primary/15 text-primary border border-primary/30' : 'bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50'}"
-										disabled={currentTab.isStreaming}
-									>
-										<span>{modelLabels[effectiveModel] || effectiveModel}</span>
-										<svg class="w-2.5 h-2.5 opacity-60 transition-transform rotate-180 {showModelPopup ? 'rotate-0' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
-										</svg>
-									</button>
-									{#if showModelPopup}
-										<div class="fixed inset-0 z-40" on:click={() => showModelPopup = false}></div>
-										<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[90px]">
-											{#each [['sonnet', 'Sonnet'], ['sonnet-1m', 'Sonnet 1M'], ['opus', 'Opus'], ['haiku', 'Haiku']] as [value, label]}
-												<button
-													type="button"
-													on:click={() => {
-														if (value === profileModel) {
-															tabs.setTabModelOverride(tabId, null);
-														} else {
-															tabs.setTabModelOverride(tabId, value);
-														}
-														showModelPopup = false;
-													}}
-													class="w-full px-3 py-1.5 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-3 {effectiveModel === value ? 'bg-accent/50 text-foreground font-medium' : 'text-muted-foreground'}"
-												>
-													<span>{label}</span>
-													{#if effectiveModel === value}
-														<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
-														</svg>
-													{/if}
-												</button>
-											{/each}
-										</div>
-									{/if}
-								</div>
-
-								<!-- Permission Mode Selector Pill -->
-								<div class="relative">
-									<button
-										type="button"
-										on:click={() => { showModePopup = !showModePopup; showModelPopup = false; }}
-										class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {currentTab.permissionModeOverride ? 'bg-primary/15 text-primary border border-primary/30' : 'bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50'}"
-										disabled={currentTab.isStreaming}
-									>
-										<span>{modeLabels[effectiveMode] || effectiveMode}</span>
-										<svg class="w-2.5 h-2.5 opacity-60 transition-transform rotate-180 {showModePopup ? 'rotate-0' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
-										</svg>
-									</button>
-									{#if showModePopup}
-										<div class="fixed inset-0 z-40" on:click={() => showModePopup = false}></div>
-										<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[100px]">
-											{#each [['default', 'Ask'], ['acceptEdits', 'Auto-Accept'], ['plan', 'Plan'], ['bypassPermissions', 'Bypass']] as [value, label]}
-												<button
-													type="button"
-													on:click={() => {
-														if (value === profilePermissionMode) {
-															tabs.setTabPermissionModeOverride(tabId, null);
-														} else {
-															tabs.setTabPermissionModeOverride(tabId, value);
-														}
-														showModePopup = false;
-													}}
-													class="w-full px-3 py-1.5 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-3 {effectiveMode === value ? 'bg-accent/50 text-foreground font-medium' : 'text-muted-foreground'}"
-												>
-													<span>{label}</span>
-													{#if effectiveMode === value}
-														<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
-														</svg>
-													{/if}
-												</button>
-											{/each}
-										</div>
-									{/if}
-								</div>
-							{/if}
-
-							<!-- Attach File Button -->
-							<button
-								type="button"
-								on:click={triggerFileUpload}
-								class="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-full bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50 transition-all disabled:opacity-40"
-								disabled={currentTab.isStreaming || !$claudeAuthenticated || isUploading}
-								title={currentTab.project ? 'Attach file' : 'Select a project to attach files'}
-							>
-								{#if isUploading}
-									<svg class="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-										<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-									</svg>
-								{:else}
-									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-									</svg>
-								{/if}
-								<span>Attach</span>
-							</button>
-
-							<!-- Reset Button (Admin only) -->
-							{#if currentTab && $isAdmin && (currentTab.modelOverride || currentTab.permissionModeOverride)}
-								<button
-									type="button"
-									on:click={() => {
-										tabs.setTabModelOverride(tabId, null);
-										tabs.setTabPermissionModeOverride(tabId, null);
-									}}
-									class="inline-flex items-center gap-1 px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground rounded-full hover:bg-accent/50 transition-all disabled:opacity-40"
-									title="Reset to defaults"
-									disabled={currentTab.isStreaming}
-								>
-									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-									</svg>
-									<span class="hidden sm:inline">Reset</span>
-								</button>
-							{/if}
-						</div>
-
-						<!-- Floating Island Input Container -->
-						<div class="floating-island transition-all duration-200 focus-within:border-primary/40 focus-within:shadow-primary/10 focus-within:shadow-xl">
-
-							<!-- Uploaded Files (inside container) -->
-							{#if (tabUploadedFiles[tabId] || []).length > 0}
-								<div class="px-3 pt-3 pb-0 flex flex-wrap gap-1.5">
-									{#each tabUploadedFiles[tabId] as file, index}
-										<div class="flex items-center gap-1.5 bg-accent/50 text-xs px-2 py-1 rounded-lg group">
-											<svg class="w-3.5 h-3.5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-											</svg>
-											<span class="text-foreground truncate max-w-[100px]" title={file.path}>{file.filename}</span>
-											<button
-												type="button"
-												on:click={() => removeUploadedFile(tabId, index)}
-												class="text-muted-foreground hover:text-destructive opacity-60 group-hover:opacity-100 transition-opacity"
-											>
-												<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-												</svg>
-											</button>
-										</div>
-									{/each}
-								</div>
-							{/if}
-
-							<!-- Main Input Row -->
-							<div class="flex items-center gap-1 p-2 sm:p-2.5">
-								<!-- Textarea Container -->
-								<div class="flex-1 relative min-w-0">
-									<!-- Command Autocomplete -->
-									<CommandAutocomplete
-										bind:this={commandAutocompleteRefs[tabId]}
-										inputValue={tabInputs[tabId] || ''}
-										projectId={currentTab.project}
-										visible={showCommandAutocomplete[tabId] || false}
-										onSelect={(cmd) => handleCommandSelect(tabId, cmd)}
-										onClose={() => {
-											showCommandAutocomplete[tabId] = false;
-											showCommandAutocomplete = showCommandAutocomplete;
-										}}
-									/>
-
-									<!-- File Autocomplete (@ mentions) -->
-									<FileAutocomplete
-										bind:this={fileAutocompleteRefs[tabId]}
-										inputValue={tabInputs[tabId] || ''}
-										projectId={currentTab.project}
-										visible={showFileAutocomplete[tabId] || false}
-										onSelect={(file) => handleFileSelect(tabId, file)}
-										onClose={() => {
-											showFileAutocomplete[tabId] = false;
-											showFileAutocomplete = showFileAutocomplete;
-										}}
-									/>
-
-									<textarea
-										bind:this={textareas[tabId]}
-										bind:value={tabInputs[tabId]}
-										on:input={() => handleInputChange(tabId)}
-										on:keydown={(e) => handleKeyDown(e, tabId)}
-										placeholder="Message Claude..."
-										class="w-full bg-transparent border-0 px-2 sm:px-3 py-2 text-foreground placeholder-muted-foreground/60 resize-none focus:outline-none focus:ring-0 min-h-[44px] max-h-[200px] leading-relaxed text-sm sm:text-base"
-										rows="1"
-										disabled={!$claudeAuthenticated}
-									></textarea>
-								</div>
-
-								<!-- Voice/Send/Stop/Queue Buttons -->
-								<div class="flex items-center gap-1">
-									<!-- Voice Recording Button - always available -->
-									<button
-										type="button"
-										on:click={toggleRecording}
-										disabled={!$claudeAuthenticated || isUploading || isTranscribing}
-										class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center rounded-xl transition-all disabled:opacity-30 disabled:cursor-not-allowed {isRecording ? 'bg-destructive/20 text-destructive animate-pulse' : isTranscribing ? 'bg-primary/15 text-primary' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}"
-										title={isRecording ? 'Stop recording' : isTranscribing ? 'Transcribing...' : 'Voice input'}
-									>
-										{#if isTranscribing}
-											<svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
-											</svg>
-										{:else}
-											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-											</svg>
-										{/if}
-									</button>
-									{#if currentTab.isStreaming}
-										<!-- When streaming: show send button if text entered (interrupts then sends), otherwise show stop button -->
-										{#if (tabInputs[tabId] || '').trim()}
-											<button
-												type="submit"
-												class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-primary hover:bg-primary/90 text-primary-foreground rounded-xl transition-all"
-												title="Send message (interrupts current response)"
-											>
-												<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
-												</svg>
-											</button>
-										{:else}
-											<button
-												type="button"
-												on:click={() => tabs.stopGeneration(tabId)}
-												class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-destructive/15 text-destructive hover:bg-destructive/25 rounded-xl transition-all"
-												title="Stop generating"
-											>
-												<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-													<rect x="6" y="6" width="12" height="12" rx="2" />
-												</svg>
-											</button>
-										{/if}
-									{:else}
-										<!-- Send Button -->
-										<button
-											type="submit"
-											class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-primary hover:bg-primary/90 text-primary-foreground rounded-xl transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-											disabled={!(tabInputs[tabId] || '').trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing}
-											title={isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : "Send message"}
-										>
-											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
-											</svg>
-										</button>
-									{/if}
-								</div>
-							</div>
-						</div>
-					</form>
-				</div>
-			</div>
-		{:else}
-			<!-- Empty state when no tabs are open -->
-			<div class="flex-1 flex flex-col items-center justify-center p-8 text-center">
-				<div class="max-w-md space-y-6">
-					<div class="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-br from-primary/20 to-primary/10 flex items-center justify-center">
-						<svg class="w-8 h-8 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-						</svg>
-					</div>
-
-					<div class="space-y-2">
-						<h2 class="text-xl font-semibold text-foreground">No open chats</h2>
-						<p class="text-sm text-muted-foreground">
-							Start a new conversation or open one from your history
-						</p>
-					</div>
-
-					<div class="flex flex-col sm:flex-row gap-3 justify-center">
-						<button
-							on:click={handleNewTab}
-							class="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg font-medium transition-colors"
-						>
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
 							</svg>
 							New Chat
 						</button>
-						<button
-							on:click={() => (sidebarOpen = true)}
-							class="lg:hidden inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-accent hover:bg-accent/80 text-foreground rounded-lg font-medium transition-colors"
-						>
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-							</svg>
-							View History
-						</button>
 					</div>
+				</div>
+			{:else}
+				<CardContainer
+					cards={deckCards}
+					layout={cardLayout}
+					{activeCardId}
+					oncardactivate={handleCardActivate}
+					oncardclose={handleCardClose}
+					oncardminimize={handleCardMinimize}
+					onlayoutchange={handleLayoutChange}
+					onreorder={handleCardReorder}
+				>
+					{#snippet children({ card, index, isActive })}
+						{@const tab = $allTabs.find(t => t.id === card.id)}
+						{#if tab}
+							<ChatCard
+								id={card.id}
+								title={tab.title || 'New Chat'}
+								sessionId={tab.sessionId || ''}
+								messages={tab.messages}
+								isStreaming={tab.isStreaming}
+								profile={$profiles.find(p => p.id === tab.profile)?.name}
+								project={$projects.find(p => p.id === tab.project)?.name}
+								pinned={card.pinned}
+								minimized={card.minimized}
+								active={isActive}
+								onpin={() => deck.pinCard(card.id)}
+								onminimize={() => handleCardMinimize(card.id)}
+								onclose={() => handleCardClose(card.id)}
+								onactivate={() => handleCardActivate(card.id)}
+								onsendmessage={(msg) => handleSendMessage(card.id, msg)}
+								onstopstreaming={() => handleStopStreaming(card.id)}
+							/>
+
+							<!-- Permission Queue for this tab -->
+							{#if tab.pendingPermissions.length > 0}
+								<div class="absolute bottom-20 left-4 right-4 z-50">
+									<PermissionQueue
+										requests={tab.pendingPermissions}
+										on:respond={(e) => handlePermissionRespond(tab.id, e)}
+									/>
+								</div>
+							{/if}
+
+							<!-- User Question for this tab -->
+							{#if tab.pendingQuestions.length > 0}
+								<div class="absolute bottom-20 left-4 right-4 z-50">
+									<UserQuestion
+										data={tab.pendingQuestions[0]}
+										on:respond={(e) => handleUserQuestionRespond(tab.id, e)}
+									/>
+								</div>
+							{/if}
+						{/if}
+					{/snippet}
+				</CardContainer>
+			{/if}
+
+		{:else if $activeMode === 'agents'}
+			<!-- Agents Mode -->
+			<div class="h-full flex items-center justify-center">
+				<div class="text-center max-w-md px-4">
+					<div class="w-20 h-20 rounded-2xl bg-success/10 flex items-center justify-center mx-auto mb-6">
+						<svg class="w-10 h-10 text-success" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+						</svg>
+					</div>
+					<h2 class="text-xl font-semibold text-foreground mb-2">Background Agents</h2>
+					<p class="text-muted-foreground mb-6">Launch autonomous agents to work on tasks in the background. Perfect for long-running operations.</p>
+					{#if $allAgents.length > 0}
+						<div class="space-y-2 mb-6">
+							{#each $allAgents as agent}
+								<div class="p-3 bg-card border border-border rounded-lg text-left">
+									<div class="flex items-center gap-2">
+										<span class="w-2 h-2 rounded-full {agent.status === 'running' ? 'bg-success animate-pulse' : agent.status === 'completed' ? 'bg-primary' : 'bg-warning'}"></span>
+										<span class="font-medium text-foreground">{agent.name}</span>
+										<span class="text-xs text-muted-foreground ml-auto capitalize">{agent.status}</span>
+									</div>
+									{#if agent.progress}
+										<div class="mt-2 h-1 bg-muted rounded-full overflow-hidden">
+											<div class="h-full bg-primary transition-all" style="width: {agent.progress}%"></div>
+										</div>
+									{/if}
+								</div>
+							{/each}
+						</div>
+					{/if}
+					<button
+						onclick={handleNewAgent}
+						class="inline-flex items-center gap-2 px-6 py-3 bg-success text-success-foreground rounded-xl font-medium hover:bg-success/90 transition-colors"
+					>
+						<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+						</svg>
+						Launch Agent
+					</button>
+				</div>
+			</div>
+
+		{:else if $activeMode === 'studio'}
+			<!-- Studio Mode -->
+			<div class="h-full flex items-center justify-center">
+				<div class="text-center max-w-md px-4">
+					<div class="w-20 h-20 rounded-2xl bg-purple-500/10 flex items-center justify-center mx-auto mb-6">
+						<svg class="w-10 h-10 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4.098 19.902a3.75 3.75 0 005.304 0l6.401-6.402M6.75 21A3.75 3.75 0 013 17.25V4.125C3 3.504 3.504 3 4.125 3h5.25c.621 0 1.125.504 1.125 1.125v4.072M6.75 21a3.75 3.75 0 003.75-3.75V8.197M6.75 21h13.125c.621 0 1.125-.504 1.125-1.125v-5.25c0-.621-.504-1.125-1.125-1.125h-4.072M10.5 8.197l2.88-2.88c.438-.439 1.15-.439 1.59 0l3.712 3.713c.44.44.44 1.152 0 1.59l-2.879 2.88M6.75 17.25h.008v.008H6.75v-.008z" />
+						</svg>
+					</div>
+					<h2 class="text-xl font-semibold text-foreground mb-2">Creative Studio</h2>
+					<p class="text-muted-foreground mb-6">Generate images and videos with AI. Create stunning visuals from text descriptions.</p>
+					<button
+						onclick={handleNewCreate}
+						class="inline-flex items-center gap-2 px-6 py-3 bg-purple-500 text-white rounded-xl font-medium hover:bg-purple-600 transition-colors"
+					>
+						<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+						</svg>
+						Create
+					</button>
+				</div>
+			</div>
+
+		{:else if $activeMode === 'files'}
+			<!-- Files Mode -->
+			<div class="h-full flex items-center justify-center">
+				<div class="text-center max-w-md px-4">
+					<div class="w-20 h-20 rounded-2xl bg-blue-500/10 flex items-center justify-center mx-auto mb-6">
+						<svg class="w-10 h-10 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
+						</svg>
+					</div>
+					<h2 class="text-xl font-semibold text-foreground mb-2">File Browser</h2>
+					<p class="text-muted-foreground mb-6">Browse and manage project files. Coming soon.</p>
 				</div>
 			</div>
 		{/if}
-	</main>
-</div>
+	</DeckLayout>
 
-<!-- Spotlight Search (Cmd+K) -->
-<SpotlightSearch
-	visible={showSpotlight}
-	sessions={$sessions}
-	currentProjectId={$activeTab?.project}
-	onClose={() => showSpotlight = false}
-	onSelectSession={handleSpotlightSelectSession}
-	onSelectCommand={handleSpotlightSelectCommand}
-	onNewChat={handleSpotlightNewChat}
-	onOpenSettings={handleSpotlightOpenSettings}
-/>
-
-<!-- Subagent Manager Panel -->
-{#if showSubagentManager}
-	<SubagentManager onClose={() => showSubagentManager = false} onUpdate={() => loadSubagents()} />
-{/if}
-
-<!-- Settings Modal -->
-<SettingsModal open={showSettingsModal} onClose={() => showSettingsModal = false} />
-
-<!-- Keyboard Shortcuts Modal -->
-<KeyboardShortcutsModal open={showKeyboardShortcuts} onClose={() => showKeyboardShortcuts = false} />
-
-<!-- Analytics Modal -->
-<AnalyticsModal
-	open={showAnalyticsModal}
-	onClose={() => showAnalyticsModal = false}
-	onSessionClick={(sessionId) => {
-		tabs.openSession(sessionId);
-		showAnalyticsModal = false;
-	}}
-/>
-
-<!-- Advanced Search Modal (Cmd+Shift+F) -->
-<AdvancedSearch
-	visible={showAdvancedSearch}
-	onClose={() => showAdvancedSearch = false}
-	onSelectSession={(sessionId) => {
-		tabs.openSession(sessionId);
-		showAdvancedSearch = false;
-	}}
-/>
-
-<!-- Import Session Modal -->
-<ImportSessionModal
-	show={showImportModal}
-	on:close={() => showImportModal = false}
-	on:imported={handleImportSuccess}
-/>
-
-<!-- Tag Manager Modal -->
-{#if showTagManager}
-	<TagManager
-		on:close={handleTagManagerClose}
-		on:tagsUpdated={() => loadAllTags()}
+	<!-- Modals -->
+	<!-- Settings Modal (Svelte 5 - callback props) -->
+	<SettingsModal
+		open={showSettingsModal}
+		onClose={() => showSettingsModal = false}
 	/>
-{/if}
 
-<!-- Session Tag Picker -->
-{#if showTagPicker && tagPickerSessionId}
-	<SessionTagPicker
-		sessionId={tagPickerSessionId}
-		currentTags={tagPickerCurrentTags}
-		position={tagPickerPosition}
-		on:close={closeTagPicker}
-		on:tagsUpdated={handleTagsUpdated}
-		on:openTagManager={handleOpenTagManager}
+	<!-- Spotlight Search (Svelte 5 - callback props) -->
+	<SpotlightSearch
+		visible={showSpotlight}
+		sessions={$sessions}
+		currentProjectId={$activeTab?.project}
+		onClose={() => showSpotlight = false}
+		onSelectSession={(session) => handleSpotlightSelectSession(session)}
+		onSelectCommand={(command) => handleSpotlightSelectCommand(command)}
+		onNewChat={handleSpotlightNewChat}
+		onOpenSettings={handleSpotlightOpenSettings}
 	/>
-{/if}
 
-<!-- Profile Modal -->
-<ProfileModal
-	show={showProfileModal}
-	editingProfile={editingProfile}
-	profiles={$profiles}
-	allSubagents={allSubagents}
-	availableTools={availableTools}
-	groups={$groups}
-	on:close={() => {
-		showProfileModal = false;
-		editingProfile = null;
-	}}
-	on:save={async (e) => {
-		const { isNew, data } = e.detail;
-		if (isNew) {
-			await tabs.createProfile(data);
-		} else {
-			await tabs.updateProfile(data.id, {
-				name: data.name,
-				description: data.description,
-				config: data.config
-			});
-		}
-	}}
-	on:delete={async (e) => {
-		const profileId = e.detail;
-		if (confirm('Delete this profile?')) {
-			await tabs.deleteProfile(profileId);
-		}
-	}}
-	on:export={(e) => handleExportProfile(e.detail)}
-	on:import={async (e) => {
-		// Handle file-based import - parse the file and use our new API
-		const file = e.detail;
-		try {
-			const content = await file.text();
-			const parsed = parseAgentExportFile(content);
-			const profile = await importAgent(parsed);
-			await tabs.loadProfiles();
-			alert(`Successfully imported agent: ${profile.name}`);
-		} catch (err: any) {
-			alert('Import failed: ' + (err.detail || err.message || 'Invalid file format'));
-		}
-	}}
-	on:assignGroup={(e) => groups.assignToGroup('profiles', e.detail.profileId, e.detail.groupName)}
-	on:removeGroup={(e) => groups.removeFromGroup('profiles', e.detail)}
-	on:createGroup={(e) => {
-		groups.createGroup('profiles', e.detail.groupName);
-		groups.assignToGroup('profiles', e.detail.profileId, e.detail.groupName);
-	}}
-/>
-
-<!-- Agent Import Modal -->
-<AgentImportModal
-	show={showAgentImportModal}
-	on:close={() => showAgentImportModal = false}
-	on:imported={handleAgentImported}
-/>
-
-<!-- Knowledge Base Modal -->
-{#if showKnowledgeModal && $activeTab?.project}
-	<KnowledgeManager
-		projectId={$activeTab.project}
-		on:close={() => showKnowledgeModal = false}
+	<!-- Keyboard Shortcuts Modal (Svelte 5 - callback props) -->
+	<KeyboardShortcutsModal
+		open={showKeyboardShortcuts}
+		onClose={() => showKeyboardShortcuts = false}
 	/>
-{/if}
 
-<!-- Git Modal -->
-{#if showGitModal && $activeTab?.project}
-	<GitModal
-		open={showGitModal}
-		projectId={$activeTab.project}
-		onClose={() => showGitModal = false}
-		onOpenSession={(sessionId) => {
-			tabs.openSession(sessionId);
-			showGitModal = false;
-		}}
-	/>
-{/if}
+	<!-- Profile Modal (Svelte 4 - uses export and events) -->
+	{#if showProfileModal}
+		<ProfileModal
+			show={showProfileModal}
+			profiles={$profiles}
+			groups={$groups}
+			on:close={() => showProfileModal = false}
+		/>
+	{/if}
 
-<!-- Project Modal -->
-{#if showProjectModal}
-	<div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" on:click={() => (showProjectModal = false)}>
-		<div class="bg-card rounded-xl w-full max-w-lg max-h-[80vh] overflow-y-auto" on:click|stopPropagation>
-			<div class="p-4 border-b border-border flex items-center justify-between">
-				<h2 class="text-lg font-semibold text-foreground">Projects</h2>
-				<button
-					class="text-muted-foreground hover:text-foreground"
-					on:click={() => {
-						showProjectModal = false;
-						showNewProjectForm = false;
-					}}
-				>
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-					</svg>
-				</button>
-			</div>
+	<!-- Terminal Modal (Svelte 5 - callback props) -->
+	{#if showTerminalModal && terminalSessionId}
+		<TerminalModal
+			sessionId={terminalSessionId}
+			command={terminalCommand}
+			onClose={() => showTerminalModal = false}
+		/>
+	{/if}
 
-			<div class="p-4">
-				{#if showNewProjectForm}
-					<div class="space-y-4">
-						<div>
-							<label class="block text-xs text-muted-foreground mb-1">ID</label>
-							<input bind:value={newProjectId} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground" placeholder="my-project" />
-						</div>
-						<div>
-							<label class="block text-xs text-muted-foreground mb-1">Name</label>
-							<input bind:value={newProjectName} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground" placeholder="My Project" />
-						</div>
-						<div>
-							<label class="block text-xs text-muted-foreground mb-1">Description</label>
-							<textarea bind:value={newProjectDescription} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-none" rows="2" placeholder="Optional"></textarea>
-						</div>
-						<div class="flex gap-2">
-							<button on:click={() => (showNewProjectForm = false)} class="flex-1 px-4 py-2 bg-muted text-foreground rounded-lg hover:bg-accent"> Cancel </button>
-							<button on:click={createProject} class="flex-1 px-4 py-2 bg-primary text-foreground rounded-lg hover:opacity-90"> Create </button>
-						</div>
-					</div>
-				{:else}
-					<div class="space-y-2 mb-4">
-						{#each $projects as project}
-							<div class="flex items-center justify-between p-3 bg-accent rounded-lg">
-								<div class="flex-1 min-w-0">
-									<div class="flex items-center gap-2">
-										<p class="text-sm text-foreground font-medium">{project.name}</p>
-										{#if $groups.projects.assignments[project.id]}
-											<span class="text-[10px] px-1.5 py-0.5 bg-primary/10 text-primary rounded">{$groups.projects.assignments[project.id]}</span>
-										{/if}
-									</div>
-									<p class="text-xs text-muted-foreground mt-0.5">/workspace/{project.path}/</p>
-								</div>
-								<div class="flex gap-1">
-									<!-- Group button -->
-									<div class="relative group/dropdown">
-										<button class="p-1.5 text-muted-foreground hover:text-foreground" title="Assign to group">
-											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
-											</svg>
-										</button>
-										<div class="absolute right-0 top-full mt-1 w-40 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover/dropdown:opacity-100 group-hover/dropdown:visible transition-all z-50">
-											<div class="py-1 max-h-48 overflow-y-auto">
-												{#each $groups.projects.groups as group}
-													<button
-														on:click={() => groups.assignToGroup('projects', project.id, group.name)}
-														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
-													>
-														{#if $groups.projects.assignments[project.id] === group.name}
-															<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-															</svg>
-														{:else}
-															<span class="w-3"></span>
-														{/if}
-														{group.name}
-													</button>
-												{/each}
-												{#if $groups.projects.assignments[project.id]}
-													<button
-														on:click={() => groups.removeFromGroup('projects', project.id)}
-														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
-													>
-														<span class="ml-5">Remove</span>
-													</button>
-												{/if}
-												<div class="border-t border-border my-1"></div>
-												<button
-													on:click={() => { const name = prompt('New group name:'); if (name?.trim()) { groups.createGroup('projects', name.trim()); groups.assignToGroup('projects', project.id, name.trim()); } }}
-													class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
-												>
-													<span class="ml-5">+ New group</span>
-												</button>
-											</div>
-										</div>
-									</div>
-									<button on:click={() => deleteProject(project.id)} class="p-1.5 text-muted-foreground hover:text-destructive" title="Delete project">
-										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-										</svg>
-									</button>
-								</div>
-							</div>
-						{/each}
-					</div>
-					<button on:click={() => (showNewProjectForm = true)} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-gray-500">
-						+ New Project
-					</button>
-				{/if}
-			</div>
-		</div>
-	</div>
-{/if}
+	<!-- Analytics Modal (Svelte 4 - uses export and callback props) -->
+	{#if showAnalyticsModal}
+		<AnalyticsModal
+			open={showAnalyticsModal}
+			onClose={() => showAnalyticsModal = false}
+		/>
+	{/if}
 
-<!-- Terminal Modal for interactive CLI commands (like /resume) -->
-{#if showTerminalModal && terminalSessionId}
-	<TerminalModal
-		sessionId={terminalSessionId}
-		command={terminalCommand}
-		onClose={closeTerminalModal}
-	/>
+	<!-- Import Session Modal (Svelte 4 - uses export and events) -->
+	{#if showImportModal}
+		<ImportSessionModal
+			show={showImportModal}
+			on:close={() => showImportModal = false}
+		/>
+	{/if}
+
+	<!-- Knowledge Manager (Svelte 4 - uses export and events) -->
+	{#if showKnowledgeModal && $activeTab?.project}
+		<KnowledgeManager
+			projectId={$activeTab.project}
+			on:close={() => showKnowledgeModal = false}
+		/>
+	{/if}
+
+	<!-- Git Modal (Svelte 5 - callback props) -->
+	{#if showGitModal && $activeTab?.project}
+		<GitModal
+			open={showGitModal}
+			projectId={$activeTab.project}
+			onClose={() => showGitModal = false}
+		/>
+	{/if}
+
+	<!-- Subagent Manager (Svelte 5 - callback props) -->
+	{#if showSubagentManager}
+		<SubagentManager onClose={() => showSubagentManager = false} />
+	{/if}
 {/if}
 
 <style>
-	.overflow-wrap-anywhere {
-		overflow-wrap: anywhere;
-		word-break: break-word;
-	}
-	.scrollbar-hide::-webkit-scrollbar {
-		display: none;
-	}
-	.scrollbar-hide {
-		-ms-overflow-style: none;
-		scrollbar-width: none;
-	}
-
-	/* Media overlay buttons - show on hover */
-	:global(.generated-media-container:hover .media-overlay-buttons) {
-		opacity: 1 !important;
-	}
-	:global(.media-overlay-buttons) {
-		transition: opacity 0.2s ease-in-out;
-	}
-
-	/* Floating Panel Styles */
-	.floating-panel {
-		background: var(--panel-bg);
-		backdrop-filter: blur(20px);
-		-webkit-backdrop-filter: blur(20px);
-		border: 1px solid var(--panel-border);
-		box-shadow:
-			0 0 0 1px var(--panel-shadow-inset) inset,
-			0 8px 32px var(--panel-shadow-outer),
-			0 2px 8px var(--panel-shadow-inner);
-	}
-
-	/* Floating Pill Styles (for header elements) */
-	.floating-pill {
-		background: var(--panel-bg);
-		backdrop-filter: blur(16px);
-		-webkit-backdrop-filter: blur(16px);
-		border: 1px solid var(--panel-border);
-		border-radius: 9999px;
-		box-shadow:
-			0 2px 8px var(--panel-shadow-inner);
-	}
-
-	/* Floating Island Styles (for input area) */
-	.floating-island {
-		background: var(--panel-bg);
-		backdrop-filter: blur(20px);
-		-webkit-backdrop-filter: blur(20px);
-		border: 1px solid var(--panel-border);
-		border-radius: 1.5rem;
-		box-shadow:
-			0 0 0 1px var(--panel-shadow-inset) inset,
-			0 8px 32px var(--panel-shadow-outer),
-			0 4px 16px var(--panel-shadow-inner);
-	}
-
-	/* Glow effect for active buttons */
-	.shadow-glow {
-		box-shadow:
-			0 0 12px oklch(0.72 0.14 180 / 0.4),
-			0 0 4px oklch(0.72 0.14 180 / 0.3);
-	}
-
-	/* Panel slide-in animation */
-	.panel-slide-in {
-		animation: panelSlideIn 0.25s cubic-bezier(0.32, 0.72, 0, 1);
-	}
-
-	@keyframes panelSlideIn {
-		from {
-			transform: translateX(-16px);
-			opacity: 0;
-		}
-		to {
-			transform: translateX(0);
-			opacity: 1;
-		}
-	}
-
-	/* Legacy sidebar animation - keep for mobile */
-	.sidebar-slide-in {
-		animation: slideInFromLeft 0.2s ease-out;
-	}
-
-	@keyframes slideInFromLeft {
-		from {
-			transform: translateX(-100%);
-			opacity: 0;
-		}
-		to {
-			transform: translateX(0);
-			opacity: 1;
-		}
+	/* Global styles for the page */
+	:global(body) {
+		overflow: hidden;
 	}
 </style>

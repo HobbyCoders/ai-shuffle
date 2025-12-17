@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 # Schema version for migrations
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 
 def get_connection() -> sqlite3.Connection:
@@ -580,6 +580,84 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_session ON worktrees(session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_branch ON worktrees(branch_name)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_status ON worktrees(status)")
+
+    # Background agents (for autonomous task execution)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS background_agents (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            project_id TEXT,
+            session_id TEXT,
+            status TEXT DEFAULT 'queued',
+            progress REAL DEFAULT 0.0,
+            branch TEXT,
+            auto_pr BOOLEAN DEFAULT FALSE,
+            tasks JSON DEFAULT '[]',
+            logs JSON DEFAULT '[]',
+            error TEXT,
+            total_cost_usd REAL DEFAULT 0.0,
+            total_tokens_in INTEGER DEFAULT 0,
+            total_tokens_out INTEGER DEFAULT 0,
+            started_at TIMESTAMP,
+            completed_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+        )
+    """)
+
+    # Studio generations (for image/video generation tracking)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS studio_generations (
+            id TEXT PRIMARY KEY,
+            type TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT,
+            status TEXT DEFAULT 'pending',
+            progress REAL DEFAULT 0.0,
+            file_path TEXT,
+            url TEXT,
+            thumbnail_url TEXT,
+            metadata JSON DEFAULT '{}',
+            error TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            completed_at TIMESTAMP
+        )
+    """)
+
+    # Studio assets (saved generated content library)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS studio_assets (
+            id TEXT PRIMARY KEY,
+            type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT,
+            file_path TEXT NOT NULL,
+            url TEXT NOT NULL,
+            thumbnail_url TEXT,
+            tags JSON DEFAULT '[]',
+            metadata JSON DEFAULT '{}',
+            generation_id TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (generation_id) REFERENCES studio_generations(id) ON DELETE SET NULL
+        )
+    """)
+
+    # Create indexes for background agents and studio tables
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_background_agents_status ON background_agents(status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_background_agents_project ON background_agents(project_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_background_agents_profile ON background_agents(profile_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_background_agents_created ON background_agents(created_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_studio_generations_type ON studio_generations(type)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_studio_generations_status ON studio_generations(status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_studio_generations_created ON studio_generations(created_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_studio_assets_type ON studio_assets(type)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_studio_assets_created ON studio_assets(created_at)")
 
 
 def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:

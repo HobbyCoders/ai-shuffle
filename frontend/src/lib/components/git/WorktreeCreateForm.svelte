@@ -54,12 +54,12 @@
     // Available branches for existing branch selection (non-remote, not already in worktree)
     const availableExistingBranches = $derived(() => {
         const worktreeBranches = new Set($localBranches.map(w => w.name));
-        return branches.filter(b => !b.is_remote && !worktreeBranches.has(b.name));
+        return branches.filter(b => !b.remote && !worktreeBranches.has(b.name));
     });
 
     // Available base branches for creating new branch
     const availableBaseBranches = $derived(() => {
-        return branches.filter(b => !b.is_remote);
+        return branches.filter(b => !b.remote);
     });
 
     // Get main/master as default base branch
@@ -102,7 +102,11 @@
 
             // Call onCreated with the new worktree
             // Note: Session creation is handled by the backend when creating worktree
-            onCreated(worktree, null);
+            if (worktree) {
+                onCreated(worktree, null);
+            } else {
+                error = 'Failed to create worktree - no project selected';
+            }
         } catch (e) {
             const err = e as { detail?: string };
             error = err.detail || 'Failed to create worktree';
