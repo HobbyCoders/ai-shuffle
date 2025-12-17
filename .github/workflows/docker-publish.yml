@@ -7,6 +7,7 @@ on:
       - master
       - ai-hub
       - 'claude/**'  # Allow builds from Claude feature branches
+      - 'feature/**'
     tags:
       - 'v*.*.*'
   pull_request:
