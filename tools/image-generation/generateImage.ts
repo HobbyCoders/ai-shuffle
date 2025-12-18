@@ -174,7 +174,7 @@ function getApiKey(providerId: string): string {
   }
 
   // Legacy fallbacks based on provider
-  if (providerId === 'google-gemini') {
+  if (providerId === 'google-gemini' || providerId === 'google-imagen') {
     return process.env.GEMINI_API_KEY || '';
   }
 

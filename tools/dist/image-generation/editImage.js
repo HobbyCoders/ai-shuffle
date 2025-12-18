@@ -56,7 +56,7 @@ function getApiKey(providerId) {
         return process.env.IMAGE_API_KEY;
     }
     // Legacy fallbacks based on provider
-    if (providerId === 'google-gemini') {
+    if (providerId === 'google-gemini' || providerId === 'google-imagen') {
         return process.env.GEMINI_API_KEY || '';
     }
     if (providerId === 'openai-gpt-image') {
