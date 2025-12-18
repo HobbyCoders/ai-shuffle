@@ -11,12 +11,12 @@
     let selectedCommit = $state<CommitNode | null>(null);
     let graphLimit = $state(50);
 
-    // Layout constants
-    const NODE_RADIUS = 6;
-    const ROW_HEIGHT = 40;
-    const COL_WIDTH = 24;
-    const LEFT_PADDING = 20;
-    const TOP_PADDING = 20;
+    // Layout constants for horizontal timeline
+    const NODE_RADIUS = 8;
+    const COL_WIDTH = 120;  // Horizontal spacing between commits
+    const ROW_HEIGHT = 28;  // Vertical spacing between branch lanes
+    const LEFT_PADDING = 40;
+    const TOP_PADDING = 60;
 
     // Branch colors (consistent colors for branch lanes)
     const BRANCH_COLORS = [
@@ -30,9 +30,9 @@
         '#f97316', // orange
     ];
 
-    // Calculate graph layout
+    // Calculate horizontal graph layout (left to right, newest on left)
     function calculateLayout(commits: CommitNode[]): {
-        nodes: (CommitNode & { x: number; y: number; color: string })[];
+        nodes: (CommitNode & { x: number; y: number; color: string; lane: number })[];
         edges: { x1: number; y1: number; x2: number; y2: number; color: string }[];
         width: number;
         height: number;
@@ -41,58 +41,55 @@
             return { nodes: [], edges: [], width: 0, height: 0 };
         }
 
-        const commitMap = new Map<string, CommitNode & { x: number; y: number; color: string }>();
-        const columnUsage = new Map<number, string>(); // column -> commit sha using it
-        const branchColumns = new Map<string, number>(); // branch/sha -> column
-        const nodes: (CommitNode & { x: number; y: number; color: string })[] = [];
+        const commitMap = new Map<string, CommitNode & { x: number; y: number; color: string; lane: number }>();
+        const laneUsage = new Map<number, string>(); // lane -> commit sha using it
+        const nodes: (CommitNode & { x: number; y: number; color: string; lane: number })[] = [];
         const edges: { x1: number; y1: number; x2: number; y2: number; color: string }[] = [];
 
-        let maxColumn = 0;
+        let maxLane = 0;
 
-        // First pass: assign columns based on parent relationships
+        // First pass: assign lanes (vertical position) based on parent relationships
         commits.forEach((commit, index) => {
-            let column = 0;
+            let lane = 0;
 
-            // Try to use parent's column if available and not in use
+            // Try to use parent's lane if available
             if (commit.parents.length > 0) {
                 const parent = commitMap.get(commit.parents[0]);
                 if (parent) {
-                    // If parent's column is free at this row, use it
-                    const currentUser = columnUsage.get(parent.x);
+                    const currentUser = laneUsage.get(parent.lane);
                     if (!currentUser || currentUser === commit.parents[0]) {
-                        column = parent.x;
+                        lane = parent.lane;
                     }
                 }
             }
 
-            // If column is in use by another branch, find next available
-            while (columnUsage.has(column) && columnUsage.get(column) !== commit.sha) {
-                const user = columnUsage.get(column);
-                // Check if the column user is our parent
+            // If lane is in use by another branch, find next available
+            while (laneUsage.has(lane) && laneUsage.get(lane) !== commit.sha) {
+                const user = laneUsage.get(lane);
                 if (user && commit.parents.includes(user)) {
                     break;
                 }
-                column++;
+                lane++;
             }
 
-            const color = BRANCH_COLORS[column % BRANCH_COLORS.length];
+            const color = BRANCH_COLORS[lane % BRANCH_COLORS.length];
             const node = {
                 ...commit,
-                x: column,
-                y: index,
-                color
+                x: LEFT_PADDING + index * COL_WIDTH,  // Horizontal position based on index
+                y: TOP_PADDING + lane * ROW_HEIGHT,   // Vertical position based on lane
+                color,
+                lane
             };
 
             commitMap.set(commit.sha, node);
-            columnUsage.set(column, commit.sha);
-            maxColumn = Math.max(maxColumn, column);
+            laneUsage.set(lane, commit.sha);
+            maxLane = Math.max(maxLane, lane);
 
-            // Clear column if this commit continues the line
+            // Clear lane if this commit continues the line
             if (commit.parents.length > 0) {
                 const firstParent = commitMap.get(commit.parents[0]);
-                if (firstParent && firstParent.x !== column) {
-                    // Branch merged or diverged, clear parent column
-                    columnUsage.delete(firstParent.x);
+                if (firstParent && firstParent.lane !== lane) {
+                    laneUsage.delete(firstParent.lane);
                 }
             }
 
@@ -104,46 +101,34 @@
             node.parents.forEach((parentSha, parentIndex) => {
                 const parent = commitMap.get(parentSha);
                 if (parent) {
-                    const x1 = LEFT_PADDING + node.x * COL_WIDTH;
-                    const y1 = TOP_PADDING + node.y * ROW_HEIGHT;
-                    const x2 = LEFT_PADDING + parent.x * COL_WIDTH;
-                    const y2 = TOP_PADDING + parent.y * ROW_HEIGHT;
-
-                    // Use parent's color for the edge
                     edges.push({
-                        x1,
-                        y1,
-                        x2,
-                        y2,
+                        x1: node.x,
+                        y1: node.y,
+                        x2: parent.x,
+                        y2: parent.y,
                         color: parentIndex === 0 ? node.color : parent.color
                     });
                 }
             });
         });
 
-        // Calculate final positions
-        nodes.forEach(node => {
-            node.x = LEFT_PADDING + node.x * COL_WIDTH;
-            node.y = TOP_PADDING + node.y * ROW_HEIGHT;
-        });
-
         return {
             nodes,
             edges,
-            width: LEFT_PADDING * 2 + (maxColumn + 1) * COL_WIDTH,
-            height: TOP_PADDING * 2 + commits.length * ROW_HEIGHT
+            width: LEFT_PADDING * 2 + commits.length * COL_WIDTH,
+            height: TOP_PADDING * 2 + (maxLane + 1) * ROW_HEIGHT + 80  // Extra space for labels
         };
     }
 
-    // Generate edge path (bezier curve for merges)
+    // Generate edge path (bezier curve for merges) - horizontal version
     function getEdgePath(edge: { x1: number; y1: number; x2: number; y2: number }): string {
-        if (edge.x1 === edge.x2) {
-            // Straight line
+        if (edge.y1 === edge.y2) {
+            // Straight horizontal line
             return `M ${edge.x1} ${edge.y1} L ${edge.x2} ${edge.y2}`;
         } else {
             // Bezier curve for branch/merge
-            const midY = (edge.y1 + edge.y2) / 2;
-            return `M ${edge.x1} ${edge.y1} C ${edge.x1} ${midY} ${edge.x2} ${midY} ${edge.x2} ${edge.y2}`;
+            const midX = (edge.x1 + edge.x2) / 2;
+            return `M ${edge.x1} ${edge.y1} C ${midX} ${edge.y1} ${midX} ${edge.y2} ${edge.x2} ${edge.y2}`;
         }
     }
 
@@ -174,11 +159,16 @@
         }
     }
 
+    function formatShortDate(dateStr: string): string {
+        const date = new Date(dateStr);
+        return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    }
+
     // Reactive layout calculation
     const layout = $derived(calculateLayout($commits));
 </script>
 
-<div class="p-4">
+<div class="flex flex-col h-full">
     {#if $gitLoading && $commits.length === 0}
         <div class="flex items-center justify-center py-12">
             <svg class="w-6 h-6 animate-spin text-primary" fill="none" viewBox="0 0 24 24">
@@ -196,220 +186,214 @@
             <p class="text-sm mt-1">This repository may be empty or not initialized</p>
         </div>
     {:else}
-        <div class="flex flex-col lg:flex-row gap-4">
-            <!-- Graph visualization -->
-            <div class="flex-1 overflow-x-auto border border-border rounded-lg bg-card">
-                <div class="min-w-[600px]" style="height: {Math.min(layout.height + 40, 500)}px; overflow-y: auto;">
-                    <svg
-                        width="100%"
-                        height={layout.height}
-                        class="block"
-                    >
-                        <!-- Edges -->
-                        {#each layout.edges as edge}
-                            <path
-                                d={getEdgePath(edge)}
-                                fill="none"
-                                stroke={edge.color}
-                                stroke-width="2"
-                                stroke-linecap="round"
-                            />
-                        {/each}
+        <!-- Horizontal scrolling timeline container -->
+        <div class="flex-1 overflow-x-auto overflow-y-hidden border border-border rounded-lg bg-card">
+            <div style="width: {layout.width}px; min-width: 100%; height: {Math.max(layout.height, 200)}px;" class="relative">
+                <svg
+                    width={layout.width}
+                    height={layout.height}
+                    class="block"
+                >
+                    <!-- Timeline base line -->
+                    <line
+                        x1={LEFT_PADDING - 10}
+                        y1={TOP_PADDING}
+                        x2={layout.width - LEFT_PADDING + 10}
+                        y2={TOP_PADDING}
+                        stroke="var(--border)"
+                        stroke-width="2"
+                        stroke-dasharray="4 4"
+                    />
 
-                        <!-- Nodes -->
-                        {#each layout.nodes as node, index}
-                            {@const isHead = node.branches?.includes('HEAD') || (index === 0 && node.branches?.includes($gitStatus?.current_branch || ''))}
-                            <g
-                                transform="translate({node.x}, {node.y})"
-                                class="cursor-pointer"
-                                onclick={() => selectedCommit = node}
-                            >
-                                <!-- Node circle -->
-                                <circle
-                                    r={NODE_RADIUS}
-                                    fill={isHead ? 'var(--primary)' : node.color}
-                                    stroke={selectedCommit?.sha === node.sha ? 'var(--foreground)' : 'transparent'}
-                                    stroke-width="2"
-                                />
+                    <!-- Edges (connections between commits) -->
+                    {#each layout.edges as edge}
+                        <path
+                            d={getEdgePath(edge)}
+                            fill="none"
+                            stroke={edge.color}
+                            stroke-width="2"
+                            stroke-linecap="round"
+                        />
+                    {/each}
 
-                                <!-- HEAD indicator -->
-                                {#if isHead}
-                                    <circle
-                                        r={NODE_RADIUS + 4}
-                                        fill="none"
-                                        stroke="var(--primary)"
-                                        stroke-width="2"
-                                        stroke-dasharray="4 2"
-                                    />
-                                {/if}
-
-                                <!-- Commit info -->
-                                <g transform="translate(20, 0)">
-                                    <!-- Short SHA -->
-                                    <text
-                                        y="4"
-                                        class="text-xs fill-current text-muted-foreground font-mono"
-                                        style="font-size: 11px;"
-                                    >
-                                        {node.shortSha}
-                                    </text>
-
-                                    <!-- Commit message -->
-                                    <text
-                                        x="60"
-                                        y="4"
-                                        class="text-sm fill-current text-foreground"
-                                        style="font-size: 12px;"
-                                    >
-                                        {node.message.length > 50 ? node.message.substring(0, 50) + '...' : node.message}
-                                    </text>
-
-                                    <!-- Branch labels -->
-                                    {#each node.branches || [] as branch, i}
-                                        <rect
-                                            x={350 + i * 80}
-                                            y="-8"
-                                            rx="3"
-                                            ry="3"
-                                            width={branch.length * 7 + 12}
-                                            height="16"
-                                            fill="var(--primary)"
-                                            opacity="0.15"
-                                        />
-                                        <text
-                                            x={356 + i * 80}
-                                            y="3"
-                                            class="fill-current text-primary"
-                                            style="font-size: 10px; font-weight: 500;"
-                                        >
-                                            {branch}
-                                        </text>
-                                    {/each}
-
-                                    <!-- Tags -->
-                                    {#each node.tags || [] as tag, i}
-                                        <rect
-                                            x={350 + (node.branches?.length || 0) * 80 + i * 70}
-                                            y="-8"
-                                            rx="3"
-                                            ry="3"
-                                            width={tag.length * 7 + 12}
-                                            height="16"
-                                            fill="var(--chart-4)"
-                                            opacity="0.15"
-                                        />
-                                        <text
-                                            x={356 + (node.branches?.length || 0) * 80 + i * 70}
-                                            y="3"
-                                            style="font-size: 10px; font-weight: 500; fill: var(--chart-4);"
-                                        >
-                                            {tag}
-                                        </text>
-                                    {/each}
-                                </g>
-                            </g>
-                        {/each}
-                    </svg>
-                </div>
-
-                <!-- Load more button -->
-                {#if $commits.length >= graphLimit}
-                    <div class="p-3 border-t border-border text-center">
-                        <button
-                            onclick={handleLoadMore}
-                            disabled={$gitLoading}
-                            class="text-sm text-primary hover:underline disabled:opacity-50"
+                    <!-- Nodes (commits) -->
+                    {#each layout.nodes as node, index}
+                        {@const isHead = node.branches?.includes('HEAD') || (index === 0 && node.branches?.includes($gitStatus?.current_branch || ''))}
+                        {@const isSelected = selectedCommit?.sha === node.sha}
+                        <g
+                            transform="translate({node.x}, {node.y})"
+                            class="cursor-pointer group"
+                            onclick={() => selectedCommit = selectedCommit?.sha === node.sha ? null : node}
+                            role="button"
+                            tabindex="0"
+                            onkeydown={(e) => e.key === 'Enter' && (selectedCommit = selectedCommit?.sha === node.sha ? null : node)}
                         >
-                            Load more commits...
-                        </button>
-                    </div>
-                {/if}
+                            <!-- Node circle with hover effect -->
+                            <circle
+                                r={isSelected ? NODE_RADIUS + 2 : NODE_RADIUS}
+                                fill={isHead ? 'var(--primary)' : node.color}
+                                stroke={isSelected ? 'var(--foreground)' : 'var(--card)'}
+                                stroke-width={isSelected ? 3 : 2}
+                                class="transition-all duration-150"
+                            />
+
+                            <!-- HEAD indicator ring -->
+                            {#if isHead}
+                                <circle
+                                    r={NODE_RADIUS + 6}
+                                    fill="none"
+                                    stroke="var(--primary)"
+                                    stroke-width="2"
+                                    stroke-dasharray="4 2"
+                                    class="animate-pulse"
+                                />
+                            {/if}
+
+                            <!-- Branch labels above node -->
+                            {#each node.branches || [] as branch, i}
+                                <g transform="translate(0, {-NODE_RADIUS - 12 - i * 20})">
+                                    <rect
+                                        x={-branch.length * 3.5 - 6}
+                                        y="-8"
+                                        rx="4"
+                                        ry="4"
+                                        width={branch.length * 7 + 12}
+                                        height="16"
+                                        fill="var(--primary)"
+                                        opacity="0.9"
+                                    />
+                                    <text
+                                        y="3"
+                                        text-anchor="middle"
+                                        class="fill-primary-foreground"
+                                        style="font-size: 10px; font-weight: 600;"
+                                    >
+                                        {branch}
+                                    </text>
+                                </g>
+                            {/each}
+
+                            <!-- Tag labels -->
+                            {#each node.tags || [] as tag, i}
+                                <g transform="translate(0, {-NODE_RADIUS - 12 - (node.branches?.length || 0) * 20 - i * 20})">
+                                    <rect
+                                        x={-tag.length * 3.5 - 6}
+                                        y="-8"
+                                        rx="4"
+                                        ry="4"
+                                        width={tag.length * 7 + 12}
+                                        height="16"
+                                        fill="var(--chart-4)"
+                                        opacity="0.9"
+                                    />
+                                    <text
+                                        y="3"
+                                        text-anchor="middle"
+                                        style="font-size: 10px; font-weight: 600; fill: white;"
+                                    >
+                                        {tag}
+                                    </text>
+                                </g>
+                            {/each}
+
+                            <!-- Short SHA below node -->
+                            <text
+                                y={NODE_RADIUS + 16}
+                                text-anchor="middle"
+                                class="fill-current text-muted-foreground font-mono"
+                                style="font-size: 10px;"
+                            >
+                                {node.shortSha}
+                            </text>
+
+                            <!-- Date below SHA -->
+                            <text
+                                y={NODE_RADIUS + 28}
+                                text-anchor="middle"
+                                class="fill-current text-muted-foreground/70"
+                                style="font-size: 9px;"
+                            >
+                                {formatShortDate(node.date)}
+                            </text>
+                        </g>
+                    {/each}
+
+                    <!-- "Now" label on the left -->
+                    <text
+                        x={LEFT_PADDING - 20}
+                        y={TOP_PADDING + 4}
+                        text-anchor="end"
+                        class="fill-current text-muted-foreground"
+                        style="font-size: 10px; font-weight: 500;"
+                    >
+                        NOW
+                    </text>
+
+                    <!-- "Older" arrow on the right -->
+                    <g transform="translate({layout.width - LEFT_PADDING + 20}, {TOP_PADDING})">
+                        <text
+                            x="-5"
+                            y="4"
+                            text-anchor="end"
+                            class="fill-current text-muted-foreground"
+                            style="font-size: 10px; font-weight: 500;"
+                        >
+                            OLDER
+                        </text>
+                        <path
+                            d="M 0 0 L 10 0 L 6 -4 M 10 0 L 6 4"
+                            fill="none"
+                            stroke="var(--muted-foreground)"
+                            stroke-width="1.5"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                        />
+                    </g>
+                </svg>
             </div>
 
-            <!-- Commit details panel -->
-            {#if selectedCommit}
-                <div class="w-full lg:w-80 border border-border rounded-lg bg-card p-4">
-                    <div class="flex items-center justify-between mb-4">
-                        <h3 class="font-medium text-foreground">Commit Details</h3>
-                        <button
-                            onclick={() => selectedCommit = null}
-                            class="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
-                        >
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                            </svg>
-                        </button>
+            <!-- Load more button (at the end) -->
+            {#if $commits.length >= graphLimit}
+                <div class="absolute right-4 top-1/2 -translate-y-1/2">
+                    <button
+                        onclick={handleLoadMore}
+                        disabled={$gitLoading}
+                        class="px-3 py-2 text-xs bg-muted text-foreground rounded-lg hover:bg-accent transition-colors disabled:opacity-50 shadow-lg"
+                    >
+                        Load more →
+                    </button>
+                </div>
+            {/if}
+        </div>
+
+        <!-- Commit details panel (below timeline) -->
+        {#if selectedCommit}
+            <div class="mt-4 border border-border rounded-lg bg-card p-4">
+                <div class="flex items-start justify-between gap-4">
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-3 mb-2">
+                            <span class="font-mono text-sm text-primary bg-primary/10 px-2 py-0.5 rounded">{selectedCommit.shortSha}</span>
+                            {#each selectedCommit.branches || [] as branch}
+                                <span class="px-2 py-0.5 text-xs rounded-full bg-primary/15 text-primary">{branch}</span>
+                            {/each}
+                            {#each selectedCommit.tags || [] as tag}
+                                <span class="px-2 py-0.5 text-xs rounded-full bg-amber-500/15 text-amber-600">{tag}</span>
+                            {/each}
+                        </div>
+                        <p class="text-foreground font-medium mb-1">{selectedCommit.message}</p>
+                        <div class="flex items-center gap-4 text-xs text-muted-foreground">
+                            <span>{selectedCommit.author}</span>
+                            <span>{formatDate(selectedCommit.date)}</span>
+                            {#if selectedCommit.parents.length > 0}
+                                <span>Parent: {selectedCommit.parents[0].substring(0, 7)}</span>
+                            {/if}
+                        </div>
                     </div>
-
-                    <div class="space-y-3">
-                        <!-- SHA -->
-                        <div>
-                            <label class="text-xs text-muted-foreground uppercase tracking-wide">SHA</label>
-                            <p class="font-mono text-sm text-foreground break-all">{selectedCommit.sha}</p>
-                        </div>
-
-                        <!-- Message -->
-                        <div>
-                            <label class="text-xs text-muted-foreground uppercase tracking-wide">Message</label>
-                            <p class="text-sm text-foreground">{selectedCommit.message}</p>
-                        </div>
-
-                        <!-- Author -->
-                        <div>
-                            <label class="text-xs text-muted-foreground uppercase tracking-wide">Author</label>
-                            <p class="text-sm text-foreground">{selectedCommit.author}</p>
-                            <p class="text-xs text-muted-foreground">{selectedCommit.email}</p>
-                        </div>
-
-                        <!-- Date -->
-                        <div>
-                            <label class="text-xs text-muted-foreground uppercase tracking-wide">Date</label>
-                            <p class="text-sm text-foreground">{formatDate(selectedCommit.date)}</p>
-                            <p class="text-xs text-muted-foreground">{new Date(selectedCommit.date).toLocaleString()}</p>
-                        </div>
-
-                        <!-- Parents -->
-                        {#if selectedCommit.parents.length > 0}
-                            <div>
-                                <label class="text-xs text-muted-foreground uppercase tracking-wide">Parents</label>
-                                <div class="space-y-1 mt-1">
-                                    {#each selectedCommit.parents as parent}
-                                        <p class="font-mono text-xs text-muted-foreground">{parent.substring(0, 7)}</p>
-                                    {/each}
-                                </div>
-                            </div>
-                        {/if}
-
-                        <!-- Branches -->
-                        {#if selectedCommit.branches && selectedCommit.branches.length > 0}
-                            <div>
-                                <label class="text-xs text-muted-foreground uppercase tracking-wide">Branches</label>
-                                <div class="flex flex-wrap gap-1 mt-1">
-                                    {#each selectedCommit.branches as branch}
-                                        <span class="px-2 py-0.5 text-xs rounded-full bg-primary/15 text-primary">{branch}</span>
-                                    {/each}
-                                </div>
-                            </div>
-                        {/if}
-
-                        <!-- Tags -->
-                        {#if selectedCommit.tags && selectedCommit.tags.length > 0}
-                            <div>
-                                <label class="text-xs text-muted-foreground uppercase tracking-wide">Tags</label>
-                                <div class="flex flex-wrap gap-1 mt-1">
-                                    {#each selectedCommit.tags as tag}
-                                        <span class="px-2 py-0.5 text-xs rounded-full bg-amber-500/15 text-amber-600">{tag}</span>
-                                    {/each}
-                                </div>
-                            </div>
-                        {/if}
-                    </div>
-
-                    <!-- Actions -->
-                    <div class="mt-4 pt-4 border-t border-border flex gap-2">
+                    <div class="flex items-center gap-2 shrink-0">
                         <button
                             onclick={() => navigator.clipboard.writeText(selectedCommit?.sha || '')}
-                            class="flex-1 px-3 py-2 text-xs bg-muted text-foreground rounded-lg hover:bg-accent transition-colors"
+                            class="px-3 py-1.5 text-xs bg-muted text-foreground rounded-lg hover:bg-accent transition-colors"
+                            title="Copy full SHA"
                         >
                             Copy SHA
                         </button>
@@ -419,13 +403,22 @@
                                     git.checkout(selectedCommit.sha);
                                 }
                             }}
-                            class="flex-1 px-3 py-2 text-xs bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity"
+                            class="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity"
                         >
                             Checkout
                         </button>
+                        <button
+                            onclick={() => selectedCommit = null}
+                            class="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
+                            title="Close"
+                        >
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                        </button>
                     </div>
                 </div>
-            {/if}
-        </div>
+            </div>
+        {/if}
     {/if}
 </div>
