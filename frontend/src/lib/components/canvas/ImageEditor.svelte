@@ -1,28 +1,62 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { canvas, editingItem, isLoading } from '$lib/stores/canvas';
 	import { api } from '$lib/api/client';
+	import { getProviders, type ImageProvider } from '$lib/api/canvas';
 	import ProviderSelector from './ProviderSelector.svelte';
 
 	let editPrompt = '';
-	let provider = 'google-gemini';
+	let provider = '';
+	let model: string | null = null;
 
-	// Providers that support image editing
-	const editProviders = [
-		{ id: 'google-gemini', name: 'Nano Banana (Gemini)', desc: 'Fast, natural edits' },
-		{ id: 'openai-gpt-image', name: 'GPT Image', desc: 'Accurate text edits' }
-	];
+	// Data from API
+	let editProviders: ImageProvider[] = [];
+	let loadingProviders = true;
 
 	$: currentItem = $editingItem;
 
 	// Initialize provider from the original image if available
 	$: {
-		if (currentItem && editProviders.some(p => p.id === currentItem.provider)) {
-			provider = currentItem.provider;
+		if (currentItem && editProviders.length > 0) {
+			const originalProvider = editProviders.find((p) => p.id === currentItem.provider);
+			if (originalProvider) {
+				provider = currentItem.provider;
+			} else if (!provider) {
+				provider = editProviders[0].id;
+			}
 		}
 	}
 
+	onMount(async () => {
+		try {
+			const providersData = await getProviders();
+			// Only include providers that support editing
+			editProviders = providersData.image_providers.filter((p) => p.supports_edit);
+
+			// Set defaults
+			if (editProviders.length > 0) {
+				// Try to use original provider if it supports edit
+				if (currentItem && editProviders.some((p) => p.id === currentItem.provider)) {
+					provider = currentItem.provider;
+				} else {
+					provider = editProviders[0].id;
+				}
+				const defaultModel = editProviders.find((p) => p.id === provider)?.models.find((m) => m.default) || editProviders.find((p) => p.id === provider)?.models[0];
+				model = defaultModel?.id || null;
+			}
+		} catch (error) {
+			console.error('Failed to fetch providers:', error);
+		} finally {
+			loadingProviders = false;
+		}
+	});
+
 	function handleProviderChange(newProvider: string) {
 		provider = newProvider;
+	}
+
+	function handleModelChange(newModel: string | null) {
+		model = newModel;
 	}
 
 	async function handleEdit() {
@@ -35,7 +69,8 @@
 			const response = await api.post('/canvas/edit/image', {
 				item_id: currentItem.id,
 				prompt: editPrompt,
-				provider
+				provider,
+				model
 			});
 
 			canvas.completeGeneration(response as any);
@@ -66,11 +101,7 @@
 					</span>
 				</div>
 				<div class="relative aspect-video bg-muted rounded-xl overflow-hidden border border-border">
-					<img
-						src={currentItem.url}
-						alt={currentItem.prompt}
-						class="w-full h-full object-contain"
-					/>
+					<img src={currentItem.url} alt={currentItem.prompt} class="w-full h-full object-contain" />
 				</div>
 
 				<!-- Original Prompt -->
@@ -103,21 +134,22 @@
 						rows="5"
 						class="w-full bg-muted border border-border rounded-xl px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
 					></textarea>
-					<p class="text-xs text-muted-foreground mt-2">
-						Be specific about what you want to change. The AI will modify the original image based on your instructions.
-					</p>
+					<p class="text-xs text-muted-foreground mt-2">Be specific about what you want to change. The AI will modify the original image based on your instructions.</p>
 				</div>
 
 				<!-- Provider Selector -->
 				<div>
-					<ProviderSelector
-						type="image"
-						value={provider}
-						onChange={handleProviderChange}
-					/>
-					<p class="text-xs text-muted-foreground mt-2">
-						Note: Only certain providers support image editing.
-					</p>
+					{#if loadingProviders}
+						<div class="flex items-center gap-2 py-4">
+							<div class="w-4 h-4 border-2 border-muted-foreground border-t-transparent rounded-full animate-spin"></div>
+							<span class="text-sm text-muted-foreground">Loading providers...</span>
+						</div>
+					{:else if editProviders.length === 0}
+						<p class="text-sm text-muted-foreground">No providers available for image editing.</p>
+					{:else}
+						<ProviderSelector type="image" value={provider} modelValue={model} onChange={handleProviderChange} onModelChange={handleModelChange} providers={editProviders} loading={loadingProviders} />
+						<p class="text-xs text-muted-foreground mt-2">Note: Only providers that support image editing are shown.</p>
+					{/if}
 				</div>
 
 				<!-- Example Edits -->
@@ -134,18 +166,13 @@
 
 				<!-- Action Buttons -->
 				<div class="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-end gap-3 pt-4 border-t border-border">
-					<button
-						type="button"
-						onclick={handleCancel}
-						disabled={$isLoading}
-						class="px-6 py-2.5 text-sm font-medium bg-muted text-foreground border border-border rounded-xl hover:bg-accent transition-colors disabled:opacity-50"
-					>
+					<button type="button" onclick={handleCancel} disabled={$isLoading} class="px-6 py-2.5 text-sm font-medium bg-muted text-foreground border border-border rounded-xl hover:bg-accent transition-colors disabled:opacity-50">
 						Cancel
 					</button>
 					<button
 						type="button"
 						onclick={handleEdit}
-						disabled={!editPrompt.trim() || $isLoading}
+						disabled={!editPrompt.trim() || $isLoading || loadingProviders || editProviders.length === 0}
 						class="px-6 py-2.5 text-sm font-medium bg-primary text-primary-foreground rounded-xl hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 min-w-[140px]"
 					>
 						{#if $isLoading}
@@ -171,11 +198,6 @@
 		</div>
 		<h3 class="text-lg font-medium text-foreground mb-2">No image selected</h3>
 		<p class="text-sm text-muted-foreground mb-4">Select an image from the gallery to edit it.</p>
-		<button
-			onclick={() => canvas.setView('gallery')}
-			class="px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors"
-		>
-			Back to Gallery
-		</button>
+		<button onclick={() => canvas.setView('gallery')} class="px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors"> Back to Gallery </button>
 	</div>
 {/if}

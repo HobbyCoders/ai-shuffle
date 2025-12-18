@@ -27,6 +27,84 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/canvas", tags=["Canvas"])
 
+# AI Tools path
+AI_TOOLS_PATH = Path("/opt/ai-tools/dist")
+
+
+# ============================================================================
+# Provider/Model Definitions
+# ============================================================================
+
+IMAGE_PROVIDERS = {
+    "google-gemini": {
+        "id": "google-gemini",
+        "name": "Nano Banana (Gemini)",
+        "description": "Fast iteration, editing, reference images",
+        "supports_edit": True,
+        "supports_reference": True,
+        "models": [
+            {"id": "gemini-2.0-flash-exp-image-generation", "name": "Gemini 2.0 Flash", "default": True},
+            {"id": "gemini-2.0-flash-preview-image-generation", "name": "Gemini 2.0 Flash Preview"},
+        ],
+        "aspect_ratios": ["1:1", "16:9", "9:16", "4:3", "3:4", "2:3", "3:2", "4:5", "5:4", "21:9"],
+        "resolutions": ["1K", "2K"],
+    },
+    "google-imagen": {
+        "id": "google-imagen",
+        "name": "Imagen 4",
+        "description": "Highest quality, photo-realism",
+        "supports_edit": False,
+        "supports_reference": False,
+        "models": [
+            {"id": "imagen-4.0-generate-preview-05-20", "name": "Imagen 4.0", "default": True},
+        ],
+        "aspect_ratios": ["1:1", "16:9", "9:16", "4:3", "3:4", "2:3", "3:2"],
+        "resolutions": ["1K", "2K", "4K"],
+    },
+    "openai-gpt-image": {
+        "id": "openai-gpt-image",
+        "name": "GPT Image",
+        "description": "Accurate text in images, inpainting",
+        "supports_edit": True,
+        "supports_reference": False,
+        "models": [
+            {"id": "gpt-image-1", "name": "GPT Image 1", "default": True},
+        ],
+        "aspect_ratios": ["1:1", "16:9", "9:16"],
+        "resolutions": ["1K", "2K", "4K"],
+    }
+}
+
+VIDEO_PROVIDERS = {
+    "google-veo": {
+        "id": "google-veo",
+        "name": "Veo",
+        "description": "Video extension, frame bridging, native audio",
+        "supports_extend": True,
+        "supports_image_to_video": True,
+        "models": [
+            {"id": "veo-3-generate-preview", "name": "Veo 3 (Audio)", "default": True, "has_audio": True},
+            {"id": "veo-2.0-generate-001", "name": "Veo 2.0"},
+        ],
+        "aspect_ratios": ["16:9", "9:16", "1:1"],
+        "durations": [4, 6, 8],
+        "max_duration": 8,
+    },
+    "openai-sora": {
+        "id": "openai-sora",
+        "name": "Sora",
+        "description": "Fast generation, good quality",
+        "supports_extend": False,
+        "supports_image_to_video": True,
+        "models": [
+            {"id": "sora-2", "name": "Sora 2", "default": True},
+        ],
+        "aspect_ratios": ["16:9", "9:16", "1:1"],
+        "durations": [4, 8, 12],
+        "max_duration": 12,
+    }
+}
+
 
 # ============================================================================
 # Pydantic Models
@@ -41,6 +119,7 @@ class CanvasItem(BaseModel):
     model: Optional[str] = None
     file_path: str
     file_name: str
+    url: Optional[str] = None  # API URL to access the file
     file_size: int = 0
     width: Optional[int] = None
     height: Optional[int] = None
@@ -80,15 +159,34 @@ class ImageEditRequest(BaseModel):
     provider: str = Field(default="google-gemini", description="AI provider to use")
 
 
-class CanvasItemResponse(BaseModel):
-    """Response containing a single canvas item"""
-    item: CanvasItem
-
-
 class CanvasListResponse(BaseModel):
     """Response containing a list of canvas items"""
     items: List[CanvasItem]
     total: int
+
+
+class ProviderInfo(BaseModel):
+    """Information about a provider"""
+    id: str
+    name: str
+    description: str
+    models: List[dict]
+    aspect_ratios: List[str]
+    # Image-specific
+    supports_edit: Optional[bool] = None
+    supports_reference: Optional[bool] = None
+    resolutions: Optional[List[str]] = None
+    # Video-specific
+    supports_extend: Optional[bool] = None
+    supports_image_to_video: Optional[bool] = None
+    durations: Optional[List[int]] = None
+    max_duration: Optional[int] = None
+
+
+class ProvidersResponse(BaseModel):
+    """Response containing available providers"""
+    image_providers: List[ProviderInfo]
+    video_providers: List[ProviderInfo]
 
 
 # ============================================================================
@@ -162,21 +260,29 @@ def get_item_by_id(item_id: str) -> Optional[dict]:
     return None
 
 
+def get_file_url(file_path: str, item_type: str) -> str:
+    """Generate the API URL for a canvas file"""
+    file_name = Path(file_path).name
+    if item_type == "image":
+        return f"/api/v1/canvas/files/images/{file_name}"
+    else:
+        return f"/api/v1/canvas/files/videos/{file_name}"
+
+
 def execute_ai_tool(script: str, timeout: int = 300) -> dict:
     """
-    Execute a Node.js AI tool script and parse the result.
+    Execute a Node.js AI tool script (ESM) and parse the result.
 
     Args:
-        script: The JavaScript code to execute
+        script: The JavaScript code to execute (ESM format)
         timeout: Timeout in seconds
 
     Returns:
         Parsed JSON result from the script
     """
-    tools_dir = settings.effective_tools_dir
-
-    # Create a temporary script file
-    script_path = get_canvas_dir() / f"temp_script_{uuid.uuid4().hex}.js"
+    # Create a temporary script file with .mjs extension for ESM
+    script_id = uuid.uuid4().hex
+    script_path = get_canvas_dir() / f"temp_script_{script_id}.mjs"
 
     try:
         ensure_canvas_directories()
@@ -188,18 +294,18 @@ def execute_ai_tool(script: str, timeout: int = 300) -> dict:
         # Execute with Node.js
         result = subprocess.run(
             ["node", str(script_path)],
-            cwd=str(tools_dir),
             capture_output=True,
             text=True,
             timeout=timeout,
-            env={**os.environ, "NODE_PATH": str(tools_dir / "node_modules")}
+            env={**os.environ}
         )
 
         if result.returncode != 0:
-            logger.error(f"AI tool execution failed: {result.stderr}")
+            error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+            logger.error(f"AI tool execution failed: {error_msg}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"AI tool execution failed: {result.stderr[:500]}"
+                detail=f"AI tool execution failed: {error_msg[:500]}"
             )
 
         # Parse output - expect JSON on stdout
@@ -264,6 +370,7 @@ def create_canvas_item(
         "model": model,
         "file_path": str(file_path),
         "file_name": file_path_obj.name,
+        "url": get_file_url(str(file_path), item_type),
         "file_size": file_size,
         "aspect_ratio": aspect_ratio,
         "resolution": resolution,
@@ -285,6 +392,23 @@ def create_canvas_item(
 # ============================================================================
 # API Endpoints
 # ============================================================================
+
+@router.get("/providers", response_model=ProvidersResponse)
+async def get_providers(token: str = Depends(require_auth)):
+    """
+    Get available AI providers and their capabilities.
+
+    Returns information about supported providers, models, aspect ratios,
+    resolutions, and feature support for both image and video generation.
+    """
+    image_providers = [ProviderInfo(**p) for p in IMAGE_PROVIDERS.values()]
+    video_providers = [ProviderInfo(**p) for p in VIDEO_PROVIDERS.values()]
+
+    return ProvidersResponse(
+        image_providers=image_providers,
+        video_providers=video_providers
+    )
+
 
 @router.get("", response_model=CanvasListResponse)
 async def list_canvas_items(
@@ -318,6 +442,30 @@ async def list_canvas_items(
     return CanvasListResponse(items=items, total=total)
 
 
+@router.get("/files/images/{filename}")
+async def serve_canvas_image(filename: str, token: str = Depends(require_auth)):
+    """Serve a canvas image file"""
+    from fastapi.responses import FileResponse
+
+    file_path = get_images_dir() / filename
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    return FileResponse(file_path, media_type="image/png")
+
+
+@router.get("/files/videos/{filename}")
+async def serve_canvas_video(filename: str, token: str = Depends(require_auth)):
+    """Serve a canvas video file"""
+    from fastapi.responses import FileResponse
+
+    file_path = get_videos_dir() / filename
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    return FileResponse(file_path, media_type="video/mp4")
+
+
 @router.get("/{item_id}", response_model=CanvasItem)
 async def get_canvas_item(
     item_id: str,
@@ -345,8 +493,38 @@ async def generate_image(
     an image from the text prompt.
 
     If reference_images are provided, uses generateWithReference for
-    style/character consistency.
+    style/character consistency (only supported by google-gemini).
     """
+    # Validate provider
+    if request.provider not in IMAGE_PROVIDERS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid provider: {request.provider}. Must be one of: {list(IMAGE_PROVIDERS.keys())}"
+        )
+
+    provider_info = IMAGE_PROVIDERS[request.provider]
+
+    # Validate reference images only work with supporting providers
+    if request.reference_images and not provider_info.get("supports_reference"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Provider {request.provider} does not support reference images"
+        )
+
+    # Validate aspect ratio
+    if request.aspect_ratio not in provider_info["aspect_ratios"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Aspect ratio {request.aspect_ratio} not supported by {request.provider}. Supported: {provider_info['aspect_ratios']}"
+        )
+
+    # Validate resolution
+    if request.resolution not in provider_info["resolutions"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Resolution {request.resolution} not supported by {request.provider}. Supported: {provider_info['resolutions']}"
+        )
+
     ensure_canvas_directories()
 
     # Generate unique filename
@@ -354,66 +532,59 @@ async def generate_image(
     file_id = uuid.uuid4().hex[:8]
     output_path = get_images_dir() / f"img_{timestamp}_{file_id}.png"
 
-    # Prepare the AI tool script
+    # Get default model if not specified
+    model = request.model
+    if not model:
+        for m in provider_info["models"]:
+            if m.get("default"):
+                model = m["id"]
+                break
+
+    # Prepare the AI tool script (ESM format)
     if request.reference_images:
         # Use generateWithReference for style/character consistency
         ref_images_json = json.dumps(request.reference_images)
         script = f"""
-const {{ generateWithReference }} = require('./image-tools.js');
+import {{ generateWithReference }} from '/opt/ai-tools/dist/image-generation/generateWithReference.js';
 
-async function main() {{
-    const result = await generateWithReference({{
-        prompt: {json.dumps(request.prompt)},
-        referenceImages: {ref_images_json},
-        outputPath: {json.dumps(str(output_path))},
-        provider: {json.dumps(request.provider)},
-        model: {json.dumps(request.model)},
-        aspectRatio: {json.dumps(request.aspect_ratio)},
-        resolution: {json.dumps(request.resolution)}
-    }});
-    console.log(JSON.stringify(result));
-}}
-
-main().catch(err => {{
-    console.error(JSON.stringify({{ error: err.message }}));
-    process.exit(1);
+const result = await generateWithReference({{
+    prompt: {json.dumps(request.prompt)},
+    reference_images: {ref_images_json},
+    provider: {json.dumps(request.provider)},
+    model: {json.dumps(model)},
+    aspect_ratio: {json.dumps(request.aspect_ratio)},
+    output_dir: {json.dumps(str(get_images_dir()))}
 }});
+console.log(JSON.stringify(result));
 """
     else:
         # Standard image generation
         script = f"""
-const {{ generateImage }} = require('./image-tools.js');
+import {{ generateImage }} from '/opt/ai-tools/dist/image-generation/generateImage.js';
 
-async function main() {{
-    const result = await generateImage({{
-        prompt: {json.dumps(request.prompt)},
-        outputPath: {json.dumps(str(output_path))},
-        provider: {json.dumps(request.provider)},
-        model: {json.dumps(request.model)},
-        aspectRatio: {json.dumps(request.aspect_ratio)},
-        resolution: {json.dumps(request.resolution)}
-    }});
-    console.log(JSON.stringify(result));
-}}
-
-main().catch(err => {{
-    console.error(JSON.stringify({{ error: err.message }}));
-    process.exit(1);
+const result = await generateImage({{
+    prompt: {json.dumps(request.prompt)},
+    provider: {json.dumps(request.provider)},
+    model: {json.dumps(model)},
+    aspect_ratio: {json.dumps(request.aspect_ratio)},
+    resolution: {json.dumps(request.resolution)},
+    output_dir: {json.dumps(str(get_images_dir()))}
 }});
+console.log(JSON.stringify(result));
 """
 
     # Execute the AI tool
     result = execute_ai_tool(script)
 
-    # Get the actual output path from result if provided
-    actual_path = result.get("outputPath", str(output_path))
+    # Get the actual output path from result
+    actual_path = result.get("file_path") or result.get("outputPath") or str(output_path)
 
     # Create and save the canvas item
     item = create_canvas_item(
         item_type="image",
         prompt=request.prompt,
         provider=request.provider,
-        model=request.model or result.get("model"),
+        model=model or result.get("model_used"),
         file_path=actual_path,
         aspect_ratio=request.aspect_ratio,
         resolution=request.resolution,
@@ -439,6 +610,29 @@ async def generate_video(
 
     If source_image is provided, generates an image-to-video animation.
     """
+    # Validate provider
+    if request.provider not in VIDEO_PROVIDERS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid provider: {request.provider}. Must be one of: {list(VIDEO_PROVIDERS.keys())}"
+        )
+
+    provider_info = VIDEO_PROVIDERS[request.provider]
+
+    # Validate duration
+    if request.duration > provider_info["max_duration"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Duration {request.duration}s exceeds max for {request.provider} ({provider_info['max_duration']}s)"
+        )
+
+    # Validate aspect ratio
+    if request.aspect_ratio not in provider_info["aspect_ratios"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Aspect ratio {request.aspect_ratio} not supported by {request.provider}. Supported: {provider_info['aspect_ratios']}"
+        )
+
     ensure_canvas_directories()
 
     # Generate unique filename
@@ -446,70 +640,69 @@ async def generate_video(
     file_id = uuid.uuid4().hex[:8]
     output_path = get_videos_dir() / f"vid_{timestamp}_{file_id}.mp4"
 
-    # Prepare the AI tool script
+    # Get default model if not specified
+    model = request.model
+    if not model:
+        for m in provider_info["models"]:
+            if m.get("default"):
+                model = m["id"]
+                break
+
+    # Prepare the AI tool script (ESM format)
     if request.source_image:
         # Image-to-video generation
         script = f"""
-const {{ imageToVideo }} = require('./video-tools.js');
+import {{ imageToVideo }} from '/opt/ai-tools/dist/video-generation/imageToVideo.js';
 
-async function main() {{
-    const result = await imageToVideo({{
-        prompt: {json.dumps(request.prompt)},
-        sourceImage: {json.dumps(request.source_image)},
-        outputPath: {json.dumps(str(output_path))},
-        provider: {json.dumps(request.provider)},
-        model: {json.dumps(request.model)},
-        aspectRatio: {json.dumps(request.aspect_ratio)},
-        duration: {request.duration}
-    }});
-    console.log(JSON.stringify(result));
-}}
-
-main().catch(err => {{
-    console.error(JSON.stringify({{ error: err.message }}));
-    process.exit(1);
+const result = await imageToVideo({{
+    prompt: {json.dumps(request.prompt)},
+    image_path: {json.dumps(request.source_image)},
+    provider: {json.dumps(request.provider)},
+    model: {json.dumps(model)},
+    aspect_ratio: {json.dumps(request.aspect_ratio)},
+    duration: {request.duration},
+    output_dir: {json.dumps(str(get_videos_dir()))}
 }});
+console.log(JSON.stringify(result));
 """
     else:
         # Standard video generation
         script = f"""
-const {{ generateVideo }} = require('./video-tools.js');
+import {{ generateVideo }} from '/opt/ai-tools/dist/video-generation/generateVideo.js';
 
-async function main() {{
-    const result = await generateVideo({{
-        prompt: {json.dumps(request.prompt)},
-        outputPath: {json.dumps(str(output_path))},
-        provider: {json.dumps(request.provider)},
-        model: {json.dumps(request.model)},
-        aspectRatio: {json.dumps(request.aspect_ratio)},
-        duration: {request.duration}
-    }});
-    console.log(JSON.stringify(result));
-}}
-
-main().catch(err => {{
-    console.error(JSON.stringify({{ error: err.message }}));
-    process.exit(1);
+const result = await generateVideo({{
+    prompt: {json.dumps(request.prompt)},
+    provider: {json.dumps(request.provider)},
+    model: {json.dumps(model)},
+    aspect_ratio: {json.dumps(request.aspect_ratio)},
+    duration: {request.duration},
+    output_dir: {json.dumps(str(get_videos_dir()))}
 }});
+console.log(JSON.stringify(result));
 """
 
     # Execute the AI tool (videos can take longer)
     result = execute_ai_tool(script, timeout=600)
 
-    # Get the actual output path from result if provided
-    actual_path = result.get("outputPath", str(output_path))
+    # Get the actual output path from result
+    actual_path = result.get("file_path") or result.get("video_url") or str(output_path)
+
+    # If it's a URL, extract filename
+    if actual_path.startswith("/api/"):
+        actual_path = result.get("file_path", str(output_path))
 
     # Create and save the canvas item
     item = create_canvas_item(
         item_type="video",
         prompt=request.prompt,
         provider=request.provider,
-        model=request.model or result.get("model"),
+        model=model or result.get("model_used"),
         file_path=actual_path,
         aspect_ratio=request.aspect_ratio,
         duration=request.duration,
         metadata={
             "source_image": request.source_image,
+            "source_video_uri": result.get("source_video_uri"),  # For extending Veo videos
             "generation_result": result
         }
     )
@@ -528,6 +721,20 @@ async def edit_image(
     Creates a new canvas item for the edited version while preserving
     the original. Links to the original via parent_id.
     """
+    # Validate provider supports editing
+    if request.provider not in IMAGE_PROVIDERS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid provider: {request.provider}"
+        )
+
+    provider_info = IMAGE_PROVIDERS[request.provider]
+    if not provider_info.get("supports_edit"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Provider {request.provider} does not support image editing"
+        )
+
     # Get the original item
     original_item = get_item_by_id(request.item_id)
     if not original_item:
@@ -542,59 +749,53 @@ async def edit_image(
             detail="Can only edit image items"
         )
 
-    original_path = original_item.get("file_path")
-    if not original_path or not Path(original_path).exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Original image file not found"
-        )
-
     ensure_canvas_directories()
 
-    # Generate unique filename for edited version
+    # Generate unique filename for edited image
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     file_id = uuid.uuid4().hex[:8]
-    output_path = get_images_dir() / f"img_edit_{timestamp}_{file_id}.png"
+    output_path = get_images_dir() / f"img_{timestamp}_{file_id}_edit.png"
 
-    # Prepare the AI tool script for image editing
+    # Get default model
+    model = None
+    for m in provider_info["models"]:
+        if m.get("default"):
+            model = m["id"]
+            break
+
+    # Prepare the AI tool script (ESM format)
     script = f"""
-const {{ editImage }} = require('./image-tools.js');
+import {{ editImage }} from '/opt/ai-tools/dist/image-generation/editImage.js';
 
-async function main() {{
-    const result = await editImage({{
-        inputPath: {json.dumps(original_path)},
-        prompt: {json.dumps(request.prompt)},
-        outputPath: {json.dumps(str(output_path))},
-        provider: {json.dumps(request.provider)}
-    }});
-    console.log(JSON.stringify(result));
-}}
-
-main().catch(err => {{
-    console.error(JSON.stringify({{ error: err.message }}));
-    process.exit(1);
+const result = await editImage({{
+    prompt: {json.dumps(request.prompt)},
+    image_path: {json.dumps(original_item["file_path"])},
+    provider: {json.dumps(request.provider)},
+    model: {json.dumps(model)},
+    output_dir: {json.dumps(str(get_images_dir()))}
 }});
+console.log(JSON.stringify(result));
 """
 
     # Execute the AI tool
     result = execute_ai_tool(script)
 
-    # Get the actual output path from result if provided
-    actual_path = result.get("outputPath", str(output_path))
+    # Get the actual output path from result
+    actual_path = result.get("file_path") or result.get("outputPath") or str(output_path)
 
     # Create and save the canvas item
     item = create_canvas_item(
         item_type="image",
         prompt=request.prompt,
         provider=request.provider,
-        model=result.get("model"),
+        model=model or result.get("model_used"),
         file_path=actual_path,
         aspect_ratio=original_item.get("aspect_ratio", "16:9"),
         resolution=original_item.get("resolution"),
         parent_id=request.item_id,
         metadata={
-            "edit_instruction": request.prompt,
             "original_prompt": original_item.get("prompt"),
+            "edit_instruction": request.prompt,
             "generation_result": result
         }
     )
@@ -611,40 +812,32 @@ async def delete_canvas_item(
     """
     Delete a canvas item.
 
-    By default, only removes the item from the metadata store.
+    By default, only removes the item from the database.
     Set delete_file=true to also delete the actual media file.
     """
     items = load_canvas_items()
-
-    # Find the item
     item_to_delete = None
-    item_index = None
+
     for i, item in enumerate(items):
         if item.get("id") == item_id:
-            item_to_delete = item
-            item_index = i
+            item_to_delete = items.pop(i)
             break
 
-    if item_to_delete is None:
+    if not item_to_delete:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Canvas item not found: {item_id}"
         )
 
     # Optionally delete the file
-    if delete_file:
-        file_path = item_to_delete.get("file_path")
-        if file_path:
-            path = Path(file_path)
-            if path.exists():
-                try:
-                    path.unlink()
-                    logger.info(f"Deleted media file: {file_path}")
-                except IOError as e:
-                    logger.warning(f"Failed to delete media file {file_path}: {e}")
+    if delete_file and item_to_delete.get("file_path"):
+        try:
+            file_path = Path(item_to_delete["file_path"])
+            if file_path.exists():
+                file_path.unlink()
+                logger.info(f"Deleted canvas file: {file_path}")
+        except IOError as e:
+            logger.warning(f"Failed to delete canvas file: {e}")
 
-    # Remove from list and save
-    items.pop(item_index)
+    # Save updated items list
     save_canvas_items(items)
-
-    logger.info(f"Deleted canvas item: {item_id}")
