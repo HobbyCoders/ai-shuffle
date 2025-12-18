@@ -171,43 +171,41 @@
 		></textarea>
 	</div>
 
-	<!-- Provider Selector -->
-	<div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-		<ProviderSelector
-			type="image"
-			value={provider}
-			modelValue={model}
-			onChange={handleProviderChange}
-			onModelChange={handleModelChange}
-			providers={imageProviders}
-			loading={loadingProviders}
-		/>
+	<!-- Provider and Model Selector -->
+	<ProviderSelector
+		type="image"
+		value={provider}
+		modelValue={model}
+		onChange={handleProviderChange}
+		onModelChange={handleModelChange}
+		providers={imageProviders}
+		loading={loadingProviders}
+	/>
 
-		<!-- Resolution Selector -->
-		<div>
-			<label class="block text-xs text-muted-foreground mb-1.5">Resolution</label>
-			{#if loadingProviders}
-				<div class="flex gap-2">
-					<div class="flex-1 px-3 py-2.5 bg-muted border border-border rounded-lg">
-						<div class="flex items-center justify-center gap-2">
-							<div class="w-4 h-4 border-2 border-muted-foreground border-t-transparent rounded-full animate-spin"></div>
-						</div>
+	<!-- Resolution Selector -->
+	<div>
+		<label class="block text-xs text-muted-foreground mb-2">Resolution</label>
+		{#if loadingProviders}
+			<div class="flex gap-2">
+				<div class="flex-1 px-3 py-2.5 bg-muted border border-border rounded-lg">
+					<div class="flex items-center justify-center gap-2">
+						<div class="w-4 h-4 border-2 border-muted-foreground border-t-transparent rounded-full animate-spin"></div>
 					</div>
 				</div>
-			{:else}
-				<div class="flex gap-2">
-					{#each availableResolutions as res}
-						<button
-							type="button"
-							onclick={() => (resolution = res)}
-							class="flex-1 px-3 py-2.5 text-sm font-medium rounded-lg transition-colors {resolution === res ? 'bg-primary text-primary-foreground' : 'bg-muted text-foreground hover:bg-hover-overlay border border-border'}"
-						>
-							{res}
-						</button>
-					{/each}
-				</div>
-			{/if}
-		</div>
+			</div>
+		{:else}
+			<div class="flex flex-wrap gap-2">
+				{#each availableResolutions as res}
+					<button
+						type="button"
+						onclick={() => (resolution = res)}
+						class="px-4 py-2.5 text-sm font-medium rounded-lg transition-colors min-w-[60px] {resolution === res ? 'bg-primary text-primary-foreground' : 'bg-muted text-foreground hover:bg-hover-overlay border border-border'}"
+					>
+						{res}
+					</button>
+				{/each}
+			</div>
+		{/if}
 	</div>
 
 	<!-- Aspect Ratio Selector -->

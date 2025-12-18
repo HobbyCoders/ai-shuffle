@@ -73,6 +73,54 @@ export interface CanvasState {
 const PREFERENCE_KEY = 'canvas_view_prefs';
 const SAVE_DEBOUNCE_MS = 500;
 
+// ============================================================================
+// API Response Types (what the backend returns)
+// ============================================================================
+
+interface BackendCanvasItem {
+	id: string;
+	type: string;
+	prompt: string;
+	provider: string;
+	model: string | null;
+	file_path: string;
+	file_name: string;
+	url: string | null;
+	file_size: number;
+	width: number | null;
+	height: number | null;
+	duration: number | null;
+	aspect_ratio: string;
+	resolution: string | null;
+	parent_id: string | null;
+	metadata: Record<string, unknown> | null;
+	created_at: string;
+	updated_at: string;
+}
+
+/**
+ * Transform backend snake_case response to frontend camelCase format
+ */
+function mapBackendItemToFrontend(item: BackendCanvasItem): CanvasItem {
+	return {
+		id: item.id,
+		type: item.type as 'image' | 'video',
+		filename: item.file_name,
+		url: item.url || `/api/v1/canvas/files/${item.type === 'image' ? 'images' : 'videos'}/${item.file_name}`,
+		prompt: item.prompt,
+		provider: item.provider,
+		model: item.model,
+		settings: {
+			aspectRatio: item.aspect_ratio,
+			resolution: item.resolution || undefined,
+			duration: item.duration || undefined
+		},
+		fileSize: item.file_size,
+		createdAt: item.created_at,
+		sourceVideoUri: item.metadata?.source_video_uri as string | undefined
+	};
+}
+
 const DEFAULT_STATE: CanvasState = {
 	items: [],
 	selectedItemId: null,
@@ -301,10 +349,11 @@ function createCanvasStore() {
 		 */
 		async loadItems(): Promise<void> {
 			try {
-				const response = await api.get<{ items: CanvasItem[]; total: number }>('/canvas');
+				const response = await api.get<{ items: BackendCanvasItem[]; total: number }>('/canvas');
+				const items = (response?.items || []).map(mapBackendItemToFrontend);
 				update((state) => ({
 					...state,
-					items: response?.items || [],
+					items,
 					error: null
 				}));
 			} catch (error) {
@@ -356,8 +405,14 @@ function createCanvasStore() {
 
 		/**
 		 * Complete generation successfully with the new item
+		 * Accepts either backend format (snake_case) or frontend format (camelCase)
 		 */
-		completeGeneration(item: CanvasItem): void {
+		completeGeneration(rawItem: BackendCanvasItem | CanvasItem): void {
+			// Check if it's backend format (has file_name) and map if needed
+			const item = 'file_name' in rawItem
+				? mapBackendItemToFrontend(rawItem as BackendCanvasItem)
+				: rawItem as CanvasItem;
+
 			update((state) => ({
 				...state,
 				isGenerating: false,
@@ -506,8 +561,14 @@ function createCanvasStore() {
 
 		/**
 		 * Add an item to the gallery (used when receiving from backend)
+		 * Accepts either backend format (snake_case) or frontend format (camelCase)
 		 */
-		addItem(item: CanvasItem): void {
+		addItem(rawItem: BackendCanvasItem | CanvasItem): void {
+			// Check if it's backend format (has file_name) and map if needed
+			const item = 'file_name' in rawItem
+				? mapBackendItemToFrontend(rawItem as BackendCanvasItem)
+				: rawItem as CanvasItem;
+
 			update((state) => ({
 				...state,
 				items: [item, ...state.items.filter((i) => i.id !== item.id)]

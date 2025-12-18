@@ -38,13 +38,13 @@ AI_TOOLS_PATH = Path("/opt/ai-tools/dist")
 IMAGE_PROVIDERS = {
     "google-gemini": {
         "id": "google-gemini",
-        "name": "Nano Banana (Gemini)",
+        "name": "Nano Banana",
         "description": "Fast iteration, editing, reference images",
         "supports_edit": True,
         "supports_reference": True,
         "models": [
-            {"id": "gemini-2.0-flash-exp-image-generation", "name": "Gemini 2.0 Flash", "default": True},
-            {"id": "gemini-2.0-flash-preview-image-generation", "name": "Gemini 2.0 Flash Preview"},
+            {"id": "gemini-2.5-flash-image", "name": "Nano Banana", "default": True},
+            {"id": "gemini-3-pro-image-preview", "name": "Nano Banana Pro"},
         ],
         "aspect_ratios": ["1:1", "16:9", "9:16", "4:3", "3:4", "2:3", "3:2", "4:5", "5:4", "21:9"],
         "resolutions": ["1K", "2K"],
@@ -56,10 +56,12 @@ IMAGE_PROVIDERS = {
         "supports_edit": False,
         "supports_reference": False,
         "models": [
-            {"id": "imagen-4.0-generate-preview-05-20", "name": "Imagen 4.0", "default": True},
+            {"id": "imagen-4.0-generate-001", "name": "Imagen 4", "default": True},
+            {"id": "imagen-4.0-ultra-generate-001", "name": "Imagen 4 Ultra"},
+            {"id": "imagen-4.0-fast-generate-001", "name": "Imagen 4 Fast"},
         ],
-        "aspect_ratios": ["1:1", "16:9", "9:16", "4:3", "3:4", "2:3", "3:2"],
-        "resolutions": ["1K", "2K", "4K"],
+        "aspect_ratios": ["1:1", "16:9", "9:16", "4:3", "3:4"],
+        "resolutions": ["1K", "2K"],
     },
     "openai-gpt-image": {
         "id": "openai-gpt-image",
@@ -68,7 +70,7 @@ IMAGE_PROVIDERS = {
         "supports_edit": True,
         "supports_reference": False,
         "models": [
-            {"id": "gpt-image-1", "name": "GPT Image 1", "default": True},
+            {"id": "gpt-image-1", "name": "GPT Image", "default": True},
         ],
         "aspect_ratios": ["1:1", "16:9", "9:16"],
         "resolutions": ["1K", "2K", "4K"],
@@ -78,15 +80,17 @@ IMAGE_PROVIDERS = {
 VIDEO_PROVIDERS = {
     "google-veo": {
         "id": "google-veo",
-        "name": "Veo",
+        "name": "Google Veo",
         "description": "Video extension, frame bridging, native audio",
         "supports_extend": True,
         "supports_image_to_video": True,
         "models": [
-            {"id": "veo-3-generate-preview", "name": "Veo 3 (Audio)", "default": True, "has_audio": True},
-            {"id": "veo-2.0-generate-001", "name": "Veo 2.0"},
+            {"id": "veo-3.1-generate-preview", "name": "Veo 3.1", "default": True},
+            {"id": "veo-3.1-fast-generate-preview", "name": "Veo 3.1 Fast"},
+            {"id": "veo-3-generate-preview", "name": "Veo 3", "has_audio": True},
+            {"id": "veo-3-fast-generate-preview", "name": "Veo 3 Fast", "has_audio": True},
         ],
-        "aspect_ratios": ["16:9", "9:16", "1:1"],
+        "aspect_ratios": ["16:9", "9:16"],
         "durations": [4, 6, 8],
         "max_duration": 8,
     },
@@ -269,12 +273,13 @@ def get_file_url(file_path: str, item_type: str) -> str:
         return f"/api/v1/canvas/files/videos/{file_name}"
 
 
-def execute_ai_tool(script: str, timeout: int = 300) -> dict:
+def execute_ai_tool(script: str, item_type: str = "image", timeout: int = 300) -> dict:
     """
     Execute a Node.js AI tool script (ESM) and parse the result.
 
     Args:
         script: The JavaScript code to execute (ESM format)
+        item_type: Type of media being generated ("image" or "video")
         timeout: Timeout in seconds
 
     Returns:
@@ -291,13 +296,20 @@ def execute_ai_tool(script: str, timeout: int = 300) -> dict:
         with open(script_path, "w", encoding="utf-8") as f:
             f.write(script)
 
+        # Set up environment with output directories for the AI tools
+        env = {
+            **os.environ,
+            "GENERATED_IMAGES_DIR": str(get_images_dir()),
+            "GENERATED_VIDEOS_DIR": str(get_videos_dir()),
+        }
+
         # Execute with Node.js
         result = subprocess.run(
             ["node", str(script_path)],
             capture_output=True,
             text=True,
             timeout=timeout,
-            env={**os.environ}
+            env=env
         )
 
         if result.returncode != 0:
@@ -541,6 +553,7 @@ async def generate_image(
                 break
 
     # Prepare the AI tool script (ESM format)
+    # Note: output directory is set via GENERATED_IMAGES_DIR env var in execute_ai_tool
     if request.reference_images:
         # Use generateWithReference for style/character consistency
         ref_images_json = json.dumps(request.reference_images)
@@ -552,8 +565,7 @@ const result = await generateWithReference({{
     reference_images: {ref_images_json},
     provider: {json.dumps(request.provider)},
     model: {json.dumps(model)},
-    aspect_ratio: {json.dumps(request.aspect_ratio)},
-    output_dir: {json.dumps(str(get_images_dir()))}
+    aspect_ratio: {json.dumps(request.aspect_ratio)}
 }});
 console.log(JSON.stringify(result));
 """
@@ -567,17 +579,31 @@ const result = await generateImage({{
     provider: {json.dumps(request.provider)},
     model: {json.dumps(model)},
     aspect_ratio: {json.dumps(request.aspect_ratio)},
-    resolution: {json.dumps(request.resolution)},
-    output_dir: {json.dumps(str(get_images_dir()))}
+    resolution: {json.dumps(request.resolution)}
 }});
 console.log(JSON.stringify(result));
 """
 
-    # Execute the AI tool
-    result = execute_ai_tool(script)
+    # Execute the AI tool (env vars set output directory)
+    result = execute_ai_tool(script, item_type="image")
+
+    # Check if generation succeeded
+    if not result.get("success", True) or result.get("error"):
+        error_msg = result.get("error", "Image generation failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_msg
+        )
 
     # Get the actual output path from result
     actual_path = result.get("file_path") or result.get("outputPath") or str(output_path)
+
+    # Verify the file was actually created
+    if not Path(actual_path).exists():
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Image generation completed but file was not created"
+        )
 
     # Create and save the canvas item
     item = create_canvas_item(
@@ -649,6 +675,7 @@ async def generate_video(
                 break
 
     # Prepare the AI tool script (ESM format)
+    # Note: output directory is set via GENERATED_VIDEOS_DIR env var in execute_ai_tool
     if request.source_image:
         # Image-to-video generation
         script = f"""
@@ -660,8 +687,7 @@ const result = await imageToVideo({{
     provider: {json.dumps(request.provider)},
     model: {json.dumps(model)},
     aspect_ratio: {json.dumps(request.aspect_ratio)},
-    duration: {request.duration},
-    output_dir: {json.dumps(str(get_videos_dir()))}
+    duration: {request.duration}
 }});
 console.log(JSON.stringify(result));
 """
@@ -675,14 +701,21 @@ const result = await generateVideo({{
     provider: {json.dumps(request.provider)},
     model: {json.dumps(model)},
     aspect_ratio: {json.dumps(request.aspect_ratio)},
-    duration: {request.duration},
-    output_dir: {json.dumps(str(get_videos_dir()))}
+    duration: {request.duration}
 }});
 console.log(JSON.stringify(result));
 """
 
-    # Execute the AI tool (videos can take longer)
-    result = execute_ai_tool(script, timeout=600)
+    # Execute the AI tool (videos can take longer, env vars set output directory)
+    result = execute_ai_tool(script, item_type="video", timeout=600)
+
+    # Check if generation succeeded
+    if not result.get("success", True) or result.get("error"):
+        error_msg = result.get("error", "Video generation failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_msg
+        )
 
     # Get the actual output path from result
     actual_path = result.get("file_path") or result.get("video_url") or str(output_path)
@@ -690,6 +723,13 @@ console.log(JSON.stringify(result));
     # If it's a URL, extract filename
     if actual_path.startswith("/api/"):
         actual_path = result.get("file_path", str(output_path))
+
+    # Verify the file was actually created
+    if not Path(actual_path).exists():
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Video generation completed but file was not created"
+        )
 
     # Create and save the canvas item
     item = create_canvas_item(
@@ -764,6 +804,7 @@ async def edit_image(
             break
 
     # Prepare the AI tool script (ESM format)
+    # Note: output directory is set via GENERATED_IMAGES_DIR env var in execute_ai_tool
     script = f"""
 import {{ editImage }} from '/opt/ai-tools/dist/image-generation/editImage.js';
 
@@ -771,17 +812,31 @@ const result = await editImage({{
     prompt: {json.dumps(request.prompt)},
     image_path: {json.dumps(original_item["file_path"])},
     provider: {json.dumps(request.provider)},
-    model: {json.dumps(model)},
-    output_dir: {json.dumps(str(get_images_dir()))}
+    model: {json.dumps(model)}
 }});
 console.log(JSON.stringify(result));
 """
 
-    # Execute the AI tool
-    result = execute_ai_tool(script)
+    # Execute the AI tool (env vars set output directory)
+    result = execute_ai_tool(script, item_type="image")
+
+    # Check if generation succeeded
+    if not result.get("success", True) or result.get("error"):
+        error_msg = result.get("error", "Image edit failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_msg
+        )
 
     # Get the actual output path from result
     actual_path = result.get("file_path") or result.get("outputPath") or str(output_path)
+
+    # Verify the file was actually created
+    if not Path(actual_path).exists():
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Image edit completed but file was not created"
+        )
 
     # Create and save the canvas item
     item = create_canvas_item(

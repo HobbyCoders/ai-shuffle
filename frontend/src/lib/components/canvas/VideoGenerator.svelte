@@ -175,31 +175,29 @@
 		></textarea>
 	</div>
 
-	<!-- Provider and Duration -->
-	<div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-		<ProviderSelector type="video" value={provider} modelValue={model} onChange={handleProviderChange} onModelChange={handleModelChange} providers={videoProviders} loading={loadingProviders} />
+	<!-- Provider and Model Selector -->
+	<ProviderSelector type="video" value={provider} modelValue={model} onChange={handleProviderChange} onModelChange={handleModelChange} providers={videoProviders} loading={loadingProviders} />
 
-		<!-- Duration Selector -->
-		<div>
-			<label class="block text-xs text-muted-foreground mb-1.5">Duration</label>
-			{#if loadingProviders}
-				<div class="flex gap-2">
-					<div class="flex-1 px-3 py-2.5 bg-muted border border-border rounded-lg">
-						<div class="flex items-center justify-center gap-2">
-							<div class="w-4 h-4 border-2 border-muted-foreground border-t-transparent rounded-full animate-spin"></div>
-						</div>
+	<!-- Duration Selector -->
+	<div>
+		<label class="block text-xs text-muted-foreground mb-2">Duration</label>
+		{#if loadingProviders}
+			<div class="flex gap-2">
+				<div class="flex-1 px-3 py-2.5 bg-muted border border-border rounded-lg">
+					<div class="flex items-center justify-center gap-2">
+						<div class="w-4 h-4 border-2 border-muted-foreground border-t-transparent rounded-full animate-spin"></div>
 					</div>
 				</div>
-			{:else}
-				<div class="flex gap-2">
-					{#each availableDurations as dur}
-						<button type="button" onclick={() => (duration = dur)} class="flex-1 px-3 py-2.5 text-sm font-medium rounded-lg transition-colors {duration === dur ? 'bg-primary text-primary-foreground' : 'bg-muted text-foreground hover:bg-hover-overlay border border-border'}">
-							{dur}s
-						</button>
-					{/each}
-				</div>
-			{/if}
-		</div>
+			</div>
+		{:else}
+			<div class="flex flex-wrap gap-2">
+				{#each availableDurations as dur}
+					<button type="button" onclick={() => (duration = dur)} class="px-4 py-2.5 text-sm font-medium rounded-lg transition-colors min-w-[60px] {duration === dur ? 'bg-primary text-primary-foreground' : 'bg-muted text-foreground hover:bg-hover-overlay border border-border'}">
+						{dur}s
+					</button>
+				{/each}
+			</div>
+		{/if}
 	</div>
 
 	<!-- Aspect Ratio Selector -->

@@ -170,19 +170,19 @@
 									<span class="text-foreground">{$selectedItem.model}</span>
 								</div>
 							{/if}
-							{#if $selectedItem.settings.aspectRatio}
+							{#if $selectedItem.settings?.aspectRatio}
 								<div class="flex justify-between">
 									<span class="text-muted-foreground">Aspect Ratio</span>
 									<span class="text-foreground">{$selectedItem.settings.aspectRatio}</span>
 								</div>
 							{/if}
-							{#if $selectedItem.settings.resolution}
+							{#if $selectedItem.settings?.resolution}
 								<div class="flex justify-between">
 									<span class="text-muted-foreground">Resolution</span>
 									<span class="text-foreground">{$selectedItem.settings.resolution}</span>
 								</div>
 							{/if}
-							{#if $selectedItem.settings.duration}
+							{#if $selectedItem.settings?.duration}
 								<div class="flex justify-between">
 									<span class="text-muted-foreground">Duration</span>
 									<span class="text-foreground">{$selectedItem.settings.duration}s</span>

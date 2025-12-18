@@ -248,7 +248,7 @@
 						</span>
 
 						<!-- Duration Badge (for videos) -->
-						{#if item.type === 'video' && item.settings.duration}
+						{#if item.type === 'video' && item.settings?.duration}
 							<span class="px-2 py-1 text-xs font-medium rounded-md bg-black/50 text-white">
 								{formatDuration(item.settings.duration)}
 							</span>
