@@ -15,6 +15,8 @@
 		openCards,
 		minimizedCards,
 		maximizedCard,
+		activeMode,
+		WORKSPACE_MODES,
 		type WorkspaceCard as WorkspaceCardType
 	} from '$lib/stores/workspace';
 	import WorkspaceCard from './WorkspaceCard.svelte';
@@ -55,6 +57,9 @@
 
 	// Check if there's a maximized card
 	const hasMaximizedCard = $derived($maximizedCard !== undefined);
+
+	// Get current mode config for empty state
+	const currentModeConfig = $derived(WORKSPACE_MODES.find(m => m.id === $activeMode) || WORKSPACE_MODES[0]);
 </script>
 
 <div
@@ -87,13 +92,18 @@
 					stroke="currentColor"
 					stroke-width="1.5"
 				>
-					<rect x="3" y="3" width="7" height="7" rx="1" />
-					<rect x="14" y="3" width="7" height="7" rx="1" />
-					<rect x="3" y="14" width="7" height="7" rx="1" />
-					<rect x="14" y="14" width="7" height="7" rx="1" />
+					<path d={currentModeConfig.icon} />
 				</svg>
-				<p class="empty-text">No cards open</p>
-				<p class="empty-hint">Open a chat from the sidebar or press <kbd>Cmd+N</kbd></p>
+				<p class="empty-text">No {currentModeConfig.name.toLowerCase()} open</p>
+				<p class="empty-hint">
+					{#if $activeMode === 'chat'}
+						Open a conversation from the sidebar or click <kbd>+</kbd>
+					{:else if $activeMode === 'files'}
+						Open a file browser from the sidebar or click <kbd>+</kbd>
+					{:else}
+						Click <kbd>+</kbd> to get started
+					{/if}
+				</p>
 			</div>
 		</div>
 	{/if}
@@ -105,17 +115,6 @@
 		flex: 1;
 		overflow: hidden;
 		background: var(--workspace-bg, #0a0a0a);
-
-		/* Subtle grid pattern */
-		background-image:
-			linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
-			linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
-		background-size: 20px 20px;
-	}
-
-	.workspace.has-maximized {
-		/* Hide grid when a card is maximized */
-		background-image: none;
 	}
 
 	.empty-state {

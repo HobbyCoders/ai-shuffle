@@ -8,8 +8,13 @@ export default defineConfig({
 			'/api': {
 				target: 'http://localhost:8000',
 				changeOrigin: true,
-				cookieDomainRewrite: '',
-				secure: false
+				secure: false,
+				cookieDomainRewrite: {
+					'*': ''
+				},
+				cookiePathRewrite: {
+					'*': '/'
+				}
 			},
 			'/health': {
 				target: 'http://localhost:8000',

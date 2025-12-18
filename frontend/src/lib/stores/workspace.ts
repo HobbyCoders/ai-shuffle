@@ -19,9 +19,9 @@ import { api } from '$lib/api/client';
 
 export type CardState = 'open' | 'minimized' | 'maximized';
 
-export type CardType = 'chat' | 'settings' | 'profile' | 'project';
+export type CardType = 'chat' | 'files' | 'settings' | 'profile' | 'project';
 
-export type WorkspaceMode = 'chat'; // Will expand: 'canvas' | 'tasks' | etc.
+export type WorkspaceMode = 'chat' | 'files';
 
 export interface CardPosition {
 	x: number;
@@ -131,7 +131,8 @@ function createDefaultWorkspace(mode: WorkspaceMode): Workspace {
 function createInitialState(): WorkspaceState {
 	return {
 		workspaces: {
-			chat: createDefaultWorkspace('chat')
+			chat: createDefaultWorkspace('chat'),
+			files: createDefaultWorkspace('files')
 		},
 		activeMode: 'chat',
 		focusedCardId: null
@@ -596,6 +597,8 @@ function getDefaultTitle(type: CardType): string {
 	switch (type) {
 		case 'chat':
 			return 'New Chat';
+		case 'files':
+			return 'File Browser';
 		case 'settings':
 			return 'Settings';
 		case 'profile':
@@ -642,3 +645,32 @@ export const focusedCardId = derived(workspace, $ws => $ws.focusedCardId);
 
 // Check if a card is focused
 export const isCardFocused = (cardId: string) => derived(focusedCardId, $id => $id === cardId);
+
+// ============================================================================
+// Workspace Mode Configuration
+// ============================================================================
+
+export interface WorkspaceModeConfig {
+	id: WorkspaceMode;
+	name: string;
+	icon: string; // SVG path
+	newItemLabel: string;
+	defaultCardType: CardType;
+}
+
+export const WORKSPACE_MODES: WorkspaceModeConfig[] = [
+	{
+		id: 'chat',
+		name: 'Chats',
+		icon: 'M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z',
+		newItemLabel: 'New Chat',
+		defaultCardType: 'chat'
+	},
+	{
+		id: 'files',
+		name: 'Files',
+		icon: 'M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z',
+		newItemLabel: 'New Browser',
+		defaultCardType: 'files'
+	}
+];

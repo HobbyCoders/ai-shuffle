@@ -312,6 +312,10 @@ if static_dir.exists():
     async def serve_spa_settings():
         return FileResponse(static_dir / "index.html")
 
+    @app.get("/workspace")
+    async def serve_spa_workspace():
+        return FileResponse(static_dir / "index.html")
+
     @app.get("/favicon.svg")
     async def serve_favicon():
         return FileResponse(static_dir / "favicon.svg")
