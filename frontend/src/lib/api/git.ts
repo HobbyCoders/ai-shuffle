@@ -4,7 +4,7 @@
 
 import { api } from './client';
 
-const BASE = '/api/v1/projects';
+const BASE = '/projects';
 
 // ============================================================================
 // Git Status Types
