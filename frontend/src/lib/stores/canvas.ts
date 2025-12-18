@@ -301,16 +301,17 @@ function createCanvasStore() {
 		 */
 		async loadItems(): Promise<void> {
 			try {
-				const response = await api.get<CanvasItem[]>('/canvas');
+				const response = await api.get<{ items: CanvasItem[]; total: number }>('/canvas');
 				update((state) => ({
 					...state,
-					items: response || [],
+					items: response?.items || [],
 					error: null
 				}));
 			} catch (error) {
 				console.error('[Canvas] Failed to load items:', error);
 				update((state) => ({
 					...state,
+					items: [], // Reset to empty array on error
 					error: error instanceof Error ? error.message : 'Failed to load canvas items'
 				}));
 			}

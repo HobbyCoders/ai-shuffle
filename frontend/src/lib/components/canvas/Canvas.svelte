@@ -5,7 +5,13 @@
 	import VideoGenerator from './VideoGenerator.svelte';
 	import ImageEditor from './ImageEditor.svelte';
 	import MediaPreview from './MediaPreview.svelte';
-	import { onMount } from 'svelte';
+	import { onMount, createEventDispatcher } from 'svelte';
+
+	const dispatch = createEventDispatcher<{ close: void }>();
+
+	function handleClose() {
+		dispatch('close');
+	}
 
 	// Load items on mount
 	onMount(() => {
@@ -99,13 +105,27 @@
 				</div>
 			</div>
 
-			<!-- Generation indicator -->
-			{#if $isLoading}
-				<div class="flex items-center gap-2 text-primary">
-					<div class="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin"></div>
-					<span class="text-sm">{$generationProgress || 'Generating...'}</span>
-				</div>
-			{/if}
+			<div class="flex items-center gap-2">
+				<!-- Generation indicator -->
+				{#if $isLoading}
+					<div class="flex items-center gap-2 text-primary">
+						<div class="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin"></div>
+						<span class="text-sm hidden sm:inline">{$generationProgress || 'Generating...'}</span>
+					</div>
+				{/if}
+
+				<!-- Close button -->
+				<button
+					onclick={handleClose}
+					class="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+					aria-label="Close Canvas"
+					title="Close Canvas"
+				>
+					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+					</svg>
+				</button>
+			</div>
 		</div>
 
 		<!-- Tab Navigation - only show in main view -->

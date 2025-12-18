@@ -3316,7 +3316,7 @@
 	<main class="flex-1 flex flex-col min-w-0 bg-background pb-[4.5rem] lg:pb-0 lg:ml-[4.5rem]">
 		{#if showCanvas}
 			<!-- Canvas View -->
-			<Canvas />
+			<Canvas on:close={() => showCanvas = false} />
 		{:else}
 		<!-- Context Bar - Floating Pills Design -->
 		{#if $activeTab}
