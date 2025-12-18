@@ -7,12 +7,24 @@
 		canvas.selectItem(null);
 	}
 
-	function handleDownload() {
+	async function handleDownload() {
 		if (!$selectedItem) return;
-		const a = document.createElement('a');
-		a.href = $selectedItem.url;
-		a.download = $selectedItem.filename;
-		a.click();
+		try {
+			// Fetch with credentials to include auth cookie
+			const response = await fetch($selectedItem.url, { credentials: 'include' });
+			if (!response.ok) throw new Error('Download failed');
+
+			const blob = await response.blob();
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			a.href = url;
+			a.download = $selectedItem.filename;
+			a.click();
+			URL.revokeObjectURL(url);
+		} catch (error) {
+			console.error('Download failed:', error);
+			alert('Download failed. Please try again.');
+		}
 	}
 
 	async function handleCopyUrl() {
