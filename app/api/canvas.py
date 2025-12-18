@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Depends, status, Query
+from fastapi import APIRouter, HTTPException, Depends, status, Query, UploadFile, File
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
@@ -249,11 +249,17 @@ def get_videos_dir() -> Path:
     return get_canvas_dir() / "videos"
 
 
+def get_uploads_dir() -> Path:
+    """Get the uploads directory path for temporary source files"""
+    return get_canvas_dir() / "uploads"
+
+
 def ensure_canvas_directories() -> None:
     """Ensure all canvas directories exist"""
     get_canvas_dir().mkdir(parents=True, exist_ok=True)
     get_images_dir().mkdir(parents=True, exist_ok=True)
     get_videos_dir().mkdir(parents=True, exist_ok=True)
+    get_uploads_dir().mkdir(parents=True, exist_ok=True)
 
 
 def load_canvas_items() -> List[dict]:
@@ -449,6 +455,60 @@ def create_canvas_item(
 # ============================================================================
 # API Endpoints
 # ============================================================================
+
+class FileUploadResponse(BaseModel):
+    """Response from file upload"""
+    path: str
+    filename: str
+    size: int
+
+
+@router.post("/upload", response_model=FileUploadResponse)
+async def upload_file(
+    file: UploadFile = File(...),
+    token: str = Depends(require_auth)
+):
+    """
+    Upload a file for use with image-to-video or reference images.
+
+    Files are stored in the canvas uploads directory and the path is returned
+    for use in subsequent API calls.
+    """
+    # Validate file type
+    allowed_types = ["image/jpeg", "image/png", "image/gif", "image/webp"]
+    if file.content_type not in allowed_types:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid file type: {file.content_type}. Allowed: {allowed_types}"
+        )
+
+    ensure_canvas_directories()
+
+    # Generate unique filename
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    file_id = uuid.uuid4().hex[:8]
+    ext = Path(file.filename or "image.png").suffix or ".png"
+    filename = f"upload_{timestamp}_{file_id}{ext}"
+    file_path = get_uploads_dir() / filename
+
+    # Save file
+    try:
+        content = await file.read()
+        with open(file_path, "wb") as f:
+            f.write(content)
+    except IOError as e:
+        logger.error(f"Failed to save uploaded file: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to save uploaded file"
+        )
+
+    return FileUploadResponse(
+        path=str(file_path),
+        filename=filename,
+        size=len(content)
+    )
+
 
 @router.get("/providers", response_model=ProvidersResponse)
 async def get_providers(token: str = Depends(require_auth)):

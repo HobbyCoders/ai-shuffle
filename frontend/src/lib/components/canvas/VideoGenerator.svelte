@@ -127,9 +127,9 @@
 
 		sourceImagePreview = { url, file };
 
-		// Upload file to server
+		// Upload file to Canvas uploads directory
 		try {
-			const response = await api.uploadFile('/files/upload', file);
+			const response = await api.uploadFile('/canvas/upload', file);
 			sourceImage = response.path;
 		} catch (error) {
 			console.error('Failed to upload source image:', error);
