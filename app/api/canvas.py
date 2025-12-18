@@ -22,8 +22,40 @@ from pydantic import BaseModel, Field
 
 from app.core.config import settings
 from app.api.auth import require_auth, require_admin
+from app.db import database
+from app.core import encryption
 
 logger = logging.getLogger(__name__)
+
+
+def _get_decrypted_api_key(setting_name: str) -> Optional[str]:
+    """
+    Get an API key from the database and decrypt it if encrypted.
+
+    Args:
+        setting_name: The name of the setting (e.g., "openai_api_key", "image_api_key")
+
+    Returns:
+        The decrypted API key, or None if not found or decryption fails
+    """
+    value = database.get_system_setting(setting_name)
+    if not value:
+        return None
+
+    # Check if the value is encrypted
+    if encryption.is_encrypted(value):
+        if not encryption.is_encryption_ready():
+            logger.warning(f"Cannot decrypt {setting_name}: encryption key not available")
+            return None
+        try:
+            decrypted = encryption.decrypt_value(value)
+            return decrypted
+        except Exception as e:
+            logger.error(f"Failed to decrypt {setting_name}: {e}")
+            return None
+
+    # Return plaintext value (for backwards compatibility during migration)
+    return value
 
 router = APIRouter(prefix="/api/v1/canvas", tags=["Canvas"])
 
@@ -302,6 +334,19 @@ def execute_ai_tool(script: str, item_type: str = "image", timeout: int = 300) -
             "GENERATED_IMAGES_DIR": str(get_images_dir()),
             "GENERATED_VIDEOS_DIR": str(get_videos_dir()),
         }
+
+        # Inject API keys from database settings
+        # Use image_api_key for Gemini-based providers (Nano Banana, Imagen, Veo)
+        gemini_api_key = _get_decrypted_api_key("image_api_key")
+        if gemini_api_key:
+            env["GEMINI_API_KEY"] = gemini_api_key
+            env["IMAGE_API_KEY"] = gemini_api_key
+            env["VIDEO_API_KEY"] = gemini_api_key
+
+        # Use openai_api_key for OpenAI providers (GPT Image, Sora)
+        openai_api_key = _get_decrypted_api_key("openai_api_key")
+        if openai_api_key:
+            env["OPENAI_API_KEY"] = openai_api_key
 
         # Execute with Node.js
         result = subprocess.run(
