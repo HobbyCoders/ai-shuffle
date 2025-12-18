@@ -31,6 +31,7 @@
     ];
 
     // Calculate horizontal graph layout (left to right, newest on left)
+    // Simple linear layout - all commits on same horizontal line
     function calculateLayout(commits: CommitNode[]): {
         nodes: (CommitNode & { x: number; y: number; color: string; lane: number })[];
         edges: { x1: number; y1: number; x2: number; y2: number; color: string }[];
@@ -42,63 +43,28 @@
         }
 
         const commitMap = new Map<string, CommitNode & { x: number; y: number; color: string; lane: number }>();
-        const laneUsage = new Map<number, string>(); // lane -> commit sha using it
         const nodes: (CommitNode & { x: number; y: number; color: string; lane: number })[] = [];
         const edges: { x1: number; y1: number; x2: number; y2: number; color: string }[] = [];
 
-        let maxLane = 0;
-
-        // First pass: assign lanes (vertical position) based on parent relationships
+        // Simple layout: all commits on lane 0 (single horizontal line)
+        // Each commit gets its own x position based on index
         commits.forEach((commit, index) => {
-            let lane = 0;
-
-            // Try to use parent's lane if available
-            if (commit.parents.length > 0) {
-                const parent = commitMap.get(commit.parents[0]);
-                if (parent) {
-                    const currentUser = laneUsage.get(parent.lane);
-                    if (!currentUser || currentUser === commit.parents[0]) {
-                        lane = parent.lane;
-                    }
-                }
-            }
-
-            // If lane is in use by another branch, find next available
-            while (laneUsage.has(lane) && laneUsage.get(lane) !== commit.sha) {
-                const user = laneUsage.get(lane);
-                if (user && commit.parents.includes(user)) {
-                    break;
-                }
-                lane++;
-            }
-
-            const color = BRANCH_COLORS[lane % BRANCH_COLORS.length];
+            const color = BRANCH_COLORS[0]; // Use primary color for main line
             const node = {
                 ...commit,
                 x: LEFT_PADDING + index * COL_WIDTH,  // Horizontal position based on index
-                y: TOP_PADDING + lane * ROW_HEIGHT,   // Vertical position based on lane
+                y: TOP_PADDING,                        // All on same horizontal line
                 color,
-                lane
+                lane: 0
             };
 
             commitMap.set(commit.sha, node);
-            laneUsage.set(lane, commit.sha);
-            maxLane = Math.max(maxLane, lane);
-
-            // Clear lane if this commit continues the line
-            if (commit.parents.length > 0) {
-                const firstParent = commitMap.get(commit.parents[0]);
-                if (firstParent && firstParent.lane !== lane) {
-                    laneUsage.delete(firstParent.lane);
-                }
-            }
-
             nodes.push(node);
         });
 
-        // Second pass: create edges
+        // Create edges between commits and their parents
         nodes.forEach(node => {
-            node.parents.forEach((parentSha, parentIndex) => {
+            node.parents.forEach((parentSha) => {
                 const parent = commitMap.get(parentSha);
                 if (parent) {
                     edges.push({
@@ -106,7 +72,7 @@
                         y1: node.y,
                         x2: parent.x,
                         y2: parent.y,
-                        color: parentIndex === 0 ? node.color : parent.color
+                        color: node.color
                     });
                 }
             });
@@ -116,7 +82,7 @@
             nodes,
             edges,
             width: LEFT_PADDING * 2 + commits.length * COL_WIDTH,
-            height: TOP_PADDING * 2 + (maxLane + 1) * ROW_HEIGHT + 80  // Extra space for labels
+            height: TOP_PADDING * 2 + 80  // Fixed height for single lane + labels
         };
     }
 
