@@ -51,6 +51,7 @@
 	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
 	import KnowledgeManager from '$lib/components/KnowledgeManager.svelte';
 	import GitModal from '$lib/components/git/GitModal.svelte';
+	import Canvas from '$lib/components/canvas/Canvas.svelte';
 	import { groups, organizeByGroups } from '$lib/stores/groups';
 	import { executeCommand, isSlashCommand, listCommands, type Command } from '$lib/api/commands';
 	import { groupSessionsByDate, type DateGroup } from '$lib/utils/dateGroups';
@@ -234,6 +235,10 @@
 		}
 	}
 
+	function toggleCanvas() {
+		showCanvas = !showCanvas;
+	}
+
 	function toggleSidebarPin() {
 		sidebarPinned = !sidebarPinned;
 	}
@@ -338,6 +343,9 @@
 
 	// Mobile tools menu state
 	let showToolsMenu = false;
+
+	// Canvas view state
+	let showCanvas = false;
 
 	// Override popup menu state
 	let showModelPopup = false;
@@ -522,6 +530,8 @@
 						showGitModal = false;
 					} else if (showKnowledgeModal) {
 						showKnowledgeModal = false;
+					} else if (showCanvas) {
+						showCanvas = false;
 					}
 				}
 			}),
@@ -560,6 +570,17 @@
 						showGitModal = !showGitModal;
 					}
 				}
+			}),
+
+			// Toggle Canvas (Cmd+Shift+C)
+			registerShortcut({
+				id: 'toggle-canvas',
+				description: 'Toggle Canvas view',
+				key: 'c',
+				cmdOrCtrl: true,
+				shift: true,
+				category: 'navigation',
+				action: () => { showCanvas = !showCanvas; }
 			})
 		];
 
@@ -1499,6 +1520,7 @@
 			console.log('[Page] Ignoring session click while loading');
 			return;
 		}
+		showCanvas = false;
 		tabs.openSession(sessionId);
 		sidebarOpen = false;
 		// Auto-scroll is handled by the autoScroll action on the messages container
@@ -1590,6 +1612,7 @@
 	}
 
 	function handleNewTab() {
+		showCanvas = false;
 		tabs.createTab();
 	}
 
@@ -1842,6 +1865,12 @@
 					</svg>
 				</button>
 			{/if}
+			<!-- Canvas Button -->
+			<button on:click={toggleCanvas} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {showCanvas ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-hover-overlay text-muted-foreground hover:text-foreground'}" title="Canvas - AI Image & Video">
+				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+				</svg>
+			</button>
 		</div>
 		<div class="mt-auto flex flex-col items-center pb-3 gap-1">
 			<!-- Analytics (Admin only) -->
@@ -3230,6 +3259,18 @@
 					</svg>
 					<span class="text-sm font-medium text-foreground">Subagents</span>
 				</button>
+				<div class="border-t border-border/50 mt-1 pt-1">
+					<button
+						on:click={() => { showToolsMenu = false; showCanvas = true; }}
+						class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-hover-overlay transition-colors text-left w-full"
+					>
+						<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+						</svg>
+						<span class="text-sm font-medium text-foreground">Canvas</span>
+						<span class="ml-auto text-xs text-primary bg-primary/10 px-1.5 py-0.5 rounded">New</span>
+					</button>
+				</div>
 			</div>
 		</div>
 	{/if}
@@ -3273,6 +3314,10 @@
 
 	<!-- Main Content -->
 	<main class="flex-1 flex flex-col min-w-0 bg-background pb-[4.5rem] lg:pb-0 lg:ml-[4.5rem]">
+		{#if showCanvas}
+			<!-- Canvas View -->
+			<Canvas />
+		{:else}
 		<!-- Context Bar - Floating Pills Design -->
 		{#if $activeTab}
 			{@const currentTab = $activeTab}
@@ -4254,6 +4299,7 @@
 					</div>
 				</div>
 			</div>
+		{/if}
 		{/if}
 	</main>
 </div>
