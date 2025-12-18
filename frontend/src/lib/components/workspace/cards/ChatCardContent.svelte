@@ -52,28 +52,27 @@
 			}
 		}
 
-		// Create a new tab for this card
-		const newTabId = tabs.createTab();
+		// Create a new tab for this card (WebSocket connects automatically)
+		// If sessionId is provided, it will be loaded automatically
+		const newTabId = tabs.createTab(sessionId || undefined);
 		tabId = newTabId;
 
-		// If we have a session ID, load it
+		// Update card title based on session if loaded
 		if (sessionId) {
-			await tabs.loadSession(newTabId, sessionId);
-			// Update card title based on session
-			const loadedTab = $allTabs.find(t => t.id === newTabId);
-			if (loadedTab?.title) {
-				workspace.setCardTitle(cardId, loadedTab.title);
-			}
+			// Wait a bit for the session to load
+			setTimeout(() => {
+				const loadedTab = $allTabs.find(t => t.id === newTabId);
+				if (loadedTab?.title && loadedTab.title !== 'New Chat') {
+					workspace.setCardTitle(cardId, loadedTab.title);
+				}
+			}, 500);
 		}
-
-		// Connect WebSocket for this tab
-		tabs.connect(newTabId);
 	});
 
 	onDestroy(() => {
-		// Disconnect WebSocket when card is destroyed
+		// Close the tab when card is destroyed (handles WebSocket cleanup)
 		if (tabId) {
-			tabs.disconnect(tabId);
+			tabs.closeTab(tabId);
 		}
 	});
 

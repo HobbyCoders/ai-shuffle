@@ -932,7 +932,7 @@ export async function getKnowledgeStats(projectId: string): Promise<KnowledgeSta
  * Upload a document to the knowledge base
  */
 export async function uploadKnowledgeDocument(projectId: string, file: File): Promise<KnowledgeDocumentSummary> {
-	return api.uploadFile(`/projects/${projectId}/knowledge`, file);
+	return api.uploadFile(`/projects/${projectId}/knowledge`, file) as unknown as Promise<KnowledgeDocumentSummary>;
 }
 
 /**

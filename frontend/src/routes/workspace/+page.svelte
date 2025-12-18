@@ -201,22 +201,22 @@
 					{/if}
 
 					<!-- Sessions grouped by date -->
-					{#each groupedSessions as group (group.id)}
+					{#each groupedSessions as group (group.key)}
 						{#if group.sessions.length > 0}
 							<div class="mb-2">
 								<button
-									onclick={() => toggleGroup(group.id)}
+									onclick={() => toggleGroup(group.key)}
 									class="w-full flex items-center justify-between px-2 py-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wider hover:text-foreground transition-colors"
 								>
 									<span>{group.label}</span>
 									<div class="flex items-center gap-2">
 										<span class="text-muted-foreground/60">{group.sessions.length}</span>
-										<svg class="w-3 h-3 transition-transform {collapsedGroups.has(group.id) ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<svg class="w-3 h-3 transition-transform {collapsedGroups.has(group.key) ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 										</svg>
 									</div>
 								</button>
-								{#if !collapsedGroups.has(group.id)}
+								{#if !collapsedGroups.has(group.key)}
 									<div class="space-y-0.5 mt-1">
 										{#each group.sessions as session (session.id)}
 											<button

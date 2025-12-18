@@ -24,7 +24,7 @@ from app.core.sync_engine import sync_engine
 from app.core.cleanup_manager import cleanup_manager
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, knowledge, rate_limits, github, git, canvas
+from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, knowledge, rate_limits, github, git, canvas, agents, studio
 
 # Import middleware
 from app.middleware.rate_limit import RateLimitMiddleware
@@ -274,6 +274,8 @@ app.include_router(rate_limits.router)
 app.include_router(github.router)
 app.include_router(git.router)
 app.include_router(canvas.router)
+app.include_router(agents.router)
+app.include_router(studio.router)
 
 # Serve static files (Svelte build) if they exist
 static_dir = Path(__file__).parent / "static"
@@ -315,6 +317,10 @@ if static_dir.exists():
 
     @app.get("/workspace")
     async def serve_spa_workspace():
+        return FileResponse(static_dir / "index.html")
+
+    @app.get("/deck")
+    async def serve_spa_deck():
         return FileResponse(static_dir / "index.html")
 
     @app.get("/favicon.svg")

@@ -69,6 +69,7 @@
 		name: string;
 		description: string;
 		model?: string;
+		is_builtin?: boolean;
 	}
 
 	// Tool interfaces for tool configuration
@@ -880,7 +881,7 @@
 	}
 
 	function handleSpotlightNewChat() {
-		tabs.addTab();
+		tabs.createTab();
 		showSpotlight = false;
 	}
 
@@ -1966,7 +1967,7 @@
 								<div class="space-y-1">
 									{#each $allTabs as tab}
 										{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
-										{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', is_favorite: false, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, tags: [], profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
+										{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', is_favorite: false, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, tags: [], profile_id: '', project_id: null, parent_session_id: null, fork_point_message_index: null, has_forks: false, created_at: '', updated_at: new Date().toISOString() }}
 										<SessionCard
 											session={tabSession}
 											isOpen={true}
@@ -2217,7 +2218,7 @@
 								<div class="space-y-1">
 									{#each $allTabs as tab}
 										{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
-										{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', is_favorite: false, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, tags: [], profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
+										{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', is_favorite: false, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, tags: [], profile_id: '', project_id: null, parent_session_id: null, fork_point_message_index: null, has_forks: false, created_at: '', updated_at: new Date().toISOString() }}
 										<SessionCard
 											session={tabSession}
 											isOpen={true}
@@ -2894,7 +2895,7 @@
 							<div class="space-y-1">
 								{#each $allTabs as tab}
 									{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
-									{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', is_favorite: false, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, tags: [], profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
+									{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', is_favorite: false, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, tags: [], profile_id: '', project_id: null, parent_session_id: null, fork_point_message_index: null, has_forks: false, created_at: '', updated_at: new Date().toISOString() }}
 									<SessionCard
 										session={tabSession}
 										isOpen={true}
@@ -3056,7 +3057,7 @@
 							<div class="space-y-1">
 								{#each $allTabs as tab}
 									{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
-									{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', is_favorite: false, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, tags: [], profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
+									{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', is_favorite: false, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, tags: [], profile_id: '', project_id: null, parent_session_id: null, fork_point_message_index: null, has_forks: false, created_at: '', updated_at: new Date().toISOString() }}
 									<SessionCard
 										session={tabSession}
 										isOpen={true}
@@ -3415,7 +3416,8 @@
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
 						</svg>
 						<span class="hidden sm:inline max-w-[120px] truncate">{$profiles.find((p) => p.id === $apiUser.profile_id)?.name || $apiUser.profile_id}</span>
-						<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24" title="Profile locked by API key">
+						<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-label="Profile locked by API key">
+							<title>Profile locked by API key</title>
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
 						</svg>
 					</div>
@@ -3507,7 +3509,8 @@
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 						</svg>
 						<span class="hidden sm:inline max-w-[120px] truncate">{$projects.find((p) => p.id === $apiUser.project_id)?.name || $apiUser.project_id}</span>
-						<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24" title="Project locked by API key">
+						<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-label="Project locked by API key">
+							<title>Project locked by API key</title>
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
 						</svg>
 					</div>
@@ -3768,7 +3771,7 @@
 													{#if currentTab.sessionId}
 														<button
 															class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
-															on:click={() => handleForkSession(currentTab.sessionId, messageIndex, message.id)}
+															on:click={() => handleForkSession(currentTab.sessionId ?? undefined, messageIndex, message.id)}
 															title="Fork conversation from this point"
 															disabled={forkingMessageId === message.id}
 														>
