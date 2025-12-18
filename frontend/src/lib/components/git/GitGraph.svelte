@@ -265,7 +265,7 @@
                                     </text>
 
                                     <!-- Branch labels -->
-                                    {#each node.branches as branch, i}
+                                    {#each node.branches || [] as branch, i}
                                         <rect
                                             x={350 + i * 80}
                                             y="-8"
@@ -287,9 +287,9 @@
                                     {/each}
 
                                     <!-- Tags -->
-                                    {#each node.tags as tag, i}
+                                    {#each node.tags || [] as tag, i}
                                         <rect
-                                            x={350 + node.branches.length * 80 + i * 70}
+                                            x={350 + (node.branches?.length || 0) * 80 + i * 70}
                                             y="-8"
                                             rx="3"
                                             ry="3"
@@ -299,7 +299,7 @@
                                             opacity="0.15"
                                         />
                                         <text
-                                            x={356 + node.branches.length * 80 + i * 70}
+                                            x={356 + (node.branches?.length || 0) * 80 + i * 70}
                                             y="3"
                                             style="font-size: 10px; font-weight: 500; fill: var(--chart-4);"
                                         >
@@ -381,7 +381,7 @@
                         {/if}
 
                         <!-- Branches -->
-                        {#if selectedCommit.branches.length > 0}
+                        {#if selectedCommit.branches && selectedCommit.branches.length > 0}
                             <div>
                                 <label class="text-xs text-muted-foreground uppercase tracking-wide">Branches</label>
                                 <div class="flex flex-wrap gap-1 mt-1">
@@ -393,7 +393,7 @@
                         {/if}
 
                         <!-- Tags -->
-                        {#if selectedCommit.tags.length > 0}
+                        {#if selectedCommit.tags && selectedCommit.tags.length > 0}
                             <div>
                                 <label class="text-xs text-muted-foreground uppercase tracking-wide">Tags</label>
                                 <div class="flex flex-wrap gap-1 mt-1">

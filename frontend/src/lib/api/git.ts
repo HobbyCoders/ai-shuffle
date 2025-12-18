@@ -57,6 +57,51 @@ export interface CommitNode {
     y?: number;
 }
 
+// Raw commit from API (different field names)
+interface RawCommitNode {
+    sha: string;
+    short_sha: string;
+    message: string;
+    author: string;
+    author_email: string;
+    timestamp: string;
+    parents: string[];
+    refs: string[];
+}
+
+// Transform raw commit to CommitNode
+function transformCommit(raw: RawCommitNode): CommitNode {
+    // Parse refs into branches and tags
+    const branches: string[] = [];
+    const tags: string[] = [];
+
+    for (const ref of raw.refs || []) {
+        // Skip HEAD pointer references like "HEAD -> main"
+        const cleanRef = ref.replace(/^HEAD -> /, '');
+
+        if (ref.startsWith('tag: ')) {
+            tags.push(ref.replace('tag: ', ''));
+        } else if (cleanRef.startsWith('origin/')) {
+            // Skip remote refs for display (or include them if desired)
+            // branches.push(cleanRef);
+        } else if (cleanRef && cleanRef !== 'HEAD') {
+            branches.push(cleanRef);
+        }
+    }
+
+    return {
+        sha: raw.sha,
+        shortSha: raw.short_sha,
+        message: raw.message,
+        author: raw.author,
+        email: raw.author_email,
+        date: raw.timestamp,
+        parents: raw.parents || [],
+        branches,
+        tags
+    };
+}
+
 export interface CommitGraphResponse {
     commits: CommitNode[];
     total: number;
@@ -151,9 +196,21 @@ export async function fetchRemote(projectId: string): Promise<{ success: boolean
 /**
  * Get the commit graph for a project
  */
+// Raw response from API
+interface RawCommitGraphResponse {
+    commits: RawCommitNode[];
+    total: number;
+}
+
 export async function getCommitGraph(projectId: string, limit?: number): Promise<CommitGraphResponse> {
     const params = limit ? `?limit=${limit}` : '';
-    return api.get<CommitGraphResponse>(`${BASE}/${projectId}/git/graph${params}`);
+    const raw = await api.get<RawCommitGraphResponse>(`${BASE}/${projectId}/git/graph${params}`);
+
+    // Transform raw commits to frontend format
+    return {
+        commits: raw.commits.map(transformCommit),
+        total: raw.total
+    };
 }
 
 // ============================================================================
