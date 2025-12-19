@@ -282,6 +282,7 @@
 		display: flex;
 		flex-direction: column;
 		transition: width 0.2s ease;
+		overflow: hidden;
 	}
 
 	.context-panel.collapsed {
@@ -322,6 +323,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 8px;
+		min-height: 0;
 	}
 
 	.section {

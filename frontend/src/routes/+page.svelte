@@ -191,13 +191,14 @@
 		}))
 	);
 
+	// Show all open cards (visible + minimized) in the Active Threads sidebar
 	const deckSessions = $derived<DeckSession[]>(
-		$sessions.slice(0, 20).map((s) => ({
-			id: s.id,
-			title: s.title || 'Untitled',
-			lastMessage: s.title || undefined,
-			timestamp: new Date(s.updated_at),
-			isActive: $allTabs.some((t) => t.sessionId === s.id)
+		[...$visibleCards, ...$minimizedCardsStore].map((c) => ({
+			id: c.id,
+			title: c.title || 'Untitled',
+			lastMessage: c.type === 'chat' ? 'Chat' : c.type === 'terminal' ? 'Terminal' : c.type,
+			timestamp: new Date(c.createdAt),
+			isActive: c.id === $focusedCardId && !c.minimized
 		}))
 	);
 
@@ -559,20 +560,14 @@
 	}
 
 	function handleSessionClick(session: DeckSession) {
-		const existingCard = deck.findCardByDataId(session.id);
+		// Since we now pass card.id as session.id, find the card directly
+		const allCards = [...$visibleCards, ...$minimizedCardsStore];
+		const existingCard = allCards.find((c) => c.id === session.id);
 		if (existingCard) {
 			if (existingCard.minimized) {
 				deck.restoreCard(existingCard.id);
-			} else {
-				deck.focusCard(existingCard.id);
 			}
-		} else {
-			const tabId = tabs.openSession(session.id);
-			deck.addCard('chat', {
-				title: session.title,
-				dataId: session.id,
-				meta: { tabId }
-			});
+			deck.focusCard(existingCard.id);
 		}
 	}
 

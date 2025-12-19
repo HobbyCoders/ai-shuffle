@@ -347,15 +347,14 @@
 		display: flex;
 		flex-direction: column;
 		height: 100%;
-		background: hsl(var(--card) / 0.8);
-		backdrop-filter: blur(24px);
-		-webkit-backdrop-filter: blur(24px);
+		background: var(--card);
 		border-radius: 12px;
-		border: 1px solid hsl(var(--border) / 0.5);
+		border: 1px solid var(--border);
 		overflow: hidden;
 		box-shadow:
-			0 4px 6px -1px rgba(0, 0, 0, 0.2),
-			0 2px 4px -2px rgba(0, 0, 0, 0.1);
+			0 4px 6px -1px rgba(0, 0, 0, 0.3),
+			0 2px 4px -2px rgba(0, 0, 0, 0.15),
+			0 0 0 1px var(--border);
 		transition: box-shadow 0.15s ease, border-color 0.15s ease;
 	}
 
@@ -393,8 +392,8 @@
 		justify-content: space-between;
 		height: 40px;
 		padding: 0 8px 0 12px;
-		background: linear-gradient(180deg, hsl(var(--muted) / 0.8) 0%, hsl(var(--muted) / 0.6) 100%);
-		border-bottom: 1px solid hsl(var(--border) / 0.3);
+		background: var(--secondary);
+		border-bottom: 1px solid var(--border);
 		cursor: grab;
 		user-select: none;
 		flex-shrink: 0;

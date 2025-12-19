@@ -98,17 +98,15 @@
 		{/each}
 	</div>
 
-	<!-- Settings button at bottom -->
-	{#if !isMobile}
-		<button
-			class="settings-button"
-			onclick={() => onSettingsClick?.()}
-			title="Settings"
-		>
-			<Settings size={20} strokeWidth={1.5} />
-			<span class="tooltip">Settings</span>
-		</button>
-	{/if}
+	<!-- Settings button at bottom - always show, mobile layout handled by parent -->
+	<button
+		class="settings-button"
+		onclick={() => onSettingsClick?.()}
+		title="Settings"
+	>
+		<Settings size={20} strokeWidth={1.5} />
+		<span class="tooltip">Settings</span>
+	</button>
 </div>
 
 <style>
@@ -298,5 +296,19 @@
 	.settings-button:hover {
 		color: var(--foreground);
 		background: var(--hover-overlay);
+	}
+
+	/* Mobile-specific settings button styling */
+	.mobile .settings-button {
+		margin-top: 0;
+		width: 48px;
+		height: 48px;
+	}
+
+	.mobile .settings-button .tooltip {
+		left: 50%;
+		top: auto;
+		bottom: calc(100% + 12px);
+		transform: translateX(-50%);
 	}
 </style>
