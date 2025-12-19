@@ -14,18 +14,29 @@
 		Bot,
 		Image,
 		Info,
-		Circle
+		Circle,
+		History
 	} from 'lucide-svelte';
 	import type { DeckSession, DeckAgent, DeckGeneration, SessionInfo } from './types';
+
+	// Session history item (for loading old chats)
+	export interface HistorySession {
+		id: string;
+		title: string;
+		timestamp: Date;
+		isOpen?: boolean; // true if already open as a card
+	}
 
 	interface Props {
 		collapsed?: boolean;
 		sessions?: DeckSession[];
+		recentSessions?: HistorySession[];
 		agents?: DeckAgent[];
 		generations?: DeckGeneration[];
 		sessionInfo?: SessionInfo | null;
 		onToggleCollapse?: () => void;
 		onSessionClick?: (session: DeckSession) => void;
+		onHistorySessionClick?: (session: HistorySession) => void;
 		onAgentClick?: (agent: DeckAgent) => void;
 		onGenerationClick?: (generation: DeckGeneration) => void;
 	}
@@ -33,11 +44,13 @@
 	let {
 		collapsed = false,
 		sessions = [],
+		recentSessions = [],
 		agents = [],
 		generations = [],
 		sessionInfo = null,
 		onToggleCollapse,
 		onSessionClick,
+		onHistorySessionClick,
 		onAgentClick,
 		onGenerationClick
 	}: Props = $props();
@@ -45,6 +58,7 @@
 	// Section collapse states
 	let sectionsCollapsed = $state({
 		threads: false,
+		history: false,
 		agents: false,
 		generations: false,
 		sessionInfo: false
@@ -136,6 +150,48 @@
 										{/if}
 									</div>
 									<div class="item-meta">{formatTime(session.timestamp)}</div>
+								</button>
+							{/each}
+						{/if}
+					</div>
+				{/if}
+			</div>
+
+			<!-- Recent Sessions Section (Session History) -->
+			<div class="section">
+				<button class="section-header" onclick={() => toggleSection('history')}>
+					<div class="section-title">
+						<History size={14} strokeWidth={1.5} />
+						<span>Recent Sessions</span>
+						{#if recentSessions.length > 0}
+							<span class="section-count">{recentSessions.length}</span>
+						{/if}
+					</div>
+					<span class="chevron" class:collapsed={sectionsCollapsed.history}>
+						<ChevronDown size={14} strokeWidth={2} />
+					</span>
+				</button>
+				{#if !sectionsCollapsed.history}
+					<div class="section-content">
+						{#if recentSessions.length === 0}
+							<div class="empty-state">No session history</div>
+						{:else}
+							{#each recentSessions as historySession}
+								<button
+									class="list-item"
+									class:open={historySession.isOpen}
+									onclick={() => onHistorySessionClick?.(historySession)}
+								>
+									<div class="item-content">
+										<div class="item-title">{historySession.title}</div>
+									</div>
+									<div class="item-meta">
+										{#if historySession.isOpen}
+											<span class="open-badge">open</span>
+										{:else}
+											{formatTime(historySession.timestamp)}
+										{/if}
+									</div>
 								</button>
 							{/each}
 						{/if}
@@ -430,6 +486,20 @@
 		height: 6px;
 		background: var(--primary);
 		border-radius: 50%;
+	}
+
+	.list-item.open {
+		opacity: 0.6;
+	}
+
+	.open-badge {
+		font-size: 0.5625rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		color: var(--success);
+		background: color-mix(in oklch, var(--success) 15%, transparent);
+		padding: 2px 6px;
+		border-radius: 4px;
 	}
 
 	.status-dot {

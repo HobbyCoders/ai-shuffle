@@ -26,12 +26,14 @@
 		MinimizedCard,
 		RunningProcess
 	} from './types';
+	import type { HistorySession } from './ContextPanel.svelte';
 
 	interface Props {
 		activeMode?: ActivityMode;
 		badges?: ActivityBadges;
 		contextCollapsed?: boolean;
 		sessions?: DeckSession[];
+		recentSessions?: HistorySession[];
 		agents?: DeckAgent[];
 		generations?: DeckGeneration[];
 		currentSession?: SessionInfo | null;
@@ -42,6 +44,7 @@
 		onSettingsClick?: () => void;
 		onContextToggle?: () => void;
 		onSessionClick?: (session: DeckSession) => void;
+		onHistorySessionClick?: (session: HistorySession) => void;
 		onAgentClick?: (agent: DeckAgent) => void;
 		onGenerationClick?: (generation: DeckGeneration) => void;
 		onMinimizedCardClick?: (card: MinimizedCard) => void;
@@ -54,6 +57,7 @@
 		badges = {},
 		contextCollapsed = false,
 		sessions = [],
+		recentSessions = [],
 		agents = [],
 		generations = [],
 		currentSession = null,
@@ -64,6 +68,7 @@
 		onSettingsClick,
 		onContextToggle,
 		onSessionClick,
+		onHistorySessionClick,
 		onAgentClick,
 		onGenerationClick,
 		onMinimizedCardClick,
@@ -143,11 +148,13 @@
 			<ContextPanel
 				collapsed={localContextCollapsed}
 				{sessions}
+				{recentSessions}
 				{agents}
 				{generations}
 				sessionInfo={currentSession}
 				onToggleCollapse={handleContextToggle}
 				{onSessionClick}
+				{onHistorySessionClick}
 				{onAgentClick}
 				{onGenerationClick}
 			/>

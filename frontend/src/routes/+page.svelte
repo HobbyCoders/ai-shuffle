@@ -191,7 +191,7 @@
 		}))
 	);
 
-	// Show all open cards (visible + minimized) in the Active Threads sidebar
+	// Active Threads: Show all open cards (visible + minimized) in the sidebar
 	const deckSessions = $derived<DeckSession[]>(
 		[...$visibleCards, ...$minimizedCardsStore].map((c) => ({
 			id: c.id,
@@ -199,6 +199,23 @@
 			lastMessage: c.type === 'chat' ? 'Chat' : c.type === 'terminal' ? 'Terminal' : c.type,
 			timestamp: new Date(c.createdAt),
 			isActive: c.id === $focusedCardId && !c.minimized
+		}))
+	);
+
+	// Recent Sessions: Session history for loading old chats
+	// Shows sessions that are NOT currently open as cards
+	const openSessionIds = $derived(
+		new Set([...$visibleCards, ...$minimizedCardsStore]
+			.filter(c => c.dataId)
+			.map(c => c.dataId))
+	);
+
+	const recentSessions = $derived<import('$lib/components/deck/ContextPanel.svelte').HistorySession[]>(
+		$sessions.slice(0, 20).map((s) => ({
+			id: s.id,
+			title: s.title || 'Untitled',
+			timestamp: new Date(s.updated_at),
+			isOpen: openSessionIds.has(s.id)
 		}))
 	);
 
@@ -571,6 +588,26 @@
 		}
 	}
 
+	function handleHistorySessionClick(historySession: import('$lib/components/deck/ContextPanel.svelte').HistorySession) {
+		// Check if this session is already open as a card
+		const existingCard = deck.findCardByDataId(historySession.id);
+		if (existingCard) {
+			// Focus the existing card
+			if (existingCard.minimized) {
+				deck.restoreCard(existingCard.id);
+			}
+			deck.focusCard(existingCard.id);
+		} else {
+			// Open the session as a new card
+			const tabId = tabs.openSession(historySession.id);
+			deck.addCard('chat', {
+				title: historySession.title || 'Chat',
+				dataId: historySession.id,
+				meta: { tabId }
+			});
+		}
+	}
+
 	// ============================================
 	// Card Lifecycle Handlers
 	// ============================================
@@ -803,6 +840,7 @@
 		{badges}
 		contextCollapsed={contextCollapsed}
 		sessions={deckSessions}
+		{recentSessions}
 		agents={deckAgents}
 		generations={deckGenerations}
 		currentSession={null}
@@ -813,6 +851,7 @@
 		onSettingsClick={() => (showSettingsModal = true)}
 		onContextToggle={() => deck.toggleContextPanel()}
 		onSessionClick={handleSessionClick}
+		onHistorySessionClick={handleHistorySessionClick}
 		onAgentClick={() => {}}
 		onGenerationClick={() => {}}
 		onMinimizedCardClick={handleMinimizedCardClick}
