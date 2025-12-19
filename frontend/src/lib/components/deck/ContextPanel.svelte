@@ -311,9 +311,12 @@
 		z-index: 10;
 	}
 
+	/* When collapsed, position toggle at right edge of screen */
 	.collapsed .collapse-toggle {
-		left: -24px;
-		border-radius: 6px;
+		position: fixed;
+		right: 0;
+		left: auto;
+		border-radius: 6px 0 0 6px;
 	}
 
 	.collapse-toggle:hover {

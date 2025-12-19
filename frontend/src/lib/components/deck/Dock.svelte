@@ -76,20 +76,24 @@
 <div class="dock">
 	<!-- Left: Minimized Cards -->
 	<div class="dock-section minimized-cards">
-		{#each minimizedCards as card}
-			{@const IconComponent = getCardIconComponent(card.type)}
-			<button
-				class="dock-item card-item"
-				onclick={() => onCardClick?.(card)}
-				title={card.title}
-			>
-				<div class="item-icon">
-					<IconComponent size={16} strokeWidth={1.5} />
-				</div>
-				<span class="item-label">{card.title}</span>
-				<span class="tooltip">{card.title}</span>
-			</button>
-		{/each}
+		{#if minimizedCards.length === 0}
+			<span class="empty-hint">Minimized windows appear here</span>
+		{:else}
+			{#each minimizedCards as card}
+				{@const IconComponent = getCardIconComponent(card.type)}
+				<button
+					class="dock-item card-item"
+					onclick={() => onCardClick?.(card)}
+					title={card.title}
+				>
+					<div class="item-icon">
+						<IconComponent size={16} strokeWidth={1.5} />
+					</div>
+					<span class="item-label">{card.title}</span>
+					<span class="tooltip">{card.title}</span>
+				</button>
+			{/each}
+		{/if}
 	</div>
 
 	<!-- Center: Running Processes -->
@@ -162,6 +166,12 @@
 
 	.dock-spacer {
 		flex: 1;
+	}
+
+	.empty-hint {
+		font-size: 0.6875rem;
+		color: rgba(255, 255, 255, 0.3);
+		font-style: italic;
 	}
 
 	.dock-item {
