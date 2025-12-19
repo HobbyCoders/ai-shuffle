@@ -199,6 +199,8 @@
 		flex-direction: column;
 		overflow: hidden;
 		min-width: 0;
+		min-height: 0;
+		height: 100%;
 	}
 
 	.deck-layout:not(.mobile) .main-area {
@@ -215,6 +217,9 @@
 		flex: 1;
 		overflow: hidden;
 		position: relative;
+		display: flex;
+		flex-direction: column;
+		min-height: 0;
 	}
 
 	.workspace-placeholder {

@@ -269,6 +269,8 @@
 		flex: 1;
 		overflow: hidden;
 		background: hsl(var(--background));
+		min-height: 0;
+		height: 100%;
 	}
 
 	.workspace.has-maximized {
