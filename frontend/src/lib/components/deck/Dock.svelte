@@ -142,8 +142,8 @@
 		align-items: center;
 		justify-content: space-between;
 		height: 56px;
-		background: rgba(17, 17, 17, 0.95);
-		border-top: 1px solid rgba(255, 255, 255, 0.08);
+		background: var(--card);
+		border-top: 1px solid var(--border);
 		padding: 0 16px;
 		backdrop-filter: blur(12px);
 	}
@@ -170,7 +170,7 @@
 
 	.empty-hint {
 		font-size: 0.6875rem;
-		color: rgba(255, 255, 255, 0.3);
+		color: var(--muted-foreground);
 		font-style: italic;
 	}
 
@@ -180,30 +180,30 @@
 		align-items: center;
 		gap: 8px;
 		padding: 8px 12px;
-		background: rgba(255, 255, 255, 0.05);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		background: var(--secondary);
+		border: 1px solid var(--border);
 		border-radius: 10px;
-		color: rgba(255, 255, 255, 0.8);
+		color: var(--foreground);
 		cursor: pointer;
 		transition: all 0.15s ease;
 		max-width: 160px;
 	}
 
 	.dock-item:hover {
-		background: rgba(255, 255, 255, 0.1);
-		border-color: rgba(255, 255, 255, 0.15);
-		color: white;
+		background: var(--accent);
+		border-color: var(--primary);
+		color: var(--foreground);
 	}
 
 	.card-item .item-icon {
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		color: rgba(255, 255, 255, 0.6);
+		color: var(--muted-foreground);
 	}
 
 	.card-item:hover .item-icon {
-		color: rgba(255, 255, 255, 0.9);
+		color: var(--foreground);
 	}
 
 	.item-label {
@@ -219,8 +219,8 @@
 	}
 
 	.process-item.active {
-		border-color: rgba(168, 85, 247, 0.3);
-		background: rgba(168, 85, 247, 0.1);
+		border-color: #a855f7;
+		background: color-mix(in oklch, #a855f7 10%, transparent);
 	}
 
 	.process-icon {
@@ -274,7 +274,7 @@
 	.progress-bar-container {
 		width: 80px;
 		height: 3px;
-		background: rgba(255, 255, 255, 0.1);
+		background: var(--muted);
 		border-radius: 2px;
 		overflow: hidden;
 	}
@@ -292,18 +292,18 @@
 		left: 50%;
 		transform: translateX(-50%);
 		padding: 6px 10px;
-		background: rgba(30, 30, 30, 0.95);
-		border: 1px solid rgba(255, 255, 255, 0.1);
+		background: var(--popover);
+		border: 1px solid var(--border);
 		border-radius: 6px;
 		font-size: 0.6875rem;
-		color: white;
+		color: var(--popover-foreground);
 		white-space: nowrap;
 		opacity: 0;
 		visibility: hidden;
 		transition: all 0.15s ease;
 		pointer-events: none;
 		z-index: 100;
-		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+		box-shadow: var(--shadow-m);
 	}
 
 	.dock-item:hover .tooltip {

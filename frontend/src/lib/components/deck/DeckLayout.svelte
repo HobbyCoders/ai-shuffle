@@ -187,7 +187,7 @@
 		grid-template-rows: 1fr;
 		width: 100%;
 		height: 100vh;
-		background: #0a0a0a;
+		background: var(--background);
 		overflow: hidden;
 	}
 
@@ -239,7 +239,7 @@
 		align-items: center;
 		justify-content: center;
 		height: 100%;
-		color: rgba(255, 255, 255, 0.3);
+		color: var(--muted-foreground);
 		font-size: 0.875rem;
 	}
 
@@ -279,11 +279,11 @@
 		transform: translateY(-50%);
 		width: 24px;
 		height: 48px;
-		background: rgba(24, 24, 27, 0.95);
-		border: 1px solid rgba(255, 255, 255, 0.1);
+		background: var(--card);
+		border: 1px solid var(--border);
 		border-right: none;
 		border-radius: 6px 0 0 6px;
-		color: rgba(255, 255, 255, 0.6);
+		color: var(--muted-foreground);
 		cursor: pointer;
 		display: flex;
 		align-items: center;
@@ -293,7 +293,7 @@
 	}
 
 	.context-expand-toggle:hover {
-		color: white;
-		background: rgba(40, 40, 44, 0.95);
+		color: var(--foreground);
+		background: var(--accent);
 	}
 </style>

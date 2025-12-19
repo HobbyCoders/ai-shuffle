@@ -276,9 +276,9 @@
 		position: relative;
 		width: 320px;
 		height: 100%;
-		background: rgba(24, 24, 27, 0.8);
+		background: var(--card);
 		backdrop-filter: blur(24px);
-		border-left: 1px solid rgba(255, 255, 255, 0.08);
+		border-left: 1px solid var(--border);
 		display: flex;
 		flex-direction: column;
 		transition: width 0.2s ease;
@@ -297,10 +297,10 @@
 		transform: translateY(-50%);
 		width: 24px;
 		height: 48px;
-		background: rgba(24, 24, 27, 0.95);
-		border: 1px solid rgba(255, 255, 255, 0.1);
+		background: var(--card);
+		border: 1px solid var(--border);
 		border-radius: 6px 0 0 6px;
-		color: rgba(255, 255, 255, 0.6);
+		color: var(--muted-foreground);
 		cursor: pointer;
 		display: flex;
 		align-items: center;
@@ -310,9 +310,9 @@
 	}
 
 	.collapse-toggle:hover {
-		color: white;
-		background: rgba(40, 40, 44, 0.95);
-		border-color: rgba(255, 255, 255, 0.2);
+		color: var(--foreground);
+		background: var(--accent);
+		border-color: var(--border);
 	}
 
 	.panel-content {
@@ -325,8 +325,8 @@
 	}
 
 	.section {
-		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid rgba(255, 255, 255, 0.06);
+		background: var(--secondary);
+		border: 1px solid var(--border);
 		border-radius: 10px;
 		overflow: hidden;
 	}
@@ -339,13 +339,13 @@
 		padding: 10px 12px;
 		background: transparent;
 		border: none;
-		color: rgba(255, 255, 255, 0.9);
+		color: var(--foreground);
 		cursor: pointer;
 		transition: background 0.15s ease;
 	}
 
 	.section-header:hover {
-		background: rgba(255, 255, 255, 0.05);
+		background: var(--hover-overlay);
 	}
 
 	.section-title {
@@ -360,15 +360,15 @@
 
 	.section-count {
 		padding: 2px 6px;
-		background: rgba(255, 255, 255, 0.1);
+		background: var(--muted);
 		border-radius: 10px;
 		font-size: 0.625rem;
 		font-weight: 700;
 	}
 
 	.section-count.active {
-		background: rgba(16, 185, 129, 0.2);
-		color: #10b981;
+		background: color-mix(in oklch, var(--success) 20%, transparent);
+		color: var(--success);
 	}
 
 	.chevron {
@@ -391,7 +391,7 @@
 		padding: 16px;
 		text-align: center;
 		font-size: 0.75rem;
-		color: rgba(255, 255, 255, 0.4);
+		color: var(--muted-foreground);
 	}
 
 	.list-item {
@@ -400,7 +400,7 @@
 		gap: 10px;
 		padding: 8px 10px;
 		background: transparent;
-		border: none;
+		border: 1px solid transparent;
 		border-radius: 8px;
 		cursor: pointer;
 		transition: all 0.15s ease;
@@ -409,12 +409,13 @@
 	}
 
 	.list-item:hover {
-		background: rgba(255, 255, 255, 0.05);
+		background: var(--hover-overlay);
+		border-color: var(--border);
 	}
 
 	.list-item.active {
-		background: rgba(59, 130, 246, 0.15);
-		border: 1px solid rgba(59, 130, 246, 0.2);
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		border-color: color-mix(in oklch, var(--primary) 30%, transparent);
 	}
 
 	.list-item.unread::before {
@@ -425,7 +426,7 @@
 		transform: translateY(-50%);
 		width: 6px;
 		height: 6px;
-		background: #3b82f6;
+		background: var(--primary);
 		border-radius: 50%;
 	}
 
@@ -444,7 +445,7 @@
 	.item-title {
 		font-size: 0.8125rem;
 		font-weight: 500;
-		color: rgba(255, 255, 255, 0.9);
+		color: var(--foreground);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -452,7 +453,7 @@
 
 	.item-subtitle {
 		font-size: 0.6875rem;
-		color: rgba(255, 255, 255, 0.5);
+		color: var(--muted-foreground);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -461,14 +462,14 @@
 
 	.item-meta {
 		font-size: 0.625rem;
-		color: rgba(255, 255, 255, 0.4);
+		color: var(--muted-foreground);
 		flex-shrink: 0;
 	}
 
 	.progress-indicator {
 		font-size: 0.625rem;
 		font-weight: 600;
-		color: #10b981;
+		color: var(--success);
 		flex-shrink: 0;
 	}
 
@@ -482,8 +483,8 @@
 		aspect-ratio: 1;
 		border-radius: 8px;
 		overflow: hidden;
-		background: rgba(255, 255, 255, 0.05);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		background: var(--muted);
+		border: 1px solid var(--border);
 		cursor: pointer;
 		transition: all 0.15s ease;
 		position: relative;
@@ -493,12 +494,12 @@
 	}
 
 	.generation-item:hover {
-		border-color: rgba(255, 255, 255, 0.2);
+		border-color: var(--primary);
 		transform: scale(1.02);
 	}
 
 	.generation-item.generating {
-		border-color: rgba(168, 85, 247, 0.3);
+		border-color: #a855f7;
 	}
 
 	.generation-thumbnail {
@@ -508,7 +509,7 @@
 	}
 
 	.generation-placeholder {
-		color: rgba(255, 255, 255, 0.3);
+		color: var(--muted-foreground);
 	}
 
 	.generation-progress {
@@ -517,7 +518,7 @@
 		left: 0;
 		right: 0;
 		height: 3px;
-		background: rgba(0, 0, 0, 0.5);
+		background: var(--muted);
 	}
 
 	.progress-bar {
@@ -536,13 +537,14 @@
 		justify-content: space-between;
 		align-items: center;
 		padding: 6px 8px;
-		background: rgba(255, 255, 255, 0.03);
+		background: var(--muted);
 		border-radius: 6px;
+		border: 1px solid var(--border);
 	}
 
 	.info-label {
 		font-size: 0.6875rem;
-		color: rgba(255, 255, 255, 0.5);
+		color: var(--muted-foreground);
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
 	}
@@ -550,6 +552,6 @@
 	.info-value {
 		font-size: 0.75rem;
 		font-weight: 500;
-		color: rgba(255, 255, 255, 0.9);
+		color: var(--foreground);
 	}
 </style>

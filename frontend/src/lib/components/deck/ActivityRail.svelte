@@ -118,8 +118,8 @@
 		align-items: center;
 		width: 64px;
 		height: 100%;
-		background: rgba(17, 17, 17, 0.95);
-		border-right: 1px solid rgba(255, 255, 255, 0.08);
+		background: var(--card);
+		border-right: 1px solid var(--border);
 		padding: 12px 0;
 		gap: 8px;
 	}
@@ -129,7 +129,7 @@
 		width: 100%;
 		height: 64px;
 		border-right: none;
-		border-top: 1px solid rgba(255, 255, 255, 0.08);
+		border-top: 1px solid var(--border);
 		padding: 0 12px;
 		justify-content: space-around;
 	}
@@ -140,10 +140,10 @@
 		justify-content: center;
 		width: 40px;
 		height: 40px;
-		background: linear-gradient(135deg, #f59e0b 0%, #fb923c 100%);
+		background: linear-gradient(135deg, var(--primary) 0%, var(--primary) 100%);
 		border: none;
 		border-radius: 12px;
-		color: white;
+		color: var(--primary-foreground);
 		cursor: pointer;
 		transition: all 0.2s ease;
 		margin-bottom: 16px;
@@ -151,7 +151,7 @@
 
 	.logo-button:hover {
 		transform: scale(1.05);
-		box-shadow: 0 0 20px rgba(251, 146, 60, 0.4);
+		box-shadow: 0 0 20px var(--glow-color);
 	}
 
 	.activities {
@@ -177,14 +177,14 @@
 		background: transparent;
 		border: none;
 		border-radius: 12px;
-		color: rgba(255, 255, 255, 0.5);
+		color: var(--muted-foreground);
 		cursor: pointer;
 		transition: all 0.2s ease;
 	}
 
 	.activity-button:hover {
-		color: rgba(255, 255, 255, 0.9);
-		background: rgba(255, 255, 255, 0.05);
+		color: var(--foreground);
+		background: var(--hover-overlay);
 	}
 
 	.activity-button.active {
@@ -227,11 +227,11 @@
 		min-width: 16px;
 		height: 16px;
 		padding: 0 4px;
-		background: #ef4444;
+		background: var(--destructive);
 		border-radius: 8px;
 		font-size: 0.625rem;
 		font-weight: 600;
-		color: white;
+		color: var(--destructive-foreground);
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -252,18 +252,18 @@
 		top: 50%;
 		transform: translateY(-50%);
 		padding: 6px 10px;
-		background: rgba(30, 30, 30, 0.95);
-		border: 1px solid rgba(255, 255, 255, 0.1);
+		background: var(--popover);
+		border: 1px solid var(--border);
 		border-radius: 6px;
 		font-size: 0.75rem;
-		color: white;
+		color: var(--popover-foreground);
 		white-space: nowrap;
 		opacity: 0;
 		visibility: hidden;
 		transition: all 0.15s ease;
 		pointer-events: none;
 		z-index: 100;
-		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+		box-shadow: var(--shadow-m);
 	}
 
 	.mobile .tooltip {
@@ -289,14 +289,14 @@
 		background: transparent;
 		border: none;
 		border-radius: 10px;
-		color: rgba(255, 255, 255, 0.5);
+		color: var(--muted-foreground);
 		cursor: pointer;
 		transition: all 0.2s ease;
 		margin-top: auto;
 	}
 
 	.settings-button:hover {
-		color: rgba(255, 255, 255, 0.9);
-		background: rgba(255, 255, 255, 0.05);
+		color: var(--foreground);
+		background: var(--hover-overlay);
 	}
 </style>
