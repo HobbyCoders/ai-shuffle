@@ -26,9 +26,6 @@ export * from './pwa';
 // Theme
 export * from './theme';
 
-// Workspace (legacy card system)
-export * from './workspace';
-
 // Canvas (media generation)
 export * from './canvas';
 
