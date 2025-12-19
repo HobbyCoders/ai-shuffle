@@ -12,6 +12,7 @@
 	 */
 
 	import { onMount } from 'svelte';
+	import { ChevronLeft } from 'lucide-svelte';
 	import ActivityRail from './ActivityRail.svelte';
 	import ContextPanel from './ContextPanel.svelte';
 	import Dock from './Dock.svelte';
@@ -151,6 +152,17 @@
 				{onGenerationClick}
 			/>
 		</aside>
+
+		<!-- Expand button - shown when context panel is collapsed -->
+		{#if localContextCollapsed}
+			<button
+				class="context-expand-toggle"
+				onclick={handleContextToggle}
+				title="Expand panel"
+			>
+				<ChevronLeft size={16} strokeWidth={2} />
+			</button>
+		{/if}
 	{/if}
 
 	<!-- Mobile Rail - Bottom of screen -->
@@ -257,5 +269,31 @@
 	:global(.deck-layout > *) {
 		min-width: 0;
 		min-height: 0;
+	}
+
+	/* Expand toggle button - shown when context panel is collapsed */
+	.context-expand-toggle {
+		position: fixed;
+		right: 0;
+		top: 50%;
+		transform: translateY(-50%);
+		width: 24px;
+		height: 48px;
+		background: rgba(24, 24, 27, 0.95);
+		border: 1px solid rgba(255, 255, 255, 0.1);
+		border-right: none;
+		border-radius: 6px 0 0 6px;
+		color: rgba(255, 255, 255, 0.6);
+		cursor: pointer;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		transition: all 0.15s ease;
+		z-index: 60;
+	}
+
+	.context-expand-toggle:hover {
+		color: white;
+		background: rgba(40, 40, 44, 0.95);
 	}
 </style>

@@ -94,14 +94,12 @@
 </script>
 
 <div class="context-panel" class:collapsed>
-	<!-- Collapse toggle button -->
-	<button class="collapse-toggle" onclick={() => onToggleCollapse?.()} title={collapsed ? 'Expand panel' : 'Collapse panel'}>
-		{#if collapsed}
-			<ChevronLeft size={16} strokeWidth={2} />
-		{:else}
+	<!-- Collapse toggle button - only show when NOT collapsed (expanded state) -->
+	{#if !collapsed}
+		<button class="collapse-toggle" onclick={() => onToggleCollapse?.()} title="Collapse panel">
 			<ChevronRight size={16} strokeWidth={2} />
-		{/if}
-	</button>
+		</button>
+	{/if}
 
 	{#if !collapsed}
 		<div class="panel-content">
@@ -311,17 +309,10 @@
 		z-index: 10;
 	}
 
-	/* When collapsed, position toggle at right edge of screen */
-	.collapsed .collapse-toggle {
-		position: fixed;
-		right: 0;
-		left: auto;
-		border-radius: 6px 0 0 6px;
-	}
-
 	.collapse-toggle:hover {
 		color: white;
 		background: rgba(40, 40, 44, 0.95);
+		border-color: rgba(255, 255, 255, 0.2);
 	}
 
 	.panel-content {
