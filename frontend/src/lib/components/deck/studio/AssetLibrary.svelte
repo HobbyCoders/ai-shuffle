@@ -12,6 +12,8 @@
 		Layers
 	} from 'lucide-svelte';
 	import type { DeckGeneration } from '../types';
+	import { savedAssets, studio } from '$lib/stores/studio';
+	import type { Asset } from '$lib/stores/studio';
 
 	// Props
 	interface Props {
@@ -24,57 +26,20 @@
 	// Types
 	type FilterType = 'all' | 'images' | 'videos';
 
-	// Mock data
-	const mockAssets: DeckGeneration[] = [
-		{
-			id: '1',
-			type: 'image',
-			prompt: 'A serene mountain landscape at sunset with golden clouds',
+	// Map store asset to component's expected format
+	function mapStoreAsset(asset: Asset): DeckGeneration {
+		return {
+			id: asset.id,
+			type: asset.type,
+			prompt: asset.prompt,
 			status: 'complete',
-			thumbnailUrl: 'https://picsum.photos/seed/1/300/200',
-			resultUrl: 'https://picsum.photos/seed/1/1200/800'
-		},
-		{
-			id: '2',
-			type: 'video',
-			prompt: 'A cinematic drone shot flying over a misty forest at dawn',
-			status: 'complete',
-			thumbnailUrl: 'https://picsum.photos/seed/2/300/200',
-			resultUrl: 'https://picsum.photos/seed/2/1200/800'
-		},
-		{
-			id: '3',
-			type: 'image',
-			prompt: 'Futuristic cyberpunk city with neon lights',
-			status: 'complete',
-			thumbnailUrl: 'https://picsum.photos/seed/3/300/200',
-			resultUrl: 'https://picsum.photos/seed/3/1200/800'
-		},
-		{
-			id: '4',
-			type: 'image',
-			prompt: 'Abstract digital art with flowing colors',
-			status: 'complete',
-			thumbnailUrl: 'https://picsum.photos/seed/4/300/200',
-			resultUrl: 'https://picsum.photos/seed/4/1200/800'
-		},
-		{
-			id: '5',
-			type: 'video',
-			prompt: 'Ocean waves crashing on a beach at sunset',
-			status: 'complete',
-			thumbnailUrl: 'https://picsum.photos/seed/5/300/200',
-			resultUrl: 'https://picsum.photos/seed/5/1200/800'
-		},
-		{
-			id: '6',
-			type: 'image',
-			prompt: 'Portrait of a person in renaissance style',
-			status: 'complete',
-			thumbnailUrl: 'https://picsum.photos/seed/6/300/200',
-			resultUrl: 'https://picsum.photos/seed/6/1200/800'
-		}
-	];
+			thumbnailUrl: asset.url,
+			resultUrl: asset.url
+		};
+	}
+
+	// Derived assets from store
+	let assets = $derived($savedAssets.map(mapStoreAsset));
 
 	// State
 	let activeFilter: FilterType = $state('all');
@@ -84,30 +49,30 @@
 
 	// Derived
 	let filteredAssets = $derived.by(() => {
-		let assets = mockAssets;
+		let filtered = assets;
 
 		// Filter by type
 		if (activeFilter === 'images') {
-			assets = assets.filter(a => a.type === 'image');
+			filtered = filtered.filter(a => a.type === 'image');
 		} else if (activeFilter === 'videos') {
-			assets = assets.filter(a => a.type === 'video');
+			filtered = filtered.filter(a => a.type === 'video');
 		}
 
 		// Filter by search query
 		if (searchQuery.trim()) {
 			const query = searchQuery.toLowerCase();
-			assets = assets.filter(a => a.prompt.toLowerCase().includes(query));
+			filtered = filtered.filter(a => a.prompt.toLowerCase().includes(query));
 		}
 
-		return assets;
+		return filtered;
 	});
 
 	let allSelected = $derived(
 		filteredAssets.length > 0 && filteredAssets.every(a => selectedIds.has(a.id))
 	);
 
-	let imageCount = $derived(mockAssets.filter(a => a.type === 'image').length);
-	let videoCount = $derived(mockAssets.filter(a => a.type === 'video').length);
+	let imageCount = $derived(assets.filter(a => a.type === 'image').length);
+	let videoCount = $derived(assets.filter(a => a.type === 'video').length);
 
 	// Handlers
 	function handleFilterChange(filter: FilterType) {
@@ -153,8 +118,10 @@
 	}
 
 	function handleBulkDelete() {
-		// In real implementation, this would delete selected assets
-		console.log('Deleting assets:', Array.from(selectedIds));
+		// Delete selected assets from the store
+		for (const id of selectedIds) {
+			studio.deleteAsset(id);
+		}
 		selectedIds = new Set();
 		isMultiSelectMode = false;
 	}
@@ -171,7 +138,7 @@
 
 	function handleDelete(asset: DeckGeneration, event: MouseEvent) {
 		event.stopPropagation();
-		console.log('Delete asset:', asset.id);
+		studio.deleteAsset(asset.id);
 	}
 
 	function truncatePrompt(prompt: string, maxLength: number = 50): string {
@@ -206,7 +173,7 @@
 			aria-pressed={activeFilter === 'all'}
 		>
 			All
-			<span class="px-1.5 py-0.5 rounded bg-black/10 text-[10px]">{mockAssets.length}</span>
+			<span class="px-1.5 py-0.5 rounded bg-black/10 text-[10px]">{assets.length}</span>
 		</button>
 		<button
 			type="button"

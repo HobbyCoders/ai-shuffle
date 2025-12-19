@@ -10,6 +10,8 @@
 		Loader2
 	} from 'lucide-svelte';
 	import type { DeckGeneration } from '../types';
+	import { recentGenerations, studio } from '$lib/stores/studio';
+	import type { DeckGeneration as StoreDeckGeneration } from '$lib/stores/studio';
 
 	// Props
 	interface Props {
@@ -20,53 +22,41 @@
 
 	let { onSelect, onRegenerate, onDelete }: Props = $props();
 
-	// Mock data for recent generations
-	const mockHistory: DeckGeneration[] = [
-		{
-			id: 'h1',
-			type: 'image',
-			prompt: 'A serene mountain landscape at sunset with golden clouds reflecting on a calm lake',
-			status: 'complete',
-			thumbnailUrl: 'https://picsum.photos/seed/h1/200/150',
-			resultUrl: 'https://picsum.photos/seed/h1/1200/800'
-		},
-		{
-			id: 'h2',
-			type: 'video',
-			prompt: 'A cinematic drone shot flying over a misty forest at dawn',
-			status: 'generating',
-			progress: 65,
-			thumbnailUrl: 'https://picsum.photos/seed/h2/200/150'
-		},
-		{
-			id: 'h3',
-			type: 'image',
-			prompt: 'Futuristic cyberpunk city with neon lights and flying cars',
-			status: 'complete',
-			thumbnailUrl: 'https://picsum.photos/seed/h3/200/150',
-			resultUrl: 'https://picsum.photos/seed/h3/1200/800'
-		},
-		{
-			id: 'h4',
-			type: 'image',
-			prompt: 'Abstract digital art with flowing colors and geometric shapes',
-			status: 'error'
-		},
-		{
-			id: 'h5',
-			type: 'video',
-			prompt: 'Ocean waves crashing on a beach during golden hour',
-			status: 'complete',
-			thumbnailUrl: 'https://picsum.photos/seed/h5/200/150',
-			resultUrl: 'https://picsum.photos/seed/h5/1200/800'
-		},
-		{
-			id: 'h6',
-			type: 'image',
-			prompt: 'Portrait of a person in renaissance painting style',
-			status: 'pending'
+	// Map store generation to component's expected format
+	function mapStoreGeneration(gen: StoreDeckGeneration): DeckGeneration {
+		// Map status: store uses 'completed'/'failed', component uses 'complete'/'error'
+		let status: DeckGeneration['status'];
+		switch (gen.status) {
+			case 'completed':
+				status = 'complete';
+				break;
+			case 'failed':
+				status = 'error';
+				break;
+			default:
+				status = gen.status;
 		}
-	];
+
+		return {
+			id: gen.id,
+			type: gen.type,
+			prompt: gen.prompt,
+			status,
+			progress: gen.progress,
+			thumbnailUrl: gen.result?.url,
+			resultUrl: gen.result?.url
+		};
+	}
+
+	// Derived history from store
+	let history = $derived($recentGenerations.map(mapStoreGeneration));
+
+	// Handle delete with store
+	function handleDeleteGeneration(generation: DeckGeneration, event: MouseEvent) {
+		event.stopPropagation();
+		studio.removeGeneration(generation.id);
+		onDelete?.(generation);
+	}
 
 	// State
 	let hoveredId: string | null = $state(null);
@@ -84,8 +74,7 @@
 	}
 
 	function handleDelete(generation: DeckGeneration, event: MouseEvent) {
-		event.stopPropagation();
-		onDelete?.(generation);
+		handleDeleteGeneration(generation, event);
 	}
 
 	function getStatusIcon(status: DeckGeneration['status']) {
@@ -131,7 +120,7 @@
 		</h3>
 	</div>
 
-	{#if mockHistory.length === 0}
+	{#if history.length === 0}
 		<!-- Empty state -->
 		<div class="flex items-center justify-center py-8 text-muted-foreground">
 			<div class="text-center">
@@ -142,7 +131,7 @@
 	{:else}
 		<!-- Horizontal scroll container -->
 		<div class="flex gap-3 overflow-x-auto pb-2 -mx-4 px-4 scrollbar-thin scrollbar-thumb-border scrollbar-track-transparent">
-			{#each mockHistory as generation (generation.id)}
+			{#each history as generation (generation.id)}
 				{@const StatusIcon = getStatusIcon(generation.status)}
 				<div
 					role="button"

@@ -6,6 +6,8 @@
 	import AssetLibrary from './AssetLibrary.svelte';
 	import GenerationHistory from './GenerationHistory.svelte';
 	import type { DeckGeneration } from '../types';
+	import { studio, activeGeneration as storeActiveGeneration } from '$lib/stores/studio';
+	import type { ImageProvider, VideoProvider } from '$lib/stores/studio';
 
 	// Props
 	interface Props {
@@ -14,6 +16,39 @@
 	}
 
 	let { activeGeneration = null, onStartGeneration }: Props = $props();
+
+	// Handle generation from child components
+	async function handleStartGeneration(type: 'image' | 'video', config: unknown) {
+		if (type === 'image') {
+			const imageConfig = config as {
+				prompt: string;
+				provider: string;
+				aspectRatio: string;
+				style?: string;
+			};
+			await studio.generateImage(imageConfig.prompt, {
+				provider: imageConfig.provider as ImageProvider,
+				aspectRatio: imageConfig.aspectRatio,
+				style: imageConfig.style
+			});
+		} else {
+			const videoConfig = config as {
+				prompt: string;
+				provider: string;
+				duration: number;
+				aspectRatio: string;
+				startFrame?: string;
+			};
+			await studio.generateVideo(videoConfig.prompt, {
+				provider: videoConfig.provider as VideoProvider,
+				aspectRatio: videoConfig.aspectRatio,
+				duration: videoConfig.duration,
+				sourceImage: videoConfig.startFrame
+			});
+		}
+		// Also call the parent callback if provided
+		onStartGeneration?.(type, config);
+	}
 
 	// State
 	let activeTab: 'image' | 'video' = $state('image');
@@ -107,9 +142,9 @@
 			<!-- Tab Content -->
 			<div class="flex-1 overflow-y-auto">
 				{#if activeTab === 'image'}
-					<ImageGenerator {onStartGeneration} />
+					<ImageGenerator onStartGeneration={handleStartGeneration} />
 				{:else}
-					<VideoGenerator {onStartGeneration} />
+					<VideoGenerator onStartGeneration={handleStartGeneration} />
 				{/if}
 			</div>
 		</div>

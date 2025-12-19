@@ -165,10 +165,8 @@
 				referenceImages: referenceImages.map(r => r.url)
 			};
 
-			onStartGeneration?.('image', config);
-
-			// Simulate generation delay for demo
-			await new Promise(resolve => setTimeout(resolve, 2000));
+			// Call the callback which will trigger the store's generateImage
+			await onStartGeneration?.('image', config);
 
 			// Reset form after successful generation
 			prompt = '';

@@ -259,6 +259,51 @@
 	}
 
 	// ============================================
+	// Deck-Tabs Sync
+	// ============================================
+	/**
+	 * Synchronize deck cards with tabs after initialization.
+	 * For chat cards with stale/missing tab references, recreate the tabs.
+	 */
+	function syncDeckCardsWithTabs() {
+		const currentTabs = $allTabs;
+
+		// Combine visible and minimized cards from deck store
+		const allDeckCards = [...$visibleCards, ...$minimizedCardsStore];
+
+		for (const card of allDeckCards) {
+			if (card.type !== 'chat') continue;
+
+			const tabId = card.meta?.tabId as string | undefined;
+			if (!tabId) {
+				// Card has no tabId - create a fresh tab
+				const newTabId = tabs.createTab();
+				deck.setCardMeta(card.id, { tabId: newTabId });
+				console.log(`[Deck] Card ${card.id} had no tabId, created fresh tab ${newTabId}`);
+				continue;
+			}
+
+			// Check if the tab exists
+			const existingTab = currentTabs.find((t) => t.id === tabId);
+			if (!existingTab) {
+				// Tab doesn't exist - we need to create it
+				// If the card has a sessionId (dataId), load that session
+				if (card.dataId) {
+					const newTabId = tabs.openSession(card.dataId);
+					// Update the card's meta with the new tabId
+					deck.setCardMeta(card.id, { tabId: newTabId });
+					console.log(`[Deck] Synced card ${card.id}: created tab ${newTabId} for session ${card.dataId}`);
+				} else {
+					// New chat with no session - create a fresh tab
+					const newTabId = tabs.createTab();
+					deck.setCardMeta(card.id, { tabId: newTabId });
+					console.log(`[Deck] Synced card ${card.id}: created fresh tab ${newTabId}`);
+				}
+			}
+		}
+	}
+
+	// ============================================
 	// Lifecycle
 	// ============================================
 	onMount(async () => {
@@ -282,6 +327,10 @@
 			tabs.loadApiUsers();
 			tabs.loadAdminSessions();
 		}
+
+		// Sync deck cards with tabs after initialization
+		// This ensures chat cards have valid tab references
+		syncDeckCardsWithTabs();
 
 		// Setup responsive handling
 		checkMobile();

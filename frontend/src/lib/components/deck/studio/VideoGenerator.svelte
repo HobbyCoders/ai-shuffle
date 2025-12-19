@@ -183,10 +183,8 @@
 				endFrame: endFrame?.url
 			};
 
-			onStartGeneration?.('video', config);
-
-			// Simulate generation delay for demo
-			await new Promise(resolve => setTimeout(resolve, 3000));
+			// Call the callback which will trigger the store's generateVideo
+			await onStartGeneration?.('video', config);
 
 			// Reset form after successful generation
 			prompt = '';
