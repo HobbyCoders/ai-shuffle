@@ -249,8 +249,9 @@
 	}
 
 	function getTabIdForCard(card: CardsDeckCard): string | null {
-		if (card.data?.meta?.tabId) {
-			return card.data.meta.tabId as string;
+		const tabIdFromMeta = card.data?.meta?.tabId as string | undefined;
+		if (tabIdFromMeta) {
+			return tabIdFromMeta;
 		}
 		if (card.data?.dataId) {
 			return tabs.findTabBySessionId(card.data.dataId as string);
@@ -279,7 +280,6 @@
 				// Card has no tabId - create a fresh tab
 				const newTabId = tabs.createTab();
 				deck.setCardMeta(card.id, { tabId: newTabId });
-				console.log(`[Deck] Card ${card.id} had no tabId, created fresh tab ${newTabId}`);
 				continue;
 			}
 
@@ -292,12 +292,10 @@
 					const newTabId = tabs.openSession(card.dataId);
 					// Update the card's meta with the new tabId
 					deck.setCardMeta(card.id, { tabId: newTabId });
-					console.log(`[Deck] Synced card ${card.id}: created tab ${newTabId} for session ${card.dataId}`);
 				} else {
 					// New chat with no session - create a fresh tab
 					const newTabId = tabs.createTab();
 					deck.setCardMeta(card.id, { tabId: newTabId });
-					console.log(`[Deck] Synced card ${card.id}: created fresh tab ${newTabId}`);
 				}
 			}
 		}
@@ -878,72 +876,74 @@
 					onCardSnap={handleCardSnap}
 					onCreateCard={handleCreateCard}
 				>
-					{#each workspaceCards.sort((a, b) => a.zIndex - b.zIndex) as card (card.id)}
-						{@const tabId = getTabIdForCard(card)}
-						{#if !card.minimized}
-							<div
-								class="card-wrapper"
-								class:maximized={card.maximized}
-								style:position="absolute"
-								style:left={card.maximized ? '0' : `${card.x}px`}
-								style:top={card.maximized ? '0' : `${card.y}px`}
-								style:width={card.maximized ? '100%' : `${card.width}px`}
-								style:height={card.maximized ? '100%' : `${card.height}px`}
-								style:z-index={card.zIndex}
-							>
-								{#if card.type === 'chat'}
-									{#if tabId}
-										<ChatCard
+					{#snippet children()}
+						{#each workspaceCards.sort((a, b) => a.zIndex - b.zIndex) as card (card.id)}
+							{@const tabId = getTabIdForCard(card)}
+							{#if !card.minimized}
+								<div
+									class="card-wrapper"
+									class:maximized={card.maximized}
+									style:position="absolute"
+									style:left={card.maximized ? '0' : `${card.x}px`}
+									style:top={card.maximized ? '0' : `${card.y}px`}
+									style:width={card.maximized ? '100%' : `${card.width}px`}
+									style:height={card.maximized ? '100%' : `${card.height}px`}
+									style:z-index={card.zIndex}
+								>
+									{#if card.type === 'chat'}
+										{#if tabId}
+											<ChatCard
+												{card}
+												{tabId}
+												onClose={() => handleCardClose(card.id)}
+												onMinimize={() => handleCardMinimize(card.id)}
+												onMaximize={() => handleCardMaximize(card.id)}
+												onFocus={() => handleCardFocus(card.id)}
+												onMove={(x, y) => handleCardMove(card.id, x, y)}
+												onResize={(w, h) => handleCardResize(card.id, w, h)}
+												onFork={(sessionId, messageIndex, messageId) =>
+													handleFork(card.id, sessionId, messageIndex, messageId)
+												}
+											/>
+										{:else}
+											<div class="card-loading">
+												<p>Initializing chat...</p>
+											</div>
+										{/if}
+									{:else if card.type === 'agent'}
+										<AgentCard
 											{card}
-											{tabId}
+											agentId={card.data?.dataId as string || card.id}
 											onClose={() => handleCardClose(card.id)}
 											onMinimize={() => handleCardMinimize(card.id)}
 											onMaximize={() => handleCardMaximize(card.id)}
 											onFocus={() => handleCardFocus(card.id)}
 											onMove={(x, y) => handleCardMove(card.id, x, y)}
 											onResize={(w, h) => handleCardResize(card.id, w, h)}
-											onFork={(sessionId, messageIndex, messageId) =>
-												handleFork(card.id, sessionId, messageIndex, messageId)
-											}
+										/>
+									{:else if card.type === 'canvas'}
+										<CanvasCard
+											{card}
+											canvasId={card.data?.dataId as string || card.id}
+											onClose={() => handleCardClose(card.id)}
+											onMinimize={() => handleCardMinimize(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
 										/>
 									{:else}
-										<div class="card-loading">
-											<p>Initializing chat...</p>
+										<!-- Terminal or other card types -->
+										<div class="card-placeholder">
+											<p class="text-muted-foreground">
+												{card.type} card (coming soon)
+											</p>
 										</div>
 									{/if}
-								{:else if card.type === 'agent'}
-									<AgentCard
-										{card}
-										agentId={card.data?.dataId as string || card.id}
-										onClose={() => handleCardClose(card.id)}
-										onMinimize={() => handleCardMinimize(card.id)}
-										onMaximize={() => handleCardMaximize(card.id)}
-										onFocus={() => handleCardFocus(card.id)}
-										onMove={(x, y) => handleCardMove(card.id, x, y)}
-										onResize={(w, h) => handleCardResize(card.id, w, h)}
-									/>
-								{:else if card.type === 'canvas'}
-									<CanvasCard
-										{card}
-										canvasId={card.data?.dataId as string || card.id}
-										onClose={() => handleCardClose(card.id)}
-										onMinimize={() => handleCardMinimize(card.id)}
-										onMaximize={() => handleCardMaximize(card.id)}
-										onFocus={() => handleCardFocus(card.id)}
-										onMove={(x, y) => handleCardMove(card.id, x, y)}
-										onResize={(w, h) => handleCardResize(card.id, w, h)}
-									/>
-								{:else}
-									<!-- Terminal or other card types -->
-									<div class="card-placeholder">
-										<p class="text-muted-foreground">
-											{card.type} card (coming soon)
-										</p>
-									</div>
-								{/if}
-							</div>
-						{/if}
-					{/each}
+								</div>
+							{/if}
+						{/each}
+					{/snippet}
 				</Workspace>
 			{/if}
 		{:else if activeMode === 'agents'}
