@@ -134,6 +134,10 @@
 		}
 
 		if (newIndex !== activeCardIndex) {
+			// Blur any focused element before switching to prevent focus jumping issues
+			if (document.activeElement instanceof HTMLElement) {
+				document.activeElement.blur();
+			}
 			onCardChange(newIndex);
 		}
 
@@ -152,6 +156,10 @@
 	// Navigate to specific card via dot indicator
 	function navigateToCard(index: number) {
 		if (index !== activeCardIndex && index >= 0 && index < cards.length) {
+			// Blur any focused element before switching to prevent focus jumping issues
+			if (document.activeElement instanceof HTMLElement) {
+				document.activeElement.blur();
+			}
 			onCardChange(index);
 		}
 	}

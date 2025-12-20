@@ -28,6 +28,8 @@
 	let containerRef = $state<HTMLDivElement | null>(null);
 	let shouldAutoScroll = $state(true); // Start with auto-scroll enabled
 	let isScrollingProgrammatically = $state(false);
+	let previousTabId = $state<string | null>(null); // Track previous tab to detect actual tab switches
+	let savedScrollPositions = $state<Map<string, number>>(new Map()); // Preserve scroll positions per tab
 
 	// Current profile for message settings
 	const currentProfile = $derived($profiles.find(p => p.id === tab.profile));
@@ -87,11 +89,49 @@
 		}
 	});
 
-	// Scroll on tab change - reset scroll state and go to bottom
+	// Scroll on tab change - only scroll to bottom on ACTUAL tab switches, not remounts
 	$effect(() => {
-		const _tabId = tab.id;
-		shouldAutoScroll = true;
-		tick().then(scrollToBottom);
+		const currentTabId = tab.id;
+
+		// Check if this is an actual tab switch (different tab) vs a remount of the same tab
+		if (previousTabId !== null && previousTabId !== currentTabId) {
+			// Actual tab switch: save old position, restore new position or scroll to bottom
+			if (containerRef && previousTabId) {
+				savedScrollPositions.set(previousTabId, containerRef.scrollTop);
+			}
+
+			const savedPosition = savedScrollPositions.get(currentTabId);
+			if (savedPosition !== undefined && containerRef) {
+				// Restore saved scroll position for this tab
+				tick().then(() => {
+					if (containerRef) {
+						isScrollingProgrammatically = true;
+						containerRef.scrollTop = savedPosition;
+						// Check if we're near bottom to set auto-scroll appropriately
+						shouldAutoScroll = isNearBottom();
+						requestAnimationFrame(() => {
+							isScrollingProgrammatically = false;
+						});
+					}
+				});
+			} else {
+				// New tab or no saved position: scroll to bottom
+				shouldAutoScroll = true;
+				tick().then(scrollToBottom);
+			}
+		} else if (previousTabId === null) {
+			// Initial mount: scroll to bottom for new conversations, but don't force it
+			// This prevents scroll reset on component remount during card transforms
+			tick().then(() => {
+				if (containerRef && containerRef.scrollTop === 0 && tab.messages.length > 0) {
+					// Only scroll to bottom if we're at the top with messages (likely initial load)
+					scrollToBottom();
+				}
+			});
+		}
+		// If same tab remounting (previousTabId === currentTabId), don't change scroll position
+
+		previousTabId = currentTabId;
 	});
 </script>
 
