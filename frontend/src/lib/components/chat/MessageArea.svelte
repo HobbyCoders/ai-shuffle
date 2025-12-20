@@ -1,6 +1,8 @@
 <script lang="ts">
 	/**
 	 * MessageArea - Scrollable message container with auto-scroll behavior
+	 *
+	 * Auto-scroll pauses when user scrolls up, resumes when they scroll back down.
 	 */
 	import { tick } from 'svelte';
 	import { tabs, profiles, type ChatTab, type ChatMessage } from '$lib/stores/tabs';
@@ -21,12 +23,14 @@
 
 	let containerRef = $state<HTMLDivElement | null>(null);
 	let userScrolledUp = $state(false);
+	let lastScrollTop = $state(0);
+	let isScrollingProgrammatically = $state(false);
 
 	// Current profile for message settings
 	const currentProfile = $derived($profiles.find(p => p.id === tab.profile));
 	const hasPartialMessages = $derived(currentProfile?.config?.include_partial_messages !== false);
 
-	// Auto-scroll logic
+	// Check if near bottom of scroll container
 	function isNearBottom(): boolean {
 		if (!containerRef) return true;
 		const threshold = 100;
@@ -35,18 +39,43 @@
 
 	function scrollToBottom() {
 		if (containerRef) {
+			isScrollingProgrammatically = true;
 			containerRef.scrollTop = containerRef.scrollHeight;
+			// Reset flag after scroll completes
+			requestAnimationFrame(() => {
+				isScrollingProgrammatically = false;
+			});
 		}
 	}
 
 	function handleScroll() {
-		userScrolledUp = !isNearBottom();
+		if (!containerRef || isScrollingProgrammatically) return;
+
+		const currentScrollTop = containerRef.scrollTop;
+		const scrollingDown = currentScrollTop > lastScrollTop;
+		lastScrollTop = currentScrollTop;
+
+		if (scrollingDown && isNearBottom()) {
+			// User scrolled back down to bottom - resume auto-scroll
+			userScrolledUp = false;
+		} else if (!scrollingDown && !isNearBottom()) {
+			// User scrolled up away from bottom - pause auto-scroll
+			userScrolledUp = true;
+		}
 	}
 
-	// Watch for message changes and auto-scroll
+	// Get last message content for streaming detection
+	const lastMessageContent = $derived(() => {
+		const lastMsg = tab.messages[tab.messages.length - 1];
+		return lastMsg?.content || '';
+	});
+
+	// Watch for message changes and streaming content updates
 	$effect(() => {
-		// Track messages length to trigger on new messages
+		// Track messages length and last message content for streaming
 		const _messagesLength = tab.messages.length;
+		const _lastContent = lastMessageContent();
+
 		if (!userScrolledUp && containerRef) {
 			tick().then(scrollToBottom);
 		}
@@ -56,6 +85,7 @@
 	$effect(() => {
 		const _tabId = tab.id;
 		userScrolledUp = false;
+		lastScrollTop = 0;
 		tick().then(scrollToBottom);
 	});
 </script>
