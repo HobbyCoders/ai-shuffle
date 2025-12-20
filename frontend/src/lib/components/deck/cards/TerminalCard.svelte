@@ -37,13 +37,14 @@
 		flex: 1;
 		display: flex;
 		flex-direction: column;
-		background: var(--background);
+		background: hsl(var(--background));
 		color: var(--success);
 		font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
 		font-size: 0.875rem;
 		padding: 16px;
 		overflow: auto;
 		min-height: 100px;
+		border-radius: 0 0 12px 12px;
 	}
 
 	.terminal-line {

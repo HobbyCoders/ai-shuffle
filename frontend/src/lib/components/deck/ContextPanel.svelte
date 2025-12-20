@@ -349,13 +349,14 @@
 
 	.collapse-toggle {
 		position: absolute;
-		left: -12px;
+		left: 0;
 		top: 50%;
-		transform: translateY(-50%);
+		transform: translate(-100%, -50%);
 		width: 24px;
 		height: 48px;
 		background: var(--card);
 		border: 1px solid var(--border);
+		border-right: none;
 		border-radius: 6px 0 0 6px;
 		color: var(--muted-foreground);
 		cursor: pointer;
@@ -443,6 +444,8 @@
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
+		max-height: 200px;
+		overflow-y: auto;
 	}
 
 	.empty-state {

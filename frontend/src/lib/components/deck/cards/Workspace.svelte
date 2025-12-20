@@ -158,8 +158,20 @@
 		hideSnapPreview();
 	}
 
-	// Context menu handling
+	// Context menu handling - only show on empty workspace, not on cards or inputs
 	function handleContextMenu(e: MouseEvent) {
+		const target = e.target as HTMLElement;
+
+		// Don't show context menu if clicking on a card, input, textarea, or any interactive element
+		if (target.closest('.base-card') ||
+			target.closest('input') ||
+			target.closest('textarea') ||
+			target.closest('[contenteditable]') ||
+			target.closest('button') ||
+			target.closest('a')) {
+			return; // Allow default context menu for these elements
+		}
+
 		e.preventDefault();
 		contextMenu = {
 			show: true,

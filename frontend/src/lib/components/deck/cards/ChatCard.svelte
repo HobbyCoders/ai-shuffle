@@ -124,9 +124,6 @@
 				<!-- Header with context usage, profile/project selectors -->
 				<div class="chat-header-section">
 					<ChatHeader {tab} compact />
-					<div class="connection-status-wrapper">
-						<ConnectionStatus wsConnected={tab.wsConnected} />
-					</div>
 				</div>
 
 				<!-- Main message area -->
@@ -186,14 +183,10 @@
 	.chat-header-section {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
+		justify-content: center;
 		gap: 8px;
 		padding: 8px 12px;
 		border-bottom: 1px solid hsl(var(--border) / 0.5);
-		flex-shrink: 0;
-	}
-
-	.connection-status-wrapper {
 		flex-shrink: 0;
 	}
 
