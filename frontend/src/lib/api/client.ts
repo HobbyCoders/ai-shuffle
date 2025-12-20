@@ -969,3 +969,42 @@ export async function getKnowledgeDocumentPreview(
 	const params = maxLength ? `?max_length=${maxLength}` : '';
 	return api.get(`/projects/${projectId}/knowledge/${documentId}/preview${params}`);
 }
+
+// ============================================================================
+// User Preferences API (for cross-device sync)
+// ============================================================================
+
+export interface PreferenceResponse {
+	key: string;
+	value: unknown;
+	updated_at?: string;
+}
+
+/**
+ * Get a user preference by key
+ */
+export async function getPreference<T = unknown>(key: string): Promise<PreferenceResponse | null> {
+	try {
+		return await api.get<PreferenceResponse>(`/preferences/${key}`);
+	} catch (e) {
+		// Return null if not found (404)
+		if ((e as ApiError).status === 404) {
+			return null;
+		}
+		throw e;
+	}
+}
+
+/**
+ * Set a user preference
+ */
+export async function setPreference<T = unknown>(key: string, value: T): Promise<PreferenceResponse> {
+	return api.put<PreferenceResponse>(`/preferences/${key}`, { key, value });
+}
+
+/**
+ * Delete a user preference
+ */
+export async function deletePreference(key: string): Promise<{ deleted: boolean }> {
+	return api.delete<{ deleted: boolean }>(`/preferences/${key}`) as Promise<{ deleted: boolean }>;
+}

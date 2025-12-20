@@ -324,6 +324,10 @@
 	// ============================================
 	// Lifecycle
 	// ============================================
+
+	// Visibility change handler for cross-device sync
+	let visibilityChangeHandler: (() => void) | null = null;
+
 	onMount(async () => {
 		if (!$isAuthenticated) {
 			await goto('/login');
@@ -346,6 +350,9 @@
 			tabs.loadAdminSessions();
 		}
 
+		// Sync deck state from server for cross-device sync
+		await deck.syncFromServer();
+
 		// Sync deck cards with tabs after initialization
 		// This ensures chat cards have valid tab references
 		syncDeckCardsWithTabs();
@@ -354,6 +361,14 @@
 		checkMobile();
 		window.addEventListener('resize', checkMobile);
 		window.addEventListener('resize', updateWorkspaceBounds);
+
+		// Sync from server when window regains focus (user switching devices)
+		visibilityChangeHandler = () => {
+			if (document.visibilityState === 'visible') {
+				deck.syncFromServer();
+			}
+		};
+		document.addEventListener('visibilitychange', visibilityChangeHandler);
 
 		// Initial workspace bounds
 		updateWorkspaceBounds();
@@ -516,6 +531,9 @@
 		if (typeof window !== 'undefined') {
 			window.removeEventListener('resize', checkMobile);
 			window.removeEventListener('resize', updateWorkspaceBounds);
+			if (visibilityChangeHandler) {
+				document.removeEventListener('visibilitychange', visibilityChangeHandler);
+			}
 		}
 		if (deckUnsubscribe) {
 			deckUnsubscribe();

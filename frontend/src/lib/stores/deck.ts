@@ -9,6 +9,7 @@
  */
 
 import { writable, derived, get } from 'svelte/store';
+import { getPreference, setPreference } from '$lib/api/client';
 
 // ============================================================================
 // Types
@@ -91,7 +92,9 @@ export interface DeckState {
 // ============================================================================
 
 const STORAGE_KEY = 'deck_state';
+const SERVER_PREFERENCE_KEY = 'deck_state';
 const SAVE_DEBOUNCE_MS = 500;
+const SERVER_SYNC_DEBOUNCE_MS = 1000; // Slightly longer debounce for server sync
 const CASCADE_OFFSET = 30;
 const DEFAULT_CARD_SIZE: DeckCardSize = { width: 600, height: 500 };
 const MIN_CARD_SIZE: DeckCardSize = { width: 320, height: 200 };
@@ -106,9 +109,40 @@ interface PersistedDeckState {
 	contextPanelCollapsed: boolean;
 	snapEnabled: boolean;
 	gridSnapEnabled: boolean;
+	lastModified?: number; // Timestamp for conflict resolution
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+let serverSyncTimer: ReturnType<typeof setTimeout> | null = null;
+let isLoadingFromServer = false;
+let lastServerSync = 0;
+
+function parsePersistedState(parsed: PersistedDeckState): Partial<DeckState> {
+	return {
+		activeMode: parsed.activeMode,
+		cards: parsed.cards.map((c) => ({
+			...c,
+			createdAt: new Date(c.createdAt)
+		})),
+		contextPanelCollapsed: parsed.contextPanelCollapsed,
+		snapEnabled: parsed.snapEnabled,
+		gridSnapEnabled: parsed.gridSnapEnabled
+	};
+}
+
+function createPersistedState(state: DeckState): PersistedDeckState {
+	return {
+		activeMode: state.activeMode,
+		cards: state.cards.map((c) => ({
+			...c,
+			createdAt: c.createdAt.toISOString()
+		})),
+		contextPanelCollapsed: state.contextPanelCollapsed,
+		snapEnabled: state.snapEnabled,
+		gridSnapEnabled: state.gridSnapEnabled,
+		lastModified: Date.now()
+	};
+}
 
 function loadFromStorage(): Partial<DeckState> | null {
 	if (typeof window === 'undefined') return null;
@@ -117,16 +151,7 @@ function loadFromStorage(): Partial<DeckState> | null {
 		const stored = localStorage.getItem(STORAGE_KEY);
 		if (stored) {
 			const parsed: PersistedDeckState = JSON.parse(stored);
-			return {
-				activeMode: parsed.activeMode,
-				cards: parsed.cards.map((c) => ({
-					...c,
-					createdAt: new Date(c.createdAt)
-				})),
-				contextPanelCollapsed: parsed.contextPanelCollapsed,
-				snapEnabled: parsed.snapEnabled,
-				gridSnapEnabled: parsed.gridSnapEnabled
-			};
+			return parsePersistedState(parsed);
 		}
 	} catch (e) {
 		console.error('[Deck] Failed to load state from localStorage:', e);
@@ -143,22 +168,100 @@ function saveToStorage(state: DeckState) {
 
 	saveTimer = setTimeout(() => {
 		try {
-			const persisted: PersistedDeckState = {
-				activeMode: state.activeMode,
-				cards: state.cards.map((c) => ({
-					...c,
-					createdAt: c.createdAt.toISOString()
-				})),
-				contextPanelCollapsed: state.contextPanelCollapsed,
-				snapEnabled: state.snapEnabled,
-				gridSnapEnabled: state.gridSnapEnabled
-			};
+			const persisted = createPersistedState(state);
 			localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
 		} catch (e) {
 			console.error('[Deck] Failed to save state to localStorage:', e);
 		}
 		saveTimer = null;
 	}, SAVE_DEBOUNCE_MS);
+}
+
+/**
+ * Save deck state to server for cross-device sync
+ */
+async function saveToServer(state: DeckState) {
+	if (typeof window === 'undefined' || isLoadingFromServer) return;
+
+	if (serverSyncTimer) {
+		clearTimeout(serverSyncTimer);
+	}
+
+	serverSyncTimer = setTimeout(async () => {
+		try {
+			const persisted = createPersistedState(state);
+			await setPreference(SERVER_PREFERENCE_KEY, persisted);
+			lastServerSync = Date.now();
+			console.log('[Deck] Synced state to server');
+		} catch (e) {
+			console.error('[Deck] Failed to sync state to server:', e);
+		}
+		serverSyncTimer = null;
+	}, SERVER_SYNC_DEBOUNCE_MS);
+}
+
+/**
+ * Load deck state from server
+ * Returns the server state if newer than local, otherwise null
+ */
+async function loadFromServer(): Promise<Partial<DeckState> | null> {
+	if (typeof window === 'undefined') return null;
+
+	try {
+		isLoadingFromServer = true;
+		const response = await getPreference<PersistedDeckState>(SERVER_PREFERENCE_KEY);
+
+		if (response && response.value) {
+			const serverState = response.value as PersistedDeckState;
+			console.log('[Deck] Loaded state from server');
+			return parsePersistedState(serverState);
+		}
+	} catch (e) {
+		console.error('[Deck] Failed to load state from server:', e);
+	} finally {
+		isLoadingFromServer = false;
+	}
+	return null;
+}
+
+/**
+ * Merge server state with local state
+ * - Server cards take precedence for positions/sizes
+ * - Local-only cards are preserved
+ * - Server-only cards are added
+ */
+function mergeStates(local: Partial<DeckState> | null, server: Partial<DeckState> | null): Partial<DeckState> | null {
+	if (!server) return local;
+	if (!local) return server;
+
+	const localCards = local.cards || [];
+	const serverCards = server.cards || [];
+
+	// Create a map of server cards by ID
+	const serverCardMap = new Map(serverCards.map(c => [c.id, c]));
+	const localCardMap = new Map(localCards.map(c => [c.id, c]));
+
+	// Merged cards: start with server cards, add local-only cards
+	const mergedCards: DeckCard[] = [];
+
+	// Add all server cards (they have the latest positions from other devices)
+	for (const serverCard of serverCards) {
+		mergedCards.push(serverCard);
+	}
+
+	// Add local-only cards (created on this device but not yet synced to server)
+	for (const localCard of localCards) {
+		if (!serverCardMap.has(localCard.id)) {
+			mergedCards.push(localCard);
+		}
+	}
+
+	return {
+		...server,
+		cards: mergedCards,
+		// Preserve local-only runtime state
+		focusedCardId: local.focusedCardId
+	};
 }
 
 // ============================================================================
@@ -243,18 +346,66 @@ function createDeckStore() {
 	const { subscribe, set, update } = writable<DeckState>(initialState);
 
 	/**
-	 * Helper to update state and persist
+	 * Helper to update state and persist (local + server)
 	 */
 	function updateAndPersist(updater: (state: DeckState) => DeckState): void {
 		update((state) => {
 			const newState = updater(state);
 			saveToStorage(newState);
+			saveToServer(newState); // Sync to server for cross-device access
 			return newState;
 		});
 	}
 
 	return {
 		subscribe,
+
+		// ========================================================================
+		// Server Sync
+		// ========================================================================
+
+		/**
+		 * Sync state from server (call on page load/focus)
+		 */
+		async syncFromServer(): Promise<void> {
+			const serverState = await loadFromServer();
+			if (serverState) {
+				update((state) => {
+					const merged = mergeStates(
+						{ ...state },
+						serverState
+					);
+					if (merged) {
+						const newState = {
+							...state,
+							...merged,
+							// Recalculate nextZIndex
+							nextZIndex: merged.cards
+								? Math.max(...merged.cards.map((c) => c.zIndex), state.nextZIndex) + 1
+								: state.nextZIndex
+						};
+						// Save merged state back to localStorage
+						saveToStorage(newState);
+						return newState;
+					}
+					return state;
+				});
+			}
+		},
+
+		/**
+		 * Force sync current state to server
+		 */
+		async forceServerSync(): Promise<void> {
+			const state = get({ subscribe });
+			const persisted = createPersistedState(state);
+			try {
+				await setPreference(SERVER_PREFERENCE_KEY, persisted);
+				console.log('[Deck] Force synced state to server');
+			} catch (e) {
+				console.error('[Deck] Failed to force sync to server:', e);
+			}
+		},
 
 		// ========================================================================
 		// Mode Management
