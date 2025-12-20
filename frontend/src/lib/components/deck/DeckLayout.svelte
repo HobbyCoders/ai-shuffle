@@ -194,6 +194,7 @@
 		grid-template-rows: 1fr;
 		width: 100%;
 		height: 100vh;
+		height: 100dvh; /* Dynamic viewport height for mobile browsers */
 		background: var(--background);
 		overflow: hidden;
 	}
@@ -204,7 +205,7 @@
 
 	.deck-layout.mobile {
 		grid-template-columns: 1fr;
-		grid-template-rows: 1fr 64px;
+		grid-template-rows: 1fr calc(64px + env(safe-area-inset-bottom, 0px));
 	}
 
 	.rail-container {
@@ -273,6 +274,10 @@
 		z-index: 100;
 		position: relative;
 		background: var(--card);
+		height: calc(64px + env(safe-area-inset-bottom, 0px));
+		min-height: calc(64px + env(safe-area-inset-bottom, 0px));
+		padding-bottom: env(safe-area-inset-bottom, 0px);
+		flex-shrink: 0;
 	}
 
 	/* Ensure proper layering */

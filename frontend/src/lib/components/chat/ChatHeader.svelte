@@ -49,7 +49,7 @@
 	const hasProjectGroups = $derived(headerProjectsOrganized.groupOrder.length > 0);
 </script>
 
-<div class="flex items-center gap-2 {compact ? 'flex-wrap' : ''}">
+<div class="flex items-center justify-center gap-2 {compact ? 'flex-wrap' : ''}">
 	<!-- Context usage dropdown (always show) -->
 	<div class="relative group">
 		<button

@@ -171,28 +171,6 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="mobile-workspace">
-	<!-- Mobile Toolbar - always visible at top -->
-	<div class="mobile-toolbar">
-		<button
-			class="toolbar-btn"
-			onclick={() => onMinimizedClick?.()}
-			title="Minimized cards"
-			disabled={minimizedCount === 0}
-		>
-			<Layers size={20} />
-			{#if minimizedCount > 0}
-				<span class="badge">{minimizedCount}</span>
-			{/if}
-		</button>
-		<button
-			class="toolbar-btn"
-			onclick={() => onSettingsClick?.()}
-			title="Settings"
-		>
-			<Settings size={20} />
-		</button>
-	</div>
-
 	{#if cards.length === 0}
 		<!-- Empty State -->
 		<div class="empty-state">
@@ -235,13 +213,33 @@
 				{/if}
 			</div>
 
-			<button
-				class="header-btn close"
-				onclick={handleClose}
-				aria-label="Close card"
-			>
-				<X size={20} />
-			</button>
+			<div class="header-actions">
+				<button
+					class="header-btn small"
+					onclick={() => onMinimizedClick?.()}
+					title="Minimized cards"
+					disabled={minimizedCount === 0}
+				>
+					<Layers size={18} />
+					{#if minimizedCount > 0}
+						<span class="badge">{minimizedCount}</span>
+					{/if}
+				</button>
+				<button
+					class="header-btn small"
+					onclick={() => onSettingsClick?.()}
+					title="Settings"
+				>
+					<Settings size={18} />
+				</button>
+				<button
+					class="header-btn close"
+					onclick={handleClose}
+					aria-label="Close card"
+				>
+					<X size={20} />
+				</button>
+			</div>
 		</header>
 
 		<!-- Card Container with Swipe -->
@@ -288,60 +286,6 @@
 		background: hsl(var(--background));
 	}
 
-	/* Mobile Toolbar */
-	.mobile-toolbar {
-		display: flex;
-		align-items: center;
-		justify-content: flex-end;
-		gap: 8px;
-		padding: 8px 12px;
-		background: hsl(var(--card));
-		border-bottom: 1px solid hsl(var(--border));
-		flex-shrink: 0;
-	}
-
-	.toolbar-btn {
-		position: relative;
-		width: 40px;
-		height: 40px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: transparent;
-		border: none;
-		border-radius: 8px;
-		color: hsl(var(--muted-foreground));
-		cursor: pointer;
-		transition: all 0.15s ease;
-	}
-
-	.toolbar-btn:hover {
-		background: hsl(var(--accent));
-		color: hsl(var(--foreground));
-	}
-
-	.toolbar-btn:disabled {
-		opacity: 0.4;
-		cursor: default;
-	}
-
-	.toolbar-btn .badge {
-		position: absolute;
-		top: 4px;
-		right: 4px;
-		min-width: 16px;
-		height: 16px;
-		padding: 0 4px;
-		background: hsl(var(--primary));
-		border-radius: 8px;
-		font-size: 0.625rem;
-		font-weight: 600;
-		color: hsl(var(--primary-foreground));
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-
 	/* Header */
 	.mobile-header {
 		display: flex;
@@ -380,6 +324,35 @@
 	.header-btn.close:hover {
 		background: hsl(var(--destructive) / 0.1);
 		color: hsl(var(--destructive));
+	}
+
+	.header-btn.small {
+		width: 36px;
+		height: 36px;
+		position: relative;
+	}
+
+	.header-actions {
+		display: flex;
+		align-items: center;
+		gap: 2px;
+	}
+
+	.header-actions .badge {
+		position: absolute;
+		top: 2px;
+		right: 2px;
+		min-width: 14px;
+		height: 14px;
+		padding: 0 3px;
+		background: hsl(var(--primary));
+		border-radius: 7px;
+		font-size: 0.5625rem;
+		font-weight: 600;
+		color: hsl(var(--primary-foreground));
+		display: flex;
+		align-items: center;
+		justify-content: center;
 	}
 
 	.header-center {
