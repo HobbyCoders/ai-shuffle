@@ -330,19 +330,17 @@
 <style>
 	.context-panel {
 		position: relative;
-		width: 320px;
+		width: 100%;
 		height: 100%;
 		background: var(--card);
 		backdrop-filter: blur(24px);
 		border-left: 1px solid var(--border);
 		display: flex;
 		flex-direction: column;
-		transition: width 0.2s ease;
 		overflow: visible;
 	}
 
 	.context-panel.collapsed {
-		width: 0;
 		border-left: none;
 		overflow: hidden;
 	}

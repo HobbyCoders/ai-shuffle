@@ -118,7 +118,7 @@
 
 	<!-- Main content area -->
 	<div class="main-area">
-		<!-- Workspace slot -->
+		<!-- Workspace slot - contains cards and the context panel overlay -->
 		<main class="workspace-container">
 			{#if children}
 				{@render children()}
@@ -126,6 +126,36 @@
 				<div class="workspace-placeholder">
 					<p>Workspace content goes here</p>
 				</div>
+			{/if}
+
+			<!-- Context Panel - Inside workspace, overlays cards -->
+			{#if !isMobile}
+				<aside class="context-container" class:collapsed={localContextCollapsed}>
+					<ContextPanel
+						collapsed={localContextCollapsed}
+						{sessions}
+						{recentSessions}
+						{agents}
+						{generations}
+						sessionInfo={currentSession}
+						onToggleCollapse={handleContextToggle}
+						{onSessionClick}
+						{onHistorySessionClick}
+						{onAgentClick}
+						{onGenerationClick}
+					/>
+				</aside>
+
+				<!-- Expand button - shown when context panel is collapsed -->
+				{#if localContextCollapsed}
+					<button
+						class="context-expand-toggle"
+						onclick={handleContextToggle}
+						title="Expand panel"
+					>
+						<ChevronLeft size={16} strokeWidth={2} />
+					</button>
+				{/if}
 			{/if}
 		</main>
 
@@ -141,36 +171,6 @@
 			</div>
 		{/if}
 	</div>
-
-	<!-- Context Panel - Hidden on mobile -->
-	{#if !isMobile}
-		<aside class="context-container">
-			<ContextPanel
-				collapsed={localContextCollapsed}
-				{sessions}
-				{recentSessions}
-				{agents}
-				{generations}
-				sessionInfo={currentSession}
-				onToggleCollapse={handleContextToggle}
-				{onSessionClick}
-				{onHistorySessionClick}
-				{onAgentClick}
-				{onGenerationClick}
-			/>
-		</aside>
-
-		<!-- Expand button - shown when context panel is collapsed -->
-		{#if localContextCollapsed}
-			<button
-				class="context-expand-toggle"
-				onclick={handleContextToggle}
-				title="Expand panel"
-			>
-				<ChevronLeft size={16} strokeWidth={2} />
-			</button>
-		{/if}
-	{/if}
 
 	<!-- Mobile Rail - Bottom of screen -->
 	{#if isMobile}
@@ -190,17 +190,13 @@
 <style>
 	.deck-layout {
 		display: grid;
-		grid-template-columns: 64px 1fr 320px;
+		grid-template-columns: 64px 1fr;
 		grid-template-rows: 1fr;
 		width: 100%;
 		height: 100vh;
 		height: 100dvh; /* Dynamic viewport height for mobile browsers */
 		background: var(--background);
 		overflow: hidden;
-	}
-
-	.deck-layout.context-collapsed {
-		grid-template-columns: 64px 1fr 0;
 	}
 
 	.deck-layout.mobile {
@@ -256,16 +252,22 @@
 		flex-shrink: 0;
 	}
 
+	/* Context panel - positioned inside workspace as an overlay */
 	.context-container {
-		grid-column: 3;
-		grid-row: 1;
+		position: absolute;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		width: 320px;
 		z-index: 40;
-		transition: width 0.2s ease;
+		transition: transform 0.2s ease, opacity 0.2s ease;
+		pointer-events: auto;
 	}
 
-	.context-collapsed .context-container {
-		width: 0;
-		overflow: visible;
+	.context-container.collapsed {
+		transform: translateX(100%);
+		opacity: 0;
+		pointer-events: none;
 	}
 
 	.mobile-rail-container {
@@ -288,7 +290,7 @@
 
 	/* Expand toggle button - shown when context panel is collapsed */
 	.context-expand-toggle {
-		position: fixed;
+		position: absolute;
 		right: 0;
 		top: 50%;
 		transform: translateY(-50%);
