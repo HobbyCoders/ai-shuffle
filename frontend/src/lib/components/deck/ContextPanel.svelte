@@ -443,8 +443,6 @@
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
-		max-height: 200px;
-		overflow-y: auto;
 	}
 
 	.empty-state {
