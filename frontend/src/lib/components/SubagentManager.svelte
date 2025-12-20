@@ -233,7 +233,7 @@
 
 <!-- Modal backdrop -->
 <div
-	class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-4"
+	class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-4"
 	onclick={() => onClose()}
 	role="dialog"
 	aria-modal="true"
@@ -586,7 +586,7 @@
 <!-- Delete Confirmation -->
 {#if deletingId}
 	<div
-		class="fixed inset-0 bg-black/60 backdrop-blur-sm z-[70] flex items-center justify-center p-4"
+		class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] bg-black/60 backdrop-blur-sm z-[70] flex items-center justify-center p-4"
 		onclick={() => (deletingId = null)}
 		role="dialog"
 		aria-modal="true"

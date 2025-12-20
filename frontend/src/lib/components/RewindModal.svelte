@@ -155,7 +155,7 @@
 
 <!-- Modal backdrop -->
 <div
-	class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+	class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] bg-black/50 z-50 flex items-center justify-center p-4"
 	onclick={(e) => e.target === e.currentTarget && onClose()}
 	onkeydown={(e) => e.key === 'Escape' && onClose()}
 	role="dialog"

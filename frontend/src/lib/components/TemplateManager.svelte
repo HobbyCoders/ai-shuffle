@@ -200,8 +200,8 @@
 	loadData();
 </script>
 
-<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-	<div class="bg-background border border-border rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col">
+<div class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+	<div class="bg-background border border-border rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] max-sm:max-h-full flex flex-col">
 		<!-- Header -->
 		<div class="flex items-center justify-between px-5 py-4 border-b border-border">
 			<h2 class="text-lg font-semibold text-foreground">Manage Templates</h2>

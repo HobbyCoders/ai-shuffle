@@ -988,7 +988,7 @@
 {#if open}
 	<!-- Backdrop -->
 	<div
-		class="fixed inset-0 z-[200] flex items-center justify-center"
+		class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-[200] flex items-center justify-center"
 		role="dialog"
 		aria-modal="true"
 		aria-labelledby="settings-modal-title"
@@ -1005,7 +1005,7 @@
 				relative bg-card border border-border shadow-2xl
 				flex flex-col overflow-hidden
 				animate-modal-in
-				w-full h-full
+				w-full h-full max-sm:rounded-none
 				sm:w-[95vw] sm:h-[90vh] sm:max-w-5xl sm:rounded-2xl
 			"
 			onclick={(e) => e.stopPropagation()}
@@ -1946,7 +1946,7 @@
 
 	<!-- Create/Edit API User Modal -->
 	{#if showCreateForm}
-		<div class="fixed inset-0 bg-black/70 backdrop-blur-md z-[210] flex items-center justify-center p-4">
+		<div class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] bg-black/70 backdrop-blur-md z-[210] flex items-center justify-center p-4">
 			<div class="bg-card border border-border rounded-2xl w-full max-w-lg shadow-2xl animate-modal-in">
 				<div class="p-4 border-b border-border flex items-center justify-between">
 					<h3 class="text-lg font-semibold text-foreground">
@@ -2025,8 +2025,8 @@
 
 	<!-- Cleanup Preview Modal -->
 	{#if showCleanupPreview && cleanupPreview}
-		<div class="fixed inset-0 bg-black/70 backdrop-blur-md z-[210] flex items-center justify-center p-4">
-			<div class="bg-card border border-border rounded-2xl w-full max-w-2xl shadow-2xl max-h-[80vh] flex flex-col animate-modal-in">
+		<div class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] bg-black/70 backdrop-blur-md z-[210] flex items-center justify-center p-4">
+			<div class="bg-card border border-border rounded-2xl w-full max-w-2xl shadow-2xl max-h-[80vh] max-sm:max-h-full flex flex-col animate-modal-in">
 				<div class="p-4 border-b border-border flex items-center justify-between shrink-0">
 					<h3 class="text-lg font-semibold text-foreground">Cleanup Preview</h3>
 					<button class="icon-btn" onclick={() => showCleanupPreview = false}>
