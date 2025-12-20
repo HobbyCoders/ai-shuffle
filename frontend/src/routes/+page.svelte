@@ -928,7 +928,6 @@
 					onCardChange={(index) => deck.setMobileActiveCardIndex(index)}
 					onCloseCard={handleCardClose}
 					onCreateCard={handleCreateCard}
-					onSettingsClick={() => (showSettingsModal = true)}
 					onMinimizedClick={() => {
 						// Restore the first minimized card
 						if ($minimizedCardsStore.length > 0) {

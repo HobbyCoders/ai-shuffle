@@ -10,7 +10,7 @@
 	 * - Empty state with create buttons
 	 */
 
-	import { ChevronLeft, X, MessageSquare, Bot, Palette, Terminal, Plus, Settings, Layers } from 'lucide-svelte';
+	import { ChevronLeft, X, MessageSquare, Bot, Palette, Terminal, Plus, Layers } from 'lucide-svelte';
 	import type { DeckCard, CardType } from './types';
 	import type { Snippet } from 'svelte';
 
@@ -21,7 +21,6 @@
 		onCardChange: (index: number) => void;
 		onCloseCard: (id: string) => void;
 		onCreateCard: (type: CardType) => void;
-		onSettingsClick?: () => void;
 		onMinimizedClick?: () => void;
 		children?: Snippet<[DeckCard]>;
 	}
@@ -33,7 +32,6 @@
 		onCardChange,
 		onCloseCard,
 		onCreateCard,
-		onSettingsClick,
 		onMinimizedClick,
 		children
 	}: Props = $props();
@@ -224,13 +222,6 @@
 					{#if minimizedCount > 0}
 						<span class="badge">{minimizedCount}</span>
 					{/if}
-				</button>
-				<button
-					class="header-btn small"
-					onclick={() => onSettingsClick?.()}
-					title="Settings"
-				>
-					<Settings size={18} />
 				</button>
 				<button
 					class="header-btn close"
