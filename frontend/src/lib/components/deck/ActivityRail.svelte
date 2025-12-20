@@ -6,7 +6,7 @@
 	 * Switches to horizontal layout on mobile.
 	 */
 
-	import { Zap, Monitor, Bot, Palette, FolderOpen, Settings } from 'lucide-svelte';
+	import { Plus, Monitor, Bot, Palette, FolderOpen, Settings } from 'lucide-svelte';
 	import type { ActivityMode, ActivityBadges } from './types';
 
 	interface Props {
@@ -49,16 +49,15 @@
 </script>
 
 <div class="activity-rail" class:mobile={isMobile}>
-	<!-- Logo button at top -->
-	{#if !isMobile}
-		<button
-			class="logo-button"
-			onclick={() => onLogoClick?.()}
-			title="AI Hub"
-		>
-			<Zap size={24} strokeWidth={2} />
-		</button>
-	{/if}
+	<!-- Plus button - top on desktop, included in mobile rail -->
+	<button
+		class="plus-button"
+		onclick={() => onLogoClick?.()}
+		title="New"
+	>
+		<Plus size={24} strokeWidth={2} />
+		<span class="tooltip">New</span>
+	</button>
 
 	<!-- Activity buttons -->
 	<div class="activities">
@@ -132,7 +131,8 @@
 		justify-content: space-around;
 	}
 
-	.logo-button {
+	.plus-button {
+		position: relative;
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -147,9 +147,48 @@
 		margin-bottom: 16px;
 	}
 
-	.logo-button:hover {
+	.plus-button:hover {
 		transform: scale(1.05);
 		box-shadow: 0 0 20px var(--glow-color);
+	}
+
+	.mobile .plus-button {
+		margin-bottom: 0;
+		width: 44px;
+		height: 44px;
+		border-radius: 10px;
+	}
+
+	.plus-button .tooltip {
+		position: absolute;
+		left: calc(100% + 12px);
+		top: 50%;
+		transform: translateY(-50%);
+		padding: 6px 10px;
+		background: var(--popover);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		font-size: 0.75rem;
+		color: var(--popover-foreground);
+		white-space: nowrap;
+		opacity: 0;
+		visibility: hidden;
+		transition: all 0.15s ease;
+		pointer-events: none;
+		z-index: 100;
+		box-shadow: var(--shadow-m);
+	}
+
+	.mobile .plus-button .tooltip {
+		left: 50%;
+		top: auto;
+		bottom: calc(100% + 12px);
+		transform: translateX(-50%);
+	}
+
+	.plus-button:hover .tooltip {
+		opacity: 1;
+		visibility: visible;
 	}
 
 	.activities {
