@@ -1,5 +1,7 @@
 <script lang="ts">
-	import { Clapperboard, Upload, X, Volume2, VolumeX, ImageIcon, Film } from 'lucide-svelte';
+	import { Clapperboard, Upload, X, Volume2, VolumeX, ImageIcon, Film, FastForward } from 'lucide-svelte';
+	import { ALL_VIDEO_MODELS, getVideoModel, VIDEO_ASPECT_RATIOS, PROVIDER_DISPLAY_NAMES, type VideoModel } from '$lib/types/ai-models';
+	import { studio, videoModel, currentVideoModelInfo } from '$lib/stores/studio';
 
 	// Props
 	interface Props {
@@ -9,24 +11,6 @@
 	let { onStartGeneration }: Props = $props();
 
 	// Types
-	interface VideoProvider {
-		id: string;
-		name: string;
-		description: string;
-		maxDuration: number;
-		durations: number[];
-		supportsAudio: boolean;
-		supportsFrameBridging: boolean;
-		supportsImageToVideo: boolean;
-	}
-
-	interface AspectRatio {
-		value: string;
-		label: string;
-		width: number;
-		height: number;
-	}
-
 	interface FrameImage {
 		id: string;
 		url: string;
@@ -37,48 +21,47 @@
 	interface VideoGenerationConfig {
 		prompt: string;
 		provider: string;
+		model: string;
 		duration: number;
 		aspectRatio: string;
+		resolution: string;
 		audioEnabled: boolean;
 		startFrame?: string;
 		endFrame?: string;
 	}
 
-	// Constants
-	const providers: VideoProvider[] = [
-		{
-			id: 'google-veo',
-			name: 'Veo',
-			description: 'Supports extend, frame bridging, audio (Veo 3)',
-			maxDuration: 8,
-			durations: [4, 6, 8],
-			supportsAudio: true,
-			supportsFrameBridging: true,
-			supportsImageToVideo: true
-		},
-		{
-			id: 'openai-sora',
-			name: 'Sora',
-			description: 'Up to 12 seconds, good quality',
-			maxDuration: 12,
-			durations: [4, 6, 8, 12],
-			supportsAudio: false,
-			supportsFrameBridging: false,
-			supportsImageToVideo: true
-		}
-	];
+	// Group models by provider
+	interface ProviderGroup {
+		provider: string;
+		displayName: string;
+		models: VideoModel[];
+	}
 
-	const aspectRatios: AspectRatio[] = [
-		{ value: '16:9', label: '16:9', width: 48, height: 27 },
-		{ value: '9:16', label: '9:16', width: 27, height: 48 },
-		{ value: '1:1', label: '1:1', width: 40, height: 40 }
-	];
+	function getModelsGroupedByProvider(): ProviderGroup[] {
+		const groups: Map<string, VideoModel[]> = new Map();
+
+		for (const model of ALL_VIDEO_MODELS) {
+			if (model.deprecated) continue;
+			const existing = groups.get(model.provider) || [];
+			existing.push(model);
+			groups.set(model.provider, existing);
+		}
+
+		return Array.from(groups.entries()).map(([provider, models]) => ({
+			provider,
+			displayName: PROVIDER_DISPLAY_NAMES[provider] || provider,
+			models
+		}));
+	}
+
+	const providerGroups = getModelsGroupedByProvider();
 
 	// State
 	let prompt = $state('');
-	let selectedProvider = $state('google-veo');
+	let selectedModelId = $state($videoModel);
 	let selectedDuration = $state(8);
 	let selectedAspectRatio = $state('16:9');
+	let selectedResolution = $state('1080p');
 	let audioEnabled = $state(true);
 	let startFrame: FrameImage | null = $state(null);
 	let endFrame: FrameImage | null = $state(null);
@@ -86,31 +69,74 @@
 	let startFrameInput: HTMLInputElement | null = $state(null);
 	let endFrameInput: HTMLInputElement | null = $state(null);
 
-	// Derived
-	let currentProvider = $derived(providers.find(p => p.id === selectedProvider)!);
-	let availableDurations = $derived(currentProvider.durations);
+	// Derived - Current model info
+	let currentModel = $derived(getVideoModel(selectedModelId) || ALL_VIDEO_MODELS[0]);
+	let availableDurations = $derived(currentModel.durations);
+	let availableResolutions = $derived(currentModel.resolutions);
 	let canGenerate = $derived(prompt.trim().length > 0 && !isGenerating);
-	let showAudioToggle = $derived(currentProvider.supportsAudio);
-	let showFrameBridging = $derived(currentProvider.supportsFrameBridging);
-	let showImageToVideo = $derived(currentProvider.supportsImageToVideo);
 
-	// Effects to validate duration when provider changes
+	// Capability checks
+	let showAudioToggle = $derived(currentModel.capabilities.nativeAudio);
+	let showFrameBridging = $derived(currentModel.capabilities.frameBridging);
+	let showImageToVideo = $derived(currentModel.capabilities.imageToVideo);
+	let showExtend = $derived(currentModel.capabilities.extension);
+
+	// Capability badges
+	let capabilityBadges = $derived.by(() => {
+		const badges: { label: string; color: string }[] = [];
+		const caps = currentModel.capabilities;
+
+		if (caps.imageToVideo) badges.push({ label: 'Image to Video', color: 'bg-blue-500/20 text-blue-400' });
+		if (caps.frameBridging) badges.push({ label: 'Frame Bridging', color: 'bg-purple-500/20 text-purple-400' });
+		if (caps.extension) badges.push({ label: 'Extend', color: 'bg-green-500/20 text-green-400' });
+		if (caps.nativeAudio) badges.push({ label: 'Audio', color: 'bg-orange-500/20 text-orange-400' });
+		if (caps.remix) badges.push({ label: 'Remix', color: 'bg-pink-500/20 text-pink-400' });
+
+		return badges;
+	});
+
+	// Get badges for a specific model
+	function getModelBadges(model: VideoModel): { label: string; color: string }[] {
+		const badges: { label: string; color: string }[] = [];
+		const caps = model.capabilities;
+
+		if (caps.imageToVideo) badges.push({ label: 'Image to Video', color: 'bg-blue-500/20 text-blue-400' });
+		if (caps.frameBridging) badges.push({ label: 'Frame Bridging', color: 'bg-purple-500/20 text-purple-400' });
+		if (caps.extension) badges.push({ label: 'Extend', color: 'bg-green-500/20 text-green-400' });
+		if (caps.nativeAudio) badges.push({ label: 'Audio', color: 'bg-orange-500/20 text-orange-400' });
+		if (caps.remix) badges.push({ label: 'Remix', color: 'bg-pink-500/20 text-pink-400' });
+
+		return badges;
+	}
+
+	// Effects to validate duration when model changes
 	$effect(() => {
 		if (!availableDurations.includes(selectedDuration)) {
 			selectedDuration = availableDurations[availableDurations.length - 1];
 		}
 	});
 
+	// Effects to validate resolution when model changes
+	$effect(() => {
+		if (!availableResolutions.includes(selectedResolution)) {
+			selectedResolution = availableResolutions[0];
+		}
+	});
+
 	// Handlers
-	function handleProviderChange(providerId: string) {
-		selectedProvider = providerId;
-		// Clear frames if new provider doesn't support them
-		const provider = providers.find(p => p.id === providerId);
-		if (!provider?.supportsImageToVideo) {
+	function handleModelChange(modelId: string) {
+		selectedModelId = modelId;
+		studio.setVideoModel(modelId);
+
+		const model = getVideoModel(modelId);
+		if (!model) return;
+
+		// Clear frames if new model doesn't support them
+		if (!model.capabilities.imageToVideo) {
 			clearFrame('start');
 			clearFrame('end');
 		}
-		if (!provider?.supportsFrameBridging) {
+		if (!model.capabilities.frameBridging) {
 			clearFrame('end');
 		}
 	}
@@ -121,6 +147,10 @@
 
 	function handleAspectRatioChange(ratio: string) {
 		selectedAspectRatio = ratio;
+	}
+
+	function handleResolutionChange(resolution: string) {
+		selectedResolution = resolution;
 	}
 
 	function toggleAudio() {
@@ -175,9 +205,11 @@
 		try {
 			const config: VideoGenerationConfig = {
 				prompt,
-				provider: selectedProvider,
+				provider: currentModel.provider,
+				model: selectedModelId,
 				duration: selectedDuration,
 				aspectRatio: selectedAspectRatio,
+				resolution: selectedResolution,
 				audioEnabled: showAudioToggle ? audioEnabled : false,
 				startFrame: startFrame?.url,
 				endFrame: endFrame?.url
@@ -194,6 +226,17 @@
 			isGenerating = false;
 		}
 	}
+
+	// Get aspect ratio display info
+	function getAspectRatioInfo(value: string) {
+		const ratio = VIDEO_ASPECT_RATIOS.find(r => r.value === value);
+		return ratio || { value, label: value, width: 40, height: 40 };
+	}
+
+	// Filter aspect ratios for current model
+	let availableAspectRatios = $derived(
+		VIDEO_ASPECT_RATIOS.filter(ar => currentModel.aspectRatios.includes(ar.value))
+	);
 </script>
 
 <div class="p-4 space-y-6">
@@ -212,29 +255,51 @@
 		></textarea>
 	</div>
 
-	<!-- Provider Selector -->
+	<!-- Model Selector - Grouped by Provider -->
 	<div>
-		<label class="block text-xs text-muted-foreground mb-2">Provider</label>
-		<div class="space-y-2">
-			{#each providers as provider}
-				<button
-					type="button"
-					onclick={() => handleProviderChange(provider.id)}
-					disabled={isGenerating}
-					class="w-full flex items-start gap-3 p-3 rounded-lg border transition-colors text-left {selectedProvider === provider.id ? 'border-primary bg-primary/5' : 'border-border hover:border-muted-foreground/50 hover:bg-muted'}"
-					aria-pressed={selectedProvider === provider.id}
-				>
-					<div class="shrink-0 w-8 h-8 rounded-lg flex items-center justify-center {selectedProvider === provider.id ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}">
-						<Film class="w-4 h-4" />
+		<label class="block text-xs text-muted-foreground mb-2">Model</label>
+		<div class="space-y-4">
+			{#each providerGroups as group}
+				<div>
+					<div class="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+						{group.displayName}
 					</div>
-					<div class="flex-1 min-w-0">
-						<div class="text-sm font-medium text-foreground">{provider.name}</div>
-						<div class="text-xs text-muted-foreground">{provider.description}</div>
+					<div class="space-y-2">
+						{#each group.models as model}
+							{@const badges = getModelBadges(model)}
+							<button
+								type="button"
+								onclick={() => handleModelChange(model.id)}
+								disabled={isGenerating}
+								class="w-full flex flex-col gap-2 p-3 rounded-lg border transition-colors text-left {selectedModelId === model.id ? 'border-primary bg-primary/5' : 'border-border hover:border-muted-foreground/50 hover:bg-muted'}"
+								aria-pressed={selectedModelId === model.id}
+							>
+								<div class="flex items-start gap-3">
+									<div class="shrink-0 w-8 h-8 rounded-lg flex items-center justify-center {selectedModelId === model.id ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}">
+										<Film class="w-4 h-4" />
+									</div>
+									<div class="flex-1 min-w-0">
+										<div class="text-sm font-medium text-foreground">{model.displayName}</div>
+										<div class="text-xs text-muted-foreground">{model.description}</div>
+									</div>
+									{#if selectedModelId === model.id}
+										<div class="shrink-0 w-2 h-2 rounded-full bg-primary mt-2"></div>
+									{/if}
+								</div>
+								<!-- Capability Badges -->
+								{#if badges.length > 0}
+									<div class="flex flex-wrap gap-1 ml-11">
+										{#each badges as badge}
+											<span class="text-[10px] px-1.5 py-0.5 rounded {badge.color}">
+												{badge.label}
+											</span>
+										{/each}
+									</div>
+								{/if}
+							</button>
+						{/each}
 					</div>
-					{#if selectedProvider === provider.id}
-						<div class="shrink-0 w-2 h-2 rounded-full bg-primary mt-2"></div>
-					{/if}
-				</button>
+				</div>
 			{/each}
 		</div>
 	</div>
@@ -257,11 +322,29 @@
 		</div>
 	</div>
 
+	<!-- Resolution Selector -->
+	<div>
+		<label class="block text-xs text-muted-foreground mb-2">Resolution</label>
+		<div class="flex flex-wrap gap-2">
+			{#each availableResolutions as resolution}
+				<button
+					type="button"
+					onclick={() => handleResolutionChange(resolution)}
+					disabled={isGenerating}
+					class="px-4 py-2.5 text-sm font-medium rounded-lg transition-colors min-w-[70px] {selectedResolution === resolution ? 'bg-primary text-primary-foreground' : 'bg-muted text-foreground hover:bg-muted/80 border border-border'}"
+					aria-pressed={selectedResolution === resolution}
+				>
+					{resolution}
+				</button>
+			{/each}
+		</div>
+	</div>
+
 	<!-- Aspect Ratio -->
 	<div>
 		<label class="block text-xs text-muted-foreground mb-2">Aspect Ratio</label>
 		<div class="flex flex-wrap gap-2">
-			{#each aspectRatios as ratio}
+			{#each availableAspectRatios as ratio}
 				<button
 					type="button"
 					onclick={() => handleAspectRatioChange(ratio.value)}
@@ -280,10 +363,10 @@
 		</div>
 	</div>
 
-	<!-- Audio Toggle (Veo 3 only) -->
+	<!-- Audio Toggle (only if model supports nativeAudio) -->
 	{#if showAudioToggle}
 		<div>
-			<label class="block text-xs text-muted-foreground mb-2">Audio (Veo 3)</label>
+			<label class="block text-xs text-muted-foreground mb-2">Audio ({currentModel.displayName})</label>
 			<button
 				type="button"
 				onclick={toggleAudio}
@@ -313,7 +396,7 @@
 		</div>
 	{/if}
 
-	<!-- Image-to-Video Section -->
+	<!-- Image-to-Video Section (only if model supports imageToVideo) -->
 	{#if showImageToVideo}
 		<div>
 			<label class="block text-xs text-muted-foreground mb-2">
@@ -366,7 +449,7 @@
 					/>
 				</div>
 
-				<!-- End Frame (Frame Bridging) -->
+				<!-- End Frame (Frame Bridging - only if model supports frameBridging) -->
 				{#if showFrameBridging}
 					<div class="flex-1">
 						<div class="text-xs font-medium text-foreground mb-2">End Frame</div>
@@ -409,6 +492,23 @@
 						/>
 					</div>
 				{/if}
+			</div>
+		</div>
+	{/if}
+
+	<!-- Extend Button (only if model supports extension) -->
+	{#if showExtend}
+		<div class="p-3 rounded-lg border border-border bg-muted/50">
+			<div class="flex items-center gap-3">
+				<div class="shrink-0 w-8 h-8 rounded-lg bg-green-500/20 text-green-400 flex items-center justify-center">
+					<FastForward class="w-4 h-4" />
+				</div>
+				<div class="flex-1">
+					<div class="text-sm font-medium text-foreground">Video Extension</div>
+					<div class="text-xs text-muted-foreground">
+						This model supports extending existing videos up to {currentModel.maxDuration}s total
+					</div>
+				</div>
 			</div>
 		</div>
 	{/if}

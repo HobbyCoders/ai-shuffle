@@ -1,12 +1,14 @@
 <script lang="ts">
-	import { Image, Video, FolderOpen, Sparkles } from 'lucide-svelte';
+	import { Image, Video, FolderOpen, Mic, FileAudio } from 'lucide-svelte';
 	import ImageGenerator from './ImageGenerator.svelte';
 	import VideoGenerator from './VideoGenerator.svelte';
+	import TTSGenerator from './TTSGenerator.svelte';
+	import STTTranscriber from './STTTranscriber.svelte';
 	import MediaPreview from './MediaPreview.svelte';
 	import AssetLibrary from './AssetLibrary.svelte';
 	import GenerationHistory from './GenerationHistory.svelte';
 	import type { DeckGeneration } from '../types';
-	import { studio, activeGeneration as storeActiveGeneration } from '$lib/stores/studio';
+	import { studio, activeGeneration as storeActiveGeneration, activeTab } from '$lib/stores/studio';
 	import type { ImageProvider, VideoProvider } from '$lib/stores/studio';
 
 	// Props
@@ -51,7 +53,6 @@
 	}
 
 	// State
-	let activeTab: 'image' | 'video' = $state('image');
 	let showAssetLibrary = $state(false);
 	let selectedAsset: DeckGeneration | null = $state(null);
 
@@ -59,8 +60,8 @@
 	let currentPreview = $derived(selectedAsset || activeGeneration);
 
 	// Handlers
-	function handleTabChange(tab: 'image' | 'video') {
-		activeTab = tab;
+	function handleTabChange(tab: 'image' | 'video' | 'tts' | 'stt') {
+		studio.setActiveTab(tab);
 	}
 
 	function toggleAssetLibrary() {
@@ -110,8 +111,8 @@
 					<button
 						type="button"
 						onclick={() => handleTabChange('image')}
-						class="flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors {activeTab === 'image' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
-						aria-pressed={activeTab === 'image'}
+						class="flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg transition-colors {$activeTab === 'image' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
+						aria-pressed={$activeTab === 'image'}
 					>
 						<Image class="w-4 h-4" />
 						Image
@@ -119,11 +120,29 @@
 					<button
 						type="button"
 						onclick={() => handleTabChange('video')}
-						class="flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors {activeTab === 'video' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
-						aria-pressed={activeTab === 'video'}
+						class="flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg transition-colors {$activeTab === 'video' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
+						aria-pressed={$activeTab === 'video'}
 					>
 						<Video class="w-4 h-4" />
 						Video
+					</button>
+					<button
+						type="button"
+						onclick={() => handleTabChange('tts')}
+						class="flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg transition-colors {$activeTab === 'tts' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
+						aria-pressed={$activeTab === 'tts'}
+					>
+						<Mic class="w-4 h-4" />
+						Voice
+					</button>
+					<button
+						type="button"
+						onclick={() => handleTabChange('stt')}
+						class="flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg transition-colors {$activeTab === 'stt' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
+						aria-pressed={$activeTab === 'stt'}
+					>
+						<FileAudio class="w-4 h-4" />
+						Transcribe
 					</button>
 				</div>
 
@@ -141,10 +160,14 @@
 
 			<!-- Tab Content -->
 			<div class="flex-1 overflow-y-auto">
-				{#if activeTab === 'image'}
+				{#if $activeTab === 'image'}
 					<ImageGenerator onStartGeneration={handleStartGeneration} />
-				{:else}
+				{:else if $activeTab === 'video'}
 					<VideoGenerator onStartGeneration={handleStartGeneration} />
+				{:else if $activeTab === 'tts'}
+					<TTSGenerator />
+				{:else if $activeTab === 'stt'}
+					<STTTranscriber />
 				{/if}
 			</div>
 		</div>

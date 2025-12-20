@@ -27,6 +27,18 @@
 	import WebhookManager from '$lib/components/WebhookManager.svelte';
 	import TwoFactorSetup from '$lib/components/TwoFactorSetup.svelte';
 	import RateLimitManager from '$lib/components/RateLimitManager.svelte';
+	import {
+		ALL_IMAGE_MODELS,
+		ALL_VIDEO_MODELS,
+		ALL_TTS_MODELS,
+		ALL_STT_MODELS,
+		PROVIDER_DISPLAY_NAMES,
+		type ImageModel as AIImageModel,
+		type VideoModel as AIVideoModel,
+		type TTSModel,
+		type STTModel,
+		type TTSVoice
+	} from '$lib/types/ai-models';
 
 	interface Props {
 		card: DeckCard;
@@ -238,6 +250,62 @@
 	let audioConfigSuccess = $state('');
 	let audioConfigError = $state('');
 
+	// Extended TTS settings
+	let selectedTtsVoice = $state('alloy');
+	let currentTtsVoice = $state('alloy');
+	let ttsSpeed = $state(1.0);
+	let currentTtsSpeed = $state(1.0);
+	let ttsOutputFormat = $state('mp3');
+	let currentTtsOutputFormat = $state('mp3');
+	let savingTtsSettings = $state(false);
+
+	// Helper function to get available voices for selected TTS model
+	function getAvailableVoices(): TTSVoice[] {
+		const model = ALL_TTS_MODELS.find(m => m.id === selectedTtsModel);
+		return model?.voices || [];
+	}
+
+	// Helper to group models by provider
+	function groupImageModelsByProvider() {
+		const groups: Record<string, AIImageModel[]> = {};
+		for (const model of ALL_IMAGE_MODELS) {
+			const providerName = PROVIDER_DISPLAY_NAMES[model.provider] || model.provider;
+			if (!groups[providerName]) groups[providerName] = [];
+			groups[providerName].push(model);
+		}
+		return groups;
+	}
+
+	function groupVideoModelsByProvider() {
+		const groups: Record<string, AIVideoModel[]> = {};
+		for (const model of ALL_VIDEO_MODELS) {
+			const providerName = PROVIDER_DISPLAY_NAMES[model.provider] || model.provider;
+			if (!groups[providerName]) groups[providerName] = [];
+			groups[providerName].push(model);
+		}
+		return groups;
+	}
+
+	function groupTtsModelsByProvider() {
+		const groups: Record<string, TTSModel[]> = {};
+		for (const model of ALL_TTS_MODELS) {
+			const providerName = PROVIDER_DISPLAY_NAMES[model.provider] || model.provider;
+			if (!groups[providerName]) groups[providerName] = [];
+			groups[providerName].push(model);
+		}
+		return groups;
+	}
+
+	function groupSttModelsByProvider() {
+		const groups: Record<string, STTModel[]> = {};
+		for (const model of ALL_STT_MODELS) {
+			const providerName = PROVIDER_DISPLAY_NAMES[model.provider] || model.provider;
+			if (!groups[providerName]) groups[providerName] = [];
+			groups[providerName].push(model);
+		}
+		return groups;
+	}
+
 	// Password change state
 	let currentPassword = $state('');
 	let newPassword = $state('');
@@ -397,6 +465,9 @@
 				video_provider: string | null;
 				video_model: string | null;
 				tts_model: string | null;
+				tts_voice: string | null;
+				tts_speed: number | null;
+				tts_output_format: string | null;
 				stt_model: string | null;
 			}>('/settings/integrations');
 			openaiApiKeyMasked = settings.openai_api_key_masked;
@@ -411,6 +482,13 @@
 			currentSttModel = settings.stt_model || 'whisper-1';
 			selectedTtsModel = currentTtsModel;
 			selectedSttModel = currentSttModel;
+			// Extended TTS settings
+			currentTtsVoice = settings.tts_voice || 'alloy';
+			selectedTtsVoice = currentTtsVoice;
+			currentTtsSpeed = settings.tts_speed || 1.0;
+			ttsSpeed = currentTtsSpeed;
+			currentTtsOutputFormat = settings.tts_output_format || 'mp3';
+			ttsOutputFormat = currentTtsOutputFormat;
 		} catch (e) {
 			console.error('Failed to load integration settings:', e);
 		}
@@ -585,6 +663,11 @@
 				model: selectedTtsModel
 			});
 			currentTtsModel = selectedTtsModel;
+			// Reset voice to default when changing models
+			const model = ALL_TTS_MODELS.find(m => m.id === selectedTtsModel);
+			if (model && model.voices.length > 0) {
+				selectedTtsVoice = model.voices[0].id;
+			}
 			audioConfigSuccess = 'TTS model updated';
 			setTimeout(() => audioConfigSuccess = '', 3000);
 		} catch (e: any) {
@@ -594,13 +677,37 @@
 		}
 	}
 
+	async function saveTtsSettings() {
+		savingTtsSettings = true;
+		audioConfigError = '';
+		audioConfigSuccess = '';
+		try {
+			await api.patch<{success: boolean}>('/settings/integrations/tts', {
+				model: selectedTtsModel,
+				voice: selectedTtsVoice,
+				speed: ttsSpeed,
+				output_format: ttsOutputFormat
+			});
+			currentTtsModel = selectedTtsModel;
+			currentTtsVoice = selectedTtsVoice;
+			currentTtsSpeed = ttsSpeed;
+			currentTtsOutputFormat = ttsOutputFormat;
+			audioConfigSuccess = 'TTS settings updated';
+			setTimeout(() => audioConfigSuccess = '', 3000);
+		} catch (e: any) {
+			audioConfigError = e.detail || 'Failed to update TTS settings';
+		} finally {
+			savingTtsSettings = false;
+		}
+	}
+
 	async function saveSttModel() {
 		if (!selectedSttModel || selectedSttModel === currentSttModel) return;
 		savingSttModel = true;
 		audioConfigError = '';
 		audioConfigSuccess = '';
 		try {
-			await api.patch<{success: boolean, model: string}>('/settings/integrations/audio/stt', {
+			await api.patch<{success: boolean, model: string}>('/settings/integrations/stt', {
 				model: selectedSttModel
 			});
 			currentSttModel = selectedSttModel;
@@ -1404,7 +1511,7 @@
 
 	<!-- AI MODELS > MODELS -->
 	{#if activeSection === 'models'}
-		<div class="section-content">
+		<div class="section-content models-section">
 			<div class="section-header">
 				<h3>AI Models</h3>
 				<p>Select default models for generation tasks.</p>
@@ -1413,76 +1520,234 @@
 			{#if audioConfigSuccess || imageConfigSuccess || videoConfigSuccess}
 				<div class="success-banner">{audioConfigSuccess || imageConfigSuccess || videoConfigSuccess}</div>
 			{/if}
+			{#if audioConfigError || imageConfigError || videoConfigError}
+				<div class="error-banner">
+					<span>{audioConfigError || imageConfigError || videoConfigError}</span>
+					<button onclick={() => { audioConfigError = ''; imageConfigError = ''; videoConfigError = ''; }} class="close-btn">&times;</button>
+				</div>
+			{/if}
 
-			<!-- Image Models -->
+			<!-- Image Generation Models -->
 			<div class="settings-group">
-				<h4>🖼️ Image Generation</h4>
-				<div class="model-grid">
-					{#each imageModels as model}
-						<button
-							onclick={() => { selectedImageModel = model.id; updateImageModel(); }}
-							disabled={!model.available || updatingImageModel}
-							class="model-btn {model.id === imageModel ? 'active' : ''} {!model.available ? 'disabled' : ''}"
-						>
-							<span class="model-name">{model.name}</span>
-							<span class="model-price">${model.price_per_image}/img</span>
-							<span class="model-provider">{model.provider_name}</span>
-						</button>
-					{/each}
+				<h4>Image Generation</h4>
+				<p class="group-description">Select the default model for generating images.</p>
+
+				{#each Object.entries(groupImageModelsByProvider()) as [provider, models]}
+					<div class="provider-section">
+						<div class="provider-header">{provider}</div>
+						<div class="model-cards">
+							{#each models as model}
+								<button
+									onclick={() => { selectedImageModel = model.id; updateImageModel(); }}
+									disabled={updatingImageModel}
+									class="model-card {model.id === imageModel ? 'active' : ''} {model.deprecated ? 'deprecated' : ''}"
+								>
+									<div class="model-card-header">
+										<span class="model-card-name">{model.displayName}</span>
+										{#if model.deprecated}
+											<span class="badge warning">Deprecated</span>
+										{/if}
+									</div>
+									<p class="model-card-desc">{model.description}</p>
+									<div class="model-card-capabilities">
+										{#if model.capabilities.editing}
+											<span class="capability-badge">Editing</span>
+										{/if}
+										{#if model.capabilities.inpainting}
+											<span class="capability-badge">Inpainting</span>
+										{/if}
+										{#if model.capabilities.referenceImages}
+											<span class="capability-badge">References</span>
+										{/if}
+										{#if model.capabilities.textRendering !== 'none'}
+											<span class="capability-badge text-{model.capabilities.textRendering}">
+												Text: {model.capabilities.textRendering}
+											</span>
+										{/if}
+									</div>
+									<div class="model-card-footer">
+										<span class="model-card-price">${model.pricePerImage.toFixed(2)}/image</span>
+										<span class="model-card-resolution">{model.maxOutputSize}</span>
+									</div>
+								</button>
+							{/each}
+						</div>
+					</div>
+				{/each}
+			</div>
+
+			<!-- Video Generation Models -->
+			<div class="settings-group">
+				<h4>Video Generation</h4>
+				<p class="group-description">Select the default model for generating videos.</p>
+
+				{#each Object.entries(groupVideoModelsByProvider()) as [provider, models]}
+					<div class="provider-section">
+						<div class="provider-header">{provider}</div>
+						<div class="model-cards">
+							{#each models as model}
+								<button
+									onclick={() => { selectedVideoModel = model.id; saveVideoModel(); }}
+									disabled={savingVideoModel}
+									class="model-card {model.id === videoModel ? 'active' : ''}"
+								>
+									<div class="model-card-header">
+										<span class="model-card-name">{model.displayName}</span>
+									</div>
+									<p class="model-card-desc">{model.description}</p>
+									<div class="model-card-capabilities">
+										{#if model.capabilities.nativeAudio}
+											<span class="capability-badge audio">Audio</span>
+										{/if}
+										{#if model.capabilities.extension}
+											<span class="capability-badge">Extend</span>
+										{/if}
+										{#if model.capabilities.frameBridging}
+											<span class="capability-badge">Frame Bridge</span>
+										{/if}
+										{#if model.capabilities.imageToVideo}
+											<span class="capability-badge">Image-to-Video</span>
+										{/if}
+									</div>
+									<div class="model-card-footer">
+										<span class="model-card-price">${model.pricePerSecond.toFixed(2)}/sec</span>
+										<span class="model-card-resolution">Max {model.maxDuration}s</span>
+									</div>
+								</button>
+							{/each}
+						</div>
+					</div>
+				{/each}
+			</div>
+
+			<!-- Text-to-Speech Models -->
+			<div class="settings-group">
+				<h4>Text-to-Speech</h4>
+				<p class="group-description">Configure speech synthesis settings.</p>
+
+				{#each Object.entries(groupTtsModelsByProvider()) as [provider, models]}
+					<div class="provider-section">
+						<div class="provider-header">{provider}</div>
+						<div class="model-cards tts-cards">
+							{#each models as model}
+								<button
+									onclick={() => { selectedTtsModel = model.id; }}
+									class="model-card {model.id === selectedTtsModel ? 'active' : ''}"
+								>
+									<div class="model-card-header">
+										<span class="model-card-name">{model.displayName}</span>
+									</div>
+									<p class="model-card-desc">{model.description}</p>
+									<div class="model-card-capabilities">
+										{#if model.capabilities.steerability}
+											<span class="capability-badge highlight">Steerable</span>
+										{/if}
+										{#if model.capabilities.streaming}
+											<span class="capability-badge">Streaming</span>
+										{/if}
+										{#if model.capabilities.emotionControl}
+											<span class="capability-badge">Emotion</span>
+										{/if}
+										{#if model.capabilities.multiSpeaker}
+											<span class="capability-badge">Multi-Speaker</span>
+										{/if}
+									</div>
+									<div class="model-card-footer">
+										<span class="model-card-price">${model.pricePerMillion}/1M chars</span>
+									</div>
+								</button>
+							{/each}
+						</div>
+					</div>
+				{/each}
+
+				<!-- TTS Settings -->
+				<div class="tts-settings">
+					<div class="tts-setting-row">
+						<label>Voice</label>
+						<select bind:value={selectedTtsVoice} class="input">
+							{#each getAvailableVoices() as voice}
+								<option value={voice.id}>{voice.name} {voice.gender ? `(${voice.gender})` : ''}</option>
+							{/each}
+							{#if getAvailableVoices().length === 0}
+								<option value="alloy">Alloy (default)</option>
+								<option value="echo">Echo</option>
+								<option value="fable">Fable</option>
+								<option value="onyx">Onyx</option>
+								<option value="nova">Nova</option>
+								<option value="shimmer">Shimmer</option>
+							{/if}
+						</select>
+					</div>
+					<div class="tts-setting-row">
+						<label>Speed ({ttsSpeed.toFixed(2)}x)</label>
+						<input type="range" min="0.25" max="4.0" step="0.05" bind:value={ttsSpeed} class="slider" />
+					</div>
+					<div class="tts-setting-row">
+						<label>Output Format</label>
+						<select bind:value={ttsOutputFormat} class="input">
+							<option value="mp3">MP3</option>
+							<option value="wav">WAV</option>
+							<option value="opus">Opus</option>
+							<option value="aac">AAC</option>
+							<option value="flac">FLAC</option>
+						</select>
+					</div>
+					<button
+						onclick={saveTtsSettings}
+						disabled={savingTtsSettings}
+						class="btn btn-primary"
+					>
+						{savingTtsSettings ? 'Saving...' : 'Save TTS Settings'}
+					</button>
 				</div>
 			</div>
 
-			<!-- Video Models -->
+			<!-- Speech-to-Text Models -->
 			<div class="settings-group">
-				<h4>🎬 Video Generation</h4>
-				<div class="model-grid">
-					{#each videoModels as model}
-						<button
-							onclick={() => { selectedVideoModel = model.id; saveVideoModel(); }}
-							disabled={!model.available || savingVideoModel}
-							class="model-btn {model.id === videoModel ? 'active' : ''} {!model.available ? 'disabled' : ''}"
-						>
-							<span class="model-name">{model.name}</span>
-							<span class="model-price">${model.price_per_second}/sec</span>
-							<span class="model-provider">{model.provider_name}</span>
-						</button>
-					{/each}
-				</div>
-			</div>
+				<h4>Speech-to-Text</h4>
+				<p class="group-description">Configure speech recognition settings.</p>
 
-			<!-- Audio Models -->
-			<div class="audio-models">
-				<div class="settings-group">
-					<h4>🎤 Speech-to-Text</h4>
-					<div class="audio-model-list">
-						{#each sttModels as model}
-							<button
-								onclick={() => { selectedSttModel = model.id; saveSttModel(); }}
-								disabled={!model.available || savingSttModel}
-								class="audio-btn {model.id === currentSttModel ? 'active' : ''} {!model.available ? 'disabled' : ''}"
-							>
-								<span>{model.name}</span>
-								<span class="price">{model.price_display}</span>
-							</button>
-						{/each}
+				{#each Object.entries(groupSttModelsByProvider()) as [provider, models]}
+					<div class="provider-section">
+						<div class="provider-header">{provider}</div>
+						<div class="model-cards stt-cards">
+							{#each models as model}
+								<button
+									onclick={() => { selectedSttModel = model.id; saveSttModel(); }}
+									disabled={savingSttModel}
+									class="model-card {model.id === currentSttModel ? 'active' : ''}"
+								>
+									<div class="model-card-header">
+										<span class="model-card-name">{model.displayName}</span>
+									</div>
+									<p class="model-card-desc">{model.description}</p>
+									<div class="model-card-capabilities">
+										{#if model.capabilities.diarization}
+											<span class="capability-badge highlight">Diarization</span>
+										{/if}
+										{#if model.capabilities.translation}
+											<span class="capability-badge">Translation</span>
+										{/if}
+										{#if model.capabilities.timestamps}
+											<span class="capability-badge">Timestamps</span>
+										{/if}
+										{#if model.capabilities.realtime}
+											<span class="capability-badge">Realtime</span>
+										{/if}
+									</div>
+									<div class="model-card-footer">
+										<span class="model-card-price">${model.pricePerMinute.toFixed(3)}/min</span>
+										<span class="model-card-resolution">Max {model.maxFileSizeMB}MB</span>
+									</div>
+									<div class="model-card-formats">
+										{model.inputFormats.slice(0, 5).join(', ')}{model.inputFormats.length > 5 ? '...' : ''}
+									</div>
+								</button>
+							{/each}
+						</div>
 					</div>
-				</div>
-
-				<div class="settings-group">
-					<h4>🔊 Text-to-Speech</h4>
-					<div class="audio-model-list">
-						{#each ttsModels as model}
-							<button
-								onclick={() => { selectedTtsModel = model.id; saveTtsModel(); }}
-								disabled={!model.available || savingTtsModel}
-								class="audio-btn {model.id === currentTtsModel ? 'active' : ''} {!model.available ? 'disabled' : ''}"
-							>
-								<span>{model.name}</span>
-								<span class="price">{model.price_display}</span>
-							</button>
-						{/each}
-					</div>
-				</div>
+				{/each}
 			</div>
 		</div>
 	{/if}
@@ -2604,6 +2869,227 @@
 		padding: 16px;
 	}
 
+	/* Models Section */
+	.models-section {
+		max-width: 800px;
+	}
+
+	.group-description {
+		font-size: 0.8125rem;
+		color: hsl(var(--muted-foreground));
+		margin-bottom: 16px;
+	}
+
+	.provider-section {
+		margin-bottom: 16px;
+	}
+
+	.provider-section:last-child {
+		margin-bottom: 0;
+	}
+
+	.provider-header {
+		font-size: 0.75rem;
+		font-weight: 600;
+		color: hsl(var(--muted-foreground));
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		margin-bottom: 10px;
+		padding-bottom: 6px;
+		border-bottom: 1px solid hsl(var(--border) / 0.5);
+	}
+
+	.model-cards {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+		gap: 10px;
+	}
+
+	.model-cards.tts-cards,
+	.model-cards.stt-cards {
+		grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+	}
+
+	.model-card {
+		display: flex;
+		flex-direction: column;
+		padding: 12px;
+		background: hsl(var(--background));
+		border: 2px solid hsl(var(--border));
+		border-radius: 10px;
+		cursor: pointer;
+		transition: all 0.15s;
+		text-align: left;
+		gap: 6px;
+	}
+
+	.model-card:hover:not(:disabled) {
+		border-color: hsl(var(--primary) / 0.5);
+		background: hsl(var(--primary) / 0.02);
+	}
+
+	.model-card.active {
+		border-color: hsl(var(--primary));
+		background: hsl(var(--primary) / 0.08);
+	}
+
+	.model-card.deprecated {
+		opacity: 0.7;
+	}
+
+	.model-card.deprecated:hover {
+		border-color: hsl(45 80% 50% / 0.5);
+	}
+
+	.model-card:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.model-card-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+	}
+
+	.model-card-name {
+		font-size: 0.875rem;
+		font-weight: 600;
+		color: hsl(var(--foreground));
+	}
+
+	.model-card-desc {
+		font-size: 0.75rem;
+		color: hsl(var(--muted-foreground));
+		line-height: 1.4;
+		margin: 0;
+	}
+
+	.model-card-capabilities {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+		margin-top: 4px;
+	}
+
+	.capability-badge {
+		font-size: 0.625rem;
+		padding: 2px 6px;
+		border-radius: 4px;
+		background: hsl(var(--muted));
+		color: hsl(var(--muted-foreground));
+		font-weight: 500;
+	}
+
+	.capability-badge.highlight {
+		background: hsl(var(--primary) / 0.15);
+		color: hsl(var(--primary));
+	}
+
+	.capability-badge.audio {
+		background: hsl(280 60% 50% / 0.15);
+		color: hsl(280 60% 50%);
+	}
+
+	.capability-badge.text-excellent {
+		background: hsl(var(--success) / 0.15);
+		color: hsl(var(--success));
+	}
+
+	.capability-badge.text-good {
+		background: hsl(210 80% 50% / 0.15);
+		color: hsl(210 80% 50%);
+	}
+
+	.capability-badge.text-basic {
+		background: hsl(45 80% 50% / 0.15);
+		color: hsl(45 80% 40%);
+	}
+
+	.model-card-footer {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		margin-top: auto;
+		padding-top: 8px;
+		border-top: 1px solid hsl(var(--border) / 0.5);
+	}
+
+	.model-card-price {
+		font-size: 0.75rem;
+		font-weight: 600;
+		color: hsl(var(--primary));
+	}
+
+	.model-card-resolution {
+		font-size: 0.6875rem;
+		color: hsl(var(--muted-foreground));
+	}
+
+	.model-card-formats {
+		font-size: 0.625rem;
+		color: hsl(var(--muted-foreground));
+		font-style: italic;
+	}
+
+	.badge.warning {
+		background: hsl(45 80% 50% / 0.15);
+		color: hsl(45 80% 35%);
+	}
+
+	/* TTS Settings */
+	.tts-settings {
+		margin-top: 16px;
+		padding: 16px;
+		background: hsl(var(--muted) / 0.3);
+		border-radius: 8px;
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.tts-setting-row {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.tts-setting-row label {
+		font-size: 0.75rem;
+		font-weight: 500;
+		color: hsl(var(--foreground));
+	}
+
+	.slider {
+		width: 100%;
+		height: 6px;
+		-webkit-appearance: none;
+		appearance: none;
+		background: hsl(var(--muted));
+		border-radius: 3px;
+		outline: none;
+	}
+
+	.slider::-webkit-slider-thumb {
+		-webkit-appearance: none;
+		appearance: none;
+		width: 16px;
+		height: 16px;
+		border-radius: 50%;
+		background: hsl(var(--primary));
+		cursor: pointer;
+	}
+
+	.slider::-moz-range-thumb {
+		width: 16px;
+		height: 16px;
+		border-radius: 50%;
+		background: hsl(var(--primary));
+		cursor: pointer;
+		border: none;
+	}
+
 	@media (max-width: 640px) {
 		.audio-models {
 			grid-template-columns: 1fr;
@@ -2614,6 +3100,15 @@
 		}
 
 		.form-row {
+			grid-template-columns: 1fr;
+		}
+
+		.model-cards {
+			grid-template-columns: 1fr;
+		}
+
+		.model-cards.tts-cards,
+		.model-cards.stt-cards {
 			grid-template-columns: 1fr;
 		}
 	}

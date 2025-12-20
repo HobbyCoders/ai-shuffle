@@ -143,6 +143,52 @@ VIDEO_PROVIDERS = {
 
 
 # ============================================================================
+# TTS/STT Provider/Model Definitions
+# ============================================================================
+
+TTS_PROVIDERS = {
+    "openai": {
+        "id": "openai",
+        "name": "OpenAI TTS",
+        "description": "Natural-sounding speech with multiple voices",
+        "models": [
+            {"id": "gpt-4o-mini-tts", "name": "GPT-4o Mini TTS", "default": True, "supports_instructions": True},
+            {"id": "tts-1", "name": "TTS-1", "supports_instructions": False},
+            {"id": "tts-1-hd", "name": "TTS-1 HD", "supports_instructions": False},
+        ],
+        "voices": [
+            {"id": "alloy", "name": "Alloy", "description": "Neutral, versatile"},
+            {"id": "ash", "name": "Ash", "description": "Clear, professional"},
+            {"id": "ballad", "name": "Ballad", "description": "Warm, storytelling"},
+            {"id": "coral", "name": "Coral", "description": "Friendly, conversational"},
+            {"id": "echo", "name": "Echo", "description": "Resonant, dramatic"},
+            {"id": "fable", "name": "Fable", "description": "Engaging, expressive"},
+            {"id": "onyx", "name": "Onyx", "description": "Deep, authoritative"},
+            {"id": "nova", "name": "Nova", "description": "Soft, gentle"},
+            {"id": "sage", "name": "Sage", "description": "Calm, measured"},
+            {"id": "shimmer", "name": "Shimmer", "description": "Bright, energetic"},
+            {"id": "verse", "name": "Verse", "description": "Lyrical, musical"},
+        ],
+        "output_formats": ["mp3", "opus", "aac", "flac", "wav", "pcm"],
+    }
+}
+
+STT_PROVIDERS = {
+    "openai": {
+        "id": "openai",
+        "name": "OpenAI STT",
+        "description": "Accurate speech-to-text transcription",
+        "models": [
+            {"id": "gpt-4o-transcribe", "name": "GPT-4o Transcribe", "default": True, "supports_diarization": False},
+            {"id": "gpt-4o-mini-transcribe", "name": "GPT-4o Mini Transcribe", "supports_diarization": False},
+            {"id": "whisper-1", "name": "Whisper", "supports_diarization": False},
+        ],
+        "supported_formats": ["mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm", "ogg", "flac"],
+    }
+}
+
+
+# ============================================================================
 # Pydantic Models
 # ============================================================================
 
@@ -225,6 +271,94 @@ class ProvidersResponse(BaseModel):
     video_providers: List[ProviderInfo]
 
 
+# TTS Request/Response Models
+class TTSGenerateRequest(BaseModel):
+    """Request to generate text-to-speech audio"""
+    text: str = Field(..., min_length=1, max_length=4096, description="Text to convert to speech")
+    provider: str = Field(default="openai", description="TTS provider to use")
+    model: Optional[str] = Field(default=None, description="TTS model (gpt-4o-mini-tts, tts-1, tts-1-hd)")
+    voice: str = Field(default="alloy", description="Voice to use")
+    voice_instructions: Optional[str] = Field(default=None, description="Instructions for how to speak (only for gpt-4o-mini-tts)")
+    speed: float = Field(default=1.0, ge=0.25, le=4.0, description="Speech speed (0.25 to 4.0)")
+    output_format: str = Field(default="mp3", description="Output format (mp3, opus, aac, flac, wav, pcm)")
+
+
+class TTSGenerateResponse(BaseModel):
+    """Response from TTS generation"""
+    id: str
+    url: str
+    file_path: str
+    filename: str
+    duration: Optional[float] = None
+    mime_type: str
+    text_length: int
+    provider: str
+    model: str
+    voice: str
+    created_at: str
+
+
+# STT Request/Response Models
+class STTTranscribeRequest(BaseModel):
+    """Request to transcribe audio to text"""
+    audio_url: Optional[str] = Field(default=None, description="URL or path to audio file")
+    provider: str = Field(default="openai", description="STT provider to use")
+    model: Optional[str] = Field(default=None, description="STT model (gpt-4o-transcribe, whisper-1, etc.)")
+    language: Optional[str] = Field(default=None, description="Language code (e.g., 'en', 'es', 'fr')")
+    diarization: bool = Field(default=False, description="Enable speaker diarization (not yet supported)")
+    translate: bool = Field(default=False, description="Translate to English")
+    timestamp_granularity: Optional[str] = Field(default=None, description="Timestamp level: 'word' or 'segment'")
+
+
+class Speaker(BaseModel):
+    """Speaker info for diarization"""
+    id: str
+    label: Optional[str] = None
+
+
+class TranscriptSegment(BaseModel):
+    """A segment of transcribed text"""
+    id: int
+    text: str
+    start: float
+    end: float
+    speaker: Optional[str] = None
+
+
+class STTTranscribeResponse(BaseModel):
+    """Response from STT transcription"""
+    id: str
+    transcript: str
+    duration: Optional[float] = None
+    language: Optional[str] = None
+    speakers: Optional[List[Speaker]] = None
+    segments: Optional[List[TranscriptSegment]] = None
+    words: Optional[List[dict]] = None
+    provider: str
+    model: str
+    created_at: str
+
+
+# Audio Canvas Item (similar to CanvasItem but for audio)
+class AudioCanvasItem(BaseModel):
+    """A canvas audio item (TTS-generated audio)"""
+    id: str
+    type: str = "audio"
+    text: str  # Original text for TTS
+    provider: str
+    model: Optional[str] = None
+    voice: str
+    file_path: str
+    file_name: str
+    url: Optional[str] = None
+    file_size: int = 0
+    duration: Optional[float] = None
+    mime_type: str = "audio/mpeg"
+    metadata: Optional[dict] = None
+    created_at: str
+    updated_at: str
+
+
 # ============================================================================
 # Helper Functions
 # ============================================================================
@@ -254,12 +388,18 @@ def get_uploads_dir() -> Path:
     return get_canvas_dir() / "uploads"
 
 
+def get_audio_dir() -> Path:
+    """Get the audio directory path for TTS-generated audio"""
+    return get_canvas_dir() / "audio"
+
+
 def ensure_canvas_directories() -> None:
     """Ensure all canvas directories exist"""
     get_canvas_dir().mkdir(parents=True, exist_ok=True)
     get_images_dir().mkdir(parents=True, exist_ok=True)
     get_videos_dir().mkdir(parents=True, exist_ok=True)
     get_uploads_dir().mkdir(parents=True, exist_ok=True)
+    get_audio_dir().mkdir(parents=True, exist_ok=True)
 
 
 def load_canvas_items() -> List[dict]:
@@ -339,6 +479,7 @@ def execute_ai_tool(script: str, item_type: str = "image", timeout: int = 300) -
             **os.environ,
             "GENERATED_IMAGES_DIR": str(get_images_dir()),
             "GENERATED_VIDEOS_DIR": str(get_videos_dir()),
+            "GENERATED_AUDIO_DIR": str(get_audio_dir()),
         }
 
         # Inject API keys from database settings
@@ -349,10 +490,11 @@ def execute_ai_tool(script: str, item_type: str = "image", timeout: int = 300) -
             env["IMAGE_API_KEY"] = gemini_api_key
             env["VIDEO_API_KEY"] = gemini_api_key
 
-        # Use openai_api_key for OpenAI providers (GPT Image, Sora)
+        # Use openai_api_key for OpenAI providers (GPT Image, Sora, TTS, STT)
         openai_api_key = _get_decrypted_api_key("openai_api_key")
         if openai_api_key:
             env["OPENAI_API_KEY"] = openai_api_key
+            env["AUDIO_API_KEY"] = openai_api_key
 
         # Execute with Node.js
         result = subprocess.run(
@@ -1001,3 +1143,421 @@ async def delete_canvas_item(
 
     # Save updated items list
     save_canvas_items(items)
+
+
+# ============================================================================
+# TTS Endpoints
+# ============================================================================
+
+@router.get("/files/audio/{filename}")
+async def serve_canvas_audio(filename: str, token: str = Depends(require_auth)):
+    """Serve a canvas audio file"""
+    from fastapi.responses import FileResponse
+
+    file_path = get_audio_dir() / filename
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Audio not found")
+
+    # Determine content type based on extension
+    ext = file_path.suffix.lower()
+    mime_types = {
+        ".mp3": "audio/mpeg",
+        ".opus": "audio/opus",
+        ".aac": "audio/aac",
+        ".flac": "audio/flac",
+        ".wav": "audio/wav",
+        ".pcm": "audio/pcm",
+        ".webm": "audio/webm",
+        ".ogg": "audio/ogg",
+    }
+    mime_type = mime_types.get(ext, "audio/mpeg")
+
+    return FileResponse(file_path, media_type=mime_type)
+
+
+@router.post("/generate/tts", response_model=TTSGenerateResponse, status_code=status.HTTP_201_CREATED)
+async def generate_tts(
+    request: TTSGenerateRequest,
+    token: str = Depends(require_auth)
+):
+    """
+    Generate text-to-speech audio using AI.
+
+    Converts text to natural-sounding speech using OpenAI TTS models.
+    Saves the audio file to {workspace}/canvas/audio/.
+
+    Models:
+    - gpt-4o-mini-tts: Steerable TTS with voice instructions support
+    - tts-1: Standard quality, optimized for speed
+    - tts-1-hd: High quality with better clarity
+
+    Voices: alloy, ash, ballad, coral, echo, fable, onyx, nova, sage, shimmer, verse
+    """
+    # Validate provider
+    if request.provider not in TTS_PROVIDERS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid TTS provider: {request.provider}. Available: {list(TTS_PROVIDERS.keys())}"
+        )
+
+    provider_info = TTS_PROVIDERS[request.provider]
+
+    # Get model (use default if not specified)
+    model = request.model
+    if not model:
+        for m in provider_info["models"]:
+            if m.get("default"):
+                model = m["id"]
+                break
+        if not model:
+            model = provider_info["models"][0]["id"]
+
+    # Validate model
+    model_ids = [m["id"] for m in provider_info["models"]]
+    if model not in model_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid TTS model: {model}. Available: {model_ids}"
+        )
+
+    # Validate voice
+    voice_ids = [v["id"] for v in provider_info["voices"]]
+    if request.voice not in voice_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid voice: {request.voice}. Available: {voice_ids}"
+        )
+
+    # Validate output format
+    if request.output_format not in provider_info["output_formats"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid output format: {request.output_format}. Available: {provider_info['output_formats']}"
+        )
+
+    # Voice instructions only work with gpt-4o-mini-tts
+    model_info = next((m for m in provider_info["models"] if m["id"] == model), None)
+    if request.voice_instructions and model_info and not model_info.get("supports_instructions"):
+        logger.warning(f"Voice instructions ignored for model {model} (only supported by gpt-4o-mini-tts)")
+
+    ensure_canvas_directories()
+
+    # Build the AI tool script
+    instructions_param = ""
+    if request.voice_instructions and model == "gpt-4o-mini-tts":
+        instructions_param = f"instructions: {json.dumps(request.voice_instructions)},"
+
+    script = f"""
+import {{ textToSpeech }} from '/opt/ai-tools/dist/audio-generation/textToSpeech.js';
+
+const result = await textToSpeech({{
+    text: {json.dumps(request.text)},
+    provider: {json.dumps(request.provider + "-audio")},
+    model: {json.dumps(model)},
+    voice: {json.dumps(request.voice)},
+    speed: {request.speed},
+    response_format: {json.dumps(request.output_format)},
+    {instructions_param}
+}});
+console.log(JSON.stringify(result));
+"""
+
+    # Set up environment with audio output directory
+    env_override = {
+        "GENERATED_AUDIO_DIR": str(get_audio_dir()),
+    }
+
+    # Execute the AI tool
+    result = execute_ai_tool(script, item_type="audio", timeout=120)
+
+    # Check if generation succeeded
+    if not result.get("success", True) or result.get("error"):
+        error_msg = result.get("error", "TTS generation failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_msg
+        )
+
+    # Get the output file path
+    file_path = result.get("file_path")
+    if not file_path or not Path(file_path).exists():
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="TTS generation completed but audio file was not created"
+        )
+
+    # Get file info
+    file_path_obj = Path(file_path)
+    filename = file_path_obj.name
+    file_size = file_path_obj.stat().st_size if file_path_obj.exists() else 0
+
+    # Determine mime type
+    ext = file_path_obj.suffix.lower().lstrip(".")
+    mime_types = {
+        "mp3": "audio/mpeg",
+        "opus": "audio/opus",
+        "aac": "audio/aac",
+        "flac": "audio/flac",
+        "wav": "audio/wav",
+        "pcm": "audio/pcm",
+    }
+    mime_type = mime_types.get(ext, "audio/mpeg")
+
+    now = datetime.utcnow().isoformat() + "Z"
+    item_id = str(uuid.uuid4())
+
+    return TTSGenerateResponse(
+        id=item_id,
+        url=f"/api/v1/canvas/files/audio/{filename}",
+        file_path=str(file_path),
+        filename=filename,
+        duration=None,  # Would need to parse audio file to get duration
+        mime_type=mime_type,
+        text_length=len(request.text),
+        provider=request.provider,
+        model=model,
+        voice=request.voice,
+        created_at=now
+    )
+
+
+@router.get("/tts/providers")
+async def get_tts_providers(token: str = Depends(require_auth)):
+    """
+    Get available TTS providers, models, and voices.
+
+    Returns provider information including supported models, voices, and output formats.
+    """
+    openai_key = _get_decrypted_api_key("openai_api_key")
+
+    providers = []
+    for provider_id, provider_info in TTS_PROVIDERS.items():
+        is_available = bool(openai_key) if provider_id == "openai" else False
+
+        providers.append({
+            "id": provider_id,
+            "name": provider_info["name"],
+            "description": provider_info["description"],
+            "available": is_available,
+            "models": provider_info["models"],
+            "voices": provider_info["voices"],
+            "output_formats": provider_info["output_formats"],
+        })
+
+    return {
+        "providers": providers,
+        "openai_configured": bool(openai_key)
+    }
+
+
+# ============================================================================
+# STT Endpoints
+# ============================================================================
+
+@router.post("/transcribe", response_model=STTTranscribeResponse, status_code=status.HTTP_201_CREATED)
+async def transcribe_audio(
+    request: STTTranscribeRequest = None,
+    file: UploadFile = File(None),
+    token: str = Depends(require_auth)
+):
+    """
+    Transcribe audio to text using AI.
+
+    Accepts either:
+    - audio_url in request body (path to existing audio file)
+    - file upload via multipart form
+
+    Models:
+    - gpt-4o-transcribe: Best quality transcription
+    - gpt-4o-mini-transcribe: Fast, affordable transcription
+    - whisper-1: Original Whisper model
+
+    Returns the transcribed text along with optional timestamps and segments.
+    """
+    # Handle the case where request is None (form data upload)
+    if request is None:
+        request = STTTranscribeRequest()
+
+    # Validate provider
+    if request.provider not in STT_PROVIDERS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid STT provider: {request.provider}. Available: {list(STT_PROVIDERS.keys())}"
+        )
+
+    provider_info = STT_PROVIDERS[request.provider]
+
+    # Get model (use default if not specified)
+    model = request.model
+    if not model:
+        for m in provider_info["models"]:
+            if m.get("default"):
+                model = m["id"]
+                break
+        if not model:
+            model = provider_info["models"][0]["id"]
+
+    # Validate model
+    model_ids = [m["id"] for m in provider_info["models"]]
+    if model not in model_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid STT model: {model}. Available: {model_ids}"
+        )
+
+    # Determine audio source
+    audio_path = None
+
+    if file and file.filename:
+        # Handle file upload
+        ensure_canvas_directories()
+
+        # Validate file type
+        allowed_types = ["audio/mpeg", "audio/mp3", "audio/mp4", "audio/m4a",
+                        "audio/wav", "audio/webm", "audio/x-wav", "video/mp4",
+                        "video/webm", "audio/ogg", "audio/flac"]
+        content_type = file.content_type or ""
+
+        # Check by extension
+        filename = file.filename or ""
+        allowed_extensions = [".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".ogg", ".flac"]
+        ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+        if content_type not in allowed_types and ext not in allowed_extensions:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unsupported audio format: {content_type or ext}. Supported: {provider_info['supported_formats']}"
+            )
+
+        # Save uploaded file temporarily
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        file_id = uuid.uuid4().hex[:8]
+        upload_filename = f"stt_upload_{timestamp}_{file_id}{ext or '.webm'}"
+        audio_path = get_uploads_dir() / upload_filename
+
+        try:
+            content = await file.read()
+            if len(content) == 0:
+                raise HTTPException(status_code=400, detail="Audio file is empty")
+            if len(content) > 25 * 1024 * 1024:
+                raise HTTPException(status_code=400, detail="Audio file too large. Maximum 25MB.")
+
+            with open(audio_path, "wb") as f:
+                f.write(content)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to save uploaded audio: {str(e)}")
+
+    elif request.audio_url:
+        # Use provided audio path
+        audio_path = Path(request.audio_url)
+        if not audio_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Audio file not found: {request.audio_url}"
+            )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Either audio_url or file upload is required"
+        )
+
+    # Build timestamp granularities
+    timestamp_granularities = []
+    if request.timestamp_granularity:
+        if request.timestamp_granularity in ["word", "segment"]:
+            timestamp_granularities.append(request.timestamp_granularity)
+
+    # Build the AI tool script
+    timestamp_param = ""
+    if timestamp_granularities:
+        timestamp_param = f"timestamp_granularities: {json.dumps(timestamp_granularities)},"
+
+    language_param = ""
+    if request.language:
+        language_param = f"language: {json.dumps(request.language)},"
+
+    script = f"""
+import {{ speechToText }} from '/opt/ai-tools/dist/audio-generation/speechToText.js';
+
+const result = await speechToText({{
+    audio_path: {json.dumps(str(audio_path))},
+    provider: {json.dumps(request.provider + "-audio")},
+    model: {json.dumps(model)},
+    {language_param}
+    {timestamp_param}
+    response_format: "verbose_json"
+}});
+console.log(JSON.stringify(result));
+"""
+
+    # Execute the AI tool
+    result = execute_ai_tool(script, item_type="audio", timeout=300)
+
+    # Check if transcription succeeded
+    if not result.get("success", True) or result.get("error"):
+        error_msg = result.get("error", "Transcription failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_msg
+        )
+
+    # Build response
+    now = datetime.utcnow().isoformat() + "Z"
+    item_id = str(uuid.uuid4())
+
+    # Parse segments if available
+    segments = None
+    if result.get("segments"):
+        segments = [
+            TranscriptSegment(
+                id=seg.get("id", i),
+                text=seg.get("text", ""),
+                start=seg.get("start", 0),
+                end=seg.get("end", 0),
+                speaker=None  # Diarization not yet supported
+            )
+            for i, seg in enumerate(result.get("segments", []))
+        ]
+
+    return STTTranscribeResponse(
+        id=item_id,
+        transcript=result.get("text", ""),
+        duration=result.get("duration_seconds"),
+        language=result.get("language"),
+        speakers=None,  # Diarization not yet supported
+        segments=segments,
+        words=result.get("words"),
+        provider=request.provider,
+        model=model,
+        created_at=now
+    )
+
+
+@router.get("/stt/providers")
+async def get_stt_providers(token: str = Depends(require_auth)):
+    """
+    Get available STT providers and models.
+
+    Returns provider information including supported models and audio formats.
+    """
+    openai_key = _get_decrypted_api_key("openai_api_key")
+
+    providers = []
+    for provider_id, provider_info in STT_PROVIDERS.items():
+        is_available = bool(openai_key) if provider_id == "openai" else False
+
+        providers.append({
+            "id": provider_id,
+            "name": provider_info["name"],
+            "description": provider_info["description"],
+            "available": is_available,
+            "models": provider_info["models"],
+            "supported_formats": provider_info["supported_formats"],
+        })
+
+    return {
+        "providers": providers,
+        "openai_configured": bool(openai_key)
+    }
