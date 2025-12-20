@@ -230,6 +230,7 @@
 	.mobile .main-area {
 		grid-column: 1;
 		grid-row: 1;
+		overflow: hidden;
 	}
 
 	.workspace-container {
@@ -269,7 +270,9 @@
 	.mobile-rail-container {
 		grid-column: 1;
 		grid-row: 2;
-		z-index: 50;
+		z-index: 100;
+		position: relative;
+		background: var(--card);
 	}
 
 	/* Ensure proper layering */

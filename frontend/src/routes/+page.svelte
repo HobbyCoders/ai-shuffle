@@ -864,9 +864,18 @@
 				<MobileWorkspace
 					cards={workspaceCards}
 					activeCardIndex={$mobileActiveCardIndex}
+					minimizedCount={$minimizedCardsStore.length}
 					onCardChange={(index) => deck.setMobileActiveCardIndex(index)}
 					onCloseCard={handleCardClose}
 					onCreateCard={handleCreateCard}
+					onSettingsClick={() => (showSettingsModal = true)}
+					onMinimizedClick={() => {
+						// Restore the first minimized card
+						if ($minimizedCardsStore.length > 0) {
+							const firstMinimized = $minimizedCardsStore[0];
+							handleMinimizedCardClick({ id: firstMinimized.id, type: firstMinimized.type, title: firstMinimized.title });
+						}
+					}}
 				>
 					{#snippet children(card)}
 						{@const tabId = getTabIdForCard(card)}

@@ -338,7 +338,7 @@
 		display: flex;
 		flex-direction: column;
 		transition: width 0.2s ease;
-		overflow: hidden;
+		overflow: visible;
 	}
 
 	.context-panel.collapsed {
@@ -376,6 +376,7 @@
 	.panel-content {
 		flex: 1;
 		overflow-y: auto;
+		overflow-x: hidden;
 		padding: 12px;
 		display: flex;
 		flex-direction: column;
