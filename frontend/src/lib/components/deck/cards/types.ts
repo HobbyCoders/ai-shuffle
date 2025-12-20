@@ -39,3 +39,34 @@ export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }>
 
 export const SNAP_THRESHOLD = 20;
 export const SNAP_GRID = 10;
+export const CARD_SNAP_THRESHOLD = 12; // Threshold for card-to-card snapping
+
+/**
+ * Workspace padding to keep cards visible and accessible
+ */
+export const WORKSPACE_PADDING = {
+  top: 10,       // Small top padding
+  bottom: 10,    // Small bottom padding
+  left: 10,      // Small left padding
+  right: 10,     // Small right padding
+  minVisible: 100 // Minimum visible area of card (header must stay visible)
+};
+
+/**
+ * Represents a snap guide line for card-to-card alignment
+ */
+export interface SnapGuide {
+  type: 'horizontal' | 'vertical';
+  position: number; // x for vertical, y for horizontal
+  start: number;    // start of the line
+  end: number;      // end of the line
+}
+
+/**
+ * Result of checking for card-to-card snap alignment
+ */
+export interface SnapResult {
+  x: number;
+  y: number;
+  guides: SnapGuide[];
+}

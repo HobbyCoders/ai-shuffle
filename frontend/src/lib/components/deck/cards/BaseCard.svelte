@@ -24,6 +24,8 @@
 		onFocus: () => void;
 		onMove: (x: number, y: number) => void;
 		onResize: (w: number, h: number) => void;
+		onDragEnd?: () => void;
+		onResizeEnd?: () => void;
 		onTitleChange?: (title: string) => void;
 		children?: Snippet;
 	}
@@ -36,6 +38,8 @@
 		onFocus,
 		onMove,
 		onResize,
+		onDragEnd,
+		onResizeEnd,
 		onTitleChange,
 		children
 	}: Props = $props();
@@ -127,6 +131,7 @@
 		if (isDragging) {
 			isDragging = false;
 			(e.target as HTMLElement).releasePointerCapture(e.pointerId);
+			onDragEnd?.();
 		}
 	}
 
@@ -190,6 +195,7 @@
 			isResizing = false;
 			resizeEdge = null;
 			(e.target as HTMLElement).releasePointerCapture(e.pointerId);
+			onResizeEnd?.();
 		}
 	}
 

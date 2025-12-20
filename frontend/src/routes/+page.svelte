@@ -26,7 +26,8 @@
 		visibleCards,
 		minimizedCards as minimizedCardsStore,
 		focusedCardId,
-		mobileActiveCardIndex
+		mobileActiveCardIndex,
+		gridSnapEnabled
 	} from '$lib/stores/deck';
 	import type { DeckCard, DeckCardType } from '$lib/stores/deck';
 	import { groups } from '$lib/stores/groups';
@@ -652,15 +653,56 @@
 	}
 
 	function handleCardMove(id: string, x: number, y: number) {
-		deck.moveCard(id, x, y);
 		const card = deck.getCard(id);
-		if (card && workspaceRef) {
-			workspaceRef.showSnapPreview(x, y, card.size.width, card.size.height);
+		if (!card || !workspaceRef) {
+			deck.moveCard(id, x, y);
+			return;
 		}
+
+		const { width, height } = card.size;
+
+		// Apply bounds clamping to prevent cards from going off-screen
+		let clampedPos = workspaceRef.clampToBounds(x, y, width, height);
+
+		// Apply grid snapping if enabled
+		clampedPos = workspaceRef.snapToGrid(clampedPos.x, clampedPos.y);
+
+		// Check for card-to-card snapping
+		const snapResult = workspaceRef.checkCardSnapping(id, clampedPos.x, clampedPos.y, width, height);
+
+		// Update the card position with snapped coordinates
+		deck.moveCard(id, snapResult.x, snapResult.y);
+
+		// Show snap guides during drag
+		workspaceRef.updateSnapGuides(snapResult.guides);
+
+		// Also show edge snap preview if applicable
+		workspaceRef.showSnapPreview(snapResult.x, snapResult.y, width, height);
 	}
 
 	function handleCardResize(id: string, width: number, height: number) {
 		deck.resizeCard(id, width, height);
+	}
+
+	function handleCardDragEnd(id: string) {
+		if (workspaceRef) {
+			// Clear snap guides when drag ends
+			workspaceRef.clearSnapGuides();
+			workspaceRef.hideSnapPreview();
+
+			// Finalize edge snapping if card is near workspace edge
+			const card = deck.getCard(id);
+			if (card) {
+				workspaceRef.finalizeSnap(id, card.position.x, card.position.y, card.size.width, card.size.height);
+			}
+		}
+	}
+
+	function handleCardResizeEnd(id: string) {
+		if (workspaceRef) {
+			// Clear snap guides when resize ends
+			workspaceRef.clearSnapGuides();
+		}
 	}
 
 	function handleCardSnap(id: string, snapTo: CardsDeckCard['snappedTo']) {
@@ -928,6 +970,8 @@
 					onCardResize={handleCardResize}
 					onCardSnap={handleCardSnap}
 					onCreateCard={handleCreateCard}
+					gridSnapEnabled={$gridSnapEnabled}
+					cardSnapEnabled={true}
 				>
 					{#snippet children()}
 						{#each workspaceCards.sort((a, b) => a.zIndex - b.zIndex) as card (card.id)}
@@ -954,6 +998,8 @@
 												onFocus={() => handleCardFocus(card.id)}
 												onMove={(x, y) => handleCardMove(card.id, x, y)}
 												onResize={(w, h) => handleCardResize(card.id, w, h)}
+												onDragEnd={() => handleCardDragEnd(card.id)}
+												onResizeEnd={() => handleCardResizeEnd(card.id)}
 												onFork={(sessionId, messageIndex, messageId) =>
 													handleFork(card.id, sessionId, messageIndex, messageId)
 												}
@@ -973,6 +1019,8 @@
 											onFocus={() => handleCardFocus(card.id)}
 											onMove={(x, y) => handleCardMove(card.id, x, y)}
 											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
 										/>
 									{:else if card.type === 'canvas'}
 										<CanvasCard
@@ -984,6 +1032,8 @@
 											onFocus={() => handleCardFocus(card.id)}
 											onMove={(x, y) => handleCardMove(card.id, x, y)}
 											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
 										/>
 									{:else if card.type === 'terminal'}
 										<TerminalCard
@@ -994,6 +1044,8 @@
 											onFocus={() => handleCardFocus(card.id)}
 											onMove={(x, y) => handleCardMove(card.id, x, y)}
 											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
 										/>
 									{:else}
 										<!-- Other card types -->

@@ -51,6 +51,8 @@
 		onFocus: () => void;
 		onMove: (x: number, y: number) => void;
 		onResize: (w: number, h: number) => void;
+		onDragEnd?: () => void;
+		onResizeEnd?: () => void;
 		onPause?: () => void;
 		onResume?: () => void;
 		onCancel?: () => void;
@@ -65,6 +67,8 @@
 		onFocus,
 		onMove,
 		onResize,
+		onDragEnd,
+		onResizeEnd,
 		onPause,
 		onResume,
 		onCancel
@@ -173,7 +177,7 @@
 	}
 </script>
 
-<BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize}>
+<BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
 	<div class="agent-content">
 		<!-- Status Header -->
 		<div class="status-header">

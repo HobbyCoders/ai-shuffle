@@ -22,6 +22,8 @@
 		onFocus: () => void;
 		onMove: (x: number, y: number) => void;
 		onResize: (w: number, h: number) => void;
+		onDragEnd?: () => void;
+		onResizeEnd?: () => void;
 		onFork?: (sessionId: string, messageIndex: number, messageId: string) => void;
 		mobile?: boolean;
 	}
@@ -35,6 +37,8 @@
 		onFocus,
 		onMove,
 		onResize,
+		onDragEnd,
+		onResizeEnd,
 		onFork,
 		mobile = false
 	}: Props = $props();
@@ -118,7 +122,7 @@
 	</div>
 {:else}
 	<!-- Desktop: Full BaseCard with all features -->
-	<BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize}>
+	<BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
 		<div class="chat-card-content">
 			{#if tab}
 				<!-- Header with context usage, profile/project selectors -->

@@ -30,6 +30,8 @@
 		onFocus: () => void;
 		onMove: (x: number, y: number) => void;
 		onResize: (w: number, h: number) => void;
+		onDragEnd?: () => void;
+		onResizeEnd?: () => void;
 		onGenerate?: (prompt: string, provider: string, aspectRatio: string) => void;
 	}
 
@@ -42,6 +44,8 @@
 		onFocus,
 		onMove,
 		onResize,
+		onDragEnd,
+		onResizeEnd,
 		onGenerate
 	}: Props = $props();
 
@@ -130,7 +134,7 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize}>
+<BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
 	<div class="canvas-content" onclick={handleCardClick}>
 		<!-- Preview Area -->
 		<div class="preview-area">

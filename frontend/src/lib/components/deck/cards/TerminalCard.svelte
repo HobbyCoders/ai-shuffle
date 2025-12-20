@@ -16,12 +16,14 @@
 		onFocus: () => void;
 		onMove: (x: number, y: number) => void;
 		onResize: (w: number, h: number) => void;
+		onDragEnd?: () => void;
+		onResizeEnd?: () => void;
 	}
 
-	let { card, onClose, onMinimize, onMaximize, onFocus, onMove, onResize }: Props = $props();
+	let { card, onClose, onMinimize, onMaximize, onFocus, onMove, onResize, onDragEnd, onResizeEnd }: Props = $props();
 </script>
 
-<BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize}>
+<BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
 	<div class="terminal-content">
 		<div class="terminal-line">Terminal integration coming soon...</div>
 		<div class="terminal-line"></div>
