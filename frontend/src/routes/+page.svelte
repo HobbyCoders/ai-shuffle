@@ -43,6 +43,7 @@
 		ChatCard,
 		AgentCard,
 		CanvasCard,
+		TerminalCard,
 		MobileWorkspace
 	} from '$lib/components/deck/cards';
 	import type { CardType, DeckCard as CardsDeckCard } from '$lib/components/deck/cards/types';
@@ -892,6 +893,15 @@
 							<div class="p-4">
 								<p class="text-muted-foreground">Canvas view (mobile)</p>
 							</div>
+						{:else if card.type === 'terminal'}
+							<div class="terminal-mobile-content">
+								<div class="terminal-line">Terminal integration coming soon...</div>
+								<div class="terminal-line"></div>
+								<div class="terminal-prompt">
+									<span class="prompt-symbol">$</span>
+									<span class="cursor"></span>
+								</div>
+							</div>
 						{:else}
 							<div class="p-4">
 								<p class="text-muted-foreground">Unknown card type</p>
@@ -966,8 +976,18 @@
 											onMove={(x, y) => handleCardMove(card.id, x, y)}
 											onResize={(w, h) => handleCardResize(card.id, w, h)}
 										/>
+									{:else if card.type === 'terminal'}
+										<TerminalCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMinimize={() => handleCardMinimize(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+										/>
 									{:else}
-										<!-- Terminal or other card types -->
+										<!-- Other card types -->
 										<div class="card-placeholder">
 											<p class="text-muted-foreground">
 												{card.type} card (coming soon)
@@ -1278,5 +1298,46 @@
 	.card-placeholder p {
 		color: hsl(var(--muted-foreground));
 		font-size: 0.875rem;
+	}
+
+	/* Mobile terminal styling */
+	.terminal-mobile-content {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		background: hsl(var(--background));
+		color: #22c55e;
+		font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+		font-size: 0.875rem;
+		padding: 16px;
+		overflow: auto;
+	}
+
+	.terminal-mobile-content .terminal-line {
+		line-height: 1.5;
+		min-height: 1.5em;
+	}
+
+	.terminal-mobile-content .terminal-prompt {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-top: 8px;
+	}
+
+	.terminal-mobile-content .prompt-symbol {
+		color: #00ff00;
+	}
+
+	.terminal-mobile-content .cursor {
+		width: 8px;
+		height: 16px;
+		background: #00ff00;
+		animation: blink 1s step-end infinite;
+	}
+
+	@keyframes blink {
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0; }
 	}
 </style>
