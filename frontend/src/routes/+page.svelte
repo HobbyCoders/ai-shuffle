@@ -32,7 +32,7 @@
 	import type { DeckCard, DeckCardType } from '$lib/stores/deck';
 	import { groups } from '$lib/stores/groups';
 	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
-	import { getTags, type Tag, type SessionTag, exportAgent, importAgent, parseAgentExportFile } from '$lib/api/client';
+	import { getTags, type Tag } from '$lib/api/client';
 	import type { Command } from '$lib/api/commands';
 
 	// Deck components
@@ -45,13 +45,15 @@
 		AgentCard,
 		CanvasCard,
 		TerminalCard,
-		MobileWorkspace
+		MobileWorkspace,
+		ProfileCard,
+		ProjectCard,
+		SubagentCard,
+		SettingsCard
 	} from '$lib/components/deck/cards';
 	import type { CardType, DeckCard as CardsDeckCard } from '$lib/components/deck/cards/types';
 
 	// Modals
-	import SettingsModal from '$lib/components/SettingsModal.svelte';
-	import ProfileModal from '$lib/components/ProfileModal.svelte';
 	import KeyboardShortcutsModal from '$lib/components/KeyboardShortcutsModal.svelte';
 	import AnalyticsModal from '$lib/components/AnalyticsModal.svelte';
 	import TerminalModal from '$lib/components/TerminalModal.svelte';
@@ -62,9 +64,7 @@
 	import KnowledgeManager from '$lib/components/KnowledgeManager.svelte';
 	import Canvas from '$lib/components/canvas/Canvas.svelte';
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
-	import SubagentManager from '$lib/components/SubagentManager.svelte';
 	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
-	import { api } from '$lib/api/client';
 
 	// Types from deck/types
 	import type {
@@ -75,35 +75,6 @@
 		MinimizedCard,
 		RunningProcess
 	} from '$lib/components/deck/types';
-
-	// Subagent interface for profile config
-	interface Subagent {
-		id: string;
-		name: string;
-		description: string;
-		model?: string;
-		is_builtin?: boolean;
-	}
-
-	// Tool interfaces for profile config
-	interface ToolInfo {
-		name: string;
-		category: string;
-		description: string;
-		mcp_server?: string;
-	}
-
-	interface ToolCategory {
-		id: string;
-		name: string;
-		description: string;
-		tools: ToolInfo[];
-	}
-
-	interface ToolsResponse {
-		categories: ToolCategory[];
-		all_tools: ToolInfo[];
-	}
 
 	// ============================================
 	// State: Deck Layout
@@ -116,8 +87,6 @@
 	// ============================================
 	// State: Modals
 	// ============================================
-	let showSettingsModal = $state(false);
-	let showProfileModal = $state(false);
 	let showKeyboardShortcuts = $state(false);
 	let showAnalyticsModal = $state(false);
 	let showTerminalModal = $state(false);
@@ -128,27 +97,14 @@
 	let showKnowledgeModal = $state(false);
 	let showCanvas = $state(false);
 	let showSpotlight = $state(false);
-	let showSubagentManager = $state(false);
 	let showAdvancedSearch = $state(false);
-	let showProjectModal = $state(false);
-	let showNewProjectForm = $state(false);
 
 	// Terminal modal state
 	let terminalCommand = $state('/resume');
 	let terminalSessionId = $state('');
 
-	// Profile modal state
-	let editingProfile: any = $state(null);
-	let allSubagents: Subagent[] = $state([]);
-	let availableTools: ToolsResponse = $state({ categories: [], all_tools: [] });
-
 	// Tag state
 	let allTags: Tag[] = $state([]);
-
-	// Project form state
-	let newProjectId = $state('');
-	let newProjectName = $state('');
-	let newProjectDescription = $state('');
 
 	// Shortcut registrations for cleanup
 	let shortcutRegistrations: ShortcutRegistration[] = [];
@@ -248,6 +204,14 @@
 				return 'canvas';
 			case 'terminal':
 				return 'terminal';
+			case 'settings':
+				return 'settings';
+			case 'profile':
+				return 'profile';
+			case 'subagent':
+				return 'subagent';
+			case 'project':
+				return 'project';
 			default:
 				return 'chat';
 		}
@@ -340,8 +304,6 @@
 			tabs.loadProfiles(),
 			tabs.loadSessions(),
 			tabs.loadProjects(),
-			loadSubagents(),
-			loadTools(),
 			loadAllTags()
 		]);
 
@@ -434,16 +396,8 @@
 						showAdvancedSearch = false;
 					} else if (showSpotlight) {
 						showSpotlight = false;
-					} else if (showSettingsModal) {
-						showSettingsModal = false;
 					} else if (showImportModal) {
 						showImportModal = false;
-					} else if (showProfileModal) {
-						showProfileModal = false;
-					} else if (showSubagentManager) {
-						showSubagentManager = false;
-					} else if (showProjectModal) {
-						showProjectModal = false;
 					} else if (showTerminalModal) {
 						showTerminalModal = false;
 					} else if (showGitModal) {
@@ -471,7 +425,40 @@
 				key: ',',
 				cmdOrCtrl: true,
 				category: 'navigation',
-				action: () => { showSettingsModal = true; }
+				action: () => { handleCreateCard('settings'); }
+			}),
+
+			// Open profiles (Cmd+Shift+P)
+			registerShortcut({
+				id: 'open-profiles',
+				description: 'Open profiles',
+				key: 'p',
+				cmdOrCtrl: true,
+				shift: true,
+				category: 'navigation',
+				action: () => { handleCreateCard('profile'); }
+			}),
+
+			// Open subagents (Cmd+Shift+A)
+			registerShortcut({
+				id: 'open-subagents',
+				description: 'Open subagents',
+				key: 'a',
+				cmdOrCtrl: true,
+				shift: true,
+				category: 'navigation',
+				action: () => { handleCreateCard('subagent'); }
+			}),
+
+			// Open projects (Cmd+Shift+J)
+			registerShortcut({
+				id: 'open-projects',
+				description: 'Open projects',
+				key: 'j',
+				cmdOrCtrl: true,
+				shift: true,
+				category: 'navigation',
+				action: () => { handleCreateCard('project'); }
 			}),
 
 			// Advanced search (Cmd+Shift+F)
@@ -546,24 +533,6 @@
 	// ============================================
 	// Data Loading
 	// ============================================
-	async function loadSubagents() {
-		try {
-			allSubagents = await api.get<Subagent[]>('/subagents');
-		} catch (e) {
-			console.error('Failed to load subagents:', e);
-			allSubagents = [];
-		}
-	}
-
-	async function loadTools() {
-		try {
-			availableTools = await api.get<ToolsResponse>('/tools');
-		} catch (e) {
-			console.error('Failed to load tools:', e);
-			availableTools = { categories: [], all_tools: [] };
-		}
-	}
-
 	async function loadAllTags() {
 		try {
 			allTags = await getTags();
@@ -658,6 +627,56 @@
 				deckCardType = 'terminal';
 				title = 'Terminal';
 				break;
+			case 'settings': {
+				// Singleton - check if already open
+				const existingSettings = [...$visibleCards, ...$minimizedCardsStore].find(c => c.type === 'settings');
+				if (existingSettings) {
+					if (existingSettings.minimized) {
+						deck.restoreCard(existingSettings.id);
+					} else {
+						deck.focusCard(existingSettings.id);
+					}
+					return;
+				}
+				deckCardType = 'settings';
+				title = 'Settings';
+				break;
+			}
+			case 'profile': {
+				deckCardType = 'profile';
+				title = 'Profiles';
+				break;
+			}
+			case 'subagent': {
+				// Singleton
+				const existingSubagent = [...$visibleCards, ...$minimizedCardsStore].find(c => c.type === 'subagent');
+				if (existingSubagent) {
+					if (existingSubagent.minimized) {
+						deck.restoreCard(existingSubagent.id);
+					} else {
+						deck.focusCard(existingSubagent.id);
+					}
+					return;
+				}
+				deckCardType = 'subagent';
+				title = 'Subagents';
+				break;
+			}
+			case 'project': {
+				// Singleton
+				const existingProject = [...$visibleCards, ...$minimizedCardsStore].find(c => c.type === 'project');
+				if (existingProject) {
+					if (existingProject.minimized) {
+						deck.restoreCard(existingProject.id);
+					} else {
+						deck.focusCard(existingProject.id);
+					}
+					return;
+				}
+				deckCardType = 'project';
+				title = 'Projects';
+				break;
+			}
 			default:
 				deckCardType = 'chat';
 				title = 'New Card';
@@ -813,7 +832,7 @@
 	}
 
 	function handleSpotlightOpenSettings() {
-		showProfileModal = true;
+		handleCreateCard('settings');
 		showSpotlight = false;
 	}
 
@@ -823,23 +842,6 @@
 	function closeTerminalModal() {
 		showTerminalModal = false;
 		terminalSessionId = '';
-	}
-
-	// ============================================
-	// Profile Modal Handlers
-	// ============================================
-	async function handleExportProfile(profileId: string) {
-		try {
-			await exportAgent(profileId);
-		} catch (e: any) {
-			alert('Export failed: ' + (e.detail || 'Unknown error'));
-		}
-	}
-
-	async function handleAgentImported() {
-		await tabs.loadProfiles();
-		showAgentImportModal = false;
-		showProfileModal = false;
 	}
 
 	// ============================================
@@ -867,27 +869,6 @@
 		await tabs.loadSessions($sessionsTagFilter);
 	}
 
-	// ============================================
-	// Project Modal Handlers
-	// ============================================
-	async function createProject() {
-		if (!newProjectId || !newProjectName) return;
-		await tabs.createProject({
-			id: newProjectId.toLowerCase().replace(/[^a-z0-9-]/g, '-'),
-			name: newProjectName,
-			description: newProjectDescription || undefined
-		});
-		newProjectId = '';
-		newProjectName = '';
-		newProjectDescription = '';
-		showNewProjectForm = false;
-	}
-
-	async function deleteProject(projectId: string) {
-		if (confirm('Delete this project?')) {
-			await tabs.deleteProject(projectId);
-		}
-	}
 </script>
 
 {#if !$isAuthenticated}
@@ -909,7 +890,7 @@
 		{runningProcesses}
 		onModeChange={handleModeChange}
 		onLogoClick={() => handleCreateCard('chat')}
-		onSettingsClick={() => (showSettingsModal = true)}
+		onSettingsClick={() => handleCreateCard('settings')}
 		onContextToggle={() => deck.toggleContextPanel()}
 		onSessionClick={handleSessionClick}
 		onHistorySessionClick={handleHistorySessionClick}
@@ -970,6 +951,50 @@
 									<span class="cursor"></span>
 								</div>
 							</div>
+						{:else if card.type === 'settings'}
+							<SettingsCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMinimize={() => handleCardMinimize(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
+						{:else if card.type === 'profile'}
+							<ProfileCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMinimize={() => handleCardMinimize(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
+						{:else if card.type === 'subagent'}
+							<SubagentCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMinimize={() => handleCardMinimize(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
+						{:else if card.type === 'project'}
+							<ProjectCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMinimize={() => handleCardMinimize(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
 						{:else}
 							<div class="p-4">
 								<p class="text-muted-foreground">Unknown card type</p>
@@ -1064,6 +1089,54 @@
 											onDragEnd={() => handleCardDragEnd(card.id)}
 											onResizeEnd={() => handleCardResizeEnd(card.id)}
 										/>
+									{:else if card.type === 'settings'}
+										<SettingsCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMinimize={() => handleCardMinimize(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
+										/>
+									{:else if card.type === 'profile'}
+										<ProfileCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMinimize={() => handleCardMinimize(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
+										/>
+									{:else if card.type === 'subagent'}
+										<SubagentCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMinimize={() => handleCardMinimize(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
+										/>
+									{:else if card.type === 'project'}
+										<ProjectCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMinimize={() => handleCardMinimize(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
+										/>
 									{:else}
 										<!-- Other card types -->
 										<div class="card-placeholder">
@@ -1113,9 +1186,6 @@
 		onNewChat={handleSpotlightNewChat}
 		onOpenSettings={handleSpotlightOpenSettings}
 	/>
-
-	<!-- Settings Modal -->
-	<SettingsModal open={showSettingsModal} onClose={() => showSettingsModal = false} />
 
 	<!-- Keyboard Shortcuts Modal -->
 	<KeyboardShortcutsModal open={showKeyboardShortcuts} onClose={() => showKeyboardShortcuts = false} />
@@ -1167,68 +1237,15 @@
 		/>
 	{/if}
 
-	<!-- Profile Modal -->
-	<ProfileModal
-		show={showProfileModal}
-		{editingProfile}
-		profiles={$profiles}
-		{allSubagents}
-		{availableTools}
-		groups={$groups}
-		on:close={() => {
-			showProfileModal = false;
-			editingProfile = null;
-		}}
-		on:save={async (e) => {
-			const { isNew, data } = e.detail;
-			if (isNew) {
-				await tabs.createProfile(data);
-			} else {
-				await tabs.updateProfile(data.id, {
-					name: data.name,
-					description: data.description,
-					config: data.config
-				});
-			}
-		}}
-		on:delete={async (e) => {
-			const profileId = e.detail;
-			if (confirm('Delete this profile?')) {
-				await tabs.deleteProfile(profileId);
-			}
-		}}
-		on:export={(e) => handleExportProfile(e.detail)}
-		on:import={async (e) => {
-			const file = e.detail;
-			try {
-				const content = await file.text();
-				const parsed = parseAgentExportFile(content);
-				const profile = await importAgent(parsed);
-				await tabs.loadProfiles();
-				alert(`Successfully imported agent: ${profile.name}`);
-			} catch (err: any) {
-				alert('Import failed: ' + (err.detail || err.message || 'Invalid file format'));
-			}
-		}}
-		on:assignGroup={(e) => groups.assignToGroup('profiles', e.detail.profileId, e.detail.groupName)}
-		on:removeGroup={(e) => groups.removeFromGroup('profiles', e.detail)}
-		on:createGroup={(e) => {
-			groups.createGroup('profiles', e.detail.groupName);
-			groups.assignToGroup('profiles', e.detail.profileId, e.detail.groupName);
-		}}
-	/>
-
 	<!-- Agent Import Modal -->
 	<AgentImportModal
 		show={showAgentImportModal}
 		on:close={() => showAgentImportModal = false}
-		on:imported={handleAgentImported}
+		on:imported={async () => {
+			await tabs.loadProfiles();
+			showAgentImportModal = false;
+		}}
 	/>
-
-	<!-- Subagent Manager Panel -->
-	{#if showSubagentManager}
-		<SubagentManager onClose={() => showSubagentManager = false} onUpdate={() => loadSubagents()} />
-	{/if}
 
 	<!-- Knowledge Base Modal -->
 	{#if showKnowledgeModal && $activeTab?.project}
@@ -1261,79 +1278,6 @@
 	{#if showCanvas}
 		<div class="fixed inset-0 z-50 bg-background">
 			<Canvas on:close={() => showCanvas = false} />
-		</div>
-	{/if}
-
-	<!-- Project Modal -->
-	{#if showProjectModal}
-		<div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onclick={() => (showProjectModal = false)}>
-			<!-- svelte-ignore a11y_click_events_have_key_events -->
-			<!-- svelte-ignore a11y_no_static_element_interactions -->
-			<div class="bg-card rounded-xl w-full max-w-lg max-h-[80vh] overflow-y-auto" onclick={(e) => e.stopPropagation()}>
-				<div class="p-4 border-b border-border flex items-center justify-between">
-					<h2 class="text-lg font-semibold text-foreground">Projects</h2>
-					<button
-						class="text-muted-foreground hover:text-foreground"
-						onclick={() => {
-							showProjectModal = false;
-							showNewProjectForm = false;
-						}}
-					>
-						<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-						</svg>
-					</button>
-				</div>
-
-				<div class="p-4">
-					{#if showNewProjectForm}
-						<div class="space-y-4">
-							<div>
-								<label class="block text-xs text-muted-foreground mb-1">ID</label>
-								<input bind:value={newProjectId} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground" placeholder="my-project" />
-							</div>
-							<div>
-								<label class="block text-xs text-muted-foreground mb-1">Name</label>
-								<input bind:value={newProjectName} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground" placeholder="My Project" />
-							</div>
-							<div>
-								<label class="block text-xs text-muted-foreground mb-1">Description</label>
-								<textarea bind:value={newProjectDescription} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-none" rows="2" placeholder="Optional"></textarea>
-							</div>
-							<div class="flex gap-2">
-								<button onclick={() => (showNewProjectForm = false)} class="flex-1 px-4 py-2 bg-muted text-foreground rounded-lg hover:bg-accent">Cancel</button>
-								<button onclick={createProject} class="flex-1 px-4 py-2 bg-primary text-foreground rounded-lg hover:opacity-90">Create</button>
-							</div>
-						</div>
-					{:else}
-						<div class="space-y-2 mb-4">
-							{#each $projects as project}
-								<div class="flex items-center justify-between p-3 bg-accent rounded-lg">
-									<div class="flex-1 min-w-0">
-										<div class="flex items-center gap-2">
-											<p class="text-sm text-foreground font-medium">{project.name}</p>
-											{#if $groups.projects.assignments[project.id]}
-												<span class="text-[10px] px-1.5 py-0.5 bg-primary/10 text-primary rounded">{$groups.projects.assignments[project.id]}</span>
-											{/if}
-										</div>
-										<p class="text-xs text-muted-foreground mt-0.5">/workspace/{project.path}/</p>
-									</div>
-									<div class="flex gap-1">
-										<button onclick={() => deleteProject(project.id)} class="p-1.5 text-muted-foreground hover:text-destructive" title="Delete project">
-											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-											</svg>
-										</button>
-									</div>
-								</div>
-							{/each}
-						</div>
-						<button onclick={() => (showNewProjectForm = true)} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-gray-500">
-							+ New Project
-						</button>
-					{/if}
-				</div>
-			</div>
 		</div>
 	{/if}
 

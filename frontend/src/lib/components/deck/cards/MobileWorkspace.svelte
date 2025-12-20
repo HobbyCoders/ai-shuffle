@@ -10,7 +10,7 @@
 	 * - Empty state with create buttons
 	 */
 
-	import { ChevronLeft, X, MessageSquare, Bot, Palette, Terminal, Plus, Layers } from 'lucide-svelte';
+	import { ChevronLeft, X, MessageSquare, Bot, Palette, Terminal, Plus, Layers, Settings, User, Users, FolderKanban } from 'lucide-svelte';
 	import type { DeckCard, CardType } from './types';
 	import type { Snippet } from 'svelte';
 
@@ -54,6 +54,10 @@
 		agent: Bot,
 		canvas: Palette,
 		terminal: Terminal,
+		settings: Settings,
+		profile: User,
+		subagent: Users,
+		project: FolderKanban,
 	};
 
 	// Card type config for create buttons

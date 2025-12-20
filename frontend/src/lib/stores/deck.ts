@@ -26,7 +26,9 @@ export type DeckCardType =
 	| 'file-browser'
 	| 'settings'
 	| 'profile'
-	| 'terminal';
+	| 'terminal'
+	| 'subagent'
+	| 'project';
 
 export type SnapZone =
 	| 'left'
@@ -318,6 +320,10 @@ function getDefaultTitle(type: DeckCardType): string {
 			return 'Profile';
 		case 'terminal':
 			return 'Terminal';
+		case 'subagent':
+			return 'Subagents';
+		case 'project':
+			return 'Projects';
 		default:
 			return 'Card';
 	}

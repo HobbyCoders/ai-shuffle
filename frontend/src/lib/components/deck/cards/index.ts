@@ -15,3 +15,7 @@ export { default as ChatCard } from './ChatCard.svelte';
 export { default as AgentCard } from './AgentCard.svelte';
 export { default as CanvasCard } from './CanvasCard.svelte';
 export { default as TerminalCard } from './TerminalCard.svelte';
+export { default as ProfileCard } from './ProfileCard.svelte';
+export { default as ProjectCard } from './ProjectCard.svelte';
+export { default as SubagentCard } from './SubagentCard.svelte';
+export { default as SettingsCard } from './SettingsCard.svelte';

@@ -2,7 +2,7 @@
  * Card types for The Deck - Draggable window system
  */
 
-export type CardType = 'chat' | 'agent' | 'canvas' | 'terminal';
+export type CardType = 'chat' | 'agent' | 'canvas' | 'terminal' | 'settings' | 'profile' | 'subagent' | 'project';
 
 export interface DeckCard {
   id: string;
@@ -28,6 +28,10 @@ export const DEFAULT_CARD_SIZES: Record<CardType, { width: number; height: numbe
   agent: { width: 400, height: 500 },
   canvas: { width: 600, height: 500 },
   terminal: { width: 600, height: 400 },
+  settings: { width: 700, height: 650 },
+  profile: { width: 600, height: 620 },
+  subagent: { width: 550, height: 580 },
+  project: { width: 480, height: 520 },
 };
 
 export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }> = {
@@ -35,6 +39,10 @@ export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }>
   agent: { width: 320, height: 300 },
   canvas: { width: 400, height: 300 },
   terminal: { width: 400, height: 200 },
+  settings: { width: 500, height: 400 },
+  profile: { width: 450, height: 400 },
+  subagent: { width: 400, height: 350 },
+  project: { width: 360, height: 300 },
 };
 
 export const SNAP_THRESHOLD = 20;
