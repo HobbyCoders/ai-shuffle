@@ -988,13 +988,13 @@
 {#if open}
 	<!-- Backdrop -->
 	<div
-		class="fixed inset-0 z-50 flex items-center justify-center"
+		class="fixed inset-0 z-[200] flex items-center justify-center"
 		role="dialog"
 		aria-modal="true"
 		aria-labelledby="settings-modal-title"
 	>
 		<button
-			class="absolute inset-0 bg-black/60 backdrop-blur-sm"
+			class="absolute inset-0 bg-black/70 backdrop-blur-md"
 			onclick={onClose}
 			aria-label="Close settings"
 		></button>
@@ -1946,7 +1946,7 @@
 
 	<!-- Create/Edit API User Modal -->
 	{#if showCreateForm}
-		<div class="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
+		<div class="fixed inset-0 bg-black/70 backdrop-blur-md z-[210] flex items-center justify-center p-4">
 			<div class="bg-card border border-border rounded-2xl w-full max-w-lg shadow-2xl animate-modal-in">
 				<div class="p-4 border-b border-border flex items-center justify-between">
 					<h3 class="text-lg font-semibold text-foreground">
@@ -2025,7 +2025,7 @@
 
 	<!-- Cleanup Preview Modal -->
 	{#if showCleanupPreview && cleanupPreview}
-		<div class="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
+		<div class="fixed inset-0 bg-black/70 backdrop-blur-md z-[210] flex items-center justify-center p-4">
 			<div class="bg-card border border-border rounded-2xl w-full max-w-2xl shadow-2xl max-h-[80vh] flex flex-col animate-modal-in">
 				<div class="p-4 border-b border-border flex items-center justify-between shrink-0">
 					<h3 class="text-lg font-semibold text-foreground">Cleanup Preview</h3>
@@ -2140,10 +2140,23 @@
 
 	/* Settings Card */
 	.settings-card {
-		background-color: oklch(from var(--color-muted) l c h / 0.3);
+		background-color: oklch(from var(--color-muted) l c h / 0.4);
 		border-radius: 0.75rem;
 		padding: 1rem;
-		border: 1px solid oklch(from var(--color-border) l c h / 0.5);
+		border: 1px solid oklch(from var(--color-border) l c h / 0.6);
+	}
+
+	/* Dark mode settings card - slightly elevated from modal bg */
+	:global(.dark) .settings-card {
+		background-color: oklch(0.14 0.008 260);
+		border-color: oklch(0.26 0.01 260);
+	}
+
+	/* Light mode settings card - white with subtle border */
+	:global(.light) .settings-card {
+		background-color: oklch(1 0 0);
+		border-color: oklch(0.88 0.008 260);
+		box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
 	}
 
 	.settings-card-title {
@@ -2185,13 +2198,32 @@
 		flex-direction: column;
 		justify-content: space-between;
 	}
+
+	:global(.dark) .model-card {
+		background-color: oklch(0.12 0.008 260);
+		border-color: oklch(0.28 0.01 260);
+	}
+
+	:global(.light) .model-card {
+		background-color: oklch(0.98 0.002 260);
+		border-color: oklch(0.85 0.008 260);
+	}
+
 	.model-card:hover:not(:disabled) {
 		border-color: oklch(from var(--color-primary) l c h / 0.5);
-		background-color: oklch(from var(--color-muted) l c h / 0.5);
 	}
+
+	:global(.dark) .model-card:hover:not(:disabled) {
+		background-color: oklch(0.18 0.01 260);
+	}
+
+	:global(.light) .model-card:hover:not(:disabled) {
+		background-color: oklch(0.95 0.005 260);
+	}
+
 	.model-card.active {
 		border-color: var(--color-primary);
-		background-color: oklch(from var(--color-primary) l c h / 0.1);
+		background-color: oklch(from var(--color-primary) l c h / 0.15);
 	}
 
 	.model-card-sm {
@@ -2203,13 +2235,32 @@
 		align-items: center;
 		justify-content: space-between;
 	}
+
+	:global(.dark) .model-card-sm {
+		background-color: oklch(0.12 0.008 260);
+		border-color: oklch(0.28 0.01 260);
+	}
+
+	:global(.light) .model-card-sm {
+		background-color: oklch(0.98 0.002 260);
+		border-color: oklch(0.85 0.008 260);
+	}
+
 	.model-card-sm:hover:not(:disabled) {
 		border-color: oklch(from var(--color-primary) l c h / 0.5);
-		background-color: oklch(from var(--color-muted) l c h / 0.5);
 	}
+
+	:global(.dark) .model-card-sm:hover:not(:disabled) {
+		background-color: oklch(0.18 0.01 260);
+	}
+
+	:global(.light) .model-card-sm:hover:not(:disabled) {
+		background-color: oklch(0.95 0.005 260);
+	}
+
 	.model-card-sm.active {
 		border-color: var(--color-primary);
-		background-color: oklch(from var(--color-primary) l c h / 0.1);
+		background-color: oklch(from var(--color-primary) l c h / 0.15);
 	}
 
 	/* Toggle Switch */
