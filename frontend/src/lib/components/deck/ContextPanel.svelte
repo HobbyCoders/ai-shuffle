@@ -386,7 +386,8 @@
 		background: var(--secondary);
 		border: 1px solid var(--border);
 		border-radius: 10px;
-		overflow: hidden;
+		overflow: visible;
+		flex-shrink: 0;
 	}
 
 	.section-header {
@@ -443,6 +444,8 @@
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
+		/* Allow section to expand to show all content - no max-height constraint */
+		overflow: visible;
 	}
 
 	.empty-state {

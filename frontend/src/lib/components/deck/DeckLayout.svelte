@@ -253,13 +253,14 @@
 	}
 
 	/* Context panel - positioned inside workspace as an overlay */
+	/* z-index: 10000 ensures it's always above maximized cards which use dynamic z-index values */
 	.context-container {
 		position: absolute;
 		top: 0;
 		right: 0;
 		bottom: 0;
 		width: 320px;
-		z-index: 40;
+		z-index: 10000;
 		transition: transform 0.2s ease, opacity 0.2s ease;
 		pointer-events: auto;
 	}
@@ -306,7 +307,7 @@
 		align-items: center;
 		justify-content: center;
 		transition: all 0.15s ease;
-		z-index: 60;
+		z-index: 10001;
 	}
 
 	.context-expand-toggle:hover {
