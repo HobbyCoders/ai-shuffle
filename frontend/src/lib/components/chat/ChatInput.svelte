@@ -2,7 +2,7 @@
 	/**
 	 * ChatInput - Full input section with file upload, autocomplete, and voice recording
 	 */
-	import { tick } from 'svelte';
+	import { tick, onDestroy } from 'svelte';
 	import { tabs, profiles, type ChatTab } from '$lib/stores/tabs';
 	import { claudeAuthenticated, isAdmin } from '$lib/stores/auth';
 	import { api, type FileUploadResponse } from '$lib/api/client';
@@ -28,22 +28,53 @@
 	// Input state - use tab.draft for persistence across card switches
 	let inputValue = $state(tab.draft || '');
 	let uploadedFiles = $state<FileUploadResponse[]>([]);
+	let previousTabId = $state(tab.id);
+	let draftSaveTimeout: ReturnType<typeof setTimeout> | null = null;
+
+	// Helper to save draft immediately (used on unmount and before tab switch)
+	function saveDraftImmediately(tabId: string, value: string) {
+		if (draftSaveTimeout) {
+			clearTimeout(draftSaveTimeout);
+			draftSaveTimeout = null;
+		}
+		tabs.setTabDraft(tabId, value);
+	}
 
 	// Sync input with tab draft when tab changes
 	$effect(() => {
-		// When tab changes, restore draft from new tab
-		inputValue = tab.draft || '';
+		const currentTabId = tab.id;
+
+		// Detect actual tab change (not just re-render)
+		if (previousTabId !== currentTabId) {
+			// Save draft to old tab before switching
+			saveDraftImmediately(previousTabId, inputValue);
+			// Restore draft from new tab
+			inputValue = tab.draft || '';
+			previousTabId = currentTabId;
+		}
 	});
 
-	// Save draft to tab store when input changes
+	// Save draft to tab store when input changes (debounced)
 	$effect(() => {
+		// Track inputValue for reactivity
+		const currentValue = inputValue;
+		const currentTabId = tab.id;
+
 		// Debounce draft saves to avoid excessive updates
-		const timeoutId = setTimeout(() => {
-			if (inputValue !== tab.draft) {
-				tabs.setTabDraft(tab.id, inputValue);
+		if (draftSaveTimeout) {
+			clearTimeout(draftSaveTimeout);
+		}
+		draftSaveTimeout = setTimeout(() => {
+			if (currentValue !== tab.draft) {
+				tabs.setTabDraft(currentTabId, currentValue);
 			}
+			draftSaveTimeout = null;
 		}, 100);
-		return () => clearTimeout(timeoutId);
+	});
+
+	// Save draft immediately when component unmounts (critical for mode switches)
+	onDestroy(() => {
+		saveDraftImmediately(tab.id, inputValue);
 	});
 	let textareaRef = $state<HTMLTextAreaElement | null>(null);
 	let fileInputRef = $state<HTMLInputElement | null>(null);

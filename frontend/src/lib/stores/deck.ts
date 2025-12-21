@@ -467,11 +467,16 @@ function createDeckStore() {
 					createdAt: new Date()
 				};
 
+				const newCards = [...state.cards, newCard];
 				const newState = {
 					...state,
-					cards: [...state.cards, newCard],
+					cards: newCards,
 					focusedCardId: cardId,
-					nextZIndex: state.nextZIndex + 1
+					nextZIndex: state.nextZIndex + 1,
+					// On mobile, navigate to the newly added card (it's the last visible card)
+					mobileActiveCardIndex: state.isMobile
+						? newCards.filter(c => !c.minimized).length - 1
+						: state.mobileActiveCardIndex
 				};
 
 				saveToStorage(newState);
