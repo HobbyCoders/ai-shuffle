@@ -93,7 +93,7 @@
 				children: [
 					{ id: '2.1', title: 'BaseCard.svelte', status: 'completed' },
 					{ id: '2.2', title: 'AgentCard.svelte', status: 'running' },
-					{ id: '2.3', title: 'CanvasCard.svelte', status: 'pending' },
+					{ id: '2.3', title: 'StudioCard.svelte', status: 'pending' },
 				],
 			},
 			{

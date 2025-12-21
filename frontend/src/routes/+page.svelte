@@ -3,7 +3,7 @@
 	 * Main Page - Deck-based AI Workspace
 	 *
 	 * A card-based desktop workspace combining:
-	 * - DeckLayout with draggable, resizable cards (chat, agent, canvas, terminal)
+	 * - DeckLayout with draggable, resizable cards (chat, agent, studio, terminal)
 	 * - All modals from the original page (settings, profile, analytics, etc.)
 	 * - SpotlightSearch (Cmd+K) for quick navigation
 	 * - Full keyboard shortcut support
@@ -43,7 +43,7 @@
 		Workspace,
 		ChatCard,
 		AgentCard,
-		CanvasCard,
+		StudioCard,
 		TerminalCard,
 		MobileWorkspace,
 		ProfileCard,
@@ -201,7 +201,7 @@
 				return 'agent';
 			case 'studio-image':
 			case 'studio-video':
-				return 'canvas';
+				return 'studio';
 			case 'terminal':
 				return 'terminal';
 			case 'settings':
@@ -619,9 +619,9 @@
 				deckCardType = 'agent-monitor';
 				title = 'Agent Monitor';
 				break;
-			case 'canvas':
+			case 'studio':
 				deckCardType = 'studio-image';
-				title = 'Image Studio';
+				title = 'Studio';
 				break;
 			case 'terminal':
 				deckCardType = 'terminal';
@@ -938,9 +938,9 @@
 							<div class="p-4">
 								<p class="text-muted-foreground">Agent view (mobile)</p>
 							</div>
-						{:else if card.type === 'canvas'}
+						{:else if card.type === 'studio'}
 							<div class="p-4">
-								<p class="text-muted-foreground">Canvas view (mobile)</p>
+								<p class="text-muted-foreground">Studio view (mobile)</p>
 							</div>
 						{:else if card.type === 'terminal'}
 							<div class="terminal-mobile-content">
@@ -1064,10 +1064,9 @@
 											onDragEnd={() => handleCardDragEnd(card.id)}
 											onResizeEnd={() => handleCardResizeEnd(card.id)}
 										/>
-									{:else if card.type === 'canvas'}
-										<CanvasCard
+									{:else if card.type === 'studio'}
+										<StudioCard
 											{card}
-											canvasId={card.data?.dataId as string || card.id}
 											onClose={() => handleCardClose(card.id)}
 											onMinimize={() => handleCardMinimize(card.id)}
 											onMaximize={() => handleCardMaximize(card.id)}

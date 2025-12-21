@@ -62,7 +62,7 @@
 	const cardIcons: Record<CardType, typeof MessageSquare> = {
 		chat: MessageSquare,
 		agent: Bot,
-		canvas: Palette,
+		studio: Palette,
 		terminal: Terminal,
 		settings: Settings,
 		profile: User,
