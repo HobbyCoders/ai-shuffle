@@ -30,6 +30,7 @@
 	let isScrollingProgrammatically = $state(false);
 	let previousTabId = $state<string | null>(null); // Track previous tab to detect actual tab switches
 	let savedScrollPositions = $state<Map<string, number>>(new Map()); // Preserve scroll positions per tab
+	let lastKnownScrollTop = $state(0); // Track scroll position to restore after re-renders
 
 	// Current profile for message settings
 	const currentProfile = $derived($profiles.find(p => p.id === tab.profile));
@@ -58,6 +59,9 @@
 	function handleScroll() {
 		if (!containerRef || isScrollingProgrammatically) return;
 
+		// Save current scroll position to restore after re-renders
+		lastKnownScrollTop = containerRef.scrollTop;
+
 		// Check current position
 		const nearBottom = isNearBottom();
 
@@ -70,6 +74,15 @@
 			shouldAutoScroll = false;
 		}
 	}
+
+	// Restore scroll position after DOM updates (prevents scroll reset on re-renders)
+	$effect(() => {
+		// This effect runs after every render - restore scroll if it was reset
+		if (containerRef && lastKnownScrollTop > 0 && containerRef.scrollTop === 0 && !isScrollingProgrammatically) {
+			// Scroll was reset to 0, restore it
+			containerRef.scrollTop = lastKnownScrollTop;
+		}
+	});
 
 	// Track previous values to detect actual content changes (not just re-renders)
 	let prevMessagesLength = $state(0);

@@ -25,9 +25,26 @@
 
 	let { tab, compact = false, onOpenTerminalModal }: Props = $props();
 
-	// Input state
-	let inputValue = $state('');
+	// Input state - use tab.draft for persistence across card switches
+	let inputValue = $state(tab.draft || '');
 	let uploadedFiles = $state<FileUploadResponse[]>([]);
+
+	// Sync input with tab draft when tab changes
+	$effect(() => {
+		// When tab changes, restore draft from new tab
+		inputValue = tab.draft || '';
+	});
+
+	// Save draft to tab store when input changes
+	$effect(() => {
+		// Debounce draft saves to avoid excessive updates
+		const timeoutId = setTimeout(() => {
+			if (inputValue !== tab.draft) {
+				tabs.setTabDraft(tab.id, inputValue);
+			}
+		}, 100);
+		return () => clearTimeout(timeoutId);
+	});
 	let textareaRef = $state<HTMLTextAreaElement | null>(null);
 	let fileInputRef = $state<HTMLInputElement | null>(null);
 	let isUploading = $state(false);

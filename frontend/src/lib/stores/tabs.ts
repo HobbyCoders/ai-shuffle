@@ -105,6 +105,8 @@ export interface ChatTab {
 	pendingQuestions: UserQuestionRequest[];
 	// Todo list for task tracking
 	todos: TodoItem[];
+	// Draft input text (preserved when switching cards)
+	draft: string;
 }
 
 interface TabsState {
@@ -2542,7 +2544,8 @@ function createTabsStore() {
 						permissionModeOverride: pt.permissionModeOverride ?? null,
 						pendingPermissions: [],
 						pendingQuestions: [],
-						todos: []
+						todos: [],
+						draft: ''
 					}));
 
 					update(s => ({
@@ -2612,7 +2615,8 @@ function createTabsStore() {
 				permissionModeOverride: null,
 				pendingPermissions: [],
 				pendingQuestions: [],
-				todos: []
+				todos: [],
+				draft: ''
 			};
 
 			update(s => ({
@@ -2970,6 +2974,14 @@ function createTabsStore() {
 		},
 
 		/**
+		 * Set draft input text for a tab (preserved when switching cards)
+		 */
+		setTabDraft(tabId: string, draft: string) {
+			updateTab(tabId, { draft });
+			// Don't save to server - drafts are ephemeral
+		},
+
+		/**
 		 * Update a tab's state (exposed for direct updates like todos)
 		 */
 		updateTab(tabId: string, updates: Partial<ChatTab>) {
@@ -3012,7 +3024,8 @@ function createTabsStore() {
 				permissionModeOverride: null,
 				pendingPermissions: [],
 				pendingQuestions: [],
-				todos: []
+				todos: [],
+				draft: ''
 			});
 			connectTab(tabId);
 			// Save tabs state (debounced)
