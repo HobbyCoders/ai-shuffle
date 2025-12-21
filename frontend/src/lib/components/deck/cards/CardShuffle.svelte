@@ -26,10 +26,9 @@
 	interface Props {
 		currentMode: LayoutMode;
 		onModeChange: (mode: LayoutMode) => void;
-		disabled?: boolean;
 	}
 
-	let { currentMode, onModeChange, disabled = false }: Props = $props();
+	let { currentMode, onModeChange }: Props = $props();
 
 	// Visibility state - trigger shows when mouse is near top of workspace
 	let isVisible = $state(false);
@@ -77,7 +76,6 @@
 
 	// Handle mouse entering the trigger zone (near top of workspace)
 	function handleTriggerZoneEnter() {
-		if (disabled) return;
 		if (visibilityTimeout) clearTimeout(visibilityTimeout);
 		isVisible = true;
 	}
@@ -94,7 +92,6 @@
 	}
 
 	function handleMouseEnter() {
-		if (disabled) return;
 		if (hoverTimeout) clearTimeout(hoverTimeout);
 		if (visibilityTimeout) clearTimeout(visibilityTimeout);
 		isHovered = true;
@@ -139,7 +136,6 @@
 
 <div
 	class="card-shuffle-container"
-	class:disabled
 	role="group"
 	aria-label="Card layout mode selector"
 >
@@ -216,11 +212,6 @@
 		left: 50%;
 		transform: translateX(-50%);
 		z-index: 10001; /* Above cards and context panel */
-		pointer-events: none;
-	}
-
-	.card-shuffle-container.disabled {
-		opacity: 0.5;
 		pointer-events: none;
 	}
 

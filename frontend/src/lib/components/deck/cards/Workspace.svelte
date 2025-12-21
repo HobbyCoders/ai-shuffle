@@ -446,7 +446,6 @@
 		<CardShuffle
 			currentMode={layoutMode}
 			onModeChange={handleLayoutModeChange}
-			disabled={hasMaximizedCard}
 		/>
 	{/if}
 
