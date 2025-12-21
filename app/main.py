@@ -22,6 +22,7 @@ from app.core.auth import auth_service
 from app.core.query_engine import cleanup_stale_sessions
 from app.core.sync_engine import sync_engine
 from app.core.cleanup_manager import cleanup_manager
+from app.core import encryption
 
 # Import API routers
 from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, knowledge, rate_limits, github, git, canvas, agents, studio
@@ -136,12 +137,18 @@ async def lifespan(app: FastAPI):
     # Run database migrations
     run_migrations()
 
-    # Clear all sessions on startup - forces re-login to restore encryption key
-    # This is required because the encryption key (derived from admin password)
-    # is only kept in memory and lost on restart
-    admin_cleared, api_cleared = database.clear_all_sessions()
-    if admin_cleared or api_cleared:
-        logger.info(f"Cleared {admin_cleared} admin and {api_cleared} API user sessions (re-login required)")
+    # Try to initialize encryption from ADMIN_PASSWORD env var
+    # This enables headless operation without requiring admin login
+    if encryption.init_encryption_from_env(database):
+        logger.info("Encryption initialized from ADMIN_PASSWORD environment variable")
+    else:
+        # Clear all sessions on startup - forces re-login to restore encryption key
+        # This is required because the encryption key (derived from admin password)
+        # is only kept in memory and lost on restart
+        admin_cleared, api_cleared = database.clear_all_sessions()
+        if admin_cleared or api_cleared:
+            logger.info(f"Cleared {admin_cleared} admin and {api_cleared} API user sessions (re-login required)")
+        logger.info("Set ADMIN_PASSWORD env var for automatic encryption key loading")
 
     # Load user-configured workspace path from database (for local mode)
     load_workspace_from_database()
