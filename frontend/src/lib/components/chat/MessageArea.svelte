@@ -28,9 +28,7 @@
 	let containerRef = $state<HTMLDivElement | null>(null);
 	let shouldAutoScroll = $state(true); // Start with auto-scroll enabled
 	let isScrollingProgrammatically = $state(false);
-	let previousTabId = $state<string | null>(null); // Track previous tab to detect actual tab switches
-	let savedScrollPositions = $state<Map<string, number>>(new Map()); // Preserve scroll positions per tab
-	let lastKnownScrollTop = $state(0); // Track scroll position to restore after re-renders
+	let hasInitialized = $state(false); // Track if we've done initial scroll setup
 
 	// Current profile for message settings
 	const currentProfile = $derived($profiles.find(p => p.id === tab.profile));
@@ -59,8 +57,8 @@
 	function handleScroll() {
 		if (!containerRef || isScrollingProgrammatically) return;
 
-		// Save current scroll position to restore after re-renders
-		lastKnownScrollTop = containerRef.scrollTop;
+		// Save scroll position to tab store (persists across card switches)
+		tabs.setTabScrollTop(tab.id, containerRef.scrollTop);
 
 		// Check current position
 		const nearBottom = isNearBottom();
@@ -75,12 +73,23 @@
 		}
 	}
 
-	// Restore scroll position after DOM updates (prevents scroll reset on re-renders)
+	// Restore scroll position on mount from tab store
 	$effect(() => {
-		// This effect runs after every render - restore scroll if it was reset
-		if (containerRef && lastKnownScrollTop > 0 && containerRef.scrollTop === 0 && !isScrollingProgrammatically) {
-			// Scroll was reset to 0, restore it
-			containerRef.scrollTop = lastKnownScrollTop;
+		if (containerRef && !hasInitialized) {
+			hasInitialized = true;
+
+			// Restore saved scroll position from tab store
+			if (tab.scrollTop > 0) {
+				isScrollingProgrammatically = true;
+				containerRef.scrollTop = tab.scrollTop;
+				shouldAutoScroll = isNearBottom();
+				requestAnimationFrame(() => {
+					isScrollingProgrammatically = false;
+				});
+			} else if (tab.messages.length > 0) {
+				// New tab with messages but no saved position - scroll to bottom
+				scrollToBottom();
+			}
 		}
 	});
 
@@ -111,51 +120,6 @@
 		// Update previous values
 		prevMessagesLength = currentLength;
 		prevLastContent = currentContent;
-	});
-
-	// Scroll on tab change - only scroll to bottom on ACTUAL tab switches, not remounts
-	$effect(() => {
-		const currentTabId = tab.id;
-
-		// Check if this is an actual tab switch (different tab) vs a remount of the same tab
-		if (previousTabId !== null && previousTabId !== currentTabId) {
-			// Actual tab switch: save old position, restore new position or scroll to bottom
-			if (containerRef && previousTabId) {
-				savedScrollPositions.set(previousTabId, containerRef.scrollTop);
-			}
-
-			const savedPosition = savedScrollPositions.get(currentTabId);
-			if (savedPosition !== undefined && containerRef) {
-				// Restore saved scroll position for this tab
-				tick().then(() => {
-					if (containerRef) {
-						isScrollingProgrammatically = true;
-						containerRef.scrollTop = savedPosition;
-						// Check if we're near bottom to set auto-scroll appropriately
-						shouldAutoScroll = isNearBottom();
-						requestAnimationFrame(() => {
-							isScrollingProgrammatically = false;
-						});
-					}
-				});
-			} else {
-				// New tab or no saved position: scroll to bottom
-				shouldAutoScroll = true;
-				tick().then(scrollToBottom);
-			}
-		} else if (previousTabId === null) {
-			// Initial mount: scroll to bottom for new conversations, but don't force it
-			// This prevents scroll reset on component remount during card transforms
-			tick().then(() => {
-				if (containerRef && containerRef.scrollTop === 0 && tab.messages.length > 0) {
-					// Only scroll to bottom if we're at the top with messages (likely initial load)
-					scrollToBottom();
-				}
-			});
-		}
-		// If same tab remounting (previousTabId === currentTabId), don't change scroll position
-
-		previousTabId = currentTabId;
 	});
 </script>
 

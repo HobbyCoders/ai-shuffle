@@ -107,6 +107,8 @@ export interface ChatTab {
 	todos: TodoItem[];
 	// Draft input text (preserved when switching cards)
 	draft: string;
+	// Scroll position (preserved when switching cards)
+	scrollTop: number;
 }
 
 interface TabsState {
@@ -2545,7 +2547,8 @@ function createTabsStore() {
 						pendingPermissions: [],
 						pendingQuestions: [],
 						todos: [],
-						draft: ''
+						draft: '',
+						scrollTop: 0
 					}));
 
 					update(s => ({
@@ -2616,7 +2619,8 @@ function createTabsStore() {
 				pendingPermissions: [],
 				pendingQuestions: [],
 				todos: [],
-				draft: ''
+				draft: '',
+				scrollTop: 0
 			};
 
 			update(s => ({
@@ -2982,6 +2986,14 @@ function createTabsStore() {
 		},
 
 		/**
+		 * Set scroll position for a tab (preserved when switching cards)
+		 */
+		setTabScrollTop(tabId: string, scrollTop: number) {
+			updateTab(tabId, { scrollTop });
+			// Don't save to server - scroll position is ephemeral
+		},
+
+		/**
 		 * Update a tab's state (exposed for direct updates like todos)
 		 */
 		updateTab(tabId: string, updates: Partial<ChatTab>) {
@@ -3025,7 +3037,8 @@ function createTabsStore() {
 				pendingPermissions: [],
 				pendingQuestions: [],
 				todos: [],
-				draft: ''
+				draft: '',
+				scrollTop: 0
 			});
 			connectTab(tabId);
 			// Save tabs state (debounced)
