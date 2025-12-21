@@ -266,8 +266,8 @@
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 				</svg>
 			</button>
-			<!-- Profile dropdown -->
-			<div class="absolute left-0 top-full mt-1 w-56 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 max-h-80 overflow-y-auto">
+			<!-- Profile dropdown - stays visible when context menu is open -->
+			<div class="absolute left-0 top-full mt-1 w-56 bg-card border border-border rounded-lg shadow-lg transition-all z-50 max-h-80 overflow-y-auto {profileContextMenu.show ? 'opacity-100 visible' : 'opacity-0 invisible group-hover:opacity-100 group-hover:visible'}">
 				<div class="py-1">
 					{#if $profiles.length === 0}
 						<p class="px-3 py-2 text-sm text-muted-foreground">No profiles yet</p>
@@ -363,9 +363,9 @@
 					</svg>
 				{/if}
 			</button>
-			<!-- Project dropdown (only show when no session) -->
+			<!-- Project dropdown (only show when no session) - stays visible when context menu is open -->
 			{#if !tab.sessionId}
-				<div class="absolute left-0 top-full mt-1 w-56 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 max-h-80 overflow-y-auto">
+				<div class="absolute left-0 top-full mt-1 w-56 bg-card border border-border rounded-lg shadow-lg transition-all z-50 max-h-80 overflow-y-auto {projectContextMenu.show ? 'opacity-100 visible' : 'opacity-0 invisible group-hover:opacity-100 group-hover:visible'}">
 					<div class="py-1">
 						{#if $projects.length === 0}
 							<p class="px-3 py-2 text-sm text-muted-foreground">No projects yet</p>
