@@ -29,6 +29,7 @@
 	let shouldAutoScroll = $state(true); // Start with auto-scroll enabled
 	let isScrollingProgrammatically = $state(false);
 	let hasInitialized = $state(false); // Track if we've done initial scroll setup
+	let currentTabId = $state(tab.id); // Track which tab we're initialized for
 
 	// Current profile for message settings
 	const currentProfile = $derived($profiles.find(p => p.id === tab.profile));
@@ -73,9 +74,23 @@
 		}
 	}
 
-	// Restore scroll position on mount from tab store
+	// Detect tab changes and reset initialization state
 	$effect(() => {
-		if (containerRef && !hasInitialized) {
+		if (tab.id !== currentTabId) {
+			// Tab changed - save scroll position of OLD tab before switching
+			if (containerRef && currentTabId) {
+				tabs.setTabScrollTop(currentTabId, containerRef.scrollTop);
+			}
+			// Reset initialization for new tab
+			currentTabId = tab.id;
+			hasInitialized = false;
+			shouldAutoScroll = true; // Reset auto-scroll state for new tab
+		}
+	});
+
+	// Restore scroll position on mount or tab change
+	$effect(() => {
+		if (containerRef && !hasInitialized && tab.id === currentTabId) {
 			hasInitialized = true;
 
 			// Restore saved scroll position from tab store
