@@ -19,3 +19,4 @@ export { default as ProfileCard } from './ProfileCard.svelte';
 export { default as ProjectCard } from './ProjectCard.svelte';
 export { default as SubagentCard } from './SubagentCard.svelte';
 export { default as SettingsCard } from './SettingsCard.svelte';
+export { default as CardShuffle } from './CardShuffle.svelte';

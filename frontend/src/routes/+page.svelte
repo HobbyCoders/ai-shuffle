@@ -27,9 +27,10 @@
 		minimizedCards as minimizedCardsStore,
 		focusedCardId,
 		mobileActiveCardIndex,
-		gridSnapEnabled
+		gridSnapEnabled,
+		layoutMode
 	} from '$lib/stores/deck';
-	import type { DeckCard, DeckCardType } from '$lib/stores/deck';
+	import type { DeckCard, DeckCardType, LayoutMode } from '$lib/stores/deck';
 	import { groups } from '$lib/stores/groups';
 	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
 	import { getTags, type Tag } from '$lib/api/client';
@@ -49,7 +50,8 @@
 		ProfileCard,
 		ProjectCard,
 		SubagentCard,
-		SettingsCard
+		SettingsCard,
+		CardShuffle
 	} from '$lib/components/deck/cards';
 	import type { CardType, DeckCard as CardsDeckCard } from '$lib/components/deck/cards/types';
 
@@ -789,6 +791,13 @@
 	}
 
 	// ============================================
+	// Layout Mode Handler
+	// ============================================
+	function handleLayoutModeChange(mode: LayoutMode) {
+		deck.setLayoutMode(mode);
+	}
+
+	// ============================================
 	// Profile/Project Card Handlers (from ChatHeader context menu)
 	// ============================================
 	function handleOpenProfileCard(editId?: string) {
@@ -1061,6 +1070,8 @@
 					onCreateCard={handleCreateCard}
 					gridSnapEnabled={$gridSnapEnabled}
 					cardSnapEnabled={true}
+					layoutMode={$layoutMode}
+					onLayoutModeChange={handleLayoutModeChange}
 				>
 					{#snippet children()}
 						{#each workspaceCards.sort((a, b) => a.zIndex - b.zIndex) as card (card.id)}

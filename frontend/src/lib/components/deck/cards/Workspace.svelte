@@ -8,6 +8,7 @@
 	 * - Empty state with welcome message and create buttons
 	 * - Right-click context menu with create options
 	 * - Tracks workspace bounds
+	 * - Card Shuffle UI for layout mode switching
 	 */
 
 	import { onMount } from 'svelte';
@@ -15,6 +16,8 @@
 	import type { DeckCard, CardType, SnapGuide, SnapResult } from './types';
 	import { SNAP_THRESHOLD, CARD_SNAP_THRESHOLD, SNAP_GRID, WORKSPACE_PADDING } from './types';
 	import type { Snippet } from 'svelte';
+	import type { LayoutMode } from '$lib/stores/deck';
+	import CardShuffle from './CardShuffle.svelte';
 
 	interface Props {
 		cards: DeckCard[];
@@ -25,6 +28,8 @@
 		onCreateCard: (type: CardType) => void;
 		gridSnapEnabled?: boolean;
 		cardSnapEnabled?: boolean;
+		layoutMode?: LayoutMode;
+		onLayoutModeChange?: (mode: LayoutMode) => void;
 		children?: Snippet;
 	}
 
@@ -37,8 +42,15 @@
 		onCreateCard,
 		gridSnapEnabled = false,
 		cardSnapEnabled = true,
+		layoutMode = 'freeflow',
+		onLayoutModeChange,
 		children
 	}: Props = $props();
+
+	// Handle layout mode change
+	function handleLayoutModeChange(mode: LayoutMode) {
+		onLayoutModeChange?.(mode);
+	}
 
 	let workspaceEl: HTMLDivElement | undefined = $state();
 	let workspaceBounds = $state({ width: 0, height: 0 });
@@ -429,6 +441,15 @@
 	oncontextmenu={handleContextMenu}
 	onclick={handleClick}
 >
+	<!-- Card Shuffle UI - Layout mode selector -->
+	{#if sortedCards.length > 0}
+		<CardShuffle
+			currentMode={layoutMode}
+			onModeChange={handleLayoutModeChange}
+			disabled={hasMaximizedCard}
+		/>
+	{/if}
+
 	<!-- Snap Preview Guide -->
 	{#if snapPreview.show}
 		<div
