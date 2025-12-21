@@ -128,6 +128,16 @@
 		onClose();
 	}
 
+	function handleDeleteGroup(groupName: string) {
+		const confirmDelete = confirm(
+			`Delete group "${groupName}"?\n\nThis will remove the group and unassign all ${itemType}s from it. The ${itemType}s themselves will not be deleted.`
+		);
+		if (confirmDelete) {
+			groups.deleteGroup(entityType, groupName);
+		}
+		onClose();
+	}
+
 	// Close on click outside
 	function handleBackdropClick(e: MouseEvent) {
 		if (e.target === e.currentTarget) {
@@ -281,6 +291,34 @@
 						<span class="item-label">Remove from "{currentGroup}"</span>
 					</button>
 				{/if}
+
+				{#if availableGroups.length > 0}
+					<!-- Submenu for deleting groups -->
+					<div class="submenu-container">
+						<button class="menu-item has-submenu danger-subtle">
+							<svg class="item-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+							</svg>
+							<span class="item-label">Delete group</span>
+							<svg class="item-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+							</svg>
+						</button>
+						<div class="submenu">
+							{#each availableGroups as group}
+								<button
+									class="menu-item danger"
+									onclick={() => handleDeleteGroup(group.name)}
+								>
+									<svg class="item-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+									</svg>
+									<span class="item-label">{group.name}</span>
+								</button>
+							{/each}
+						</div>
+					</div>
+				{/if}
 			</div>
 
 			{#if !isBuiltin}
@@ -433,6 +471,19 @@
 
 	.menu-item.danger:hover {
 		background: hsl(var(--destructive) / 0.1);
+	}
+
+	.menu-item.danger-subtle {
+		color: hsl(var(--muted-foreground));
+	}
+
+	.menu-item.danger-subtle:hover {
+		color: hsl(var(--destructive));
+		background: hsl(var(--destructive) / 0.1);
+	}
+
+	.menu-item.danger-subtle:hover .item-icon {
+		color: hsl(var(--destructive));
 	}
 
 	.item-icon {
