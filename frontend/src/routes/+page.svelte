@@ -1074,7 +1074,9 @@
 					onLayoutModeChange={handleLayoutModeChange}
 				>
 					{#snippet children()}
-						{#each workspaceCards.sort((a, b) => a.zIndex - b.zIndex) as card (card.id)}
+						<!-- Don't sort cards - z-index CSS handles visual stacking order -->
+						<!-- Sorting would cause DOM reordering which resets scroll positions -->
+						{#each workspaceCards as card (card.id)}
 							{@const tabId = getTabIdForCard(card)}
 							{#if !card.minimized}
 								<div

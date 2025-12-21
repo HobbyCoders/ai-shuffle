@@ -274,7 +274,8 @@
 				style:transform="translateX({swipeOffset}px)"
 			>
 				{#if activeCard && children}
-					{#key activeCard.id}
+					<!-- Use optional chaining to prevent undefined.id error during card removal -->
+					{#key activeCard?.id ?? 'none'}
 						{@render children(activeCard)}
 					{/key}
 				{/if}

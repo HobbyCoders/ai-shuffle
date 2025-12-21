@@ -7,8 +7,13 @@
 	 * - Pauses when user scrolls up to read older messages
 	 * - Resumes when user manually scrolls back to the bottom
 	 * - Does NOT force scroll when user is reading older messages, even on new messages
+	 *
+	 * Scroll persistence:
+	 * - Uses a non-reactive Map to avoid triggering effects when storing scroll position
+	 * - Scroll position is restored on component mount (not on every tab prop change)
+	 * - This prevents scroll jumping when switching between cards
 	 */
-	import { tick, onDestroy } from 'svelte';
+	import { tick, onMount, onDestroy } from 'svelte';
 	import { tabs, profiles, type ChatTab, type ChatMessage } from '$lib/stores/tabs';
 	import UserMessage from './UserMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
@@ -17,6 +22,10 @@
 	import SystemMessage from '$lib/components/SystemMessage.svelte';
 	import SubagentMessage from '$lib/components/SubagentMessage.svelte';
 	import TodoList from '$lib/components/TodoList.svelte';
+
+	// Non-reactive scroll position cache to avoid triggering effects
+	// This is module-level so it persists across component instances
+	const scrollPositionCache = new Map<string, number>();
 
 	interface Props {
 		tab: ChatTab;
@@ -28,8 +37,7 @@
 	let containerRef = $state<HTMLDivElement | null>(null);
 	let shouldAutoScroll = $state(true); // Start with auto-scroll enabled
 	let isScrollingProgrammatically = $state(false);
-	let hasInitialized = $state(false); // Track if we've done initial scroll setup
-	let currentTabId = $state(tab.id); // Track which tab we're initialized for
+	let isMounted = $state(false);
 
 	// Current profile for message settings
 	const currentProfile = $derived($profiles.find(p => p.id === tab.profile));
@@ -58,7 +66,9 @@
 	function handleScroll() {
 		if (!containerRef || isScrollingProgrammatically) return;
 
-		// Save scroll position to tab store (persists across card switches)
+		// Save scroll position to non-reactive cache (doesn't trigger effects)
+		scrollPositionCache.set(tab.id, containerRef.scrollTop);
+		// Also save to tab store for cross-session persistence
 		tabs.setTabScrollTop(tab.id, containerRef.scrollTop);
 
 		// Check current position
@@ -74,29 +84,21 @@
 		}
 	}
 
-	// Detect tab changes and reset initialization state
-	$effect(() => {
-		if (tab.id !== currentTabId) {
-			// Tab changed - save scroll position of OLD tab before switching
-			if (containerRef && currentTabId) {
-				tabs.setTabScrollTop(currentTabId, containerRef.scrollTop);
-			}
-			// Reset initialization for new tab
-			currentTabId = tab.id;
-			hasInitialized = false;
-			shouldAutoScroll = true; // Reset auto-scroll state for new tab
-		}
-	});
+	// Restore scroll position only on mount - not on every reactive update
+	onMount(() => {
+		isMounted = true;
+		// Wait for DOM to be ready
+		requestAnimationFrame(() => {
+			if (!containerRef) return;
 
-	// Restore scroll position on mount or tab change
-	$effect(() => {
-		if (containerRef && !hasInitialized && tab.id === currentTabId) {
-			hasInitialized = true;
+			// Check non-reactive cache first (fastest, for switching between cards)
+			const cachedPosition = scrollPositionCache.get(tab.id);
+			// Fall back to tab store (for page reload persistence)
+			const storedPosition = cachedPosition ?? tab.scrollTop;
 
-			// Restore saved scroll position from tab store
-			if (tab.scrollTop > 0) {
+			if (storedPosition > 0) {
 				isScrollingProgrammatically = true;
-				containerRef.scrollTop = tab.scrollTop;
+				containerRef.scrollTop = storedPosition;
 				shouldAutoScroll = isNearBottom();
 				requestAnimationFrame(() => {
 					isScrollingProgrammatically = false;
@@ -105,13 +107,14 @@
 				// New tab with messages but no saved position - scroll to bottom
 				scrollToBottom();
 			}
-		}
+		});
 	});
 
-	// Save scroll position when component is destroyed (critical for mobile card switching)
+	// Save scroll position when component is destroyed (critical for card switching)
 	onDestroy(() => {
-		if (containerRef && currentTabId) {
-			tabs.setTabScrollTop(currentTabId, containerRef.scrollTop);
+		if (containerRef) {
+			scrollPositionCache.set(tab.id, containerRef.scrollTop);
+			tabs.setTabScrollTop(tab.id, containerRef.scrollTop);
 		}
 	});
 
@@ -127,6 +130,9 @@
 
 	// Watch for message changes and streaming content updates
 	$effect(() => {
+		// Only run after mount and when there's actual content change
+		if (!isMounted) return;
+
 		// Get current values
 		const currentLength = tab.messages.length;
 		const currentContent = lastMessageContent();
