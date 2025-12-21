@@ -2,6 +2,7 @@
 	import {
 		Image as ImageIcon,
 		Film,
+		Volume2,
 		RefreshCw,
 		Trash2,
 		Clock,
@@ -175,6 +176,10 @@
 							<div class="w-full h-full bg-muted flex items-center justify-center">
 								{#if generation.type === 'image'}
 									<ImageIcon class="w-6 h-6 text-muted-foreground" />
+								{:else if generation.type === 'video'}
+									<Film class="w-6 h-6 text-muted-foreground" />
+								{:else if generation.type === 'audio'}
+									<Volume2 class="w-6 h-6 text-muted-foreground" />
 								{:else}
 									<Film class="w-6 h-6 text-muted-foreground" />
 								{/if}
@@ -185,6 +190,10 @@
 						<div class="absolute top-1.5 left-1.5 flex items-center gap-1 px-1.5 py-0.5 rounded bg-black/60 text-white text-[10px]">
 							{#if generation.type === 'image'}
 								<ImageIcon class="w-2.5 h-2.5" />
+							{:else if generation.type === 'video'}
+								<Film class="w-2.5 h-2.5" />
+							{:else if generation.type === 'audio'}
+								<Volume2 class="w-2.5 h-2.5" />
 							{:else}
 								<Film class="w-2.5 h-2.5" />
 							{/if}

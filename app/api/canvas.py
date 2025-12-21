@@ -193,9 +193,9 @@ STT_PROVIDERS = {
 # ============================================================================
 
 class CanvasItem(BaseModel):
-    """A canvas media item (image or video)"""
+    """A canvas media item (image, video, or audio)"""
     id: str
-    type: str  # "image" or "video"
+    type: str  # "image", "video", or "audio"
     prompt: str
     provider: str
     model: Optional[str] = None
@@ -447,6 +447,10 @@ def get_file_url(file_path: str, item_type: str) -> str:
     file_name = Path(file_path).name
     if item_type == "image":
         return f"/api/v1/canvas/files/images/{file_name}"
+    elif item_type == "video":
+        return f"/api/v1/canvas/files/videos/{file_name}"
+    elif item_type == "audio":
+        return f"/api/v1/canvas/files/audio/{file_name}"
     else:
         return f"/api/v1/canvas/files/videos/{file_name}"
 
@@ -680,16 +684,16 @@ async def list_canvas_items(
     List all Canvas-generated media items.
 
     Items are sorted by created_at descending (newest first).
-    Optionally filter by type (image or video).
+    Optionally filter by type (image, video, or audio).
     """
     items = load_canvas_items()
 
     # Filter by type if specified
     if type:
-        if type not in ("image", "video"):
+        if type not in ("image", "video", "audio"):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid type. Must be 'image' or 'video'."
+                detail="Invalid type. Must be 'image', 'video', or 'audio'."
             )
         items = [item for item in items if item.get("type") == type]
 
@@ -1308,10 +1312,27 @@ console.log(JSON.stringify(result));
     mime_type = mime_types.get(ext, "audio/mpeg")
 
     now = datetime.utcnow().isoformat() + "Z"
-    item_id = str(uuid.uuid4())
+
+    # Save to canvas_items.json as audio type
+    item = create_canvas_item(
+        item_type="audio",
+        prompt=request.text,
+        provider=request.provider,
+        model=model,
+        file_path=str(file_path),
+        metadata={
+            "voice": request.voice,
+            "speed": request.speed,
+            "output_format": request.output_format,
+            "voice_instructions": request.voice_instructions,
+            "mime_type": mime_type,
+            "text_length": len(request.text),
+            "generation_result": result
+        }
+    )
 
     return TTSGenerateResponse(
-        id=item_id,
+        id=item["id"],
         url=f"/api/v1/canvas/files/audio/{filename}",
         file_path=str(file_path),
         filename=filename,

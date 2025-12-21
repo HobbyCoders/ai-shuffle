@@ -40,7 +40,7 @@ import {
 
 export type { ImageProvider, VideoProvider, TTSProvider, STTProvider };
 
-export type GenerationType = 'image' | 'video' | 'tts' | 'stt';
+export type GenerationType = 'image' | 'video' | 'audio' | 'tts' | 'stt';
 export type GenerationStatus = 'pending' | 'generating' | 'completed' | 'failed';
 
 export interface GenerationSettings {
@@ -153,6 +153,9 @@ const MAX_RECENT_GENERATIONS = 50;
 // Persistence Helpers
 // ============================================================================
 
+/**
+ * Settings persisted to localStorage (user preferences only, not generation data)
+ */
 interface PersistedStudioState {
 	imageProvider: ImageProvider;
 	imageModel: string;
@@ -169,11 +172,28 @@ interface PersistedStudioState {
 	defaultTTSSpeed: number;
 	defaultTTSFormat: string;
 	activeTab: 'image' | 'video' | 'tts' | 'stt';
-	recentGenerations: Array<Omit<DeckGeneration, 'startedAt' | 'completedAt'> & {
-		startedAt: string;
-		completedAt?: string;
-	}>;
-	savedAssets: Array<Omit<Asset, 'createdAt'> & { createdAt: string }>;
+}
+
+/**
+ * Canvas item from the backend API
+ */
+interface CanvasItem {
+	id: string;
+	type: 'image' | 'video' | 'audio';
+	prompt: string;
+	provider: string;
+	model?: string;
+	file_path: string;
+	file_name: string;
+	url?: string;
+	file_size?: number;
+	aspect_ratio?: string;
+	resolution?: string;
+	duration?: number;
+	parent_id?: string;
+	metadata?: Record<string, unknown>;
+	created_at: string;
+	updated_at: string;
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -208,6 +228,9 @@ function isValidAsset(a: unknown): boolean {
 	);
 }
 
+/**
+ * Load user preferences from localStorage (settings only, not generation data)
+ */
 function loadFromStorage(): Partial<StudioState> | null {
 	if (typeof window === 'undefined') return null;
 
@@ -215,27 +238,6 @@ function loadFromStorage(): Partial<StudioState> | null {
 		const stored = localStorage.getItem(STORAGE_KEY);
 		if (stored) {
 			const parsed: PersistedStudioState = JSON.parse(stored);
-
-			// Filter out invalid generations and assets
-			const validGenerations = (parsed.recentGenerations || [])
-				.filter(isValidGeneration)
-				.map((g) => ({
-					...g,
-					startedAt: new Date(g.startedAt),
-					completedAt: g.completedAt ? new Date(g.completedAt) : undefined
-				}));
-
-			const validAssets = (parsed.savedAssets || [])
-				.filter(isValidAsset)
-				.map((a) => ({
-					...a,
-					createdAt: new Date(a.createdAt)
-				}));
-
-			// Log if we filtered anything
-			if (validGenerations.length !== (parsed.recentGenerations?.length || 0)) {
-				console.warn('[Studio] Filtered out', (parsed.recentGenerations?.length || 0) - validGenerations.length, 'invalid generations');
-			}
 
 			// Migrate deprecated model IDs
 			let imageModel = parsed.imageModel || 'gemini-2.5-flash-image';
@@ -259,9 +261,8 @@ function loadFromStorage(): Partial<StudioState> | null {
 				defaultVideoDuration: parsed.defaultVideoDuration,
 				defaultTTSSpeed: parsed.defaultTTSSpeed || 1.0,
 				defaultTTSFormat: parsed.defaultTTSFormat || 'mp3',
-				activeTab: parsed.activeTab || 'image',
-				recentGenerations: validGenerations,
-				savedAssets: validAssets
+				activeTab: parsed.activeTab || 'image'
+				// Note: recentGenerations and savedAssets are now loaded from Canvas API
 			};
 		}
 	} catch (e) {
@@ -270,6 +271,10 @@ function loadFromStorage(): Partial<StudioState> | null {
 	return null;
 }
 
+/**
+ * Save user preferences to localStorage (settings only, not generation data)
+ * Generation data is stored in /workspace/canvas/ via the backend API
+ */
 function saveToStorage(state: StudioState) {
 	if (typeof window === 'undefined') return;
 
@@ -294,16 +299,8 @@ function saveToStorage(state: StudioState) {
 				defaultVideoDuration: state.defaultVideoDuration,
 				defaultTTSSpeed: state.defaultTTSSpeed,
 				defaultTTSFormat: state.defaultTTSFormat,
-				activeTab: state.activeTab,
-				recentGenerations: state.recentGenerations.map((g) => ({
-					...g,
-					startedAt: g.startedAt.toISOString(),
-					completedAt: g.completedAt?.toISOString()
-				})),
-				savedAssets: state.savedAssets.map((a) => ({
-					...a,
-					createdAt: a.createdAt.toISOString()
-				}))
+				activeTab: state.activeTab
+				// Note: recentGenerations and savedAssets are stored in /workspace/canvas/ via backend
 			};
 			localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
 		} catch (e) {
@@ -311,6 +308,51 @@ function saveToStorage(state: StudioState) {
 		}
 		saveTimer = null;
 	}, SAVE_DEBOUNCE_MS);
+}
+
+/**
+ * Convert a CanvasItem from the API to a DeckGeneration for the store
+ */
+function canvasItemToGeneration(item: CanvasItem): DeckGeneration {
+	// Map canvas item type to generation type
+	// Canvas stores 'audio' for TTS/STT, keep it as 'audio' for proper display
+	let type: GenerationType = item.type;
+
+	return {
+		id: item.id,
+		type,
+		prompt: item.prompt,
+		provider: item.provider as ImageProvider | VideoProvider | TTSProvider | STTProvider,
+		model: item.model || '',
+		status: 'completed', // Canvas items are always completed
+		progress: 100,
+		result: {
+			url: item.url || `/api/v1/canvas/files/${item.type === 'video' ? 'videos' : item.type === 'audio' ? 'audio' : 'images'}/${item.file_name}`,
+			width: undefined,
+			height: undefined,
+			duration: item.duration
+		},
+		settings: {
+			aspectRatio: item.aspect_ratio,
+			resolution: item.resolution,
+			duration: item.duration
+		},
+		startedAt: new Date(item.created_at),
+		completedAt: new Date(item.updated_at)
+	};
+}
+
+/**
+ * Load recent generations from the Canvas API
+ */
+async function loadFromCanvasAPI(): Promise<DeckGeneration[]> {
+	try {
+		const response = await api.get<{ items: CanvasItem[]; total: number }>('/canvas?limit=50');
+		return response.items.map(canvasItemToGeneration);
+	} catch (e) {
+		console.error('[Studio] Failed to load from Canvas API:', e);
+		return [];
+	}
 }
 
 // ============================================================================
@@ -345,16 +387,26 @@ function createStudioStore() {
 		defaultTTSSpeed: persisted?.defaultTTSSpeed || 1.0,
 		defaultTTSFormat: persisted?.defaultTTSFormat || 'mp3',
 		activeTab: persisted?.activeTab || 'image',
-		recentGenerations: persisted?.recentGenerations || [],
-		savedAssets: persisted?.savedAssets || [],
+		recentGenerations: [], // Loaded from Canvas API
+		savedAssets: [], // Loaded from Canvas API
 		isLoading: false,
 		error: null
 	};
 
 	const { subscribe, set, update } = writable<StudioState>(initialState);
 
+	// Load recent generations from Canvas API on initialization
+	if (typeof window !== 'undefined') {
+		loadFromCanvasAPI().then((generations) => {
+			update((state) => ({
+				...state,
+				recentGenerations: generations
+			}));
+		});
+	}
+
 	/**
-	 * Helper to update state and persist
+	 * Helper to update state and persist settings (not generations)
 	 */
 	function updateAndPersist(updater: (state: StudioState) => StudioState): void {
 		update((state) => {
@@ -366,6 +418,21 @@ function createStudioStore() {
 
 	return {
 		subscribe,
+
+		// ========================================================================
+		// Data Loading
+		// ========================================================================
+
+		/**
+		 * Reload recent generations from the Canvas API
+		 */
+		async refreshGenerations(): Promise<void> {
+			const generations = await loadFromCanvasAPI();
+			update((state) => ({
+				...state,
+				recentGenerations: generations
+			}));
+		},
 
 		// ========================================================================
 		// Tab Management
