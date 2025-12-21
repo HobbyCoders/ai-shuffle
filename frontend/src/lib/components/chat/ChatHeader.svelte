@@ -1,15 +1,24 @@
 <script lang="ts">
 	/**
 	 * ChatHeader - Context usage indicator, profile selector, and project selector
+	 *
+	 * Features right-click context menus for profiles and projects with:
+	 * - Full CRUD operations
+	 * - Group management
+	 * - Quick card access
 	 */
+	import { createEventDispatcher } from 'svelte';
 	import {
 		tabs,
 		profiles,
 		projects,
-		type ChatTab
+		type ChatTab,
+		type Profile,
+		type Project
 	} from '$lib/stores/tabs';
 	import { isAdmin, apiUser } from '$lib/stores/auth';
 	import { groups, organizeByGroups } from '$lib/stores/groups';
+	import DropdownContextMenu from './DropdownContextMenu.svelte';
 
 	interface Props {
 		tab: ChatTab;
@@ -17,6 +26,11 @@
 	}
 
 	let { tab, compact = false }: Props = $props();
+
+	const dispatch = createEventDispatcher<{
+		openProfileCard: { editId?: string };
+		openProjectCard: { editId?: string };
+	}>();
 
 	function formatTokenCount(count: number): string {
 		if (count >= 1000000) {
@@ -34,6 +48,109 @@
 
 	function setTabProject(projectId: string) {
 		tabs.setTabProject(tab.id, projectId);
+	}
+
+	// Context menu state for profiles
+	let profileContextMenu = $state<{
+		show: boolean;
+		x: number;
+		y: number;
+		profile: Profile | null;
+	}>({ show: false, x: 0, y: 0, profile: null });
+
+	// Context menu state for projects
+	let projectContextMenu = $state<{
+		show: boolean;
+		x: number;
+		y: number;
+		project: Project | null;
+	}>({ show: false, x: 0, y: 0, project: null });
+
+	function handleProfileContextMenu(e: MouseEvent, profile: Profile) {
+		e.preventDefault();
+		e.stopPropagation();
+		profileContextMenu = {
+			show: true,
+			x: e.clientX,
+			y: e.clientY,
+			profile
+		};
+	}
+
+	function handleProjectContextMenu(e: MouseEvent, project: Project) {
+		e.preventDefault();
+		e.stopPropagation();
+		projectContextMenu = {
+			show: true,
+			x: e.clientX,
+			y: e.clientY,
+			project
+		};
+	}
+
+	function closeProfileContextMenu() {
+		profileContextMenu = { show: false, x: 0, y: 0, profile: null };
+	}
+
+	function closeProjectContextMenu() {
+		projectContextMenu = { show: false, x: 0, y: 0, project: null };
+	}
+
+	// Profile context menu handlers
+	function handleProfileSelect(e: CustomEvent<{ id: string }>) {
+		setTabProfile(e.detail.id);
+	}
+
+	function handleProfileEdit(e: CustomEvent<{ id: string }>) {
+		dispatch('openProfileCard', { editId: e.detail.id });
+	}
+
+	async function handleProfileDuplicate(e: CustomEvent<{ id: string }>) {
+		const profile = $profiles.find(p => p.id === e.detail.id);
+		if (!profile) return;
+
+		const newId = `${profile.id}-copy-${Date.now().toString(36)}`;
+		const newName = `${profile.name} (Copy)`;
+
+		try {
+			await tabs.createProfile({
+				id: newId,
+				name: newName,
+				description: profile.description,
+				config: profile.config || {}
+			});
+		} catch (err) {
+			console.error('Failed to duplicate profile:', err);
+		}
+	}
+
+	async function handleProfileDelete(e: CustomEvent<{ id: string }>) {
+		if (confirm(`Delete profile "${$profiles.find(p => p.id === e.detail.id)?.name}"? This cannot be undone.`)) {
+			await tabs.deleteProfile(e.detail.id);
+		}
+	}
+
+	function handleProfileOpenCard(e: CustomEvent<{ type: 'profile' | 'project'; editId?: string }>) {
+		dispatch('openProfileCard', { editId: e.detail.editId });
+	}
+
+	// Project context menu handlers
+	function handleProjectSelect(e: CustomEvent<{ id: string }>) {
+		setTabProject(e.detail.id);
+	}
+
+	function handleProjectEdit(e: CustomEvent<{ id: string }>) {
+		dispatch('openProjectCard', { editId: e.detail.id });
+	}
+
+	async function handleProjectDelete(e: CustomEvent<{ id: string }>) {
+		if (confirm(`Delete project "${$projects.find(p => p.id === e.detail.id)?.name}"? This cannot be undone.`)) {
+			await tabs.deleteProject(e.detail.id);
+		}
+	}
+
+	function handleProjectOpenCard(e: CustomEvent<{ type: 'profile' | 'project'; editId?: string }>) {
+		dispatch('openProjectCard', { editId: e.detail.editId });
 	}
 
 	// Computed values
@@ -174,7 +291,9 @@
 										{#each groupProfiles as profile}
 											<button
 												onclick={() => setTabProfile(profile.id)}
+												oncontextmenu={(e) => handleProfileContextMenu(e, profile)}
 												class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {tab.profile === profile.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
+												title="Right-click for options"
 											>
 												{profile.name}
 											</button>
@@ -195,7 +314,9 @@
 							{#each headerProfilesOrganized.ungrouped as profile}
 								<button
 									onclick={() => setTabProfile(profile.id)}
+									oncontextmenu={(e) => handleProfileContextMenu(e, profile)}
 									class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {tab.profile === profile.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
+									title="Right-click for options"
 								>
 									{profile.name}
 								</button>
@@ -268,7 +389,9 @@
 											{#each groupProjects as project}
 												<button
 													onclick={() => setTabProject(project.id)}
+													oncontextmenu={(e) => handleProjectContextMenu(e, project)}
 													class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {tab.project === project.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
+													title="Right-click for options"
 												>
 													{project.name}
 												</button>
@@ -289,7 +412,9 @@
 								{#each headerProjectsOrganized.ungrouped as project}
 									<button
 										onclick={() => setTabProject(project.id)}
+										oncontextmenu={(e) => handleProjectContextMenu(e, project)}
 										class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {tab.project === project.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
+										title="Right-click for options"
 									>
 										{project.name}
 									</button>
@@ -302,3 +427,44 @@
 		</div>
 	{/if}
 </div>
+
+<!-- Profile Context Menu -->
+{#if profileContextMenu.show && profileContextMenu.profile}
+	<DropdownContextMenu
+		show={profileContextMenu.show}
+		x={profileContextMenu.x}
+		y={profileContextMenu.y}
+		itemId={profileContextMenu.profile.id}
+		itemName={profileContextMenu.profile.name}
+		itemType="profile"
+		isSelected={tab.profile === profileContextMenu.profile.id}
+		isBuiltin={profileContextMenu.profile.is_builtin}
+		currentGroup={$groups.profiles.assignments[profileContextMenu.profile.id]}
+		onClose={closeProfileContextMenu}
+		on:select={handleProfileSelect}
+		on:edit={handleProfileEdit}
+		on:duplicate={handleProfileDuplicate}
+		on:delete={handleProfileDelete}
+		on:openCard={handleProfileOpenCard}
+	/>
+{/if}
+
+<!-- Project Context Menu -->
+{#if projectContextMenu.show && projectContextMenu.project}
+	<DropdownContextMenu
+		show={projectContextMenu.show}
+		x={projectContextMenu.x}
+		y={projectContextMenu.y}
+		itemId={projectContextMenu.project.id}
+		itemName={projectContextMenu.project.name}
+		itemType="project"
+		isSelected={tab.project === projectContextMenu.project.id}
+		isBuiltin={false}
+		currentGroup={$groups.projects.assignments[projectContextMenu.project.id]}
+		onClose={closeProjectContextMenu}
+		on:select={handleProjectSelect}
+		on:edit={handleProjectEdit}
+		on:delete={handleProjectDelete}
+		on:openCard={handleProjectOpenCard}
+	/>
+{/if}

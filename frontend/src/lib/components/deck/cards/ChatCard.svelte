@@ -25,6 +25,8 @@
 		onDragEnd?: () => void;
 		onResizeEnd?: () => void;
 		onFork?: (sessionId: string, messageIndex: number, messageId: string) => void;
+		onOpenProfileCard?: (editId?: string) => void;
+		onOpenProjectCard?: (editId?: string) => void;
 		mobile?: boolean;
 	}
 
@@ -40,6 +42,8 @@
 		onDragEnd,
 		onResizeEnd,
 		onFork,
+		onOpenProfileCard,
+		onOpenProjectCard,
 		mobile = false
 	}: Props = $props();
 
@@ -77,13 +81,28 @@
 	function handleFork(sessionId: string, messageIndex: number, messageId: string) {
 		onFork?.(sessionId, messageIndex, messageId);
 	}
+
+	// Handle profile card open request from ChatHeader context menu
+	function handleOpenProfileCard(e: CustomEvent<{ editId?: string }>) {
+		onOpenProfileCard?.(e.detail.editId);
+	}
+
+	// Handle project card open request from ChatHeader context menu
+	function handleOpenProjectCard(e: CustomEvent<{ editId?: string }>) {
+		onOpenProjectCard?.(e.detail.editId);
+	}
 </script>
 
 {#if mobile}
 	<!-- Mobile: No BaseCard wrapper, just the content -->
 	<div class="chat-card-content mobile">
 		{#if tab}
-			<ChatHeader {tab} compact />
+			<ChatHeader
+				{tab}
+				compact
+				on:openProfileCard={handleOpenProfileCard}
+				on:openProjectCard={handleOpenProjectCard}
+			/>
 			<MessageArea {tab} onFork={handleFork} />
 
 			<!-- Permission Queue -->
@@ -127,7 +146,12 @@
 			{#if tab}
 				<!-- Header with context usage, profile/project selectors -->
 				<div class="chat-header-section">
-					<ChatHeader {tab} compact />
+					<ChatHeader
+						{tab}
+						compact
+						on:openProfileCard={handleOpenProfileCard}
+						on:openProjectCard={handleOpenProjectCard}
+					/>
 				</div>
 
 				<!-- Main message area -->
