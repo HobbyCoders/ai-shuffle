@@ -176,8 +176,8 @@ export const GOOGLE_IMAGE_MODELS: ImageModel[] = [
 		pricePerImage: 0.039
 	},
 	{
-		id: 'gemini-2.5-pro-image',
-		name: 'gemini-2.5-pro-image',
+		id: 'gemini-3-pro-image-preview',
+		name: 'gemini-3-pro-image-preview',
 		displayName: 'Nano Banana Pro',
 		provider: 'google-gemini',
 		description: 'Higher quality generation with enhanced editing capabilities',

@@ -237,9 +237,16 @@ function loadFromStorage(): Partial<StudioState> | null {
 				console.warn('[Studio] Filtered out', (parsed.recentGenerations?.length || 0) - validGenerations.length, 'invalid generations');
 			}
 
+			// Migrate deprecated model IDs
+			let imageModel = parsed.imageModel || 'gemini-2.5-flash-image';
+			if (imageModel === 'gemini-2.5-pro-image') {
+				imageModel = 'gemini-3-pro-image-preview';
+				console.info('[Studio] Migrated deprecated model gemini-2.5-pro-image → gemini-3-pro-image-preview');
+			}
+
 			return {
 				imageProvider: parsed.imageProvider,
-				imageModel: parsed.imageModel || 'gemini-2.5-flash-image',
+				imageModel,
 				videoProvider: parsed.videoProvider,
 				videoModel: parsed.videoModel || 'veo-3.1-generate-preview',
 				ttsProvider: parsed.ttsProvider || 'openai-tts',
