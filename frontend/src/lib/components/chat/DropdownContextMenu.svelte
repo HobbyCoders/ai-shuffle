@@ -349,15 +349,26 @@
 		position: fixed;
 		min-width: 220px;
 		max-width: 280px;
-		background: hsl(var(--card));
-		border: 1px solid hsl(var(--border));
+		background: oklch(0.22 0.008 260);
+		border: 1px solid oklch(0.32 0.01 260);
 		border-radius: 12px;
 		box-shadow:
-			0 10px 38px -10px rgba(0, 0, 0, 0.35),
-			0 10px 20px -15px rgba(0, 0, 0, 0.2);
+			0 10px 38px -10px rgba(0, 0, 0, 0.6),
+			0 10px 20px -15px rgba(0, 0, 0, 0.4),
+			0 0 0 1px oklch(0.32 0.01 260);
 		padding: 6px;
 		animation: slideIn 0.15s ease-out;
 		backdrop-filter: none;
+		-webkit-backdrop-filter: none;
+	}
+
+	:global(.light) .context-menu {
+		background: oklch(0.98 0.005 260);
+		border: 1px solid oklch(0.80 0.01 260);
+		box-shadow:
+			0 10px 38px -10px rgba(0, 0, 0, 0.15),
+			0 10px 20px -15px rgba(0, 0, 0, 0.1),
+			0 0 0 1px oklch(0.80 0.01 260);
 	}
 
 	@keyframes slideIn {
@@ -553,20 +564,31 @@
 		top: 0;
 		min-width: 160px;
 		margin-left: 4px;
-		background: hsl(var(--card));
-		border: 1px solid hsl(var(--border));
+		background: oklch(0.22 0.008 260);
+		border: 1px solid oklch(0.32 0.01 260);
 		border-radius: 8px;
 		box-shadow:
-			0 10px 38px -10px rgba(0, 0, 0, 0.35),
-			0 10px 20px -15px rgba(0, 0, 0, 0.2);
+			0 10px 38px -10px rgba(0, 0, 0, 0.6),
+			0 10px 20px -15px rgba(0, 0, 0, 0.4),
+			0 0 0 1px oklch(0.32 0.01 260);
 		padding: 4px;
 		opacity: 0;
 		visibility: hidden;
 		transform: translateX(-4px);
 		backdrop-filter: none;
+		-webkit-backdrop-filter: none;
 		transition: all 0.15s ease;
 		max-height: 200px;
 		overflow-y: auto;
+	}
+
+	:global(.light) .submenu {
+		background: oklch(0.98 0.005 260);
+		border: 1px solid oklch(0.80 0.01 260);
+		box-shadow:
+			0 10px 38px -10px rgba(0, 0, 0, 0.15),
+			0 10px 20px -15px rgba(0, 0, 0, 0.1),
+			0 0 0 1px oklch(0.80 0.01 260);
 	}
 
 	.submenu-container:hover .submenu {
