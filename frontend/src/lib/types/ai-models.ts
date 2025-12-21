@@ -591,50 +591,6 @@ export const OPENAI_IMAGE_MODELS: ImageModel[] = [
 		maxOutputSize: '2048x2048',
 		pricePerImage: 0.02
 	},
-	{
-		id: 'dall-e-3',
-		name: 'dall-e-3',
-		displayName: 'DALL-E 3',
-		provider: 'openai-dalle',
-		description: 'Text-to-image generation only (deprecated May 2026)',
-		capabilities: {
-			generation: true,
-			editing: false,
-			inpainting: false,
-			referenceImages: false,
-			variations: false,
-			textRendering: 'good',
-			maxReferenceImages: 0
-		},
-		aspectRatios: ['1:1', '16:9', '9:16'],
-		resolutions: ['1K'],
-		maxOutputSize: '1792x1024',
-		pricePerImage: 0.04,
-		deprecated: true,
-		deprecationDate: '2026-05-12'
-	},
-	{
-		id: 'dall-e-2',
-		name: 'dall-e-2',
-		displayName: 'DALL-E 2',
-		provider: 'openai-dalle',
-		description: 'Supports variations endpoint (deprecated May 2026)',
-		capabilities: {
-			generation: true,
-			editing: true,
-			inpainting: true,
-			referenceImages: false,
-			variations: true,
-			textRendering: 'basic',
-			maxReferenceImages: 0
-		},
-		aspectRatios: ['1:1'],
-		resolutions: ['256', '512', '1K'],
-		maxOutputSize: '1024x1024',
-		pricePerImage: 0.02,
-		deprecated: true,
-		deprecationDate: '2026-05-12'
-	}
 ];
 
 export const OPENAI_VIDEO_MODELS: VideoModel[] = [
@@ -990,7 +946,6 @@ export const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
 	'google-tts': 'Google Cloud TTS',
 	'google-stt': 'Google Cloud STT',
 	'openai-gpt-image': 'OpenAI GPT Image',
-	'openai-dalle': 'OpenAI DALL-E',
 	'openai-sora': 'OpenAI Sora',
 	'openai-tts': 'OpenAI TTS',
 	'openai-stt': 'OpenAI Whisper'
