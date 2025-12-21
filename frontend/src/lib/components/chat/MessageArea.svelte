@@ -149,7 +149,7 @@
 <div
 	bind:this={containerRef}
 	onscroll={handleScroll}
-	class="flex-1 overflow-y-auto"
+	class="flex-1 overflow-y-auto overscroll-contain"
 >
 	{#if tab.messages.length === 0}
 		<!-- Empty State -->

@@ -397,7 +397,8 @@
 	.card-container {
 		flex: 1;
 		overflow: hidden;
-		touch-action: pan-y;
+		/* Allow normal touch behavior for inputs - swipe is controlled by JS */
+		touch-action: auto;
 	}
 
 	.card-wrapper {
