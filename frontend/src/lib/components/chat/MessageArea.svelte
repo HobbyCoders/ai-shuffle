@@ -8,7 +8,7 @@
 	 * - Resumes when user manually scrolls back to the bottom
 	 * - Does NOT force scroll when user is reading older messages, even on new messages
 	 */
-	import { tick } from 'svelte';
+	import { tick, onDestroy } from 'svelte';
 	import { tabs, profiles, type ChatTab, type ChatMessage } from '$lib/stores/tabs';
 	import UserMessage from './UserMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
@@ -105,6 +105,13 @@
 				// New tab with messages but no saved position - scroll to bottom
 				scrollToBottom();
 			}
+		}
+	});
+
+	// Save scroll position when component is destroyed (critical for mobile card switching)
+	onDestroy(() => {
+		if (containerRef && currentTabId) {
+			tabs.setTabScrollTop(currentTabId, containerRef.scrollTop);
 		}
 	});
 

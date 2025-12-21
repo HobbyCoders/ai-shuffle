@@ -274,7 +274,9 @@
 				style:transform="translateX({swipeOffset}px)"
 			>
 				{#if activeCard && children}
-					{@render children(activeCard)}
+					{#key activeCard.id}
+						{@render children(activeCard)}
+					{/key}
 				{/if}
 			</div>
 		</div>

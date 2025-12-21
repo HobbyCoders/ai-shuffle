@@ -542,13 +542,40 @@ function createDeckStore() {
 		/**
 		 * Remove a card from the deck
 		 * Automatically reapplies the current layout mode if not freeflow
+		 * On mobile, adjusts the active card index to show the previous card
 		 */
 		removeCard(id: string): void {
 			update((state) => {
+				// Find the index of the card being removed (among visible cards)
+				const visibleCards = state.cards.filter((c) => !c.minimized);
+				const removedCardIndex = visibleCards.findIndex((c) => c.id === id);
+
+				// Filter out the removed card
+				const newCards = state.cards.filter((c) => c.id !== id);
+				const newVisibleCards = newCards.filter((c) => !c.minimized);
+
+				// Calculate new mobile active card index
+				let newMobileActiveCardIndex = state.mobileActiveCardIndex;
+				if (state.isMobile && newVisibleCards.length > 0) {
+					// If we removed the active card, show the previous card (or first if at start)
+					if (removedCardIndex === state.mobileActiveCardIndex) {
+						newMobileActiveCardIndex = Math.max(0, removedCardIndex - 1);
+					} else if (removedCardIndex < state.mobileActiveCardIndex) {
+						// If we removed a card before the active one, adjust index
+						newMobileActiveCardIndex = state.mobileActiveCardIndex - 1;
+					}
+					// Ensure index is within bounds
+					newMobileActiveCardIndex = Math.min(newMobileActiveCardIndex, newVisibleCards.length - 1);
+					newMobileActiveCardIndex = Math.max(0, newMobileActiveCardIndex);
+				} else if (newVisibleCards.length === 0) {
+					newMobileActiveCardIndex = 0;
+				}
+
 				let newState: DeckState = {
 					...state,
-					cards: state.cards.filter((c) => c.id !== id),
-					focusedCardId: state.focusedCardId === id ? null : state.focusedCardId
+					cards: newCards,
+					focusedCardId: state.focusedCardId === id ? null : state.focusedCardId,
+					mobileActiveCardIndex: newMobileActiveCardIndex
 				};
 
 				// Auto-reapply layout mode if not freeflow
@@ -570,6 +597,7 @@ function createDeckStore() {
 		 * Focus a card (bring to front)
 		 * Note: This only updates focusedCardId and zIndex, does NOT persist to server
 		 * to avoid position sync issues during frequent focus changes
+		 * On mobile, also syncs mobileActiveCardIndex to match the focused card
 		 */
 		focusCard(id: string): void {
 			update((state) => {
@@ -584,13 +612,24 @@ function createDeckStore() {
 					: 0;
 				const newZIndex = Math.max(state.nextZIndex, maxExistingZ + 1);
 
+				// On mobile, sync the active card index to match the focused card
+				let newMobileActiveCardIndex = state.mobileActiveCardIndex;
+				if (state.isMobile) {
+					const visibleCards = state.cards.filter((c) => !c.minimized);
+					const focusedCardVisibleIndex = visibleCards.findIndex((c) => c.id === id);
+					if (focusedCardVisibleIndex !== -1) {
+						newMobileActiveCardIndex = focusedCardVisibleIndex;
+					}
+				}
+
 				const newState = {
 					...state,
 					cards: state.cards.map((c) =>
 						c.id === id ? { ...c, zIndex: newZIndex } : c
 					),
 					focusedCardId: id,
-					nextZIndex: newZIndex + 1
+					nextZIndex: newZIndex + 1,
+					mobileActiveCardIndex: newMobileActiveCardIndex
 				};
 
 				// Only save to localStorage, not server (avoid position sync issues)
@@ -1078,12 +1117,20 @@ function createDeckStore() {
 
 		/**
 		 * Set active card index for mobile navigation
+		 * Also updates focusedCardId to match the active card
 		 */
 		setMobileActiveCardIndex(index: number): void {
-			update((state) => ({
-				...state,
-				mobileActiveCardIndex: Math.max(0, Math.min(index, state.cards.length - 1))
-			}));
+			update((state) => {
+				const visibleCards = state.cards.filter((c) => !c.minimized);
+				const clampedIndex = Math.max(0, Math.min(index, visibleCards.length - 1));
+				const activeCard = visibleCards[clampedIndex];
+
+				return {
+					...state,
+					mobileActiveCardIndex: clampedIndex,
+					focusedCardId: activeCard?.id ?? state.focusedCardId
+				};
+			});
 		},
 
 		// ========================================================================
