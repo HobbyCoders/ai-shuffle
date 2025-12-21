@@ -9,6 +9,8 @@
 	 * - Tile: Cards tiled in a grid pattern
 	 * - Stack: Cards stacked in a cascade pattern
 	 * - Focus: One main card with sidebar cards
+	 *
+	 * Hidden by default, only shows when mouse is near the top of the workspace.
 	 */
 
 	import {
@@ -29,10 +31,13 @@
 
 	let { currentMode, onModeChange, disabled = false }: Props = $props();
 
+	// Visibility state - trigger shows when mouse is near top of workspace
+	let isVisible = $state(false);
 	// Hover state for the panel
 	let isHovered = $state(false);
 	let isExpanded = $state(false);
 	let hoverTimeout: ReturnType<typeof setTimeout> | null = null;
+	let visibilityTimeout: ReturnType<typeof setTimeout> | null = null;
 
 	const layoutModes: { mode: LayoutMode; label: string; description: string; icon: typeof Move }[] = [
 		{
@@ -70,9 +75,28 @@
 	// Derive current mode info
 	const currentModeInfo = $derived(layoutModes.find(m => m.mode === currentMode) || layoutModes[0]);
 
+	// Handle mouse entering the trigger zone (near top of workspace)
+	function handleTriggerZoneEnter() {
+		if (disabled) return;
+		if (visibilityTimeout) clearTimeout(visibilityTimeout);
+		isVisible = true;
+	}
+
+	// Handle mouse leaving the trigger zone
+	function handleTriggerZoneLeave() {
+		if (visibilityTimeout) clearTimeout(visibilityTimeout);
+		// Don't hide if expanded or hovered over the panel
+		if (!isExpanded && !isHovered) {
+			visibilityTimeout = setTimeout(() => {
+				isVisible = false;
+			}, 300);
+		}
+	}
+
 	function handleMouseEnter() {
 		if (disabled) return;
 		if (hoverTimeout) clearTimeout(hoverTimeout);
+		if (visibilityTimeout) clearTimeout(visibilityTimeout);
 		isHovered = true;
 		// Small delay before expanding to avoid accidental triggers
 		hoverTimeout = setTimeout(() => {
@@ -85,6 +109,10 @@
 		hoverTimeout = setTimeout(() => {
 			isHovered = false;
 			isExpanded = false;
+			// Also trigger visibility check after leaving
+			visibilityTimeout = setTimeout(() => {
+				isVisible = false;
+			}, 300);
 		}, 200);
 	}
 
@@ -94,6 +122,7 @@
 		setTimeout(() => {
 			isExpanded = false;
 			isHovered = false;
+			isVisible = false;
 		}, 300);
 	}
 
@@ -101,6 +130,7 @@
 		if (e.key === 'Escape') {
 			isExpanded = false;
 			isHovered = false;
+			isVisible = false;
 		}
 	}
 </script>
@@ -113,61 +143,70 @@
 	role="group"
 	aria-label="Card layout mode selector"
 >
-	<!-- Hover trigger zone at top of workspace -->
+	<!-- Invisible trigger zone at top of workspace - always present to detect mouse -->
 	<div
-		class="hover-zone"
-		class:active={isHovered}
-		onmouseenter={handleMouseEnter}
-		onmouseleave={handleMouseLeave}
-	>
-		<!-- Collapsed view: Just a subtle indicator -->
-		<div class="shuffle-trigger" class:expanded={isExpanded}>
-			<div class="trigger-content">
-				<svelte:component this={currentModeInfo.icon} size={14} strokeWidth={2} />
-				<span class="trigger-label">{currentModeInfo.label}</span>
-				<ChevronDown
-					size={12}
-					strokeWidth={2}
-					class="chevron {isExpanded ? 'rotated' : ''}"
-				/>
-			</div>
-		</div>
+		class="trigger-zone"
+		onmouseenter={handleTriggerZoneEnter}
+		onmouseleave={handleTriggerZoneLeave}
+	></div>
 
-		<!-- Expanded view: Layout options -->
-		{#if isExpanded}
-			<div class="shuffle-panel" role="menu">
-				<div class="panel-header">
-					<span class="header-title">Card Layout</span>
-				</div>
-				<div class="layout-options">
-					{#each layoutModes as { mode, label, description, icon: Icon }}
-						<button
-							class="layout-option"
-							class:active={currentMode === mode}
-							onclick={() => handleModeSelect(mode)}
-							role="menuitem"
-							aria-current={currentMode === mode ? 'true' : undefined}
-						>
-							<div class="option-icon">
-								<Icon size={18} strokeWidth={1.5} />
-							</div>
-							<div class="option-content">
-								<span class="option-label">{label}</span>
-								<span class="option-description">{description}</span>
-							</div>
-							{#if currentMode === mode}
-								<div class="option-check">
-									<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-										<path d="M20 6L9 17l-5-5" />
-									</svg>
-								</div>
-							{/if}
-						</button>
-					{/each}
+	<!-- Hover zone with the actual UI - only visible when triggered -->
+	{#if isVisible || isHovered || isExpanded}
+		<div
+			class="hover-zone"
+			class:active={isHovered}
+			onmouseenter={handleMouseEnter}
+			onmouseleave={handleMouseLeave}
+		>
+			<!-- Collapsed view: Just a subtle indicator -->
+			<div class="shuffle-trigger" class:expanded={isExpanded}>
+				<div class="trigger-content">
+					<svelte:component this={currentModeInfo.icon} size={14} strokeWidth={2} />
+					<span class="trigger-label">{currentModeInfo.label}</span>
+					<ChevronDown
+						size={12}
+						strokeWidth={2}
+						class="chevron {isExpanded ? 'rotated' : ''}"
+					/>
 				</div>
 			</div>
-		{/if}
-	</div>
+
+			<!-- Expanded view: Layout options -->
+			{#if isExpanded}
+				<div class="shuffle-panel" role="menu">
+					<div class="panel-header">
+						<span class="header-title">Card Layout</span>
+					</div>
+					<div class="layout-options">
+						{#each layoutModes as { mode, label, description, icon: Icon }}
+							<button
+								class="layout-option"
+								class:active={currentMode === mode}
+								onclick={() => handleModeSelect(mode)}
+								role="menuitem"
+								aria-current={currentMode === mode ? 'true' : undefined}
+							>
+								<div class="option-icon">
+									<Icon size={18} strokeWidth={1.5} />
+								</div>
+								<div class="option-content">
+									<span class="option-label">{label}</span>
+									<span class="option-description">{description}</span>
+								</div>
+								{#if currentMode === mode}
+									<div class="option-check">
+										<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+											<path d="M20 6L9 17l-5-5" />
+										</svg>
+									</div>
+								{/if}
+							</button>
+						{/each}
+					</div>
+				</div>
+			{/if}
+		</div>
+	{/if}
 </div>
 
 <style>
@@ -176,7 +215,7 @@
 		top: 0;
 		left: 50%;
 		transform: translateX(-50%);
-		z-index: 100;
+		z-index: 10001; /* Above cards and context panel */
 		pointer-events: none;
 	}
 
@@ -185,12 +224,35 @@
 		pointer-events: none;
 	}
 
+	/* Invisible trigger zone - wide area at top to detect mouse */
+	.trigger-zone {
+		position: absolute;
+		top: 0;
+		left: 50%;
+		transform: translateX(-50%);
+		width: 300px;
+		height: 40px;
+		pointer-events: auto;
+	}
+
 	.hover-zone {
 		pointer-events: auto;
 		display: flex;
 		flex-direction: column;
 		align-items: center;
 		padding-top: 4px;
+		animation: fadeIn 0.15s ease-out;
+	}
+
+	@keyframes fadeIn {
+		from {
+			opacity: 0;
+			transform: translateY(-4px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
 	}
 
 	.shuffle-trigger {

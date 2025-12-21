@@ -524,9 +524,11 @@ function createDeckStore() {
 
 		/**
 		 * Focus a card (bring to front)
+		 * Note: This only updates focusedCardId and zIndex, does NOT persist to server
+		 * to avoid position sync issues during frequent focus changes
 		 */
 		focusCard(id: string): void {
-			updateAndPersist((state) => {
+			update((state) => {
 				const card = state.cards.find((c) => c.id === id);
 				if (!card || card.minimized) {
 					return state;
@@ -538,7 +540,7 @@ function createDeckStore() {
 					: 0;
 				const newZIndex = Math.max(state.nextZIndex, maxExistingZ + 1);
 
-				return {
+				const newState = {
 					...state,
 					cards: state.cards.map((c) =>
 						c.id === id ? { ...c, zIndex: newZIndex } : c
@@ -546,6 +548,10 @@ function createDeckStore() {
 					focusedCardId: id,
 					nextZIndex: newZIndex + 1
 				};
+
+				// Only save to localStorage, not server (avoid position sync issues)
+				saveToStorage(newState);
+				return newState;
 			});
 		},
 
