@@ -147,8 +147,8 @@ VIDEO_PROVIDERS = {
 # ============================================================================
 
 TTS_PROVIDERS = {
-    "openai": {
-        "id": "openai",
+    "openai-tts": {
+        "id": "openai-tts",
         "name": "OpenAI TTS",
         "description": "Natural-sounding speech with multiple voices",
         "models": [
@@ -174,8 +174,8 @@ TTS_PROVIDERS = {
 }
 
 STT_PROVIDERS = {
-    "openai": {
-        "id": "openai",
+    "openai-stt": {
+        "id": "openai-stt",
         "name": "OpenAI STT",
         "description": "Accurate speech-to-text transcription",
         "models": [
@@ -1247,12 +1247,16 @@ async def generate_tts(
     if request.voice_instructions and model == "gpt-4o-mini-tts":
         instructions_param = f"instructions: {json.dumps(request.voice_instructions)},"
 
+    # Map frontend provider ID to AI tools provider ID
+    # Frontend: openai-tts -> AI tools: openai-audio
+    ai_tools_provider = "openai-audio" if request.provider == "openai-tts" else request.provider.replace("-tts", "-audio")
+
     script = f"""
 import {{ textToSpeech }} from '/opt/ai-tools/dist/audio-generation/textToSpeech.js';
 
 const result = await textToSpeech({{
     text: {json.dumps(request.text)},
-    provider: {json.dumps(request.provider + "-audio")},
+    provider: {json.dumps(ai_tools_provider)},
     model: {json.dumps(model)},
     voice: {json.dumps(request.voice)},
     speed: {request.speed},
@@ -1332,7 +1336,7 @@ async def get_tts_providers(token: str = Depends(require_auth)):
 
     providers = []
     for provider_id, provider_info in TTS_PROVIDERS.items():
-        is_available = bool(openai_key) if provider_id == "openai" else False
+        is_available = bool(openai_key) if provider_id == "openai-tts" else False
 
         providers.append({
             "id": provider_id,
@@ -1478,12 +1482,16 @@ async def transcribe_audio(
     if request.language:
         language_param = f"language: {json.dumps(request.language)},"
 
+    # Map frontend provider ID to AI tools provider ID
+    # Frontend: openai-stt -> AI tools: openai-audio
+    ai_tools_provider = "openai-audio" if request.provider == "openai-stt" else request.provider.replace("-stt", "-audio")
+
     script = f"""
 import {{ speechToText }} from '/opt/ai-tools/dist/audio-generation/speechToText.js';
 
 const result = await speechToText({{
     audio_path: {json.dumps(str(audio_path))},
-    provider: {json.dumps(request.provider + "-audio")},
+    provider: {json.dumps(ai_tools_provider)},
     model: {json.dumps(model)},
     {language_param}
     {timestamp_param}
@@ -1546,7 +1554,7 @@ async def get_stt_providers(token: str = Depends(require_auth)):
 
     providers = []
     for provider_id, provider_info in STT_PROVIDERS.items():
-        is_available = bool(openai_key) if provider_id == "openai" else False
+        is_available = bool(openai_key) if provider_id == "openai-stt" else False
 
         providers.append({
             "id": provider_id,
