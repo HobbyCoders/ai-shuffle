@@ -41,6 +41,9 @@ export interface DeckGeneration {
 	progress?: number;
 	thumbnailUrl?: string;
 	resultUrl?: string;
+	// Extended fields for store integration
+	provider?: string;
+	model?: string;
 }
 
 // Session info for the context panel

@@ -8,8 +8,8 @@
 	import AssetLibrary from './AssetLibrary.svelte';
 	import GenerationHistory from './GenerationHistory.svelte';
 	import type { DeckGeneration } from '../types';
-	import { studio, activeGeneration as storeActiveGeneration, activeTab } from '$lib/stores/studio';
-	import type { ImageProvider, VideoProvider } from '$lib/stores/studio';
+	import { studio, activeGeneration as storeActiveGeneration, activeTab, recentGenerations } from '$lib/stores/studio';
+	import type { ImageProvider, VideoProvider, DeckGeneration as StoreDeckGeneration } from '$lib/stores/studio';
 
 	// Props
 	interface Props {
@@ -21,35 +21,49 @@
 
 	// Handle generation from child components
 	async function handleStartGeneration(type: 'image' | 'video', config: unknown) {
-		if (type === 'image') {
-			const imageConfig = config as {
-				prompt: string;
-				provider: string;
-				aspectRatio: string;
-				style?: string;
-			};
-			await studio.generateImage(imageConfig.prompt, {
-				provider: imageConfig.provider as ImageProvider,
-				aspectRatio: imageConfig.aspectRatio,
-				style: imageConfig.style
-			});
-		} else {
-			const videoConfig = config as {
-				prompt: string;
-				provider: string;
-				duration: number;
-				aspectRatio: string;
-				startFrame?: string;
-			};
-			await studio.generateVideo(videoConfig.prompt, {
-				provider: videoConfig.provider as VideoProvider,
-				aspectRatio: videoConfig.aspectRatio,
-				duration: videoConfig.duration,
-				sourceImage: videoConfig.startFrame
-			});
+		try {
+			if (type === 'image') {
+				const imageConfig = config as {
+					prompt: string;
+					provider: string;
+					model: string;
+					aspectRatio: string;
+					style?: string;
+					referenceImages?: string[];
+					negativePrompt?: string;
+					fidelity?: 'low' | 'high';
+				};
+				await studio.generateImage(imageConfig.prompt, {
+					provider: imageConfig.provider as ImageProvider,
+					model: imageConfig.model,
+					aspectRatio: imageConfig.aspectRatio,
+					style: imageConfig.style,
+					referenceImages: imageConfig.referenceImages,
+					negativePrompt: imageConfig.negativePrompt,
+					fidelity: imageConfig.fidelity
+				});
+			} else {
+				const videoConfig = config as {
+					prompt: string;
+					provider: string;
+					model: string;
+					duration: number;
+					aspectRatio: string;
+					startFrame?: string;
+				};
+				await studio.generateVideo(videoConfig.prompt, {
+					provider: videoConfig.provider as VideoProvider,
+					model: videoConfig.model,
+					aspectRatio: videoConfig.aspectRatio,
+					duration: videoConfig.duration,
+					sourceImage: videoConfig.startFrame
+				});
+			}
+			// Also call the parent callback if provided
+			onStartGeneration?.(type, config);
+		} catch (error) {
+			console.error('[Studio] Generation failed:', error);
 		}
-		// Also call the parent callback if provided
-		onStartGeneration?.(type, config);
 	}
 
 	// State
@@ -80,6 +94,117 @@
 	function clearPreview() {
 		selectedAsset = null;
 	}
+
+	// ========================================================================
+	// Media Preview Action Handlers
+	// ========================================================================
+
+	/**
+	 * Download the generated media
+	 */
+	function handleDownload(generation: DeckGeneration) {
+		if (!generation.resultUrl) return;
+
+		// Create a temporary link and trigger download
+		const link = document.createElement('a');
+		link.href = generation.resultUrl;
+		link.download = `${generation.type}-${generation.id}.${generation.type === 'image' ? 'png' : 'mp4'}`;
+		document.body.appendChild(link);
+		link.click();
+		document.body.removeChild(link);
+	}
+
+	/**
+	 * Edit the generated image (opens edit mode with the image)
+	 */
+	async function handleEdit(generation: DeckGeneration) {
+		if (generation.type !== 'image' || !generation.resultUrl) return;
+
+		// Switch to image tab and trigger edit mode
+		studio.setActiveTab('image');
+
+		// For now, we'll prompt for edit instruction
+		const editPrompt = window.prompt('Enter edit instructions:');
+		if (editPrompt) {
+			// Find the original store generation to get the file path
+			const storeGen = $recentGenerations.find(g => g.id === generation.id);
+			if (storeGen?.result?.url) {
+				await studio.editImage(storeGen.result.url, editPrompt);
+			}
+		}
+	}
+
+	/**
+	 * Extend a video (Veo only)
+	 */
+	async function handleExtend(generation: DeckGeneration) {
+		if (generation.type !== 'video') return;
+
+		const extendPrompt = window.prompt('Enter prompt to continue the video:');
+		if (extendPrompt) {
+			// Find the original store generation to get the source_video_uri
+			const storeGen = $recentGenerations.find(g => g.id === generation.id);
+			const sourceUri = (storeGen as StoreDeckGeneration | undefined)?.result?.url;
+			if (sourceUri) {
+				await studio.extendVideo(sourceUri, extendPrompt);
+			}
+		}
+	}
+
+	/**
+	 * Save generation to asset library
+	 */
+	function handleSaveToLibrary(generation: DeckGeneration) {
+		// Find the store generation
+		const storeGen = $recentGenerations.find(g => g.id === generation.id);
+		if (storeGen) {
+			const assetId = studio.saveAsset(storeGen);
+			if (assetId) {
+				// Could show a toast notification here
+				console.log('[Studio] Saved to library:', assetId);
+			}
+		}
+	}
+
+	/**
+	 * Delete generation from history
+	 */
+	function handleDelete(generation: DeckGeneration) {
+		studio.removeGeneration(generation.id);
+		if (selectedAsset?.id === generation.id) {
+			selectedAsset = null;
+		}
+	}
+
+	/**
+	 * Retry failed generation
+	 */
+	async function handleRetry(generation: DeckGeneration) {
+		// Find the original store generation to get full settings
+		const storeGen = $recentGenerations.find(g => g.id === generation.id);
+		if (!storeGen) return;
+
+		if (generation.type === 'image') {
+			await studio.generateImage(storeGen.prompt, {
+				provider: storeGen.provider as ImageProvider,
+				aspectRatio: storeGen.settings.aspectRatio,
+				style: storeGen.settings.style
+			});
+		} else if (generation.type === 'video') {
+			await studio.generateVideo(storeGen.prompt, {
+				provider: storeGen.provider as VideoProvider,
+				aspectRatio: storeGen.settings.aspectRatio,
+				duration: storeGen.settings.duration
+			});
+		}
+	}
+
+	/**
+	 * Regenerate from history (same as retry but for completed generations)
+	 */
+	async function handleRegenerate(generation: DeckGeneration) {
+		await handleRetry(generation);
+	}
 </script>
 
 <div class="flex flex-col h-full bg-background">
@@ -92,6 +217,12 @@
 				<MediaPreview
 					generation={currentPreview}
 					onClear={clearPreview}
+					onDownload={handleDownload}
+					onEdit={handleEdit}
+					onExtend={handleExtend}
+					onSaveToLibrary={handleSaveToLibrary}
+					onDelete={handleDelete}
+					onRetry={handleRetry}
 				/>
 			</div>
 
@@ -99,6 +230,8 @@
 			<div class="shrink-0 border-t border-border">
 				<GenerationHistory
 					onSelect={handleHistorySelect}
+					onRegenerate={handleRegenerate}
+					onDelete={handleDelete}
 				/>
 			</div>
 		</div>

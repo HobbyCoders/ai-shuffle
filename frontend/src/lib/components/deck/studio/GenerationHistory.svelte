@@ -23,7 +23,13 @@
 	let { onSelect, onRegenerate, onDelete }: Props = $props();
 
 	// Map store generation to component's expected format
-	function mapStoreGeneration(gen: StoreDeckGeneration): DeckGeneration {
+	function mapStoreGeneration(gen: StoreDeckGeneration): DeckGeneration | null {
+		// Skip invalid generations (missing required fields)
+		if (!gen || !gen.id || !gen.type || !gen.prompt) {
+			console.warn('[GenerationHistory] Skipping invalid generation:', gen);
+			return null;
+		}
+
 		// Map status: store uses 'completed'/'failed', component uses 'complete'/'error'
 		let status: DeckGeneration['status'];
 		switch (gen.status) {
@@ -37,19 +43,31 @@
 				status = gen.status;
 		}
 
+		// Map type: store uses 'tts'/'stt', component expects 'audio'
+		let type: DeckGeneration['type'] = gen.type as DeckGeneration['type'];
+		if (gen.type === 'tts' || gen.type === 'stt') {
+			type = 'audio';
+		}
+
 		return {
 			id: gen.id,
-			type: gen.type,
+			type,
 			prompt: gen.prompt,
 			status,
-			progress: gen.progress,
+			progress: gen.progress ?? 0,
 			thumbnailUrl: gen.result?.url,
-			resultUrl: gen.result?.url
+			resultUrl: gen.result?.url,
+			provider: gen.provider,
+			model: gen.model
 		};
 	}
 
-	// Derived history from store
-	let history = $derived($recentGenerations.map(mapStoreGeneration));
+	// Derived history from store - filter out null/invalid generations
+	let history = $derived(
+		$recentGenerations
+			.map(mapStoreGeneration)
+			.filter((gen): gen is DeckGeneration => gen !== null)
+	);
 
 	// Handle delete with store
 	function handleDeleteGeneration(generation: DeckGeneration, event: MouseEvent) {

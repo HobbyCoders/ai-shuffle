@@ -178,6 +178,36 @@ interface PersistedStudioState {
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * Validate a generation object has required fields
+ */
+function isValidGeneration(g: unknown): boolean {
+	if (!g || typeof g !== 'object') return false;
+	const gen = g as Record<string, unknown>;
+	return !!(
+		gen.id &&
+		gen.type &&
+		gen.prompt &&
+		gen.status &&
+		gen.startedAt
+	);
+}
+
+/**
+ * Validate an asset object has required fields
+ */
+function isValidAsset(a: unknown): boolean {
+	if (!a || typeof a !== 'object') return false;
+	const asset = a as Record<string, unknown>;
+	return !!(
+		asset.id &&
+		asset.type &&
+		asset.url &&
+		asset.prompt &&
+		asset.createdAt
+	);
+}
+
 function loadFromStorage(): Partial<StudioState> | null {
 	if (typeof window === 'undefined') return null;
 
@@ -185,6 +215,28 @@ function loadFromStorage(): Partial<StudioState> | null {
 		const stored = localStorage.getItem(STORAGE_KEY);
 		if (stored) {
 			const parsed: PersistedStudioState = JSON.parse(stored);
+
+			// Filter out invalid generations and assets
+			const validGenerations = (parsed.recentGenerations || [])
+				.filter(isValidGeneration)
+				.map((g) => ({
+					...g,
+					startedAt: new Date(g.startedAt),
+					completedAt: g.completedAt ? new Date(g.completedAt) : undefined
+				}));
+
+			const validAssets = (parsed.savedAssets || [])
+				.filter(isValidAsset)
+				.map((a) => ({
+					...a,
+					createdAt: new Date(a.createdAt)
+				}));
+
+			// Log if we filtered anything
+			if (validGenerations.length !== (parsed.recentGenerations?.length || 0)) {
+				console.warn('[Studio] Filtered out', (parsed.recentGenerations?.length || 0) - validGenerations.length, 'invalid generations');
+			}
+
 			return {
 				imageProvider: parsed.imageProvider,
 				imageModel: parsed.imageModel || 'gemini-2.5-flash-image',
@@ -201,15 +253,8 @@ function loadFromStorage(): Partial<StudioState> | null {
 				defaultTTSSpeed: parsed.defaultTTSSpeed || 1.0,
 				defaultTTSFormat: parsed.defaultTTSFormat || 'mp3',
 				activeTab: parsed.activeTab || 'image',
-				recentGenerations: parsed.recentGenerations.map((g) => ({
-					...g,
-					startedAt: new Date(g.startedAt),
-					completedAt: g.completedAt ? new Date(g.completedAt) : undefined
-				})),
-				savedAssets: parsed.savedAssets.map((a) => ({
-					...a,
-					createdAt: new Date(a.createdAt)
-				}))
+				recentGenerations: validGenerations,
+				savedAssets: validAssets
 			};
 		}
 	} catch (e) {
@@ -561,7 +606,10 @@ function createStudioStore() {
 
 				return completed;
 			} catch (e) {
-				const errorMessage = e instanceof Error ? e.message : 'Failed to generate image';
+				// Handle API errors which have a `detail` property
+				const apiError = e as { detail?: string; message?: string };
+				const errorMessage = apiError.detail || apiError.message || (e instanceof Error ? e.message : 'Failed to generate image');
+				console.error('[Studio] Image generation failed:', errorMessage, e);
 
 				const failed: DeckGeneration = {
 					...generation,
@@ -654,7 +702,9 @@ function createStudioStore() {
 
 				return completed;
 			} catch (e) {
-				const errorMessage = e instanceof Error ? e.message : 'Failed to edit image';
+				const apiError = e as { detail?: string; message?: string };
+				const errorMessage = apiError.detail || apiError.message || (e instanceof Error ? e.message : 'Failed to edit image');
+				console.error('[Studio] Image edit failed:', errorMessage, e);
 
 				update((s) => ({
 					...s,
@@ -754,7 +804,9 @@ function createStudioStore() {
 
 				return completed;
 			} catch (e) {
-				const errorMessage = e instanceof Error ? e.message : 'Failed to generate video';
+				const apiError = e as { detail?: string; message?: string };
+				const errorMessage = apiError.detail || apiError.message || (e instanceof Error ? e.message : 'Failed to generate video');
+				console.error('[Studio] Video generation failed:', errorMessage, e);
 
 				const failed: DeckGeneration = {
 					...generation,
@@ -835,7 +887,9 @@ function createStudioStore() {
 
 				return completed;
 			} catch (e) {
-				const errorMessage = e instanceof Error ? e.message : 'Failed to extend video';
+				const apiError = e as { detail?: string; message?: string };
+				const errorMessage = apiError.detail || apiError.message || (e instanceof Error ? e.message : 'Failed to extend video');
+				console.error('[Studio] Video extend failed:', errorMessage, e);
 
 				update((s) => ({
 					...s,
@@ -930,7 +984,9 @@ function createStudioStore() {
 
 				return completed;
 			} catch (e) {
-				const errorMessage = e instanceof Error ? e.message : 'Failed to generate speech';
+				const apiError = e as { detail?: string; message?: string };
+				const errorMessage = apiError.detail || apiError.message || (e instanceof Error ? e.message : 'Failed to generate speech');
+				console.error('[Studio] TTS generation failed:', errorMessage, e);
 
 				const failed: DeckGeneration = {
 					...generation,
@@ -1035,7 +1091,9 @@ function createStudioStore() {
 
 				return completed;
 			} catch (e) {
-				const errorMessage = e instanceof Error ? e.message : 'Failed to transcribe audio';
+				const apiError = e as { detail?: string; message?: string };
+				const errorMessage = apiError.detail || apiError.message || (e instanceof Error ? e.message : 'Failed to transcribe audio');
+				console.error('[Studio] STT transcription failed:', errorMessage, e);
 
 				const failed: DeckGeneration = {
 					...generation,
