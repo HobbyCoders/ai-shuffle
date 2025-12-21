@@ -467,6 +467,12 @@ function createDeckStore() {
 				const position =
 					data?.position || calculateCascadePosition(state.cards, state.workspaceBounds);
 
+				// Ensure new card gets the highest zIndex (safeguard against sync issues)
+				const maxExistingZ = state.cards.length > 0
+					? Math.max(...state.cards.map(c => c.zIndex))
+					: 0;
+				const newZIndex = Math.max(state.nextZIndex, maxExistingZ + 1);
+
 				const newCard: DeckCard = {
 					id: cardId,
 					type,
@@ -475,7 +481,7 @@ function createDeckStore() {
 					maximized: false,
 					position,
 					size: data?.size || { ...DEFAULT_CARD_SIZE },
-					zIndex: state.nextZIndex,
+					zIndex: newZIndex,
 					snappedTo: null,
 					dataId: data?.dataId ?? null,
 					meta: data?.meta,
@@ -487,7 +493,7 @@ function createDeckStore() {
 					...state,
 					cards: newCards,
 					focusedCardId: cardId,
-					nextZIndex: state.nextZIndex + 1,
+					nextZIndex: newZIndex + 1,
 					// On mobile, navigate to the newly added card (it's the last visible card)
 					mobileActiveCardIndex: state.isMobile
 						? newCards.filter(c => !c.minimized).length - 1
@@ -526,13 +532,19 @@ function createDeckStore() {
 					return state;
 				}
 
+				// Ensure focused card gets the highest zIndex
+				const maxExistingZ = state.cards.length > 0
+					? Math.max(...state.cards.map(c => c.zIndex))
+					: 0;
+				const newZIndex = Math.max(state.nextZIndex, maxExistingZ + 1);
+
 				return {
 					...state,
 					cards: state.cards.map((c) =>
-						c.id === id ? { ...c, zIndex: state.nextZIndex } : c
+						c.id === id ? { ...c, zIndex: newZIndex } : c
 					),
 					focusedCardId: id,
-					nextZIndex: state.nextZIndex + 1
+					nextZIndex: newZIndex + 1
 				};
 			});
 		},
@@ -613,20 +625,28 @@ function createDeckStore() {
 		 * Restore a card from minimized state
 		 */
 		restoreCard(id: string): void {
-			updateAndPersist((state) => ({
-				...state,
-				cards: state.cards.map((c) =>
-					c.id === id
-						? {
-								...c,
-								minimized: false,
-								zIndex: state.nextZIndex
-							}
-						: c
-				),
-				focusedCardId: id,
-				nextZIndex: state.nextZIndex + 1
-			}));
+			updateAndPersist((state) => {
+				// Ensure restored card gets the highest zIndex
+				const maxExistingZ = state.cards.length > 0
+					? Math.max(...state.cards.map(c => c.zIndex))
+					: 0;
+				const newZIndex = Math.max(state.nextZIndex, maxExistingZ + 1);
+
+				return {
+					...state,
+					cards: state.cards.map((c) =>
+						c.id === id
+							? {
+									...c,
+									minimized: false,
+									zIndex: newZIndex
+								}
+							: c
+					),
+					focusedCardId: id,
+					nextZIndex: newZIndex + 1
+				};
+			});
 		},
 
 		// ========================================================================
@@ -637,24 +657,32 @@ function createDeckStore() {
 		 * Maximize a card to fill the workspace
 		 */
 		maximizeCard(id: string): void {
-			updateAndPersist((state) => ({
-				...state,
-				cards: state.cards.map((c) =>
-					c.id === id
-						? {
-								...c,
-								maximized: true,
-								minimized: false,
-								// Save current position/size for restore
-								savedPosition: c.savedPosition || { ...c.position },
-								savedSize: c.savedSize || { ...c.size },
-								zIndex: state.nextZIndex
-							}
-						: c
-				),
-				focusedCardId: id,
-				nextZIndex: state.nextZIndex + 1
-			}));
+			updateAndPersist((state) => {
+				// Ensure maximized card gets the highest zIndex
+				const maxExistingZ = state.cards.length > 0
+					? Math.max(...state.cards.map(c => c.zIndex))
+					: 0;
+				const newZIndex = Math.max(state.nextZIndex, maxExistingZ + 1);
+
+				return {
+					...state,
+					cards: state.cards.map((c) =>
+						c.id === id
+							? {
+									...c,
+									maximized: true,
+									minimized: false,
+									// Save current position/size for restore
+									savedPosition: c.savedPosition || { ...c.position },
+									savedSize: c.savedSize || { ...c.size },
+									zIndex: newZIndex
+								}
+							: c
+					),
+					focusedCardId: id,
+					nextZIndex: newZIndex + 1
+				};
+			});
 		},
 
 		/**
@@ -704,6 +732,12 @@ function createDeckStore() {
 			updateAndPersist((state) => {
 				const card = state.cards.find((c) => c.id === id);
 				if (!card) return state;
+
+				// Ensure snapped card gets the highest zIndex
+				const maxExistingZ = state.cards.length > 0
+					? Math.max(...state.cards.map(c => c.zIndex))
+					: 0;
+				const newZIndex = Math.max(state.nextZIndex, maxExistingZ + 1);
 
 				// Calculate snap position and size
 				const { width: boundsW, height: boundsH } = state.workspaceBounds;
@@ -760,12 +794,12 @@ function createDeckStore() {
 									savedSize: c.savedSize || { ...card.size },
 									maximized: false,
 									minimized: false,
-									zIndex: state.nextZIndex
+									zIndex: newZIndex
 								}
 							: c
 					),
 					focusedCardId: id,
-					nextZIndex: state.nextZIndex + 1
+					nextZIndex: newZIndex + 1
 				};
 			});
 		},
