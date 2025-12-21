@@ -74,9 +74,25 @@
 	// Swipe offset for animation
 	const swipeOffset = $derived(isSwiping && swipeDirection === 'horizontal' ? touchCurrentX - touchStartX : 0);
 
+	// Check if touch target is an interactive element (input, textarea, etc.)
+	function isInteractiveElement(target: EventTarget | null): boolean {
+		if (!(target instanceof HTMLElement)) return false;
+		const tagName = target.tagName.toLowerCase();
+		const interactiveTags = ['input', 'textarea', 'select', 'button', 'a'];
+		if (interactiveTags.includes(tagName)) return true;
+		// Check for contenteditable
+		if (target.isContentEditable) return true;
+		// Check if inside an interactive element
+		const interactive = target.closest('input, textarea, select, button, a, [contenteditable="true"]');
+		return interactive !== null;
+	}
+
 	// Touch handlers
 	function handleTouchStart(e: TouchEvent) {
 		if (cards.length <= 1) return;
+
+		// Don't initiate swipe if touching an interactive element
+		if (isInteractiveElement(e.target)) return;
 
 		touchStartX = e.touches[0].clientX;
 		touchStartY = e.touches[0].clientY;

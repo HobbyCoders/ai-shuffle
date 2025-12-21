@@ -71,6 +71,10 @@
 		}
 	}
 
+	// Track previous values to detect actual content changes (not just re-renders)
+	let prevMessagesLength = $state(0);
+	let prevLastContent = $state('');
+
 	// Get last message content for streaming detection
 	const lastMessageContent = $derived(() => {
 		const lastMsg = tab.messages[tab.messages.length - 1];
@@ -79,14 +83,21 @@
 
 	// Watch for message changes and streaming content updates
 	$effect(() => {
-		// Track messages length and last message content for streaming
-		const _messagesLength = tab.messages.length;
-		const _lastContent = lastMessageContent();
+		// Get current values
+		const currentLength = tab.messages.length;
+		const currentContent = lastMessageContent();
 
-		// Only scroll if auto-scroll is enabled (user is at bottom)
-		if (shouldAutoScroll && containerRef) {
+		// Only scroll if there's an actual change (new message or content update)
+		const hasNewMessage = currentLength !== prevMessagesLength;
+		const hasContentChange = currentContent !== prevLastContent;
+
+		if ((hasNewMessage || hasContentChange) && shouldAutoScroll && containerRef) {
 			tick().then(scrollToBottom);
 		}
+
+		// Update previous values
+		prevMessagesLength = currentLength;
+		prevLastContent = currentContent;
 	});
 
 	// Scroll on tab change - only scroll to bottom on ACTUAL tab switches, not remounts
