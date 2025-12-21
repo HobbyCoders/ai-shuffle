@@ -349,7 +349,7 @@
 		position: fixed;
 		min-width: 220px;
 		max-width: 280px;
-		background: hsl(var(--popover));
+		background: hsl(var(--card));
 		border: 1px solid hsl(var(--border));
 		border-radius: 12px;
 		box-shadow:
@@ -357,6 +357,7 @@
 			0 10px 20px -15px rgba(0, 0, 0, 0.2);
 		padding: 6px;
 		animation: slideIn 0.15s ease-out;
+		backdrop-filter: none;
 	}
 
 	@keyframes slideIn {
@@ -552,7 +553,7 @@
 		top: 0;
 		min-width: 160px;
 		margin-left: 4px;
-		background: hsl(var(--popover));
+		background: hsl(var(--card));
 		border: 1px solid hsl(var(--border));
 		border-radius: 8px;
 		box-shadow:
@@ -562,6 +563,7 @@
 		opacity: 0;
 		visibility: hidden;
 		transform: translateX(-4px);
+		backdrop-filter: none;
 		transition: all 0.15s ease;
 		max-height: 200px;
 		overflow-y: auto;
