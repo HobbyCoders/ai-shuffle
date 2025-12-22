@@ -316,6 +316,14 @@
 		visibility: visible;
 	}
 
+	/* Disable tooltips on mobile - touch hover states cause layout issues */
+	.mobile .activity-button:hover .tooltip,
+	.mobile .settings-button:hover .tooltip,
+	.mobile .plus-button:hover .tooltip {
+		opacity: 0;
+		visibility: hidden;
+	}
+
 	.settings-button {
 		position: relative;
 		display: flex;
