@@ -2,12 +2,14 @@
 	/**
 	 * ChatInput - Full input section with file upload, autocomplete, and voice recording
 	 */
-	import { tick, onDestroy } from 'svelte';
-	import { tabs, profiles, projects, type ChatTab } from '$lib/stores/tabs';
+	import { tick, onDestroy, createEventDispatcher } from 'svelte';
+	import { tabs, profiles, projects, type ChatTab, type Profile, type Project } from '$lib/stores/tabs';
 	import { claudeAuthenticated, isAdmin, apiUser } from '$lib/stores/auth';
 	import { api, type FileUploadResponse } from '$lib/api/client';
+	import { groups, organizeByGroups } from '$lib/stores/groups';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
+	import DropdownContextMenu from './DropdownContextMenu.svelte';
 
 	interface Command {
 		name: string;
@@ -21,9 +23,145 @@
 		tab: ChatTab;
 		compact?: boolean;
 		onOpenTerminalModal?: (tabId: string, command: string) => void;
+		onOpenProfileCard?: (editId?: string) => void;
+		onOpenProjectCard?: (editId?: string) => void;
 	}
 
-	let { tab, compact = false, onOpenTerminalModal }: Props = $props();
+	let { tab, compact = false, onOpenTerminalModal, onOpenProfileCard, onOpenProjectCard }: Props = $props();
+
+	const dispatch = createEventDispatcher<{
+		openProfileCard: { editId?: string };
+		openProjectCard: { editId?: string };
+	}>();
+
+	// Context usage calculation
+	function formatTokenCount(count: number): string {
+		if (count >= 1000000) {
+			return `${(count / 1000000).toFixed(1)}M`;
+		}
+		if (count >= 1000) {
+			return `${(count / 1000).toFixed(1)}k`;
+		}
+		return count.toString();
+	}
+
+	const autocompactBuffer = 45000;
+	const contextUsed = $derived((tab.contextUsed ?? (tab.totalTokensIn + tab.totalCacheCreationTokens + tab.totalCacheReadTokens)) + autocompactBuffer);
+	const contextMax = 200000;
+	const contextPercent = $derived(Math.min((contextUsed / contextMax) * 100, 100));
+
+	// Organize profiles and projects by groups
+	const profilesOrganized = $derived(organizeByGroups($profiles, 'profiles', $groups));
+	const hasProfileGroups = $derived(profilesOrganized.groupOrder.length > 0);
+	const projectsOrganized = $derived(organizeByGroups($projects, 'projects', $groups));
+	const hasProjectGroups = $derived(projectsOrganized.groupOrder.length > 0);
+
+	// Context menu state for profiles
+	let profileContextMenu = $state<{
+		show: boolean;
+		x: number;
+		y: number;
+		profile: Profile | null;
+	}>({ show: false, x: 0, y: 0, profile: null });
+
+	// Context menu state for projects
+	let projectContextMenu = $state<{
+		show: boolean;
+		x: number;
+		y: number;
+		project: Project | null;
+	}>({ show: false, x: 0, y: 0, project: null });
+
+	function handleProfileContextMenu(e: MouseEvent, profile: Profile) {
+		e.preventDefault();
+		e.stopPropagation();
+		profileContextMenu = {
+			show: true,
+			x: e.clientX,
+			y: e.clientY,
+			profile
+		};
+	}
+
+	function handleProjectContextMenu(e: MouseEvent, project: Project) {
+		e.preventDefault();
+		e.stopPropagation();
+		projectContextMenu = {
+			show: true,
+			x: e.clientX,
+			y: e.clientY,
+			project
+		};
+	}
+
+	function closeProfileContextMenu() {
+		profileContextMenu = { show: false, x: 0, y: 0, profile: null };
+	}
+
+	function closeProjectContextMenu() {
+		projectContextMenu = { show: false, x: 0, y: 0, project: null };
+	}
+
+	// Profile context menu handlers
+	function handleProfileSelect(e: CustomEvent<{ id: string }>) {
+		tabs.setTabProfile(tab.id, e.detail.id);
+	}
+
+	function handleProfileEdit(e: CustomEvent<{ id: string }>) {
+		onOpenProfileCard?.(e.detail.id);
+		dispatch('openProfileCard', { editId: e.detail.id });
+	}
+
+	async function handleProfileDuplicate(e: CustomEvent<{ id: string }>) {
+		const profile = $profiles.find(p => p.id === e.detail.id);
+		if (!profile) return;
+
+		const newId = `${profile.id}-copy-${Date.now().toString(36)}`;
+		const newName = `${profile.name} (Copy)`;
+
+		try {
+			await tabs.createProfile({
+				id: newId,
+				name: newName,
+				description: profile.description,
+				config: profile.config || {}
+			});
+		} catch (err) {
+			console.error('Failed to duplicate profile:', err);
+		}
+	}
+
+	async function handleProfileDelete(e: CustomEvent<{ id: string }>) {
+		if (confirm(`Delete profile "${$profiles.find(p => p.id === e.detail.id)?.name}"? This cannot be undone.`)) {
+			await tabs.deleteProfile(e.detail.id);
+		}
+	}
+
+	function handleProfileOpenCard(e: CustomEvent<{ type: 'profile' | 'project'; editId?: string }>) {
+		onOpenProfileCard?.(e.detail.editId);
+		dispatch('openProfileCard', { editId: e.detail.editId });
+	}
+
+	// Project context menu handlers
+	function handleProjectSelect(e: CustomEvent<{ id: string }>) {
+		tabs.setTabProject(tab.id, e.detail.id);
+	}
+
+	function handleProjectEdit(e: CustomEvent<{ id: string }>) {
+		onOpenProjectCard?.(e.detail.id);
+		dispatch('openProjectCard', { editId: e.detail.id });
+	}
+
+	async function handleProjectDelete(e: CustomEvent<{ id: string }>) {
+		if (confirm(`Delete project "${$projects.find(p => p.id === e.detail.id)?.name}"? This cannot be undone.`)) {
+			await tabs.deleteProject(e.detail.id);
+		}
+	}
+
+	function handleProjectOpenCard(e: CustomEvent<{ type: 'profile' | 'project'; editId?: string }>) {
+		onOpenProjectCard?.(e.detail.editId);
+		dispatch('openProjectCard', { editId: e.detail.editId });
+	}
 
 	// Input state - use tab.draft for persistence across card switches
 	let inputValue = $state(tab.draft || '');
@@ -418,8 +556,81 @@
 		{/if}
 
 		<form onsubmit={(e) => { e.preventDefault(); handleSubmit(); }} class="relative">
-			<!-- Top Controls Row (Pills + Attach) -->
+			<!-- Top Controls Row (Context + Profile + Project + Model + Mode + Attach) -->
 			<div class="mb-2 flex flex-wrap items-center justify-center gap-1.5">
+				<!-- Context Usage Indicator -->
+				<div class="relative group">
+					<button
+						type="button"
+						class="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium rounded-full bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50 transition-all"
+						title="Context usage: {formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}"
+					>
+						<!-- Circular progress indicator -->
+						<svg class="w-3.5 h-3.5 -rotate-90" viewBox="0 0 20 20">
+							<circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="2" opacity="0.2" />
+							<circle
+								cx="10" cy="10" r="8" fill="none"
+								stroke={contextPercent > 80 ? '#ef4444' : contextPercent > 60 ? '#f59e0b' : '#22c55e'}
+								stroke-width="2"
+								stroke-dasharray={2 * Math.PI * 8}
+								stroke-dashoffset={2 * Math.PI * 8 * (1 - contextPercent / 100)}
+								stroke-linecap="round"
+							/>
+						</svg>
+						<span>{Math.round(contextPercent)}%</span>
+					</button>
+					<!-- Token dropdown -->
+					<div class="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 w-52 bg-card border border-border rounded-xl shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+						<div class="py-2 px-3 space-y-2">
+							<!-- Context header -->
+							<div class="flex items-center justify-between text-xs pb-1 border-b border-border">
+								<span class="text-muted-foreground">Context</span>
+								<span class="text-foreground font-medium">{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}</span>
+							</div>
+							<div class="flex items-center justify-between text-xs">
+								<span class="flex items-center gap-1.5 text-muted-foreground">
+									<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4" />
+									</svg>
+									Input
+								</span>
+								<span class="text-foreground font-medium">{formatTokenCount(tab.totalTokensIn)}</span>
+							</div>
+							<div class="flex items-center justify-between text-xs">
+								<span class="flex items-center gap-1.5 text-muted-foreground">
+									<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8v12m0 0l4-4m-4 4l-4-4" />
+									</svg>
+									Output
+								</span>
+								<span class="text-foreground font-medium">{formatTokenCount(tab.totalTokensOut)}</span>
+							</div>
+							{#if tab.totalCacheCreationTokens > 0}
+								<div class="flex items-center justify-between text-xs">
+									<span class="flex items-center gap-1.5 text-muted-foreground">
+										<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+										</svg>
+										Cache Creation
+									</span>
+									<span class="text-foreground font-medium">{formatTokenCount(tab.totalCacheCreationTokens)}</span>
+								</div>
+							{/if}
+							{#if tab.totalCacheReadTokens > 0}
+								<div class="flex items-center justify-between text-xs">
+									<span class="flex items-center gap-1.5 text-blue-400">
+										<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+										</svg>
+										Cache Read
+									</span>
+									<span class="text-blue-400 font-medium">{formatTokenCount(tab.totalCacheReadTokens)}</span>
+								</div>
+							{/if}
+						</div>
+					</div>
+				</div>
+
 				<!-- Profile Selector Pill (always visible, mobile-friendly) -->
 				{#if !isProfileLocked}
 					<div class="relative">
@@ -439,27 +650,79 @@
 						</button>
 						{#if showProfilePopup}
 							<button class="fixed inset-0 z-40" onclick={() => showProfilePopup = false} aria-label="Close"></button>
-							<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[140px] max-h-[240px] overflow-y-auto">
+							<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[160px] max-h-[280px] overflow-y-auto {profileContextMenu.show ? 'pointer-events-auto' : ''}">
 								{#if $profiles.length === 0}
 									<div class="px-3 py-2 text-xs text-muted-foreground">No profiles</div>
 								{:else}
-									{#each $profiles as profile}
-										<button
-											type="button"
-											onclick={() => {
-												tabs.setTabProfile(tab.id, profile.id);
-												showProfilePopup = false;
-											}}
-											class="w-full px-3 py-1.5 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-2 {tab.profile === profile.id ? 'bg-accent/50 text-foreground font-medium' : 'text-muted-foreground'}"
-										>
-											<span class="truncate">{profile.name}</span>
-											{#if tab.profile === profile.id}
-												<svg class="w-3 h-3 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
-												</svg>
-											{/if}
-										</button>
+									<!-- Grouped profiles -->
+									{#each profilesOrganized.groupOrder as groupItem}
+										{@const groupProfiles = profilesOrganized.grouped.get(groupItem.name) || []}
+										{#if groupProfiles.length > 0}
+											<div class="py-0.5">
+												<button
+													type="button"
+													class="w-full flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-medium text-muted-foreground hover:text-foreground uppercase tracking-wide bg-muted/30 transition-colors"
+													onclick={() => groups.toggleGroupCollapsed('profiles', groupItem.name)}
+												>
+													<svg class="w-2.5 h-2.5 transition-transform {groupItem.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+													</svg>
+													<span>{groupItem.name}</span>
+													<span class="text-muted-foreground/60 ml-auto">({groupProfiles.length})</span>
+												</button>
+												{#if !groupItem.collapsed}
+													{#each groupProfiles as profile}
+														<button
+															type="button"
+															onclick={() => {
+																tabs.setTabProfile(tab.id, profile.id);
+																showProfilePopup = false;
+															}}
+															oncontextmenu={(e) => handleProfileContextMenu(e, profile)}
+															class="w-full px-3 py-1.5 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-2 {tab.profile === profile.id ? 'bg-accent/50 text-foreground font-medium' : 'text-muted-foreground'}"
+															title="Right-click for options"
+														>
+															<span class="truncate">{profile.name}</span>
+															{#if tab.profile === profile.id}
+																<svg class="w-3 h-3 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
+																</svg>
+															{/if}
+														</button>
+													{/each}
+												{/if}
+											</div>
+										{/if}
 									{/each}
+									<!-- Ungrouped profiles -->
+									{#if profilesOrganized.ungrouped.length > 0}
+										{#if hasProfileGroups}
+											<div class="py-0.5">
+												<div class="px-2.5 py-1 text-[10px] font-medium text-muted-foreground uppercase tracking-wide bg-muted/30">
+													Other
+												</div>
+											</div>
+										{/if}
+										{#each profilesOrganized.ungrouped as profile}
+											<button
+												type="button"
+												onclick={() => {
+													tabs.setTabProfile(tab.id, profile.id);
+													showProfilePopup = false;
+												}}
+												oncontextmenu={(e) => handleProfileContextMenu(e, profile)}
+												class="w-full px-3 py-1.5 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-2 {tab.profile === profile.id ? 'bg-accent/50 text-foreground font-medium' : 'text-muted-foreground'}"
+												title="Right-click for options"
+											>
+												<span class="truncate">{profile.name}</span>
+												{#if tab.profile === profile.id}
+													<svg class="w-3 h-3 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
+													</svg>
+												{/if}
+											</button>
+										{/each}
+									{/if}
 								{/if}
 							</div>
 						{/if}
@@ -496,27 +759,79 @@
 						</button>
 						{#if showProjectPopup}
 							<button class="fixed inset-0 z-40" onclick={() => showProjectPopup = false} aria-label="Close"></button>
-							<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[140px] max-h-[240px] overflow-y-auto">
+							<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[160px] max-h-[280px] overflow-y-auto {projectContextMenu.show ? 'pointer-events-auto' : ''}">
 								{#if $projects.length === 0}
 									<div class="px-3 py-2 text-xs text-muted-foreground">No projects</div>
 								{:else}
-									{#each $projects as project}
-										<button
-											type="button"
-											onclick={() => {
-												tabs.setTabProject(tab.id, project.id);
-												showProjectPopup = false;
-											}}
-											class="w-full px-3 py-1.5 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-2 {tab.project === project.id ? 'bg-accent/50 text-foreground font-medium' : 'text-muted-foreground'}"
-										>
-											<span class="truncate">{project.name}</span>
-											{#if tab.project === project.id}
-												<svg class="w-3 h-3 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
-												</svg>
-											{/if}
-										</button>
+									<!-- Grouped projects -->
+									{#each projectsOrganized.groupOrder as groupItem}
+										{@const groupProjects = projectsOrganized.grouped.get(groupItem.name) || []}
+										{#if groupProjects.length > 0}
+											<div class="py-0.5">
+												<button
+													type="button"
+													class="w-full flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-medium text-muted-foreground hover:text-foreground uppercase tracking-wide bg-muted/30 transition-colors"
+													onclick={() => groups.toggleGroupCollapsed('projects', groupItem.name)}
+												>
+													<svg class="w-2.5 h-2.5 transition-transform {groupItem.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+													</svg>
+													<span>{groupItem.name}</span>
+													<span class="text-muted-foreground/60 ml-auto">({groupProjects.length})</span>
+												</button>
+												{#if !groupItem.collapsed}
+													{#each groupProjects as project}
+														<button
+															type="button"
+															onclick={() => {
+																tabs.setTabProject(tab.id, project.id);
+																showProjectPopup = false;
+															}}
+															oncontextmenu={(e) => handleProjectContextMenu(e, project)}
+															class="w-full px-3 py-1.5 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-2 {tab.project === project.id ? 'bg-accent/50 text-foreground font-medium' : 'text-muted-foreground'}"
+															title="Right-click for options"
+														>
+															<span class="truncate">{project.name}</span>
+															{#if tab.project === project.id}
+																<svg class="w-3 h-3 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
+																</svg>
+															{/if}
+														</button>
+													{/each}
+												{/if}
+											</div>
+										{/if}
 									{/each}
+									<!-- Ungrouped projects -->
+									{#if projectsOrganized.ungrouped.length > 0}
+										{#if hasProjectGroups}
+											<div class="py-0.5">
+												<div class="px-2.5 py-1 text-[10px] font-medium text-muted-foreground uppercase tracking-wide bg-muted/30">
+													Other
+												</div>
+											</div>
+										{/if}
+										{#each projectsOrganized.ungrouped as project}
+											<button
+												type="button"
+												onclick={() => {
+													tabs.setTabProject(tab.id, project.id);
+													showProjectPopup = false;
+												}}
+												oncontextmenu={(e) => handleProjectContextMenu(e, project)}
+												class="w-full px-3 py-1.5 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-2 {tab.project === project.id ? 'bg-accent/50 text-foreground font-medium' : 'text-muted-foreground'}"
+												title="Right-click for options"
+											>
+												<span class="truncate">{project.name}</span>
+												{#if tab.project === project.id}
+													<svg class="w-3 h-3 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
+													</svg>
+												{/if}
+											</button>
+										{/each}
+									{/if}
 								{/if}
 							</div>
 						{/if}
@@ -787,3 +1102,44 @@
 		</form>
 	</div>
 </div>
+
+<!-- Profile Context Menu -->
+{#if profileContextMenu.show && profileContextMenu.profile}
+	<DropdownContextMenu
+		show={profileContextMenu.show}
+		x={profileContextMenu.x}
+		y={profileContextMenu.y}
+		itemId={profileContextMenu.profile.id}
+		itemName={profileContextMenu.profile.name}
+		itemType="profile"
+		isSelected={tab.profile === profileContextMenu.profile.id}
+		isBuiltin={profileContextMenu.profile.is_builtin}
+		currentGroup={$groups.profiles.assignments[profileContextMenu.profile.id]}
+		onClose={closeProfileContextMenu}
+		on:select={handleProfileSelect}
+		on:edit={handleProfileEdit}
+		on:duplicate={handleProfileDuplicate}
+		on:delete={handleProfileDelete}
+		on:openCard={handleProfileOpenCard}
+	/>
+{/if}
+
+<!-- Project Context Menu -->
+{#if projectContextMenu.show && projectContextMenu.project}
+	<DropdownContextMenu
+		show={projectContextMenu.show}
+		x={projectContextMenu.x}
+		y={projectContextMenu.y}
+		itemId={projectContextMenu.project.id}
+		itemName={projectContextMenu.project.name}
+		itemType="project"
+		isSelected={tab.project === projectContextMenu.project.id}
+		isBuiltin={false}
+		currentGroup={$groups.projects.assignments[projectContextMenu.project.id]}
+		onClose={closeProjectContextMenu}
+		on:select={handleProjectSelect}
+		on:edit={handleProjectEdit}
+		on:delete={handleProjectDelete}
+		on:openCard={handleProjectOpenCard}
+	/>
+{/if}

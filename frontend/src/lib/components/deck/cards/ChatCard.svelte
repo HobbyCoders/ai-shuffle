@@ -8,7 +8,7 @@
 	import BaseCard from './BaseCard.svelte';
 	import type { DeckCard } from './types';
 	import { tabs, allTabs } from '$lib/stores/tabs';
-	import { ChatHeader, MessageArea, ChatInput } from '$lib/components/chat';
+	import { MessageArea, ChatInput } from '$lib/components/chat';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import ConnectionStatus from '$lib/components/ConnectionStatus.svelte';
@@ -81,16 +81,6 @@
 	function handleFork(sessionId: string, messageIndex: number, messageId: string) {
 		onFork?.(sessionId, messageIndex, messageId);
 	}
-
-	// Handle profile card open request from ChatHeader context menu
-	function handleOpenProfileCard(e: CustomEvent<{ editId?: string }>) {
-		onOpenProfileCard?.(e.detail.editId);
-	}
-
-	// Handle project card open request from ChatHeader context menu
-	function handleOpenProjectCard(e: CustomEvent<{ editId?: string }>) {
-		onOpenProjectCard?.(e.detail.editId);
-	}
 </script>
 
 {#if mobile}
@@ -141,16 +131,6 @@
 	<BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
 		<div class="chat-card-content">
 			{#if tab}
-				<!-- Header with context usage, profile/project selectors -->
-				<div class="chat-header-section">
-					<ChatHeader
-						{tab}
-						compact
-						on:openProfileCard={handleOpenProfileCard}
-						on:openProjectCard={handleOpenProjectCard}
-					/>
-				</div>
-
 				<!-- Main message area -->
 				<MessageArea {tab} onFork={handleFork} />
 
@@ -204,16 +184,6 @@
 
 	.chat-card-content.mobile {
 		height: 100%;
-	}
-
-	.chat-header-section {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: 8px;
-		padding: 8px 12px;
-		border-bottom: 1px solid hsl(var(--border) / 0.5);
-		flex-shrink: 0;
 	}
 
 	.chat-loading {
