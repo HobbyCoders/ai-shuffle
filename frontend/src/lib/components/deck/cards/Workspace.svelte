@@ -427,7 +427,7 @@
 	const cardTypes: { type: CardType; label: string; icon: typeof MessageSquare }[] = [
 		{ type: 'chat', label: 'New Chat', icon: MessageSquare },
 		{ type: 'agent', label: 'New Agent', icon: Bot },
-		{ type: 'canvas', label: 'New Canvas', icon: Palette },
+		{ type: 'canvas', label: 'New Studio', icon: Palette },
 		{ type: 'terminal', label: 'New Terminal', icon: Terminal },
 	];
 </script>
