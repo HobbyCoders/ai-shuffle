@@ -47,7 +47,8 @@ class AgentLaunchRequest(BaseModel):
     auto_branch: bool = Field(True, description="Automatically create a git branch")
     auto_pr: bool = Field(False, description="Automatically create a pull request on completion")
     auto_review: bool = Field(False, description="Automatically review the PR after creation")
-    max_duration_minutes: int = Field(30, ge=1, le=480, description="Maximum run duration in minutes")
+    max_duration_minutes: int = Field(30, ge=0, le=480, description="Maximum run duration in minutes (0 = unlimited)")
+    base_branch: Optional[str] = Field(None, description="Base branch for worktree (defaults to main/master)")
 
 
 class AgentResponse(BaseModel):
@@ -198,7 +199,8 @@ async def launch_agent(request: AgentLaunchRequest, token: str = Depends(require
         auto_branch=request.auto_branch,
         auto_pr=request.auto_pr,
         auto_review=request.auto_review,
-        max_duration_minutes=request.max_duration_minutes
+        max_duration_minutes=request.max_duration_minutes,
+        base_branch=request.base_branch
     )
 
     logger.info(f"Launched agent {agent_run['id']}: {request.name}")

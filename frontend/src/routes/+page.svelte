@@ -21,6 +21,7 @@
 		sessions,
 		sessionsTagFilter
 	} from '$lib/stores/tabs';
+	import { runningAgents } from '$lib/stores/agents';
 	import {
 		deck,
 		visibleCards,
@@ -186,8 +187,18 @@
 		files: undefined
 	});
 
-	// Empty arrays for now (agents/studio integration pending)
-	const deckAgents: DeckAgent[] = [];
+	// Map running agents to DeckAgent format for ContextPanel
+	const deckAgents = $derived<DeckAgent[]>(
+		$runningAgents.map(agent => ({
+			id: agent.id,
+			name: agent.name,
+			status: agent.status === 'running' ? 'running' :
+			        agent.status === 'paused' ? 'paused' :
+			        agent.status === 'failed' ? 'error' : 'idle',
+			task: agent.prompt?.slice(0, 50),
+			progress: agent.progress
+		}))
+	);
 	const deckGenerations: DeckGeneration[] = [];
 	const runningProcesses = $derived<RunningProcess[]>([]);
 
@@ -948,7 +959,14 @@
 		onContextToggle={() => deck.toggleContextPanel()}
 		onSessionClick={handleSessionClick}
 		onHistorySessionClick={handleHistorySessionClick}
-		onAgentClick={() => {}}
+		onAgentClick={(agent) => {
+			// Open agent card in workspace
+			deck.setMode('workspace');
+			deck.openOrFocusCard('agent-monitor', agent.id, {
+				title: agent.name,
+				meta: { agentId: agent.id }
+			});
+		}}
 		onGenerationClick={() => {}}
 		onMinimizedCardClick={handleMinimizedCardClick}
 		onProcessClick={() => {}}

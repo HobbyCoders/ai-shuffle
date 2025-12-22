@@ -73,6 +73,9 @@
 	let duration = $state('0:00');
 	let durationInterval: ReturnType<typeof setInterval> | null = null;
 
+	// Time remaining for timeout
+	let timeRemaining = $state<string | null>(null);
+
 	// Fetch agent data
 	async function fetchAgent() {
 		loading = true;
@@ -116,9 +119,23 @@
 		agents.subscribeToAgent(agentId);
 
 		// Poll for updates every 5 seconds as backup
+		// Only update if meaningful data changed to avoid unnecessary re-renders
 		const pollInterval = setInterval(() => {
 			const updated = agents.getAgent(agentId);
-			if (updated) {
+			if (updated && agent) {
+				// Only update if status, progress, or logs changed
+				const hasChanged =
+					updated.status !== agent.status ||
+					updated.progress !== agent.progress ||
+					updated.error !== agent.error ||
+					updated.prUrl !== agent.prUrl ||
+					(updated.logs?.length || 0) !== (agent.logs?.length || 0) ||
+					(updated.tasks?.length || 0) !== (agent.tasks?.length || 0);
+
+				if (hasChanged) {
+					agent = updated;
+				}
+			} else if (updated && !agent) {
 				agent = updated;
 			}
 		}, 5000);
@@ -152,6 +169,23 @@
 			const mins = Math.floor(elapsed / 60);
 			const secs = elapsed % 60;
 			duration = `${mins}:${secs.toString().padStart(2, '0')}`;
+
+			// Calculate time remaining (if maxDurationMinutes is set and > 0)
+			const maxDurationMinutes = agent?.maxDurationMinutes;
+			if (maxDurationMinutes && maxDurationMinutes > 0) {
+				const maxDurationSeconds = maxDurationMinutes * 60;
+				const remainingSeconds = maxDurationSeconds - elapsed;
+				if (remainingSeconds > 0) {
+					const remainingMins = Math.floor(remainingSeconds / 60);
+					const remainingSecs = remainingSeconds % 60;
+					timeRemaining = `${remainingMins}:${remainingSecs.toString().padStart(2, '0')}`;
+				} else {
+					timeRemaining = '0:00';
+				}
+			} else {
+				// Unlimited duration
+				timeRemaining = null;
+			}
 		}
 
 		updateDuration();
@@ -281,6 +315,11 @@
 					</span>
 					{#if agent.status === 'running'}
 						<span class="duration">{duration}</span>
+						{#if timeRemaining !== null}
+							<span class="time-remaining" title="Time remaining">({timeRemaining} left)</span>
+						{:else}
+							<span class="time-remaining unlimited" title="Unlimited duration">(Unlimited)</span>
+						{/if}
 					{/if}
 				</div>
 
@@ -494,6 +533,16 @@
 		font-size: 0.75rem;
 		color: hsl(var(--muted-foreground));
 		font-family: monospace;
+	}
+
+	.time-remaining {
+		font-size: 0.6875rem;
+		color: hsl(var(--muted-foreground) / 0.8);
+		font-family: monospace;
+	}
+
+	.time-remaining.unlimited {
+		color: hsl(var(--primary) / 0.7);
 	}
 
 	.branch-badge,

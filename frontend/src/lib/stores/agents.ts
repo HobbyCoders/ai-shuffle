@@ -456,6 +456,7 @@ function createAgentsStore() {
 			autoPr?: boolean;
 			autoReview?: boolean;
 			maxDurationMinutes?: number;
+			baseBranch?: string;
 		}): Promise<BackgroundAgent> {
 			const response = await apiRequest<ApiAgentResponse>('/launch', {
 				method: 'POST',
@@ -467,7 +468,8 @@ function createAgentsStore() {
 					auto_branch: options.autoBranch ?? true,
 					auto_pr: options.autoPr ?? false,
 					auto_review: options.autoReview ?? false,
-					max_duration_minutes: options.maxDurationMinutes ?? 30
+					max_duration_minutes: options.maxDurationMinutes ?? 30,
+					base_branch: options.baseBranch
 				})
 			});
 

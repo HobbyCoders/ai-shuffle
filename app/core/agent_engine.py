@@ -199,7 +199,8 @@ class AgentExecutionEngine:
         auto_branch: bool = True,
         auto_pr: bool = False,
         auto_review: bool = False,
-        max_duration_minutes: int = 30
+        max_duration_minutes: int = 30,
+        base_branch: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Launch a new background agent.
@@ -218,7 +219,8 @@ class AgentExecutionEngine:
             auto_branch=auto_branch,
             auto_pr=auto_pr,
             auto_review=auto_review,
-            max_duration_minutes=max_duration_minutes
+            max_duration_minutes=max_duration_minutes,
+            base_branch=base_branch
         )
 
         self._log(agent_run_id, f"Agent '{name}' created and queued")
@@ -313,11 +315,15 @@ class AgentExecutionEngine:
             # Build the enhanced prompt with context
             enhanced_prompt = self._build_agent_prompt(agent_run, state)
 
-            # Set up timeout
+            # Set up timeout (0 = unlimited)
             max_duration = agent_run.get("max_duration_minutes", 30)
-            timeout_at = datetime.utcnow() + timedelta(minutes=max_duration)
+            unlimited_duration = max_duration <= 0
+            timeout_at = None if unlimited_duration else datetime.utcnow() + timedelta(minutes=max_duration)
 
-            self._log(agent_run_id, f"Starting execution with {max_duration} minute timeout")
+            if unlimited_duration:
+                self._log(agent_run_id, "Starting execution with unlimited duration")
+            else:
+                self._log(agent_run_id, f"Starting execution with {max_duration} minute timeout")
             self._log(agent_run_id, f"Working directory: {working_dir}")
             if state.branch_name:
                 self._log(agent_run_id, f"Branch: {state.branch_name}")
@@ -337,8 +343,8 @@ class AgentExecutionEngine:
                     self._log(agent_run_id, "Cancellation requested", "warning")
                     raise asyncio.CancelledError("User cancelled")
 
-                # Check timeout
-                if datetime.utcnow() > timeout_at:
+                # Check timeout (skip if unlimited)
+                if timeout_at and datetime.utcnow() > timeout_at:
                     self._log(agent_run_id, f"Agent timed out after {max_duration} minutes", "warning")
                     raise TimeoutError(f"Agent exceeded maximum duration of {max_duration} minutes")
 
@@ -443,15 +449,19 @@ class AgentExecutionEngine:
         self._log(agent_run_id, f"Creating worktree for branch: {branch_name}")
 
         try:
-            # Get default branch
-            default_branch = git_service.get_default_branch(project_path) or "main"
+            # Get base branch - use provided one or get default from repo
+            base_branch = agent_run.get("base_branch")
+            if not base_branch:
+                base_branch = git_service.get_default_branch(project_path) or "main"
+
+            self._log(agent_run_id, f"Using base branch: {base_branch}")
 
             # Create worktree (this also creates the branch)
             worktree, session = worktree_manager.create_worktree_session(
                 project_id=project_id,
                 branch_name=branch_name,
                 create_new_branch=True,
-                base_branch=default_branch,
+                base_branch=base_branch,
                 profile_id=agent_run.get("profile_id")
             )
 
@@ -586,6 +596,8 @@ class AgentExecutionEngine:
         state: AgentRunState
     ):
         """Create a pull request for the agent's changes"""
+        import subprocess
+
         if not state.worktree_path or not state.branch_name:
             self._log(agent_run_id, "Cannot create PR: no worktree or branch", "warning")
             return
@@ -593,11 +605,43 @@ class AgentExecutionEngine:
         self._log(agent_run_id, f"Creating pull request for branch {state.branch_name}")
 
         try:
-            # Push the branch
-            push_result = git_service.push(state.worktree_path, state.branch_name, set_upstream=True)
-            if not push_result:
-                self._log(agent_run_id, "Failed to push branch", "error")
+            # Check if gh is authenticated
+            auth_check = subprocess.run(
+                ["gh", "auth", "status"],
+                capture_output=True,
+                text=True,
+                cwd=state.worktree_path,
+                timeout=30
+            )
+            if auth_check.returncode != 0:
+                self._log(agent_run_id, f"GitHub CLI not authenticated: {auth_check.stderr}", "error")
                 return
+
+            # Check if there are any commits on the branch
+            diff_check = subprocess.run(
+                ["git", "log", "--oneline", f"HEAD...origin/{agent_run.get('base_branch', 'main')}", "--"],
+                capture_output=True,
+                text=True,
+                cwd=state.worktree_path,
+                timeout=30
+            )
+            if not diff_check.stdout.strip():
+                self._log(agent_run_id, "No commits to push - branch has no changes", "warning")
+                return
+
+            # Push the branch
+            self._log(agent_run_id, f"Pushing branch {state.branch_name} to origin")
+            push_result = subprocess.run(
+                ["git", "push", "-u", "origin", state.branch_name],
+                capture_output=True,
+                text=True,
+                cwd=state.worktree_path,
+                timeout=120
+            )
+            if push_result.returncode != 0:
+                self._log(agent_run_id, f"Failed to push branch: {push_result.stderr}", "error")
+                return
+            self._log(agent_run_id, f"Branch pushed successfully")
 
             # Get project for GitHub repo info
             project_id = agent_run.get("project_id")
@@ -615,19 +659,22 @@ class AgentExecutionEngine:
             default_branch = repo.get("default_branch", "main")
 
             # Create PR using gh CLI
-            import subprocess
             pr_title = f"Agent: {agent_run['name']}"
+            # Escape special characters in PR body
+            prompt_safe = agent_run['prompt'][:1000].replace('`', '\\`').replace('$', '\\$')
             pr_body = f"""## Automated Agent PR
 
 **Agent:** {agent_run['name']}
 **Branch:** {state.branch_name}
 
 ### Task Description
-{agent_run['prompt'][:1000]}
+{prompt_safe}
 
 ---
 *This PR was created automatically by an AI agent.*
 """
+            self._log(agent_run_id, f"Creating PR: {pr_title} ({github_repo})")
+
             result = subprocess.run(
                 [
                     "gh", "pr", "create",
@@ -648,20 +695,26 @@ class AgentExecutionEngine:
                 database.update_agent_run(agent_run_id, pr_url=pr_url)
                 self._log(agent_run_id, f"Pull request created: {pr_url}")
             else:
-                self._log(agent_run_id, f"Failed to create PR: {result.stderr}", "error")
+                self._log(agent_run_id, f"Failed to create PR (exit code {result.returncode}): {result.stderr}", "error")
+                if result.stdout:
+                    self._log(agent_run_id, f"PR stdout: {result.stdout}", "debug")
 
+        except subprocess.TimeoutExpired:
+            self._log(agent_run_id, "PR creation timed out", "error")
         except Exception as e:
-            self._log(agent_run_id, f"PR creation failed: {e}", "error")
+            self._log(agent_run_id, f"PR creation failed: {type(e).__name__}: {e}", "error")
 
     async def _trigger_auto_review(self, agent_run_id: str, agent_run: Dict[str, Any]):
         """Trigger an automatic code review for the PR"""
+        import subprocess
+
         pr_url = agent_run.get("pr_url")
         if not pr_url:
             return
 
         self._log(agent_run_id, f"Triggering auto-review for PR: {pr_url}")
 
-        # Launch a new review agent
+        # Launch a new review agent with instructions to merge if approved
         review_prompt = f"""Review this pull request and provide feedback:
 {pr_url}
 
@@ -672,7 +725,14 @@ Check for:
 4. Test coverage
 5. Documentation
 
-If the PR looks good, approve it. If there are issues, leave comments on the PR."""
+If the PR looks good with no critical issues:
+1. Approve the PR using: gh pr review --approve {pr_url}
+2. Then merge the PR using: gh pr merge --merge {pr_url}
+
+If there are issues that need fixing, leave comments on the PR using:
+gh pr review --comment --body "Your feedback here" {pr_url}
+
+Important: Always approve before attempting to merge."""
 
         try:
             review_run = await self.launch_agent(
@@ -686,8 +746,77 @@ If the PR looks good, approve it. If there are issues, leave comments on the PR.
                 max_duration_minutes=15  # Reviews should be quick
             )
             self._log(agent_run_id, f"Review agent launched: {review_run['id']}")
+
+            # Note: Worktree cleanup will happen when the original agent task completes
+            # If we wanted to wait for review completion, we'd need a callback mechanism
+
         except Exception as e:
             self._log(agent_run_id, f"Failed to launch review agent: {e}", "error")
+
+    async def _cleanup_worktree(self, agent_run_id: str, agent_run: Dict[str, Any]):
+        """Clean up the worktree directory after PR is merged"""
+        import subprocess
+        import shutil
+
+        worktree_id = agent_run.get("worktree_id")
+        branch_name = agent_run.get("branch")
+        project_id = agent_run.get("project_id")
+
+        if not worktree_id or not project_id:
+            return
+
+        project = database.get_project(project_id)
+        if not project:
+            return
+
+        project_path = str(settings.workspace_dir / project["path"])
+        worktree_data = database.get_worktree(worktree_id)
+
+        if worktree_data:
+            worktree_path = str(settings.workspace_dir / worktree_data["worktree_path"])
+
+            try:
+                # Remove the worktree using git
+                self._log(agent_run_id, f"Removing worktree at {worktree_path}")
+                result = subprocess.run(
+                    ["git", "worktree", "remove", worktree_path, "--force"],
+                    capture_output=True,
+                    text=True,
+                    cwd=project_path,
+                    timeout=60
+                )
+
+                if result.returncode != 0:
+                    self._log(agent_run_id, f"Git worktree remove failed: {result.stderr}", "warning")
+                    # Try manual removal as fallback
+                    if Path(worktree_path).exists():
+                        shutil.rmtree(worktree_path, ignore_errors=True)
+
+                # Update database
+                database.delete_worktree(worktree_id)
+                self._log(agent_run_id, "Worktree removed successfully")
+
+            except Exception as e:
+                self._log(agent_run_id, f"Failed to remove worktree: {e}", "warning")
+
+        # Optionally delete the branch if it was merged
+        if branch_name:
+            try:
+                # Check if branch was merged
+                result = subprocess.run(
+                    ["git", "branch", "-d", branch_name],
+                    capture_output=True,
+                    text=True,
+                    cwd=project_path,
+                    timeout=30
+                )
+                if result.returncode == 0:
+                    self._log(agent_run_id, f"Branch {branch_name} deleted")
+                else:
+                    # Branch might not be merged yet or already deleted
+                    self._log(agent_run_id, f"Could not delete branch {branch_name}: {result.stderr}", "debug")
+            except Exception as e:
+                self._log(agent_run_id, f"Failed to delete branch: {e}", "debug")
 
     async def _fail_agent(self, agent_run_id: str, state: AgentRunState, error: str):
         """Handle agent failure"""

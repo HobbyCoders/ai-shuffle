@@ -25,6 +25,12 @@
 		maxDuration: number;
 		profileId?: string;
 		projectId?: string;
+		baseBranch?: string;
+	}
+
+	interface Branch {
+		name: string;
+		current: boolean;
 	}
 
 	interface Profile {
@@ -55,10 +61,14 @@
 	// Data from API
 	let profiles = $state<Profile[]>([]);
 	let projects = $state<Project[]>([]);
+	let branches = $state<Branch[]>([]);
+	let baseBranch = $state<string | undefined>(undefined);
 	let loadingProfiles = $state(true);
 	let loadingProjects = $state(true);
+	let loadingBranches = $state(false);
 
 	const durations = [
+		{ value: 0, label: 'Unlimited' },
 		{ value: 15, label: '15 minutes' },
 		{ value: 30, label: '30 minutes' },
 		{ value: 60, label: '1 hour' },
@@ -105,6 +115,40 @@
 		}
 	}
 
+	async function fetchBranches(projId: string) {
+		loadingBranches = true;
+		branches = [];
+		baseBranch = undefined;
+		try {
+			const response = await fetch(`/api/v1/projects/${projId}/branches`, {
+				credentials: 'include'
+			});
+			if (response.ok) {
+				const data = await response.json();
+				branches = data.branches ?? [];
+				// Set default to the default branch (main/master) or current branch
+				const defaultBranch = branches.find(b => b.name === 'main' || b.name === 'master') ?? branches.find(b => b.current);
+				if (defaultBranch) {
+					baseBranch = defaultBranch.name;
+				}
+			}
+		} catch (err) {
+			console.error('Failed to fetch branches:', err);
+		} finally {
+			loadingBranches = false;
+		}
+	}
+
+	// Watch for project selection changes to fetch branches
+	$effect(() => {
+		if (projectId) {
+			fetchBranches(projectId);
+		} else {
+			branches = [];
+			baseBranch = undefined;
+		}
+	});
+
 	async function handleSubmit() {
 		if (!canLaunch) return;
 
@@ -120,7 +164,8 @@
 				autoReview,
 				maxDuration,
 				profileId,
-				projectId
+				projectId,
+				baseBranch
 			});
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to launch agent';
@@ -346,6 +391,34 @@
 							{/each}
 						</select>
 					</div>
+
+					<!-- Branch selector (shows when project is selected) -->
+					{#if projectId && branches.length > 0}
+						<div>
+							<label class="flex items-center gap-2 text-sm text-foreground mb-2">
+								<GitBranch class="w-4 h-4 text-muted-foreground" />
+								Base Branch
+							</label>
+							<select
+								bind:value={baseBranch}
+								disabled={isLaunching || loadingBranches}
+								class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+							>
+								{#if loadingBranches}
+									<option value={undefined}>Loading branches...</option>
+								{:else}
+									{#each branches as branch}
+										<option value={branch.name}>
+											{branch.name}{branch.current ? ' (current)' : ''}
+										</option>
+									{/each}
+								{/if}
+							</select>
+							<p class="text-xs text-muted-foreground mt-1">
+								The worktree will be created from this branch
+							</p>
+						</div>
+					{/if}
 				</div>
 			{/if}
 		</div>

@@ -13,7 +13,6 @@
 	import { Rocket, Clock, CheckCircle, XCircle, BarChart3, Bot, RefreshCw, Loader2, AlertCircle } from 'lucide-svelte';
 	import AgentListItem from './AgentListItem.svelte';
 	import AgentLauncher from './AgentLauncher.svelte';
-	import AgentDetails from './AgentDetails.svelte';
 	import AgentStats from './AgentStats.svelte';
 	import {
 		agents,
@@ -26,11 +25,11 @@
 		agentsError,
 		type BackgroundAgent
 	} from '$lib/stores/agents';
+	import { deck } from '$lib/stores/deck';
 
 	// State
 	let activeTab = $state<'running' | 'queued' | 'completed' | 'failed' | 'stats'>('running');
 	let showLauncher = $state(false);
-	let selectedAgentId = $state<string | null>(null);
 	let isRefreshing = $state(false);
 
 	// Derived state from stores
@@ -44,12 +43,6 @@
 
 	// Combined running + paused for active tab
 	const activeAgentsForTab = $derived([...running, ...paused]);
-
-	const selectedAgent = $derived(() => {
-		if (!selectedAgentId) return null;
-		const all = [...running, ...queued, ...completed, ...failed, ...paused];
-		return all.find(a => a.id === selectedAgentId) ?? null;
-	});
 
 	// Initialize store on mount
 	onMount(() => {
@@ -91,7 +84,17 @@
 	}
 
 	function handleAgentSelect(agentId: string) {
-		selectedAgentId = agentId;
+		// Find the agent to get its name for the card title
+		const all = [...running, ...queued, ...completed, ...failed, ...paused];
+		const agent = all.find(a => a.id === agentId);
+		const agentName = agent?.name ?? 'Agent Monitor';
+
+		// Switch to workspace mode and open the agent card
+		deck.setMode('workspace');
+		deck.openOrFocusCard('agent-monitor', agentId, {
+			title: agentName,
+			meta: { agentId }
+		});
 	}
 
 	function handleLaunch() {
@@ -111,9 +114,10 @@
 		maxDuration: number;
 		profileId?: string;
 		projectId?: string;
+		baseBranch?: string;
 	}) {
 		try {
-			await agents.launchAgent({
+			const agent = await agents.launchAgent({
 				name: data.name,
 				prompt: data.prompt,
 				profileId: data.profileId,
@@ -121,20 +125,27 @@
 				autoBranch: data.autoBranch,
 				autoPr: data.autoPR,
 				autoReview: data.autoReview,
-				maxDurationMinutes: data.maxDuration
+				maxDurationMinutes: data.maxDuration,
+				baseBranch: data.baseBranch
 			});
+
+			// Close the launcher modal
 			showLauncher = false;
-			// Switch to running tab to see the new agent
-			activeTab = 'running';
+
+			// Switch to workspace mode and open an AgentCard for the new agent
+			deck.setMode('workspace');
+			deck.addCard('agent-monitor', {
+				title: agent.name,
+				dataId: agent.id,
+				meta: { agentId: agent.id }
+			});
 		} catch (err) {
 			console.error('Failed to launch agent:', err);
 			// Keep launcher open on error so user can retry
+			throw err;
 		}
 	}
 
-	function handleDetailsClose() {
-		selectedAgentId = null;
-	}
 
 	async function handleRefresh() {
 		isRefreshing = true;
@@ -172,9 +183,6 @@
 	async function handleDelete(agentId: string) {
 		try {
 			await agents.deleteAgent(agentId);
-			if (selectedAgentId === agentId) {
-				selectedAgentId = null;
-			}
 		} catch (err) {
 			console.error('Failed to delete agent:', err);
 		}
@@ -358,14 +366,3 @@
 	/>
 {/if}
 
-<!-- Agent Details Panel -->
-{#if selectedAgent()}
-	<AgentDetails
-		agent={selectedAgent()}
-		onClose={handleDetailsClose}
-		onPause={() => selectedAgentId && handlePause(selectedAgentId)}
-		onResume={() => selectedAgentId && handleResume(selectedAgentId)}
-		onCancel={() => selectedAgentId && handleCancel(selectedAgentId)}
-		onDelete={() => selectedAgentId && handleDelete(selectedAgentId)}
-	/>
-{/if}
