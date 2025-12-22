@@ -9,102 +9,65 @@
 	 * - Failed agents
 	 * - Statistics
 	 */
-	import { Rocket, Clock, CheckCircle, XCircle, BarChart3, Bot } from 'lucide-svelte';
+	import { onMount, onDestroy } from 'svelte';
+	import { Rocket, Clock, CheckCircle, XCircle, BarChart3, Bot, RefreshCw, Loader2, AlertCircle } from 'lucide-svelte';
 	import AgentListItem from './AgentListItem.svelte';
 	import AgentLauncher from './AgentLauncher.svelte';
 	import AgentDetails from './AgentDetails.svelte';
 	import AgentStats from './AgentStats.svelte';
-
-	// Types
-	type AgentStatus = 'running' | 'queued' | 'completed' | 'failed' | 'paused';
-
-	interface Agent {
-		id: string;
-		name: string;
-		status: AgentStatus;
-		progress?: number;
-		startedAt?: Date;
-		completedAt?: Date;
-		duration?: number;
-		branch?: string;
-		task?: string;
-	}
+	import {
+		agents,
+		runningAgents,
+		queuedAgents,
+		completedAgents,
+		failedAgents,
+		pausedAgents,
+		agentsLoading,
+		agentsError,
+		type BackgroundAgent
+	} from '$lib/stores/agents';
 
 	// State
 	let activeTab = $state<'running' | 'queued' | 'completed' | 'failed' | 'stats'>('running');
 	let showLauncher = $state(false);
 	let selectedAgentId = $state<string | null>(null);
+	let isRefreshing = $state(false);
 
-	// Mock data for display
-	const mockAgents: Agent[] = [
-		{
-			id: '1',
-			name: 'Implement user authentication',
-			status: 'running',
-			progress: 65,
-			startedAt: new Date(Date.now() - 1800000),
-			branch: 'feature/auth',
-			task: 'Setting up JWT middleware'
-		},
-		{
-			id: '2',
-			name: 'Add dark mode support',
-			status: 'running',
-			progress: 30,
-			startedAt: new Date(Date.now() - 600000),
-			branch: 'feature/dark-mode',
-			task: 'Creating theme context'
-		},
-		{
-			id: '3',
-			name: 'Fix navigation bug',
-			status: 'queued',
-			task: 'Waiting for agent slot'
-		},
-		{
-			id: '4',
-			name: 'Refactor API endpoints',
-			status: 'completed',
-			startedAt: new Date(Date.now() - 7200000),
-			completedAt: new Date(Date.now() - 3600000),
-			duration: 3600000,
-			branch: 'feature/api-refactor'
-		},
-		{
-			id: '5',
-			name: 'Update database schema',
-			status: 'completed',
-			startedAt: new Date(Date.now() - 86400000),
-			completedAt: new Date(Date.now() - 82800000),
-			duration: 3600000,
-			branch: 'feature/db-update'
-		},
-		{
-			id: '6',
-			name: 'Add email notifications',
-			status: 'failed',
-			startedAt: new Date(Date.now() - 3600000),
-			completedAt: new Date(Date.now() - 3000000),
-			duration: 600000,
-			task: 'SMTP configuration error'
-		}
-	];
+	// Derived state from stores
+	const running = $derived($runningAgents);
+	const queued = $derived($queuedAgents);
+	const completed = $derived($completedAgents);
+	const failed = $derived($failedAgents);
+	const paused = $derived($pausedAgents);
+	const loading = $derived($agentsLoading);
+	const error = $derived($agentsError);
 
-	// Filtered agents by status
-	const runningAgents = $derived(mockAgents.filter(a => a.status === 'running' || a.status === 'paused'));
-	const queuedAgents = $derived(mockAgents.filter(a => a.status === 'queued'));
-	const completedAgents = $derived(mockAgents.filter(a => a.status === 'completed'));
-	const failedAgents = $derived(mockAgents.filter(a => a.status === 'failed'));
+	// Combined running + paused for active tab
+	const activeAgentsForTab = $derived([...running, ...paused]);
 
-	const selectedAgent = $derived(mockAgents.find(a => a.id === selectedAgentId));
+	const selectedAgent = $derived(() => {
+		if (!selectedAgentId) return null;
+		const all = [...running, ...queued, ...completed, ...failed, ...paused];
+		return all.find(a => a.id === selectedAgentId) ?? null;
+	});
+
+	// Initialize store on mount
+	onMount(() => {
+		agents.init();
+	});
+
+	// Cleanup on destroy
+	onDestroy(() => {
+		agents.disconnectWebSocket();
+	});
 
 	// Tab configuration - use function for counts to get reactive values
 	function getTabCount(tabId: string): number | null {
 		switch (tabId) {
-			case 'running': return runningAgents.length;
-			case 'queued': return queuedAgents.length;
-			case 'completed': return completedAgents.length;
-			case 'failed': return failedAgents.length;
+			case 'running': return activeAgentsForTab.length;
+			case 'queued': return queued.length;
+			case 'completed': return completed.length;
+			case 'failed': return failed.length;
 			default: return null;
 		}
 	}
@@ -117,12 +80,12 @@
 		{ id: 'stats' as const, label: 'Stats', icon: BarChart3 }
 	];
 
-	function getAgentsForTab() {
+	function getAgentsForTab(): BackgroundAgent[] {
 		switch (activeTab) {
-			case 'running': return runningAgents;
-			case 'queued': return queuedAgents;
-			case 'completed': return completedAgents;
-			case 'failed': return failedAgents;
+			case 'running': return activeAgentsForTab;
+			case 'queued': return queued;
+			case 'completed': return completed;
+			case 'failed': return failed;
 			default: return [];
 		}
 	}
@@ -139,13 +102,98 @@
 		showLauncher = false;
 	}
 
-	function handleLauncherSubmit(data: { name: string; prompt: string }) {
-		console.log('Launch agent:', data);
-		showLauncher = false;
+	async function handleLauncherSubmit(data: {
+		name: string;
+		prompt: string;
+		autoBranch: boolean;
+		autoPR: boolean;
+		autoReview: boolean;
+		maxDuration: number;
+		profileId?: string;
+		projectId?: string;
+	}) {
+		try {
+			await agents.launchAgent({
+				name: data.name,
+				prompt: data.prompt,
+				profileId: data.profileId,
+				projectId: data.projectId,
+				autoBranch: data.autoBranch,
+				autoPr: data.autoPR,
+				autoReview: data.autoReview,
+				maxDurationMinutes: data.maxDuration
+			});
+			showLauncher = false;
+			// Switch to running tab to see the new agent
+			activeTab = 'running';
+		} catch (err) {
+			console.error('Failed to launch agent:', err);
+			// Keep launcher open on error so user can retry
+		}
 	}
 
 	function handleDetailsClose() {
 		selectedAgentId = null;
+	}
+
+	async function handleRefresh() {
+		isRefreshing = true;
+		try {
+			await agents.refresh();
+		} finally {
+			isRefreshing = false;
+		}
+	}
+
+	async function handlePause(agentId: string) {
+		try {
+			await agents.pauseAgent(agentId);
+		} catch (err) {
+			console.error('Failed to pause agent:', err);
+		}
+	}
+
+	async function handleResume(agentId: string) {
+		try {
+			await agents.resumeAgent(agentId);
+		} catch (err) {
+			console.error('Failed to resume agent:', err);
+		}
+	}
+
+	async function handleCancel(agentId: string) {
+		try {
+			await agents.cancelAgent(agentId);
+		} catch (err) {
+			console.error('Failed to cancel agent:', err);
+		}
+	}
+
+	async function handleDelete(agentId: string) {
+		try {
+			await agents.deleteAgent(agentId);
+			if (selectedAgentId === agentId) {
+				selectedAgentId = null;
+			}
+		} catch (err) {
+			console.error('Failed to delete agent:', err);
+		}
+	}
+
+	async function handleClearCompleted() {
+		try {
+			await agents.clearCompleted();
+		} catch (err) {
+			console.error('Failed to clear completed agents:', err);
+		}
+	}
+
+	async function handleClearFailed() {
+		try {
+			await agents.clearFailed();
+		} catch (err) {
+			console.error('Failed to clear failed agents:', err);
+		}
 	}
 
 	// Empty state messages
@@ -180,14 +228,38 @@
 			<Bot class="w-5 h-5 text-primary" />
 			<h2 class="text-lg font-semibold text-foreground">Agents</h2>
 		</div>
-		<button
-			onclick={handleLaunch}
-			class="flex items-center gap-2 px-3 py-1.5 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors text-sm font-medium"
-		>
-			<Rocket class="w-4 h-4" />
-			Launch Agent
-		</button>
+		<div class="flex items-center gap-2">
+			<button
+				onclick={handleRefresh}
+				disabled={isRefreshing || loading}
+				class="p-2 text-muted-foreground hover:text-foreground rounded-lg hover:bg-muted transition-colors disabled:opacity-50"
+				title="Refresh agents"
+			>
+				<RefreshCw class="w-4 h-4 {isRefreshing ? 'animate-spin' : ''}" />
+			</button>
+			<button
+				onclick={handleLaunch}
+				class="flex items-center gap-2 px-3 py-1.5 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors text-sm font-medium"
+			>
+				<Rocket class="w-4 h-4" />
+				Launch Agent
+			</button>
+		</div>
 	</div>
+
+	<!-- Error banner -->
+	{#if error}
+		<div class="px-4 py-2 bg-red-500/10 border-b border-red-500/20 flex items-center gap-2">
+			<AlertCircle class="w-4 h-4 text-red-500" />
+			<span class="text-sm text-red-500">{error}</span>
+			<button
+				onclick={handleRefresh}
+				class="ml-auto text-xs text-red-500 hover:underline"
+			>
+				Retry
+			</button>
+		</div>
+	{/if}
 
 	<!-- Tabs -->
 	<div class="flex items-center gap-1 px-4 py-2 border-b border-border overflow-x-auto">
@@ -207,18 +279,42 @@
 				{/if}
 			</button>
 		{/each}
+
+		<!-- Clear buttons for completed/failed tabs -->
+		{#if activeTab === 'completed' && completed.length > 0}
+			<button
+				onclick={handleClearCompleted}
+				class="ml-auto text-xs text-muted-foreground hover:text-foreground"
+			>
+				Clear all
+			</button>
+		{/if}
+		{#if activeTab === 'failed' && failed.length > 0}
+			<button
+				onclick={handleClearFailed}
+				class="ml-auto text-xs text-muted-foreground hover:text-foreground"
+			>
+				Clear all
+			</button>
+		{/if}
 	</div>
 
 	<!-- Content -->
 	<div class="flex-1 overflow-y-auto">
-		{#if activeTab === 'stats'}
+		{#if loading && !isRefreshing}
+			<!-- Loading state -->
+			<div class="flex flex-col items-center justify-center h-full p-8">
+				<Loader2 class="w-8 h-8 text-primary animate-spin mb-4" />
+				<p class="text-sm text-muted-foreground">Loading agents...</p>
+			</div>
+		{:else if activeTab === 'stats'}
 			<AgentStats />
 		{:else}
-			{@const agents = getAgentsForTab()}
+			{@const agentsList = getAgentsForTab()}
 			{@const empty = emptyMessages[activeTab]}
 			{@const EmptyIcon = empty.icon}
 
-			{#if agents.length === 0}
+			{#if agentsList.length === 0}
 				<!-- Empty state -->
 				<div class="flex flex-col items-center justify-center h-full p-8 text-center">
 					<div class="w-16 h-16 rounded-full bg-muted flex items-center justify-center mb-4">
@@ -239,10 +335,13 @@
 			{:else}
 				<!-- Agent list -->
 				<div class="p-4 space-y-2">
-					{#each agents as agent (agent.id)}
+					{#each agentsList as agent (agent.id)}
 						<AgentListItem
 							{agent}
 							onSelect={() => handleAgentSelect(agent.id)}
+							onPause={() => handlePause(agent.id)}
+							onResume={() => handleResume(agent.id)}
+							onCancel={() => handleCancel(agent.id)}
 						/>
 					{/each}
 				</div>
@@ -260,9 +359,13 @@
 {/if}
 
 <!-- Agent Details Panel -->
-{#if selectedAgent}
+{#if selectedAgent()}
 	<AgentDetails
-		agent={selectedAgent}
+		agent={selectedAgent()}
 		onClose={handleDetailsClose}
+		onPause={() => selectedAgentId && handlePause(selectedAgentId)}
+		onResume={() => selectedAgentId && handleResume(selectedAgentId)}
+		onCancel={() => selectedAgentId && handleCancel(selectedAgentId)}
+		onDelete={() => selectedAgentId && handleDelete(selectedAgentId)}
 	/>
 {/if}

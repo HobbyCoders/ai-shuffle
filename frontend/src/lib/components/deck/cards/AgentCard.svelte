@@ -11,6 +11,7 @@
 	 * - Progress bar
 	 */
 
+	import { onMount, onDestroy } from 'svelte';
 	import {
 		Play,
 		Pause,
@@ -21,26 +22,18 @@
 		CheckCircle,
 		Circle,
 		Loader2,
-		AlertCircle
+		AlertCircle,
+		ExternalLink,
+		Trash2
 	} from 'lucide-svelte';
 	import BaseCard from './BaseCard.svelte';
 	import type { DeckCard } from './types';
-
-	interface AgentTask {
-		id: string;
-		title: string;
-		status: 'pending' | 'running' | 'completed' | 'error';
-		children?: AgentTask[];
-	}
-
-	interface AgentData {
-		status: 'running' | 'paused' | 'idle' | 'error' | 'completed';
-		branch?: string;
-		startTime?: Date;
-		tasks?: AgentTask[];
-		logs?: string[];
-		progress?: number;
-	}
+	import {
+		agents,
+		type BackgroundAgent,
+		type AgentTask,
+		type AgentLogEntry
+	} from '$lib/stores/agents';
 
 	interface Props {
 		card: DeckCard;
@@ -53,9 +46,6 @@
 		onResize: (w: number, h: number) => void;
 		onDragEnd?: () => void;
 		onResizeEnd?: () => void;
-		onPause?: () => void;
-		onResume?: () => void;
-		onCancel?: () => void;
 	}
 
 	let {
@@ -68,85 +58,127 @@
 		onMove,
 		onResize,
 		onDragEnd,
-		onResizeEnd,
-		onPause,
-		onResume,
-		onCancel
+		onResizeEnd
 	}: Props = $props();
 
-	// Agent data (would come from store/props in real implementation)
-	let agentData = $state<AgentData>({
-		status: 'running',
-		branch: 'feature/add-cards',
-		startTime: new Date(Date.now() - 125000), // 2 min ago
-		progress: 45,
-		tasks: [
-			{
-				id: '1',
-				title: 'Analyze codebase',
-				status: 'completed',
-			},
-			{
-				id: '2',
-				title: 'Create components',
-				status: 'running',
-				children: [
-					{ id: '2.1', title: 'BaseCard.svelte', status: 'completed' },
-					{ id: '2.2', title: 'AgentCard.svelte', status: 'running' },
-					{ id: '2.3', title: 'StudioCard.svelte', status: 'pending' },
-				],
-			},
-			{
-				id: '3',
-				title: 'Run tests',
-				status: 'pending',
-			},
-		],
-		logs: [
-			'[14:32:15] Starting task analysis...',
-			'[14:32:18] Found 12 files to modify',
-			'[14:32:20] Creating BaseCard.svelte...',
-			'[14:34:45] Creating AgentCard.svelte...',
-		],
-	});
+	// Agent data from store
+	let agent = $state<BackgroundAgent | null>(null);
+	let loading = $state(true);
+	let error = $state<string | null>(null);
 
 	// Task tree expanded state
-	let expandedTasks = $state<Set<string>>(new Set(['2']));
+	let expandedTasks = $state<Set<string>>(new Set());
 
 	// Duration timer
 	let duration = $state('0:00');
+	let durationInterval: ReturnType<typeof setInterval> | null = null;
 
+	// Fetch agent data
+	async function fetchAgent() {
+		loading = true;
+		error = null;
+		try {
+			const fetchedAgent = await agents.fetchAgent(agentId);
+			if (fetchedAgent) {
+				agent = fetchedAgent;
+				// Auto-expand tasks with running children
+				const runningTaskIds = new Set<string>();
+				function findRunningParents(tasks: AgentTask[], parentIds: string[] = []) {
+					for (const task of tasks) {
+						if (task.status === 'in_progress') {
+							parentIds.forEach((id) => runningTaskIds.add(id));
+						}
+						if (task.children) {
+							findRunningParents(task.children, [...parentIds, task.id]);
+						}
+					}
+				}
+				findRunningParents(fetchedAgent.tasks);
+				expandedTasks = runningTaskIds;
+
+				// Fetch logs
+				await agents.fetchLogs(agentId, { limit: 10 });
+				// Update agent with logs
+				agent = agents.getAgent(agentId) || agent;
+			} else {
+				error = 'Agent not found';
+			}
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Failed to load agent';
+		} finally {
+			loading = false;
+		}
+	}
+
+	// Subscribe to agent updates via store
+	onMount(() => {
+		fetchAgent();
+		agents.subscribeToAgent(agentId);
+
+		// Poll for updates every 5 seconds as backup
+		const pollInterval = setInterval(() => {
+			const updated = agents.getAgent(agentId);
+			if (updated) {
+				agent = updated;
+			}
+		}, 5000);
+
+		return () => {
+			clearInterval(pollInterval);
+		};
+	});
+
+	onDestroy(() => {
+		agents.unsubscribeFromAgent(agentId);
+		if (durationInterval) {
+			clearInterval(durationInterval);
+		}
+	});
+
+	// Duration timer effect
 	$effect(() => {
-		if (agentData.status !== 'running' || !agentData.startTime) return;
+		if (durationInterval) {
+			clearInterval(durationInterval);
+			durationInterval = null;
+		}
+
+		if (agent?.status !== 'running' || !agent?.startedAt) {
+			return;
+		}
 
 		function updateDuration() {
-			if (!agentData.startTime) return;
-			const elapsed = Math.floor((Date.now() - agentData.startTime.getTime()) / 1000);
+			if (!agent?.startedAt) return;
+			const elapsed = Math.floor((Date.now() - agent.startedAt.getTime()) / 1000);
 			const mins = Math.floor(elapsed / 60);
 			const secs = elapsed % 60;
 			duration = `${mins}:${secs.toString().padStart(2, '0')}`;
 		}
 
 		updateDuration();
-		const interval = setInterval(updateDuration, 1000);
+		durationInterval = setInterval(updateDuration, 1000);
 
-		return () => clearInterval(interval);
+		return () => {
+			if (durationInterval) {
+				clearInterval(durationInterval);
+				durationInterval = null;
+			}
+		};
 	});
 
 	// Status colors and icons
-	const statusConfig: Record<AgentData['status'], { color: string; label: string }> = {
+	const statusConfig = {
 		running: { color: 'text-blue-500', label: 'Running' },
 		paused: { color: 'text-yellow-500', label: 'Paused' },
-		idle: { color: 'text-muted-foreground', label: 'Idle' },
-		error: { color: 'text-destructive', label: 'Error' },
-		completed: { color: 'text-green-500', label: 'Completed' },
+		queued: { color: 'text-muted-foreground', label: 'Queued' },
+		failed: { color: 'text-destructive', label: 'Failed' },
+		completed: { color: 'text-green-500', label: 'Completed' }
 	};
 
 	const taskStatusIcons = {
 		pending: Circle,
-		running: Loader2,
+		in_progress: Loader2,
 		completed: CheckCircle,
-		error: AlertCircle,
+		failed: AlertCircle
 	};
 
 	// Toggle task expansion
@@ -161,145 +193,236 @@
 	}
 
 	// Control actions
-	function handlePause() {
-		agentData.status = 'paused';
-		onPause?.();
+	async function handlePause() {
+		if (!agent) return;
+		try {
+			await agents.pauseAgent(agent.id);
+			agent = agents.getAgent(agentId) || agent;
+		} catch (e) {
+			console.error('Failed to pause agent:', e);
+		}
 	}
 
-	function handleResume() {
-		agentData.status = 'running';
-		onResume?.();
+	async function handleResume() {
+		if (!agent) return;
+		try {
+			await agents.resumeAgent(agent.id);
+			agent = agents.getAgent(agentId) || agent;
+		} catch (e) {
+			console.error('Failed to resume agent:', e);
+		}
 	}
 
-	function handleCancel() {
-		agentData.status = 'idle';
-		onCancel?.();
+	async function handleCancel() {
+		if (!agent) return;
+		try {
+			await agents.cancelAgent(agent.id);
+			agent = agents.getAgent(agentId) || agent;
+		} catch (e) {
+			console.error('Failed to cancel agent:', e);
+		}
+	}
+
+	async function handleDelete() {
+		if (!agent) return;
+		try {
+			await agents.deleteAgent(agent.id);
+			onClose();
+		} catch (e) {
+			console.error('Failed to delete agent:', e);
+		}
+	}
+
+	// Format log timestamp
+	function formatLogTime(date: Date): string {
+		return date.toLocaleTimeString([], {
+			hour: '2-digit',
+			minute: '2-digit',
+			second: '2-digit'
+		});
+	}
+
+	// Format log entry
+	function formatLog(log: AgentLogEntry): string {
+		return `[${formatLogTime(log.timestamp)}] ${log.message}`;
 	}
 </script>
 
 <BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
 	<div class="agent-content">
-		<!-- Status Header -->
-		<div class="status-header">
-			<div class="status-left">
-				<span class="status-indicator {statusConfig[agentData.status].color}">
-					{#if agentData.status === 'running'}
-						<Loader2 size={14} class="animate-spin" />
-					{:else if agentData.status === 'completed'}
-						<CheckCircle size={14} />
-					{:else if agentData.status === 'error'}
-						<AlertCircle size={14} />
-					{:else}
-						<Circle size={14} />
+		{#if loading}
+			<div class="loading-state">
+				<Loader2 size={24} class="animate-spin text-muted-foreground" />
+				<span class="text-sm text-muted-foreground">Loading agent...</span>
+			</div>
+		{:else if error}
+			<div class="error-state">
+				<AlertCircle size={24} class="text-destructive" />
+				<span class="text-sm text-destructive">{error}</span>
+				<button class="retry-btn" onclick={fetchAgent}>Retry</button>
+			</div>
+		{:else if agent}
+			<!-- Status Header -->
+			<div class="status-header">
+				<div class="status-left">
+					<span class="status-indicator {statusConfig[agent.status].color}">
+						{#if agent.status === 'running'}
+							<Loader2 size={14} class="animate-spin" />
+						{:else if agent.status === 'completed'}
+							<CheckCircle size={14} />
+						{:else if agent.status === 'failed'}
+							<AlertCircle size={14} />
+						{:else if agent.status === 'paused'}
+							<Pause size={14} />
+						{:else}
+							<Circle size={14} />
+						{/if}
+						<span>{statusConfig[agent.status].label}</span>
+					</span>
+					{#if agent.status === 'running'}
+						<span class="duration">{duration}</span>
 					{/if}
-					<span>{statusConfig[agentData.status].label}</span>
-				</span>
-				{#if agentData.status === 'running'}
-					<span class="duration">{duration}</span>
+				</div>
+
+				<div class="header-right">
+					{#if agent.prUrl}
+						<a
+							href={agent.prUrl}
+							target="_blank"
+							rel="noopener noreferrer"
+							class="pr-badge"
+							title="View Pull Request"
+						>
+							<ExternalLink size={12} />
+							<span>PR</span>
+						</a>
+					{/if}
+					{#if agent.branch}
+						<div class="branch-badge">
+							<GitBranch size={12} />
+							<span>{agent.branch}</span>
+						</div>
+					{/if}
+				</div>
+			</div>
+
+			<!-- Progress Bar -->
+			{#if agent.progress !== undefined && agent.status === 'running'}
+				<div class="progress-container">
+					<div class="progress-bar" style:width="{agent.progress}%"></div>
+				</div>
+			{/if}
+
+			<!-- Error Message -->
+			{#if agent.status === 'failed' && agent.error}
+				<div class="error-banner">
+					<AlertCircle size={14} />
+					<span>{agent.error}</span>
+				</div>
+			{/if}
+
+			<!-- Result Summary -->
+			{#if agent.status === 'completed' && agent.resultSummary}
+				<div class="result-banner">
+					<CheckCircle size={14} />
+					<span>{agent.resultSummary}</span>
+				</div>
+			{/if}
+
+			<!-- Task Tree -->
+			{#if agent.tasks && agent.tasks.length > 0}
+				<div class="task-tree">
+					<div class="section-label">Tasks</div>
+					<div class="tasks">
+						{#each agent.tasks as task}
+							{@const TaskIcon = taskStatusIcons[task.status]}
+							{@const hasChildren = task.children && task.children.length > 0}
+							{@const isExpanded = expandedTasks.has(task.id)}
+
+							<div class="task-item">
+								<button
+									class="task-row"
+									onclick={() => hasChildren && toggleTask(task.id)}
+									class:has-children={hasChildren}
+								>
+									{#if hasChildren}
+										{#if isExpanded}
+											<ChevronDown size={14} class="expand-icon" />
+										{:else}
+											<ChevronRight size={14} class="expand-icon" />
+										{/if}
+									{:else}
+										<span class="expand-placeholder"></span>
+									{/if}
+									<TaskIcon
+										size={14}
+										class="task-icon {task.status === 'in_progress' ? 'animate-spin' : ''} {task.status === 'completed' ? 'text-green-500' : task.status === 'failed' ? 'text-destructive' : ''}"
+									/>
+									<span class="task-title">{task.name}</span>
+								</button>
+
+								{#if hasChildren && isExpanded}
+									<div class="task-children">
+										{#each task.children as child}
+											{@const ChildIcon = taskStatusIcons[child.status]}
+											<div class="task-row child">
+												<span class="expand-placeholder"></span>
+												<ChildIcon
+													size={12}
+													class="task-icon {child.status === 'in_progress' ? 'animate-spin' : ''} {child.status === 'completed' ? 'text-green-500' : child.status === 'failed' ? 'text-destructive' : ''}"
+												/>
+												<span class="task-title">{child.name}</span>
+											</div>
+										{/each}
+									</div>
+								{/if}
+							</div>
+						{/each}
+					</div>
+				</div>
+			{/if}
+
+			<!-- Log Lines -->
+			{#if agent.logs && agent.logs.length > 0}
+				<div class="logs-section">
+					<div class="section-label">Recent Logs</div>
+					<div class="logs">
+						{#each agent.logs.slice(-4) as log}
+							<div class="log-line">{formatLog(log)}</div>
+						{/each}
+					</div>
+				</div>
+			{/if}
+
+			<!-- Control Buttons -->
+			<div class="controls">
+				{#if agent.status === 'running'}
+					<button class="control-btn pause" onclick={handlePause}>
+						<Pause size={14} />
+						<span>Pause</span>
+					</button>
+				{:else if agent.status === 'paused'}
+					<button class="control-btn resume" onclick={handleResume}>
+						<Play size={14} />
+						<span>Resume</span>
+					</button>
+				{/if}
+
+				{#if agent.status === 'running' || agent.status === 'paused' || agent.status === 'queued'}
+					<button class="control-btn cancel" onclick={handleCancel}>
+						<Square size={14} />
+						<span>Cancel</span>
+					</button>
+				{/if}
+
+				{#if agent.status === 'completed' || agent.status === 'failed'}
+					<button class="control-btn delete" onclick={handleDelete}>
+						<Trash2 size={14} />
+						<span>Delete</span>
+					</button>
 				{/if}
 			</div>
-
-			{#if agentData.branch}
-				<div class="branch-badge">
-					<GitBranch size={12} />
-					<span>{agentData.branch}</span>
-				</div>
-			{/if}
-		</div>
-
-		<!-- Progress Bar -->
-		{#if agentData.progress !== undefined && agentData.status === 'running'}
-			<div class="progress-container">
-				<div class="progress-bar" style:width="{agentData.progress}%"></div>
-			</div>
 		{/if}
-
-		<!-- Task Tree -->
-		{#if agentData.tasks && agentData.tasks.length > 0}
-			<div class="task-tree">
-				<div class="section-label">Tasks</div>
-				<div class="tasks">
-					{#each agentData.tasks as task}
-						{@const TaskIcon = taskStatusIcons[task.status]}
-						{@const hasChildren = task.children && task.children.length > 0}
-						{@const isExpanded = expandedTasks.has(task.id)}
-
-						<div class="task-item">
-							<button
-								class="task-row"
-								onclick={() => hasChildren && toggleTask(task.id)}
-								class:has-children={hasChildren}
-							>
-								{#if hasChildren}
-									{#if isExpanded}
-										<ChevronDown size={14} class="expand-icon" />
-									{:else}
-										<ChevronRight size={14} class="expand-icon" />
-									{/if}
-								{:else}
-									<span class="expand-placeholder"></span>
-								{/if}
-								<TaskIcon
-									size={14}
-									class="task-icon {task.status === 'running' ? 'animate-spin' : ''} {task.status === 'completed' ? 'text-green-500' : task.status === 'error' ? 'text-destructive' : ''}"
-								/>
-								<span class="task-title">{task.title}</span>
-							</button>
-
-							{#if hasChildren && isExpanded}
-								<div class="task-children">
-									{#each task.children as child}
-										{@const ChildIcon = taskStatusIcons[child.status]}
-										<div class="task-row child">
-											<span class="expand-placeholder"></span>
-											<ChildIcon
-												size={12}
-												class="task-icon {child.status === 'running' ? 'animate-spin' : ''} {child.status === 'completed' ? 'text-green-500' : child.status === 'error' ? 'text-destructive' : ''}"
-											/>
-											<span class="task-title">{child.title}</span>
-										</div>
-									{/each}
-								</div>
-							{/if}
-						</div>
-					{/each}
-				</div>
-			</div>
-		{/if}
-
-		<!-- Log Lines -->
-		{#if agentData.logs && agentData.logs.length > 0}
-			<div class="logs-section">
-				<div class="section-label">Recent Logs</div>
-				<div class="logs">
-					{#each agentData.logs.slice(-4) as log}
-						<div class="log-line">{log}</div>
-					{/each}
-				</div>
-			</div>
-		{/if}
-
-		<!-- Control Buttons -->
-		<div class="controls">
-			{#if agentData.status === 'running'}
-				<button class="control-btn pause" onclick={handlePause}>
-					<Pause size={14} />
-					<span>Pause</span>
-				</button>
-			{:else if agentData.status === 'paused'}
-				<button class="control-btn resume" onclick={handleResume}>
-					<Play size={14} />
-					<span>Resume</span>
-				</button>
-			{/if}
-
-			{#if agentData.status === 'running' || agentData.status === 'paused'}
-				<button class="control-btn cancel" onclick={handleCancel}>
-					<Square size={14} />
-					<span>Cancel</span>
-				</button>
-			{/if}
-		</div>
 	</div>
 </BaseCard>
 
@@ -309,6 +432,32 @@
 		flex-direction: column;
 		height: 100%;
 		overflow: hidden;
+	}
+
+	/* Loading/Error States */
+	.loading-state,
+	.error-state {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 12px;
+		height: 100%;
+		padding: 24px;
+	}
+
+	.retry-btn {
+		padding: 6px 12px;
+		background: hsl(var(--muted));
+		border: 1px solid hsl(var(--border));
+		border-radius: 4px;
+		font-size: 0.75rem;
+		color: hsl(var(--foreground));
+		cursor: pointer;
+	}
+
+	.retry-btn:hover {
+		background: hsl(var(--accent));
 	}
 
 	/* Status Header */
@@ -327,6 +476,12 @@
 		gap: 12px;
 	}
 
+	.header-right {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
 	.status-indicator {
 		display: flex;
 		align-items: center;
@@ -341,7 +496,8 @@
 		font-family: monospace;
 	}
 
-	.branch-badge {
+	.branch-badge,
+	.pr-badge {
 		display: flex;
 		align-items: center;
 		gap: 4px;
@@ -350,6 +506,16 @@
 		border-radius: 4px;
 		font-size: 0.6875rem;
 		color: hsl(var(--muted-foreground));
+		text-decoration: none;
+	}
+
+	.pr-badge {
+		background: hsl(var(--primary) / 0.1);
+		color: hsl(var(--primary));
+	}
+
+	.pr-badge:hover {
+		background: hsl(var(--primary) / 0.2);
 	}
 
 	/* Progress Bar */
@@ -363,6 +529,27 @@
 		height: 100%;
 		background: hsl(var(--primary));
 		transition: width 0.3s ease;
+	}
+
+	/* Error/Result Banners */
+	.error-banner,
+	.result-banner {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 8px 16px;
+		font-size: 0.75rem;
+		flex-shrink: 0;
+	}
+
+	.error-banner {
+		background: hsl(var(--destructive) / 0.1);
+		color: hsl(var(--destructive));
+	}
+
+	.result-banner {
+		background: hsl(var(--primary) / 0.1);
+		color: hsl(var(--primary));
 	}
 
 	/* Task Tree */
@@ -499,10 +686,17 @@
 		background: hsl(var(--accent));
 	}
 
-	.control-btn.cancel:hover {
+	.control-btn.cancel:hover,
+	.control-btn.delete:hover {
 		background: hsl(var(--destructive) / 0.1);
 		border-color: hsl(var(--destructive) / 0.3);
 		color: hsl(var(--destructive));
+	}
+
+	.control-btn.resume:hover {
+		background: hsl(var(--primary) / 0.1);
+		border-color: hsl(var(--primary) / 0.3);
+		color: hsl(var(--primary));
 	}
 
 	/* Utility classes */

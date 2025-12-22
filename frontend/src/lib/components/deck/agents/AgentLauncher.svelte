@@ -5,10 +5,11 @@
 	 * Features:
 	 * - Task name input
 	 * - Large prompt textarea
-	 * - Options for auto-branch, auto-PR, max duration
-	 * - Profile and project selectors
+	 * - Options for auto-branch, auto-PR, auto-review, max duration
+	 * - Profile and project selectors (fetched from API)
 	 */
-	import { X, Rocket, GitBranch, GitPullRequest, Clock, User, FolderKanban } from 'lucide-svelte';
+	import { onMount } from 'svelte';
+	import { X, Rocket, GitBranch, GitPullRequest, Clock, User, FolderKanban, Eye, Loader2 } from 'lucide-svelte';
 
 	interface Props {
 		onClose: () => void;
@@ -20,9 +21,20 @@
 		prompt: string;
 		autoBranch: boolean;
 		autoPR: boolean;
+		autoReview: boolean;
 		maxDuration: number;
 		profileId?: string;
 		projectId?: string;
+	}
+
+	interface Profile {
+		id: string;
+		name: string;
+	}
+
+	interface Project {
+		id: string;
+		name: string;
 	}
 
 	let { onClose, onLaunch }: Props = $props();
@@ -32,25 +44,19 @@
 	let prompt = $state('');
 	let autoBranch = $state(true);
 	let autoPR = $state(false);
+	let autoReview = $state(false);
 	let maxDuration = $state(30); // minutes
 	let profileId = $state<string | undefined>(undefined);
 	let projectId = $state<string | undefined>(undefined);
 	let showOptions = $state(false);
+	let isLaunching = $state(false);
+	let error = $state<string | null>(null);
 
-	// Mock profiles and projects
-	const profiles = [
-		{ id: 'default', name: 'Default' },
-		{ id: 'backend', name: 'Backend Developer' },
-		{ id: 'frontend', name: 'Frontend Developer' },
-		{ id: 'fullstack', name: 'Full Stack' }
-	];
-
-	const projects = [
-		{ id: 'current', name: 'Current Project' },
-		{ id: 'api', name: 'API Service' },
-		{ id: 'web', name: 'Web App' },
-		{ id: 'mobile', name: 'Mobile App' }
-	];
+	// Data from API
+	let profiles = $state<Profile[]>([]);
+	let projects = $state<Project[]>([]);
+	let loadingProfiles = $state(true);
+	let loadingProjects = $state(true);
 
 	const durations = [
 		{ value: 15, label: '15 minutes' },
@@ -60,20 +66,66 @@
 	];
 
 	// Validation
-	const canLaunch = $derived(name.trim().length > 0 && prompt.trim().length > 0);
+	const canLaunch = $derived(name.trim().length > 0 && prompt.trim().length > 0 && !isLaunching);
 
-	function handleSubmit() {
+	// Fetch profiles and projects on mount
+	onMount(async () => {
+		await Promise.all([fetchProfiles(), fetchProjects()]);
+	});
+
+	async function fetchProfiles() {
+		try {
+			const response = await fetch('/api/v1/profiles', {
+				credentials: 'include'
+			});
+			if (response.ok) {
+				const data = await response.json();
+				profiles = data.profiles ?? data ?? [];
+			}
+		} catch (err) {
+			console.error('Failed to fetch profiles:', err);
+		} finally {
+			loadingProfiles = false;
+		}
+	}
+
+	async function fetchProjects() {
+		try {
+			const response = await fetch('/api/v1/projects', {
+				credentials: 'include'
+			});
+			if (response.ok) {
+				const data = await response.json();
+				projects = data.projects ?? data ?? [];
+			}
+		} catch (err) {
+			console.error('Failed to fetch projects:', err);
+		} finally {
+			loadingProjects = false;
+		}
+	}
+
+	async function handleSubmit() {
 		if (!canLaunch) return;
 
-		onLaunch({
-			name: name.trim(),
-			prompt: prompt.trim(),
-			autoBranch,
-			autoPR,
-			maxDuration,
-			profileId,
-			projectId
-		});
+		isLaunching = true;
+		error = null;
+
+		try {
+			await onLaunch({
+				name: name.trim(),
+				prompt: prompt.trim(),
+				autoBranch,
+				autoPR,
+				autoReview,
+				maxDuration,
+				profileId,
+				projectId
+			});
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to launch agent';
+			isLaunching = false;
+		}
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
@@ -120,6 +172,13 @@
 
 		<!-- Content -->
 		<div class="flex-1 overflow-y-auto p-6 space-y-4">
+			<!-- Error message -->
+			{#if error}
+				<div class="px-3 py-2 bg-red-500/10 border border-red-500/20 rounded-lg text-sm text-red-500">
+					{error}
+				</div>
+			{/if}
+
 			<!-- Task name -->
 			<div>
 				<label for="agent-name" class="block text-sm font-medium text-foreground mb-1.5">
@@ -131,6 +190,7 @@
 					bind:value={name}
 					placeholder="e.g., Implement user authentication"
 					class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+					disabled={isLaunching}
 				/>
 			</div>
 
@@ -145,6 +205,7 @@
 					placeholder="Describe what you want the agent to accomplish..."
 					rows="6"
 					class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
+					disabled={isLaunching}
 				></textarea>
 				<p class="text-xs text-muted-foreground mt-1">
 					Be specific about requirements, constraints, and expected outcomes
@@ -183,6 +244,7 @@
 							<button
 								type="button"
 								onclick={() => autoBranch = !autoBranch}
+								disabled={isLaunching}
 								class="relative w-10 h-6 rounded-full transition-colors {autoBranch ? 'bg-primary' : 'bg-muted'}"
 							>
 								<span
@@ -200,10 +262,29 @@
 							<button
 								type="button"
 								onclick={() => autoPR = !autoPR}
+								disabled={isLaunching}
 								class="relative w-10 h-6 rounded-full transition-colors {autoPR ? 'bg-primary' : 'bg-muted'}"
 							>
 								<span
 									class="absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform {autoPR ? 'translate-x-4' : ''}"
+								></span>
+							</button>
+						</label>
+
+						<!-- Auto-Review toggle -->
+						<label class="flex items-center justify-between cursor-pointer">
+							<div class="flex items-center gap-2">
+								<Eye class="w-4 h-4 text-muted-foreground" />
+								<span class="text-sm text-foreground">Auto-review changes</span>
+							</div>
+							<button
+								type="button"
+								onclick={() => autoReview = !autoReview}
+								disabled={isLaunching}
+								class="relative w-10 h-6 rounded-full transition-colors {autoReview ? 'bg-primary' : 'bg-muted'}"
+							>
+								<span
+									class="absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform {autoReview ? 'translate-x-4' : ''}"
 								></span>
 							</button>
 						</label>
@@ -217,6 +298,7 @@
 						</label>
 						<select
 							bind:value={maxDuration}
+							disabled={isLaunching}
 							class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
 						>
 							{#each durations as duration}
@@ -233,9 +315,12 @@
 						</label>
 						<select
 							bind:value={profileId}
+							disabled={isLaunching || loadingProfiles}
 							class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
 						>
-							<option value={undefined}>Use default</option>
+							<option value={undefined}>
+								{loadingProfiles ? 'Loading profiles...' : 'Use default'}
+							</option>
 							{#each profiles as profile}
 								<option value={profile.id}>{profile.name}</option>
 							{/each}
@@ -250,9 +335,12 @@
 						</label>
 						<select
 							bind:value={projectId}
+							disabled={isLaunching || loadingProjects}
 							class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
 						>
-							<option value={undefined}>Current workspace</option>
+							<option value={undefined}>
+								{loadingProjects ? 'Loading projects...' : 'Current workspace'}
+							</option>
 							{#each projects as project}
 								<option value={project.id}>{project.name}</option>
 							{/each}
@@ -267,6 +355,8 @@
 			<p class="text-xs text-muted-foreground">
 				{#if canLaunch}
 					Press <kbd class="px-1.5 py-0.5 bg-muted rounded text-xs">Cmd+Enter</kbd> to launch
+				{:else if isLaunching}
+					Launching agent...
 				{:else}
 					Enter task name and instructions
 				{/if}
@@ -274,7 +364,8 @@
 			<div class="flex items-center gap-2">
 				<button
 					onclick={onClose}
-					class="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
+					disabled={isLaunching}
+					class="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
 				>
 					Cancel
 				</button>
@@ -283,8 +374,13 @@
 					disabled={!canLaunch}
 					class="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
 				>
-					<Rocket class="w-4 h-4" />
-					Launch Agent
+					{#if isLaunching}
+						<Loader2 class="w-4 h-4 animate-spin" />
+						Launching...
+					{:else}
+						<Rocket class="w-4 h-4" />
+						Launch Agent
+					{/if}
 				</button>
 			</div>
 		</div>

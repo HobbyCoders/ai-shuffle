@@ -4,29 +4,16 @@
 	 *
 	 * Features:
 	 * - Status indicator with animation
-	 * - Agent name and task
+	 * - Agent name and current task
 	 * - Progress bar for running agents
 	 * - Duration badge
 	 * - Quick actions: Pause/Resume, View, Cancel
 	 */
 	import { Pause, Play, Eye, X, Clock, GitBranch } from 'lucide-svelte';
-
-	type AgentStatus = 'running' | 'queued' | 'completed' | 'failed' | 'paused';
-
-	interface Agent {
-		id: string;
-		name: string;
-		status: AgentStatus;
-		progress?: number;
-		startedAt?: Date;
-		completedAt?: Date;
-		duration?: number;
-		branch?: string;
-		task?: string;
-	}
+	import type { BackgroundAgent, AgentStatus } from '$lib/stores/agents';
 
 	interface Props {
-		agent: Agent;
+		agent: BackgroundAgent;
 		onSelect: () => void;
 		onPause?: () => void;
 		onResume?: () => void;
@@ -46,9 +33,26 @@
 
 	const config = $derived(statusConfig[agent.status]);
 
+	// Get current task description from tasks array
+	const currentTask = $derived(() => {
+		// Find the first in_progress task, or pending task
+		function findCurrentTask(tasks: typeof agent.tasks): string | undefined {
+			for (const task of tasks) {
+				if (task.status === 'in_progress') {
+					return task.name;
+				}
+				if (task.children) {
+					const childTask = findCurrentTask(task.children);
+					if (childTask) return childTask;
+				}
+			}
+			return undefined;
+		}
+		return findCurrentTask(agent.tasks) ?? (agent.error ? agent.error : undefined);
+	});
+
 	// Format duration
-	function formatDuration(ms?: number): string {
-		if (!ms) return '--';
+	function formatDuration(ms: number): string {
 		const seconds = Math.floor(ms / 1000);
 		const minutes = Math.floor(seconds / 60);
 		const hours = Math.floor(minutes / 60);
@@ -65,7 +69,8 @@
 	// Calculate elapsed time for running agents
 	function getElapsedTime(): string {
 		if (!agent.startedAt) return '--';
-		const elapsed = Date.now() - agent.startedAt.getTime();
+		const endTime = agent.completedAt ?? new Date();
+		const elapsed = endTime.getTime() - agent.startedAt.getTime();
 		return formatDuration(elapsed);
 	}
 
@@ -109,8 +114,10 @@
 			</div>
 
 			<!-- Task or message -->
-			{#if agent.task}
-				<p class="text-sm text-muted-foreground mt-1 truncate">{agent.task}</p>
+			{#if currentTask()}
+				<p class="text-sm text-muted-foreground mt-1 truncate">{currentTask()}</p>
+			{:else if agent.resultSummary}
+				<p class="text-sm text-muted-foreground mt-1 truncate">{agent.resultSummary}</p>
 			{/if}
 
 			<!-- Progress bar for running agents -->
@@ -134,13 +141,7 @@
 				<!-- Duration -->
 				<div class="flex items-center gap-1 text-xs text-muted-foreground">
 					<Clock class="w-3 h-3" />
-					{#if agent.status === 'running' || agent.status === 'paused'}
-						<span>{getElapsedTime()}</span>
-					{:else if agent.duration}
-						<span>{formatDuration(agent.duration)}</span>
-					{:else}
-						<span>--</span>
-					{/if}
+					<span>{getElapsedTime()}</span>
 				</div>
 
 				<!-- Branch -->
@@ -149,6 +150,19 @@
 						<GitBranch class="w-3 h-3" />
 						<span class="truncate max-w-[100px]">{agent.branch}</span>
 					</div>
+				{/if}
+
+				<!-- PR Link -->
+				{#if agent.prUrl}
+					<a
+						href={agent.prUrl}
+						target="_blank"
+						rel="noopener noreferrer"
+						onclick={(e) => e.stopPropagation()}
+						class="text-xs text-primary hover:underline"
+					>
+						View PR
+					</a>
 				{/if}
 			</div>
 		</div>

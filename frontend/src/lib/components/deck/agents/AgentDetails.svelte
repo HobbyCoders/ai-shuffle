@@ -5,16 +5,16 @@
 	 * Features:
 	 * - Header with name and status badge
 	 * - Metadata: started time, duration, branch
-	 * - GitHub link
+	 * - GitHub link for PR
 	 * - Tabs: Tasks, Logs
-	 * - Control buttons: Pause, Resume, Cancel, Intervene
+	 * - Control buttons: Pause, Resume, Cancel, Delete
 	 */
 	import {
 		X,
 		Pause,
 		Play,
 		StopCircle,
-		MessageSquare,
+		Trash2,
 		Clock,
 		GitBranch,
 		ExternalLink,
@@ -23,31 +23,18 @@
 	} from 'lucide-svelte';
 	import TaskTree from './TaskTree.svelte';
 	import AgentLogs from './AgentLogs.svelte';
-
-	type AgentStatus = 'running' | 'queued' | 'completed' | 'failed' | 'paused';
-
-	interface Agent {
-		id: string;
-		name: string;
-		status: AgentStatus;
-		progress?: number;
-		startedAt?: Date;
-		completedAt?: Date;
-		duration?: number;
-		branch?: string;
-		task?: string;
-	}
+	import type { BackgroundAgent, AgentStatus } from '$lib/stores/agents';
 
 	interface Props {
-		agent: Agent;
+		agent: BackgroundAgent;
 		onClose: () => void;
 		onPause?: () => void;
 		onResume?: () => void;
 		onCancel?: () => void;
-		onIntervene?: () => void;
+		onDelete?: () => void;
 	}
 
-	let { agent, onClose, onPause, onResume, onCancel, onIntervene }: Props = $props();
+	let { agent, onClose, onPause, onResume, onCancel, onDelete }: Props = $props();
 
 	// State
 	let activeTab = $state<'tasks' | 'logs'>('tasks');
@@ -63,6 +50,23 @@
 
 	const config = $derived(statusConfig[agent.status]);
 
+	// Get current task description from tasks array
+	const currentTask = $derived(() => {
+		function findCurrentTask(tasks: typeof agent.tasks): string | undefined {
+			for (const task of tasks) {
+				if (task.status === 'in_progress') {
+					return task.name;
+				}
+				if (task.children) {
+					const childTask = findCurrentTask(task.children);
+					if (childTask) return childTask;
+				}
+			}
+			return undefined;
+		}
+		return findCurrentTask(agent.tasks) ?? (agent.error ? agent.error : agent.resultSummary);
+	});
+
 	// Format time
 	function formatTime(date?: Date): string {
 		if (!date) return '--';
@@ -75,8 +79,7 @@
 	}
 
 	// Format duration
-	function formatDuration(ms?: number): string {
-		if (!ms) return '--';
+	function formatDuration(ms: number): string {
 		const seconds = Math.floor(ms / 1000);
 		const minutes = Math.floor(seconds / 60);
 		const hours = Math.floor(minutes / 60);
@@ -92,7 +95,8 @@
 
 	function getElapsedTime(): string {
 		if (!agent.startedAt) return '--';
-		const elapsed = Date.now() - agent.startedAt.getTime();
+		const endTime = agent.completedAt ?? new Date();
+		const elapsed = endTime.getTime() - agent.startedAt.getTime();
 		return formatDuration(elapsed);
 	}
 
@@ -126,8 +130,8 @@
 						{config.label}
 					</span>
 				</div>
-				{#if agent.task}
-					<p class="text-sm text-muted-foreground mt-1 truncate">{agent.task}</p>
+				{#if currentTask()}
+					<p class="text-sm text-muted-foreground mt-1 truncate">{currentTask()}</p>
 				{/if}
 			</div>
 			<button
@@ -159,13 +163,7 @@
 					<p class="text-xs text-muted-foreground mb-1">Duration</p>
 					<div class="flex items-center gap-1 text-sm text-foreground">
 						<Clock class="w-3.5 h-3.5 text-muted-foreground" />
-						{#if agent.status === 'running' || agent.status === 'paused'}
-							<span>{getElapsedTime()}</span>
-						{:else if agent.duration}
-							<span>{formatDuration(agent.duration)}</span>
-						{:else}
-							<span>--</span>
-						{/if}
+						<span>{getElapsedTime()}</span>
 					</div>
 				</div>
 
@@ -185,15 +183,18 @@
 				<!-- GitHub link -->
 				<div>
 					<p class="text-xs text-muted-foreground mb-1">GitHub</p>
-					{#if agent.branch}
-						<button
-							type="button"
+					{#if agent.prUrl}
+						<a
+							href={agent.prUrl}
+							target="_blank"
+							rel="noopener noreferrer"
 							class="flex items-center gap-1 text-sm text-primary hover:underline"
-							onclick={(e) => { e.stopPropagation(); /* TODO: Open GitHub branch */ }}
 						>
 							<ExternalLink class="w-3.5 h-3.5" />
-							View branch
-						</button>
+							View PR
+						</a>
+					{:else if agent.branch}
+						<span class="text-sm text-muted-foreground">No PR yet</span>
 					{:else}
 						<span class="text-sm text-muted-foreground">--</span>
 					{/if}
@@ -215,10 +216,26 @@
 					</div>
 				</div>
 			{/if}
+
+			<!-- Error message -->
+			{#if agent.status === 'failed' && agent.error}
+				<div class="mt-4 p-3 bg-red-500/10 border border-red-500/20 rounded-lg">
+					<p class="text-sm text-red-500 font-medium">Error</p>
+					<p class="text-sm text-red-400 mt-1">{agent.error}</p>
+				</div>
+			{/if}
+
+			<!-- Result summary -->
+			{#if agent.status === 'completed' && agent.resultSummary}
+				<div class="mt-4 p-3 bg-green-500/10 border border-green-500/20 rounded-lg">
+					<p class="text-sm text-green-500 font-medium">Result</p>
+					<p class="text-sm text-green-400 mt-1">{agent.resultSummary}</p>
+				</div>
+			{/if}
 		</div>
 
 		<!-- Control buttons -->
-		{#if agent.status === 'running' || agent.status === 'paused'}
+		{#if agent.status === 'running' || agent.status === 'paused' || agent.status === 'queued'}
 			<div class="px-6 py-3 border-b border-border flex items-center gap-2">
 				{#if agent.status === 'running'}
 					<button
@@ -228,7 +245,7 @@
 						<Pause class="w-4 h-4" />
 						Pause
 					</button>
-				{:else}
+				{:else if agent.status === 'paused'}
 					<button
 						onclick={onResume}
 						class="flex items-center gap-2 px-3 py-1.5 bg-green-500/10 text-green-500 rounded-lg hover:bg-green-500/20 transition-colors text-sm font-medium"
@@ -239,19 +256,22 @@
 				{/if}
 
 				<button
-					onclick={onIntervene}
-					class="flex items-center gap-2 px-3 py-1.5 bg-primary/10 text-primary rounded-lg hover:bg-primary/20 transition-colors text-sm font-medium"
-				>
-					<MessageSquare class="w-4 h-4" />
-					Intervene
-				</button>
-
-				<button
 					onclick={onCancel}
 					class="flex items-center gap-2 px-3 py-1.5 bg-red-500/10 text-red-500 rounded-lg hover:bg-red-500/20 transition-colors text-sm font-medium ml-auto"
 				>
 					<StopCircle class="w-4 h-4" />
 					Cancel
+				</button>
+			</div>
+		{:else}
+			<!-- Delete button for completed/failed agents -->
+			<div class="px-6 py-3 border-b border-border flex items-center">
+				<button
+					onclick={onDelete}
+					class="flex items-center gap-2 px-3 py-1.5 bg-red-500/10 text-red-500 rounded-lg hover:bg-red-500/20 transition-colors text-sm font-medium ml-auto"
+				>
+					<Trash2 class="w-4 h-4" />
+					Delete
 				</button>
 			</div>
 		{/if}
@@ -277,9 +297,9 @@
 		<!-- Content -->
 		<div class="flex-1 overflow-hidden">
 			{#if activeTab === 'tasks'}
-				<TaskTree />
+				<TaskTree tasks={agent.tasks} />
 			{:else}
-				<AgentLogs />
+				<AgentLogs agentId={agent.id} initialLogs={agent.logs} />
 			{/if}
 		</div>
 	</div>
