@@ -1557,6 +1557,7 @@
 		height: 100%;
 		display: flex;
 		flex-direction: column;
+		background: var(--card);
 	}
 
 	.hidden {

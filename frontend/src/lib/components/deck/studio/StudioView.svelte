@@ -10,6 +10,7 @@
 	import type { DeckGeneration } from '../types';
 	import { studio, activeGeneration as storeActiveGeneration, activeTab, recentGenerations } from '$lib/stores/studio';
 	import type { ImageProvider, VideoProvider, DeckGeneration as StoreDeckGeneration } from '$lib/stores/studio';
+	import { onMount } from 'svelte';
 
 	// Props
 	interface Props {
@@ -18,6 +19,18 @@
 	}
 
 	let { activeGeneration = null, onStartGeneration }: Props = $props();
+
+	// Mobile detection
+	let isMobile = $state(false);
+
+	onMount(() => {
+		function checkMobile() {
+			isMobile = window.innerWidth < 768;
+		}
+		checkMobile();
+		window.addEventListener('resize', checkMobile);
+		return () => window.removeEventListener('resize', checkMobile);
+	});
 
 	// Handle generation from child components
 	async function handleStartGeneration(type: 'image' | 'video', config: unknown) {
@@ -207,103 +220,204 @@
 	}
 </script>
 
-<div class="flex flex-col h-full bg-background">
+<div class="studio-view" class:mobile={isMobile}>
 	<!-- Main Content Area -->
-	<div class="flex-1 flex min-h-0">
-		<!-- Preview Area (60%) -->
-		<div class="w-[60%] flex flex-col border-r border-border">
-			<!-- Preview -->
-			<div class="flex-1 min-h-0 p-4">
-				<MediaPreview
-					generation={currentPreview}
-					onClear={clearPreview}
-					onDownload={handleDownload}
-					onEdit={handleEdit}
-					onExtend={handleExtend}
-					onSaveToLibrary={handleSaveToLibrary}
-					onDelete={handleDelete}
-					onRetry={handleRetry}
-				/>
-			</div>
-
-			<!-- Generation History -->
-			<div class="shrink-0 border-t border-border">
-				<GenerationHistory
-					onSelect={handleHistorySelect}
-					onRegenerate={handleRegenerate}
-					onDelete={handleDelete}
-				/>
-			</div>
-		</div>
-
-		<!-- Controls Area (40%) -->
-		<div class="w-[40%] flex flex-col min-h-0">
-			<!-- Tab Header -->
-			<div class="shrink-0 flex items-center justify-between px-4 py-3 border-b border-border">
-				<div class="flex gap-1">
+	<div class="studio-main">
+		{#if isMobile}
+			<!-- Mobile: Tab Header at top -->
+			<div class="mobile-tab-header">
+				<div class="tab-buttons">
 					<button
 						type="button"
 						onclick={() => handleTabChange('image')}
-						class="flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg transition-colors {$activeTab === 'image' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
+						class="tab-btn"
+						class:active={$activeTab === 'image'}
 						aria-pressed={$activeTab === 'image'}
 					>
 						<Image class="w-4 h-4" />
-						Image
+						<span>Image</span>
 					</button>
 					<button
 						type="button"
 						onclick={() => handleTabChange('video')}
-						class="flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg transition-colors {$activeTab === 'video' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
+						class="tab-btn"
+						class:active={$activeTab === 'video'}
 						aria-pressed={$activeTab === 'video'}
 					>
 						<Video class="w-4 h-4" />
-						Video
+						<span>Video</span>
 					</button>
 					<button
 						type="button"
 						onclick={() => handleTabChange('tts')}
-						class="flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg transition-colors {$activeTab === 'tts' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
+						class="tab-btn"
+						class:active={$activeTab === 'tts'}
 						aria-pressed={$activeTab === 'tts'}
 					>
 						<Mic class="w-4 h-4" />
-						Voice
+						<span>Voice</span>
 					</button>
 					<button
 						type="button"
 						onclick={() => handleTabChange('stt')}
-						class="flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg transition-colors {$activeTab === 'stt' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
+						class="tab-btn"
+						class:active={$activeTab === 'stt'}
 						aria-pressed={$activeTab === 'stt'}
 					>
 						<FileAudio class="w-4 h-4" />
-						Transcribe
+						<span>STT</span>
 					</button>
 				</div>
-
 				<button
 					type="button"
 					onclick={toggleAssetLibrary}
-					class="flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors"
+					class="library-btn"
 					aria-label="Toggle asset library"
 					aria-pressed={showAssetLibrary}
 				>
-					<FolderOpen class="w-4 h-4" />
-					<span class="hidden sm:inline">Library</span>
+					<FolderOpen class="w-5 h-5" />
 				</button>
 			</div>
 
-			<!-- Tab Content -->
-			<div class="flex-1 overflow-y-auto">
-				{#if $activeTab === 'image'}
-					<ImageGenerator onStartGeneration={handleStartGeneration} />
-				{:else if $activeTab === 'video'}
-					<VideoGenerator onStartGeneration={handleStartGeneration} />
-				{:else if $activeTab === 'tts'}
-					<TTSGenerator />
-				{:else if $activeTab === 'stt'}
-					<STTTranscriber />
-				{/if}
+			<!-- Mobile: Scrollable content area -->
+			<div class="mobile-content">
+				<!-- Preview Area -->
+				<div class="mobile-preview">
+					<MediaPreview
+						generation={currentPreview}
+						onClear={clearPreview}
+						onDownload={handleDownload}
+						onEdit={handleEdit}
+						onExtend={handleExtend}
+						onSaveToLibrary={handleSaveToLibrary}
+						onDelete={handleDelete}
+						onRetry={handleRetry}
+					/>
+				</div>
+
+				<!-- Controls -->
+				<div class="mobile-controls">
+					{#if $activeTab === 'image'}
+						<ImageGenerator onStartGeneration={handleStartGeneration} />
+					{:else if $activeTab === 'video'}
+						<VideoGenerator onStartGeneration={handleStartGeneration} />
+					{:else if $activeTab === 'tts'}
+						<TTSGenerator />
+					{:else if $activeTab === 'stt'}
+						<STTTranscriber />
+					{/if}
+				</div>
+
+				<!-- Generation History -->
+				<div class="mobile-history">
+					<GenerationHistory
+						onSelect={handleHistorySelect}
+						onRegenerate={handleRegenerate}
+						onDelete={handleDelete}
+					/>
+				</div>
 			</div>
-		</div>
+		{:else}
+			<!-- Desktop: Side-by-side layout -->
+			<!-- Preview Area (60%) -->
+			<div class="preview-column">
+				<!-- Preview -->
+				<div class="preview-content">
+					<MediaPreview
+						generation={currentPreview}
+						onClear={clearPreview}
+						onDownload={handleDownload}
+						onEdit={handleEdit}
+						onExtend={handleExtend}
+						onSaveToLibrary={handleSaveToLibrary}
+						onDelete={handleDelete}
+						onRetry={handleRetry}
+					/>
+				</div>
+
+				<!-- Generation History -->
+				<div class="history-section">
+					<GenerationHistory
+						onSelect={handleHistorySelect}
+						onRegenerate={handleRegenerate}
+						onDelete={handleDelete}
+					/>
+				</div>
+			</div>
+
+			<!-- Controls Area (40%) -->
+			<div class="controls-column">
+				<!-- Tab Header -->
+				<div class="tab-header">
+					<div class="tab-buttons">
+						<button
+							type="button"
+							onclick={() => handleTabChange('image')}
+							class="tab-btn"
+							class:active={$activeTab === 'image'}
+							aria-pressed={$activeTab === 'image'}
+						>
+							<Image class="w-4 h-4" />
+							Image
+						</button>
+						<button
+							type="button"
+							onclick={() => handleTabChange('video')}
+							class="tab-btn"
+							class:active={$activeTab === 'video'}
+							aria-pressed={$activeTab === 'video'}
+						>
+							<Video class="w-4 h-4" />
+							Video
+						</button>
+						<button
+							type="button"
+							onclick={() => handleTabChange('tts')}
+							class="tab-btn"
+							class:active={$activeTab === 'tts'}
+							aria-pressed={$activeTab === 'tts'}
+						>
+							<Mic class="w-4 h-4" />
+							Voice
+						</button>
+						<button
+							type="button"
+							onclick={() => handleTabChange('stt')}
+							class="tab-btn"
+							class:active={$activeTab === 'stt'}
+							aria-pressed={$activeTab === 'stt'}
+						>
+							<FileAudio class="w-4 h-4" />
+							Transcribe
+						</button>
+					</div>
+
+					<button
+						type="button"
+						onclick={toggleAssetLibrary}
+						class="library-btn desktop"
+						aria-label="Toggle asset library"
+						aria-pressed={showAssetLibrary}
+					>
+						<FolderOpen class="w-4 h-4" />
+						<span>Library</span>
+					</button>
+				</div>
+
+				<!-- Tab Content -->
+				<div class="controls-content">
+					{#if $activeTab === 'image'}
+						<ImageGenerator onStartGeneration={handleStartGeneration} />
+					{:else if $activeTab === 'video'}
+						<VideoGenerator onStartGeneration={handleStartGeneration} />
+					{:else if $activeTab === 'tts'}
+						<TTSGenerator />
+					{:else if $activeTab === 'stt'}
+						<STTTranscriber />
+					{/if}
+				</div>
+			</div>
+		{/if}
 	</div>
 
 	<!-- Asset Library Overlay -->
@@ -329,6 +443,183 @@
 </div>
 
 <style>
+	/* Base layout */
+	.studio-view {
+		display: flex;
+		flex-direction: column;
+		height: 100%;
+		background: var(--background);
+	}
+
+	.studio-main {
+		flex: 1;
+		display: flex;
+		min-height: 0;
+	}
+
+	/* Desktop layout */
+	.preview-column {
+		width: 60%;
+		display: flex;
+		flex-direction: column;
+		border-right: 1px solid var(--border);
+	}
+
+	.preview-content {
+		flex: 1;
+		min-height: 0;
+		padding: 1rem;
+	}
+
+	.history-section {
+		flex-shrink: 0;
+		border-top: 1px solid var(--border);
+	}
+
+	.controls-column {
+		width: 40%;
+		display: flex;
+		flex-direction: column;
+		min-height: 0;
+	}
+
+	.tab-header {
+		flex-shrink: 0;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 0.75rem 1rem;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.tab-buttons {
+		display: flex;
+		gap: 0.25rem;
+	}
+
+	.tab-btn {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.5rem 0.75rem;
+		font-size: 0.875rem;
+		font-weight: 500;
+		border-radius: 0.5rem;
+		background: transparent;
+		border: none;
+		color: hsl(var(--muted-foreground));
+		cursor: pointer;
+		transition: all 0.15s;
+	}
+
+	.tab-btn:hover {
+		color: hsl(var(--foreground));
+		background: hsl(var(--muted));
+	}
+
+	.tab-btn.active {
+		background: hsl(var(--primary));
+		color: hsl(var(--primary-foreground));
+	}
+
+	.library-btn {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.5rem 0.75rem;
+		font-size: 0.875rem;
+		color: hsl(var(--muted-foreground));
+		background: transparent;
+		border: none;
+		border-radius: 0.5rem;
+		cursor: pointer;
+		transition: all 0.15s;
+	}
+
+	.library-btn:hover {
+		color: hsl(var(--foreground));
+		background: hsl(var(--muted));
+	}
+
+	.controls-content {
+		flex: 1;
+		overflow-y: auto;
+	}
+
+	/* Mobile layout */
+	.studio-view.mobile .studio-main {
+		flex-direction: column;
+	}
+
+	.mobile-tab-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 0.5rem;
+		background: hsl(var(--card));
+		border-bottom: 1px solid var(--border);
+		flex-shrink: 0;
+	}
+
+	.mobile-tab-header .tab-buttons {
+		flex: 1;
+		display: flex;
+		gap: 0.125rem;
+		overflow-x: auto;
+		-webkit-overflow-scrolling: touch;
+	}
+
+	.mobile-tab-header .tab-btn {
+		flex-shrink: 0;
+		padding: 0.5rem 0.625rem;
+		font-size: 0.75rem;
+		gap: 0.25rem;
+	}
+
+	.mobile-tab-header .tab-btn span {
+		display: none;
+	}
+
+	@media (min-width: 400px) {
+		.mobile-tab-header .tab-btn span {
+			display: inline;
+		}
+	}
+
+	.mobile-tab-header .library-btn {
+		flex-shrink: 0;
+		padding: 0.625rem;
+		margin-left: 0.5rem;
+	}
+
+	.mobile-content {
+		flex: 1;
+		overflow-y: auto;
+		-webkit-overflow-scrolling: touch;
+		display: flex;
+		flex-direction: column;
+	}
+
+	.mobile-preview {
+		min-height: 200px;
+		max-height: 300px;
+		padding: 0.75rem;
+		background: hsl(var(--muted) / 0.3);
+	}
+
+	.mobile-controls {
+		flex-shrink: 0;
+		border-top: 1px solid var(--border);
+	}
+
+	.mobile-history {
+		flex-shrink: 0;
+		border-top: 1px solid var(--border);
+		max-height: 150px;
+		overflow-y: auto;
+	}
+
+	/* Animation */
 	@keyframes slide-in-right {
 		from {
 			transform: translateX(100%);

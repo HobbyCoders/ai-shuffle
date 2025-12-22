@@ -597,7 +597,12 @@ function createDeckStore() {
 		 * Focus a card (bring to front)
 		 * Note: This only updates focusedCardId and zIndex, does NOT persist to server
 		 * to avoid position sync issues during frequent focus changes
-		 * On mobile, also syncs mobileActiveCardIndex to match the focused card
+		 *
+		 * IMPORTANT: On mobile, this does NOT change mobileActiveCardIndex.
+		 * Mobile card navigation should only happen through explicit user actions
+		 * (swipe, dot navigation, etc.) via setMobileActiveCardIndex().
+		 * This prevents unwanted card switching when focus events fire from
+		 * typing in input fields or textareas.
 		 */
 		focusCard(id: string): void {
 			update((state) => {
@@ -612,15 +617,9 @@ function createDeckStore() {
 					: 0;
 				const newZIndex = Math.max(state.nextZIndex, maxExistingZ + 1);
 
-				// On mobile, sync the active card index to match the focused card
-				let newMobileActiveCardIndex = state.mobileActiveCardIndex;
-				if (state.isMobile) {
-					const visibleCards = state.cards.filter((c) => !c.minimized);
-					const focusedCardVisibleIndex = visibleCards.findIndex((c) => c.id === id);
-					if (focusedCardVisibleIndex !== -1) {
-						newMobileActiveCardIndex = focusedCardVisibleIndex;
-					}
-				}
+				// On mobile, do NOT update mobileActiveCardIndex here
+				// This prevents focus events from typing in inputs from
+				// triggering unwanted card switches
 
 				const newState = {
 					...state,
@@ -628,8 +627,8 @@ function createDeckStore() {
 						c.id === id ? { ...c, zIndex: newZIndex } : c
 					),
 					focusedCardId: id,
-					nextZIndex: newZIndex + 1,
-					mobileActiveCardIndex: newMobileActiveCardIndex
+					nextZIndex: newZIndex + 1
+					// Note: mobileActiveCardIndex is NOT updated here
 				};
 
 				// Only save to localStorage, not server (avoid position sync issues)

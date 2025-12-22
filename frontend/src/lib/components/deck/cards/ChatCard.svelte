@@ -202,6 +202,7 @@
 		height: 100%;
 		min-height: 0;
 		overflow: hidden;
+		background: var(--card);
 	}
 
 	.chat-card-content.mobile {

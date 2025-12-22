@@ -2000,6 +2000,7 @@
 		display: flex;
 		height: 100%;
 		overflow: hidden;
+		background: var(--card);
 	}
 
 	.settings-card-content.mobile {
