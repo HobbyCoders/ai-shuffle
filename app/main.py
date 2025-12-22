@@ -26,6 +26,7 @@ from app.core import encryption
 
 # Import API routers
 from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, knowledge, rate_limits, github, git, canvas, agents, studio, plugins
+from app.api.agents import start_agent_engine, stop_agent_engine
 
 # Import middleware
 from app.middleware.rate_limit import RateLimitMiddleware
@@ -175,6 +176,9 @@ async def lifespan(app: FastAPI):
     global _cleanup_task
     _cleanup_task = asyncio.create_task(periodic_cleanup())
 
+    # Start agent execution engine
+    await start_agent_engine()
+
     yield
 
     # Stop background cleanup scheduler
@@ -185,6 +189,9 @@ async def lifespan(app: FastAPI):
             await _cleanup_task
         except asyncio.CancelledError:
             pass
+
+    # Stop agent execution engine
+    await stop_agent_engine()
 
 
 # Create FastAPI application
