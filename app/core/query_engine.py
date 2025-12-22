@@ -193,12 +193,12 @@ def _build_plugins_list(enabled_plugins: Optional[list]) -> Optional[list]:
     According to the Claude Agent SDK documentation, plugins are specified as:
     [{"type": "local", "path": "./my-plugin"}, ...]
 
-    Paths can be:
-    - Relative paths: Resolved relative to workspace directory
-    - Absolute paths: Used as-is
+    Supports two formats for enabled_plugins entries:
+    1. Plugin IDs: "plugin-name@marketplace" - resolved via installed_plugins.json
+    2. Direct paths: "/path/to/plugin" or "relative/path" - used directly
 
     Args:
-        enabled_plugins: List of plugin paths from profile config
+        enabled_plugins: List of plugin IDs or paths from profile config
 
     Returns:
         List of plugin dicts for SDK, or None if no plugins enabled
@@ -206,24 +206,59 @@ def _build_plugins_list(enabled_plugins: Optional[list]) -> Optional[list]:
     if not enabled_plugins:
         return None
 
+    # Try to load installed plugins registry to resolve plugin IDs
+    installed_plugins = {}
+    installed_plugins_file = Path("/home/appuser/.claude/plugins/installed_plugins.json")
+    try:
+        if installed_plugins_file.exists():
+            import json
+            with open(installed_plugins_file, 'r') as f:
+                data = json.load(f)
+                installed_plugins = data.get("plugins", {})
+    except Exception as e:
+        logger.warning(f"Failed to load installed_plugins.json: {e}")
+
     plugins = []
-    for plugin_path in enabled_plugins:
-        if not plugin_path:
+    seen_paths = set()  # Avoid duplicates
+
+    for plugin_entry in enabled_plugins:
+        if not plugin_entry:
             continue
 
-        # Resolve path - if relative, resolve from workspace_dir
-        path = Path(plugin_path)
-        if not path.is_absolute():
-            resolved_path = settings.workspace_dir / plugin_path
-        else:
-            resolved_path = path
+        resolved_path = None
 
-        # Convert to string for SDK
-        plugins.append({
-            "type": "local",
-            "path": str(resolved_path)
-        })
-        logger.info(f"Adding plugin: {resolved_path}")
+        # Check if this is a plugin ID format (name@marketplace)
+        if "@" in plugin_entry and not plugin_entry.startswith("/") and not plugin_entry.startswith("."):
+            # Look up in installed_plugins registry
+            if plugin_entry in installed_plugins:
+                installations = installed_plugins[plugin_entry]
+                if installations:
+                    resolved_path = Path(installations[0].get("installPath", ""))
+                    if not resolved_path.exists():
+                        logger.warning(f"Plugin install path not found: {resolved_path}")
+                        resolved_path = None
+            else:
+                logger.warning(f"Plugin not found in installed_plugins.json: {plugin_entry}")
+        else:
+            # Direct path format
+            path = Path(plugin_entry)
+            if path.is_absolute():
+                resolved_path = path
+            else:
+                resolved_path = settings.workspace_dir / plugin_entry
+
+        if resolved_path and str(resolved_path) not in seen_paths:
+            # Verify the plugin directory exists and has plugin.json
+            plugin_manifest = resolved_path / ".claude-plugin" / "plugin.json"
+            if resolved_path.exists():
+                plugins.append({
+                    "type": "local",
+                    "path": str(resolved_path)
+                })
+                seen_paths.add(str(resolved_path))
+                logger.info(f"Adding plugin: {resolved_path}")
+            else:
+                logger.warning(f"Plugin directory not found: {resolved_path}")
 
     if not plugins:
         return None

@@ -11,6 +11,9 @@
 	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile } from '$lib/api/client';
 	import { profiles as profilesStore, tabs as tabsStore } from '$lib/stores/tabs';
 	import { groups as groupsStore } from '$lib/stores/groups';
+	import { plugins, installedPlugins, fileBasedAgents } from '$lib/stores/plugins';
+	import type { PluginInfo, FileBasedAgent } from '$lib/api/plugins';
+	import { PluginCard } from '$lib/components/plugins';
 
 	// Types
 	interface AITool {
@@ -93,7 +96,8 @@
 		try {
 			const [subagentsResult, toolsResult] = await Promise.all([
 				api.get<Subagent[]>('/subagents').catch(() => []),
-				api.get<ToolsResponse>('/tools').catch(() => ({ all_tools: [], categories: [] }))
+				api.get<ToolsResponse>('/tools').catch(() => ({ all_tools: [], categories: [] })),
+				plugins.loadFileBasedAgents().catch(() => {})
 			]);
 			allSubagents = subagentsResult;
 			availableTools = toolsResult;
@@ -148,6 +152,11 @@
 	// Import handling
 	let profileImportInput: HTMLInputElement | undefined = $state();
 	let profileImporting = $state(false);
+
+	// Plugin management
+	let showPluginManager = $state(false);
+	let pluginAgents = $derived($fileBasedAgents);
+	let installedPluginsList = $derived($installedPlugins);
 
 	// Tab definitions
 	const tabs = [
@@ -990,9 +999,10 @@
 					{:else if activeTab === 'agents'}
 						<!-- Agents Tab -->
 						<div class="tab-panel">
+							<!-- Database Subagents Section -->
 							<div class="form-section">
 								<div class="section-header">
-									<h3 class="section-title">Enabled Subagents</h3>
+									<h3 class="section-title">Database Subagents</h3>
 									{#if allSubagents.length > 0}
 										<div class="header-actions">
 											<button
@@ -1015,17 +1025,8 @@
 								</div>
 
 								{#if allSubagents.length === 0}
-									<div class="empty-state large">
-										<svg class="empty-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path
-												stroke-linecap="round"
-												stroke-linejoin="round"
-												stroke-width="1.5"
-												d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"
-											/>
-										</svg>
-										<p>No subagents configured</p>
-										<p class="empty-hint">Create subagents from the Agents menu</p>
+									<div class="empty-state">
+										<p class="empty-hint">No database subagents configured</p>
 									</div>
 								{:else}
 									<p class="helper-text">Select which subagents this profile can use</p>
@@ -1051,6 +1052,121 @@
 									</div>
 									<div class="selection-count">
 										{profileForm.enabled_agents.length} of {allSubagents.length} enabled
+									</div>
+								{/if}
+							</div>
+
+							<!-- Plugin Agents Section (Read-only) -->
+							<div class="form-section">
+								<div class="section-header">
+									<h3 class="section-title">Plugin Agents</h3>
+									<button
+										type="button"
+										class="text-btn primary"
+										onclick={() => (showPluginManager = true)}
+									>
+										Manage Plugins
+									</button>
+								</div>
+
+								{#if pluginAgents.length === 0}
+									<div class="empty-state">
+										<p class="empty-hint">No plugin agents available</p>
+										<p class="empty-hint small">Install and enable plugins to get agents</p>
+									</div>
+								{:else}
+									<p class="helper-text">Agents from enabled plugins (managed via plugin settings)</p>
+									<div class="plugin-agents-list">
+										{#each pluginAgents as agent (agent.id)}
+											<div class="plugin-agent-item">
+												<div class="plugin-agent-info">
+													<div class="plugin-agent-header">
+														<span class="plugin-agent-name">{agent.name}</span>
+														<span class="badge muted small">{agent.plugin_name}</span>
+														{#if agent.model}
+															<span class="badge primary small">{getModelDisplay(agent.model)}</span>
+														{/if}
+													</div>
+													<p class="plugin-agent-desc">{agent.description}</p>
+												</div>
+												{#if agent.tools && agent.tools.length > 0}
+													<div class="plugin-agent-tools">
+														{#each agent.tools.slice(0, 3) as tool}
+															<span class="tool-badge">{tool}</span>
+														{/each}
+														{#if agent.tools.length > 3}
+															<span class="tool-badge more">+{agent.tools.length - 3}</span>
+														{/if}
+													</div>
+												{/if}
+											</div>
+										{/each}
+									</div>
+									<div class="selection-count">
+										{pluginAgents.length} plugin agent{pluginAgents.length !== 1 ? 's' : ''} available
+									</div>
+								{/if}
+							</div>
+
+							<!-- Installed Plugins Quick View -->
+							<div class="form-section">
+								<div class="section-header">
+									<h3 class="section-title">Installed Plugins</h3>
+									<span class="badge muted">{installedPluginsList.length} installed</span>
+								</div>
+
+								{#if installedPluginsList.length === 0}
+									<div class="empty-state">
+										<p class="empty-hint">No plugins installed</p>
+										<button
+											type="button"
+											class="btn secondary small"
+											onclick={() => (showPluginManager = true)}
+										>
+											Browse Plugins
+										</button>
+									</div>
+								{:else}
+									<div class="installed-plugins-compact">
+										{#each installedPluginsList.slice(0, 6) as plugin (plugin.id)}
+											<div class="plugin-compact-item" class:disabled={!plugin.enabled}>
+												<div class="plugin-compact-info">
+													<span class="plugin-compact-name">{plugin.name}</span>
+													<div class="plugin-compact-badges">
+														{#if plugin.has_agents}
+															<span class="feature-dot agents" title="Has agents"></span>
+														{/if}
+														{#if plugin.has_commands}
+															<span class="feature-dot commands" title="Has commands"></span>
+														{/if}
+														{#if plugin.has_skills}
+															<span class="feature-dot skills" title="Has skills"></span>
+														{/if}
+													</div>
+												</div>
+												<span class="plugin-status" class:enabled={plugin.enabled}>
+													{plugin.enabled ? 'On' : 'Off'}
+												</span>
+											</div>
+										{/each}
+										{#if installedPluginsList.length > 6}
+											<button
+												type="button"
+												class="show-more-btn"
+												onclick={() => (showPluginManager = true)}
+											>
+												+{installedPluginsList.length - 6} more plugins
+											</button>
+										{/if}
+									</div>
+									<div class="plugins-footer">
+										<button
+											type="button"
+											class="btn secondary small"
+											onclick={() => (showPluginManager = true)}
+										>
+											Open Plugin Manager
+										</button>
 									</div>
 								{/if}
 							</div>
@@ -1406,6 +1522,26 @@
 	>
 		{@render cardContent()}
 	</BaseCard>
+{/if}
+
+<!-- Plugin Manager Modal -->
+{#if showPluginManager}
+	<div class="plugin-modal-overlay" onclick={() => (showPluginManager = false)}>
+		<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+		<div class="plugin-modal-container" onclick={(e) => e.stopPropagation()}>
+			<div class="plugin-modal-header">
+				<h2>Plugin Manager</h2>
+				<button class="close-btn" onclick={() => (showPluginManager = false)}>
+					<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+					</svg>
+				</button>
+			</div>
+			<div class="plugin-modal-content">
+				<PluginCard />
+			</div>
+		</div>
+	</div>
 {/if}
 
 <style>
@@ -2405,5 +2541,263 @@
 		to {
 			transform: rotate(360deg);
 		}
+	}
+
+	/* Plugin Agent Styles */
+	.plugin-agents-list {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		max-height: 200px;
+		overflow-y: auto;
+	}
+
+	.plugin-agent-item {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		padding: 10px 12px;
+		background: hsl(var(--muted) / 0.3);
+		border: 1px solid hsl(var(--border));
+		border-radius: 8px;
+	}
+
+	.plugin-agent-info {
+		flex: 1;
+	}
+
+	.plugin-agent-header {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		flex-wrap: wrap;
+	}
+
+	.plugin-agent-name {
+		font-size: 0.875rem;
+		font-weight: 500;
+		color: hsl(var(--foreground));
+	}
+
+	.plugin-agent-desc {
+		font-size: 0.75rem;
+		color: hsl(var(--muted-foreground));
+		margin-top: 4px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		-webkit-box-orient: vertical;
+	}
+
+	.plugin-agent-tools {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+	}
+
+	.tool-badge {
+		display: inline-flex;
+		padding: 2px 6px;
+		font-size: 0.625rem;
+		font-weight: 500;
+		background: hsl(var(--muted));
+		color: hsl(var(--muted-foreground));
+		border-radius: 4px;
+	}
+
+	.tool-badge.more {
+		background: hsl(var(--primary) / 0.1);
+		color: hsl(var(--primary));
+	}
+
+	/* Installed Plugins Compact */
+	.installed-plugins-compact {
+		display: grid;
+		grid-template-columns: repeat(2, 1fr);
+		gap: 6px;
+	}
+
+	@media (max-width: 480px) {
+		.installed-plugins-compact {
+			grid-template-columns: 1fr;
+		}
+	}
+
+	.plugin-compact-item {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 8px 10px;
+		background: hsl(var(--muted) / 0.3);
+		border: 1px solid hsl(var(--border));
+		border-radius: 6px;
+		transition: opacity 0.15s ease;
+	}
+
+	.plugin-compact-item.disabled {
+		opacity: 0.5;
+	}
+
+	.plugin-compact-info {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		min-width: 0;
+		flex: 1;
+	}
+
+	.plugin-compact-name {
+		font-size: 0.8125rem;
+		color: hsl(var(--foreground));
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.plugin-compact-badges {
+		display: flex;
+		gap: 3px;
+		flex-shrink: 0;
+	}
+
+	.feature-dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+	}
+
+	.feature-dot.agents {
+		background: hsl(var(--primary));
+	}
+
+	.feature-dot.commands {
+		background: hsl(142 76% 36%);
+	}
+
+	.feature-dot.skills {
+		background: hsl(280 80% 55%);
+	}
+
+	.plugin-status {
+		font-size: 0.625rem;
+		font-weight: 500;
+		padding: 2px 6px;
+		border-radius: 4px;
+		background: hsl(var(--muted));
+		color: hsl(var(--muted-foreground));
+	}
+
+	.plugin-status.enabled {
+		background: hsl(142 76% 36% / 0.2);
+		color: hsl(142 76% 36%);
+	}
+
+	.show-more-btn {
+		grid-column: 1 / -1;
+		padding: 8px;
+		background: transparent;
+		border: 1px dashed hsl(var(--border));
+		border-radius: 6px;
+		font-size: 0.75rem;
+		color: hsl(var(--muted-foreground));
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.show-more-btn:hover {
+		color: hsl(var(--foreground));
+		border-color: hsl(var(--primary) / 0.5);
+	}
+
+	.plugins-footer {
+		margin-top: 12px;
+		padding-top: 12px;
+		border-top: 1px solid hsl(var(--border));
+		display: flex;
+		justify-content: center;
+	}
+
+	.btn.small {
+		padding: 6px 12px;
+		font-size: 0.75rem;
+	}
+
+	.empty-hint.small {
+		font-size: 0.6875rem;
+		opacity: 0.7;
+	}
+
+	/* Plugin Modal */
+	.plugin-modal-overlay {
+		position: fixed;
+		inset: 0;
+		background: rgba(0, 0, 0, 0.6);
+		backdrop-filter: blur(4px);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 1000;
+		padding: 24px;
+	}
+
+	.plugin-modal-container {
+		width: 100%;
+		max-width: 900px;
+		max-height: 85vh;
+		background: hsl(var(--card));
+		border: 1px solid hsl(var(--border));
+		border-radius: 16px;
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+		box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+	}
+
+	.plugin-modal-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 16px 20px;
+		border-bottom: 1px solid hsl(var(--border));
+		flex-shrink: 0;
+	}
+
+	.plugin-modal-header h2 {
+		font-size: 1.125rem;
+		font-weight: 600;
+		color: hsl(var(--foreground));
+		margin: 0;
+	}
+
+	.close-btn {
+		width: 32px;
+		height: 32px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: transparent;
+		border: none;
+		border-radius: 8px;
+		color: hsl(var(--muted-foreground));
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.close-btn:hover {
+		background: hsl(var(--muted));
+		color: hsl(var(--foreground));
+	}
+
+	.close-btn svg {
+		width: 18px;
+		height: 18px;
+	}
+
+	.plugin-modal-content {
+		flex: 1;
+		overflow: hidden;
+		display: flex;
+		flex-direction: column;
 	}
 </style>
