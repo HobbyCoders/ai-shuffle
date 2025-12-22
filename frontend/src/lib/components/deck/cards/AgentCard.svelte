@@ -102,7 +102,7 @@
 
 	interface Branch {
 		name: string;
-		current: boolean;
+		is_current: boolean;
 	}
 
 	interface Profile {
@@ -185,14 +185,14 @@
 		branches = [];
 		baseBranch = undefined;
 		try {
-			const response = await fetch(`/api/v1/projects/${projId}/branches`, {
+			const response = await fetch(`/api/v1/projects/${projId}/git/branches`, {
 				credentials: 'include'
 			});
 			if (response.ok) {
 				const data = await response.json();
 				branches = data.branches ?? [];
 				// Set default to the default branch (main/master) or current branch
-				const defaultBranch = branches.find(b => b.name === 'main' || b.name === 'master') ?? branches.find(b => b.current);
+				const defaultBranch = branches.find(b => b.name === 'main' || b.name === 'master') ?? branches.find(b => b.is_current);
 				if (defaultBranch) {
 					baseBranch = defaultBranch.name;
 				}
@@ -697,7 +697,7 @@
 									{:else}
 										{#each branches as branch}
 											<option value={branch.name}>
-												{branch.name}{branch.current ? ' (current)' : ''}
+												{branch.name}{branch.is_current ? ' (current)' : ''}
 											</option>
 										{/each}
 									{/if}
