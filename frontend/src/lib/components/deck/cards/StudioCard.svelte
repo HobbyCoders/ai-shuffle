@@ -62,6 +62,7 @@
 		onResize: (w: number, h: number) => void;
 		onDragEnd?: () => void;
 		onResizeEnd?: () => void;
+		mobile?: boolean;
 	}
 
 	let {
@@ -73,7 +74,8 @@
 		onMove,
 		onResize,
 		onDragEnd,
-		onResizeEnd
+		onResizeEnd,
+		mobile = false
 	}: Props = $props();
 
 	// Mode state
@@ -394,8 +396,9 @@
 	}
 </script>
 
-<BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
-	<div class="studio-content">
+{#if mobile}
+	<!-- Mobile: No BaseCard wrapper, just the content -->
+	<div class="studio-content mobile">
 		<!-- Preview Area -->
 		<div class="preview-area">
 			{#if isGenerating || isTranscribing}
@@ -729,7 +732,345 @@
 			{/if}
 		</div>
 	</div>
-</BaseCard>
+{:else}
+	<!-- Desktop: Full BaseCard with all features -->
+	<BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
+		<div class="studio-content">
+			<!-- Preview Area -->
+			<div class="preview-area">
+				{#if isGenerating || isTranscribing}
+					<div class="preview-loading">
+						<Loader2 size={32} class="animate-spin" />
+						<span class="loading-text">
+							{isTranscribing ? 'Transcribing...' : 'Generating...'}
+						</span>
+					</div>
+				{:else if lastGeneration?.result?.url && lastGeneration.type === 'image'}
+					<img src={lastGeneration.result.url} alt="Generated" class="preview-image" />
+				{:else if lastGeneration?.result?.url && lastGeneration.type === 'video'}
+					<video src={lastGeneration.result.url} controls class="preview-video">
+						<track kind="captions" />
+					</video>
+				{:else if lastGeneration?.result?.url && lastGeneration.type === 'tts'}
+					<div class="audio-preview">
+						<audio
+							bind:this={audioElement}
+							src={lastGeneration.result.url}
+							onplay={handleAudioPlay}
+							onpause={handleAudioPause}
+							onended={handleAudioEnded}
+							class="hidden"
+						></audio>
+						<button class="audio-play-btn" onclick={toggleAudioPlayback}>
+							{#if isPlaying}
+								<Pause size={24} />
+							{:else}
+								<Play size={24} />
+							{/if}
+						</button>
+						<span class="audio-label">Generated Audio</span>
+						<button class="audio-download-btn" onclick={downloadResult} title="Download">
+							<Download size={16} />
+						</button>
+					</div>
+				{:else if sttTranscript}
+					<div class="transcript-preview">
+						<p class="transcript-text">{sttTranscript}</p>
+					</div>
+				{:else if error}
+					<div class="preview-error">
+						<span>{error}</span>
+					</div>
+				{:else}
+					<div class="preview-placeholder">
+						{#if activeMode === 'image'}
+							<Image size={40} strokeWidth={1} />
+						{:else if activeMode === 'video'}
+							<Film size={40} strokeWidth={1} />
+						{:else if activeMode === 'tts'}
+							<Volume2 size={40} strokeWidth={1} />
+						{:else}
+							<Mic size={40} strokeWidth={1} />
+						{/if}
+						<span>
+							{#if activeMode === 'image'}
+								Generated image will appear here
+							{:else if activeMode === 'video'}
+								Generated video will appear here
+							{:else if activeMode === 'tts'}
+								Generated audio will appear here
+							{:else}
+								Transcription will appear here
+							{/if}
+						</span>
+					</div>
+				{/if}
+			</div>
+
+			<!-- Mode Tabs -->
+			<div class="mode-tabs">
+				<button
+					class="mode-tab"
+					class:active={activeMode === 'image'}
+					onclick={() => setMode('image')}
+				>
+					<Image size={14} />
+					<span>Image</span>
+				</button>
+				<button
+					class="mode-tab"
+					class:active={activeMode === 'video'}
+					onclick={() => setMode('video')}
+				>
+					<Film size={14} />
+					<span>Video</span>
+				</button>
+				<button
+					class="mode-tab"
+					class:active={activeMode === 'tts'}
+					onclick={() => setMode('tts')}
+				>
+					<Volume2 size={14} />
+					<span>TTS</span>
+				</button>
+				<button
+					class="mode-tab"
+					class:active={activeMode === 'stt'}
+					onclick={() => setMode('stt')}
+				>
+					<Mic size={14} />
+					<span>STT</span>
+				</button>
+			</div>
+
+			<!-- Controls Area -->
+			<div class="controls-area">
+				{#if activeMode === 'image'}
+					<!-- Image Controls -->
+					<textarea
+						bind:value={imagePrompt}
+						placeholder="Describe the image..."
+						rows="2"
+						class="prompt-input"
+						disabled={isGenerating}
+					></textarea>
+
+					<div class="controls-row">
+						<select
+							class="model-select"
+							value={selectedImageModel}
+							onchange={handleImageModelChange}
+							disabled={isGenerating}
+						>
+							{#each imageModelOptions as option}
+								<option value={option.value}>{option.label}</option>
+							{/each}
+						</select>
+
+						<div class="aspect-buttons">
+							{#each availableImageAspectRatios.slice(0, 3) as ratio}
+								<button
+									class="aspect-btn"
+									class:selected={selectedImageAspectRatio === ratio.value}
+									onclick={() => (selectedImageAspectRatio = ratio.value)}
+									disabled={isGenerating}
+									title={ratio.value}
+								>
+									<div
+										class="aspect-icon"
+										style:width="{ratio.width}px"
+										style:height="{ratio.height}px"
+									></div>
+								</button>
+							{/each}
+						</div>
+					</div>
+
+					<button
+						class="generate-btn"
+						onclick={handleImageGenerate}
+						disabled={!imagePrompt.trim() || isGenerating}
+					>
+						{#if isGenerating}
+							<Loader2 size={16} class="animate-spin" />
+						{:else}
+							<Sparkles size={16} />
+						{/if}
+						<span>{isGenerating ? 'Generating...' : 'Generate'}</span>
+					</button>
+
+				{:else if activeMode === 'video'}
+					<!-- Video Controls -->
+					<textarea
+						bind:value={videoPrompt}
+						placeholder="Describe the video..."
+						rows="2"
+						class="prompt-input"
+						disabled={isGenerating}
+					></textarea>
+
+					<div class="controls-row">
+						<select
+							class="model-select"
+							value={selectedVideoModel}
+							onchange={handleVideoModelChange}
+							disabled={isGenerating}
+						>
+							{#each videoModelOptions as option}
+								<option value={option.value}>{option.label}</option>
+							{/each}
+						</select>
+
+						<div class="duration-buttons">
+							{#each availableVideoDurations as duration}
+								<button
+									class="duration-btn"
+									class:selected={selectedVideoDuration === duration}
+									onclick={() => (selectedVideoDuration = duration)}
+									disabled={isGenerating}
+								>
+									{duration}s
+								</button>
+							{/each}
+						</div>
+					</div>
+
+					<button
+						class="generate-btn"
+						onclick={handleVideoGenerate}
+						disabled={!videoPrompt.trim() || isGenerating}
+					>
+						{#if isGenerating}
+							<Loader2 size={16} class="animate-spin" />
+						{:else}
+							<Sparkles size={16} />
+						{/if}
+						<span>{isGenerating ? 'Generating...' : 'Generate'}</span>
+					</button>
+
+				{:else if activeMode === 'tts'}
+					<!-- TTS Controls -->
+					<textarea
+						bind:value={ttsText}
+						placeholder="Enter text to convert to speech..."
+						rows="3"
+						class="prompt-input"
+						disabled={isGenerating}
+					></textarea>
+
+					<div class="controls-row">
+						<select
+							class="model-select small"
+							value={selectedTTSModel}
+							onchange={handleTTSModelChange}
+							disabled={isGenerating}
+						>
+							{#each ttsModelOptions as option}
+								<option value={option.value}>{option.label}</option>
+							{/each}
+						</select>
+
+						<select
+							class="voice-select"
+							value={selectedTTSVoice}
+							onchange={handleTTSVoiceChange}
+							disabled={isGenerating}
+						>
+							{#each availableTTSVoices as voice}
+								<option value={voice.id}>{voice.name}</option>
+							{/each}
+						</select>
+					</div>
+
+					<div class="speed-row">
+						<span class="speed-label">Speed: {ttsSpeed.toFixed(1)}x</span>
+						<input
+							type="range"
+							min="0.5"
+							max="2"
+							step="0.1"
+							bind:value={ttsSpeed}
+							disabled={isGenerating}
+							class="speed-slider"
+						/>
+					</div>
+
+					<button
+						class="generate-btn"
+						onclick={handleTTSGenerate}
+						disabled={!ttsText.trim() || isGenerating}
+					>
+						{#if isGenerating}
+							<Loader2 size={16} class="animate-spin" />
+						{:else}
+							<Volume2 size={16} />
+						{/if}
+						<span>{isGenerating ? 'Generating...' : 'Generate Speech'}</span>
+					</button>
+
+				{:else if activeMode === 'stt'}
+					<!-- STT Controls -->
+					{#if sttFile}
+						<div class="file-preview">
+							<Mic size={16} />
+							<span class="file-name">{sttFile.name}</span>
+							<button class="file-remove" onclick={clearSTTFile} disabled={isTranscribing}>
+								<X size={14} />
+							</button>
+						</div>
+					{:else}
+						<label class="file-upload">
+							<Upload size={20} />
+							<span>Drop audio file or click to upload</span>
+							<input
+								type="file"
+								accept="audio/*,video/mp4,video/webm"
+								onchange={handleSTTFileSelect}
+								class="hidden"
+							/>
+						</label>
+					{/if}
+
+					<div class="controls-row">
+						<select
+							class="model-select"
+							value={selectedSTTModel}
+							onchange={handleSTTModelChange}
+							disabled={isTranscribing}
+						>
+							{#each sttModelOptions as option}
+								<option value={option.value}>{option.label}</option>
+							{/each}
+						</select>
+
+						<select
+							class="language-select"
+							bind:value={sttLanguage}
+							disabled={isTranscribing}
+						>
+							{#each STT_LANGUAGES as lang}
+								<option value={lang.code}>{lang.name}</option>
+							{/each}
+						</select>
+					</div>
+
+					<button
+						class="generate-btn"
+						onclick={handleSTTTranscribe}
+						disabled={!sttFile || isTranscribing}
+					>
+						{#if isTranscribing}
+							<Loader2 size={16} class="animate-spin" />
+						{:else}
+							<Mic size={16} />
+						{/if}
+						<span>{isTranscribing ? 'Transcribing...' : 'Transcribe'}</span>
+					</button>
+				{/if}
+			</div>
+		</div>
+	</BaseCard>
+{/if}
 
 <style>
 	.studio-content {
@@ -737,6 +1078,11 @@
 		flex-direction: column;
 		height: 100%;
 		overflow: hidden;
+		background: var(--card);
+	}
+
+	.studio-content.mobile {
+		height: 100%;
 	}
 
 	/* Preview Area */

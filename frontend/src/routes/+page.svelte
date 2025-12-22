@@ -995,9 +995,16 @@
 								<p class="text-muted-foreground">Agent view (mobile)</p>
 							</div>
 						{:else if card.type === 'studio'}
-							<div class="p-4">
-								<p class="text-muted-foreground">Studio view (mobile)</p>
-							</div>
+							<StudioCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMinimize={() => handleCardMinimize(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
 						{:else if card.type === 'terminal'}
 							<div class="terminal-mobile-content">
 								<div class="terminal-line">Terminal integration coming soon...</div>
