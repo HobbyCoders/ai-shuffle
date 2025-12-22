@@ -10,7 +10,7 @@ import logging
 from typing import Optional, List, Dict, Any, Set
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Query, status
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Query, status, Depends
 from fastapi.websockets import WebSocketState
 from pydantic import BaseModel, Field
 
@@ -183,7 +183,7 @@ agent_engine.set_broadcast_callback(_broadcast_agent_update)
 # ============================================================================
 
 @router.post("/launch", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
-async def launch_agent(request: AgentLaunchRequest, token: str = require_auth):
+async def launch_agent(request: AgentLaunchRequest, token: str = Depends(require_auth)):
     """
     Launch a new background agent.
 
@@ -212,7 +212,7 @@ async def list_agents(
     project_id: Optional[str] = Query(None, description="Filter by project"),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    token: str = require_auth
+    token: str = Depends(require_auth)
 ):
     """
     List all agents, optionally filtered by status.
@@ -238,7 +238,7 @@ async def list_agents(
 async def get_stats(
     days: int = Query(7, ge=1, le=365, description="Number of days to include"),
     project_id: Optional[str] = Query(None, description="Filter by project"),
-    token: str = require_auth
+    token: str = Depends(require_auth)
 ):
     """Get agent run statistics"""
     stats = database.get_agent_run_stats(days=days, project_id=project_id)
@@ -246,7 +246,7 @@ async def get_stats(
 
 
 @router.get("/{agent_id}", response_model=AgentResponse)
-async def get_agent(agent_id: str, token: str = require_auth):
+async def get_agent(agent_id: str, token: str = Depends(require_auth)):
     """Get details of a specific agent"""
     agent_run = database.get_agent_run(agent_id)
     if not agent_run:
@@ -264,7 +264,7 @@ async def get_agent_logs(
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     level: Optional[str] = Query(None, description="Filter by log level"),
-    token: str = require_auth
+    token: str = Depends(require_auth)
 ):
     """
     Get logs for an agent with pagination.
@@ -303,7 +303,7 @@ async def get_agent_logs(
 # ============================================================================
 
 @router.post("/{agent_id}/pause")
-async def pause_agent(agent_id: str, token: str = require_auth):
+async def pause_agent(agent_id: str, token: str = Depends(require_auth)):
     """Pause a running agent"""
     agent_run = database.get_agent_run(agent_id)
     if not agent_run:
@@ -329,7 +329,7 @@ async def pause_agent(agent_id: str, token: str = require_auth):
 
 
 @router.post("/{agent_id}/resume")
-async def resume_agent(agent_id: str, token: str = require_auth):
+async def resume_agent(agent_id: str, token: str = Depends(require_auth)):
     """Resume a paused agent"""
     agent_run = database.get_agent_run(agent_id)
     if not agent_run:
@@ -355,7 +355,7 @@ async def resume_agent(agent_id: str, token: str = require_auth):
 
 
 @router.post("/{agent_id}/cancel")
-async def cancel_agent(agent_id: str, token: str = require_auth):
+async def cancel_agent(agent_id: str, token: str = Depends(require_auth)):
     """Cancel a queued or running agent"""
     agent_run = database.get_agent_run(agent_id)
     if not agent_run:
@@ -381,7 +381,7 @@ async def cancel_agent(agent_id: str, token: str = require_auth):
 
 
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_agent(agent_id: str, token: str = require_auth):
+async def delete_agent(agent_id: str, token: str = Depends(require_auth)):
     """
     Delete an agent record.
 
@@ -411,7 +411,7 @@ async def delete_agent(agent_id: str, token: str = require_auth):
 # ============================================================================
 
 @router.post("/clear-completed")
-async def clear_completed_agents(token: str = require_auth):
+async def clear_completed_agents(token: str = Depends(require_auth)):
     """Delete all completed agents"""
     completed = database.get_agent_runs(status=AgentStatus.COMPLETED.value, limit=1000)
     count = 0
@@ -424,7 +424,7 @@ async def clear_completed_agents(token: str = require_auth):
 
 
 @router.post("/clear-failed")
-async def clear_failed_agents(token: str = require_auth):
+async def clear_failed_agents(token: str = Depends(require_auth)):
     """Delete all failed agents"""
     failed = database.get_agent_runs(status=AgentStatus.FAILED.value, limit=1000)
     count = 0
