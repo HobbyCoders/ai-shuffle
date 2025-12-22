@@ -12,7 +12,6 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { Rocket, Clock, CheckCircle, XCircle, BarChart3, Bot, RefreshCw, Loader2, AlertCircle } from 'lucide-svelte';
 	import AgentListItem from './AgentListItem.svelte';
-	import AgentLauncher from './AgentLauncher.svelte';
 	import AgentStats from './AgentStats.svelte';
 	import {
 		agents,
@@ -29,7 +28,6 @@
 
 	// State
 	let activeTab = $state<'running' | 'queued' | 'completed' | 'failed' | 'stats'>('running');
-	let showLauncher = $state(false);
 	let isRefreshing = $state(false);
 
 	// Derived state from stores
@@ -98,52 +96,13 @@
 	}
 
 	function handleLaunch() {
-		showLauncher = true;
-	}
-
-	function handleLauncherClose() {
-		showLauncher = false;
-	}
-
-	async function handleLauncherSubmit(data: {
-		name: string;
-		prompt: string;
-		autoBranch: boolean;
-		autoPR: boolean;
-		autoReview: boolean;
-		maxDuration: number;
-		profileId?: string;
-		projectId?: string;
-		baseBranch?: string;
-	}) {
-		try {
-			const agent = await agents.launchAgent({
-				name: data.name,
-				prompt: data.prompt,
-				profileId: data.profileId,
-				projectId: data.projectId,
-				autoBranch: data.autoBranch,
-				autoPr: data.autoPR,
-				autoReview: data.autoReview,
-				maxDurationMinutes: data.maxDuration,
-				baseBranch: data.baseBranch
-			});
-
-			// Close the launcher modal
-			showLauncher = false;
-
-			// Switch to workspace mode and open an AgentCard for the new agent
-			deck.setMode('workspace');
-			deck.addCard('agent-monitor', {
-				title: agent.name,
-				dataId: agent.id,
-				meta: { agentId: agent.id }
-			});
-		} catch (err) {
-			console.error('Failed to launch agent:', err);
-			// Keep launcher open on error so user can retry
-			throw err;
-		}
+		// Open an agent card in launcher mode (no agentId)
+		// The card will show the launcher UI, and upon launching, transition to monitor mode
+		deck.setMode('workspace');
+		deck.addCard('agent-monitor', {
+			title: 'Launch Agent'
+			// Note: no dataId or agentId meta = launcher mode
+		});
 	}
 
 
@@ -358,11 +317,4 @@
 	</div>
 </div>
 
-<!-- Agent Launcher Modal -->
-{#if showLauncher}
-	<AgentLauncher
-		onClose={handleLauncherClose}
-		onLaunch={handleLauncherSubmit}
-	/>
-{/if}
 
