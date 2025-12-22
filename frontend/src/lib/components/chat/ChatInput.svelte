@@ -3,8 +3,8 @@
 	 * ChatInput - Full input section with file upload, autocomplete, and voice recording
 	 */
 	import { tick, onDestroy } from 'svelte';
-	import { tabs, profiles, type ChatTab } from '$lib/stores/tabs';
-	import { claudeAuthenticated, isAdmin } from '$lib/stores/auth';
+	import { tabs, profiles, projects, type ChatTab } from '$lib/stores/tabs';
+	import { claudeAuthenticated, isAdmin, apiUser } from '$lib/stores/auth';
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
@@ -96,6 +96,8 @@
 	// Override popup state
 	let showModelPopup = $state(false);
 	let showModePopup = $state(false);
+	let showProfilePopup = $state(false);
+	let showProjectPopup = $state(false);
 
 	// Get current profile settings
 	const currentProfile = $derived($profiles.find(p => p.id === tab.profile));
@@ -117,6 +119,20 @@
 		plan: 'Plan',
 		bypassPermissions: 'Bypass'
 	};
+
+	// Get selected profile/project names for display
+	const selectedProfileName = $derived($profiles.find(p => p.id === tab.profile)?.name || 'Profile');
+	const selectedProjectName = $derived($projects.find(p => p.id === tab.project)?.name || 'Project');
+	const isProfileLocked = $derived(!!$apiUser?.profile_id);
+	const isProjectLocked = $derived(!!$apiUser?.project_id || !!tab.sessionId);
+
+	// Close all popups helper
+	function closeAllPopups() {
+		showModelPopup = false;
+		showModePopup = false;
+		showProfilePopup = false;
+		showProjectPopup = false;
+	}
 
 	// Check if input contains an active @ mention
 	function hasActiveAtMention(input: string): boolean {
@@ -404,13 +420,127 @@
 		<form onsubmit={(e) => { e.preventDefault(); handleSubmit(); }} class="relative">
 			<!-- Top Controls Row (Pills + Attach) -->
 			<div class="mb-2 flex flex-wrap items-center justify-center gap-1.5">
+				<!-- Profile Selector Pill (always visible, mobile-friendly) -->
+				{#if !isProfileLocked}
+					<div class="relative">
+						<button
+							type="button"
+							onclick={() => { closeAllPopups(); showProfilePopup = !showProfilePopup; }}
+							class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {tab.profile ? 'bg-accent/50 text-foreground border border-transparent hover:border-border/50' : 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30'}"
+							disabled={tab.isStreaming}
+						>
+							<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+							</svg>
+							<span class="max-w-[80px] truncate">{selectedProfileName}</span>
+							<svg class="w-2.5 h-2.5 opacity-60 transition-transform {showProfilePopup ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
+							</svg>
+						</button>
+						{#if showProfilePopup}
+							<button class="fixed inset-0 z-40" onclick={() => showProfilePopup = false} aria-label="Close"></button>
+							<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[140px] max-h-[240px] overflow-y-auto">
+								{#if $profiles.length === 0}
+									<div class="px-3 py-2 text-xs text-muted-foreground">No profiles</div>
+								{:else}
+									{#each $profiles as profile}
+										<button
+											type="button"
+											onclick={() => {
+												tabs.setTabProfile(tab.id, profile.id);
+												showProfilePopup = false;
+											}}
+											class="w-full px-3 py-1.5 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-2 {tab.profile === profile.id ? 'bg-accent/50 text-foreground font-medium' : 'text-muted-foreground'}"
+										>
+											<span class="truncate">{profile.name}</span>
+											{#if tab.profile === profile.id}
+												<svg class="w-3 h-3 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
+												</svg>
+											{/if}
+										</button>
+									{/each}
+								{/if}
+							</div>
+						{/if}
+					</div>
+				{:else}
+					<!-- Locked profile indicator -->
+					<div class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full bg-accent/30 text-muted-foreground">
+						<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+						</svg>
+						<span class="max-w-[80px] truncate">{selectedProfileName}</span>
+						<svg class="w-2.5 h-2.5 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+						</svg>
+					</div>
+				{/if}
+
+				<!-- Project Selector Pill (always visible, mobile-friendly) -->
+				{#if !isProjectLocked}
+					<div class="relative">
+						<button
+							type="button"
+							onclick={() => { closeAllPopups(); showProjectPopup = !showProjectPopup; }}
+							class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {tab.project ? 'bg-accent/50 text-foreground border border-transparent hover:border-border/50' : 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30'}"
+							disabled={tab.isStreaming}
+						>
+							<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+							</svg>
+							<span class="max-w-[80px] truncate">{selectedProjectName}</span>
+							<svg class="w-2.5 h-2.5 opacity-60 transition-transform {showProjectPopup ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
+							</svg>
+						</button>
+						{#if showProjectPopup}
+							<button class="fixed inset-0 z-40" onclick={() => showProjectPopup = false} aria-label="Close"></button>
+							<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[140px] max-h-[240px] overflow-y-auto">
+								{#if $projects.length === 0}
+									<div class="px-3 py-2 text-xs text-muted-foreground">No projects</div>
+								{:else}
+									{#each $projects as project}
+										<button
+											type="button"
+											onclick={() => {
+												tabs.setTabProject(tab.id, project.id);
+												showProjectPopup = false;
+											}}
+											class="w-full px-3 py-1.5 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-2 {tab.project === project.id ? 'bg-accent/50 text-foreground font-medium' : 'text-muted-foreground'}"
+										>
+											<span class="truncate">{project.name}</span>
+											{#if tab.project === project.id}
+												<svg class="w-3 h-3 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
+												</svg>
+											{/if}
+										</button>
+									{/each}
+								{/if}
+							</div>
+						{/if}
+					</div>
+				{:else}
+					<!-- Locked project indicator -->
+					<div class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full bg-accent/30 text-muted-foreground">
+						<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+						</svg>
+						<span class="max-w-[80px] truncate">{selectedProjectName}</span>
+						<svg class="w-2.5 h-2.5 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+						</svg>
+					</div>
+				{/if}
+
 				<!-- Model/Mode Pills (Admin only) -->
 				{#if $isAdmin}
 					<!-- Model Selector Pill -->
 					<div class="relative">
 						<button
 							type="button"
-							onclick={() => { showModelPopup = !showModelPopup; showModePopup = false; }}
+							onclick={() => { closeAllPopups(); showModelPopup = !showModelPopup; }}
 							class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {tab.modelOverride ? 'bg-primary/15 text-primary border border-primary/30' : 'bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50'}"
 							disabled={tab.isStreaming}
 						>
@@ -451,7 +581,7 @@
 					<div class="relative">
 						<button
 							type="button"
-							onclick={() => { showModePopup = !showModePopup; showModelPopup = false; }}
+							onclick={() => { closeAllPopups(); showModePopup = !showModePopup; }}
 							class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {tab.permissionModeOverride ? 'bg-primary/15 text-primary border border-primary/30' : 'bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50'}"
 							disabled={tab.isStreaming}
 						>
