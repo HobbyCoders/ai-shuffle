@@ -94,15 +94,11 @@
 </script>
 
 {#if mobile}
-	<!-- Mobile: No BaseCard wrapper, just the content -->
+	<!-- Mobile: Full-screen card with no BaseCard wrapper or ChatHeader -->
+	<!-- MobileWorkspace provides the header with title and close button -->
 	<div class="chat-card-content mobile">
 		{#if tab}
-			<ChatHeader
-				{tab}
-				compact
-				on:openProfileCard={handleOpenProfileCard}
-				on:openProjectCard={handleOpenProjectCard}
-			/>
+			<!-- Messages fill the space -->
 			<MessageArea {tab} onFork={handleFork} />
 
 			<!-- Permission Queue -->
@@ -131,6 +127,7 @@
 				</div>
 			{/if}
 
+			<!-- Input at the bottom -->
 			<ChatInput {tab} compact />
 		{:else}
 			<div class="chat-loading">

@@ -1105,13 +1105,22 @@ function createDeckStore() {
 
 		/**
 		 * Set mobile mode
+		 * Only resets mobileActiveCardIndex when transitioning from desktop to mobile
+		 * (not on every call, which would reset on window resize)
 		 */
 		setIsMobile(isMobile: boolean): void {
-			update((state) => ({
-				...state,
-				isMobile,
-				mobileActiveCardIndex: 0
-			}));
+			update((state) => {
+				// Only reset index if actually switching to mobile from desktop
+				// Don't reset if already mobile (e.g., during keyboard open/close resize)
+				const shouldResetIndex = isMobile && !state.isMobile;
+
+				return {
+					...state,
+					isMobile,
+					// Preserve current index unless transitioning to mobile for the first time
+					mobileActiveCardIndex: shouldResetIndex ? 0 : state.mobileActiveCardIndex
+				};
+			});
 		},
 
 		/**
