@@ -58,26 +58,57 @@
 	let menuEl: HTMLDivElement | undefined = $state();
 	let adjustedX = $state(x);
 	let adjustedY = $state(y);
+	let isPositioned = $state(false);
 
+	// Reset position state when show changes
 	$effect(() => {
-		if (show && menuEl) {
-			const rect = menuEl.getBoundingClientRect();
-			const viewportWidth = window.innerWidth;
-			const viewportHeight = window.innerHeight;
+		if (show) {
+			isPositioned = false;
+			// Reset to initial position
+			adjustedX = x;
+			adjustedY = y;
+		}
+	});
 
-			// Adjust horizontal position
-			if (x + rect.width > viewportWidth - 10) {
-				adjustedX = viewportWidth - rect.width - 10;
-			} else {
-				adjustedX = x;
-			}
+	// Adjust position after menu is rendered
+	$effect(() => {
+		if (show && menuEl && !isPositioned) {
+			// Use requestAnimationFrame to ensure the menu is rendered
+			requestAnimationFrame(() => {
+				if (!menuEl) return;
 
-			// Adjust vertical position
-			if (y + rect.height > viewportHeight - 10) {
-				adjustedY = viewportHeight - rect.height - 10;
-			} else {
-				adjustedY = y;
-			}
+				const rect = menuEl.getBoundingClientRect();
+				const viewportWidth = window.innerWidth;
+				const viewportHeight = window.innerHeight;
+				const padding = 10;
+
+				let newX = x;
+				let newY = y;
+
+				// Adjust horizontal position - prefer keeping it at click position
+				if (x + rect.width > viewportWidth - padding) {
+					// Try to position to the left of the cursor
+					newX = Math.max(padding, x - rect.width);
+				}
+				// Ensure it doesn't go off the left edge
+				if (newX < padding) {
+					newX = padding;
+				}
+
+				// Adjust vertical position - if it would go below screen, position above cursor
+				if (y + rect.height > viewportHeight - padding) {
+					// Position menu so its bottom is at the click position (or above)
+					newY = Math.max(padding, viewportHeight - rect.height - padding);
+				}
+				// Ensure it doesn't go off the top edge
+				if (newY < padding) {
+					newY = padding;
+				}
+
+				adjustedX = newX;
+				adjustedY = newY;
+				isPositioned = true;
+			});
 		}
 	});
 
