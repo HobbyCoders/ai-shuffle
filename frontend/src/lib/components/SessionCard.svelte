@@ -117,18 +117,18 @@
 	{#if currentSwipeX > 0}
 		{#if isOpen}
 			<!-- Close indicator for open tabs (neutral color) -->
-			<div class="absolute inset-0 flex justify-end items-center rounded-xl overflow-hidden {isPastThreshold ? 'bg-muted-foreground' : 'bg-muted-foreground/50'}">
+			<div class="absolute inset-0 flex justify-end items-center rounded-xl overflow-hidden" style="background-color: {isPastThreshold ? 'var(--muted-foreground)' : 'color-mix(in oklch, var(--muted-foreground) 50%, transparent)'};">
 				<div class="w-[100px] flex items-center justify-center">
-					<svg class="w-5 h-5 text-background" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<svg class="w-5 h-5" style="color: var(--background);" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 					</svg>
 				</div>
 			</div>
 		{:else}
 			<!-- Delete indicator for history items (red) -->
-			<div class="absolute inset-0 flex justify-end items-center rounded-xl overflow-hidden {isPastThreshold ? 'bg-destructive' : 'bg-destructive/50'}">
+			<div class="absolute inset-0 flex justify-end items-center rounded-xl overflow-hidden" style="background-color: {isPastThreshold ? 'var(--destructive)' : 'color-mix(in oklch, var(--destructive) 50%, transparent)'};">
 				<div class="w-[100px] flex items-center justify-center">
-					<svg class="w-5 h-5 text-destructive-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<svg class="w-5 h-5" style="color: var(--destructive-foreground);" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
 					</svg>
 				</div>
@@ -138,7 +138,7 @@
 
 	<!-- Main card content - slides to reveal delete indicator -->
 	<div
-		class="group relative flex flex-col gap-1.5 px-3 py-2.5 rounded-xl cursor-pointer select-none border transition-all {isActive ? 'bg-accent border-primary/50 shadow-sm' : 'bg-card border-border hover:bg-accent/50 hover:border-border/80'} {selectionMode && isSelected ? 'bg-accent border-primary/50' : ''}"
+		class="group relative flex flex-col gap-1.5 px-3 py-2.5 rounded-xl cursor-pointer select-none transition-all session-card {isActive ? 'session-card-active' : ''} {selectionMode && isSelected ? 'session-card-selected' : ''}"
 		class:transition-transform={!directionLocked}
 		style="transform: translateX(-{currentSwipeX}px)"
 		on:click={handleCardClick}
@@ -228,7 +228,7 @@
 		<!-- Bottom row: Message count badge + Tags + Time ago + Cost -->
 		<div class="flex items-center gap-2 mt-0.5 flex-wrap">
 			<!-- Message count badge -->
-			<div class="flex items-center gap-1 bg-primary/20 text-primary px-1.5 py-0.5 rounded-md">
+			<div class="flex items-center gap-1 px-1.5 py-0.5 rounded-md session-badge">
 				<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
 				</svg>
@@ -271,7 +271,7 @@
 
 			<!-- Cost -->
 			{#if session.total_cost_usd}
-				<span class="text-xs {isHighCost ? 'text-warning' : 'text-success'}">
+				<span class="text-xs font-medium session-cost" class:high-cost={isHighCost}>
 					{formatCost(session.total_cost_usd, abbreviated)}
 				</span>
 			{/if}
@@ -307,3 +307,55 @@
 		</div>
 	</div>
 </div>
+
+<style>
+	/* Session card base styles with proper theming */
+	.session-card {
+		background-color: var(--card);
+		border: 1px solid var(--border);
+		box-shadow: var(--shadow-s);
+	}
+
+	.session-card:hover {
+		background-color: var(--accent);
+		border-color: color-mix(in oklch, var(--border) 80%, var(--primary) 20%);
+		box-shadow: var(--shadow-m);
+		transform: translateY(-1px);
+	}
+
+	.session-card-active {
+		background-color: var(--accent);
+		border-color: color-mix(in oklch, var(--primary) 50%, transparent);
+		box-shadow: var(--shadow-m), 0 0 0 1px color-mix(in oklch, var(--primary) 20%, transparent);
+	}
+
+	.session-card-selected {
+		background-color: var(--accent);
+		border-color: color-mix(in oklch, var(--primary) 50%, transparent);
+	}
+
+	/* Session badge with proper contrast */
+	.session-badge {
+		background-color: color-mix(in oklch, var(--primary) 20%, transparent);
+		color: var(--primary);
+	}
+
+	/* Cost display with proper semantic colors */
+	.session-cost {
+		color: var(--success);
+	}
+
+	.session-cost.high-cost {
+		color: var(--warning);
+	}
+
+	/* Status indicator text - ensure readability */
+	:global(.session-card .text-muted-foreground) {
+		color: var(--muted-foreground);
+	}
+
+	/* Title text - ensure high contrast */
+	:global(.session-card .text-foreground) {
+		color: var(--foreground);
+	}
+</style>

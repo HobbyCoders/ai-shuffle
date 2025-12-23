@@ -124,7 +124,7 @@
 
 {#if mobile}
 	<!-- Mobile: No BaseCard wrapper, just the content -->
-	<div class="project-card-content mobile flex flex-col h-full bg-card">
+	<div class="project-card-content mobile flex flex-col h-full">
 		<!-- Header -->
 		<div class="px-4 py-3 border-b border-border bg-gradient-to-r from-primary/5 to-transparent">
 			<div class="flex items-center justify-between">
@@ -503,10 +503,191 @@
 
 <style>
 	.project-card-content {
-		background: var(--card);
+		background: hsl(var(--card));
+		color: hsl(var(--card-foreground));
 	}
 
 	.project-card-content.mobile {
 		border-radius: 0;
+	}
+
+	/* Header gradient with better visibility */
+	:global(.project-card-content .px-4.py-3.border-b) {
+		background: linear-gradient(135deg, hsl(var(--primary) / 0.08) 0%, hsl(var(--card)) 100%);
+	}
+
+	/* Search input styling for better contrast */
+	:global(.project-card-content input[type="text"]) {
+		background: hsl(var(--muted));
+		border: 1px solid hsl(var(--border));
+		color: hsl(var(--foreground));
+		box-shadow: var(--shadow-s);
+		transition: all 0.2s ease;
+	}
+
+	:global(.project-card-content input[type="text"]:focus) {
+		border-color: hsl(var(--primary));
+		box-shadow: var(--shadow-s), 0 0 0 2px hsl(var(--primary) / 0.15);
+	}
+
+	:global(.project-card-content input[type="text"]::placeholder) {
+		color: hsl(var(--muted-foreground));
+	}
+
+	/* Textarea styling */
+	:global(.project-card-content textarea) {
+		background: hsl(var(--muted));
+		border: 1px solid hsl(var(--border));
+		color: hsl(var(--foreground));
+		box-shadow: var(--shadow-s);
+		transition: all 0.2s ease;
+	}
+
+	:global(.project-card-content textarea:focus) {
+		border-color: hsl(var(--primary));
+		box-shadow: var(--shadow-s), 0 0 0 2px hsl(var(--primary) / 0.15);
+	}
+
+	/* Project list items with shadow and better hover */
+	:global(.project-card-content .space-y-2 > div) {
+		box-shadow: var(--shadow-s);
+		transition: all 0.2s ease;
+	}
+
+	:global(.project-card-content .space-y-2 > div:hover) {
+		box-shadow: var(--shadow-m);
+		transform: translateY(-1px);
+		border-color: hsl(var(--primary) / 0.4);
+	}
+
+	/* Icon container with proper depth */
+	:global(.project-card-content .w-9.h-9.rounded-lg) {
+		box-shadow: var(--shadow-s);
+		background: linear-gradient(135deg, hsl(var(--primary) / 0.15) 0%, hsl(var(--primary) / 0.08) 100%);
+	}
+
+	/* Project name styling */
+	:global(.project-card-content .font-medium.text-foreground) {
+		color: hsl(var(--foreground));
+		font-weight: 600;
+	}
+
+	/* Path styling - monospace with subtle background */
+	:global(.project-card-content .font-mono) {
+		color: hsl(var(--muted-foreground));
+		background: hsl(var(--muted) / 0.5);
+		padding: 0.125rem 0.375rem;
+		border-radius: 0.25rem;
+	}
+
+	/* Delete button with better hover feedback */
+	:global(.project-card-content button[title="Delete project"]) {
+		transition: all 0.2s ease;
+	}
+
+	:global(.project-card-content button[title="Delete project"]:hover) {
+		transform: scale(1.05);
+	}
+
+	/* Group badge styling */
+	:global(.project-card-content .text-\[10px\].px-1\.5) {
+		box-shadow: var(--shadow-s);
+		font-weight: 500;
+	}
+
+	/* Footer with proper depth */
+	:global(.project-card-content .border-t.border-border) {
+		background: linear-gradient(180deg, hsl(var(--muted) / 0.4) 0%, hsl(var(--muted) / 0.2) 100%);
+	}
+
+	/* Form labels */
+	:global(.project-card-content label.block) {
+		color: hsl(var(--muted-foreground));
+		font-weight: 500;
+		letter-spacing: 0.01em;
+	}
+
+	/* Primary button with gradient and shadow */
+	:global(.project-card-content .bg-primary) {
+		background: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(var(--primary) / 0.85) 100%);
+		box-shadow: var(--shadow-s);
+		transition: all 0.2s ease;
+	}
+
+	:global(.project-card-content .bg-primary:hover) {
+		box-shadow: var(--shadow-m);
+		filter: brightness(1.05);
+	}
+
+	/* Cancel/secondary button */
+	:global(.project-card-content .bg-muted.text-foreground) {
+		background: hsl(var(--muted));
+		border: 1px solid hsl(var(--border));
+		box-shadow: var(--shadow-s);
+		transition: all 0.2s ease;
+	}
+
+	:global(.project-card-content .bg-muted.text-foreground:hover) {
+		background: hsl(var(--accent));
+		box-shadow: var(--shadow-m);
+	}
+
+	/* Error banner */
+	:global(.project-card-content .bg-red-500\/10) {
+		box-shadow: var(--shadow-s);
+		backdrop-filter: blur(4px);
+	}
+
+	/* Delete button in delete confirmation */
+	:global(.project-card-content .bg-red-500) {
+		box-shadow: var(--shadow-s);
+		transition: all 0.2s ease;
+	}
+
+	:global(.project-card-content .bg-red-500:hover) {
+		box-shadow: var(--shadow-m);
+	}
+
+	/* Empty state styling */
+	:global(.project-card-content .text-center.py-8 svg) {
+		opacity: 0.4;
+	}
+
+	:global(.project-card-content .text-center.py-8 p) {
+		color: hsl(var(--muted-foreground));
+	}
+
+	/* New Project button dashed border style */
+	:global(.project-card-content button.w-full.flex) {
+		background: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(var(--primary) / 0.85) 100%);
+		box-shadow: var(--shadow-s);
+	}
+
+	:global(.project-card-content button.w-full.flex:hover) {
+		box-shadow: var(--shadow-m);
+		transform: translateY(-1px);
+	}
+
+	/* Scrollbar styling */
+	:global(.project-card-content .overflow-y-auto) {
+		scrollbar-width: thin;
+		scrollbar-color: hsl(var(--border)) transparent;
+	}
+
+	:global(.project-card-content .overflow-y-auto::-webkit-scrollbar) {
+		width: 6px;
+	}
+
+	:global(.project-card-content .overflow-y-auto::-webkit-scrollbar-track) {
+		background: transparent;
+	}
+
+	:global(.project-card-content .overflow-y-auto::-webkit-scrollbar-thumb) {
+		background-color: hsl(var(--border));
+		border-radius: 3px;
+	}
+
+	:global(.project-card-content .overflow-y-auto::-webkit-scrollbar-thumb:hover) {
+		background-color: hsl(var(--muted-foreground));
 	}
 </style>

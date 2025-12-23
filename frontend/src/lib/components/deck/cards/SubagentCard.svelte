@@ -425,7 +425,7 @@
 							type="text"
 							bind:value={searchQuery}
 							placeholder="Search subagents..."
-							class="w-full pl-10 pr-4 py-2 bg-background border border-border rounded-xl text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+							class="search-input w-full pl-10 pr-4 py-2.5 border rounded-xl text-sm focus:outline-none"
 						/>
 					</div>
 				{/if}
@@ -434,9 +434,9 @@
 			<!-- Content -->
 			<div class="flex-1 overflow-y-auto p-4">
 				{#if error}
-					<div class="mb-4 p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-500 text-sm flex items-center gap-2">
+					<div class="error-banner mb-4 p-3 rounded-xl text-sm flex items-center gap-2">
 						<span class="flex-1">{error}</span>
-						<button onclick={() => (error = null)} class="hover:text-red-400">
+						<button onclick={() => (error = null)} class="hover:opacity-70 transition-opacity">
 							<X class="w-4 h-4" />
 						</button>
 					</div>
@@ -444,7 +444,7 @@
 
 				<!-- Delete confirmation banner -->
 				{#if deletingId}
-					<div class="mb-4 p-4 bg-red-500/10 border border-red-500/20 rounded-xl">
+					<div class="delete-confirm-banner mb-4 p-4 rounded-xl">
 						<p class="text-sm text-foreground mb-3">
 							Delete <strong>{subagents.find(s => s.id === deletingId)?.name}</strong>? This cannot be undone.
 						</p>
@@ -452,14 +452,14 @@
 							<button
 								onclick={() => (deletingId = null)}
 								disabled={deleteLoading}
-								class="flex-1 px-3 py-2 bg-muted text-foreground rounded-lg hover:bg-accent transition-colors text-sm"
+								class="btn-secondary flex-1 px-3 py-2.5 rounded-lg text-sm"
 							>
 								Cancel
 							</button>
 							<button
 								onclick={confirmDelete}
 								disabled={deleteLoading}
-								class="flex-1 px-3 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors text-sm flex items-center justify-center gap-2"
+								class="btn-destructive flex-1 px-3 py-2.5 rounded-lg text-sm flex items-center justify-center gap-2"
 							>
 								{#if deleteLoading}
 									<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
@@ -497,48 +497,48 @@
 						{/if}
 					</div>
 				{:else}
-					<div class="space-y-2">
+					<div class="space-y-3">
 						{#each filteredSubagents() as agent (agent.id)}
 							<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 							<div
-								class="p-3 bg-background hover:bg-accent border border-border rounded-xl transition-all group cursor-pointer"
+								class="agent-list-item p-4 rounded-xl group cursor-pointer"
 								onclick={() => handleEdit(agent)}
 							>
 								<div class="flex items-start gap-3">
-									<div class="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
-										<Monitor class="w-4 h-4 text-primary" />
+									<div class="agent-icon w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0">
+										<Monitor class="w-5 h-5 text-primary" />
 									</div>
 									<div class="flex-1 min-w-0">
 										<div class="flex items-center gap-2 flex-wrap">
-											<span class="font-medium text-foreground text-sm">{agent.name}</span>
-											<span class="text-[10px] px-1.5 py-0.5 rounded {getModelColor(agent.model)}">
+											<span class="font-semibold text-foreground text-sm">{agent.name}</span>
+											<span class="model-badge model-badge-{agent.model || 'inherit'} text-[10px]">
 												{getModelDisplay(agent.model)}
 											</span>
 											{#if agent.tools && agent.tools.length > 0}
-												<span class="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+												<span class="tools-badge text-[10px]">
 													{agent.tools.length} tools
 												</span>
 											{/if}
 											{#if $groups.subagents.assignments[agent.id]}
-												<span class="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">
+												<span class="group-badge text-[10px]">
 													{$groups.subagents.assignments[agent.id]}
 												</span>
 											{/if}
 										</div>
-										<p class="text-xs text-muted-foreground font-mono mt-0.5">{agent.id}</p>
-										<p class="text-xs text-muted-foreground mt-1 line-clamp-2">{agent.description}</p>
+										<p class="text-xs text-muted-foreground font-mono mt-1">{agent.id}</p>
+										<p class="text-xs text-muted-foreground mt-1.5 line-clamp-2">{agent.description}</p>
 									</div>
 									<div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
 										<button
 											onclick={(e) => exportSubagent(agent.id, e)}
-											class="p-2 text-muted-foreground hover:text-foreground rounded-lg hover:bg-muted transition-colors"
+											class="action-btn text-muted-foreground hover:text-foreground"
 											title="Export"
 										>
 											<Download class="w-4 h-4" />
 										</button>
 										<button
 											onclick={(e) => handleDeleteClick(agent.id, e)}
-											class="p-2 text-muted-foreground hover:text-red-500 rounded-lg hover:bg-red-500/10 transition-colors"
+											class="action-btn action-btn-delete text-muted-foreground"
 											title="Delete"
 										>
 											<Trash2 class="w-4 h-4" />
@@ -552,11 +552,11 @@
 			</div>
 
 			<!-- Footer -->
-			<div class="px-4 py-4 border-t border-border bg-muted/30">
-				<div class="flex gap-2">
+			<div class="footer-section px-4 py-4">
+				<div class="flex gap-3">
 					<button
 						onclick={handleCreate}
-						class="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground rounded-xl hover:bg-primary/90 transition-colors font-medium"
+						class="btn-primary flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl"
 					>
 						<Plus class="w-4 h-4" />
 						New Subagent
@@ -564,7 +564,7 @@
 					<button
 						onclick={triggerImport}
 						disabled={importing}
-						class="px-4 py-2.5 bg-background border border-border text-foreground rounded-xl hover:bg-muted transition-colors flex items-center gap-2"
+						class="btn-secondary px-4 py-2.5 rounded-xl flex items-center gap-2"
 						title="Import from file"
 					>
 						{#if importing}
@@ -602,13 +602,13 @@
 			</div>
 
 			<!-- Tab Navigation -->
-			<div class="flex border-b border-border bg-muted/30">
+			<div class="tab-nav flex border-b border-border">
 				{#each tabs as tab}
 					<button
 						onclick={() => activeTab = tab.id}
-						class="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium transition-all relative
+						class="tab-button flex-1 flex items-center justify-center gap-2 px-4 py-3 text-sm font-medium transition-all relative
 							{activeTab === tab.id
-								? 'text-primary'
+								? 'text-primary active'
 								: 'text-muted-foreground hover:text-foreground'}"
 					>
 						<tab.icon class="w-4 h-4" />
@@ -616,9 +616,9 @@
 
 						<!-- Validation indicator -->
 						{#if !tabStatus()[tab.id]}
-							<span class="w-2 h-2 rounded-full bg-amber-500"></span>
+							<span class="validation-dot-invalid w-2 h-2 rounded-full"></span>
 						{:else}
-							<span class="w-2 h-2 rounded-full bg-green-500"></span>
+							<span class="validation-dot-valid w-2 h-2 rounded-full"></span>
 						{/if}
 
 						<!-- Active indicator -->
@@ -632,9 +632,9 @@
 			<!-- Tab Content -->
 			<div class="flex-1 overflow-y-auto p-4">
 				{#if error}
-					<div class="mb-4 p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-500 text-sm flex items-center gap-2">
+					<div class="error-banner mb-4 p-3 rounded-xl text-sm flex items-center gap-2">
 						<span class="flex-1">{error}</span>
-						<button onclick={() => (error = null)} class="hover:text-red-400">
+						<button onclick={() => (error = null)} class="hover:opacity-70 transition-opacity">
 							<X class="w-4 h-4" />
 						</button>
 					</div>
@@ -646,14 +646,14 @@
 						{#if !isEditMode}
 							<div class="space-y-2">
 								<label for="agent-id" class="block text-sm font-medium text-foreground">
-									ID <span class="text-red-500">*</span>
+									ID <span class="text-destructive">*</span>
 								</label>
 								<input
 									id="agent-id"
 									type="text"
 									bind:value={formId}
 									placeholder="my-agent-id"
-									class="w-full px-4 py-2.5 bg-background border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary transition-all"
+									class="form-input w-full px-4 py-2.5 rounded-xl"
 								/>
 								<p class="text-xs text-muted-foreground">
 									Lowercase letters, numbers, and hyphens only.
@@ -663,27 +663,27 @@
 
 						<div class="space-y-2">
 							<label for="agent-name" class="block text-sm font-medium text-foreground">
-								Display Name <span class="text-red-500">*</span>
+								Display Name <span class="text-destructive">*</span>
 							</label>
 							<input
 								id="agent-name"
 								type="text"
 								bind:value={formName}
 								placeholder="Research Assistant"
-								class="w-full px-4 py-2.5 bg-background border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary transition-all"
+								class="form-input w-full px-4 py-2.5 rounded-xl"
 							/>
 						</div>
 
 						<div class="space-y-2">
 							<label for="agent-description" class="block text-sm font-medium text-foreground">
-								Description <span class="text-red-500">*</span>
+								Description <span class="text-destructive">*</span>
 							</label>
 							<textarea
 								id="agent-description"
 								bind:value={formDescription}
 								placeholder="Use this agent when you need to research topics..."
 								rows={3}
-								class="w-full px-4 py-2.5 bg-background border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary transition-all resize-none"
+								class="form-input w-full px-4 py-2.5 rounded-xl resize-none"
 							></textarea>
 							<p class="text-xs text-muted-foreground">
 								Describes when Claude should invoke this subagent.
@@ -698,17 +698,15 @@
 						<!-- Model Selection -->
 						<div class="space-y-3">
 							<label class="block text-sm font-medium text-foreground">Model</label>
-							<div class="grid grid-cols-2 gap-2">
+							<div class="grid grid-cols-2 gap-3">
 								{#each MODEL_OPTIONS as opt}
 									<button
 										type="button"
 										onclick={() => formModel = opt.value}
-										class="flex flex-col items-center gap-1 p-3 rounded-xl border transition-all
-											{formModel === opt.value
-												? 'bg-primary/10 border-primary text-primary'
-												: 'bg-background border-border text-foreground hover:border-primary/50'}"
+										class="model-option flex flex-col items-center gap-1 p-3 rounded-xl
+											{formModel === opt.value ? 'selected' : ''}"
 									>
-										<span class="text-sm font-medium">{opt.label}</span>
+										<span class="text-sm font-semibold">{opt.label}</span>
 										<span class="text-[10px] text-muted-foreground">{opt.description}</span>
 									</button>
 								{/each}
@@ -720,18 +718,16 @@
 							<div class="flex items-center justify-between">
 								<label class="block text-sm font-medium text-foreground">Tool Access</label>
 								{#if toolSelectionMode === 'select'}
-									<span class="text-xs text-muted-foreground">{formTools.length} selected</span>
+									<span class="text-xs text-primary font-medium">{formTools.length} selected</span>
 								{/if}
 							</div>
 
-							<div class="flex gap-2">
+							<div class="flex gap-3">
 								<button
 									type="button"
 									onclick={() => { toolSelectionMode = 'all'; formTools = []; }}
-									class="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border transition-all
-										{toolSelectionMode === 'all'
-											? 'bg-primary text-primary-foreground border-primary'
-											: 'bg-background border-border text-foreground hover:border-primary/50'}"
+									class="tool-access-btn flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl
+										{toolSelectionMode === 'all' ? 'selected' : ''}"
 								>
 									<Check class="w-4 h-4" />
 									All Tools
@@ -739,10 +735,8 @@
 								<button
 									type="button"
 									onclick={() => toolSelectionMode = 'select'}
-									class="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border transition-all
-										{toolSelectionMode === 'select'
-											? 'bg-primary text-primary-foreground border-primary'
-											: 'bg-background border-border text-foreground hover:border-primary/50'}"
+									class="tool-access-btn flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl
+										{toolSelectionMode === 'select' ? 'selected' : ''}"
 								>
 									<Settings class="w-4 h-4" />
 									Custom
@@ -750,7 +744,7 @@
 							</div>
 
 							{#if toolSelectionMode === 'all'}
-								<p class="text-xs text-muted-foreground bg-muted/50 rounded-lg p-3">
+								<p class="info-box text-xs rounded-lg p-3">
 									The subagent will have access to all tools available in the profile.
 								</p>
 							{/if}
@@ -759,17 +753,17 @@
 						<!-- Tool Selection -->
 						{#if toolSelectionMode === 'select'}
 							<div class="space-y-4">
-								<div class="flex gap-2 text-xs">
-									<button type="button" onclick={selectAllTools} class="text-primary hover:underline">
+								<div class="flex gap-3 text-xs">
+									<button type="button" onclick={selectAllTools} class="text-primary hover:underline font-medium">
 										Select all
 									</button>
 									<span class="text-muted-foreground">|</span>
-									<button type="button" onclick={clearAllTools} class="text-primary hover:underline">
+									<button type="button" onclick={clearAllTools} class="text-primary hover:underline font-medium">
 										Clear all
 									</button>
 								</div>
 
-								<div class="space-y-4 max-h-64 overflow-y-auto">
+								<div class="space-y-4 max-h-64 overflow-y-auto pr-2">
 									{#each availableTools.categories as category}
 										{#if category.tools.length > 0}
 											<div class="space-y-2">
@@ -778,12 +772,12 @@
 													onclick={() => selectAllInCategory(category)}
 													class="flex items-center gap-2 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
 												>
-													<span class="w-4 h-4 rounded flex items-center justify-center transition-colors
+													<span class="category-checkbox w-4 h-4 rounded flex items-center justify-center
 														{getCategorySelectionState(category) === 'all'
-															? 'bg-primary'
+															? 'checked'
 															: getCategorySelectionState(category) === 'partial'
-																? 'bg-primary/50'
-																: 'bg-muted border border-border'}">
+																? 'partial'
+																: ''}">
 														{#if getCategorySelectionState(category) !== 'none'}
 															<Check class="w-3 h-3 text-primary-foreground" />
 														{/if}
@@ -796,10 +790,8 @@
 														<button
 															type="button"
 															onclick={() => toggleTool(tool.name)}
-															class="px-3 py-1.5 text-xs rounded-lg border transition-all
-																{formTools.includes(tool.name)
-																	? 'bg-primary/10 border-primary text-primary'
-																	: 'bg-background border-border text-foreground hover:border-primary/50'}"
+															class="tool-chip px-3 py-1.5 text-xs rounded-lg
+																{formTools.includes(tool.name) ? 'selected' : ''}"
 															title={tool.description}
 														>
 															{tool.name}
@@ -812,7 +804,7 @@
 								</div>
 
 								{#if formTools.length === 0}
-									<p class="text-xs text-amber-500 bg-amber-500/10 rounded-lg p-3">
+									<p class="warning-box text-xs rounded-lg p-3">
 										No tools selected. The subagent won't be able to perform any actions.
 									</p>
 								{/if}
@@ -826,7 +818,7 @@
 					<div class="h-full flex flex-col space-y-2">
 						<div class="flex items-center justify-between">
 							<label for="agent-prompt" class="block text-sm font-medium text-foreground">
-								System Prompt <span class="text-red-500">*</span>
+								System Prompt <span class="text-destructive">*</span>
 							</label>
 							<span class="text-xs text-muted-foreground">
 								{formPrompt.length} characters
@@ -836,7 +828,7 @@
 							id="agent-prompt"
 							bind:value={formPrompt}
 							placeholder="You are a specialized agent that helps users with..."
-							class="flex-1 min-h-[200px] w-full px-4 py-3 bg-background border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary transition-all font-mono text-sm resize-none"
+							class="form-input flex-1 min-h-[200px] w-full px-4 py-3 rounded-xl font-mono text-sm resize-none"
 						></textarea>
 						<p class="text-xs text-muted-foreground">
 							Instructions that define the subagent's behavior and capabilities.
@@ -846,18 +838,18 @@
 			</div>
 
 			<!-- Footer -->
-			<div class="px-4 py-4 border-t border-border bg-muted/30">
-				<div class="flex gap-2">
+			<div class="footer-section px-4 py-4">
+				<div class="flex gap-3">
 					<button
 						onclick={handleBack}
-						class="flex-1 px-4 py-2.5 bg-muted text-foreground rounded-xl hover:bg-accent transition-colors"
+						class="btn-secondary flex-1 px-4 py-2.5 rounded-xl"
 					>
 						Cancel
 					</button>
 					<button
 						onclick={handleSave}
 						disabled={!isValid() || saving}
-						class="flex-1 px-4 py-2.5 bg-primary text-primary-foreground rounded-xl hover:bg-primary/90 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+						class="btn-primary flex-1 px-4 py-2.5 rounded-xl disabled:opacity-50 flex items-center justify-center gap-2"
 					>
 						{#if saving}
 							<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
@@ -905,5 +897,324 @@
 		-webkit-line-clamp: 2;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
+	}
+
+	/* ============================================
+	   IMPROVED THEMING
+	   ============================================ */
+
+	/* Card header styling */
+	.subagent-card-content :global(.header-section) {
+		background: linear-gradient(to right, color-mix(in oklch, var(--primary) 8%, transparent), transparent);
+	}
+
+	/* Search input - dark mode friendly */
+	.subagent-card-content :global(.search-input) {
+		background: oklch(0.12 0.008 260);
+		border-color: var(--border);
+		color: var(--foreground);
+		transition: all 0.15s ease;
+	}
+
+	.subagent-card-content :global(.search-input:hover) {
+		border-color: color-mix(in oklch, var(--border) 100%, var(--primary) 30%);
+	}
+
+	.subagent-card-content :global(.search-input:focus) {
+		background: oklch(0.14 0.01 260);
+		border-color: var(--primary);
+		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 20%, transparent);
+	}
+
+	/* List item cards */
+	.subagent-card-content :global(.agent-list-item) {
+		background: color-mix(in oklch, var(--muted) 40%, transparent);
+		border: 1px solid var(--border);
+		box-shadow: var(--shadow-s);
+		transition: all 0.15s ease;
+	}
+
+	.subagent-card-content :global(.agent-list-item:hover) {
+		background: var(--accent);
+		box-shadow: var(--shadow-m);
+		transform: translateY(-1px);
+		border-color: color-mix(in oklch, var(--primary) 30%, var(--border));
+	}
+
+	/* Agent icon container */
+	.subagent-card-content :global(.agent-icon) {
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		box-shadow: var(--shadow-s);
+	}
+
+	/* Model badges */
+	.subagent-card-content :global(.model-badge) {
+		font-weight: 600;
+		padding: 3px 8px;
+		border-radius: 6px;
+		box-shadow: var(--shadow-s);
+	}
+
+	.subagent-card-content :global(.model-badge-inherit) {
+		background: var(--muted);
+		color: var(--muted-foreground);
+		border: 1px solid var(--border);
+	}
+
+	.subagent-card-content :global(.model-badge-haiku) {
+		background: color-mix(in oklch, oklch(0.65 0.18 145) 15%, transparent);
+		color: oklch(0.65 0.18 145);
+		border: 1px solid color-mix(in oklch, oklch(0.65 0.18 145) 30%, transparent);
+	}
+
+	.subagent-card-content :global(.model-badge-sonnet) {
+		background: color-mix(in oklch, var(--info) 15%, transparent);
+		color: var(--info);
+		border: 1px solid color-mix(in oklch, var(--info) 30%, transparent);
+	}
+
+	.subagent-card-content :global(.model-badge-sonnet-1m) {
+		background: color-mix(in oklch, oklch(0.65 0.18 300) 15%, transparent);
+		color: oklch(0.7 0.18 300);
+		border: 1px solid color-mix(in oklch, oklch(0.65 0.18 300) 30%, transparent);
+	}
+
+	.subagent-card-content :global(.model-badge-opus) {
+		background: color-mix(in oklch, var(--warning) 15%, transparent);
+		color: var(--warning);
+		border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
+	}
+
+	/* Tool count badge */
+	.subagent-card-content :global(.tools-badge) {
+		background: var(--muted);
+		color: var(--foreground);
+		border: 1px solid var(--border);
+		font-weight: 500;
+		padding: 3px 8px;
+		border-radius: 6px;
+	}
+
+	/* Group assignment badge */
+	.subagent-card-content :global(.group-badge) {
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		color: var(--primary);
+		border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
+		font-weight: 500;
+		padding: 3px 8px;
+		border-radius: 6px;
+	}
+
+	/* Action buttons on list items */
+	.subagent-card-content :global(.action-btn) {
+		padding: 8px;
+		border-radius: 8px;
+		transition: all 0.15s ease;
+	}
+
+	.subagent-card-content :global(.action-btn:hover) {
+		background: var(--accent);
+	}
+
+	.subagent-card-content :global(.action-btn-delete:hover) {
+		background: color-mix(in oklch, var(--destructive) 15%, transparent);
+		color: var(--destructive);
+	}
+
+	/* Error messages */
+	.subagent-card-content :global(.error-banner) {
+		background: color-mix(in oklch, var(--destructive) 12%, transparent);
+		border: 1px solid color-mix(in oklch, var(--destructive) 25%, transparent);
+		color: var(--destructive);
+		box-shadow: var(--shadow-s);
+	}
+
+	/* Delete confirmation banner */
+	.subagent-card-content :global(.delete-confirm-banner) {
+		background: color-mix(in oklch, var(--destructive) 10%, transparent);
+		border: 1px solid color-mix(in oklch, var(--destructive) 25%, transparent);
+		box-shadow: var(--shadow-m);
+	}
+
+	/* Primary button */
+	.subagent-card-content :global(.btn-primary) {
+		background: var(--primary);
+		color: var(--primary-foreground);
+		font-weight: 600;
+		box-shadow: var(--shadow-m);
+		transition: all 0.15s ease;
+	}
+
+	.subagent-card-content :global(.btn-primary:hover) {
+		filter: brightness(1.1);
+		box-shadow: var(--shadow-l);
+		transform: translateY(-1px);
+	}
+
+	/* Secondary button */
+	.subagent-card-content :global(.btn-secondary) {
+		background: var(--muted);
+		color: var(--foreground);
+		border: 1px solid var(--border);
+		box-shadow: var(--shadow-s);
+		transition: all 0.15s ease;
+	}
+
+	.subagent-card-content :global(.btn-secondary:hover) {
+		background: var(--accent);
+		box-shadow: var(--shadow-m);
+	}
+
+	/* Destructive button */
+	.subagent-card-content :global(.btn-destructive) {
+		background: var(--destructive);
+		color: var(--destructive-foreground);
+		font-weight: 600;
+		box-shadow: var(--shadow-m);
+		transition: all 0.15s ease;
+	}
+
+	.subagent-card-content :global(.btn-destructive:hover) {
+		filter: brightness(1.1);
+	}
+
+	/* Footer */
+	.subagent-card-content :global(.footer-section) {
+		background: color-mix(in oklch, var(--muted) 40%, transparent);
+		border-top: 1px solid var(--border);
+	}
+
+	/* Tab navigation */
+	.subagent-card-content :global(.tab-nav) {
+		background: color-mix(in oklch, var(--muted) 40%, transparent);
+	}
+
+	.subagent-card-content :global(.tab-button) {
+		transition: all 0.15s ease;
+	}
+
+	.subagent-card-content :global(.tab-button:hover) {
+		background: color-mix(in oklch, var(--accent) 50%, transparent);
+	}
+
+	.subagent-card-content :global(.tab-button.active) {
+		color: var(--primary);
+	}
+
+	/* Validation indicators */
+	.subagent-card-content :global(.validation-dot-valid) {
+		background: var(--success);
+		box-shadow: 0 0 4px var(--success);
+	}
+
+	.subagent-card-content :global(.validation-dot-invalid) {
+		background: var(--warning);
+		box-shadow: 0 0 4px var(--warning);
+	}
+
+	/* Form inputs - dark mode friendly */
+	.subagent-card-content :global(.form-input) {
+		background: oklch(0.12 0.008 260);
+		border: 1px solid var(--border);
+		color: var(--foreground);
+		transition: all 0.15s ease;
+	}
+
+	.subagent-card-content :global(.form-input::placeholder) {
+		color: var(--muted-foreground);
+	}
+
+	.subagent-card-content :global(.form-input:hover) {
+		border-color: color-mix(in oklch, var(--border) 100%, var(--primary) 30%);
+	}
+
+	.subagent-card-content :global(.form-input:focus) {
+		outline: none;
+		background: oklch(0.14 0.01 260);
+		border-color: var(--primary);
+		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 20%, transparent);
+	}
+
+	/* Model selection buttons */
+	.subagent-card-content :global(.model-option) {
+		background: color-mix(in oklch, var(--muted) 40%, transparent);
+		border: 1px solid var(--border);
+		transition: all 0.15s ease;
+		box-shadow: var(--shadow-s);
+	}
+
+	.subagent-card-content :global(.model-option:hover) {
+		border-color: color-mix(in oklch, var(--primary) 50%, var(--border));
+		background: var(--accent);
+	}
+
+	.subagent-card-content :global(.model-option.selected) {
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		border-color: var(--primary);
+		color: var(--primary);
+	}
+
+	/* Tool access buttons */
+	.subagent-card-content :global(.tool-access-btn) {
+		background: color-mix(in oklch, var(--muted) 40%, transparent);
+		border: 1px solid var(--border);
+		transition: all 0.15s ease;
+		box-shadow: var(--shadow-s);
+	}
+
+	.subagent-card-content :global(.tool-access-btn:hover) {
+		border-color: color-mix(in oklch, var(--primary) 50%, var(--border));
+	}
+
+	.subagent-card-content :global(.tool-access-btn.selected) {
+		background: var(--primary);
+		color: var(--primary-foreground);
+		border-color: var(--primary);
+	}
+
+	/* Tool selection chips */
+	.subagent-card-content :global(.tool-chip) {
+		background: color-mix(in oklch, var(--muted) 40%, transparent);
+		border: 1px solid var(--border);
+		color: var(--foreground);
+		transition: all 0.15s ease;
+	}
+
+	.subagent-card-content :global(.tool-chip:hover) {
+		border-color: color-mix(in oklch, var(--primary) 50%, var(--border));
+	}
+
+	.subagent-card-content :global(.tool-chip.selected) {
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		border-color: var(--primary);
+		color: var(--primary);
+	}
+
+	/* Info/warning boxes */
+	.subagent-card-content :global(.info-box) {
+		background: color-mix(in oklch, var(--muted) 40%, transparent);
+		border: 1px solid var(--border);
+		color: var(--foreground);
+	}
+
+	.subagent-card-content :global(.warning-box) {
+		background: color-mix(in oklch, var(--warning) 12%, transparent);
+		border: 1px solid color-mix(in oklch, var(--warning) 25%, transparent);
+		color: var(--warning);
+	}
+
+	/* Category checkbox styling */
+	.subagent-card-content :global(.category-checkbox) {
+		background: var(--muted);
+		border: 1px solid var(--border);
+		transition: all 0.15s ease;
+	}
+
+	.subagent-card-content :global(.category-checkbox.partial) {
+		background: color-mix(in oklch, var(--primary) 50%, var(--muted));
+	}
+
+	.subagent-card-content :global(.category-checkbox.checked) {
+		background: var(--primary);
 	}
 </style>

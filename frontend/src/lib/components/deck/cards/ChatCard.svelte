@@ -180,6 +180,7 @@
 		min-height: 0;
 		overflow: hidden;
 		background: var(--card);
+		color: var(--card-foreground);
 	}
 
 	.chat-card-content.mobile {
@@ -193,14 +194,19 @@
 		align-items: center;
 		justify-content: center;
 		gap: 12px;
-		color: hsl(var(--muted-foreground));
+		color: var(--muted-foreground);
+	}
+
+	.chat-loading p {
+		color: var(--foreground);
+		font-size: 0.875rem;
 	}
 
 	.spinner {
 		width: 24px;
 		height: 24px;
-		border: 2px solid hsl(var(--border));
-		border-top-color: hsl(var(--primary));
+		border: 2px solid var(--border);
+		border-top-color: var(--primary);
 		border-radius: 50%;
 		animation: spin 0.8s linear infinite;
 	}
@@ -215,5 +221,159 @@
 	.chat-card-content :global(.flex-1) {
 		flex: 1;
 		min-height: 0;
+	}
+
+	/* User message styling - distinct teal/primary tint with good contrast */
+	.chat-card-content :global(.user-message) {
+		background: color-mix(in oklch, var(--primary) 12%, var(--card));
+		border: 1px solid color-mix(in oklch, var(--primary) 30%, var(--border));
+		border-radius: 0.75rem;
+		padding: 0.875rem 1rem;
+		box-shadow: var(--shadow-s);
+		transition: box-shadow 0.2s ease, transform 0.2s ease, background-color 0.2s ease;
+	}
+
+	.chat-card-content :global(.user-message:hover) {
+		box-shadow: var(--shadow-m);
+		background: color-mix(in oklch, var(--primary) 16%, var(--card));
+	}
+
+	/* Assistant message styling - subtle accent background */
+	.chat-card-content :global(.assistant-message) {
+		background: var(--accent);
+		border: 1px solid var(--border);
+		border-radius: 0.75rem;
+		padding: 0.875rem 1rem;
+		box-shadow: var(--shadow-s);
+		transition: box-shadow 0.2s ease, transform 0.2s ease, background-color 0.2s ease;
+	}
+
+	.chat-card-content :global(.assistant-message:hover) {
+		box-shadow: var(--shadow-m);
+		background: color-mix(in oklch, var(--accent) 90%, var(--foreground) 10%);
+	}
+
+	/* Ensure text readability in messages */
+	.chat-card-content :global(.user-message p),
+	.chat-card-content :global(.assistant-message .prose) {
+		color: var(--foreground);
+	}
+
+	/* Fix prose link colors for better visibility */
+	.chat-card-content :global(.prose a) {
+		color: var(--primary);
+		text-decoration-color: color-mix(in oklch, var(--primary) 50%, transparent);
+	}
+
+	.chat-card-content :global(.prose a:hover) {
+		text-decoration-color: var(--primary);
+		opacity: 0.9;
+	}
+
+	/* Code block styling in messages */
+	.chat-card-content :global(.prose pre) {
+		background: var(--muted);
+		border: 1px solid var(--border);
+		box-shadow: var(--shadow-s);
+	}
+
+	.chat-card-content :global(.prose code:not(pre code)) {
+		background: var(--muted);
+		color: var(--foreground);
+		border: 1px solid var(--border);
+		padding: 0.125rem 0.375rem;
+		border-radius: 0.25rem;
+		font-size: 0.9em;
+	}
+
+	/* Error message styling */
+	.chat-card-content :global(.bg-destructive\/10) {
+		background: color-mix(in oklch, var(--destructive) 12%, transparent);
+	}
+
+	/* Permission and question queue sections */
+	.chat-card-content :global(.border-warning\/30) {
+		border-color: color-mix(in oklch, var(--warning) 30%, transparent);
+	}
+
+	.chat-card-content :global(.bg-warning\/5) {
+		background: color-mix(in oklch, var(--warning) 8%, transparent);
+	}
+
+	.chat-card-content :global(.border-info\/30) {
+		border-color: color-mix(in oklch, var(--info) 30%, transparent);
+	}
+
+	.chat-card-content :global(.bg-info\/5) {
+		background: color-mix(in oklch, var(--info) 8%, transparent);
+	}
+
+	/* Scrollbar styling for dark mode readability */
+	.chat-card-content :global(::-webkit-scrollbar-thumb) {
+		background: var(--scrollbar-thumb);
+	}
+
+	.chat-card-content :global(::-webkit-scrollbar-thumb:hover) {
+		background: var(--scrollbar-thumb-hover);
+	}
+
+	/* Action buttons hover state */
+	.chat-card-content :global(button) {
+		transition: all 0.15s ease;
+	}
+
+	.chat-card-content :global(button:hover:not(:disabled)) {
+		background-color: var(--accent);
+	}
+
+	/* Muted foreground text should be readable */
+	.chat-card-content :global(.text-muted-foreground) {
+		color: var(--muted-foreground);
+	}
+
+	/* Ensure proper foreground colors */
+	.chat-card-content :global(.text-foreground) {
+		color: var(--foreground);
+	}
+
+	/* Input and select styling for dropdowns */
+	.chat-card-content :global(select),
+	.chat-card-content :global(input[type="text"]),
+	.chat-card-content :global(textarea) {
+		background-color: var(--input);
+		color: var(--foreground);
+		border-color: var(--border);
+	}
+
+	.chat-card-content :global(select:focus),
+	.chat-card-content :global(input[type="text"]:focus),
+	.chat-card-content :global(textarea:focus) {
+		border-color: var(--ring);
+		outline: none;
+		box-shadow: 0 0 0 2px color-mix(in oklch, var(--ring) 25%, transparent);
+	}
+
+	/* Select option styling */
+	.chat-card-content :global(select option) {
+		background-color: var(--popover);
+		color: var(--popover-foreground);
+	}
+
+	/* Dropdown/popover styling */
+	.chat-card-content :global([data-radix-popper-content-wrapper]),
+	.chat-card-content :global(.dropdown-content),
+	.chat-card-content :global([role="listbox"]),
+	.chat-card-content :global([role="menu"]) {
+		background-color: var(--popover);
+		color: var(--popover-foreground);
+		border: 1px solid var(--border);
+		box-shadow: var(--shadow-l);
+	}
+
+	/* Dropdown item hover states */
+	.chat-card-content :global([role="option"]:hover),
+	.chat-card-content :global([role="menuitem"]:hover) {
+		background-color: var(--accent);
+		color: var(--accent-foreground);
 	}
 </style>

@@ -357,28 +357,36 @@
 		display: flex;
 		flex-direction: column;
 		height: 100%;
-		background: var(--card);
+		background: var(--glass-bg);
+		backdrop-filter: blur(12px);
+		-webkit-backdrop-filter: blur(12px);
 		border-radius: 12px;
-		border: 1px solid var(--border);
+		border: 1px solid var(--glass-border);
 		overflow: hidden;
-		box-shadow:
-			0 4px 6px -1px rgba(0, 0, 0, 0.3),
-			0 2px 4px -2px rgba(0, 0, 0, 0.15),
-			0 0 0 1px var(--border);
-		transition: box-shadow 0.15s ease, border-color 0.15s ease;
+		box-shadow: var(--shadow-m);
+		transition:
+			box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+			border-color 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+			transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+	}
+
+	.base-card:hover:not(.focused):not(.dragging):not(.resizing) {
+		border-color: var(--border-subtle);
+		box-shadow: var(--shadow-l);
 	}
 
 	.base-card.focused {
 		box-shadow:
-			0 10px 15px -3px rgba(0, 0, 0, 0.3),
-			0 4px 6px -4px rgba(0, 0, 0, 0.2),
-			0 0 0 1px hsl(var(--primary) / 0.3);
-		border-color: hsl(var(--primary) / 0.4);
+			var(--shadow-l),
+			0 0 0 1px color-mix(in oklch, var(--primary) 30%, transparent),
+			0 0 20px var(--glow-color-soft);
+		border-color: color-mix(in oklch, var(--primary) 40%, transparent);
 	}
 
 	.base-card.maximized {
 		border-radius: 0;
 		border: none;
+		box-shadow: none;
 	}
 
 	.base-card.minimized {
@@ -392,7 +400,11 @@
 	}
 
 	.base-card.dragging {
-		opacity: 0.95;
+		opacity: 0.92;
+		transform: scale(1.005);
+		box-shadow:
+			var(--shadow-l),
+			0 20px 40px color-mix(in oklch, var(--panel-shadow-outer) 60%, transparent);
 	}
 
 	/* Header */
@@ -402,11 +414,28 @@
 		justify-content: space-between;
 		height: 40px;
 		padding: 0 8px 0 12px;
-		background: var(--secondary);
+		background: linear-gradient(
+			180deg,
+			color-mix(in oklch, var(--secondary) 100%, transparent) 0%,
+			color-mix(in oklch, var(--secondary) 85%, var(--card)) 100%
+		);
 		border-bottom: 1px solid var(--border);
 		cursor: grab;
 		user-select: none;
 		flex-shrink: 0;
+		position: relative;
+	}
+
+	/* Subtle top highlight for depth */
+	.card-header::before {
+		content: '';
+		position: absolute;
+		top: 0;
+		left: 0;
+		right: 0;
+		height: 1px;
+		background: var(--panel-shadow-inset);
+		pointer-events: none;
 	}
 
 	.base-card.dragging .card-header {
@@ -425,65 +454,90 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		color: hsl(var(--muted-foreground));
+		color: var(--muted-foreground);
 		flex-shrink: 0;
+		transition: color 0.15s ease;
+	}
+
+	.base-card.focused .card-icon {
+		color: var(--primary);
 	}
 
 	.card-title {
 		font-size: 0.8125rem;
 		font-weight: 500;
-		color: hsl(var(--foreground) / 0.8);
+		color: color-mix(in oklch, var(--foreground) 75%, transparent);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		cursor: text;
+		transition: color 0.15s ease;
 	}
 
 	.base-card.focused .card-title {
-		color: hsl(var(--foreground));
+		color: var(--foreground);
 	}
 
 	.title-input {
 		font-size: 0.8125rem;
 		font-weight: 500;
-		background: hsl(var(--background));
-		border: 1px solid hsl(var(--primary));
+		background: var(--background);
+		border: 1px solid var(--primary);
 		border-radius: 4px;
 		padding: 2px 6px;
-		color: hsl(var(--foreground));
+		color: var(--foreground);
 		outline: none;
 		width: 100%;
 		max-width: 200px;
+		box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 20%, transparent);
 	}
 
 	/* Window Controls */
 	.window-controls {
 		display: flex;
-		gap: 0;
+		gap: 2px;
 	}
 
 	.control-btn {
-		width: 36px;
-		height: 28px;
+		width: 32px;
+		height: 26px;
 		border: none;
 		background: transparent;
 		cursor: pointer;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		color: hsl(var(--muted-foreground));
-		transition: background 0.1s ease, color 0.1s ease;
-		border-radius: 0;
+		color: var(--muted-foreground);
+		transition:
+			background 0.15s ease,
+			color 0.15s ease,
+			transform 0.1s ease;
+		border-radius: 4px;
 	}
 
 	.control-btn:hover {
-		background: hsl(var(--accent));
-		color: hsl(var(--foreground));
+		background: var(--hover-overlay);
+		color: var(--foreground);
+		transform: scale(1.05);
+	}
+
+	.control-btn:active {
+		transform: scale(0.95);
+	}
+
+	.control-btn.minimize:hover {
+		background: color-mix(in oklch, var(--warning) 20%, transparent);
+		color: var(--warning);
+	}
+
+	.control-btn.maximize:hover {
+		background: color-mix(in oklch, var(--success) 20%, transparent);
+		color: var(--success);
 	}
 
 	.control-btn.close:hover {
-		background: hsl(var(--destructive));
-		color: hsl(var(--destructive-foreground));
+		background: color-mix(in oklch, var(--destructive) 25%, transparent);
+		color: var(--destructive);
 	}
 
 	/* Content */
@@ -492,12 +546,18 @@
 		overflow: hidden;
 		display: flex;
 		flex-direction: column;
+		background: var(--card);
 	}
 
 	/* Resize Handles */
 	.resize-handle {
 		position: absolute;
 		z-index: 10;
+		transition: background 0.15s ease;
+	}
+
+	.resize-handle:hover {
+		background: color-mix(in oklch, var(--primary) 30%, transparent);
 	}
 
 	.resize-handle.n,
