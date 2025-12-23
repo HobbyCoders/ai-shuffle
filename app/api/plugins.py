@@ -256,6 +256,31 @@ async def list_installed_plugins(token: str = Depends(require_auth)):
     ]
 
 
+# ============================================================================
+# File-based Agents Endpoints
+# NOTE: This MUST be defined BEFORE the catch-all /{plugin_id:path} route
+# ============================================================================
+
+@router.get("/agents/file-based", response_model=List[FileAgentResponse])
+async def list_file_based_agents(token: str = Depends(require_auth)):
+    """List all file-based agents from enabled plugins"""
+    service = get_plugin_service()
+    agents = service.get_file_based_agents()
+    return [
+        FileAgentResponse(
+            id=a["id"],
+            name=a["name"],
+            description=a.get("description", ""),
+            model=a.get("model"),
+            tools=a.get("tools"),
+            prompt=a.get("prompt", ""),
+            source_plugin=a["source_plugin"],
+            file_path=a["file_path"]
+        )
+        for a in agents
+    ]
+
+
 @router.get("/{plugin_id:path}", response_model=PluginDetailsResponse)
 async def get_plugin_details(
     plugin_id: str,
@@ -413,27 +438,3 @@ async def get_enabled_plugins(token: str = Depends(require_auth)):
     service = get_plugin_service()
     enabled = service.get_enabled_plugins()
     return PluginEnableStateResponse(enabled_plugins=enabled)
-
-
-# ============================================================================
-# File-based Agents Endpoints
-# ============================================================================
-
-@router.get("/agents/file-based", response_model=List[FileAgentResponse])
-async def list_file_based_agents(token: str = Depends(require_auth)):
-    """List all file-based agents from enabled plugins"""
-    service = get_plugin_service()
-    agents = service.get_file_based_agents()
-    return [
-        FileAgentResponse(
-            id=a["id"],
-            name=a["name"],
-            description=a.get("description", ""),
-            model=a.get("model"),
-            tools=a.get("tools"),
-            prompt=a.get("prompt", ""),
-            source_plugin=a["source_plugin"],
-            file_path=a["file_path"]
-        )
-        for a in agents
-    ]

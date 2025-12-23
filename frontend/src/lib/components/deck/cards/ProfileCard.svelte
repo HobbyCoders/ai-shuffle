@@ -94,10 +94,21 @@
 	async function loadData() {
 		loading = true;
 		try {
+			// Load all data in parallel, with individual error handling
+			// Note: plugins.loadFileBasedAgents() updates the store directly, so we don't need its return value
 			const [subagentsResult, toolsResult] = await Promise.all([
-				api.get<Subagent[]>('/subagents').catch(() => []),
-				api.get<ToolsResponse>('/tools').catch(() => ({ all_tools: [], categories: [] })),
-				plugins.loadFileBasedAgents().catch(() => {})
+				api.get<Subagent[]>('/subagents').catch((err) => {
+					console.warn('Failed to load subagents:', err);
+					return [];
+				}),
+				api.get<ToolsResponse>('/tools').catch((err) => {
+					console.warn('Failed to load tools:', err);
+					return { all_tools: [], categories: [] };
+				}),
+				plugins.loadFileBasedAgents().catch((err) => {
+					// Silently handle - store already sets error state
+					console.warn('Failed to load file-based agents:', err);
+				})
 			]);
 			allSubagents = subagentsResult;
 			availableTools = toolsResult;
