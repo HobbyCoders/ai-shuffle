@@ -469,6 +469,10 @@ def _create_schema(cursor: sqlite3.Cursor):
         cursor.execute("ALTER TABLE admin ADD COLUMN totp_verified_at TIMESTAMP")
     except sqlite3.OperationalError:
         pass  # Column already exists
+    try:
+        cursor.execute("ALTER TABLE agent_runs ADD COLUMN base_branch TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
 
     # Create indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_templates_category ON templates(category)")
@@ -598,6 +602,7 @@ def _create_schema(cursor: sqlite3.Cursor):
             project_id TEXT,
             worktree_id TEXT,
             branch TEXT,
+            base_branch TEXT,
             pr_url TEXT,
             auto_branch BOOLEAN DEFAULT TRUE,
             auto_pr BOOLEAN DEFAULT FALSE,
@@ -3851,7 +3856,8 @@ def create_agent_run(
     auto_branch: bool = True,
     auto_pr: bool = False,
     auto_review: bool = False,
-    max_duration_minutes: int = 30
+    max_duration_minutes: int = 30,
+    base_branch: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     """Create a new agent run record"""
     now = datetime.utcnow().isoformat()
@@ -3860,10 +3866,10 @@ def create_agent_run(
         cursor.execute(
             """INSERT INTO agent_runs
                (id, name, prompt, status, progress, profile_id, project_id,
-                auto_branch, auto_pr, auto_review, max_duration_minutes, started_at)
-               VALUES (?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?)""",
+                auto_branch, auto_pr, auto_review, max_duration_minutes, base_branch, started_at)
+               VALUES (?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (agent_run_id, name, prompt, profile_id, project_id,
-             auto_branch, auto_pr, auto_review, max_duration_minutes, now)
+             auto_branch, auto_pr, auto_review, max_duration_minutes, base_branch, now)
         )
     return get_agent_run(agent_run_id)
 
