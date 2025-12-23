@@ -118,7 +118,7 @@
 			{/if}
 
 			<!-- Input at the bottom -->
-			<ChatInput {tab} compact />
+			<ChatInput {tab} compact {onOpenProfileCard} {onOpenProjectCard} />
 		{:else}
 			<div class="chat-loading">
 				<div class="spinner"></div>
@@ -161,7 +161,7 @@
 				{/if}
 
 				<!-- Input area -->
-				<ChatInput {tab} compact />
+				<ChatInput {tab} compact {onOpenProfileCard} {onOpenProjectCard} />
 			{:else}
 				<div class="chat-loading">
 					<div class="spinner"></div>
