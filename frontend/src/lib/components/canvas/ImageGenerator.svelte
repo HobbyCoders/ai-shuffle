@@ -162,8 +162,9 @@
 <div class="max-w-2xl mx-auto space-y-6">
 	<!-- Prompt Input -->
 	<div>
-		<label class="block text-sm font-medium text-foreground mb-2">Describe your image</label>
+		<label for="image-prompt" class="block text-sm font-medium text-foreground mb-2">Describe your image</label>
 		<textarea
+			id="image-prompt"
 			bind:value={prompt}
 			placeholder="A serene mountain landscape at sunset with golden clouds..."
 			rows="4"
@@ -183,8 +184,8 @@
 	/>
 
 	<!-- Resolution Selector -->
-	<div>
-		<label class="block text-xs text-muted-foreground mb-2">Resolution</label>
+	<div role="group" aria-labelledby="resolution-label">
+		<span id="resolution-label" class="block text-xs text-muted-foreground mb-2">Resolution</span>
 		{#if loadingProviders}
 			<div class="flex gap-2">
 				<div class="flex-1 px-3 py-2.5 bg-muted border border-border rounded-lg">
@@ -209,8 +210,8 @@
 	</div>
 
 	<!-- Aspect Ratio Selector -->
-	<div>
-		<label class="block text-xs text-muted-foreground mb-2">Aspect Ratio</label>
+	<div role="group" aria-labelledby="aspect-ratio-label">
+		<span id="aspect-ratio-label" class="block text-xs text-muted-foreground mb-2">Aspect Ratio</span>
 		{#if loadingProviders}
 			<div class="flex items-center gap-2 py-4">
 				<div class="w-4 h-4 border-2 border-muted-foreground border-t-transparent rounded-full animate-spin"></div>
@@ -235,8 +236,8 @@
 
 	<!-- Reference Images (if supported) -->
 	{#if supportsReference}
-		<div>
-			<label class="block text-xs text-muted-foreground mb-2">Reference Images (optional)</label>
+		<div role="group" aria-labelledby="reference-images-label">
+			<span id="reference-images-label" class="block text-xs text-muted-foreground mb-2">Reference Images (optional)</span>
 			<p class="text-xs text-muted-foreground mb-3">Upload images to guide the style or composition of your generation.</p>
 
 			<div class="flex flex-wrap gap-3">
@@ -259,11 +260,11 @@
 
 				<!-- Upload button -->
 				<label class="w-20 h-20 rounded-lg border-2 border-dashed border-border hover:border-primary/50 flex flex-col items-center justify-center cursor-pointer transition-colors text-muted-foreground hover:text-foreground">
-					<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
 					</svg>
 					<span class="text-xs mt-1">Add</span>
-					<input type="file" accept="image/*" multiple onchange={handleFileUpload} class="hidden" />
+					<input type="file" accept="image/*" multiple onchange={handleFileUpload} class="hidden" aria-label="Upload reference images" />
 				</label>
 			</div>
 		</div>

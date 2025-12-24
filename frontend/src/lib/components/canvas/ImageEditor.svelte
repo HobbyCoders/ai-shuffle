@@ -95,7 +95,7 @@
 			<!-- Original Image Preview -->
 			<div class="space-y-3">
 				<div class="flex items-center justify-between">
-					<label class="text-sm font-medium text-foreground">Original Image</label>
+					<span class="text-sm font-medium text-foreground">Original Image</span>
 					<span class="text-xs text-muted-foreground px-2 py-1 bg-muted rounded-md">
 						{currentItem.settings.aspectRatio || '16:9'}
 					</span>
@@ -127,8 +127,9 @@
 			<div class="space-y-6">
 				<!-- Edit Prompt -->
 				<div>
-					<label class="block text-sm font-medium text-foreground mb-2">Edit Instructions</label>
+					<label for="edit-prompt" class="block text-sm font-medium text-foreground mb-2">Edit Instructions</label>
 					<textarea
+						id="edit-prompt"
 						bind:value={editPrompt}
 						placeholder="Describe the changes you want to make, e.g., 'Change the sky to a vibrant sunset' or 'Add a small cabin by the lake'"
 						rows="5"

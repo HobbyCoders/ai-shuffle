@@ -101,10 +101,11 @@
 	}
 </script>
 
-<div class="deck-layout" class:mobile={isMobile} class:context-collapsed={localContextCollapsed}>
+<div class="deck-layout deck-layout-responsive" class:mobile={isMobile} class:context-collapsed={localContextCollapsed}>
 	<!-- Activity Rail - Desktop: left side, Mobile: bottom -->
+	<!-- CSS classes provide fallback if JS is delayed -->
 	{#if !isMobile}
-		<aside class="rail-container">
+		<aside class="rail-container rail-desktop mobile-hidden" data-layout="rail-desktop">
 			<ActivityRail
 				{activeMode}
 				{badges}
@@ -117,7 +118,7 @@
 	{/if}
 
 	<!-- Main content area -->
-	<div class="main-area">
+	<div class="main-area main-content-responsive">
 		<!-- Workspace slot - contains cards and the context panel overlay -->
 		<main class="workspace-container">
 			{#if children}
@@ -129,8 +130,9 @@
 			{/if}
 
 			<!-- Context Panel - Inside workspace, overlays cards -->
+			<!-- CSS classes hide on mobile as fallback -->
 			{#if !isMobile}
-				<aside class="context-container" class:collapsed={localContextCollapsed}>
+				<aside class="context-container context-panel-desktop context-panel-responsive mobile-hidden" class:collapsed={localContextCollapsed} data-layout="context-panel">
 					<ContextPanel
 						collapsed={localContextCollapsed}
 						{sessions}
@@ -149,7 +151,7 @@
 				<!-- Expand button - shown when context panel is collapsed -->
 				{#if localContextCollapsed}
 					<button
-						class="context-expand-toggle"
+						class="context-expand-toggle mobile-hidden"
 						onclick={handleContextToggle}
 						title="Expand panel"
 					>
@@ -160,8 +162,9 @@
 		</main>
 
 		<!-- Dock - Desktop only -->
+		<!-- CSS classes hide on mobile as fallback -->
 		{#if !isMobile}
-			<div class="dock-container">
+			<div class="dock-container dock-desktop mobile-hidden" data-layout="dock">
 				<Dock
 					{minimizedCards}
 					{runningProcesses}
@@ -173,8 +176,9 @@
 	</div>
 
 	<!-- Mobile Rail - Bottom of screen -->
+	<!-- CSS classes show on mobile as fallback -->
 	{#if isMobile}
-		<footer class="mobile-rail-container">
+		<footer class="mobile-rail-container rail-mobile desktop-hidden" data-layout="rail-mobile">
 			<ActivityRail
 				{activeMode}
 				{badges}
@@ -204,10 +208,25 @@
 		grid-template-rows: 1fr calc(64px + env(safe-area-inset-bottom, 0px));
 	}
 
+	/* CSS fallback: If JS hasn't loaded yet, use media queries to set mobile layout */
+	@media (max-width: 639px) {
+		.deck-layout:not(.mobile) {
+			grid-template-columns: 1fr;
+			grid-template-rows: 1fr calc(64px + env(safe-area-inset-bottom, 0px));
+		}
+	}
+
 	.rail-container {
 		grid-column: 1;
 		grid-row: 1;
 		z-index: 50;
+	}
+
+	/* CSS fallback: Hide desktop rail on mobile even if JS hasn't set .mobile class */
+	@media (max-width: 639px) {
+		.rail-container {
+			display: none;
+		}
 	}
 
 	.main-area {
@@ -228,6 +247,14 @@
 		grid-column: 1;
 		grid-row: 1;
 		overflow: hidden;
+	}
+
+	/* CSS fallback: Main area takes full width on mobile */
+	@media (max-width: 639px) {
+		.main-area {
+			grid-column: 1;
+			grid-row: 1;
+		}
 	}
 
 	.workspace-container {
@@ -252,6 +279,13 @@
 		flex-shrink: 0;
 	}
 
+	/* CSS fallback: Hide dock on mobile */
+	@media (max-width: 639px) {
+		.dock-container {
+			display: none;
+		}
+	}
+
 	/* Context panel - positioned inside workspace as an overlay */
 	/* z-index: 10000 ensures it's always above maximized cards which use dynamic z-index values */
 	.context-container {
@@ -271,6 +305,20 @@
 		pointer-events: none;
 	}
 
+	/* CSS fallback: Hide context panel on mobile */
+	@media (max-width: 639px) {
+		.context-container {
+			display: none;
+		}
+	}
+
+	/* Tablet: Narrower context panel */
+	@media (min-width: 640px) and (max-width: 1023px) {
+		.context-container {
+			width: 280px;
+		}
+	}
+
 	.mobile-rail-container {
 		grid-column: 1;
 		grid-row: 2;
@@ -281,6 +329,13 @@
 		min-height: calc(64px + env(safe-area-inset-bottom, 0px));
 		padding-bottom: env(safe-area-inset-bottom, 0px);
 		flex-shrink: 0;
+	}
+
+	/* CSS fallback: Hide mobile rail on desktop */
+	@media (min-width: 640px) {
+		.mobile-rail-container {
+			display: none;
+		}
 	}
 
 	/* Ensure proper layering */
@@ -313,5 +368,30 @@
 	.context-expand-toggle:hover {
 		color: var(--foreground);
 		background: var(--accent);
+	}
+
+	/* CSS fallback: Hide expand toggle on mobile */
+	@media (max-width: 639px) {
+		.context-expand-toggle {
+			display: none;
+		}
+	}
+
+	/* Accessibility: Reduced motion support */
+	@media (prefers-reduced-motion: reduce) {
+		.context-container {
+			transition: none;
+		}
+
+		.context-expand-toggle {
+			transition: none;
+		}
+	}
+
+	/* Tablet: Adjust grid columns */
+	@media (min-width: 640px) and (max-width: 1023px) {
+		.deck-layout {
+			grid-template-columns: 56px 1fr;
+		}
 	}
 </style>

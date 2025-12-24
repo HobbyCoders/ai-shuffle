@@ -127,10 +127,15 @@
 	.activity-rail.mobile {
 		flex-direction: row;
 		width: 100%;
-		height: 64px;
+		height: auto;
+		min-height: 64px;
 		border-right: none;
 		border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-		padding: 0 12px;
+		/* Safe area support for notched devices */
+		padding: 8px 16px;
+		padding-bottom: max(12px, env(safe-area-inset-bottom, 12px));
+		padding-left: max(16px, env(safe-area-inset-left, 16px));
+		padding-right: max(16px, env(safe-area-inset-right, 16px));
 		justify-content: space-around;
 		box-shadow: 0 -2px 20px -5px rgba(0, 0, 0, 0.1);
 	}
@@ -150,6 +155,7 @@
 		transition: all 0.2s ease;
 		margin-bottom: 16px;
 		box-shadow: 0 4px 12px -2px color-mix(in srgb, var(--primary) 40%, transparent);
+		-webkit-tap-highlight-color: transparent;
 	}
 
 	.plus-button:hover {
@@ -157,11 +163,16 @@
 		box-shadow: 0 6px 20px -2px color-mix(in srgb, var(--primary) 50%, transparent);
 	}
 
+	.plus-button:active {
+		transform: scale(0.95);
+	}
+
 	.mobile .plus-button {
 		margin-bottom: 0;
-		width: 44px;
-		height: 44px;
-		border-radius: 10px;
+		/* Apple HIG: minimum 44x44px touch target */
+		width: 48px;
+		height: 48px;
+		border-radius: 12px;
 	}
 
 	.plus-button .tooltip {
@@ -206,7 +217,7 @@
 	.mobile .activities {
 		flex-direction: row;
 		flex: initial;
-		gap: 8px;
+		gap: 4px;
 	}
 
 	.activity-button {
@@ -222,11 +233,24 @@
 		color: var(--muted-foreground);
 		cursor: pointer;
 		transition: all 0.2s ease;
+		-webkit-tap-highlight-color: transparent;
+	}
+
+	/* Mobile: ensure 44x44px minimum touch target */
+	.mobile .activity-button {
+		width: 48px;
+		height: 48px;
+		min-width: 48px;
+		min-height: 48px;
 	}
 
 	.activity-button:hover {
 		color: var(--foreground);
 		background: color-mix(in srgb, var(--foreground) 8%, transparent);
+	}
+
+	.activity-button:active {
+		transform: scale(0.92);
 	}
 
 	.activity-button.active {
@@ -344,6 +368,7 @@
 		cursor: pointer;
 		transition: all 0.2s ease;
 		margin-top: auto;
+		-webkit-tap-highlight-color: transparent;
 	}
 
 	.settings-button:hover {
@@ -351,11 +376,17 @@
 		background: color-mix(in srgb, var(--foreground) 8%, transparent);
 	}
 
-	/* Mobile-specific settings button styling */
+	.settings-button:active {
+		transform: scale(0.92);
+	}
+
+	/* Mobile-specific settings button styling - ensure 44x44px touch target */
 	.mobile .settings-button {
 		margin-top: 0;
 		width: 48px;
 		height: 48px;
+		min-width: 48px;
+		min-height: 48px;
 	}
 
 	.mobile .settings-button .tooltip {
@@ -363,5 +394,60 @@
 		top: auto;
 		bottom: calc(100% + 12px);
 		transform: translateX(-50%);
+	}
+
+	/* Tablet adjustments - medium screens */
+	@media (min-width: 600px) and (max-width: 1024px) {
+		/* Increase icon sizes for tablet */
+		.mobile .plus-button {
+			width: 52px;
+			height: 52px;
+		}
+
+		.mobile .activity-button {
+			width: 52px;
+			height: 52px;
+			min-width: 52px;
+			min-height: 52px;
+		}
+
+		.mobile .activity-button .icon-wrapper :global(svg) {
+			width: 24px;
+			height: 24px;
+		}
+
+		.mobile .settings-button {
+			width: 52px;
+			height: 52px;
+			min-width: 52px;
+			min-height: 52px;
+		}
+
+		.mobile .settings-button :global(svg) {
+			width: 22px;
+			height: 22px;
+		}
+
+		.mobile .activities {
+			gap: 8px;
+		}
+	}
+
+	/* Landscape orientation adjustments */
+	@media (orientation: landscape) and (max-height: 500px) {
+		.mobile {
+			min-height: 56px;
+			padding: 6px 16px;
+			padding-bottom: max(8px, env(safe-area-inset-bottom, 8px));
+		}
+
+		.mobile .plus-button,
+		.mobile .activity-button,
+		.mobile .settings-button {
+			width: 44px;
+			height: 44px;
+			min-width: 44px;
+			min-height: 44px;
+		}
 	}
 </style>

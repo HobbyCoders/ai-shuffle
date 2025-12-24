@@ -334,6 +334,7 @@
 		height: 100%;
 		background: var(--card);
 		backdrop-filter: blur(24px);
+		-webkit-backdrop-filter: blur(24px);
 		border-left: 1px solid var(--border);
 		display: flex;
 		flex-direction: column;
@@ -350,12 +351,12 @@
 		left: 0;
 		top: 50%;
 		transform: translate(-100%, -50%);
-		width: 24px;
-		height: 48px;
+		width: 28px;
+		height: 52px;
 		background: var(--card);
 		border: 1px solid var(--border);
 		border-right: none;
-		border-radius: 6px 0 0 6px;
+		border-radius: 8px 0 0 8px;
 		color: var(--muted-foreground);
 		cursor: pointer;
 		display: flex;
@@ -363,12 +364,20 @@
 		justify-content: center;
 		transition: all 0.15s ease;
 		z-index: 10;
+		/* Improve touch target */
+		min-width: 44px;
+		min-height: 44px;
 	}
 
 	.collapse-toggle:hover {
 		color: var(--foreground);
 		background: var(--accent);
 		border-color: var(--border);
+	}
+
+	.collapse-toggle:focus-visible {
+		outline: 2px solid var(--primary);
+		outline-offset: 2px;
 	}
 
 	.panel-content {

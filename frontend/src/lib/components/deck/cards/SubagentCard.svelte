@@ -908,12 +908,13 @@
 		background: linear-gradient(to right, color-mix(in oklch, var(--primary) 8%, transparent), transparent);
 	}
 
-	/* Search input - dark mode friendly */
+	/* Search input - improved readability */
 	.subagent-card-content :global(.search-input) {
-		background: oklch(0.12 0.008 260);
-		border-color: var(--border);
+		background: var(--input);
+		border: 1px solid var(--border);
 		color: var(--foreground);
 		transition: all 0.15s ease;
+		font-size: 0.875rem;
 	}
 
 	.subagent-card-content :global(.search-input:hover) {
@@ -921,30 +922,40 @@
 	}
 
 	.subagent-card-content :global(.search-input:focus) {
-		background: oklch(0.14 0.01 260);
-		border-color: var(--primary);
-		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 20%, transparent);
+		background: var(--card);
+		border-color: var(--ring);
+		box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 20%, transparent);
 	}
 
-	/* List item cards */
+	.subagent-card-content :global(.search-input::placeholder) {
+		color: var(--muted-foreground);
+	}
+
+	/* List item cards - improved contrast and readability */
 	.subagent-card-content :global(.agent-list-item) {
-		background: color-mix(in oklch, var(--muted) 40%, transparent);
+		background: var(--accent);
 		border: 1px solid var(--border);
 		box-shadow: var(--shadow-s);
 		transition: all 0.15s ease;
 	}
 
 	.subagent-card-content :global(.agent-list-item:hover) {
-		background: var(--accent);
+		background: color-mix(in oklch, var(--accent) 80%, var(--primary) 10%);
 		box-shadow: var(--shadow-m);
 		transform: translateY(-1px);
-		border-color: color-mix(in oklch, var(--primary) 30%, var(--border));
+		border-color: color-mix(in oklch, var(--primary) 40%, var(--border));
+	}
+
+	.subagent-card-content :global(.agent-list-item:focus-visible) {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	/* Agent icon container */
 	.subagent-card-content :global(.agent-icon) {
 		background: color-mix(in oklch, var(--primary) 15%, transparent);
 		box-shadow: var(--shadow-s);
+		border: 1px solid color-mix(in oklch, var(--primary) 20%, transparent);
 	}
 
 	/* Model badges */
@@ -1051,6 +1062,11 @@
 		transform: translateY(-1px);
 	}
 
+	.subagent-card-content :global(.btn-primary:focus-visible) {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+
 	/* Secondary button */
 	.subagent-card-content :global(.btn-secondary) {
 		background: var(--muted);
@@ -1065,6 +1081,11 @@
 		box-shadow: var(--shadow-m);
 	}
 
+	.subagent-card-content :global(.btn-secondary:focus-visible) {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+
 	/* Destructive button */
 	.subagent-card-content :global(.btn-destructive) {
 		background: var(--destructive);
@@ -1076,6 +1097,11 @@
 
 	.subagent-card-content :global(.btn-destructive:hover) {
 		filter: brightness(1.1);
+	}
+
+	.subagent-card-content :global(.btn-destructive:focus-visible) {
+		outline: 2px solid var(--destructive);
+		outline-offset: 2px;
 	}
 
 	/* Footer */
@@ -1101,23 +1127,26 @@
 		color: var(--primary);
 	}
 
-	/* Validation indicators */
+	/* Validation indicators - enhanced visibility */
 	.subagent-card-content :global(.validation-dot-valid) {
 		background: var(--success);
-		box-shadow: 0 0 4px var(--success);
+		box-shadow: 0 0 6px var(--success);
+		border: 1px solid color-mix(in oklch, var(--success) 50%, transparent);
 	}
 
 	.subagent-card-content :global(.validation-dot-invalid) {
 		background: var(--warning);
-		box-shadow: 0 0 4px var(--warning);
+		box-shadow: 0 0 6px var(--warning);
+		border: 1px solid color-mix(in oklch, var(--warning) 50%, transparent);
 	}
 
-	/* Form inputs - dark mode friendly */
+	/* Form inputs - improved readability and focus states */
 	.subagent-card-content :global(.form-input) {
-		background: oklch(0.12 0.008 260);
+		background: var(--input);
 		border: 1px solid var(--border);
 		color: var(--foreground);
 		transition: all 0.15s ease;
+		font-size: 0.875rem;
 	}
 
 	.subagent-card-content :global(.form-input::placeholder) {
@@ -1130,9 +1159,9 @@
 
 	.subagent-card-content :global(.form-input:focus) {
 		outline: none;
-		background: oklch(0.14 0.01 260);
-		border-color: var(--primary);
-		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 20%, transparent);
+		background: var(--card);
+		border-color: var(--ring);
+		box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 20%, transparent);
 	}
 
 	/* Model selection buttons */

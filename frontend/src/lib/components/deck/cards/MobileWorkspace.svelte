@@ -52,7 +52,7 @@
 	const cardIcons: Record<CardType, typeof MessageSquare> = {
 		chat: MessageSquare,
 		agent: Bot,
-		canvas: Palette,
+		studio: Palette,
 		terminal: Terminal,
 		settings: Settings,
 		profile: User,
@@ -64,7 +64,7 @@
 	const cardTypes: { type: CardType; label: string; icon: typeof MessageSquare }[] = [
 		{ type: 'chat', label: 'Chat', icon: MessageSquare },
 		{ type: 'agent', label: 'Agent', icon: Bot },
-		{ type: 'canvas', label: 'Canvas', icon: Palette },
+		{ type: 'studio', label: 'Studio', icon: Palette },
 		{ type: 'terminal', label: 'Terminal', icon: Terminal },
 	];
 
@@ -73,6 +73,12 @@
 
 	// Swipe offset for animation
 	const swipeOffset = $derived(isSwiping && swipeDirection === 'horizontal' ? touchCurrentX - touchStartX : 0);
+
+	// Swipe progress for visual feedback (0 to 1, capped)
+	const swipeProgress = $derived(Math.min(Math.abs(swipeOffset) / (SWIPE_THRESHOLD * 2), 1));
+
+	// Direction indicator for swipe feedback
+	const swipeIndicatorDirection = $derived(swipeOffset > 0 ? 'left' : 'right');
 
 	// Check if touch target is an interactive element (input, textarea, etc.)
 	function isInteractiveElement(target: EventTarget | null): boolean {
@@ -268,10 +274,29 @@
 			ontouchmove={handleTouchMove}
 			ontouchend={handleTouchEnd}
 		>
+			<!-- Swipe direction indicators -->
+			{#if isSwiping && swipeDirection === 'horizontal'}
+				<div
+					class="swipe-indicator left"
+					class:visible={swipeOffset > SWIPE_THRESHOLD / 2 && activeCardIndex > 0}
+					style:opacity={swipeIndicatorDirection === 'left' ? swipeProgress : 0}
+				>
+					<ChevronLeft size={24} />
+				</div>
+				<div
+					class="swipe-indicator right"
+					class:visible={swipeOffset < -SWIPE_THRESHOLD / 2 && activeCardIndex < cards.length - 1}
+					style:opacity={swipeIndicatorDirection === 'right' ? swipeProgress : 0}
+				>
+					<ChevronLeft size={24} style="transform: rotate(180deg)" />
+				</div>
+			{/if}
+
 			<div
 				class="card-wrapper"
 				class:swiping={isSwiping}
 				style:transform="translateX({swipeOffset}px)"
+				style:opacity={1 - swipeProgress * 0.15}
 			>
 				{#if activeCard && children}
 					<!-- Use optional chaining to prevent undefined.id error during card removal -->
@@ -306,21 +331,29 @@
 		flex-direction: column;
 		height: 100%;
 		background: hsl(var(--background));
+		/* Safe area support for notched devices */
+		padding-top: env(safe-area-inset-top, 0);
+		padding-left: env(safe-area-inset-left, 0);
+		padding-right: env(safe-area-inset-right, 0);
 	}
 
-	/* Header */
+	/* Header - improved contrast and readability */
 	.mobile-header {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
 		height: 56px;
-		padding: 0 8px;
+		min-height: 56px;
+		padding: 0 12px;
 		background: hsl(var(--card));
-		border-bottom: 1px solid hsl(var(--border));
+		border-bottom: 1px solid hsl(var(--border) / 0.8);
 		flex-shrink: 0;
+		/* Subtle shadow for depth */
+		box-shadow: 0 1px 3px hsl(var(--foreground) / 0.05);
 	}
 
 	.header-btn {
+		/* Apple HIG: minimum 44x44px touch target */
 		width: 44px;
 		height: 44px;
 		display: flex;
@@ -328,14 +361,21 @@
 		justify-content: center;
 		background: transparent;
 		border: none;
-		border-radius: 8px;
+		border-radius: 10px;
 		color: hsl(var(--foreground));
 		cursor: pointer;
-		transition: background 0.15s ease;
+		transition: all 0.15s ease;
+		/* Active state feedback */
+		-webkit-tap-highlight-color: transparent;
 	}
 
 	.header-btn:hover {
 		background: hsl(var(--accent));
+	}
+
+	.header-btn:active {
+		background: hsl(var(--accent));
+		transform: scale(0.95);
 	}
 
 	.header-btn:disabled {
@@ -343,33 +383,43 @@
 		cursor: default;
 	}
 
+	.header-btn:disabled:active {
+		transform: none;
+	}
+
 	.header-btn.close:hover {
 		background: hsl(var(--destructive) / 0.1);
 		color: hsl(var(--destructive));
 	}
 
+	.header-btn.close:active {
+		background: hsl(var(--destructive) / 0.15);
+		color: hsl(var(--destructive));
+	}
+
+	/* Small button - still maintains 44px touch target */
 	.header-btn.small {
-		width: 36px;
-		height: 36px;
+		width: 44px;
+		height: 44px;
 		position: relative;
 	}
 
 	.header-actions {
 		display: flex;
 		align-items: center;
-		gap: 2px;
+		gap: 4px;
 	}
 
 	.header-actions .badge {
 		position: absolute;
-		top: 2px;
-		right: 2px;
-		min-width: 14px;
-		height: 14px;
-		padding: 0 3px;
+		top: 4px;
+		right: 4px;
+		min-width: 16px;
+		height: 16px;
+		padding: 0 4px;
 		background: hsl(var(--primary));
-		border-radius: 7px;
-		font-size: 0.5625rem;
+		border-radius: 8px;
+		font-size: 0.625rem;
 		font-weight: 600;
 		color: hsl(var(--primary-foreground));
 		display: flex;
@@ -383,49 +433,89 @@
 		gap: 8px;
 		flex: 1;
 		justify-content: center;
-		color: hsl(var(--muted-foreground));
+		/* Better contrast for icon */
+		color: hsl(var(--foreground) / 0.7);
 	}
 
 	.header-title {
-		font-size: 0.875rem;
-		font-weight: 500;
+		font-size: 0.9375rem;
+		font-weight: 600;
+		/* High contrast foreground */
 		color: hsl(var(--foreground));
 		max-width: 200px;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+		/* Slight letter spacing for readability */
+		letter-spacing: -0.01em;
 	}
 
 	/* Card Container */
 	.card-container {
 		flex: 1;
 		overflow: hidden;
+		position: relative;
 		/* Allow normal touch behavior for inputs - swipe is controlled by JS */
 		touch-action: auto;
 	}
 
+	/* Swipe direction indicators */
+	.swipe-indicator {
+		position: absolute;
+		top: 50%;
+		transform: translateY(-50%);
+		width: 40px;
+		height: 40px;
+		border-radius: 50%;
+		background: hsl(var(--primary) / 0.9);
+		color: hsl(var(--primary-foreground));
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 10;
+		pointer-events: none;
+		opacity: 0;
+		transition: opacity 0.15s ease;
+		box-shadow: 0 2px 8px hsl(var(--foreground) / 0.15);
+	}
+
+	.swipe-indicator.left {
+		left: 16px;
+	}
+
+	.swipe-indicator.right {
+		right: 16px;
+	}
+
+	.swipe-indicator.visible {
+		opacity: 1;
+	}
+
 	.card-wrapper {
 		height: 100%;
-		transition: transform 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+		transition: transform 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+					opacity 0.15s ease;
 	}
 
 	.card-wrapper.swiping {
 		transition: none;
 	}
 
-	/* Dot Indicators */
+	/* Dot Indicators - improved touch targets */
 	.dot-indicators {
 		display: flex;
 		justify-content: center;
-		gap: 8px;
-		padding: 12px;
+		gap: 4px;
+		padding: 8px 16px;
+		padding-bottom: max(12px, env(safe-area-inset-bottom, 12px));
 		background: hsl(var(--card));
-		border-top: 1px solid hsl(var(--border));
+		border-top: 1px solid hsl(var(--border) / 0.6);
 	}
 
 	.dot {
-		width: 32px;
-		height: 32px;
+		/* Apple HIG: 44x44px touch target */
+		width: 44px;
+		height: 44px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -433,6 +523,12 @@
 		border: none;
 		padding: 0;
 		cursor: pointer;
+		-webkit-tap-highlight-color: transparent;
+		transition: transform 0.15s ease;
+	}
+
+	.dot:active {
+		transform: scale(0.9);
 	}
 
 	.dot-inner {
@@ -447,6 +543,8 @@
 		width: 10px;
 		height: 10px;
 		background: hsl(var(--primary));
+		/* Subtle glow for active state */
+		box-shadow: 0 0 6px hsl(var(--primary) / 0.4);
 	}
 
 	.dot:hover .dot-inner {
@@ -457,43 +555,63 @@
 		background: hsl(var(--primary));
 	}
 
-	/* Empty State */
+	/* Empty State - properly centered */
 	.empty-state {
 		flex: 1;
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		padding: 24px;
+		/* Ensure safe area is respected */
+		padding-bottom: max(24px, env(safe-area-inset-bottom, 24px));
+		/* Center in available space */
+		min-height: 0;
 	}
 
 	.empty-content {
 		text-align: center;
 		max-width: 320px;
+		width: 100%;
+		/* Slight offset to visually center */
+		margin-top: -5vh;
 	}
 
 	.empty-icon {
-		width: 64px;
-		height: 64px;
-		margin: 0 auto 16px;
+		width: 72px;
+		height: 72px;
+		margin: 0 auto 20px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		background: hsl(var(--muted));
 		border-radius: 50%;
 		color: hsl(var(--muted-foreground));
+		/* Subtle animation on mount */
+		animation: empty-icon-appear 0.4s ease-out;
+	}
+
+	@keyframes empty-icon-appear {
+		from {
+			opacity: 0;
+			transform: scale(0.8);
+		}
+		to {
+			opacity: 1;
+			transform: scale(1);
+		}
 	}
 
 	.empty-title {
-		font-size: 1.125rem;
+		font-size: 1.25rem;
 		font-weight: 600;
 		color: hsl(var(--foreground));
 		margin-bottom: 8px;
 	}
 
 	.empty-text {
-		font-size: 0.875rem;
+		font-size: 0.9375rem;
 		color: hsl(var(--muted-foreground));
-		margin-bottom: 24px;
+		margin-bottom: 28px;
 	}
 
 	.create-grid {
@@ -506,16 +624,19 @@
 		display: flex;
 		flex-direction: column;
 		align-items: center;
-		gap: 8px;
-		padding: 20px 16px;
+		gap: 10px;
+		/* Ensure minimum touch target height */
+		padding: 24px 16px;
+		min-height: 88px;
 		background: hsl(var(--card));
 		border: 1px solid hsl(var(--border));
-		border-radius: 12px;
+		border-radius: 14px;
 		color: hsl(var(--foreground));
-		font-size: 0.875rem;
+		font-size: 0.9375rem;
 		font-weight: 500;
 		cursor: pointer;
 		transition: all 0.15s ease;
+		-webkit-tap-highlight-color: transparent;
 	}
 
 	.create-card:hover {
@@ -524,6 +645,31 @@
 	}
 
 	.create-card:active {
-		transform: scale(0.98);
+		transform: scale(0.97);
+		background: hsl(var(--accent));
+	}
+
+	/* Tablet adjustments - landscape orientation */
+	@media (min-width: 600px) and (orientation: landscape) {
+		.create-grid {
+			grid-template-columns: repeat(4, 1fr);
+			max-width: 480px;
+			margin: 0 auto;
+		}
+
+		.empty-content {
+			max-width: 500px;
+		}
+	}
+
+	/* Large phone / small tablet portrait */
+	@media (min-width: 414px) {
+		.header-title {
+			max-width: 260px;
+		}
+
+		.empty-content {
+			margin-top: -3vh;
+		}
 	}
 </style>

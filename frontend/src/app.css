@@ -520,8 +520,139 @@ select.input option {
 	font-style: italic;
 }
 
-/* Mobile optimizations */
-@media (max-width: 640px) {
+/* ========================================
+   RESPONSIVE BREAKPOINTS & CSS CUSTOM PROPERTIES
+   Mobile: < 640px
+   Tablet: 640px - 1024px
+   Desktop: > 1024px
+   ======================================== */
+
+:root {
+	--breakpoint-mobile: 640px;
+	--breakpoint-tablet: 1024px;
+}
+
+/* ========================================
+   RESPONSIVE UTILITY CLASSES
+   Provide CSS fallback for JS-based responsive behavior
+   ======================================== */
+
+/* Hide on mobile (< 640px) */
+@media (max-width: 639px) {
+	.mobile-hidden,
+	.desktop-only {
+		display: none !important;
+	}
+}
+
+/* Hide on desktop (>= 640px) */
+@media (min-width: 640px) {
+	.desktop-hidden,
+	.mobile-only {
+		display: none !important;
+	}
+}
+
+/* Tablet-specific visibility */
+@media (min-width: 640px) and (max-width: 1023px) {
+	.tablet-hidden {
+		display: none !important;
+	}
+}
+
+@media (max-width: 639px), (min-width: 1024px) {
+	.tablet-only {
+		display: none !important;
+	}
+}
+
+/* ========================================
+   MOBILE LAYOUT FALLBACKS
+   CSS backup for JS-based mobile detection
+   ======================================== */
+
+/* Mobile: Hide desktop-only elements via CSS as fallback */
+@media (max-width: 639px) {
+	/* Hide context panel on mobile */
+	.context-panel-desktop,
+	[data-layout="context-panel"] {
+		display: none !important;
+	}
+
+	/* Hide dock on mobile */
+	.dock-desktop,
+	[data-layout="dock"] {
+		display: none !important;
+	}
+
+	/* Desktop activity rail hidden on mobile */
+	.rail-desktop,
+	[data-layout="rail-desktop"] {
+		display: none !important;
+	}
+
+	/* Mobile activity rail visible and positioned at bottom */
+	.rail-mobile,
+	[data-layout="rail-mobile"] {
+		display: flex !important;
+		position: fixed;
+		bottom: 0;
+		left: 0;
+		right: 0;
+		z-index: 100;
+		background: var(--card);
+		height: calc(64px + env(safe-area-inset-bottom, 0px));
+		padding-bottom: env(safe-area-inset-bottom, 0px);
+	}
+
+	/* Main content takes full width on mobile */
+	.main-content-responsive {
+		grid-column: 1 !important;
+		margin-left: 0 !important;
+		width: 100% !important;
+	}
+
+	/* Ensure proper spacing for mobile bottom rail */
+	.has-mobile-rail {
+		padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px));
+	}
+}
+
+/* Desktop: Hide mobile-only elements via CSS as fallback */
+@media (min-width: 640px) {
+	.rail-mobile,
+	[data-layout="rail-mobile"] {
+		display: none !important;
+	}
+}
+
+/* ========================================
+   TABLET LAYOUT ADJUSTMENTS
+   Intermediate sizing for 640px - 1024px
+   ======================================== */
+
+@media (min-width: 640px) and (max-width: 1023px) {
+	/* Narrower context panel on tablets */
+	.context-panel-responsive {
+		width: 280px !important;
+	}
+
+	/* Slightly narrower activity rail on tablets */
+	.rail-responsive {
+		width: 56px !important;
+	}
+
+	/* Adjust grid for tablet */
+	.deck-layout-responsive {
+		grid-template-columns: 56px 1fr !important;
+	}
+}
+
+/* ========================================
+   MOBILE OPTIMIZATIONS
+   ======================================== */
+
+@media (max-width: 639px) {
 	html {
 		font-size: 16px;
 		-webkit-text-size-adjust: 100%;
@@ -540,6 +671,45 @@ select.input option {
 
 	select.input {
 		font-size: 16px;
+	}
+
+	/* Larger touch targets on mobile */
+	.touch-target {
+		min-width: 44px;
+		min-height: 44px;
+	}
+}
+
+/* ========================================
+   ACCESSIBILITY: REDUCED MOTION
+   ======================================== */
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
+	}
+
+	/* Disable specific animations */
+	.panel-slide-in {
+		animation: none !important;
+	}
+
+	.theme-toggle-icon.rotating {
+		transform: none !important;
+	}
+
+	/* Keep visual feedback but remove motion */
+	.context-container {
+		transition: none !important;
+	}
+
+	.floating-panel {
+		animation: none !important;
 	}
 }
 

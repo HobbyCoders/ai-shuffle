@@ -412,8 +412,8 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		height: 40px;
-		padding: 0 8px 0 12px;
+		height: 44px;
+		padding: 0 10px 0 14px;
 		background: linear-gradient(
 			180deg,
 			color-mix(in oklch, var(--secondary) 100%, transparent) 0%,
@@ -438,6 +438,14 @@
 		pointer-events: none;
 	}
 
+	/* Mobile-friendly header height */
+	@media (pointer: coarse) {
+		.card-header {
+			height: 48px;
+			padding: 0 12px 0 16px;
+		}
+	}
+
 	.base-card.dragging .card-header {
 		cursor: grabbing;
 	}
@@ -445,7 +453,7 @@
 	.header-left {
 		display: flex;
 		align-items: center;
-		gap: 8px;
+		gap: 10px;
 		flex: 1;
 		min-width: 0;
 	}
@@ -454,28 +462,37 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
+		width: 24px;
+		height: 24px;
 		color: var(--muted-foreground);
 		flex-shrink: 0;
-		transition: color 0.15s ease;
+		transition: color 0.15s ease, background-color 0.15s ease;
+		border-radius: 6px;
+		background: transparent;
 	}
 
 	.base-card.focused .card-icon {
 		color: var(--primary);
+		background: color-mix(in oklch, var(--primary) 12%, transparent);
 	}
 
 	.card-title {
 		font-size: 0.8125rem;
 		font-weight: 500;
-		color: color-mix(in oklch, var(--foreground) 75%, transparent);
+		color: var(--muted-foreground);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		cursor: text;
 		transition: color 0.15s ease;
+		/* Improved text rendering for readability */
+		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
 	}
 
 	.base-card.focused .card-title {
 		color: var(--foreground);
+		font-weight: 600;
 	}
 
 	.title-input {
@@ -495,12 +512,12 @@
 	/* Window Controls */
 	.window-controls {
 		display: flex;
-		gap: 2px;
+		gap: 4px;
 	}
 
 	.control-btn {
 		width: 32px;
-		height: 26px;
+		height: 28px;
 		border: none;
 		background: transparent;
 		cursor: pointer;
@@ -512,13 +529,26 @@
 			background 0.15s ease,
 			color 0.15s ease,
 			transform 0.1s ease;
-		border-radius: 4px;
+		border-radius: 6px;
+	}
+
+	/* Larger touch targets on mobile */
+	@media (pointer: coarse) {
+		.control-btn {
+			width: 40px;
+			height: 36px;
+		}
 	}
 
 	.control-btn:hover {
 		background: var(--hover-overlay);
 		color: var(--foreground);
 		transform: scale(1.05);
+	}
+
+	.control-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
 	}
 
 	.control-btn:active {

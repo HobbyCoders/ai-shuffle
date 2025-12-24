@@ -2118,21 +2118,15 @@
 	.section-header h3 {
 		font-size: 1.125rem;
 		font-weight: 600;
-		color: oklch(0.95 0.01 260);
-	}
-
-	:global(.light) .section-header h3 {
-		color: oklch(0.15 0.01 260);
+		color: var(--foreground);
+		letter-spacing: -0.01em;
 	}
 
 	.section-header p {
 		font-size: 0.875rem;
-		color: oklch(0.60 0.02 260);
-		margin-top: 4px;
-	}
-
-	:global(.light) .section-header p {
-		color: oklch(0.50 0.015 260);
+		color: var(--muted-foreground);
+		margin-top: 6px;
+		line-height: 1.5;
 	}
 
 	.section-header .btn {
@@ -2156,60 +2150,39 @@
 	.settings-group h4 {
 		font-size: 0.875rem;
 		font-weight: 600;
-		color: oklch(0.95 0.01 260);
-		margin-bottom: 12px;
+		color: var(--foreground);
+		margin-bottom: 14px;
 		display: flex;
 		align-items: center;
-		gap: 8px;
-	}
-
-	:global(.light) .settings-group h4 {
-		color: oklch(0.15 0.01 260);
+		gap: 10px;
+		letter-spacing: -0.005em;
 	}
 
 	/* Forms */
 	.input {
 		width: 100%;
-		padding: 8px 12px;
-		background: oklch(0.12 0.008 260);
-		border: 1px solid oklch(0.30 0.012 260);
-		border-radius: 6px;
-		color: oklch(0.95 0.01 260);
+		padding: 10px 14px;
+		background: var(--input);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		color: var(--foreground);
 		font-size: 0.875rem;
 		transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s;
 	}
 
-	:global(.light) .input {
-		background: oklch(0.97 0.003 260);
-		border-color: oklch(0.82 0.01 260);
-		color: oklch(0.15 0.01 260);
-	}
-
 	.input:hover:not(:focus) {
-		border-color: oklch(0.38 0.015 260);
-	}
-
-	:global(.light) .input:hover:not(:focus) {
-		border-color: oklch(0.72 0.015 260);
+		border-color: color-mix(in oklch, var(--border) 100%, var(--primary) 30%);
 	}
 
 	.input:focus {
 		outline: none;
-		border-color: hsl(var(--primary));
-		box-shadow: 0 0 0 2px hsl(var(--primary) / 0.2);
-		background: oklch(0.14 0.01 260);
-	}
-
-	:global(.light) .input:focus {
-		background: oklch(1 0 0);
+		border-color: var(--ring);
+		box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 20%, transparent);
+		background: var(--card);
 	}
 
 	.input::placeholder {
-		color: oklch(0.55 0.02 260);
-	}
-
-	:global(.light) .input::placeholder {
-		color: oklch(0.55 0.015 260);
+		color: var(--muted-foreground);
 	}
 
 	.input.small {
@@ -2224,10 +2197,10 @@
 		-webkit-appearance: none;
 		-moz-appearance: none;
 		background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%239ca3af' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
-		background-position: right 0.5rem center;
+		background-position: right 0.75rem center;
 		background-repeat: no-repeat;
 		background-size: 1.25em 1.25em;
-		padding-right: 2.5rem;
+		padding-right: 2.75rem;
 	}
 
 	:global(.light) select.input {
@@ -2235,14 +2208,9 @@
 	}
 
 	select.input option {
-		background-color: oklch(0.18 0.01 260);
-		color: oklch(0.95 0.01 260);
+		background-color: var(--popover);
+		color: var(--popover-foreground);
 		padding: 0.5rem;
-	}
-
-	:global(.light) select.input option {
-		background-color: oklch(1 0 0);
-		color: oklch(0.15 0.01 260);
 	}
 
 	.input-row {
@@ -2273,9 +2241,9 @@
 
 	/* Buttons */
 	.btn {
-		padding: 8px 16px;
+		padding: 10px 18px;
 		border: none;
-		border-radius: 6px;
+		border-radius: 8px;
 		font-size: 0.875rem;
 		font-weight: 500;
 		cursor: pointer;
@@ -2285,6 +2253,11 @@
 	.btn:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
+	}
+
+	.btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.btn-primary {
