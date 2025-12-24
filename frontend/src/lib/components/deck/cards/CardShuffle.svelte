@@ -11,6 +11,7 @@
 	 * - Focus: One main card with sidebar cards
 	 *
 	 * Hidden by default, only shows when mouse is near the top of the workspace.
+	 * In Focus mode, also shows page navigation controls.
 	 */
 
 	import {
@@ -19,16 +20,31 @@
 		LayoutGrid,
 		Layers,
 		Maximize2,
-		ChevronDown
+		ChevronDown,
+		ChevronLeft,
+		ChevronRight
 	} from 'lucide-svelte';
 	import type { LayoutMode } from '$lib/stores/deck';
 
 	interface Props {
 		currentMode: LayoutMode;
 		onModeChange: (mode: LayoutMode) => void;
+		// Focus mode navigation props
+		focusModeIndex?: number;
+		focusModeTotal?: number;
+		onFocusNavigate?: (direction: 'prev' | 'next') => void;
 	}
 
-	let { currentMode, onModeChange }: Props = $props();
+	let {
+		currentMode,
+		onModeChange,
+		focusModeIndex = 0,
+		focusModeTotal = 0,
+		onFocusNavigate
+	}: Props = $props();
+
+	// Derived state for focus nav visibility
+	const showFocusNav = $derived(currentMode === 'focus' && focusModeTotal > 1);
 
 	// Visibility state - trigger shows when mouse is near top of workspace
 	let isVisible = $state(false);
@@ -154,16 +170,46 @@
 			onmouseenter={handleMouseEnter}
 			onmouseleave={handleMouseLeave}
 		>
-			<!-- Collapsed view: Just a subtle indicator -->
-			<div class="shuffle-trigger" class:expanded={isExpanded}>
-				<div class="trigger-content">
-					<svelte:component this={currentModeInfo.icon} size={14} strokeWidth={2} />
-					<span class="trigger-label">{currentModeInfo.label}</span>
-					<ChevronDown
-						size={12}
-						strokeWidth={2}
-						class="chevron {isExpanded ? 'rotated' : ''}"
-					/>
+			<!-- Top bar with layout selector and optional focus nav -->
+			<div class="top-bar">
+				<!-- Focus Navigation (left side) -->
+				{#if showFocusNav}
+					<div class="focus-nav">
+						<button
+							class="focus-nav-btn"
+							onclick={() => onFocusNavigate?.('prev')}
+							title="Previous card (←)"
+						>
+							<ChevronLeft size={18} strokeWidth={2} />
+						</button>
+
+						<div class="focus-nav-indicator">
+							<span class="focus-nav-current">{focusModeIndex + 1}</span>
+							<span class="focus-nav-separator">/</span>
+							<span class="focus-nav-total">{focusModeTotal}</span>
+						</div>
+
+						<button
+							class="focus-nav-btn"
+							onclick={() => onFocusNavigate?.('next')}
+							title="Next card (→)"
+						>
+							<ChevronRight size={18} strokeWidth={2} />
+						</button>
+					</div>
+				{/if}
+
+				<!-- Layout Mode Selector (center/right) -->
+				<div class="shuffle-trigger" class:expanded={isExpanded}>
+					<div class="trigger-content">
+						<svelte:component this={currentModeInfo.icon} size={14} strokeWidth={2} />
+						<span class="trigger-label">{currentModeInfo.label}</span>
+						<ChevronDown
+							size={12}
+							strokeWidth={2}
+							class="chevron {isExpanded ? 'rotated' : ''}"
+						/>
+					</div>
 				</div>
 			</div>
 
@@ -233,6 +279,74 @@
 		align-items: center;
 		padding-top: 8px;
 		animation: fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+	}
+
+	.top-bar {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+	}
+
+	/* Focus Mode Navigation */
+	.focus-nav {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		padding: 6px 8px;
+		background: var(--glass-bg);
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
+		border: 1px solid var(--glass-border);
+		border-radius: 24px;
+		box-shadow: var(--shadow-m);
+	}
+
+	.focus-nav-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 28px;
+		height: 28px;
+		background: transparent;
+		border: none;
+		border-radius: 50%;
+		color: var(--muted-foreground);
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.focus-nav-btn:hover {
+		background: var(--accent);
+		color: var(--foreground);
+	}
+
+	.focus-nav-btn:active {
+		transform: scale(0.92);
+	}
+
+	.focus-nav-indicator {
+		display: flex;
+		align-items: center;
+		gap: 3px;
+		font-size: 0.8125rem;
+		font-weight: 500;
+		color: var(--foreground);
+		min-width: 40px;
+		justify-content: center;
+		padding: 0 4px;
+	}
+
+	.focus-nav-current {
+		color: var(--primary);
+		font-weight: 600;
+	}
+
+	.focus-nav-separator {
+		color: var(--muted-foreground);
+	}
+
+	.focus-nav-total {
+		color: var(--muted-foreground);
 	}
 
 	@keyframes fadeIn {

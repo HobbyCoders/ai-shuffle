@@ -12,7 +12,7 @@
 	 */
 
 	import { onMount } from 'svelte';
-	import { MessageSquare, Bot, Palette, Terminal, Plus, ChevronLeft, ChevronRight } from 'lucide-svelte';
+	import { MessageSquare, Bot, Palette, Terminal, Plus } from 'lucide-svelte';
 	import type { DeckCard, CardType, SnapGuide, SnapResult } from './types';
 	import { SNAP_THRESHOLD, CARD_SNAP_THRESHOLD, SNAP_GRID, WORKSPACE_PADDING } from './types';
 	import type { Snippet } from 'svelte';
@@ -69,7 +69,6 @@
 		return idx >= 0 ? idx : 0;
 	});
 	const focusModeTotal = $derived(() => focusModeCards().length);
-	const showFocusNav = $derived(isFocusMode && focusModeTotal() > 1);
 
 	// Handle layout mode change
 	function handleLayoutModeChange(mode: LayoutMode) {
@@ -482,11 +481,14 @@
 	oncontextmenu={handleContextMenu}
 	onclick={handleClick}
 >
-	<!-- Card Shuffle UI - Layout mode selector -->
+	<!-- Card Shuffle UI - Layout mode selector with focus nav integration -->
 	{#if sortedCards.length > 0}
 		<CardShuffle
 			currentMode={layoutMode}
 			onModeChange={handleLayoutModeChange}
+			focusModeIndex={focusModeIndex()}
+			focusModeTotal={focusModeTotal()}
+			onFocusNavigate={onFocusNavigate}
 		/>
 	{/if}
 
@@ -523,33 +525,6 @@
 	<!-- Render cards via children snippet -->
 	{#if children}
 		{@render children()}
-	{/if}
-
-	<!-- Focus Mode Navigation -->
-	{#if showFocusNav}
-		<div class="focus-nav">
-			<button
-				class="focus-nav-btn focus-nav-prev"
-				onclick={() => onFocusNavigate?.('prev')}
-				title="Previous card"
-			>
-				<ChevronLeft size={24} strokeWidth={2} />
-			</button>
-
-			<div class="focus-nav-indicator">
-				<span class="focus-nav-current">{focusModeIndex() + 1}</span>
-				<span class="focus-nav-separator">/</span>
-				<span class="focus-nav-total">{focusModeTotal()}</span>
-			</div>
-
-			<button
-				class="focus-nav-btn focus-nav-next"
-				onclick={() => onFocusNavigate?.('next')}
-				title="Next card"
-			>
-				<ChevronRight size={24} strokeWidth={2} />
-			</button>
-		</div>
 	{/if}
 
 	<!-- Empty state when no cards -->
@@ -760,79 +735,5 @@
 
 	.context-menu-item:hover {
 		background: hsl(var(--accent));
-	}
-
-	/* Focus Mode Navigation */
-	.focus-nav {
-		position: absolute;
-		bottom: 24px;
-		left: 50%;
-		transform: translateX(-50%);
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		padding: 8px 16px;
-		background: hsl(var(--card) / 0.95);
-		backdrop-filter: blur(8px);
-		border: 1px solid hsl(var(--border));
-		border-radius: 9999px;
-		box-shadow:
-			0 4px 6px -1px rgba(0, 0, 0, 0.1),
-			0 2px 4px -2px rgba(0, 0, 0, 0.1);
-		z-index: 10001;
-	}
-
-	.focus-nav-btn {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 40px;
-		height: 40px;
-		background: transparent;
-		border: none;
-		border-radius: 50%;
-		color: hsl(var(--muted-foreground));
-		cursor: pointer;
-		transition: all 0.15s ease;
-	}
-
-	.focus-nav-btn:hover {
-		background: hsl(var(--accent));
-		color: hsl(var(--foreground));
-	}
-
-	.focus-nav-btn:active {
-		transform: scale(0.95);
-	}
-
-	.focus-nav-indicator {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-		font-size: 0.875rem;
-		font-weight: 500;
-		color: hsl(var(--foreground));
-		min-width: 48px;
-		justify-content: center;
-	}
-
-	.focus-nav-current {
-		color: hsl(var(--primary));
-		font-weight: 600;
-	}
-
-	.focus-nav-separator {
-		color: hsl(var(--muted-foreground));
-	}
-
-	.focus-nav-total {
-		color: hsl(var(--muted-foreground));
-	}
-
-	/* Hide focus nav on mobile - they use swipe instead */
-	@media (max-width: 639px) {
-		.focus-nav {
-			display: none;
-		}
 	}
 </style>
