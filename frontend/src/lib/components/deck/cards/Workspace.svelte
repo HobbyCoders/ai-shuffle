@@ -537,6 +537,17 @@
 		background: hsl(var(--background));
 		min-height: 0;
 		height: 100%;
+		/* Left padding for floating activity pill (56px + 16px + 12px gap) */
+		padding-left: 84px;
+	}
+
+	/* On mobile, no left padding needed since pill is at bottom */
+	@media (max-width: 639px) {
+		.workspace {
+			padding-left: 0;
+			/* Bottom padding for floating pill on mobile */
+			padding-bottom: 80px;
+		}
 	}
 
 	.workspace.has-maximized {

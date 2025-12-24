@@ -51,11 +51,12 @@ export const CARD_SNAP_THRESHOLD = 12; // Threshold for card-to-card snapping
 
 /**
  * Workspace padding to keep cards visible and accessible
+ * Left padding accounts for floating activity pill (56px wide + 16px from edge + 12px gap)
  */
 export const WORKSPACE_PADDING = {
   top: 10,       // Small top padding
   bottom: 10,    // Small bottom padding
-  left: 10,      // Small left padding
+  left: 84,      // Space for floating pill bar (56px + 16px + 12px gap)
   right: 10,     // Small right padding
   minVisible: 100 // Minimum visible area of card (header must stay visible)
 };
