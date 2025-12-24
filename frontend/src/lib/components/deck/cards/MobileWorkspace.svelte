@@ -10,29 +10,25 @@
 	 * - Empty state with create buttons
 	 */
 
-	import { ChevronLeft, X, MessageSquare, Bot, Palette, Terminal, Plus, Layers, Settings, User, Users, FolderKanban } from 'lucide-svelte';
+	import { ChevronLeft, X, MessageSquare, Bot, Palette, Terminal, Plus, Settings, User, Users, FolderKanban } from 'lucide-svelte';
 	import type { DeckCard, CardType } from './types';
 	import type { Snippet } from 'svelte';
 
 	interface Props {
 		cards: DeckCard[];
 		activeCardIndex: number;
-		minimizedCount?: number;
 		onCardChange: (index: number) => void;
 		onCloseCard: (id: string) => void;
 		onCreateCard: (type: CardType) => void;
-		onMinimizedClick?: () => void;
 		children?: Snippet<[DeckCard]>;
 	}
 
 	let {
 		cards,
 		activeCardIndex,
-		minimizedCount = 0,
 		onCardChange,
 		onCloseCard,
 		onCreateCard,
-		onMinimizedClick,
 		children
 	}: Props = $props();
 
@@ -246,17 +242,6 @@
 			</div>
 
 			<div class="header-actions">
-				<button
-					class="header-btn small"
-					onclick={() => onMinimizedClick?.()}
-					title="Minimized cards"
-					disabled={minimizedCount === 0}
-				>
-					<Layers size={18} />
-					{#if minimizedCount > 0}
-						<span class="badge">{minimizedCount}</span>
-					{/if}
-				</button>
 				<button
 					class="header-btn close"
 					onclick={handleClose}

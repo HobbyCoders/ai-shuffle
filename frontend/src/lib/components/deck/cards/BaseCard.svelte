@@ -12,14 +12,13 @@
 	 * - Glassmorphism styling
 	 */
 
-	import { MessageSquare, Bot, Palette, Terminal, Minus, Square, X, Maximize2, Copy, Settings, User, Users, FolderKanban } from 'lucide-svelte';
+	import { MessageSquare, Bot, Palette, Terminal, Square, X, Maximize2, Copy, Settings, User, Users, FolderKanban } from 'lucide-svelte';
 	import type { DeckCard, CardType } from './types';
 	import type { Snippet } from 'svelte';
 
 	interface Props {
 		card: DeckCard;
 		onClose: () => void;
-		onMinimize: () => void;
 		onMaximize: () => void;
 		onFocus: () => void;
 		onMove: (x: number, y: number) => void;
@@ -33,7 +32,6 @@
 	let {
 		card,
 		onClose,
-		onMinimize,
 		onMaximize,
 		onFocus,
 		onMove,
@@ -262,14 +260,6 @@
 
 		<div class="window-controls">
 			<button
-				class="control-btn minimize"
-				onclick={(e) => { e.stopPropagation(); onMinimize(); }}
-				title="Minimize"
-				aria-label="Minimize"
-			>
-				<Minus size={14} />
-			</button>
-			<button
 				class="control-btn maximize"
 				onclick={(e) => { e.stopPropagation(); onMaximize(); }}
 				title={card.maximized ? 'Restore' : 'Maximize'}
@@ -362,7 +352,7 @@
 		-webkit-backdrop-filter: blur(12px);
 		border-radius: 12px;
 		border: 1px solid var(--glass-border);
-		overflow: hidden;
+		overflow: visible;
 		box-shadow: var(--shadow-m);
 		transition:
 			box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1),
@@ -555,11 +545,6 @@
 		transform: scale(0.95);
 	}
 
-	.control-btn.minimize:hover {
-		background: color-mix(in oklch, var(--warning) 20%, transparent);
-		color: var(--warning);
-	}
-
 	.control-btn.maximize:hover {
 		background: color-mix(in oklch, var(--success) 20%, transparent);
 		color: var(--success);
@@ -573,10 +558,12 @@
 	/* Content */
 	.card-content {
 		flex: 1;
-		overflow: hidden;
+		overflow: visible;
 		display: flex;
 		flex-direction: column;
 		background: var(--card);
+		/* Allow fixed-position children (dropdowns, modals) to escape */
+		position: relative;
 	}
 
 	/* Resize Handles */

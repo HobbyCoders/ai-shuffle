@@ -25,7 +25,6 @@
 	import {
 		deck,
 		visibleCards,
-		minimizedCards as minimizedCardsStore,
 		focusedCardId,
 		mobileActiveCardIndex,
 		gridSnapEnabled,
@@ -75,7 +74,6 @@
 		DeckSession,
 		DeckAgent,
 		DeckGeneration,
-		MinimizedCard,
 		RunningProcess
 	} from '$lib/components/deck/types';
 
@@ -144,29 +142,21 @@
 		}))
 	);
 
-	const minimizedCardsForDock = $derived<MinimizedCard[]>(
-		$minimizedCardsStore.map((c) => ({
-			id: c.id,
-			type: mapDeckCardType(c.type) as 'chat' | 'agent' | 'generation' | 'file' | 'settings',
-			title: c.title
-		}))
-	);
-
-	// Active Threads: Show all open cards (visible + minimized) in the sidebar
+	// Active Threads: Show all open cards in the sidebar
 	const deckSessions = $derived<DeckSession[]>(
-		[...$visibleCards, ...$minimizedCardsStore].map((c) => ({
+		$visibleCards.map((c) => ({
 			id: c.id,
 			title: c.title || 'Untitled',
 			lastMessage: c.type === 'chat' ? 'Chat' : c.type === 'terminal' ? 'Terminal' : c.type,
 			timestamp: new Date(c.createdAt),
-			isActive: c.id === $focusedCardId && !c.minimized
+			isActive: c.id === $focusedCardId
 		}))
 	);
 
 	// Recent Sessions: Session history for loading old chats
 	// Shows sessions that are NOT currently open as cards
 	const openSessionIds = $derived(
-		new Set([...$visibleCards, ...$minimizedCardsStore]
+		new Set($visibleCards
 			.filter(c => c.dataId)
 			.map(c => c.dataId))
 	);
@@ -266,8 +256,8 @@
 	function syncDeckCardsWithTabs() {
 		const currentTabs = $allTabs;
 
-		// Combine visible and minimized cards from deck store
-		const allDeckCards = [...$visibleCards, ...$minimizedCardsStore];
+		// Use visible cards from deck store
+		const allDeckCards = $visibleCards;
 
 		for (const card of allDeckCards) {
 			if (card.type !== 'chat') continue;
@@ -398,7 +388,7 @@
 			// Close modals (Escape)
 			registerShortcut({
 				id: 'close-modal',
-				description: 'Close modal / minimize card',
+				description: 'Close modal',
 				key: 'Escape',
 				category: 'general',
 				allowInInput: true,
@@ -425,8 +415,6 @@
 						showAgentImportModal = false;
 					} else if (showTagManager) {
 						showTagManager = false;
-					} else if ($focusedCardId) {
-						deck.minimizeCard($focusedCardId);
 					}
 				}
 			}),
@@ -523,6 +511,32 @@
 						handleCardClose($focusedCardId);
 					}
 				}
+			}),
+
+			// Focus mode: previous card (Left Arrow)
+			registerShortcut({
+				id: 'focus-prev',
+				description: 'Previous card (focus mode)',
+				key: 'ArrowLeft',
+				category: 'navigation',
+				action: () => {
+					if ($layoutMode === 'focus') {
+						handleFocusNavigate('prev');
+					}
+				}
+			}),
+
+			// Focus mode: next card (Right Arrow)
+			registerShortcut({
+				id: 'focus-next',
+				description: 'Next card (focus mode)',
+				key: 'ArrowRight',
+				category: 'navigation',
+				action: () => {
+					if ($layoutMode === 'focus') {
+						handleFocusNavigate('next');
+					}
+				}
 			})
 		];
 	});
@@ -580,12 +594,8 @@
 
 	function handleSessionClick(session: DeckSession) {
 		// Since we now pass card.id as session.id, find the card directly
-		const allCards = [...$visibleCards, ...$minimizedCardsStore];
-		const existingCard = allCards.find((c) => c.id === session.id);
+		const existingCard = $visibleCards.find((c) => c.id === session.id);
 		if (existingCard) {
-			if (existingCard.minimized) {
-				deck.restoreCard(existingCard.id);
-			}
 			deck.focusCard(existingCard.id);
 		}
 	}
@@ -595,9 +605,6 @@
 		const existingCard = deck.findCardByDataId(historySession.id);
 		if (existingCard) {
 			// Focus the existing card
-			if (existingCard.minimized) {
-				deck.restoreCard(existingCard.id);
-			}
 			deck.focusCard(existingCard.id);
 		} else {
 			// Open the session as a new card
@@ -642,13 +649,9 @@
 				break;
 			case 'settings': {
 				// Singleton - check if already open
-				const existingSettings = [...$visibleCards, ...$minimizedCardsStore].find(c => c.type === 'settings');
+				const existingSettings = $visibleCards.find(c => c.type === 'settings');
 				if (existingSettings) {
-					if (existingSettings.minimized) {
-						deck.restoreCard(existingSettings.id);
-					} else {
-						deck.focusCard(existingSettings.id);
-					}
+					deck.focusCard(existingSettings.id);
 					return;
 				}
 				deckCardType = 'settings';
@@ -662,13 +665,9 @@
 			}
 			case 'subagent': {
 				// Singleton
-				const existingSubagent = [...$visibleCards, ...$minimizedCardsStore].find(c => c.type === 'subagent');
+				const existingSubagent = $visibleCards.find(c => c.type === 'subagent');
 				if (existingSubagent) {
-					if (existingSubagent.minimized) {
-						deck.restoreCard(existingSubagent.id);
-					} else {
-						deck.focusCard(existingSubagent.id);
-					}
+					deck.focusCard(existingSubagent.id);
 					return;
 				}
 				deckCardType = 'subagent';
@@ -677,13 +676,9 @@
 			}
 			case 'project': {
 				// Singleton
-				const existingProject = [...$visibleCards, ...$minimizedCardsStore].find(c => c.type === 'project');
+				const existingProject = $visibleCards.find(c => c.type === 'project');
 				if (existingProject) {
-					if (existingProject.minimized) {
-						deck.restoreCard(existingProject.id);
-					} else {
-						deck.focusCard(existingProject.id);
-					}
+					deck.focusCard(existingProject.id);
 					return;
 				}
 				deckCardType = 'project';
@@ -773,10 +768,6 @@
 		}
 	}
 
-	function handleCardMinimize(id: string) {
-		deck.minimizeCard(id);
-	}
-
 	function handleCardMaximize(id: string) {
 		deck.toggleMaximize(id);
 	}
@@ -787,10 +778,6 @@
 			tabs.closeTab(card.meta.tabId as string);
 		}
 		deck.removeCard(id);
-	}
-
-	function handleMinimizedCardClick(card: MinimizedCard) {
-		deck.restoreCard(card.id);
 	}
 
 	function handleCardTitleChange(id: string, title: string) {
@@ -808,18 +795,18 @@
 		deck.setLayoutMode(mode);
 	}
 
+	function handleFocusNavigate(direction: 'prev' | 'next') {
+		deck.navigateFocusMode(direction);
+	}
+
 	// ============================================
 	// Profile/Project Card Handlers (from ChatHeader context menu)
 	// ============================================
 	function handleOpenProfileCard(editId?: string) {
 		// Find or create profile card
-		const existingProfile = [...$visibleCards, ...$minimizedCardsStore].find(c => c.type === 'profile');
+		const existingProfile = $visibleCards.find(c => c.type === 'profile');
 		if (existingProfile) {
-			if (existingProfile.minimized) {
-				deck.restoreCard(existingProfile.id);
-			} else {
-				deck.focusCard(existingProfile.id);
-			}
+			deck.focusCard(existingProfile.id);
 			// If editing a specific profile, set metadata to open in edit mode
 			if (editId) {
 				deck.setCardMeta(existingProfile.id, { editProfileId: editId });
@@ -834,13 +821,9 @@
 
 	function handleOpenProjectCard(editId?: string) {
 		// Find or create project card
-		const existingProject = [...$visibleCards, ...$minimizedCardsStore].find(c => c.type === 'project');
+		const existingProject = $visibleCards.find(c => c.type === 'project');
 		if (existingProject) {
-			if (existingProject.minimized) {
-				deck.restoreCard(existingProject.id);
-			} else {
-				deck.focusCard(existingProject.id);
-			}
+			deck.focusCard(existingProject.id);
 			// If editing a specific project, set metadata to open in edit mode
 			if (editId) {
 				deck.setCardMeta(existingProject.id, { editProjectId: editId });
@@ -860,11 +843,7 @@
 		// Create a card for this session
 		const existingCard = deck.findCardByDataId(session.id);
 		if (existingCard) {
-			if (existingCard.minimized) {
-				deck.restoreCard(existingCard.id);
-			} else {
-				deck.focusCard(existingCard.id);
-			}
+			deck.focusCard(existingCard.id);
 		} else {
 			const tabId = tabs.openSession(session.id);
 			const sessionData = $sessions.find((s) => s.id === session.id);
@@ -951,7 +930,6 @@
 		agents={deckAgents}
 		generations={deckGenerations}
 		currentSession={null}
-		minimizedCards={minimizedCardsForDock}
 		{runningProcesses}
 		onModeChange={handleModeChange}
 		onLogoClick={() => handleCreateCard('chat')}
@@ -968,7 +946,6 @@
 			});
 		}}
 		onGenerationClick={() => {}}
-		onMinimizedCardClick={handleMinimizedCardClick}
 		onProcessClick={() => {}}
 	>
 		{#if activeMode === 'workspace'}
@@ -977,17 +954,9 @@
 				<MobileWorkspace
 					cards={workspaceCards}
 					activeCardIndex={$mobileActiveCardIndex}
-					minimizedCount={$minimizedCardsStore.length}
 					onCardChange={(index) => deck.setMobileActiveCardIndex(index)}
 					onCloseCard={handleCardClose}
 					onCreateCard={handleCreateCard}
-					onMinimizedClick={() => {
-						// Restore the first minimized card
-						if ($minimizedCardsStore.length > 0) {
-							const firstMinimized = $minimizedCardsStore[0];
-							handleMinimizedCardClick({ id: firstMinimized.id, type: firstMinimized.type, title: firstMinimized.title });
-						}
-					}}
 				>
 					{#snippet children(card)}
 						{@const tabId = getTabIdForCard(card)}
@@ -997,8 +966,7 @@
 								{tabId}
 								mobile={true}
 								onClose={() => handleCardClose(card.id)}
-								onMinimize={() => handleCardMinimize(card.id)}
-								onMaximize={() => handleCardMaximize(card.id)}
+																onMaximize={() => handleCardMaximize(card.id)}
 								onFocus={() => handleCardFocus(card.id)}
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1017,8 +985,7 @@
 								{card}
 								mobile={true}
 								onClose={() => handleCardClose(card.id)}
-								onMinimize={() => handleCardMinimize(card.id)}
-								onMaximize={() => handleCardMaximize(card.id)}
+																onMaximize={() => handleCardMaximize(card.id)}
 								onFocus={() => handleCardFocus(card.id)}
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1037,8 +1004,7 @@
 								{card}
 								mobile={true}
 								onClose={() => handleCardClose(card.id)}
-								onMinimize={() => handleCardMinimize(card.id)}
-								onMaximize={() => handleCardMaximize(card.id)}
+																onMaximize={() => handleCardMaximize(card.id)}
 								onFocus={() => handleCardFocus(card.id)}
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1048,8 +1014,7 @@
 								{card}
 								mobile={true}
 								onClose={() => handleCardClose(card.id)}
-								onMinimize={() => handleCardMinimize(card.id)}
-								onMaximize={() => handleCardMaximize(card.id)}
+																onMaximize={() => handleCardMaximize(card.id)}
 								onFocus={() => handleCardFocus(card.id)}
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1059,8 +1024,7 @@
 								{card}
 								mobile={true}
 								onClose={() => handleCardClose(card.id)}
-								onMinimize={() => handleCardMinimize(card.id)}
-								onMaximize={() => handleCardMaximize(card.id)}
+																onMaximize={() => handleCardMaximize(card.id)}
 								onFocus={() => handleCardFocus(card.id)}
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1070,8 +1034,7 @@
 								{card}
 								mobile={true}
 								onClose={() => handleCardClose(card.id)}
-								onMinimize={() => handleCardMinimize(card.id)}
-								onMaximize={() => handleCardMaximize(card.id)}
+																onMaximize={() => handleCardMaximize(card.id)}
 								onFocus={() => handleCardFocus(card.id)}
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1097,6 +1060,8 @@
 					cardSnapEnabled={true}
 					layoutMode={$layoutMode}
 					onLayoutModeChange={handleLayoutModeChange}
+					onFocusNavigate={handleFocusNavigate}
+					focusedCardId={$focusedCardId}
 				>
 					{#snippet children()}
 						<!-- Don't sort cards - z-index CSS handles visual stacking order -->
@@ -1120,8 +1085,7 @@
 												{card}
 												{tabId}
 												onClose={() => handleCardClose(card.id)}
-												onMinimize={() => handleCardMinimize(card.id)}
-												onMaximize={() => handleCardMaximize(card.id)}
+																								onMaximize={() => handleCardMaximize(card.id)}
 												onFocus={() => handleCardFocus(card.id)}
 												onMove={(x, y) => handleCardMove(card.id, x, y)}
 												onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1143,8 +1107,7 @@
 											{card}
 											agentId={card.data?.dataId as string || card.id}
 											onClose={() => handleCardClose(card.id)}
-											onMinimize={() => handleCardMinimize(card.id)}
-											onMaximize={() => handleCardMaximize(card.id)}
+																						onMaximize={() => handleCardMaximize(card.id)}
 											onFocus={() => handleCardFocus(card.id)}
 											onMove={(x, y) => handleCardMove(card.id, x, y)}
 											onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1155,8 +1118,7 @@
 										<StudioCard
 											{card}
 											onClose={() => handleCardClose(card.id)}
-											onMinimize={() => handleCardMinimize(card.id)}
-											onMaximize={() => handleCardMaximize(card.id)}
+																						onMaximize={() => handleCardMaximize(card.id)}
 											onFocus={() => handleCardFocus(card.id)}
 											onMove={(x, y) => handleCardMove(card.id, x, y)}
 											onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1167,8 +1129,7 @@
 										<TerminalCard
 											{card}
 											onClose={() => handleCardClose(card.id)}
-											onMinimize={() => handleCardMinimize(card.id)}
-											onMaximize={() => handleCardMaximize(card.id)}
+																						onMaximize={() => handleCardMaximize(card.id)}
 											onFocus={() => handleCardFocus(card.id)}
 											onMove={(x, y) => handleCardMove(card.id, x, y)}
 											onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1179,8 +1140,7 @@
 										<SettingsCard
 											{card}
 											onClose={() => handleCardClose(card.id)}
-											onMinimize={() => handleCardMinimize(card.id)}
-											onMaximize={() => handleCardMaximize(card.id)}
+																						onMaximize={() => handleCardMaximize(card.id)}
 											onFocus={() => handleCardFocus(card.id)}
 											onMove={(x, y) => handleCardMove(card.id, x, y)}
 											onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1191,8 +1151,7 @@
 										<ProfileCard
 											{card}
 											onClose={() => handleCardClose(card.id)}
-											onMinimize={() => handleCardMinimize(card.id)}
-											onMaximize={() => handleCardMaximize(card.id)}
+																						onMaximize={() => handleCardMaximize(card.id)}
 											onFocus={() => handleCardFocus(card.id)}
 											onMove={(x, y) => handleCardMove(card.id, x, y)}
 											onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1203,8 +1162,7 @@
 										<SubagentCard
 											{card}
 											onClose={() => handleCardClose(card.id)}
-											onMinimize={() => handleCardMinimize(card.id)}
-											onMaximize={() => handleCardMaximize(card.id)}
+																						onMaximize={() => handleCardMaximize(card.id)}
 											onFocus={() => handleCardFocus(card.id)}
 											onMove={(x, y) => handleCardMove(card.id, x, y)}
 											onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1215,8 +1173,7 @@
 										<ProjectCard
 											{card}
 											onClose={() => handleCardClose(card.id)}
-											onMinimize={() => handleCardMinimize(card.id)}
-											onMaximize={() => handleCardMaximize(card.id)}
+																						onMaximize={() => handleCardMaximize(card.id)}
 											onFocus={() => handleCardFocus(card.id)}
 											onMove={(x, y) => handleCardMove(card.id, x, y)}
 											onResize={(w, h) => handleCardResize(card.id, w, h)}

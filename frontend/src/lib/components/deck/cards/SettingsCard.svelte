@@ -43,7 +43,6 @@
 	interface Props {
 		card: DeckCard;
 		onClose: () => void;
-		onMinimize: () => void;
 		onMaximize: () => void;
 		onFocus: () => void;
 		onMove: (x: number, y: number) => void;
@@ -56,7 +55,6 @@
 	let {
 		card,
 		onClose,
-		onMinimize,
 		onMaximize,
 		onFocus,
 		onMove,
@@ -1115,7 +1113,7 @@
 		</div>
 	</div>
 {:else}
-	<BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
+	<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
 		<div class="settings-card-content">
 			<!-- Sidebar -->
 			<nav class="settings-sidebar">

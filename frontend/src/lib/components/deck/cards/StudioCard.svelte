@@ -55,7 +55,6 @@
 	interface Props {
 		card: DeckCard;
 		onClose: () => void;
-		onMinimize: () => void;
 		onMaximize: () => void;
 		onFocus: () => void;
 		onMove: (x: number, y: number) => void;
@@ -68,7 +67,6 @@
 	let {
 		card,
 		onClose,
-		onMinimize,
 		onMaximize,
 		onFocus,
 		onMove,
@@ -734,7 +732,7 @@
 	</div>
 {:else}
 	<!-- Desktop: Full BaseCard with all features -->
-	<BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
+	<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
 		<div class="studio-content">
 			<!-- Preview Area -->
 			<div class="preview-area">

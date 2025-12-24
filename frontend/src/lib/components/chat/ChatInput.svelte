@@ -1283,29 +1283,9 @@
 		flex: 1;
 		min-width: 0;
 		position: relative;
-		background: color-mix(in srgb, var(--muted) 40%, transparent);
+		background: transparent;
 		border-radius: 1rem;
 		transition: background-color 0.15s;
-	}
-
-	.textarea-wrapper:focus-within {
-		background: color-mix(in srgb, var(--muted) 60%, transparent);
-	}
-
-	:global(.dark) .textarea-wrapper {
-		background: color-mix(in srgb, oklch(0.22 0.01 260) 60%, transparent);
-	}
-
-	:global(.dark) .textarea-wrapper:focus-within {
-		background: color-mix(in srgb, oklch(0.24 0.01 260) 70%, transparent);
-	}
-
-	:global(.light) .textarea-wrapper {
-		background: oklch(0.97 0.003 260);
-	}
-
-	:global(.light) .textarea-wrapper:focus-within {
-		background: oklch(0.96 0.005 260);
 	}
 
 	/* Textarea */

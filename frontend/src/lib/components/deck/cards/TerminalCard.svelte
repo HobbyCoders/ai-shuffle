@@ -11,7 +11,6 @@
 	interface Props {
 		card: DeckCard;
 		onClose: () => void;
-		onMinimize: () => void;
 		onMaximize: () => void;
 		onFocus: () => void;
 		onMove: (x: number, y: number) => void;
@@ -20,10 +19,10 @@
 		onResizeEnd?: () => void;
 	}
 
-	let { card, onClose, onMinimize, onMaximize, onFocus, onMove, onResize, onDragEnd, onResizeEnd }: Props = $props();
+	let { card, onClose, onMaximize, onFocus, onMove, onResize, onDragEnd, onResizeEnd }: Props = $props();
 </script>
 
-<BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
+<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
 	<div class="terminal-content">
 		<div class="terminal-line">Terminal integration coming soon...</div>
 		<div class="terminal-line"></div>

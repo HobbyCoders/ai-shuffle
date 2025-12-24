@@ -44,7 +44,6 @@
 		card: DeckCard;
 		agentId?: string;
 		onClose: () => void;
-		onMinimize: () => void;
 		onMaximize: () => void;
 		onFocus: () => void;
 		onMove: (x: number, y: number) => void;
@@ -57,7 +56,6 @@
 		card,
 		agentId,
 		onClose,
-		onMinimize,
 		onMaximize,
 		onFocus,
 		onMove,
@@ -494,7 +492,7 @@
 	}
 </script>
 
-<BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
+<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
 	{#if mode === 'launcher'}
 		<!-- LAUNCHER MODE UI -->
 		<div class="launcher-content">

@@ -17,7 +17,6 @@
 		card: DeckCard;
 		tabId: string;
 		onClose: () => void;
-		onMinimize: () => void;
 		onMaximize: () => void;
 		onFocus: () => void;
 		onMove: (x: number, y: number) => void;
@@ -34,7 +33,6 @@
 		card,
 		tabId,
 		onClose,
-		onMinimize,
 		onMaximize,
 		onFocus,
 		onMove,
@@ -128,7 +126,7 @@
 	</div>
 {:else}
 	<!-- Desktop: Full BaseCard with all features -->
-	<BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
+	<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
 		<div class="chat-card-content">
 			{#if tab}
 				<!-- Main message area -->
@@ -185,6 +183,8 @@
 		-webkit-font-smoothing: antialiased;
 		-moz-osx-font-smoothing: grayscale;
 		text-rendering: optimizeLegibility;
+		/* Clip internal content (messages) but allow fixed-position elements to escape */
+		border-radius: 0 0 12px 12px;
 	}
 
 	.chat-card-content.mobile {

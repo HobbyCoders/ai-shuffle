@@ -15,7 +15,6 @@
 	import { ChevronLeft } from 'lucide-svelte';
 	import ActivityRail from './ActivityRail.svelte';
 	import ContextPanel from './ContextPanel.svelte';
-	import Dock from './Dock.svelte';
 	import type {
 		ActivityMode,
 		ActivityBadges,
@@ -23,7 +22,6 @@
 		DeckAgent,
 		DeckGeneration,
 		SessionInfo,
-		MinimizedCard,
 		RunningProcess
 	} from './types';
 	import type { HistorySession } from './ContextPanel.svelte';
@@ -37,7 +35,6 @@
 		agents?: DeckAgent[];
 		generations?: DeckGeneration[];
 		currentSession?: SessionInfo | null;
-		minimizedCards?: MinimizedCard[];
 		runningProcesses?: RunningProcess[];
 		onModeChange?: (mode: ActivityMode) => void;
 		onLogoClick?: () => void;
@@ -47,7 +44,6 @@
 		onHistorySessionClick?: (session: HistorySession) => void;
 		onAgentClick?: (agent: DeckAgent) => void;
 		onGenerationClick?: (generation: DeckGeneration) => void;
-		onMinimizedCardClick?: (card: MinimizedCard) => void;
 		onProcessClick?: (process: RunningProcess) => void;
 		children?: import('svelte').Snippet;
 	}
@@ -61,7 +57,6 @@
 		agents = [],
 		generations = [],
 		currentSession = null,
-		minimizedCards = [],
 		runningProcesses = [],
 		onModeChange,
 		onLogoClick,
@@ -71,7 +66,6 @@
 		onHistorySessionClick,
 		onAgentClick,
 		onGenerationClick,
-		onMinimizedCardClick,
 		onProcessClick,
 		children
 	}: Props = $props();
@@ -160,19 +154,6 @@
 				{/if}
 			{/if}
 		</main>
-
-		<!-- Dock - Desktop only -->
-		<!-- CSS classes hide on mobile as fallback -->
-		{#if !isMobile}
-			<div class="dock-container dock-desktop mobile-hidden" data-layout="dock">
-				<Dock
-					{minimizedCards}
-					{runningProcesses}
-					onCardClick={onMinimizedCardClick}
-					{onProcessClick}
-				/>
-			</div>
-		{/if}
 	</div>
 
 	<!-- Mobile Rail - Bottom of screen -->
@@ -273,17 +254,6 @@
 		height: 100%;
 		color: var(--muted-foreground);
 		font-size: 0.875rem;
-	}
-
-	.dock-container {
-		flex-shrink: 0;
-	}
-
-	/* CSS fallback: Hide dock on mobile */
-	@media (max-width: 639px) {
-		.dock-container {
-			display: none;
-		}
 	}
 
 	/* Context panel - positioned inside workspace as an overlay */

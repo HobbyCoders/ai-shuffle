@@ -12,7 +12,7 @@
 	 */
 
 	import { onMount } from 'svelte';
-	import { MessageSquare, Bot, Palette, Terminal, Plus } from 'lucide-svelte';
+	import { MessageSquare, Bot, Palette, Terminal, Plus, ChevronLeft, ChevronRight } from 'lucide-svelte';
 	import type { DeckCard, CardType, SnapGuide, SnapResult } from './types';
 	import { SNAP_THRESHOLD, CARD_SNAP_THRESHOLD, SNAP_GRID, WORKSPACE_PADDING } from './types';
 	import type { Snippet } from 'svelte';
@@ -30,6 +30,8 @@
 		cardSnapEnabled?: boolean;
 		layoutMode?: LayoutMode;
 		onLayoutModeChange?: (mode: LayoutMode) => void;
+		onFocusNavigate?: (direction: 'prev' | 'next') => void;
+		focusedCardId?: string | null;
 		children?: Snippet;
 	}
 
@@ -44,8 +46,30 @@
 		cardSnapEnabled = true,
 		layoutMode = 'freeflow',
 		onLayoutModeChange,
+		onFocusNavigate,
+		focusedCardId = null,
 		children
 	}: Props = $props();
+
+	// In freeflow mode, disable all snapping
+	const isSnappingEnabled = $derived(layoutMode !== 'freeflow');
+
+	// Focus mode navigation state
+	const isFocusMode = $derived(layoutMode === 'focus');
+	const focusModeCards = $derived(() => {
+		if (!isFocusMode) return [];
+		return [...visibleCards].sort(
+			(a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+		);
+	});
+	const focusModeIndex = $derived(() => {
+		const cards = focusModeCards();
+		if (cards.length === 0 || !focusedCardId) return 0;
+		const idx = cards.findIndex((c) => c.id === focusedCardId);
+		return idx >= 0 ? idx : 0;
+	});
+	const focusModeTotal = $derived(() => focusModeCards().length);
+	const showFocusNav = $derived(isFocusMode && focusModeTotal() > 1);
 
 	// Handle layout mode change
 	function handleLayoutModeChange(mode: LayoutMode) {
@@ -105,8 +129,11 @@
 	const maximizedCard = $derived(cards.find((c) => c.maximized));
 	const hasMaximizedCard = $derived(!!maximizedCard);
 
-	// Snap detection helper
+	// Snap detection helper - only active when snapping is enabled (non-freeflow modes)
 	function getSnapZone(x: number, y: number, width: number, height: number): DeckCard['snappedTo'] | undefined {
+		// In freeflow mode, no edge snapping
+		if (!isSnappingEnabled) return undefined;
+
 		const bounds = workspaceBounds;
 		const threshold = SNAP_THRESHOLD;
 
@@ -188,6 +215,7 @@
 	/**
 	 * Check for card-to-card snapping alignment
 	 * Returns adjusted position and snap guides to display
+	 * Disabled in freeflow mode
 	 */
 	export function checkCardSnapping(
 		cardId: string,
@@ -196,7 +224,8 @@
 		width: number,
 		height: number
 	): SnapResult {
-		if (!cardSnapEnabled) {
+		// In freeflow mode, no card-to-card snapping
+		if (!cardSnapEnabled || !isSnappingEnabled) {
 			return { x, y, guides: [] };
 		}
 
@@ -327,21 +356,23 @@
 			}
 		}
 
-		// Also snap to workspace edges
-		if (Math.abs(x) < CARD_SNAP_THRESHOLD) {
-			snappedX = 0;
-			guides.push({ type: 'vertical', position: 0, start: 0, end: workspaceBounds.height });
-		} else if (Math.abs(x + width - workspaceBounds.width) < CARD_SNAP_THRESHOLD) {
-			snappedX = workspaceBounds.width - width;
-			guides.push({ type: 'vertical', position: workspaceBounds.width, start: 0, end: workspaceBounds.height });
-		}
+		// Also snap to workspace edges (only if snapping is enabled)
+		if (isSnappingEnabled) {
+			if (Math.abs(x) < CARD_SNAP_THRESHOLD) {
+				snappedX = 0;
+				guides.push({ type: 'vertical', position: 0, start: 0, end: workspaceBounds.height });
+			} else if (Math.abs(x + width - workspaceBounds.width) < CARD_SNAP_THRESHOLD) {
+				snappedX = workspaceBounds.width - width;
+				guides.push({ type: 'vertical', position: workspaceBounds.width, start: 0, end: workspaceBounds.height });
+			}
 
-		if (Math.abs(y) < CARD_SNAP_THRESHOLD) {
-			snappedY = 0;
-			guides.push({ type: 'horizontal', position: 0, start: 0, end: workspaceBounds.width });
-		} else if (Math.abs(y + height - workspaceBounds.height) < CARD_SNAP_THRESHOLD) {
-			snappedY = workspaceBounds.height - height;
-			guides.push({ type: 'horizontal', position: workspaceBounds.height, start: 0, end: workspaceBounds.width });
+			if (Math.abs(y) < CARD_SNAP_THRESHOLD) {
+				snappedY = 0;
+				guides.push({ type: 'horizontal', position: 0, start: 0, end: workspaceBounds.width });
+			} else if (Math.abs(y + height - workspaceBounds.height) < CARD_SNAP_THRESHOLD) {
+				snappedY = workspaceBounds.height - height;
+				guides.push({ type: 'horizontal', position: workspaceBounds.height, start: 0, end: workspaceBounds.width });
+			}
 		}
 
 		return { x: snappedX, y: snappedY, guides };
@@ -361,8 +392,13 @@
 		snapGuides = [];
 	}
 
-	// Show snap preview while dragging
+	// Show snap preview while dragging (disabled in freeflow mode)
 	export function showSnapPreview(x: number, y: number, width: number, height: number) {
+		// In freeflow mode, never show snap preview
+		if (!isSnappingEnabled) {
+			snapPreview = { show: false, x: 0, y: 0, width: 0, height: 0 };
+			return;
+		}
 		const snapTo = getSnapZone(x, y, width, height);
 		if (snapTo) {
 			const geo = getSnapGeometry(snapTo);
@@ -376,8 +412,13 @@
 		snapPreview = { show: false, x: 0, y: 0, width: 0, height: 0 };
 	}
 
-	// Finalize snap when drag ends
+	// Finalize snap when drag ends (disabled in freeflow mode)
 	export function finalizeSnap(cardId: string, x: number, y: number, width: number, height: number) {
+		// In freeflow mode, never finalize snapping
+		if (!isSnappingEnabled) {
+			hideSnapPreview();
+			return;
+		}
 		const snapTo = getSnapZone(x, y, width, height);
 		if (snapTo) {
 			onCardSnap(cardId, snapTo);
@@ -482,6 +523,33 @@
 	<!-- Render cards via children snippet -->
 	{#if children}
 		{@render children()}
+	{/if}
+
+	<!-- Focus Mode Navigation -->
+	{#if showFocusNav}
+		<div class="focus-nav">
+			<button
+				class="focus-nav-btn focus-nav-prev"
+				onclick={() => onFocusNavigate?.('prev')}
+				title="Previous card"
+			>
+				<ChevronLeft size={24} strokeWidth={2} />
+			</button>
+
+			<div class="focus-nav-indicator">
+				<span class="focus-nav-current">{focusModeIndex() + 1}</span>
+				<span class="focus-nav-separator">/</span>
+				<span class="focus-nav-total">{focusModeTotal()}</span>
+			</div>
+
+			<button
+				class="focus-nav-btn focus-nav-next"
+				onclick={() => onFocusNavigate?.('next')}
+				title="Next card"
+			>
+				<ChevronRight size={24} strokeWidth={2} />
+			</button>
+		</div>
 	{/if}
 
 	<!-- Empty state when no cards -->
@@ -692,5 +760,79 @@
 
 	.context-menu-item:hover {
 		background: hsl(var(--accent));
+	}
+
+	/* Focus Mode Navigation */
+	.focus-nav {
+		position: absolute;
+		bottom: 24px;
+		left: 50%;
+		transform: translateX(-50%);
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding: 8px 16px;
+		background: hsl(var(--card) / 0.95);
+		backdrop-filter: blur(8px);
+		border: 1px solid hsl(var(--border));
+		border-radius: 9999px;
+		box-shadow:
+			0 4px 6px -1px rgba(0, 0, 0, 0.1),
+			0 2px 4px -2px rgba(0, 0, 0, 0.1);
+		z-index: 10001;
+	}
+
+	.focus-nav-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 40px;
+		height: 40px;
+		background: transparent;
+		border: none;
+		border-radius: 50%;
+		color: hsl(var(--muted-foreground));
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.focus-nav-btn:hover {
+		background: hsl(var(--accent));
+		color: hsl(var(--foreground));
+	}
+
+	.focus-nav-btn:active {
+		transform: scale(0.95);
+	}
+
+	.focus-nav-indicator {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		font-size: 0.875rem;
+		font-weight: 500;
+		color: hsl(var(--foreground));
+		min-width: 48px;
+		justify-content: center;
+	}
+
+	.focus-nav-current {
+		color: hsl(var(--primary));
+		font-weight: 600;
+	}
+
+	.focus-nav-separator {
+		color: hsl(var(--muted-foreground));
+	}
+
+	.focus-nav-total {
+		color: hsl(var(--muted-foreground));
+	}
+
+	/* Hide focus nav on mobile - they use swipe instead */
+	@media (max-width: 639px) {
+		.focus-nav {
+			display: none;
+		}
 	}
 </style>

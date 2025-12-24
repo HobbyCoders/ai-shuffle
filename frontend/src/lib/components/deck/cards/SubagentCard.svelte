@@ -53,7 +53,6 @@
 	interface Props {
 		card: DeckCard;
 		onClose: () => void;
-		onMinimize: () => void;
 		onMaximize: () => void;
 		onFocus: () => void;
 		onMove: (x: number, y: number) => void;
@@ -66,7 +65,6 @@
 	let {
 		card,
 		onClose,
-		onMinimize,
 		onMaximize,
 		onFocus,
 		onMove,
@@ -875,7 +873,6 @@
 	<BaseCard
 		{card}
 		{onClose}
-		{onMinimize}
 		{onMaximize}
 		{onFocus}
 		{onMove}
