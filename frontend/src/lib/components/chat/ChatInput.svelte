@@ -605,7 +605,7 @@
 						<span>{Math.round(contextPercent)}%</span>
 					</button>
 					<!-- Token dropdown -->
-					<div class="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 w-52 bg-card border border-border rounded-xl shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+					<div class="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 w-52 bg-card border border-border rounded-xl shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-[10002]">
 						<div class="py-2 px-3 space-y-2">
 							<!-- Context header -->
 							<div class="flex items-center justify-between text-xs pb-1 border-b border-border">
@@ -675,9 +675,9 @@
 							</svg>
 						</button>
 						{#if showProfilePopup}
-							<button class="fixed inset-0 z-40" onclick={() => showProfilePopup = false} aria-label="Close"></button>
+							<button class="fixed inset-0 z-[10001]" onclick={() => showProfilePopup = false} aria-label="Close"></button>
 							<div
-								class="fixed -translate-x-1/2 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[160px] max-h-[280px] overflow-y-auto {profileContextMenu.show ? 'pointer-events-auto' : ''}"
+								class="fixed -translate-x-1/2 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-[10002] min-w-[160px] max-h-[280px] overflow-y-auto {profileContextMenu.show ? 'pointer-events-auto' : ''}"
 								style="left: {profileDropdownPos.left}px; bottom: {profileDropdownPos.bottom}px;">
 								{#if $profiles.length === 0}
 									<div class="px-3 py-2 text-xs text-muted-foreground">No profiles</div>
@@ -787,9 +787,9 @@
 							</svg>
 						</button>
 						{#if showProjectPopup}
-							<button class="fixed inset-0 z-40" onclick={() => showProjectPopup = false} aria-label="Close"></button>
+							<button class="fixed inset-0 z-[10001]" onclick={() => showProjectPopup = false} aria-label="Close"></button>
 							<div
-								class="fixed -translate-x-1/2 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[160px] max-h-[280px] overflow-y-auto {projectContextMenu.show ? 'pointer-events-auto' : ''}"
+								class="fixed -translate-x-1/2 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-[10002] min-w-[160px] max-h-[280px] overflow-y-auto {projectContextMenu.show ? 'pointer-events-auto' : ''}"
 								style="left: {projectDropdownPos.left}px; bottom: {projectDropdownPos.bottom}px;">
 								{#if $projects.length === 0}
 									<div class="px-3 py-2 text-xs text-muted-foreground">No projects</div>
@@ -897,9 +897,9 @@
 							</svg>
 						</button>
 						{#if showModelPopup}
-							<button class="fixed inset-0 z-40" onclick={() => showModelPopup = false} aria-label="Close"></button>
+							<button class="fixed inset-0 z-[10001]" onclick={() => showModelPopup = false} aria-label="Close"></button>
 							<div
-								class="fixed -translate-x-1/2 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[90px]"
+								class="fixed -translate-x-1/2 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-[10002] min-w-[90px]"
 								style="left: {modelDropdownPos.left}px; bottom: {modelDropdownPos.bottom}px;"
 							>
 								{#each [['sonnet', 'Sonnet'], ['sonnet-1m', 'Sonnet 1M'], ['opus', 'Opus'], ['haiku', 'Haiku']] as [value, label]}
@@ -942,9 +942,9 @@
 							</svg>
 						</button>
 						{#if showModePopup}
-							<button class="fixed inset-0 z-40" onclick={() => showModePopup = false} aria-label="Close"></button>
+							<button class="fixed inset-0 z-[10001]" onclick={() => showModePopup = false} aria-label="Close"></button>
 							<div
-								class="fixed -translate-x-1/2 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[100px]"
+								class="fixed -translate-x-1/2 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-[10002] min-w-[100px]"
 								style="left: {modeDropdownPos.left}px; bottom: {modeDropdownPos.bottom}px;"
 							>
 								{#each [['default', 'Ask'], ['acceptEdits', 'Auto-Accept'], ['plan', 'Plan'], ['bypassPermissions', 'Bypass']] as [value, label]}
