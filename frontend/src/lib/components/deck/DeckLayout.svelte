@@ -187,8 +187,9 @@
 	/* Floating pill container - positions the activity pill */
 	.floating-pill-container {
 		position: fixed;
-		top: 16px;
+		top: 50%;
 		left: 16px;
+		transform: translateY(-50%);
 		z-index: 9999;
 		pointer-events: auto;
 	}

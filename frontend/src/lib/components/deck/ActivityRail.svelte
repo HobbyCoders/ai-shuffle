@@ -97,6 +97,9 @@
 		{/each}
 	</div>
 
+	<!-- Spacer to push settings to bottom -->
+	<div class="spacer"></div>
+
 	<!-- Divider -->
 	<div class="divider"></div>
 
@@ -114,22 +117,25 @@
 <style>
 	.activity-pill {
 		display: flex;
-		flex-direction: row;
+		flex-direction: column;
 		align-items: center;
-		height: 48px;
+		width: 56px;
 		background: color-mix(in srgb, var(--card) 85%, transparent);
 		backdrop-filter: blur(20px);
 		-webkit-backdrop-filter: blur(20px);
 		border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-		border-radius: 24px;
-		padding: 0 8px;
+		border-radius: 28px;
+		padding: 10px 0;
 		gap: 4px;
 		box-shadow:
 			0 4px 24px -4px rgba(0, 0, 0, 0.15),
 			0 0 0 1px rgba(255, 255, 255, 0.05) inset;
 	}
 
+	/* Mobile: horizontal layout at bottom */
 	.activity-pill.mobile {
+		flex-direction: row;
+		width: auto;
 		height: 52px;
 		border-radius: 26px;
 		padding: 0 10px;
@@ -137,16 +143,26 @@
 	}
 
 	.divider {
-		width: 1px;
-		height: 24px;
+		width: 32px;
+		height: 1px;
 		background: var(--border);
 		opacity: 0.5;
-		margin: 0 4px;
+		margin: 4px 0;
 	}
 
 	.mobile .divider {
+		width: 1px;
 		height: 28px;
 		margin: 0 6px;
+	}
+
+	.spacer {
+		flex: 1;
+		min-height: 8px;
+	}
+
+	.mobile .spacer {
+		display: none;
 	}
 
 	.plus-button {
@@ -181,11 +197,12 @@
 
 	.activities {
 		display: flex;
-		flex-direction: row;
+		flex-direction: column;
 		gap: 2px;
 	}
 
 	.mobile .activities {
+		flex-direction: row;
 		gap: 4px;
 	}
 
@@ -257,11 +274,12 @@
 		right: 6px;
 	}
 
+	/* Tooltips appear to the right on desktop (vertical), above on mobile (horizontal) */
 	.tooltip {
 		position: absolute;
-		left: 50%;
-		bottom: calc(100% + 12px);
-		transform: translateX(-50%);
+		left: calc(100% + 12px);
+		top: 50%;
+		transform: translateY(-50%);
 		padding: 6px 10px;
 		background: var(--popover);
 		border: 1px solid var(--border);
@@ -275,6 +293,13 @@
 		pointer-events: none;
 		z-index: 100;
 		box-shadow: var(--shadow-m);
+	}
+
+	.mobile .tooltip {
+		left: 50%;
+		top: auto;
+		bottom: calc(100% + 12px);
+		transform: translateX(-50%);
 	}
 
 	.plus-button:hover .tooltip,
