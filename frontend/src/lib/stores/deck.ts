@@ -543,15 +543,43 @@ function createDeckStore() {
 		 * Remove a card from the deck
 		 * Automatically reapplies the current layout mode if not freeflow
 		 * On mobile, adjusts the active card index to show the previous card
+		 * In focus mode, if removing the maximized card, automatically opens the first minimized card
 		 */
 		removeCard(id: string): void {
 			update((state) => {
 				// Find the index of the card being removed (among visible cards)
 				const visibleCards = state.cards.filter((c) => !c.minimized);
 				const removedCardIndex = visibleCards.findIndex((c) => c.id === id);
+				const removedCard = state.cards.find((c) => c.id === id);
 
 				// Filter out the removed card
-				const newCards = state.cards.filter((c) => c.id !== id);
+				let newCards = state.cards.filter((c) => c.id !== id);
+
+				// In focus mode, if we're removing the maximized card, restore the first minimized card
+				if (state.layoutMode === 'focus' && removedCard?.maximized) {
+					const minimizedCards = newCards.filter((c) => c.minimized);
+					if (minimizedCards.length > 0) {
+						// Find the first minimized card (by creation time for consistency)
+						const firstMinimized = minimizedCards.sort(
+							(a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+						)[0];
+
+						// Restore and maximize the first minimized card
+						const highestZ = Math.max(...newCards.map((c) => c.zIndex), 0);
+						newCards = newCards.map((c) => {
+							if (c.id === firstMinimized.id) {
+								return {
+									...c,
+									minimized: false,
+									maximized: true,
+									zIndex: highestZ + 1
+								};
+							}
+							return c;
+						});
+					}
+				}
+
 				const newVisibleCards = newCards.filter((c) => !c.minimized);
 
 				// Calculate new mobile active card index
@@ -571,15 +599,26 @@ function createDeckStore() {
 					newMobileActiveCardIndex = 0;
 				}
 
+				// Determine new focused card ID
+				let newFocusedCardId = state.focusedCardId === id ? null : state.focusedCardId;
+
+				// In focus mode, set focusedCardId to the newly maximized card
+				if (state.layoutMode === 'focus') {
+					const maximizedCard = newCards.find((c) => c.maximized);
+					if (maximizedCard) {
+						newFocusedCardId = maximizedCard.id;
+					}
+				}
+
 				let newState: DeckState = {
 					...state,
 					cards: newCards,
-					focusedCardId: state.focusedCardId === id ? null : state.focusedCardId,
+					focusedCardId: newFocusedCardId,
 					mobileActiveCardIndex: newMobileActiveCardIndex
 				};
 
-				// Auto-reapply layout mode if not freeflow
-				if (state.layoutMode !== 'freeflow') {
+				// Auto-reapply layout mode if not freeflow (skip for focus mode as we handled it above)
+				if (state.layoutMode !== 'freeflow' && state.layoutMode !== 'focus') {
 					newState = this.applyLayout(newState, state.layoutMode);
 				}
 
