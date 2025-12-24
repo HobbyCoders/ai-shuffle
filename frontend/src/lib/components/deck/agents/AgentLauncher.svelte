@@ -6,16 +6,15 @@
 	 * - Task name input
 	 * - Large prompt textarea
 	 * - Profile and project selectors (fetched from API)
-	 * - Base branch selector
+	 * - Work mode: GitHub (branch + PR) or Local (direct changes)
+	 * - Base branch selector (for GitHub mode)
 	 *
-	 * Simplified workflow:
-	 * - Always creates a new feature branch automatically
-	 * - Always creates a PR on completion
-	 * - Runs until completion (no duration limit)
-	 * - No auto-review (user can manually review)
+	 * Workflow modes:
+	 * - GitHub: Creates feature branch, commits changes, creates PR on completion
+	 * - Local: Works directly on project folder, no git features
 	 */
 	import { onMount } from 'svelte';
-	import { X, Rocket, GitBranch, User, FolderKanban, Loader2 } from 'lucide-svelte';
+	import { X, Rocket, GitBranch, User, FolderKanban, Loader2, Folder } from 'lucide-svelte';
 
 	interface Props {
 		onClose: () => void;
@@ -47,15 +46,19 @@
 	interface Project {
 		id: string;
 		name: string;
+		is_git_repo?: boolean;
 	}
+
+	type WorkMode = 'github' | 'local';
 
 	let { onClose, onLaunch }: Props = $props();
 
-	// Form state - simplified: always create branch, always create PR, no duration limit, no auto-review
+	// Form state
 	let name = $state('');
 	let prompt = $state('');
 	let profileId = $state<string | undefined>(undefined);
 	let projectId = $state<string | undefined>(undefined);
+	let workMode = $state<WorkMode>('github');
 	let isLaunching = $state(false);
 	let error = $state<string | null>(null);
 
@@ -67,6 +70,7 @@
 	let loadingProfiles = $state(true);
 	let loadingProjects = $state(true);
 	let loadingBranches = $state(false);
+	let isGitRepo = $state(false);
 
 	// Validation
 	const canLaunch = $derived(name.trim().length > 0 && prompt.trim().length > 0 && !isLaunching);
@@ -112,6 +116,7 @@
 		loadingBranches = true;
 		branches = [];
 		baseBranch = undefined;
+		isGitRepo = false;
 		try {
 			const response = await fetch(`/api/v1/projects/${projId}/branches`, {
 				credentials: 'include'
@@ -119,14 +124,27 @@
 			if (response.ok) {
 				const data = await response.json();
 				branches = data.branches ?? [];
+				isGitRepo = branches.length > 0;
 				// Set default to the default branch (main/master) or current branch
 				const defaultBranch = branches.find(b => b.name === 'main' || b.name === 'master') ?? branches.find(b => b.current);
 				if (defaultBranch) {
 					baseBranch = defaultBranch.name;
 				}
+				// If it's a git repo, default to GitHub mode; otherwise, force local mode
+				if (isGitRepo) {
+					workMode = 'github';
+				} else {
+					workMode = 'local';
+				}
+			} else {
+				// If branches endpoint fails, assume not a git repo
+				isGitRepo = false;
+				workMode = 'local';
 			}
 		} catch (err) {
 			console.error('Failed to fetch branches:', err);
+			isGitRepo = false;
+			workMode = 'local';
 		} finally {
 			loadingBranches = false;
 		}
@@ -139,6 +157,7 @@
 		} else {
 			branches = [];
 			baseBranch = undefined;
+			isGitRepo = false;
 		}
 	});
 
@@ -149,16 +168,17 @@
 		error = null;
 
 		try {
+			const useGitFeatures = workMode === 'github' && isGitRepo;
 			await onLaunch({
 				name: name.trim(),
 				prompt: prompt.trim(),
-				autoBranch: true,    // Always create a new branch
-				autoPR: true,        // Always create PR on completion
-				autoReview: false,   // No auto-review
-				maxDuration: 0,      // Unlimited duration (run until complete)
+				autoBranch: useGitFeatures,    // Create branch only in GitHub mode
+				autoPR: useGitFeatures,        // Create PR only in GitHub mode
+				autoReview: false,             // No auto-review
+				maxDuration: 0,                // Unlimited duration (run until complete)
 				profileId,
 				projectId,
-				baseBranch
+				baseBranch: useGitFeatures ? baseBranch : undefined
 			});
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to launch agent';
@@ -288,48 +308,87 @@
 						<option value={project.id}>{project.name}</option>
 					{/each}
 				</select>
-				<p class="text-xs text-muted-foreground mt-1">
-					A new feature branch will be created in this project
-				</p>
 			</div>
 
-			<!-- Branch selector (shows when project is selected) -->
-			{#if projectId && branches.length > 0}
+			<!-- Work Mode selector (shows when project is selected) -->
+			{#if projectId}
 				<div>
 					<label class="flex items-center gap-2 text-sm text-foreground mb-2">
-						<GitBranch class="w-4 h-4 text-muted-foreground" />
-						Start From Branch
+						Work Mode
 					</label>
-					<select
-						bind:value={baseBranch}
-						disabled={isLaunching || loadingBranches}
-						class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-					>
-						{#if loadingBranches}
-							<option value={undefined}>Loading branches...</option>
-						{:else}
-							{#each branches as branch}
-								<option value={branch.name}>
-									{branch.name}{branch.current ? ' (current)' : ''}
-								</option>
-							{/each}
-						{/if}
-					</select>
-					<p class="text-xs text-muted-foreground mt-1">
-						Agent will create a new branch from this base and submit a PR when done
-					</p>
+					<div class="flex gap-2">
+						<!-- GitHub mode button -->
+						<button
+							type="button"
+							onclick={() => workMode = 'github'}
+							disabled={isLaunching || !isGitRepo}
+							class="flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg border transition-all {workMode === 'github' ? 'bg-primary/10 border-primary text-primary' : 'bg-background border-border text-muted-foreground hover:bg-muted/50'} {!isGitRepo ? 'opacity-50 cursor-not-allowed' : ''}"
+						>
+							<GitBranch class="w-4 h-4" />
+							<span class="text-sm font-medium">GitHub</span>
+						</button>
+						<!-- Local mode button -->
+						<button
+							type="button"
+							onclick={() => workMode = 'local'}
+							disabled={isLaunching}
+							class="flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg border transition-all {workMode === 'local' ? 'bg-primary/10 border-primary text-primary' : 'bg-background border-border text-muted-foreground hover:bg-muted/50'}"
+						>
+							<Folder class="w-4 h-4" />
+							<span class="text-sm font-medium">Local</span>
+						</button>
+					</div>
+					{#if !isGitRepo && !loadingBranches}
+						<p class="text-xs text-amber-500 mt-1.5">
+							This project is not a Git repository. Working in local mode.
+						</p>
+					{/if}
 				</div>
+
+				<!-- Branch selector (shows only in GitHub mode with branches) -->
+				{#if workMode === 'github' && isGitRepo && branches.length > 0}
+					<div>
+						<label class="flex items-center gap-2 text-sm text-foreground mb-2">
+							<GitBranch class="w-4 h-4 text-muted-foreground" />
+							Start From Branch
+						</label>
+						<select
+							bind:value={baseBranch}
+							disabled={isLaunching || loadingBranches}
+							class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+						>
+							{#if loadingBranches}
+								<option value={undefined}>Loading branches...</option>
+							{:else}
+								{#each branches as branch}
+									<option value={branch.name}>
+										{branch.name}{branch.current ? ' (current)' : ''}
+									</option>
+								{/each}
+							{/if}
+						</select>
+					</div>
+				{/if}
 			{/if}
 
 			<!-- Workflow info -->
 			<div class="bg-muted/50 rounded-lg p-3 text-xs text-muted-foreground">
 				<p class="font-medium text-foreground mb-1">Workflow</p>
-				<ul class="space-y-1">
-					<li>• Agent creates a new feature branch</li>
-					<li>• Works until the task is complete</li>
-					<li>• Automatically creates a pull request</li>
-					<li>• You can stop the agent at any time</li>
-				</ul>
+				{#if workMode === 'github' && isGitRepo}
+					<ul class="space-y-1">
+						<li>• Agent creates a new feature branch</li>
+						<li>• Works until the task is complete</li>
+						<li>• Automatically creates a pull request</li>
+						<li>• You can stop the agent at any time</li>
+					</ul>
+				{:else}
+					<ul class="space-y-1">
+						<li>• Agent works directly on the project folder</li>
+						<li>• Changes are made without Git branching</li>
+						<li>• Works until the task is complete</li>
+						<li>• You can stop the agent at any time</li>
+					</ul>
+				{/if}
 			</div>
 		</div>
 

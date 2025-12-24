@@ -6,11 +6,9 @@
 	 * 1. Launcher Mode: When no agentId is provided, shows agent configuration UI
 	 * 2. Monitor Mode: When agentId is provided, shows agent monitoring UI
 	 *
-	 * Simplified workflow:
-	 * - Always creates a new feature branch automatically
-	 * - Always creates a PR on completion
-	 * - Runs until completion (no duration limit)
-	 * - No auto-review (user can manually review)
+	 * Work modes (in launcher):
+	 * - GitHub: Creates feature branch, commits changes, creates PR on completion
+	 * - Local: Works directly on project folder, no git features
 	 */
 
 	import { onMount, onDestroy } from 'svelte';
@@ -29,7 +27,8 @@
 		Trash2,
 		Rocket,
 		User,
-		FolderKanban
+		FolderKanban,
+		Folder
 	} from 'lucide-svelte';
 	import BaseCard from './BaseCard.svelte';
 	import type { DeckCard } from './types';
@@ -103,11 +102,14 @@
 		name: string;
 	}
 
-	// Form state - simplified: always create branch, always create PR, no duration limit, no auto-review
+	type WorkMode = 'github' | 'local';
+
+	// Form state
 	let name = $state('');
 	let prompt = $state('');
 	let profileId = $state<string | undefined>(undefined);
 	let projectId = $state<string | undefined>(undefined);
+	let workMode = $state<WorkMode>('github');
 	let isLaunching = $state(false);
 	let launchError = $state<string | null>(null);
 
@@ -119,6 +121,7 @@
 	let loadingProfiles = $state(true);
 	let loadingProjects = $state(true);
 	let loadingBranches = $state(false);
+	let isGitRepo = $state(false);
 
 	// Validation
 	const canLaunch = $derived(name.trim().length > 0 && prompt.trim().length > 0 && !isLaunching);
@@ -159,6 +162,7 @@
 		loadingBranches = true;
 		branches = [];
 		baseBranch = undefined;
+		isGitRepo = false;
 		try {
 			const response = await fetch(`/api/v1/projects/${projId}/git/branches`, {
 				credentials: 'include'
@@ -166,14 +170,27 @@
 			if (response.ok) {
 				const data = await response.json();
 				branches = data.branches ?? [];
+				isGitRepo = branches.length > 0;
 				// Set default to the default branch (main/master) or current branch
 				const defaultBranch = branches.find(b => b.name === 'main' || b.name === 'master') ?? branches.find(b => b.is_current);
 				if (defaultBranch) {
 					baseBranch = defaultBranch.name;
 				}
+				// If it's a git repo, default to GitHub mode; otherwise, force local mode
+				if (isGitRepo) {
+					workMode = 'github';
+				} else {
+					workMode = 'local';
+				}
+			} else {
+				// If branches endpoint fails, assume not a git repo
+				isGitRepo = false;
+				workMode = 'local';
 			}
 		} catch (err) {
 			console.error('Failed to fetch branches:', err);
+			isGitRepo = false;
+			workMode = 'local';
 		} finally {
 			loadingBranches = false;
 		}
@@ -186,6 +203,7 @@
 		} else {
 			branches = [];
 			baseBranch = undefined;
+			isGitRepo = false;
 		}
 	});
 
@@ -196,16 +214,17 @@
 		launchError = null;
 
 		try {
+			const useGitFeatures = workMode === 'github' && isGitRepo;
 			const launchedAgent = await agents.launchAgent({
 				name: name.trim(),
 				prompt: prompt.trim(),
 				profileId,
 				projectId,
-				autoBranch: true,    // Always create a new branch
-				autoPr: true,        // Always create PR on completion
-				autoReview: false,   // No auto-review
-				maxDurationMinutes: 0, // Unlimited duration (run until complete)
-				baseBranch
+				autoBranch: useGitFeatures,    // Create branch only in GitHub mode
+				autoPr: useGitFeatures,        // Create PR only in GitHub mode
+				autoReview: false,             // No auto-review
+				maxDurationMinutes: 0,         // Unlimited duration (run until complete)
+				baseBranch: useGitFeatures ? baseBranch : undefined
 			});
 
 			// Transition to monitor mode
@@ -564,44 +583,83 @@
 							<option value={project.id}>{project.name}</option>
 						{/each}
 					</select>
-					<p class="form-hint">A new feature branch will be created in this project</p>
 				</div>
 
-				<!-- Branch selector (shows when project is selected) -->
-				{#if projectId && branches.length > 0}
+				<!-- Work Mode selector (shows when project is selected) -->
+				{#if projectId}
 					<div class="form-group">
-						<label class="form-label with-icon">
-							<GitBranch class="w-4 h-4 text-muted-foreground" />
-							Start From Branch
-						</label>
-						<select
-							bind:value={baseBranch}
-							disabled={isLaunching || loadingBranches}
-							class="form-select"
-						>
-							{#if loadingBranches}
-								<option value={undefined}>Loading branches...</option>
-							{:else}
-								{#each branches as branch}
-									<option value={branch.name}>
-										{branch.name}{branch.is_current ? ' (current)' : ''}
-									</option>
-								{/each}
-							{/if}
-						</select>
-						<p class="form-hint">Agent will create a new branch from this base and submit a PR when done</p>
+						<label class="form-label">Work Mode</label>
+						<div class="work-mode-buttons">
+							<!-- GitHub mode button -->
+							<button
+								type="button"
+								onclick={() => workMode = 'github'}
+								disabled={isLaunching || !isGitRepo}
+								class="work-mode-btn {workMode === 'github' ? 'active' : ''} {!isGitRepo ? 'disabled' : ''}"
+							>
+								<GitBranch class="w-4 h-4" />
+								<span>GitHub</span>
+							</button>
+							<!-- Local mode button -->
+							<button
+								type="button"
+								onclick={() => workMode = 'local'}
+								disabled={isLaunching}
+								class="work-mode-btn {workMode === 'local' ? 'active' : ''}"
+							>
+								<Folder class="w-4 h-4" />
+								<span>Local</span>
+							</button>
+						</div>
+						{#if !isGitRepo && !loadingBranches}
+							<p class="form-hint warning">This project is not a Git repository. Working in local mode.</p>
+						{/if}
 					</div>
+
+					<!-- Branch selector (shows only in GitHub mode with branches) -->
+					{#if workMode === 'github' && isGitRepo && branches.length > 0}
+						<div class="form-group">
+							<label class="form-label with-icon">
+								<GitBranch class="w-4 h-4 text-muted-foreground" />
+								Start From Branch
+							</label>
+							<select
+								bind:value={baseBranch}
+								disabled={isLaunching || loadingBranches}
+								class="form-select"
+							>
+								{#if loadingBranches}
+									<option value={undefined}>Loading branches...</option>
+								{:else}
+									{#each branches as branch}
+										<option value={branch.name}>
+											{branch.name}{branch.is_current ? ' (current)' : ''}
+										</option>
+									{/each}
+								{/if}
+							</select>
+						</div>
+					{/if}
 				{/if}
 
 				<!-- Workflow info -->
 				<div class="workflow-info">
 					<p class="workflow-title">Workflow</p>
-					<ul class="workflow-list">
-						<li>• Agent creates a new feature branch</li>
-						<li>• Works until the task is complete</li>
-						<li>• Automatically creates a pull request</li>
-						<li>• You can stop the agent at any time</li>
-					</ul>
+					{#if workMode === 'github' && isGitRepo}
+						<ul class="workflow-list">
+							<li>• Agent creates a new feature branch</li>
+							<li>• Works until the task is complete</li>
+							<li>• Automatically creates a pull request</li>
+							<li>• You can stop the agent at any time</li>
+						</ul>
+					{:else}
+						<ul class="workflow-list">
+							<li>• Agent works directly on the project folder</li>
+							<li>• Changes are made without Git branching</li>
+							<li>• Works until the task is complete</li>
+							<li>• You can stop the agent at any time</li>
+						</ul>
+					{/if}
 				</div>
 			</div>
 
@@ -1155,6 +1213,49 @@
 		font-size: 0.75rem;
 		color: var(--muted-foreground);
 		line-height: 1.4;
+	}
+
+	/* Work Mode Buttons */
+	.work-mode-buttons {
+		display: flex;
+		gap: 8px;
+	}
+
+	.work-mode-btn {
+		flex: 1;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 8px;
+		padding: 10px 14px;
+		background: oklch(0.12 0.008 260);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		color: var(--muted-foreground);
+		font-size: 0.875rem;
+		font-weight: 500;
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.work-mode-btn:hover:not(:disabled) {
+		background: color-mix(in oklch, var(--muted) 80%, transparent);
+		border-color: color-mix(in oklch, var(--border) 100%, var(--primary) 20%);
+	}
+
+	.work-mode-btn.active {
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		border-color: var(--primary);
+		color: var(--primary);
+	}
+
+	.work-mode-btn.disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.form-hint.warning {
+		color: oklch(0.7 0.15 80);
 	}
 
 	/* ============================================
