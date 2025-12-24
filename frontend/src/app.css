@@ -691,7 +691,7 @@ button, a, .clickable {
 .pill-input-row {
 	display: flex;
 	align-items: center;
-	gap: 0.25rem;
+	gap: 0.5rem;
 	padding: 0.5rem 0.625rem;
 }
 
@@ -699,4 +699,35 @@ button, a, .clickable {
 	.pill-input-row {
 		padding: 0.625rem 0.75rem;
 	}
+}
+
+/* Rounded textarea container inside the pill */
+.pill-textarea-container {
+	flex: 1;
+	min-width: 0;
+	position: relative;
+	background: color-mix(in srgb, var(--muted) 30%, transparent);
+	border-radius: 1.25rem;
+	padding: 0.125rem 0;
+	transition: background-color 0.15s ease;
+}
+
+.pill-textarea-container:focus-within {
+	background: color-mix(in srgb, var(--muted) 50%, transparent);
+}
+
+.dark .pill-textarea-container {
+	background: color-mix(in srgb, oklch(0.2 0.01 260) 50%, transparent);
+}
+
+.dark .pill-textarea-container:focus-within {
+	background: color-mix(in srgb, oklch(0.22 0.01 260) 60%, transparent);
+}
+
+.light .pill-textarea-container {
+	background: color-mix(in srgb, oklch(0.96 0.005 260) 80%, transparent);
+}
+
+.light .pill-textarea-container:focus-within {
+	background: color-mix(in srgb, oklch(0.94 0.008 260) 90%, transparent);
 }
