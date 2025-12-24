@@ -651,7 +651,7 @@ button, a, .clickable {
 		0 4px 24px -4px rgba(0, 0, 0, 0.12),
 		0 0 0 1px rgba(255, 255, 255, 0.05) inset;
 	transition: border-color 0.2s, box-shadow 0.2s;
-	overflow: hidden;
+	/* Note: no overflow:hidden so dropdown menus can extend above the island */
 }
 
 .chat-pill-island:focus-within {
@@ -730,4 +730,11 @@ button, a, .clickable {
 
 .light .pill-textarea-container:focus-within {
 	background: color-mix(in srgb, oklch(0.94 0.008 260) 90%, transparent);
+}
+
+/* Ensure textarea inside pill has no extra borders */
+.pill-textarea-container textarea {
+	border: none !important;
+	outline: none !important;
+	box-shadow: none !important;
 }
