@@ -710,6 +710,7 @@ button, a, .clickable {
 	border-radius: 1.25rem;
 	padding: 0.125rem 0;
 	transition: background-color 0.15s ease;
+	overflow: hidden;
 }
 
 .pill-textarea-container:focus-within {

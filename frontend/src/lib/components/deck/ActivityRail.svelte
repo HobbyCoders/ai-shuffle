@@ -115,10 +115,13 @@
 		align-items: center;
 		width: 64px;
 		height: 100%;
-		background: var(--card);
-		border-right: 1px solid var(--border);
+		background: color-mix(in srgb, var(--card) 85%, transparent);
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
+		border-right: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
 		padding: 12px 0;
 		gap: 8px;
+		box-shadow: 2px 0 20px -5px rgba(0, 0, 0, 0.1);
 	}
 
 	.activity-rail.mobile {
@@ -126,9 +129,10 @@
 		width: 100%;
 		height: 64px;
 		border-right: none;
-		border-top: 1px solid var(--border);
+		border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
 		padding: 0 12px;
 		justify-content: space-around;
+		box-shadow: 0 -2px 20px -5px rgba(0, 0, 0, 0.1);
 	}
 
 	.plus-button {
@@ -138,18 +142,19 @@
 		justify-content: center;
 		width: 40px;
 		height: 40px;
-		background: linear-gradient(135deg, var(--primary) 0%, var(--primary) 100%);
+		background: linear-gradient(135deg, var(--primary) 0%, color-mix(in srgb, var(--primary) 80%, #8b5cf6) 100%);
 		border: none;
 		border-radius: 12px;
 		color: var(--primary-foreground);
 		cursor: pointer;
 		transition: all 0.2s ease;
 		margin-bottom: 16px;
+		box-shadow: 0 4px 12px -2px color-mix(in srgb, var(--primary) 40%, transparent);
 	}
 
 	.plus-button:hover {
-		transform: scale(1.05);
-		box-shadow: 0 0 20px var(--glow-color);
+		transform: scale(1.08);
+		box-shadow: 0 6px 20px -2px color-mix(in srgb, var(--primary) 50%, transparent);
 	}
 
 	.mobile .plus-button {
@@ -221,12 +226,13 @@
 
 	.activity-button:hover {
 		color: var(--foreground);
-		background: var(--hover-overlay);
+		background: color-mix(in srgb, var(--foreground) 8%, transparent);
 	}
 
 	.activity-button.active {
 		color: var(--activity-color);
 		background: color-mix(in srgb, var(--activity-color) 15%, transparent);
+		box-shadow: 0 0 16px -2px color-mix(in srgb, var(--activity-color) 30%, transparent);
 	}
 
 	.active-indicator {
@@ -238,7 +244,7 @@
 		height: 24px;
 		background: var(--activity-color);
 		border-radius: 0 2px 2px 0;
-		box-shadow: 0 0 12px var(--activity-color);
+		box-shadow: 0 0 12px var(--activity-color), 0 0 24px color-mix(in srgb, var(--activity-color) 60%, transparent);
 	}
 
 	.mobile .active-indicator {
@@ -342,7 +348,7 @@
 
 	.settings-button:hover {
 		color: var(--foreground);
-		background: var(--hover-overlay);
+		background: color-mix(in srgb, var(--foreground) 8%, transparent);
 	}
 
 	/* Mobile-specific settings button styling */

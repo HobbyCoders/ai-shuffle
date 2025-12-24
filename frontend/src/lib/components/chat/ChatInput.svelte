@@ -662,7 +662,7 @@
 						<button
 							bind:this={profileBtnRef}
 							type="button"
-							onclick={() => { closeAllPopups(); updateDropdownPosition(profileBtnRef, (pos) => profileDropdownPos = pos); showProfilePopup = !showProfilePopup; }}
+							onclick={() => { closeAllPopups(); showProfilePopup = !showProfilePopup; }}
 							class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {tab.profile ? 'bg-accent/50 text-foreground border border-transparent hover:border-border/50' : 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30'}"
 							disabled={tab.isStreaming}
 						>
@@ -677,8 +677,8 @@
 						{#if showProfilePopup}
 							<button class="fixed inset-0 z-[10001]" onclick={() => showProfilePopup = false} aria-label="Close"></button>
 							<div
-								class="fixed -translate-x-1/2 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-[10002] min-w-[160px] max-h-[280px] overflow-y-auto {profileContextMenu.show ? 'pointer-events-auto' : ''}"
-								style="left: {profileDropdownPos.left}px; bottom: {profileDropdownPos.bottom}px;">
+								class="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-[10002] min-w-[160px] max-h-[280px] overflow-y-auto {profileContextMenu.show ? 'pointer-events-auto' : ''}"
+							>
 								{#if $profiles.length === 0}
 									<div class="px-3 py-2 text-xs text-muted-foreground">No profiles</div>
 								{:else}
@@ -774,7 +774,7 @@
 						<button
 							bind:this={projectBtnRef}
 							type="button"
-							onclick={() => { closeAllPopups(); updateDropdownPosition(projectBtnRef, (pos) => projectDropdownPos = pos); showProjectPopup = !showProjectPopup; }}
+							onclick={() => { closeAllPopups(); showProjectPopup = !showProjectPopup; }}
 							class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {tab.project ? 'bg-accent/50 text-foreground border border-transparent hover:border-border/50' : 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30'}"
 							disabled={tab.isStreaming}
 						>
@@ -789,8 +789,8 @@
 						{#if showProjectPopup}
 							<button class="fixed inset-0 z-[10001]" onclick={() => showProjectPopup = false} aria-label="Close"></button>
 							<div
-								class="fixed -translate-x-1/2 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-[10002] min-w-[160px] max-h-[280px] overflow-y-auto {projectContextMenu.show ? 'pointer-events-auto' : ''}"
-								style="left: {projectDropdownPos.left}px; bottom: {projectDropdownPos.bottom}px;">
+								class="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-[10002] min-w-[160px] max-h-[280px] overflow-y-auto {projectContextMenu.show ? 'pointer-events-auto' : ''}"
+							>
 								{#if $projects.length === 0}
 									<div class="px-3 py-2 text-xs text-muted-foreground">No projects</div>
 								{:else}
@@ -887,7 +887,7 @@
 						<button
 							bind:this={modelBtnRef}
 							type="button"
-							onclick={() => { closeAllPopups(); updateDropdownPosition(modelBtnRef, (pos) => modelDropdownPos = pos); showModelPopup = !showModelPopup; }}
+							onclick={() => { closeAllPopups(); showModelPopup = !showModelPopup; }}
 							class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {tab.modelOverride ? 'bg-primary/15 text-primary border border-primary/30' : 'bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50'}"
 							disabled={tab.isStreaming}
 						>
@@ -899,8 +899,7 @@
 						{#if showModelPopup}
 							<button class="fixed inset-0 z-[10001]" onclick={() => showModelPopup = false} aria-label="Close"></button>
 							<div
-								class="fixed -translate-x-1/2 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-[10002] min-w-[90px]"
-								style="left: {modelDropdownPos.left}px; bottom: {modelDropdownPos.bottom}px;"
+								class="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-[10002] min-w-[90px]"
 							>
 								{#each [['sonnet', 'Sonnet'], ['sonnet-1m', 'Sonnet 1M'], ['opus', 'Opus'], ['haiku', 'Haiku']] as [value, label]}
 									<button
@@ -932,7 +931,7 @@
 						<button
 							bind:this={modeBtnRef}
 							type="button"
-							onclick={() => { closeAllPopups(); updateDropdownPosition(modeBtnRef, (pos) => modeDropdownPos = pos); showModePopup = !showModePopup; }}
+							onclick={() => { closeAllPopups(); showModePopup = !showModePopup; }}
 							class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {tab.permissionModeOverride ? 'bg-primary/15 text-primary border border-primary/30' : 'bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50'}"
 							disabled={tab.isStreaming}
 						>
@@ -944,8 +943,7 @@
 						{#if showModePopup}
 							<button class="fixed inset-0 z-[10001]" onclick={() => showModePopup = false} aria-label="Close"></button>
 							<div
-								class="fixed -translate-x-1/2 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-[10002] min-w-[100px]"
-								style="left: {modeDropdownPos.left}px; bottom: {modeDropdownPos.bottom}px;"
+								class="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-[10002] min-w-[100px]"
 							>
 								{#each [['default', 'Ask'], ['acceptEdits', 'Auto-Accept'], ['plan', 'Plan'], ['bypassPermissions', 'Bypass']] as [value, label]}
 									<button
