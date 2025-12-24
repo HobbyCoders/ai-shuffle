@@ -556,8 +556,10 @@
 		{/if}
 
 		<form onsubmit={(e) => { e.preventDefault(); handleSubmit(); }} class="relative">
-			<!-- Top Controls Row (Context + Profile + Project + Model + Mode + Attach) -->
-			<div class="mb-2 flex flex-wrap items-center justify-center gap-1.5">
+			<!-- Floating Island Input Container - now contains everything -->
+			<div class="chat-pill-island">
+				<!-- Top Controls Row (Context + Profile + Project + Model + Mode + Attach) -->
+				<div class="pill-controls-row">
 				<!-- Context Usage Indicator -->
 				<div class="relative group">
 					<button
@@ -975,12 +977,9 @@
 				{/if}
 			</div>
 
-			<!-- Floating Island Input Container -->
-			<div class="floating-island transition-all duration-200 focus-within:border-primary/40 focus-within:shadow-primary/10 focus-within:shadow-xl">
-
-				<!-- Uploaded Files (inside container) -->
+				<!-- Uploaded Files -->
 				{#if uploadedFiles.length > 0}
-					<div class="px-3 pt-3 pb-0 flex flex-wrap gap-1.5">
+					<div class="px-3 pt-2 pb-0 flex flex-wrap gap-1.5">
 						{#each uploadedFiles as file, index}
 							<div class="flex items-center gap-1.5 bg-accent/50 text-xs px-2 py-1 rounded-lg group">
 								<svg class="w-3.5 h-3.5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1003,7 +1002,7 @@
 				{/if}
 
 				<!-- Main Input Row -->
-				<div class="flex items-center gap-1 p-2 sm:p-2.5">
+				<div class="pill-input-row">
 					<!-- Textarea Container -->
 					<div class="flex-1 relative min-w-0">
 						<!-- Command Autocomplete -->

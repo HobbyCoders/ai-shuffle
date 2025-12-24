@@ -637,3 +637,66 @@ button, a, .clickable {
 	border-color: oklch(0.82 0.01 260);
 	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.04);
 }
+
+/* Chat Pill Island - Main container with glassmorphism */
+.chat-pill-island {
+	display: flex;
+	flex-direction: column;
+	background: color-mix(in srgb, var(--card) 90%, transparent);
+	backdrop-filter: blur(20px);
+	-webkit-backdrop-filter: blur(20px);
+	border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+	border-radius: 1.5rem;
+	box-shadow:
+		0 4px 24px -4px rgba(0, 0, 0, 0.12),
+		0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+	transition: border-color 0.2s, box-shadow 0.2s;
+	overflow: hidden;
+}
+
+.chat-pill-island:focus-within {
+	border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
+	box-shadow:
+		0 4px 32px -4px rgba(0, 0, 0, 0.15),
+		0 0 0 1px rgba(255, 255, 255, 0.08) inset,
+		0 0 0 3px color-mix(in srgb, var(--primary) 15%, transparent);
+}
+
+.dark .chat-pill-island {
+	background: color-mix(in srgb, oklch(0.14 0.01 260) 92%, transparent);
+	border-color: color-mix(in srgb, oklch(0.32 0.012 260) 70%, transparent);
+}
+
+.light .chat-pill-island {
+	background: color-mix(in srgb, white 95%, transparent);
+	border-color: color-mix(in srgb, oklch(0.82 0.01 260) 80%, transparent);
+	box-shadow:
+		0 4px 20px -4px rgba(0, 0, 0, 0.08),
+		0 2px 8px rgba(0, 0, 0, 0.04),
+		0 0 0 1px rgba(255, 255, 255, 0.5) inset;
+}
+
+/* Controls row inside the pill */
+.pill-controls-row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: center;
+	gap: 0.375rem;
+	padding: 0.625rem 0.75rem;
+	border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+}
+
+/* Input row inside the pill */
+.pill-input-row {
+	display: flex;
+	align-items: center;
+	gap: 0.25rem;
+	padding: 0.5rem 0.625rem;
+}
+
+@media (min-width: 640px) {
+	.pill-input-row {
+		padding: 0.625rem 0.75rem;
+	}
+}
