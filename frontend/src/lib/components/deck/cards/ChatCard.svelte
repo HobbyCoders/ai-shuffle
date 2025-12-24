@@ -244,24 +244,11 @@
 		background: color-mix(in oklch, var(--primary) 14%, var(--card));
 	}
 
-	/* Assistant message styling - subtle accent background */
-	.chat-card-content :global(.assistant-message) {
-		background: var(--accent);
-		border: 1px solid var(--border);
-		border-radius: 12px;
-		padding: 12px 16px;
-		box-shadow: var(--shadow-s);
-		transition: box-shadow 0.2s ease, transform 0.2s ease, background-color 0.2s ease;
-	}
-
-	.chat-card-content :global(.assistant-message:hover) {
-		box-shadow: var(--shadow-m);
-		background: color-mix(in oklch, var(--accent) 90%, var(--foreground) 10%);
-	}
+	/* Assistant messages - no bubble, clean layout */
 
 	/* Ensure text readability in messages - improved line height and color */
 	.chat-card-content :global(.user-message p),
-	.chat-card-content :global(.assistant-message .prose) {
+	.chat-card-content :global(.prose) {
 		color: var(--foreground);
 		line-height: 1.6;
 	}
