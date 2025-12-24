@@ -237,6 +237,29 @@
 	let showProfilePopup = $state(false);
 	let showProjectPopup = $state(false);
 
+	// Button refs for fixed positioning
+	let profileBtnRef = $state<HTMLButtonElement | null>(null);
+	let projectBtnRef = $state<HTMLButtonElement | null>(null);
+	let modelBtnRef = $state<HTMLButtonElement | null>(null);
+	let modeBtnRef = $state<HTMLButtonElement | null>(null);
+
+	// Dropdown positions (calculated from button positions)
+	let profileDropdownPos = $state({ left: 0, bottom: 0 });
+	let projectDropdownPos = $state({ left: 0, bottom: 0 });
+	let modelDropdownPos = $state({ left: 0, bottom: 0 });
+	let modeDropdownPos = $state({ left: 0, bottom: 0 });
+
+	// Calculate dropdown position from button
+	function updateDropdownPosition(btnRef: HTMLButtonElement | null, setter: (pos: { left: number; bottom: number }) => void) {
+		if (!btnRef) return;
+		const rect = btnRef.getBoundingClientRect();
+		// Position dropdown centered above the button
+		setter({
+			left: rect.left + rect.width / 2,
+			bottom: window.innerHeight - rect.top + 6 // 6px gap above button
+		});
+	}
+
 	// Get current profile settings
 	const currentProfile = $derived($profiles.find(p => p.id === tab.profile));
 	const profileModel = $derived(currentProfile?.config?.model || 'sonnet');
@@ -637,8 +660,9 @@
 				{#if !isProfileLocked}
 					<div class="relative">
 						<button
+							bind:this={profileBtnRef}
 							type="button"
-							onclick={() => { closeAllPopups(); showProfilePopup = !showProfilePopup; }}
+							onclick={() => { closeAllPopups(); updateDropdownPosition(profileBtnRef, (pos) => profileDropdownPos = pos); showProfilePopup = !showProfilePopup; }}
 							class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {tab.profile ? 'bg-accent/50 text-foreground border border-transparent hover:border-border/50' : 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30'}"
 							disabled={tab.isStreaming}
 						>
@@ -652,7 +676,9 @@
 						</button>
 						{#if showProfilePopup}
 							<button class="fixed inset-0 z-40" onclick={() => showProfilePopup = false} aria-label="Close"></button>
-							<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[160px] max-h-[280px] overflow-y-auto {profileContextMenu.show ? 'pointer-events-auto' : ''}">
+							<div
+								class="fixed -translate-x-1/2 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[160px] max-h-[280px] overflow-y-auto {profileContextMenu.show ? 'pointer-events-auto' : ''}"
+								style="left: {profileDropdownPos.left}px; bottom: {profileDropdownPos.bottom}px;">
 								{#if $profiles.length === 0}
 									<div class="px-3 py-2 text-xs text-muted-foreground">No profiles</div>
 								{:else}
@@ -746,8 +772,9 @@
 				{#if !isProjectLocked}
 					<div class="relative">
 						<button
+							bind:this={projectBtnRef}
 							type="button"
-							onclick={() => { closeAllPopups(); showProjectPopup = !showProjectPopup; }}
+							onclick={() => { closeAllPopups(); updateDropdownPosition(projectBtnRef, (pos) => projectDropdownPos = pos); showProjectPopup = !showProjectPopup; }}
 							class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {tab.project ? 'bg-accent/50 text-foreground border border-transparent hover:border-border/50' : 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30'}"
 							disabled={tab.isStreaming}
 						>
@@ -761,7 +788,9 @@
 						</button>
 						{#if showProjectPopup}
 							<button class="fixed inset-0 z-40" onclick={() => showProjectPopup = false} aria-label="Close"></button>
-							<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[160px] max-h-[280px] overflow-y-auto {projectContextMenu.show ? 'pointer-events-auto' : ''}">
+							<div
+								class="fixed -translate-x-1/2 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[160px] max-h-[280px] overflow-y-auto {projectContextMenu.show ? 'pointer-events-auto' : ''}"
+								style="left: {projectDropdownPos.left}px; bottom: {projectDropdownPos.bottom}px;">
 								{#if $projects.length === 0}
 									<div class="px-3 py-2 text-xs text-muted-foreground">No projects</div>
 								{:else}
@@ -856,8 +885,9 @@
 					<!-- Model Selector Pill -->
 					<div class="relative">
 						<button
+							bind:this={modelBtnRef}
 							type="button"
-							onclick={() => { closeAllPopups(); showModelPopup = !showModelPopup; }}
+							onclick={() => { closeAllPopups(); updateDropdownPosition(modelBtnRef, (pos) => modelDropdownPos = pos); showModelPopup = !showModelPopup; }}
 							class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {tab.modelOverride ? 'bg-primary/15 text-primary border border-primary/30' : 'bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50'}"
 							disabled={tab.isStreaming}
 						>
@@ -868,7 +898,10 @@
 						</button>
 						{#if showModelPopup}
 							<button class="fixed inset-0 z-40" onclick={() => showModelPopup = false} aria-label="Close"></button>
-							<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[90px]">
+							<div
+								class="fixed -translate-x-1/2 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[90px]"
+								style="left: {modelDropdownPos.left}px; bottom: {modelDropdownPos.bottom}px;"
+							>
 								{#each [['sonnet', 'Sonnet'], ['sonnet-1m', 'Sonnet 1M'], ['opus', 'Opus'], ['haiku', 'Haiku']] as [value, label]}
 									<button
 										type="button"
@@ -897,8 +930,9 @@
 					<!-- Permission Mode Selector Pill -->
 					<div class="relative">
 						<button
+							bind:this={modeBtnRef}
 							type="button"
-							onclick={() => { closeAllPopups(); showModePopup = !showModePopup; }}
+							onclick={() => { closeAllPopups(); updateDropdownPosition(modeBtnRef, (pos) => modeDropdownPos = pos); showModePopup = !showModePopup; }}
 							class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {tab.permissionModeOverride ? 'bg-primary/15 text-primary border border-primary/30' : 'bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50'}"
 							disabled={tab.isStreaming}
 						>
@@ -909,7 +943,10 @@
 						</button>
 						{#if showModePopup}
 							<button class="fixed inset-0 z-40" onclick={() => showModePopup = false} aria-label="Close"></button>
-							<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[100px]">
+							<div
+								class="fixed -translate-x-1/2 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[100px]"
+								style="left: {modeDropdownPos.left}px; bottom: {modeDropdownPos.bottom}px;"
+							>
 								{#each [['default', 'Ask'], ['acceptEdits', 'Auto-Accept'], ['plan', 'Plan'], ['bypassPermissions', 'Bypass']] as [value, label]}
 									<button
 										type="button"
