@@ -197,15 +197,21 @@ class AgentExecutionEngine:
         profile_id: Optional[str] = None,
         project_id: Optional[str] = None,
         auto_branch: bool = True,
-        auto_pr: bool = False,
+        auto_pr: bool = True,
         auto_review: bool = False,
-        max_duration_minutes: int = 30,
+        max_duration_minutes: int = 0,
         base_branch: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Launch a new background agent.
 
         The agent will be queued and started when a slot is available.
+
+        Simplified workflow:
+        - Always creates a new feature branch (auto_branch=True)
+        - Always creates a PR on completion (auto_pr=True)
+        - Runs until completion (max_duration_minutes=0 = unlimited)
+        - No auto-review (auto_review=False)
         """
         agent_run_id = f"agent-{uuid.uuid4().hex[:12]}"
 

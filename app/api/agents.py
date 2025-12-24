@@ -39,15 +39,22 @@ class AgentTask(BaseModel):
 
 
 class AgentLaunchRequest(BaseModel):
-    """Request to launch a new background agent"""
+    """Request to launch a new background agent
+
+    Simplified workflow:
+    - Always creates a new feature branch
+    - Always creates a PR on completion
+    - Runs until completion (no duration limit by default)
+    - No auto-review
+    """
     name: str = Field(..., min_length=1, max_length=100, description="Agent name/title")
     prompt: str = Field(..., min_length=1, description="The task prompt for the agent")
     profile_id: Optional[str] = Field(None, description="Profile ID to use")
     project_id: Optional[str] = Field(None, description="Project ID to work in")
-    auto_branch: bool = Field(True, description="Automatically create a git branch")
-    auto_pr: bool = Field(False, description="Automatically create a pull request on completion")
-    auto_review: bool = Field(False, description="Automatically review the PR after creation")
-    max_duration_minutes: int = Field(30, ge=0, le=480, description="Maximum run duration in minutes (0 = unlimited)")
+    auto_branch: bool = Field(True, description="Automatically create a git branch (always enabled)")
+    auto_pr: bool = Field(True, description="Automatically create a pull request on completion (always enabled)")
+    auto_review: bool = Field(False, description="Automatically review the PR after creation (disabled)")
+    max_duration_minutes: int = Field(0, ge=0, le=480, description="Maximum run duration in minutes (0 = unlimited, default)")
     base_branch: Optional[str] = Field(None, description="Base branch for worktree (defaults to main/master)")
 
 
@@ -69,9 +76,9 @@ class AgentResponse(BaseModel):
     project_id: Optional[str] = None
     worktree_id: Optional[str] = None
     auto_branch: bool = True
-    auto_pr: bool = False
+    auto_pr: bool = True
     auto_review: bool = False
-    max_duration_minutes: int = 30
+    max_duration_minutes: int = 0
 
 
 class AgentLogEntry(BaseModel):

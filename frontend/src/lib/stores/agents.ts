@@ -446,6 +446,12 @@ function createAgentsStore() {
 
 		/**
 		 * Launch a new background agent
+		 *
+		 * Simplified workflow:
+		 * - Always creates a new feature branch (autoBranch=true)
+		 * - Always creates a PR on completion (autoPr=true)
+		 * - Runs until completion (maxDurationMinutes=0 = unlimited)
+		 * - No auto-review (autoReview=false)
 		 */
 		async launchAgent(options: {
 			name: string;
@@ -466,9 +472,9 @@ function createAgentsStore() {
 					profile_id: options.profileId,
 					project_id: options.projectId,
 					auto_branch: options.autoBranch ?? true,
-					auto_pr: options.autoPr ?? false,
+					auto_pr: options.autoPr ?? true,
 					auto_review: options.autoReview ?? false,
-					max_duration_minutes: options.maxDurationMinutes ?? 30,
+					max_duration_minutes: options.maxDurationMinutes ?? 0,
 					base_branch: options.baseBranch
 				})
 			});

@@ -5,11 +5,17 @@
 	 * Features:
 	 * - Task name input
 	 * - Large prompt textarea
-	 * - Options for auto-branch, auto-PR, auto-review, max duration
 	 * - Profile and project selectors (fetched from API)
+	 * - Base branch selector
+	 *
+	 * Simplified workflow:
+	 * - Always creates a new feature branch automatically
+	 * - Always creates a PR on completion
+	 * - Runs until completion (no duration limit)
+	 * - No auto-review (user can manually review)
 	 */
 	import { onMount } from 'svelte';
-	import { X, Rocket, GitBranch, GitPullRequest, Clock, User, FolderKanban, Eye, Loader2 } from 'lucide-svelte';
+	import { X, Rocket, GitBranch, User, FolderKanban, Loader2 } from 'lucide-svelte';
 
 	interface Props {
 		onClose: () => void;
@@ -45,16 +51,11 @@
 
 	let { onClose, onLaunch }: Props = $props();
 
-	// Form state
+	// Form state - simplified: always create branch, always create PR, no duration limit, no auto-review
 	let name = $state('');
 	let prompt = $state('');
-	let autoBranch = $state(true);
-	let autoPR = $state(false);
-	let autoReview = $state(false);
-	let maxDuration = $state(30); // minutes
 	let profileId = $state<string | undefined>(undefined);
 	let projectId = $state<string | undefined>(undefined);
-	let showOptions = $state(false);
 	let isLaunching = $state(false);
 	let error = $state<string | null>(null);
 
@@ -66,14 +67,6 @@
 	let loadingProfiles = $state(true);
 	let loadingProjects = $state(true);
 	let loadingBranches = $state(false);
-
-	const durations = [
-		{ value: 0, label: 'Unlimited' },
-		{ value: 15, label: '15 minutes' },
-		{ value: 30, label: '30 minutes' },
-		{ value: 60, label: '1 hour' },
-		{ value: 120, label: '2 hours' }
-	];
 
 	// Validation
 	const canLaunch = $derived(name.trim().length > 0 && prompt.trim().length > 0 && !isLaunching);
@@ -159,10 +152,10 @@
 			await onLaunch({
 				name: name.trim(),
 				prompt: prompt.trim(),
-				autoBranch,
-				autoPR,
-				autoReview,
-				maxDuration,
+				autoBranch: true,    // Always create a new branch
+				autoPR: true,        // Always create PR on completion
+				autoReview: false,   // No auto-review
+				maxDuration: 0,      // Unlimited duration (run until complete)
 				profileId,
 				projectId,
 				baseBranch
@@ -257,170 +250,87 @@
 				</p>
 			</div>
 
-			<!-- Options toggle -->
-			<button
-				onclick={() => showOptions = !showOptions}
-				class="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
-			>
-				<svg
-					class="w-4 h-4 transition-transform {showOptions ? 'rotate-90' : ''}"
-					fill="none"
-					stroke="currentColor"
-					viewBox="0 0 24 24"
+			<!-- Profile selector -->
+			<div>
+				<label class="flex items-center gap-2 text-sm text-foreground mb-2">
+					<User class="w-4 h-4 text-muted-foreground" />
+					Profile
+				</label>
+				<select
+					bind:value={profileId}
+					disabled={isLaunching || loadingProfiles}
+					class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
 				>
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-				</svg>
-				Advanced Options
-			</button>
+					<option value={undefined}>
+						{loadingProfiles ? 'Loading profiles...' : 'Use default'}
+					</option>
+					{#each profiles as profile}
+						<option value={profile.id}>{profile.name}</option>
+					{/each}
+				</select>
+			</div>
 
-			<!-- Options (collapsible) -->
-			{#if showOptions}
-				<div class="space-y-4 pl-2 border-l-2 border-border">
-					<!-- Git options -->
-					<div class="space-y-3">
-						<h4 class="text-xs font-medium text-muted-foreground uppercase tracking-wider">Git</h4>
+			<!-- Project selector -->
+			<div>
+				<label class="flex items-center gap-2 text-sm text-foreground mb-2">
+					<FolderKanban class="w-4 h-4 text-muted-foreground" />
+					Project
+				</label>
+				<select
+					bind:value={projectId}
+					disabled={isLaunching || loadingProjects}
+					class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+				>
+					<option value={undefined}>
+						{loadingProjects ? 'Loading projects...' : 'Select a project'}
+					</option>
+					{#each projects as project}
+						<option value={project.id}>{project.name}</option>
+					{/each}
+				</select>
+				<p class="text-xs text-muted-foreground mt-1">
+					A new feature branch will be created in this project
+				</p>
+			</div>
 
-						<!-- Auto-branch toggle -->
-						<label class="flex items-center justify-between cursor-pointer">
-							<div class="flex items-center gap-2">
-								<GitBranch class="w-4 h-4 text-muted-foreground" />
-								<span class="text-sm text-foreground">Create branch automatically</span>
-							</div>
-							<button
-								type="button"
-								onclick={() => autoBranch = !autoBranch}
-								disabled={isLaunching}
-								class="relative w-10 h-6 rounded-full transition-colors {autoBranch ? 'bg-primary' : 'bg-muted'}"
-							>
-								<span
-									class="absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform {autoBranch ? 'translate-x-4' : ''}"
-								></span>
-							</button>
-						</label>
-
-						<!-- Auto-PR toggle -->
-						<label class="flex items-center justify-between cursor-pointer">
-							<div class="flex items-center gap-2">
-								<GitPullRequest class="w-4 h-4 text-muted-foreground" />
-								<span class="text-sm text-foreground">Create PR on completion</span>
-							</div>
-							<button
-								type="button"
-								onclick={() => autoPR = !autoPR}
-								disabled={isLaunching}
-								class="relative w-10 h-6 rounded-full transition-colors {autoPR ? 'bg-primary' : 'bg-muted'}"
-							>
-								<span
-									class="absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform {autoPR ? 'translate-x-4' : ''}"
-								></span>
-							</button>
-						</label>
-
-						<!-- Auto-Review toggle -->
-						<label class="flex items-center justify-between cursor-pointer">
-							<div class="flex items-center gap-2">
-								<Eye class="w-4 h-4 text-muted-foreground" />
-								<span class="text-sm text-foreground">Auto-review changes</span>
-							</div>
-							<button
-								type="button"
-								onclick={() => autoReview = !autoReview}
-								disabled={isLaunching}
-								class="relative w-10 h-6 rounded-full transition-colors {autoReview ? 'bg-primary' : 'bg-muted'}"
-							>
-								<span
-									class="absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform {autoReview ? 'translate-x-4' : ''}"
-								></span>
-							</button>
-						</label>
-					</div>
-
-					<!-- Duration -->
-					<div>
-						<label class="flex items-center gap-2 text-sm text-foreground mb-2">
-							<Clock class="w-4 h-4 text-muted-foreground" />
-							Max Duration
-						</label>
-						<select
-							bind:value={maxDuration}
-							disabled={isLaunching}
-							class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-						>
-							{#each durations as duration}
-								<option value={duration.value}>{duration.label}</option>
+			<!-- Branch selector (shows when project is selected) -->
+			{#if projectId && branches.length > 0}
+				<div>
+					<label class="flex items-center gap-2 text-sm text-foreground mb-2">
+						<GitBranch class="w-4 h-4 text-muted-foreground" />
+						Start From Branch
+					</label>
+					<select
+						bind:value={baseBranch}
+						disabled={isLaunching || loadingBranches}
+						class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+					>
+						{#if loadingBranches}
+							<option value={undefined}>Loading branches...</option>
+						{:else}
+							{#each branches as branch}
+								<option value={branch.name}>
+									{branch.name}{branch.current ? ' (current)' : ''}
+								</option>
 							{/each}
-						</select>
-					</div>
-
-					<!-- Profile selector -->
-					<div>
-						<label class="flex items-center gap-2 text-sm text-foreground mb-2">
-							<User class="w-4 h-4 text-muted-foreground" />
-							Profile (optional)
-						</label>
-						<select
-							bind:value={profileId}
-							disabled={isLaunching || loadingProfiles}
-							class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-						>
-							<option value={undefined}>
-								{loadingProfiles ? 'Loading profiles...' : 'Use default'}
-							</option>
-							{#each profiles as profile}
-								<option value={profile.id}>{profile.name}</option>
-							{/each}
-						</select>
-					</div>
-
-					<!-- Project selector -->
-					<div>
-						<label class="flex items-center gap-2 text-sm text-foreground mb-2">
-							<FolderKanban class="w-4 h-4 text-muted-foreground" />
-							Project (optional)
-						</label>
-						<select
-							bind:value={projectId}
-							disabled={isLaunching || loadingProjects}
-							class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-						>
-							<option value={undefined}>
-								{loadingProjects ? 'Loading projects...' : 'Current workspace'}
-							</option>
-							{#each projects as project}
-								<option value={project.id}>{project.name}</option>
-							{/each}
-						</select>
-					</div>
-
-					<!-- Branch selector (shows when project is selected) -->
-					{#if projectId && branches.length > 0}
-						<div>
-							<label class="flex items-center gap-2 text-sm text-foreground mb-2">
-								<GitBranch class="w-4 h-4 text-muted-foreground" />
-								Base Branch
-							</label>
-							<select
-								bind:value={baseBranch}
-								disabled={isLaunching || loadingBranches}
-								class="w-full px-3 py-2 bg-background border border-border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-							>
-								{#if loadingBranches}
-									<option value={undefined}>Loading branches...</option>
-								{:else}
-									{#each branches as branch}
-										<option value={branch.name}>
-											{branch.name}{branch.current ? ' (current)' : ''}
-										</option>
-									{/each}
-								{/if}
-							</select>
-							<p class="text-xs text-muted-foreground mt-1">
-								The worktree will be created from this branch
-							</p>
-						</div>
-					{/if}
+						{/if}
+					</select>
+					<p class="text-xs text-muted-foreground mt-1">
+						Agent will create a new branch from this base and submit a PR when done
+					</p>
 				</div>
 			{/if}
+
+			<!-- Workflow info -->
+			<div class="bg-muted/50 rounded-lg p-3 text-xs text-muted-foreground">
+				<p class="font-medium text-foreground mb-1">Workflow</p>
+				<ul class="space-y-1">
+					<li>• Agent creates a new feature branch</li>
+					<li>• Works until the task is complete</li>
+					<li>• Automatically creates a pull request</li>
+					<li>• You can stop the agent at any time</li>
+				</ul>
+			</div>
 		</div>
 
 		<!-- Footer -->
