@@ -558,6 +558,7 @@
 	/* Content */
 	.card-content {
 		flex: 1;
+		min-height: 0; /* Critical: allows flex child to shrink and enables internal scrolling */
 		overflow: visible;
 		display: flex;
 		flex-direction: column;

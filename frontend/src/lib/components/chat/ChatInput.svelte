@@ -1158,6 +1158,7 @@
 	/* Wrapper - provides safe spacing */
 	.chat-input-wrapper {
 		padding: 0.5rem 0.75rem 0.75rem;
+		flex-shrink: 0; /* Prevents input from shrinking - stays fixed at bottom */
 	}
 
 	@media (min-width: 640px) {
