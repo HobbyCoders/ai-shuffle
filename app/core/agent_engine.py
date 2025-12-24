@@ -487,26 +487,24 @@ class AgentExecutionEngine:
             # Continue without worktree
 
     def _build_agent_prompt(self, agent_run: Dict[str, Any], state: AgentRunState) -> str:
-        """Build the enhanced prompt for the agent"""
+        """Build the prompt for the agent with minimal context injection.
+
+        Note: GitHub workflow instructions should be in the profile's system prompt,
+        not injected here. Use a dedicated "Background Agent" profile for GitHub workflows.
+        """
         base_prompt = agent_run["prompt"]
 
-        # Add context about the agent environment
-        context_parts = [
-            "You are running as an autonomous background agent.",
-            "Complete the following task thoroughly and independently.",
-            "",
-        ]
+        # Only add minimal context about the current environment
+        context_parts = []
 
         if state.branch_name:
-            context_parts.append(f"You are working on branch: {state.branch_name}")
-            context_parts.append("Commit your changes as you make progress.")
-            context_parts.append("")
-
-        if agent_run.get("auto_pr"):
-            context_parts.append("When complete, your changes should be ready for a pull request.")
+            context_parts.append(f"**Current branch:** `{state.branch_name}`")
+            base_branch = agent_run.get("base_branch", "main")
+            context_parts.append(f"**Base branch:** `{base_branch}`")
             context_parts.append("")
 
         context_parts.append("## Task")
+        context_parts.append("")
         context_parts.append(base_prompt)
 
         return "\n".join(context_parts)
