@@ -31,8 +31,6 @@ export type DeckCardType =
 	| 'chat'
 	| 'agent-monitor'
 	| 'agent-launcher'
-	| 'studio-image'
-	| 'studio-video'
 	| 'file-browser'
 	| 'settings'
 	| 'profile'
@@ -322,10 +320,6 @@ function getDefaultTitle(type: DeckCardType): string {
 			return 'Agent Monitor';
 		case 'agent-launcher':
 			return 'Launch Agent';
-		case 'studio-image':
-			return 'Image Studio';
-		case 'studio-video':
-			return 'Video Studio';
 		case 'file-browser':
 			return 'Files';
 		case 'settings':

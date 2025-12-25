@@ -2614,6 +2614,14 @@ function createTabsStore() {
 		createTab(sessionId?: string) {
 			const newTabId = generateTabId();
 
+			// Get the current state to access the last used profile/project
+			const currentState = get({ subscribe });
+			const activeTab = currentState.tabs.find(t => t.id === currentState.activeTabId);
+
+			// Priority: active tab's selection > localStorage (which syncs from backend)
+			const profile = activeTab?.profile || getPersistedProfile();
+			const project = activeTab?.project || getPersistedProject();
+
 			const newTab: ChatTab = {
 				id: newTabId,
 				title: 'New Chat',
@@ -2622,8 +2630,8 @@ function createTabsStore() {
 				isStreaming: false,
 				wsConnected: false,
 				error: null,
-				profile: getPersistedProfile(),
-				project: getPersistedProject(),
+				profile,
+				project,
 				totalTokensIn: 0,
 				totalTokensOut: 0,
 				totalCacheCreationTokens: 0,

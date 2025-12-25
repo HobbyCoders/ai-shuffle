@@ -6,13 +6,12 @@
 	 * - Contains all visible (non-minimized) cards
 	 * - Shows snap preview guides when dragging near edges
 	 * - Empty state with welcome message and create buttons
-	 * - Right-click context menu with create options
 	 * - Tracks workspace bounds
 	 * - Card Shuffle UI for layout mode switching
 	 */
 
 	import { onMount } from 'svelte';
-	import { MessageSquare, Bot, Palette, Terminal } from 'lucide-svelte';
+	import { MessageSquare, Bot, Terminal } from 'lucide-svelte';
 	import type { DeckCard, CardType, SnapGuide, SnapResult } from './types';
 	import { SNAP_THRESHOLD, CARD_SNAP_THRESHOLD, SNAP_GRID, WORKSPACE_PADDING } from './types';
 	import type { Snippet } from 'svelte';
@@ -87,13 +86,7 @@
 		height: number;
 	}>({ show: false, x: 0, y: 0, width: 0, height: 0 });
 
-	// Context menu state
-	let contextMenu = $state<{
-		show: boolean;
-		x: number;
-		y: number;
-	}>({ show: false, x: 0, y: 0 });
-
+	
 	// Card-to-card snap guides state
 	let snapGuides = $state<SnapGuide[]>([]);
 
@@ -425,61 +418,18 @@
 		hideSnapPreview();
 	}
 
-	// Context menu handling - only show on empty workspace, not on cards or inputs
-	function handleContextMenu(e: MouseEvent) {
-		const target = e.target as HTMLElement;
-
-		// Don't show context menu if clicking on a card, input, textarea, or any interactive element
-		if (target.closest('.base-card') ||
-			target.closest('input') ||
-			target.closest('textarea') ||
-			target.closest('[contenteditable]') ||
-			target.closest('button') ||
-			target.closest('a')) {
-			return; // Allow default context menu for these elements
-		}
-
-		e.preventDefault();
-		contextMenu = {
-			show: true,
-			x: e.clientX,
-			y: e.clientY,
-		};
-	}
-
-	function closeContextMenu() {
-		contextMenu = { show: false, x: 0, y: 0 };
-	}
-
-	function handleCreateFromMenu(type: CardType) {
-		onCreateCard(type);
-		closeContextMenu();
-	}
-
-	// Close context menu on click outside
-	function handleClick() {
-		if (contextMenu.show) {
-			closeContextMenu();
-		}
-	}
-
-	// Card type config for create menu
+	// Card type config for create menu (used in empty state)
 	const cardTypes: { type: CardType; label: string; icon: typeof MessageSquare }[] = [
 		{ type: 'chat', label: 'New Chat', icon: MessageSquare },
 		{ type: 'agent', label: 'New Agent', icon: Bot },
-		{ type: 'studio', label: 'New Studio', icon: Palette },
 		{ type: 'terminal', label: 'New Terminal', icon: Terminal }
 	];
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<!-- svelte-ignore a11y_click_events_have_key_events -->
 <div
 	bind:this={workspaceEl}
 	class="workspace"
 	class:has-maximized={hasMaximizedCard}
-	oncontextmenu={handleContextMenu}
-	onclick={handleClick}
 >
 	<!-- Card Shuffle UI - Layout mode selector with focus nav integration -->
 	{#if sortedCards.length > 0}
@@ -551,25 +501,6 @@
 		</div>
 	{/if}
 
-	<!-- Context Menu -->
-	{#if contextMenu.show}
-		<div
-			class="context-menu"
-			style:left="{contextMenu.x}px"
-			style:top="{contextMenu.y}px"
-		>
-			<div class="context-menu-header">Create New</div>
-			{#each cardTypes as { type, label, icon: Icon }}
-				<button
-					class="context-menu-item"
-					onclick={() => handleCreateFromMenu(type)}
-				>
-					<Icon size={16} />
-					<span>{label}</span>
-				</button>
-			{/each}
-		</div>
-	{/if}
 </div>
 
 <style>
@@ -693,47 +624,5 @@
 	.create-btn:hover {
 		background: hsl(var(--accent));
 		border-color: hsl(var(--primary) / 0.3);
-	}
-
-	/* Context Menu */
-	.context-menu {
-		position: fixed;
-		min-width: 180px;
-		background: hsl(var(--popover));
-		border: 1px solid hsl(var(--border));
-		border-radius: 8px;
-		box-shadow:
-			0 10px 15px -3px rgba(0, 0, 0, 0.3),
-			0 4px 6px -4px rgba(0, 0, 0, 0.2);
-		padding: 4px;
-		z-index: 1000;
-	}
-
-	.context-menu-header {
-		padding: 8px 12px 4px;
-		font-size: 0.75rem;
-		font-weight: 500;
-		color: hsl(var(--muted-foreground));
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-	}
-
-	.context-menu-item {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		width: 100%;
-		padding: 8px 12px;
-		background: transparent;
-		border: none;
-		border-radius: 4px;
-		color: hsl(var(--foreground));
-		font-size: 0.875rem;
-		cursor: pointer;
-		transition: background 0.1s ease;
-	}
-
-	.context-menu-item:hover {
-		background: hsl(var(--accent));
 	}
 </style>

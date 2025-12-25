@@ -44,7 +44,6 @@
 		Workspace,
 		ChatCard,
 		AgentCard,
-		StudioCard,
 		TerminalCard,
 		MobileWorkspace,
 		ProfileCard,
@@ -397,9 +396,6 @@
 			case 'agent-monitor':
 			case 'agent-launcher':
 				return 'agent';
-			case 'studio-image':
-			case 'studio-video':
-				return 'studio';
 			case 'terminal':
 				return 'terminal';
 			case 'settings':
@@ -570,17 +566,6 @@
 				shift: true,
 				category: 'agents',
 				action: () => { handleCreateCard('agent'); }
-			}),
-
-			// Studio (Cmd+Shift+S)
-			registerShortcut({
-				id: 'open-studio',
-				description: 'Open studio',
-				key: 's',
-				cmdOrCtrl: true,
-				shift: true,
-				category: 'studio',
-				action: () => { handleCreateCard('studio'); }
 			}),
 
 			// Terminal (Cmd+T)
@@ -874,10 +859,6 @@
 			case 'agent':
 				deckCardType = 'agent-monitor';
 				title = 'Agent Monitor';
-				break;
-			case 'studio':
-				deckCardType = 'studio-image';
-				title = 'Studio';
 				break;
 			case 'terminal':
 				deckCardType = 'terminal';
@@ -1258,16 +1239,6 @@
 							<div class="p-4">
 								<p class="text-muted-foreground">Agent view (mobile)</p>
 							</div>
-						{:else if card.type === 'studio'}
-							<StudioCard
-								{card}
-								mobile={true}
-								onClose={() => handleCardClose(card.id)}
-																onMaximize={() => handleCardMaximize(card.id)}
-								onFocus={() => handleCardFocus(card.id)}
-								onMove={(x, y) => handleCardMove(card.id, x, y)}
-								onResize={(w, h) => handleCardResize(card.id, w, h)}
-							/>
 						{:else if card.type === 'terminal'}
 							<div class="terminal-mobile-content">
 								<div class="terminal-line">Terminal integration coming soon...</div>
@@ -1393,17 +1364,6 @@
 											onDragEnd={() => handleCardDragEnd(card.id)}
 											onResizeEnd={() => handleCardResizeEnd(card.id)}
 										/>
-									{:else if card.type === 'studio'}
-										<StudioCard
-											{card}
-											onClose={() => handleCardClose(card.id)}
-																						onMaximize={() => handleCardMaximize(card.id)}
-											onFocus={() => handleCardFocus(card.id)}
-											onMove={(x, y) => handleCardMove(card.id, x, y)}
-											onResize={(w, h) => handleCardResize(card.id, w, h)}
-											onDragEnd={() => handleCardDragEnd(card.id)}
-											onResizeEnd={() => handleCardResizeEnd(card.id)}
-										/>
 									{:else if card.type === 'terminal'}
 										<TerminalCard
 											{card}
@@ -1500,7 +1460,6 @@
 		open={showCreateMenu}
 		onClose={() => showCreateMenu = false}
 		onCreateChat={() => handleCreateCard('chat')}
-		onCreateStudio={() => handleCreateCard('studio')}
 		onCreateTerminal={() => handleCreateCard('terminal')}
 		onOpenProfiles={() => handleCreateCard('profile')}
 		onOpenProjects={() => handleCreateCard('project')}

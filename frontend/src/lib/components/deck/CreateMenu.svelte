@@ -3,13 +3,12 @@
 	 * CreateMenu - Dropdown menu for creating new cards
 	 * Shows card type options with icons and keyboard shortcuts
 	 */
-	import { MessageSquare, Palette, Terminal, User, FolderKanban, Settings, X } from 'lucide-svelte';
+	import { MessageSquare, Terminal, User, FolderKanban, Settings, X } from 'lucide-svelte';
 
 	interface Props {
 		open: boolean;
 		onClose: () => void;
 		onCreateChat: () => void;
-		onCreateStudio: () => void;
 		onCreateTerminal: () => void;
 		onOpenProfiles: () => void;
 		onOpenProjects: () => void;
@@ -22,7 +21,6 @@
 		open,
 		onClose,
 		onCreateChat,
-		onCreateStudio,
 		onCreateTerminal,
 		onOpenProfiles,
 		onOpenProjects,
@@ -33,7 +31,6 @@
 
 	const menuItems = [
 		{ id: 'chat', label: 'New Chat', icon: MessageSquare, shortcut: '⌘N', action: onCreateChat },
-		{ id: 'studio', label: 'Studio', icon: Palette, shortcut: '⌘⇧S', action: onCreateStudio },
 		{ id: 'terminal', label: 'Terminal', icon: Terminal, shortcut: '⌘T', action: onCreateTerminal },
 		{ id: 'divider', label: '', icon: null, shortcut: '', action: () => {} },
 		{ id: 'profiles', label: 'Profiles', icon: User, shortcut: '⌘⇧P', action: onOpenProfiles },
@@ -116,7 +113,7 @@
 	.menu-backdrop {
 		position: fixed;
 		inset: 0;
-		z-index: 1000;
+		z-index: 100000;
 		background: transparent;
 	}
 
