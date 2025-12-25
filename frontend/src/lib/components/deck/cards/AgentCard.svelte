@@ -162,7 +162,8 @@
 		baseBranch = undefined;
 		isGitRepo = false;
 		try {
-			const response = await fetch(`/api/v1/projects/${projId}/git/branches`, {
+			// Only fetch local branches (exclude remote tracking branches like origin/*)
+			const response = await fetch(`/api/v1/projects/${projId}/git/branches?include_remote=false`, {
 				credentials: 'include'
 			});
 			if (response.ok) {

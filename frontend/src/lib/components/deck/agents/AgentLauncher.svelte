@@ -118,7 +118,7 @@
 		baseBranch = undefined;
 		isGitRepo = false;
 		try {
-			const response = await fetch(`/api/v1/projects/${projId}/branches`, {
+			const response = await fetch(`/api/v1/projects/${projId}/git/branches?include_remote=false`, {
 				credentials: 'include'
 			});
 			if (response.ok) {
