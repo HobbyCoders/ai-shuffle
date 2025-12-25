@@ -32,9 +32,10 @@
 		onOpenTerminalModal?: (tabId: string, command: string) => void;
 		onOpenProfileCard?: (editId?: string) => void;
 		onOpenProjectCard?: (editId?: string) => void;
+		onOpenSettings?: () => void;
 	}
 
-	let { tab, compact = false, onOpenTerminalModal, onOpenProfileCard, onOpenProjectCard }: Props = $props();
+	let { tab, compact = false, onOpenTerminalModal, onOpenProfileCard, onOpenProjectCard, onOpenSettings }: Props = $props();
 
 	const dispatch = createEventDispatcher<{
 		openProfileCard: { editId?: string };
@@ -306,7 +307,11 @@
 	}
 
 	function openSettings() {
-		showSettingsDrawer = true;
+		if (onOpenSettings) {
+			onOpenSettings();
+		} else {
+			showSettingsDrawer = true;
+		}
 	}
 
 	// Model and mode options for settings drawer

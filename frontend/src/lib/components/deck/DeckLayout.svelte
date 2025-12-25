@@ -14,7 +14,7 @@
 	import { onMount } from 'svelte';
 	import { ChevronLeft } from 'lucide-svelte';
 	import ActivityRail from './ActivityRail.svelte';
-	import ContextPanel from './ContextPanel.svelte';
+	import ActivityPanel from './ActivityPanel.svelte';
 	import type {
 		ActivityMode,
 		ActivityBadges,
@@ -24,26 +24,38 @@
 		SessionInfo,
 		RunningProcess
 	} from './types';
-	import type { HistorySession } from './ContextPanel.svelte';
+	import type { ActiveSession, HistorySession, ActivityTabType, OverlayType } from './ActivityPanel.svelte';
 
 	interface Props {
 		activeMode?: ActivityMode;
 		badges?: ActivityBadges;
 		contextCollapsed?: boolean;
-		sessions?: DeckSession[];
+		// Activity Panel props
+		activeTab?: ActivityTabType;
+		activeSessions?: ActiveSession[];
 		recentSessions?: HistorySession[];
-		agents?: DeckAgent[];
+		runningAgents?: DeckAgent[];
+		completedAgents?: DeckAgent[];
 		generations?: DeckGeneration[];
 		currentSession?: SessionInfo | null;
+		// Overlay props
+		overlayType?: OverlayType;
+		overlayData?: Record<string, unknown>;
+		// Legacy props (for backwards compat)
+		sessions?: DeckSession[];
+		agents?: DeckAgent[];
 		runningProcesses?: RunningProcess[];
+		// Callbacks
 		onModeChange?: (mode: ActivityMode) => void;
 		onLogoClick?: () => void;
 		onSettingsClick?: () => void;
 		onContextToggle?: () => void;
-		onSessionClick?: (session: DeckSession) => void;
+		onTabChange?: (tab: ActivityTabType) => void;
+		onSessionClick?: (session: ActiveSession) => void;
 		onHistorySessionClick?: (session: HistorySession) => void;
 		onAgentClick?: (agent: DeckAgent) => void;
 		onGenerationClick?: (generation: DeckGeneration) => void;
+		onOverlayClose?: () => void;
 		onProcessClick?: (process: RunningProcess) => void;
 		children?: import('svelte').Snippet;
 	}
@@ -52,20 +64,32 @@
 		activeMode = 'workspace',
 		badges = {},
 		contextCollapsed = false,
-		sessions = [],
+		// Activity Panel
+		activeTab = 'threads',
+		activeSessions = [],
 		recentSessions = [],
-		agents = [],
+		runningAgents = [],
+		completedAgents = [],
 		generations = [],
 		currentSession = null,
+		// Overlay
+		overlayType = null,
+		overlayData = {},
+		// Legacy
+		sessions = [],
+		agents = [],
 		runningProcesses = [],
+		// Callbacks
 		onModeChange,
 		onLogoClick,
 		onSettingsClick,
 		onContextToggle,
+		onTabChange,
 		onSessionClick,
 		onHistorySessionClick,
 		onAgentClick,
 		onGenerationClick,
+		onOverlayClose,
 		onProcessClick,
 		children
 	}: Props = $props();
@@ -123,22 +147,28 @@
 				</div>
 			{/if}
 
-			<!-- Context Panel - Inside workspace, overlays cards -->
+			<!-- Activity Panel - Inside workspace, overlays cards -->
 			<!-- CSS classes hide on mobile as fallback -->
 			{#if !isMobile}
 				<aside class="context-container context-panel-desktop context-panel-responsive mobile-hidden" class:collapsed={localContextCollapsed} data-layout="context-panel">
-					<ContextPanel
+					<ActivityPanel
 						collapsed={localContextCollapsed}
-						{sessions}
+						{activeTab}
+						{activeSessions}
 						{recentSessions}
-						{agents}
+						{runningAgents}
+						{completedAgents}
 						{generations}
 						sessionInfo={currentSession}
+						{overlayType}
+						{overlayData}
 						onToggleCollapse={handleContextToggle}
+						{onTabChange}
 						{onSessionClick}
 						{onHistorySessionClick}
 						{onAgentClick}
 						{onGenerationClick}
+						{onOverlayClose}
 					/>
 				</aside>
 

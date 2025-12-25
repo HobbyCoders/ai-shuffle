@@ -76,6 +76,7 @@
 		DeckGeneration,
 		RunningProcess
 	} from '$lib/components/deck/types';
+	import type { ActiveSession, HistorySession, ActivityTabType, OverlayType } from '$lib/components/deck';
 
 	// ============================================
 	// State: Deck Layout
@@ -84,6 +85,11 @@
 	let contextCollapsed = $state(false);
 	let isMobile = $state(false);
 	let workspaceRef: Workspace | undefined = $state();
+
+	// Activity Panel State
+	let activityPanelTab = $state<ActivityTabType>('threads');
+	let overlayType = $state<OverlayType>(null);
+	let overlayData = $state<Record<string, unknown>>({});
 
 	// ============================================
 	// State: Modals
@@ -143,7 +149,7 @@
 		}))
 	);
 
-	// Active Threads: Show all open cards in the sidebar
+	// Active Threads: Show all open cards in the sidebar (legacy)
 	const deckSessions = $derived<DeckSession[]>(
 		$visibleCards.map((c) => ({
 			id: c.id,
@@ -154,6 +160,30 @@
 		}))
 	);
 
+	// Active Sessions for Activity Panel: Combines open cards and running agents
+	const activeSessions = $derived<ActiveSession[]>([
+		// Open cards
+		...$visibleCards.map((c) => ({
+			id: c.id,
+			type: 'chat' as const,
+			title: c.title || 'Untitled',
+			status: c.id === $focusedCardId ? 'active' as const : 'idle' as const,
+			isSelected: c.id === $focusedCardId,
+			unread: false
+		})),
+		// Running agents
+		...$runningAgents.map(agent => ({
+			id: agent.id,
+			type: 'agent' as const,
+			title: agent.name,
+			status: agent.status === 'running' ? 'running' as const :
+			        agent.status === 'failed' ? 'error' as const : 'idle' as const,
+			progress: agent.progress,
+			isSelected: false,
+			unread: false
+		}))
+	]);
+
 	// Recent Sessions: Session history for loading old chats
 	// Shows sessions that are NOT currently open as cards
 	const openSessionIds = $derived(
@@ -162,7 +192,7 @@
 			.map(c => c.dataId))
 	);
 
-	const recentSessions = $derived<import('$lib/components/deck/ContextPanel.svelte').HistorySession[]>(
+	const recentSessions = $derived<HistorySession[]>(
 		$sessions.slice(0, 20).map((s) => ({
 			id: s.id,
 			title: s.title || 'Untitled',
@@ -189,6 +219,15 @@
 			progress: agent.progress
 		}))
 	);
+
+	// Split agents for Activity Panel tabs
+	const runningAgentsForPanel = $derived<DeckAgent[]>(
+		deckAgents.filter(a => a.status === 'running' || a.status === 'paused')
+	);
+	const completedAgentsForPanel = $derived<DeckAgent[]>(
+		deckAgents.filter(a => a.status === 'idle' || a.status === 'error')
+	);
+
 	const deckGenerations: DeckGeneration[] = [];
 	const runningProcesses = $derived<RunningProcess[]>([]);
 
@@ -624,15 +663,24 @@
 		deck.setMode(mode as 'workspace' | 'studio' | 'files');
 	}
 
-	function handleSessionClick(session: DeckSession) {
-		// Since we now pass card.id as session.id, find the card directly
-		const existingCard = $visibleCards.find((c) => c.id === session.id);
-		if (existingCard) {
-			deck.focusCard(existingCard.id);
+	function handleSessionClick(session: ActiveSession) {
+		if (session.type === 'chat') {
+			// It's a card - focus it
+			const existingCard = $visibleCards.find((c) => c.id === session.id);
+			if (existingCard) {
+				deck.focusCard(existingCard.id);
+			}
+		} else if (session.type === 'agent') {
+			// It's an agent - open/focus the agent monitor card
+			deck.setMode('workspace');
+			deck.openOrFocusCard('agent-monitor', session.id, {
+				title: session.title,
+				meta: { agentId: session.id }
+			});
 		}
 	}
 
-	function handleHistorySessionClick(historySession: import('$lib/components/deck/ContextPanel.svelte').HistorySession) {
+	function handleHistorySessionClick(historySession: HistorySession) {
 		// Check if this session is already open as a card
 		const existingCard = deck.findCardByDataId(historySession.id);
 		if (existingCard) {
@@ -851,6 +899,12 @@
 		}
 	}
 
+	function handleOpenChatSettings() {
+		// Open the chat settings overlay in the Activity Panel
+		overlayType = 'chat-settings';
+		overlayData = {};
+	}
+
 	function handleOpenProjectCard(editId?: string) {
 		// Find or create project card
 		const existingProject = $visibleCards.find(c => c.type === 'project');
@@ -957,16 +1011,23 @@
 		{activeMode}
 		{badges}
 		contextCollapsed={contextCollapsed}
-		sessions={deckSessions}
+		activeTab={activityPanelTab}
+		{activeSessions}
 		{recentSessions}
-		agents={deckAgents}
+		runningAgents={runningAgentsForPanel}
+		completedAgents={completedAgentsForPanel}
 		generations={deckGenerations}
 		currentSession={null}
+		{overlayType}
+		{overlayData}
+		sessions={deckSessions}
+		agents={deckAgents}
 		{runningProcesses}
 		onModeChange={handleModeChange}
 		onLogoClick={() => showCreateMenu = !showCreateMenu}
 		onSettingsClick={() => handleCreateCard('settings')}
 		onContextToggle={() => deck.toggleContextPanel()}
+		onTabChange={(tab) => activityPanelTab = tab}
 		onSessionClick={handleSessionClick}
 		onHistorySessionClick={handleHistorySessionClick}
 		onAgentClick={(agent) => {
@@ -978,6 +1039,7 @@
 			});
 		}}
 		onGenerationClick={() => {}}
+		onOverlayClose={() => { overlayType = null; overlayData = {}; }}
 		onProcessClick={() => {}}
 	>
 		{#if activeMode === 'workspace'}
@@ -1007,6 +1069,7 @@
 								}
 								onOpenProfileCard={handleOpenProfileCard}
 								onOpenProjectCard={handleOpenProjectCard}
+								onOpenSettings={handleOpenChatSettings}
 							/>
 						{:else if card.type === 'agent'}
 							<div class="p-4">
@@ -1128,6 +1191,7 @@
 												}
 												onOpenProfileCard={handleOpenProfileCard}
 												onOpenProjectCard={handleOpenProjectCard}
+												onOpenSettings={handleOpenChatSettings}
 											/>
 										{:else}
 											<div class="card-loading">
@@ -1253,7 +1317,6 @@
 		open={showCreateMenu}
 		onClose={() => showCreateMenu = false}
 		onCreateChat={() => handleCreateCard('chat')}
-		onCreateAgent={() => handleCreateCard('agent')}
 		onCreateStudio={() => handleCreateCard('studio')}
 		onCreateTerminal={() => handleCreateCard('terminal')}
 		onOpenProfiles={() => handleCreateCard('profile')}
