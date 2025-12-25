@@ -15,6 +15,7 @@
 	import { MessageSquare, Bot, Terminal, Square, X, Maximize2, Copy, Settings, User, Users, FolderKanban } from 'lucide-svelte';
 	import type { DeckCard, CardType } from './types';
 	import type { Snippet } from 'svelte';
+	import { layoutMode } from '$lib/stores/deck';
 
 	interface Props {
 		card: DeckCard;
@@ -68,6 +69,9 @@
 	};
 
 	const CardIcon = $derived(cardIcons[card.type]);
+
+	// In focus mode, cards are always fullscreen and cannot be un-maximized
+	const isFocusMode = $derived($layoutMode === 'focus');
 
 	// Title editing
 	function handleTitleDoubleClick() {
@@ -200,9 +204,10 @@
 		}
 	}
 
-	// Double-click header to maximize/restore
+	// Double-click header to maximize/restore (disabled in focus mode)
 	function handleHeaderDoubleClick() {
-		if (!isEditingTitle) {
+		// In focus mode, don't allow toggling maximize - cards are always fullscreen
+		if (!isEditingTitle && !isFocusMode) {
 			onMaximize();
 		}
 	}
@@ -258,18 +263,21 @@
 		</div>
 
 		<div class="window-controls">
-			<button
-				class="control-btn maximize"
-				onclick={(e) => { e.stopPropagation(); onMaximize(); }}
-				title={card.maximized ? 'Restore' : 'Maximize'}
-				aria-label={card.maximized ? 'Restore' : 'Maximize'}
-			>
-				{#if card.maximized}
-					<Copy size={12} />
-				{:else}
-					<Square size={12} />
-				{/if}
-			</button>
+			<!-- Hide maximize button in focus mode since cards are always fullscreen -->
+			{#if !isFocusMode}
+				<button
+					class="control-btn maximize"
+					onclick={(e) => { e.stopPropagation(); onMaximize(); }}
+					title={card.maximized ? 'Restore' : 'Maximize'}
+					aria-label={card.maximized ? 'Restore' : 'Maximize'}
+				>
+					{#if card.maximized}
+						<Copy size={12} />
+					{:else}
+						<Square size={12} />
+					{/if}
+				</button>
+			{/if}
 			<button
 				class="control-btn close"
 				onclick={(e) => { e.stopPropagation(); onClose(); }}

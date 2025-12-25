@@ -139,6 +139,15 @@
 		}, 300);
 	}
 
+	// Handle focus navigation button click - clear timeouts and navigate
+	function handleFocusNavClick(e: MouseEvent, direction: 'prev' | 'next') {
+		e.stopPropagation();
+		// Clear any pending hide timeouts to prevent the panel from disappearing
+		if (hoverTimeout) clearTimeout(hoverTimeout);
+		if (visibilityTimeout) clearTimeout(visibilityTimeout);
+		onFocusNavigate?.(direction);
+	}
+
 	function handleKeyDown(e: KeyboardEvent) {
 		if (e.key === 'Escape') {
 			isExpanded = false;
@@ -177,7 +186,7 @@
 					<div class="focus-nav">
 						<button
 							class="focus-nav-btn"
-							onclick={() => onFocusNavigate?.('prev')}
+							onclick={(e) => handleFocusNavClick(e, 'prev')}
 							title="Previous card (←)"
 						>
 							<ChevronLeft size={18} strokeWidth={2} />
@@ -191,7 +200,7 @@
 
 						<button
 							class="focus-nav-btn"
-							onclick={() => onFocusNavigate?.('next')}
+							onclick={(e) => handleFocusNavClick(e, 'next')}
 							title="Next card (→)"
 						>
 							<ChevronRight size={18} strokeWidth={2} />
