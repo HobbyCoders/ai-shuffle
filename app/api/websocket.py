@@ -193,14 +193,15 @@ async def chat_websocket(
             logger.info(f"Starting query for session {session_id}, profile={profile_id}, project={project_id}, overrides={overrides}")
             await send_json({"type": "start", "session_id": session_id, "message_id": message_id})
 
-            logger.info(f"Calling stream_to_websocket for session {session_id}")
+            logger.info(f"Calling stream_to_websocket for session {session_id}, api_user_id={api_user_id}")
             async for event in stream_to_websocket(
                 prompt=prompt,
                 session_id=session_id,
                 profile_id=profile_id,
                 project_id=project_id,
                 overrides=overrides,
-                broadcast_func=send_json  # Pass send_json for permission requests
+                broadcast_func=send_json,  # Pass send_json for permission requests
+                api_user_id=api_user_id  # Pass for user-scoped credential resolution
             ):
                 event_type = event.get('type')
                 logger.debug(f"Streaming event for session {session_id}: {event_type}")

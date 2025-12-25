@@ -775,6 +775,78 @@ def _get_decrypted_api_key(setting_name: str) -> Optional[str]:
     return value
 
 
+def _resolve_api_credential(
+    credential_type: str,
+    api_user_id: Optional[str] = None
+) -> Optional[str]:
+    """
+    Resolve an API credential based on policy (user key vs admin fallback).
+
+    Resolution order based on policy:
+    1. If policy is 'user_provided' or 'optional': check user's credential first
+    2. If not found and policy is 'admin_provided' or 'optional': use admin's key
+    3. If not found: return None
+
+    Args:
+        credential_type: The credential type (e.g., "openai_api_key", "gemini_api_key")
+        api_user_id: The API user ID (None for admin/local users)
+
+    Returns:
+        The resolved API key, or None if not available
+    """
+    # Map credential types to admin settings
+    admin_setting_map = {
+        "openai_api_key": "openai_api_key",
+        "gemini_api_key": "image_api_key",
+        "github_pat": None  # No admin fallback for GitHub
+    }
+
+    if credential_type not in admin_setting_map:
+        logger.warning(f"Unknown credential type: {credential_type}")
+        return None
+
+    # Get policy for this credential
+    policy_obj = database.get_credential_policy(credential_type)
+    policy = policy_obj.get("policy", "optional") if policy_obj else "optional"
+
+    resolved_key = None
+    source = None
+
+    # Try user's credential if applicable
+    if api_user_id and policy in ["user_provided", "optional"]:
+        user_cred = database.get_user_credential(api_user_id, credential_type)
+        if user_cred:
+            encrypted = user_cred.get("encrypted_value")
+            if encrypted:
+                if encryption.is_encrypted(encrypted) and encryption.is_encryption_ready():
+                    try:
+                        resolved_key = encryption.decrypt_value(encrypted)
+                        source = "user"
+                    except Exception as e:
+                        logger.error(f"Failed to decrypt user credential {credential_type}: {e}")
+                elif not encryption.is_encrypted(encrypted):
+                    # Plaintext (shouldn't happen in production, but handle it)
+                    resolved_key = encrypted
+                    source = "user"
+
+    # Try admin's key if applicable
+    if not resolved_key and policy in ["admin_provided", "optional"]:
+        admin_setting = admin_setting_map.get(credential_type)
+        if admin_setting:
+            resolved_key = _get_decrypted_api_key(admin_setting)
+            if resolved_key:
+                source = "admin"
+
+    if resolved_key:
+        logger.debug(f"Resolved {credential_type} from {source} (policy={policy})")
+    elif policy == "user_provided":
+        logger.debug(f"Credential {credential_type} not found - user must provide (policy={policy})")
+    else:
+        logger.debug(f"Credential {credential_type} not configured (policy={policy})")
+
+    return resolved_key
+
+
 def _get_hook_tool_names(hooks: Optional[Dict[str, list]]) -> list:
     """
     Extract tool names from hook matchers.
@@ -852,7 +924,8 @@ def _build_extra_args(
 
 def _build_env_with_ai_tools(
     base_env: Optional[Dict[str, str]],
-    ai_tools_config: Optional[Dict[str, Any]]
+    ai_tools_config: Optional[Dict[str, Any]],
+    api_user_id: Optional[str] = None
 ) -> Dict[str, str]:
     """
     Build environment variables dict, injecting AI tool credentials when enabled.
@@ -864,9 +937,14 @@ def _build_env_with_ai_tools(
     between providers without needing settings changes. The default provider/model
     is still set, but Claude can override per-request.
 
+    CREDENTIAL RESOLUTION: When api_user_id is provided, credentials are resolved
+    based on admin policy (admin_provided, user_provided, optional). This allows
+    API users to use their own keys when required by policy.
+
     Args:
         base_env: Base environment variables from profile config
         ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
+        api_user_id: Optional API user ID for user-specific credential resolution
 
     Returns:
         Dict of environment variables to pass to Claude CLI
@@ -883,9 +961,17 @@ def _build_env_with_ai_tools(
     if not any_image_tools and not any_video_tools:
         return env
 
-    # Get all available API keys
-    gemini_api_key = _get_decrypted_api_key("image_api_key")
-    openai_api_key = _get_decrypted_api_key("openai_api_key")
+    # Resolve API keys based on user/policy
+    # If api_user_id is provided, use policy-based resolution (user key → admin fallback)
+    # Otherwise, use admin keys directly (local/admin sessions)
+    if api_user_id:
+        gemini_api_key = _resolve_api_credential("gemini_api_key", api_user_id)
+        openai_api_key = _resolve_api_credential("openai_api_key", api_user_id)
+        logger.debug(f"Resolved credentials for API user {api_user_id}")
+    else:
+        # Admin/local session - use admin keys directly
+        gemini_api_key = _get_decrypted_api_key("image_api_key")
+        openai_api_key = _get_decrypted_api_key("openai_api_key")
 
     # Inject ALL available API keys so Claude can dynamically choose providers
     # This is the key change - instead of only injecting the default provider's key,
@@ -963,7 +1049,8 @@ def build_options_from_profile(
     overrides: Optional[Dict[str, Any]] = None,
     resume_session_id: Optional[str] = None,
     can_use_tool: Optional[callable] = None,
-    hooks: Optional[Dict[str, list]] = None
+    hooks: Optional[Dict[str, list]] = None,
+    api_user_id: Optional[str] = None
 ) -> tuple[ClaudeAgentOptions, Optional[Dict[str, AgentDefinition]]]:
     """
     Convert a profile to ClaudeAgentOptions with all available options.
@@ -972,6 +1059,15 @@ def build_options_from_profile(
         Tuple of (ClaudeAgentOptions, agents_dict)
         - ClaudeAgentOptions: SDK options with agents included for Docker/Linux, excluded for Windows
         - agents_dict: Dict of agent_id -> AgentDefinition, or None if no agents
+
+    Args:
+        profile: Profile configuration dict
+        project: Optional project configuration
+        overrides: Optional override settings
+        resume_session_id: Optional session ID to resume
+        can_use_tool: Optional permission callback
+        hooks: Optional hooks configuration
+        api_user_id: Optional API user ID for user-specific credential resolution
 
     Note: On Windows local mode, --agents CLI flag has a bug where agents are not discovered.
     Callers should use write_agents_to_filesystem() on Windows only. On Docker/Linux, agents
@@ -1155,7 +1251,8 @@ def build_options_from_profile(
         setting_sources=config.get("setting_sources"),
 
         # Environment and arguments - inject AI tool credentials if enabled
-        env=_build_env_with_ai_tools(config.get("env"), ai_tools_config),
+        # Pass api_user_id for policy-based credential resolution
+        env=_build_env_with_ai_tools(config.get("env"), ai_tools_config, api_user_id),
         extra_args=_build_extra_args(config.get("extra_args") or {}, hooks),
 
         # Buffer settings - Default to 50MB to handle large file reads (images, PDFs)
@@ -1259,12 +1356,13 @@ async def execute_query(
         content=prompt
     )
 
-    # Build options
+    # Build options with user-scoped credential resolution
     options, agents_dict = build_options_from_profile(
         profile=profile,
         project=project,
         overrides=overrides,
-        resume_session_id=resume_id
+        resume_session_id=resume_id,
+        api_user_id=api_user_id
     )
 
     # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
@@ -1475,12 +1573,13 @@ async def stream_query(
         data=user_msg
     )
 
-    # Build options
+    # Build options with user-scoped credential resolution
     options, agents_dict = build_options_from_profile(
         profile=profile,
         project=project,
         overrides=overrides,
-        resume_session_id=resume_id
+        resume_session_id=resume_id,
+        api_user_id=api_user_id
     )
 
     # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
@@ -1848,12 +1947,13 @@ async def _run_background_query(
         data=user_msg
     )
 
-    # Build options
+    # Build options with user-scoped credential resolution
     options, agents_dict = build_options_from_profile(
         profile=profile,
         project=project,
         overrides=overrides,
-        resume_session_id=resume_id
+        resume_session_id=resume_id,
+        api_user_id=api_user_id
     )
 
     # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
@@ -2311,7 +2411,8 @@ async def stream_to_websocket(
     profile_id: str,
     project_id: Optional[str] = None,
     overrides: Optional[Dict[str, Any]] = None,
-    broadcast_func: Optional[callable] = None
+    broadcast_func: Optional[callable] = None,
+    api_user_id: Optional[str] = None
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Stream Claude response directly to WebSocket.
@@ -2334,6 +2435,7 @@ async def stream_to_websocket(
         project_id: Optional project ID
         overrides: Optional overrides for model, permission_mode, etc.
         broadcast_func: Async function to broadcast messages to the WebSocket
+        api_user_id: Optional API user ID for user-specific credential resolution
     """
     # Get profile
     profile = get_profile(profile_id)
@@ -2450,14 +2552,15 @@ async def stream_to_websocket(
         }
         logger.info(f"[WS] Created AskUserQuestion hook for session {session_id}")
 
-    # Build options with the callback and hooks
+    # Build options with the callback, hooks, and user-scoped credential resolution
     options, agents_dict = build_options_from_profile(
         profile=profile,
         project=project,
         overrides=overrides,
         resume_session_id=resume_id,
         can_use_tool=can_use_tool_callback,
-        hooks=hooks_config
+        hooks=hooks_config,
+        api_user_id=api_user_id
     )
 
     # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)

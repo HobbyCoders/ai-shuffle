@@ -28,6 +28,15 @@
 	import TwoFactorSetup from '$lib/components/TwoFactorSetup.svelte';
 	import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 	import {
+		getCredentialPoliciesSummary,
+		updateCredentialPolicy,
+		getPolicyLabel,
+		getEffectiveStatusLabel,
+		getEffectiveStatusColor,
+		type CredentialPolicySummary,
+		type CredentialPolicyType
+	} from '$lib/api/credentialPolicies';
+	import {
 		ALL_IMAGE_MODELS,
 		ALL_VIDEO_MODELS,
 		ALL_TTS_MODELS,
@@ -68,7 +77,7 @@
 	type Category = 'account' | 'api-users' | 'ai-models' | 'system';
 	type Section =
 		| 'general' | 'security' | 'authentication'
-		| 'users' | 'rate-limits'
+		| 'users' | 'rate-limits' | 'credential-policies'
 		| 'api-keys' | 'models'
 		| 'notifications' | 'cleanup';
 
@@ -94,6 +103,7 @@
 			icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z',
 			sections: [
 				{ id: 'users', label: 'API Users' },
+				{ id: 'credential-policies', label: 'Key Policies' },
 				{ id: 'rate-limits', label: 'Rate Limits' }
 			]
 		},
@@ -142,6 +152,12 @@
 	let editingUser: ApiUser | null = $state(null);
 	let newlyCreatedKey: string | null = $state(null);
 	let regeneratedKey: string | null = $state(null);
+
+	// Credential policies state
+	let credentialPolicies: CredentialPolicySummary[] = $state([]);
+	let loadingPolicies = $state(false);
+	let savingPolicy = $state<string | null>(null);
+	let policyError = $state('');
 
 	// Workspace state
 	let workspaceConfig: WorkspaceConfig | null = $state(null);
@@ -411,7 +427,8 @@
 			loadAuthStatus(),
 			loadWorkspaceConfig(),
 			loadIntegrationSettings(),
-			loadCleanupSettings()
+			loadCleanupSettings(),
+			loadCredentialPolicies()
 		]);
 	}
 
@@ -431,6 +448,30 @@
 			error = e.detail || 'Failed to load data';
 		}
 		loading = false;
+	}
+
+	async function loadCredentialPolicies() {
+		loadingPolicies = true;
+		policyError = '';
+		try {
+			const response = await getCredentialPoliciesSummary();
+			credentialPolicies = response.policies;
+		} catch (e: any) {
+			policyError = e.detail || 'Failed to load credential policies';
+		}
+		loadingPolicies = false;
+	}
+
+	async function handlePolicyChange(policyId: string, newPolicy: CredentialPolicyType) {
+		savingPolicy = policyId;
+		policyError = '';
+		try {
+			await updateCredentialPolicy(policyId, newPolicy);
+			await loadCredentialPolicies();
+		} catch (e: any) {
+			policyError = e.detail || 'Failed to update policy';
+		}
+		savingPolicy = null;
 	}
 
 	async function loadAuthStatus() {
@@ -1417,6 +1458,67 @@
 						<code class="flex-1">{regeneratedKey}</code>
 						<button onclick={() => { copyToClipboard(regeneratedKey || ''); regeneratedKey = null; }} class="btn btn-primary">Copy</button>
 					</div>
+				</div>
+			{/if}
+		</div>
+	{/if}
+
+	<!-- API & USERS > CREDENTIAL POLICIES -->
+	{#if activeSection === 'credential-policies'}
+		<div class="section-content">
+			<div class="section-header">
+				<h3>Key Policies</h3>
+				<p>Control which API keys are admin-provided vs user-provided.</p>
+			</div>
+
+			{#if loadingPolicies}
+				<div class="loading-state">Loading policies...</div>
+			{:else if policyError}
+				<div class="error-state">{policyError}</div>
+			{:else if credentialPolicies.length === 0}
+				<div class="empty-state">
+					<p>No credential types configured.</p>
+				</div>
+			{:else}
+				<div class="policies-list">
+					{#each credentialPolicies as policy (policy.id)}
+						<div class="policy-item">
+							<div class="policy-info">
+								<h4>{policy.name}</h4>
+								<p class="policy-description">{policy.description}</p>
+								<div class="policy-status" class:status-green={getEffectiveStatusColor(policy.effective_status) === 'green'}
+									 class:status-yellow={getEffectiveStatusColor(policy.effective_status) === 'yellow'}
+									 class:status-red={getEffectiveStatusColor(policy.effective_status) === 'red'}
+									 class:status-blue={getEffectiveStatusColor(policy.effective_status) === 'blue'}>
+									<span class="status-dot"></span>
+									<span class="status-text">{getEffectiveStatusLabel(policy.effective_status)}</span>
+								</div>
+							</div>
+							<div class="policy-control">
+								<select
+									value={policy.policy}
+									onchange={(e) => handlePolicyChange(policy.id, (e.target as HTMLSelectElement).value as CredentialPolicyType)}
+									disabled={savingPolicy === policy.id}
+								>
+									<option value="admin_provided">Admin Provides</option>
+									<option value="user_provided">User Must Provide</option>
+									<option value="optional">Optional (User Override)</option>
+								</select>
+								{#if savingPolicy === policy.id}
+									<span class="saving-indicator">Saving...</span>
+								{/if}
+							</div>
+						</div>
+					{/each}
+				</div>
+
+				<div class="policy-help">
+					<h4>Policy Explanations</h4>
+					<ul>
+						<li><strong>Admin Provides:</strong> All API users will use the admin-configured key. Users cannot override.</li>
+						<li><strong>User Must Provide:</strong> Each API user must configure their own key in "My Settings".</li>
+						<li><strong>Optional:</strong> Admin key is used by default, but users can override with their own key.</li>
+					</ul>
 				</div>
 			{/if}
 		</div>
@@ -3500,5 +3602,156 @@
 		.model-cards.stt-cards {
 			grid-template-columns: 1fr;
 		}
+	}
+
+	/* Credential Policies */
+	.policies-list {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.policy-item {
+		background: oklch(0.15 0.008 260);
+		border: 1px solid oklch(0.28 0.01 260);
+		border-radius: 10px;
+		padding: 16px;
+		display: flex;
+		justify-content: space-between;
+		align-items: flex-start;
+		gap: 16px;
+	}
+
+	:global(.light) .policy-item {
+		background: oklch(0.98 0.003 260);
+		border-color: oklch(0.88 0.008 260);
+	}
+
+	.policy-info {
+		flex: 1;
+		min-width: 0;
+	}
+
+	.policy-info h4 {
+		margin: 0 0 4px 0;
+		font-size: 0.9375rem;
+		font-weight: 600;
+		color: var(--foreground);
+	}
+
+	.policy-description {
+		margin: 0 0 8px 0;
+		font-size: 0.8125rem;
+		color: oklch(0.60 0.02 260);
+	}
+
+	:global(.light) .policy-description {
+		color: oklch(0.50 0.015 260);
+	}
+
+	.policy-status {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		font-size: 0.75rem;
+	}
+
+	.status-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: oklch(0.50 0.02 260);
+	}
+
+	.policy-status.status-green .status-dot { background: hsl(var(--success)); }
+	.policy-status.status-yellow .status-dot { background: hsl(45 80% 50%); }
+	.policy-status.status-red .status-dot { background: hsl(var(--destructive)); }
+	.policy-status.status-blue .status-dot { background: hsl(var(--primary)); }
+
+	.policy-status.status-green .status-text { color: hsl(var(--success)); }
+	.policy-status.status-yellow .status-text { color: hsl(45 70% 45%); }
+	.policy-status.status-red .status-text { color: hsl(var(--destructive)); }
+	.policy-status.status-blue .status-text { color: hsl(var(--primary)); }
+
+	.policy-control {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
+		gap: 4px;
+		flex-shrink: 0;
+	}
+
+	.policy-control select {
+		padding: 8px 12px;
+		font-size: 0.8125rem;
+		border-radius: 6px;
+		background: oklch(0.20 0.01 260);
+		border: 1px solid oklch(0.35 0.015 260);
+		color: var(--foreground);
+		cursor: pointer;
+		min-width: 160px;
+	}
+
+	:global(.light) .policy-control select {
+		background: white;
+		border-color: oklch(0.85 0.01 260);
+	}
+
+	.policy-control select:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+
+	.saving-indicator {
+		font-size: 0.6875rem;
+		color: hsl(var(--primary));
+	}
+
+	.policy-help {
+		margin-top: 24px;
+		padding: 16px;
+		background: oklch(0.12 0.006 260);
+		border-radius: 8px;
+		border: 1px solid oklch(0.25 0.01 260);
+	}
+
+	:global(.light) .policy-help {
+		background: oklch(0.96 0.004 260);
+		border-color: oklch(0.90 0.008 260);
+	}
+
+	.policy-help h4 {
+		margin: 0 0 12px 0;
+		font-size: 0.8125rem;
+		font-weight: 600;
+		color: oklch(0.55 0.02 260);
+	}
+
+	:global(.light) .policy-help h4 {
+		color: oklch(0.45 0.015 260);
+	}
+
+	.policy-help ul {
+		margin: 0;
+		padding: 0 0 0 20px;
+		font-size: 0.8125rem;
+		color: oklch(0.60 0.02 260);
+		line-height: 1.6;
+	}
+
+	:global(.light) .policy-help ul {
+		color: oklch(0.50 0.015 260);
+	}
+
+	.policy-help li {
+		margin-bottom: 8px;
+	}
+
+	.policy-help li:last-child {
+		margin-bottom: 0;
+	}
+
+	.policy-help strong {
+		color: var(--foreground);
 	}
 </style>

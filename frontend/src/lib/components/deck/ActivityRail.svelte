@@ -6,25 +6,29 @@
 	 * Switches to horizontal layout on mobile.
 	 */
 
-	import { Plus, Monitor, Palette, FolderOpen, Settings } from 'lucide-svelte';
+	import { Plus, Monitor, Palette, FolderOpen, Settings, UserCog } from 'lucide-svelte';
 	import type { ActivityMode, ActivityBadges } from './types';
 
 	interface Props {
 		activeMode: ActivityMode;
 		badges?: ActivityBadges;
 		isMobile?: boolean;
+		isAdmin?: boolean;
 		onModeChange?: (mode: ActivityMode) => void;
 		onLogoClick?: () => void;
 		onSettingsClick?: () => void;
+		onUserSettingsClick?: () => void;
 	}
 
 	let {
 		activeMode,
 		badges = {},
 		isMobile = false,
+		isAdmin = false,
 		onModeChange,
 		onLogoClick,
-		onSettingsClick
+		onSettingsClick,
+		onUserSettingsClick
 	}: Props = $props();
 
 	// Activity button configurations with colors
@@ -94,14 +98,19 @@
 		{/each}
 	</div>
 
-	<!-- Settings button at bottom - always show, mobile layout handled by parent -->
+	<!-- Settings button at bottom - admin sees Settings, non-admin sees My Settings -->
 	<button
 		class="settings-button"
-		onclick={() => onSettingsClick?.()}
-		title="Settings"
+		onclick={() => isAdmin ? onSettingsClick?.() : onUserSettingsClick?.()}
+		title={isAdmin ? 'Settings' : 'My Settings'}
 	>
-		<Settings size={20} strokeWidth={1.5} />
-		<span class="tooltip">Settings</span>
+		{#if isAdmin}
+			<Settings size={20} strokeWidth={1.5} />
+			<span class="tooltip">Settings</span>
+		{:else}
+			<UserCog size={20} strokeWidth={1.5} />
+			<span class="tooltip">My Settings</span>
+		{/if}
 	</button>
 </div>
 
