@@ -98,7 +98,7 @@
 			taskName: '',
 			branch: 'main',
 			createNewBranch: false,
-			autoPR: false,
+			autoPR: true,  // Default to true - auto-create PR when background agent completes
 			autoMerge: false,
 			maxDurationMinutes: 30
 		},

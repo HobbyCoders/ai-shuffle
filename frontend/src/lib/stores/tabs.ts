@@ -2562,7 +2562,7 @@ function createTabsStore() {
 						backgroundTaskName: '',
 						backgroundBranch: 'main',
 						backgroundCreateNewBranch: false,
-						backgroundAutoPR: false,
+						backgroundAutoPR: true,  // Default to true - auto-create PR when background agent completes
 						backgroundAutoMerge: false,
 						backgroundMaxDurationMinutes: 30
 					}));
@@ -2641,7 +2641,7 @@ function createTabsStore() {
 				backgroundTaskName: '',
 				backgroundBranch: 'main',
 				backgroundCreateNewBranch: false,
-				backgroundAutoPR: false,
+				backgroundAutoPR: true,  // Default to true - auto-create PR when background agent completes
 				backgroundAutoMerge: false,
 				backgroundMaxDurationMinutes: 30
 			};
@@ -3195,7 +3195,7 @@ function createTabsStore() {
 				backgroundTaskName: '',
 				backgroundBranch: 'main',
 				backgroundCreateNewBranch: false,
-				backgroundAutoPR: false,
+				backgroundAutoPR: true,  // Default to true - auto-create PR when background agent completes
 				backgroundAutoMerge: false,
 				backgroundMaxDurationMinutes: 30
 			});
