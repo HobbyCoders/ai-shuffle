@@ -3,7 +3,7 @@
 	 * Workspace - Desktop canvas for free-form draggable cards
 	 *
 	 * Features:
-	 * - Contains all visible (non-minimized) cards
+	 * - Contains all cards in the deck
 	 * - Empty state with welcome message and create buttons
 	 * - Tracks workspace bounds
 	 * - Card Shuffle UI for layout mode switching
@@ -43,14 +43,11 @@
 		children
 	}: Props = $props();
 
-	// Visible cards (not minimized) - must be defined before focus mode state
-	const visibleCards = $derived(cards.filter((c) => !c.minimized));
-
-	// Focus mode navigation state
+	// Focus mode navigation state - uses all cards, not filtered
 	const isFocusMode = $derived(layoutMode === 'focus');
 	const focusModeCards = $derived(
 		isFocusMode
-			? [...visibleCards].sort(
+			? [...cards].sort(
 					(a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
 				)
 			: []
@@ -92,7 +89,7 @@
 	});
 
 	// Sorted by z-index for rendering
-	const sortedCards = $derived([...visibleCards].sort((a, b) => a.zIndex - b.zIndex));
+	const sortedCards = $derived([...cards].sort((a, b) => a.zIndex - b.zIndex));
 
 	// Check if there's a maximized card
 	const maximizedCard = $derived(cards.find((c) => c.maximized));
