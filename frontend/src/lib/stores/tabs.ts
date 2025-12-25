@@ -2843,13 +2843,16 @@ function createTabsStore() {
 
 			try {
 				// Launch the background agent
+				// Note: autoBranch=true always - this creates an isolated worktree for the agent
+				// The agent will create a new branch based on baseBranch
 				const agent = await agents.launchAgent({
 					name: taskName,
 					prompt: prompt,
 					profileId: tab.profile,
 					projectId: tab.project,
-					// Branch configuration
-					autoBranch: tab.backgroundCreateNewBranch,
+					// Always create isolated worktree for background agents
+					autoBranch: true,
+					// Base branch to create the agent's feature branch from
 					baseBranch: tab.backgroundBranch || 'main',
 					// PR configuration
 					autoPr: tab.backgroundAutoPR,
