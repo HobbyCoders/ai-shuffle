@@ -5,7 +5,7 @@
  * whether users must provide their own API keys or can use admin-provided ones.
  */
 
-import { apiCall } from './client';
+import { api } from './client';
 
 // Types
 export type CredentialPolicyType = 'admin_provided' | 'user_provided' | 'optional';
@@ -37,12 +37,12 @@ export interface CredentialPoliciesSummaryResponse {
 
 // Get all credential policies
 export async function getCredentialPolicies(): Promise<AllCredentialPoliciesResponse> {
-	return apiCall<AllCredentialPoliciesResponse>('/api/v1/settings/credential-policies');
+	return api.get<AllCredentialPoliciesResponse>('/settings/credential-policies');
 }
 
 // Get credential policies summary (with admin key status and effective status)
 export async function getCredentialPoliciesSummary(): Promise<CredentialPoliciesSummaryResponse> {
-	return apiCall<CredentialPoliciesSummaryResponse>('/api/v1/settings/credential-policies/summary');
+	return api.get<CredentialPoliciesSummaryResponse>('/settings/credential-policies/summary');
 }
 
 // Update a credential policy (admin only)
@@ -50,12 +50,9 @@ export async function updateCredentialPolicy(
 	policyId: string,
 	policy: CredentialPolicyType
 ): Promise<{ success: boolean; id: string; policy: CredentialPolicyType }> {
-	return apiCall<{ success: boolean; id: string; policy: CredentialPolicyType }>(
-		`/api/v1/settings/credential-policies/${policyId}`,
-		{
-			method: 'PUT',
-			body: JSON.stringify({ policy })
-		}
+	return api.put<{ success: boolean; id: string; policy: CredentialPolicyType }>(
+		`/settings/credential-policies/${policyId}`,
+		{ policy }
 	);
 }
 

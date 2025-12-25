@@ -4,7 +4,7 @@
  * API functions for API users to manage their own credentials, GitHub connection, and profile.
  */
 
-import { apiCall } from './client';
+import { api } from './client';
 
 // Types
 export interface UserProfile {
@@ -74,77 +74,58 @@ export interface GitHubBranch {
 
 // Profile endpoints
 export async function getMyProfile(): Promise<UserProfile> {
-	return apiCall<UserProfile>('/api/v1/me');
+	return api.get<UserProfile>('/me');
 }
 
 export async function updateMyProfile(data: { name?: string; description?: string }): Promise<UserProfile> {
-	return apiCall<UserProfile>('/api/v1/me', {
-		method: 'PUT',
-		body: JSON.stringify(data)
-	});
+	return api.put<UserProfile>('/me', data);
 }
 
 export async function changeMyPassword(currentPassword: string, newPassword: string): Promise<{ success: boolean; message: string }> {
-	return apiCall<{ success: boolean; message: string }>('/api/v1/me/password', {
-		method: 'PUT',
-		body: JSON.stringify({
-			current_password: currentPassword,
-			new_password: newPassword
-		})
+	return api.put<{ success: boolean; message: string }>('/me/password', {
+		current_password: currentPassword,
+		new_password: newPassword
 	});
 }
 
 // Credentials endpoints
 export async function getMyCredentials(): Promise<AllCredentialsResponse> {
-	return apiCall<AllCredentialsResponse>('/api/v1/me/credentials');
+	return api.get<AllCredentialsResponse>('/me/credentials');
 }
 
 export async function getCredentialRequirements(): Promise<CredentialRequirements> {
-	return apiCall<CredentialRequirements>('/api/v1/me/credentials/requirements');
+	return api.get<CredentialRequirements>('/me/credentials/requirements');
 }
 
 export async function setMyCredential(credentialType: string, value: string): Promise<{ success: boolean; credential_type: string; masked_value: string }> {
-	return apiCall<{ success: boolean; credential_type: string; masked_value: string }>(`/api/v1/me/credentials/${credentialType}`, {
-		method: 'POST',
-		body: JSON.stringify({ value })
-	});
+	return api.post<{ success: boolean; credential_type: string; masked_value: string }>(`/me/credentials/${credentialType}`, { value });
 }
 
 export async function deleteMyCredential(credentialType: string): Promise<{ success: boolean; credential_type: string; warning: string | null }> {
-	return apiCall<{ success: boolean; credential_type: string; warning: string | null }>(`/api/v1/me/credentials/${credentialType}`, {
-		method: 'DELETE'
-	});
+	return api.delete(`/me/credentials/${credentialType}`) as Promise<{ success: boolean; credential_type: string; warning: string | null }>;
 }
 
 // GitHub endpoints
 export async function getMyGitHubConfig(): Promise<GitHubConfig> {
-	return apiCall<GitHubConfig>('/api/v1/me/github');
+	return api.get<GitHubConfig>('/me/github');
 }
 
 export async function connectGitHub(personalAccessToken: string): Promise<{ success: boolean; github_username: string; github_avatar_url: string }> {
-	return apiCall<{ success: boolean; github_username: string; github_avatar_url: string }>('/api/v1/me/github/connect', {
-		method: 'POST',
-		body: JSON.stringify({ personal_access_token: personalAccessToken })
-	});
+	return api.post<{ success: boolean; github_username: string; github_avatar_url: string }>('/me/github/connect', { personal_access_token: personalAccessToken });
 }
 
 export async function disconnectGitHub(): Promise<{ success: boolean }> {
-	return apiCall<{ success: boolean }>('/api/v1/me/github', {
-		method: 'DELETE'
-	});
+	return api.delete('/me/github') as Promise<{ success: boolean }>;
 }
 
 export async function listMyGitHubRepos(page: number = 1, perPage: number = 30): Promise<{ repos: GitHubRepo[]; page: number; per_page: number }> {
-	return apiCall<{ repos: GitHubRepo[]; page: number; per_page: number }>(`/api/v1/me/github/repos?page=${page}&per_page=${perPage}`);
+	return api.get<{ repos: GitHubRepo[]; page: number; per_page: number }>(`/me/github/repos?page=${page}&per_page=${perPage}`);
 }
 
 export async function listGitHubBranches(owner: string, repo: string): Promise<{ branches: GitHubBranch[]; default_branch: string }> {
-	return apiCall<{ branches: GitHubBranch[]; default_branch: string }>(`/api/v1/me/github/branches/${owner}/${repo}`);
+	return api.get<{ branches: GitHubBranch[]; default_branch: string }>(`/me/github/branches/${owner}/${repo}`);
 }
 
 export async function setGitHubDefaults(defaultRepo?: string, defaultBranch?: string): Promise<{ success: boolean; default_repo: string | null; default_branch: string | null }> {
-	return apiCall<{ success: boolean; default_repo: string | null; default_branch: string | null }>('/api/v1/me/github/config', {
-		method: 'POST',
-		body: JSON.stringify({ default_repo: defaultRepo, default_branch: defaultBranch })
-	});
+	return api.post<{ success: boolean; default_repo: string | null; default_branch: string | null }>('/me/github/config', { default_repo: defaultRepo, default_branch: defaultBranch });
 }
