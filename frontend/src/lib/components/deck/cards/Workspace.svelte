@@ -12,7 +12,7 @@
 	 */
 
 	import { onMount } from 'svelte';
-	import { MessageSquare, Bot, Palette, Terminal, Plus } from 'lucide-svelte';
+	import { MessageSquare, Bot, Palette, Terminal } from 'lucide-svelte';
 	import type { DeckCard, CardType, SnapGuide, SnapResult } from './types';
 	import { SNAP_THRESHOLD, CARD_SNAP_THRESHOLD, SNAP_GRID, WORKSPACE_PADDING } from './types';
 	import type { Snippet } from 'svelte';
@@ -468,7 +468,7 @@
 		{ type: 'chat', label: 'New Chat', icon: MessageSquare },
 		{ type: 'agent', label: 'New Agent', icon: Bot },
 		{ type: 'studio', label: 'New Studio', icon: Palette },
-		{ type: 'terminal', label: 'New Terminal', icon: Terminal },
+		{ type: 'terminal', label: 'New Terminal', icon: Terminal }
 	];
 </script>
 

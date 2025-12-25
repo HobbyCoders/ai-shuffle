@@ -38,7 +38,6 @@
 
 	// Deck components
 	import { DeckLayout } from '$lib/components/deck';
-	import { AgentsView } from '$lib/components/deck/agents';
 	import { StudioView } from '$lib/components/deck/studio';
 	import {
 		Workspace,
@@ -67,6 +66,7 @@
 	import Canvas from '$lib/components/canvas/Canvas.svelte';
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
+	import NewItemModal from '$lib/components/NewItemModal.svelte';
 
 	// Types from deck/types
 	import type {
@@ -99,6 +99,7 @@
 	let showCanvas = $state(false);
 	let showSpotlight = $state(false);
 	let showAdvancedSearch = $state(false);
+	let showNewItemModal = $state(false);
 
 	// Terminal modal state
 	let terminalCommand = $state('/resume');
@@ -172,7 +173,6 @@
 
 	const badges = $derived<import('$lib/components/deck/types').ActivityBadges>({
 		workspace: $visibleCards.length > 0 ? $visibleCards.length : undefined,
-		agents: undefined,
 		studio: undefined,
 		files: undefined
 	});
@@ -393,7 +393,9 @@
 				category: 'general',
 				allowInInput: true,
 				action: () => {
-					if (showKeyboardShortcuts) {
+					if (showNewItemModal) {
+						showNewItemModal = false;
+					} else if (showKeyboardShortcuts) {
 						showKeyboardShortcuts = false;
 					} else if (showAdvancedSearch) {
 						showAdvancedSearch = false;
@@ -589,7 +591,7 @@
 	// ============================================
 	function handleModeChange(mode: ActivityMode) {
 		activeMode = mode;
-		deck.setMode(mode as 'workspace' | 'agents' | 'studio' | 'files');
+		deck.setMode(mode as 'workspace' | 'studio' | 'files');
 	}
 
 	function handleSessionClick(session: DeckSession) {
@@ -932,7 +934,7 @@
 		currentSession={null}
 		{runningProcesses}
 		onModeChange={handleModeChange}
-		onLogoClick={() => handleCreateCard('chat')}
+		onLogoClick={() => showNewItemModal = true}
 		onSettingsClick={() => handleCreateCard('settings')}
 		onContextToggle={() => deck.toggleContextPanel()}
 		onSessionClick={handleSessionClick}
@@ -1194,8 +1196,6 @@
 					{/snippet}
 				</Workspace>
 			{/if}
-		{:else if activeMode === 'agents'}
-			<AgentsView />
 		{:else if activeMode === 'studio'}
 			<StudioView />
 		{:else}
@@ -1332,6 +1332,14 @@
 			onClose={closeTerminalModal}
 		/>
 	{/if}
+
+	<!-- New Item Modal (Plus Button Popup) -->
+	<NewItemModal
+		bind:show={showNewItemModal}
+		on:close={() => showNewItemModal = false}
+		on:newChat={() => handleCreateCard('chat')}
+		on:newAgent={() => handleCreateCard('agent')}
+	/>
 {/if}
 
 <style>

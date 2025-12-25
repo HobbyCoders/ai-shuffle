@@ -6,7 +6,7 @@
 	 * Switches to horizontal layout on mobile.
 	 */
 
-	import { Plus, Monitor, Bot, Palette, FolderOpen, Settings } from 'lucide-svelte';
+	import { Plus, Monitor, Palette, FolderOpen, Settings } from 'lucide-svelte';
 	import type { ActivityMode, ActivityBadges } from './types';
 
 	interface Props {
@@ -34,7 +34,6 @@
 		color: string;
 	}> = [
 		{ mode: 'workspace', label: 'Workspace', color: '#3b82f6' },
-		{ mode: 'agents', label: 'Agents', color: '#10b981' },
 		{ mode: 'studio', label: 'Studio', color: '#a855f7' },
 		{ mode: 'files', label: 'Files', color: '#f59e0b' }
 	];
@@ -77,8 +76,6 @@
 				<div class="icon-wrapper">
 					{#if activity.mode === 'workspace'}
 						<Monitor size={22} strokeWidth={1.5} />
-					{:else if activity.mode === 'agents'}
-						<Bot size={22} strokeWidth={1.5} />
 					{:else if activity.mode === 'studio'}
 						<Palette size={22} strokeWidth={1.5} />
 					{:else if activity.mode === 'files'}

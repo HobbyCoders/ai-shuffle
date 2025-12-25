@@ -15,7 +15,7 @@ import { getPreference, setPreference } from '$lib/api/client';
 // Types
 // ============================================================================
 
-export type DeckMode = 'workspace' | 'agents' | 'studio' | 'files';
+export type DeckMode = 'workspace' | 'studio' | 'files';
 
 /**
  * Layout modes for card arrangement in the workspace
