@@ -27,7 +27,6 @@
 		visibleCards,
 		focusedCardId,
 		mobileActiveCardIndex,
-		gridSnapEnabled,
 		layoutMode
 	} from '$lib/stores/deck';
 	import type { DeckCard, DeckCardType, LayoutMode } from '$lib/stores/deck';
@@ -398,8 +397,7 @@
 		switch (type) {
 			case 'chat':
 				return 'chat';
-			case 'agent-monitor':
-			case 'agent-launcher':
+			case 'agent':
 				return 'agent';
 			case 'terminal':
 				return 'terminal';
@@ -416,19 +414,9 @@
 		}
 	}
 
-	function mapSnapZone(zone: DeckCard['snappedTo']): CardsDeckCard['snappedTo'] {
-		if (!zone) return undefined;
-		const mapping: Record<string, CardsDeckCard['snappedTo']> = {
-			left: 'left',
-			right: 'right',
-			top: 'top',
-			bottom: 'bottom',
-			'top-left': 'topleft',
-			'top-right': 'topright',
-			'bottom-left': 'bottomleft',
-			'bottom-right': 'bottomright'
-		};
-		return mapping[zone] || undefined;
+	function mapSnapZone(_zone: DeckCard['snappedTo']): CardsDeckCard['snappedTo'] {
+		// Snapping has been removed - always return undefined
+		return undefined;
 	}
 
 	function getTabIdForCard(card: CardsDeckCard): string | null {
@@ -818,9 +806,9 @@
 				deck.focusCard(existingCard.id);
 			}
 		} else if (session.type === 'agent') {
-			// It's an agent - open/focus the agent monitor card
+			// It's an agent - open/focus the agent card
 			deck.setMode('workspace');
-			deck.openOrFocusCard('agent-monitor', session.id, {
+			deck.openOrFocusCard('agent', session.id, {
 				title: session.title,
 				meta: { agentId: session.id }
 			});
@@ -863,8 +851,8 @@
 				break;
 			}
 			case 'agent':
-				deckCardType = 'agent-monitor';
-				title = 'Agent Monitor';
+				deckCardType = 'agent';
+				title = 'Agent';
 				break;
 			case 'terminal':
 				deckCardType = 'terminal';
@@ -947,65 +935,22 @@
 		const { width, height } = card.size;
 
 		// Apply bounds clamping to prevent cards from going off-screen
-		let clampedPos = workspaceRef.clampToBounds(x, y, width, height);
+		const clampedPos = workspaceRef.clampToBounds(x, y, width, height);
 
-		// Apply grid snapping if enabled
-		clampedPos = workspaceRef.snapToGrid(clampedPos.x, clampedPos.y);
-
-		// Check for card-to-card snapping
-		const snapResult = workspaceRef.checkCardSnapping(id, clampedPos.x, clampedPos.y, width, height);
-
-		// Update the card position with snapped coordinates
-		deck.moveCard(id, snapResult.x, snapResult.y);
-
-		// Show snap guides during drag
-		workspaceRef.updateSnapGuides(snapResult.guides);
-
-		// Also show edge snap preview if applicable
-		workspaceRef.showSnapPreview(snapResult.x, snapResult.y, width, height);
+		// Update the card position
+		deck.moveCard(id, clampedPos.x, clampedPos.y);
 	}
 
 	function handleCardResize(id: string, width: number, height: number) {
 		deck.resizeCard(id, width, height);
 	}
 
-	function handleCardDragEnd(id: string) {
-		if (workspaceRef) {
-			// Clear snap guides when drag ends
-			workspaceRef.clearSnapGuides();
-			workspaceRef.hideSnapPreview();
-
-			// Finalize edge snapping if card is near workspace edge
-			const card = deck.getCard(id);
-			if (card) {
-				workspaceRef.finalizeSnap(id, card.position.x, card.position.y, card.size.width, card.size.height);
-			}
-		}
+	function handleCardDragEnd(_id: string) {
+		// No-op: snapping has been removed
 	}
 
-	function handleCardResizeEnd(id: string) {
-		if (workspaceRef) {
-			// Clear snap guides when resize ends
-			workspaceRef.clearSnapGuides();
-		}
-	}
-
-	function handleCardSnap(id: string, snapTo: CardsDeckCard['snappedTo']) {
-		if (!snapTo) return;
-		const mapping: Record<string, DeckCard['snappedTo']> = {
-			left: 'left',
-			right: 'right',
-			top: 'top',
-			bottom: 'bottom',
-			topleft: 'top-left',
-			topright: 'top-right',
-			bottomleft: 'bottom-left',
-			bottomright: 'bottom-right'
-		};
-		const zone = mapping[snapTo] || null;
-		if (zone) {
-			deck.snapCard(id, zone);
-		}
+	function handleCardResizeEnd(_id: string) {
+		// No-op: snapping has been removed
 	}
 
 	function handleCardMaximize(id: string) {
@@ -1203,7 +1148,7 @@
 		onAgentClick={(agent) => {
 			// Open agent card in workspace
 			deck.setMode('workspace');
-			deck.openOrFocusCard('agent-monitor', agent.id, {
+			deck.openOrFocusCard('agent', agent.id, {
 				title: agent.name,
 				meta: { agentId: agent.id }
 			});
@@ -1241,7 +1186,7 @@
 								onOpenProjectCard={handleOpenProjectCard}
 								onOpenSettings={handleOpenChatSettings}
 							/>
-						{:else if card.type === 'agent' || card.type === 'agent-monitor' || card.type === 'agent-launcher'}
+						{:else if card.type === 'agent'}
 							<div class="p-4">
 								<p class="text-muted-foreground">Agent view (mobile)</p>
 							</div>
@@ -1309,10 +1254,7 @@
 					onCardFocus={handleCardFocus}
 					onCardMove={handleCardMove}
 					onCardResize={handleCardResize}
-					onCardSnap={handleCardSnap}
 					onCreateCard={handleCreateCard}
-					gridSnapEnabled={$gridSnapEnabled}
-					cardSnapEnabled={true}
 					layoutMode={$layoutMode}
 					onLayoutModeChange={handleLayoutModeChange}
 					onFocusNavigate={handleFocusNavigate}
@@ -1358,12 +1300,12 @@
 												<p>Initializing chat...</p>
 											</div>
 										{/if}
-									{:else if card.type === 'agent' || card.type === 'agent-monitor' || card.type === 'agent-launcher'}
+									{:else if card.type === 'agent'}
 										<AgentCard
 											{card}
-											agentId={card.dataId || card.meta?.agentId as string || card.id}
+											agentId={card.dataId || card.meta?.agentId as string}
 											onClose={() => handleCardClose(card.id)}
-																						onMaximize={() => handleCardMaximize(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
 											onFocus={() => handleCardFocus(card.id)}
 											onMove={(x, y) => handleCardMove(card.id, x, y)}
 											onResize={(w, h) => handleCardResize(card.id, w, h)}

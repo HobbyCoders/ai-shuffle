@@ -4,7 +4,6 @@
 	 *
 	 * Features:
 	 * - Contains all visible (non-minimized) cards
-	 * - Shows snap preview guides when dragging near edges
 	 * - Empty state with welcome message and create buttons
 	 * - Tracks workspace bounds
 	 * - Card Shuffle UI for layout mode switching
@@ -12,8 +11,8 @@
 
 	import { onMount } from 'svelte';
 	import { MessageSquare, Bot, Terminal } from 'lucide-svelte';
-	import type { DeckCard, CardType, SnapGuide, SnapResult } from './types';
-	import { SNAP_THRESHOLD, CARD_SNAP_THRESHOLD, SNAP_GRID, WORKSPACE_PADDING } from './types';
+	import type { DeckCard, CardType } from './types';
+	import { WORKSPACE_PADDING } from './types';
 	import type { Snippet } from 'svelte';
 	import type { LayoutMode } from '$lib/stores/deck';
 	import CardShuffle from './CardShuffle.svelte';
@@ -23,10 +22,7 @@
 		onCardFocus: (id: string) => void;
 		onCardMove: (id: string, x: number, y: number) => void;
 		onCardResize: (id: string, width: number, height: number) => void;
-		onCardSnap: (id: string, snapTo: DeckCard['snappedTo']) => void;
 		onCreateCard: (type: CardType) => void;
-		gridSnapEnabled?: boolean;
-		cardSnapEnabled?: boolean;
 		layoutMode?: LayoutMode;
 		onLayoutModeChange?: (mode: LayoutMode) => void;
 		onFocusNavigate?: (direction: 'prev' | 'next') => void;
@@ -39,19 +35,13 @@
 		onCardFocus,
 		onCardMove,
 		onCardResize,
-		onCardSnap,
 		onCreateCard,
-		gridSnapEnabled = false,
-		cardSnapEnabled = true,
 		layoutMode = 'freeflow',
 		onLayoutModeChange,
 		onFocusNavigate,
 		focusedCardId = null,
 		children
 	}: Props = $props();
-
-	// Only enable snapping in freeflow mode - all other layouts manage card positions automatically
-	const isSnappingEnabled = $derived(layoutMode === 'freeflow');
 
 	// Focus mode navigation state
 	const isFocusMode = $derived(layoutMode === 'focus');
@@ -76,19 +66,6 @@
 
 	let workspaceEl: HTMLDivElement | undefined = $state();
 	let workspaceBounds = $state({ width: 0, height: 0 });
-
-	// Snap preview state
-	let snapPreview = $state<{
-		show: boolean;
-		x: number;
-		y: number;
-		width: number;
-		height: number;
-	}>({ show: false, x: 0, y: 0, width: 0, height: 0 });
-
-	
-	// Card-to-card snap guides state
-	let snapGuides = $state<SnapGuide[]>([]);
 
 	// Track workspace size
 	function updateBounds() {
@@ -121,57 +98,6 @@
 	const maximizedCard = $derived(cards.find((c) => c.maximized));
 	const hasMaximizedCard = $derived(!!maximizedCard);
 
-	// Snap detection helper - only active in freeflow mode (all other layouts manage positions automatically)
-	function getSnapZone(x: number, y: number, width: number, height: number): DeckCard['snappedTo'] | undefined {
-		// Only enable snapping in freeflow mode
-		if (!isSnappingEnabled) return undefined;
-
-		const bounds = workspaceBounds;
-		const threshold = SNAP_THRESHOLD;
-
-		// Check corners first
-		if (x < threshold && y < threshold) return 'topleft';
-		if (x + width > bounds.width - threshold && y < threshold) return 'topright';
-		if (x < threshold && y + height > bounds.height - threshold) return 'bottomleft';
-		if (x + width > bounds.width - threshold && y + height > bounds.height - threshold) return 'bottomright';
-
-		// Check edges
-		if (x < threshold) return 'left';
-		if (x + width > bounds.width - threshold) return 'right';
-		if (y < threshold) return 'top';
-		if (y + height > bounds.height - threshold) return 'bottom';
-
-		return undefined;
-	}
-
-	// Get snap preview geometry
-	function getSnapGeometry(snapTo: DeckCard['snappedTo']): { x: number; y: number; width: number; height: number } {
-		const bounds = workspaceBounds;
-		const halfWidth = bounds.width / 2;
-		const halfHeight = bounds.height / 2;
-
-		switch (snapTo) {
-			case 'left':
-				return { x: 0, y: 0, width: halfWidth, height: bounds.height };
-			case 'right':
-				return { x: halfWidth, y: 0, width: halfWidth, height: bounds.height };
-			case 'top':
-				return { x: 0, y: 0, width: bounds.width, height: halfHeight };
-			case 'bottom':
-				return { x: 0, y: halfHeight, width: bounds.width, height: halfHeight };
-			case 'topleft':
-				return { x: 0, y: 0, width: halfWidth, height: halfHeight };
-			case 'topright':
-				return { x: halfWidth, y: 0, width: halfWidth, height: halfHeight };
-			case 'bottomleft':
-				return { x: 0, y: halfHeight, width: halfWidth, height: halfHeight };
-			case 'bottomright':
-				return { x: halfWidth, y: halfHeight, width: halfWidth, height: halfHeight };
-			default:
-				return { x: 0, y: 0, width: 0, height: 0 };
-		}
-	}
-
 	/**
 	 * Clamp position to keep card within workspace bounds
 	 * Ensures at least minVisible pixels of the card remain visible
@@ -190,232 +116,6 @@
 			x: Math.max(minX, Math.min(x, maxX)),
 			y: Math.max(minY, Math.min(y, maxY))
 		};
-	}
-
-	/**
-	 * Apply grid snapping to position
-	 */
-	export function snapToGrid(x: number, y: number): { x: number; y: number } {
-		if (!gridSnapEnabled) return { x, y };
-
-		return {
-			x: Math.round(x / SNAP_GRID) * SNAP_GRID,
-			y: Math.round(y / SNAP_GRID) * SNAP_GRID
-		};
-	}
-
-	/**
-	 * Check for card-to-card snapping alignment
-	 * Returns adjusted position and snap guides to display
-	 * Only enabled in freeflow mode (all other layouts manage positions automatically)
-	 */
-	export function checkCardSnapping(
-		cardId: string,
-		x: number,
-		y: number,
-		width: number,
-		height: number
-	): SnapResult {
-		// Only enable card-to-card snapping in freeflow mode
-		if (!cardSnapEnabled || !isSnappingEnabled) {
-			return { x, y, guides: [] };
-		}
-
-		const otherCards = visibleCards.filter(c => c.id !== cardId && !c.maximized);
-		const guides: SnapGuide[] = [];
-		let snappedX = x;
-		let snappedY = y;
-
-		// Card edges
-		const cardLeft = x;
-		const cardRight = x + width;
-		const cardTop = y;
-		const cardBottom = y + height;
-		const cardCenterX = x + width / 2;
-		const cardCenterY = y + height / 2;
-
-		// Check against each other card
-		for (const other of otherCards) {
-			const otherLeft = other.x;
-			const otherRight = other.x + other.width;
-			const otherTop = other.y;
-			const otherBottom = other.y + other.height;
-			const otherCenterX = other.x + other.width / 2;
-			const otherCenterY = other.y + other.height / 2;
-
-			// Vertical alignments (x-axis snapping)
-			// Left edge to left edge
-			if (Math.abs(cardLeft - otherLeft) < CARD_SNAP_THRESHOLD) {
-				snappedX = otherLeft;
-				guides.push({
-					type: 'vertical',
-					position: otherLeft,
-					start: Math.min(cardTop, otherTop),
-					end: Math.max(cardBottom, otherBottom)
-				});
-			}
-			// Right edge to right edge
-			else if (Math.abs(cardRight - otherRight) < CARD_SNAP_THRESHOLD) {
-				snappedX = otherRight - width;
-				guides.push({
-					type: 'vertical',
-					position: otherRight,
-					start: Math.min(cardTop, otherTop),
-					end: Math.max(cardBottom, otherBottom)
-				});
-			}
-			// Left edge to right edge (side-by-side)
-			else if (Math.abs(cardLeft - otherRight) < CARD_SNAP_THRESHOLD) {
-				snappedX = otherRight;
-				guides.push({
-					type: 'vertical',
-					position: otherRight,
-					start: Math.min(cardTop, otherTop),
-					end: Math.max(cardBottom, otherBottom)
-				});
-			}
-			// Right edge to left edge (side-by-side)
-			else if (Math.abs(cardRight - otherLeft) < CARD_SNAP_THRESHOLD) {
-				snappedX = otherLeft - width;
-				guides.push({
-					type: 'vertical',
-					position: otherLeft,
-					start: Math.min(cardTop, otherTop),
-					end: Math.max(cardBottom, otherBottom)
-				});
-			}
-			// Center to center (horizontal)
-			else if (Math.abs(cardCenterX - otherCenterX) < CARD_SNAP_THRESHOLD) {
-				snappedX = otherCenterX - width / 2;
-				guides.push({
-					type: 'vertical',
-					position: otherCenterX,
-					start: Math.min(cardTop, otherTop),
-					end: Math.max(cardBottom, otherBottom)
-				});
-			}
-
-			// Horizontal alignments (y-axis snapping)
-			// Top edge to top edge
-			if (Math.abs(cardTop - otherTop) < CARD_SNAP_THRESHOLD) {
-				snappedY = otherTop;
-				guides.push({
-					type: 'horizontal',
-					position: otherTop,
-					start: Math.min(cardLeft, otherLeft),
-					end: Math.max(cardRight, otherRight)
-				});
-			}
-			// Bottom edge to bottom edge
-			else if (Math.abs(cardBottom - otherBottom) < CARD_SNAP_THRESHOLD) {
-				snappedY = otherBottom - height;
-				guides.push({
-					type: 'horizontal',
-					position: otherBottom,
-					start: Math.min(cardLeft, otherLeft),
-					end: Math.max(cardRight, otherRight)
-				});
-			}
-			// Top edge to bottom edge (stacking)
-			else if (Math.abs(cardTop - otherBottom) < CARD_SNAP_THRESHOLD) {
-				snappedY = otherBottom;
-				guides.push({
-					type: 'horizontal',
-					position: otherBottom,
-					start: Math.min(cardLeft, otherLeft),
-					end: Math.max(cardRight, otherRight)
-				});
-			}
-			// Bottom edge to top edge (stacking)
-			else if (Math.abs(cardBottom - otherTop) < CARD_SNAP_THRESHOLD) {
-				snappedY = otherTop - height;
-				guides.push({
-					type: 'horizontal',
-					position: otherTop,
-					start: Math.min(cardLeft, otherLeft),
-					end: Math.max(cardRight, otherRight)
-				});
-			}
-			// Center to center (vertical)
-			else if (Math.abs(cardCenterY - otherCenterY) < CARD_SNAP_THRESHOLD) {
-				snappedY = otherCenterY - height / 2;
-				guides.push({
-					type: 'horizontal',
-					position: otherCenterY,
-					start: Math.min(cardLeft, otherLeft),
-					end: Math.max(cardRight, otherRight)
-				});
-			}
-		}
-
-		// Also snap to workspace edges (only if snapping is enabled)
-		if (isSnappingEnabled) {
-			if (Math.abs(x) < CARD_SNAP_THRESHOLD) {
-				snappedX = 0;
-				guides.push({ type: 'vertical', position: 0, start: 0, end: workspaceBounds.height });
-			} else if (Math.abs(x + width - workspaceBounds.width) < CARD_SNAP_THRESHOLD) {
-				snappedX = workspaceBounds.width - width;
-				guides.push({ type: 'vertical', position: workspaceBounds.width, start: 0, end: workspaceBounds.height });
-			}
-
-			if (Math.abs(y) < CARD_SNAP_THRESHOLD) {
-				snappedY = 0;
-				guides.push({ type: 'horizontal', position: 0, start: 0, end: workspaceBounds.width });
-			} else if (Math.abs(y + height - workspaceBounds.height) < CARD_SNAP_THRESHOLD) {
-				snappedY = workspaceBounds.height - height;
-				guides.push({ type: 'horizontal', position: workspaceBounds.height, start: 0, end: workspaceBounds.width });
-			}
-		}
-
-		return { x: snappedX, y: snappedY, guides };
-	}
-
-	/**
-	 * Update snap guides during drag
-	 */
-	export function updateSnapGuides(guides: SnapGuide[]) {
-		snapGuides = guides;
-	}
-
-	/**
-	 * Clear snap guides
-	 */
-	export function clearSnapGuides() {
-		snapGuides = [];
-	}
-
-	// Show snap preview while dragging (only in freeflow mode)
-	export function showSnapPreview(x: number, y: number, width: number, height: number) {
-		// Only show snap preview in freeflow mode
-		if (!isSnappingEnabled) {
-			snapPreview = { show: false, x: 0, y: 0, width: 0, height: 0 };
-			return;
-		}
-		const snapTo = getSnapZone(x, y, width, height);
-		if (snapTo) {
-			const geo = getSnapGeometry(snapTo);
-			snapPreview = { show: true, ...geo };
-		} else {
-			snapPreview = { show: false, x: 0, y: 0, width: 0, height: 0 };
-		}
-	}
-
-	export function hideSnapPreview() {
-		snapPreview = { show: false, x: 0, y: 0, width: 0, height: 0 };
-	}
-
-	// Finalize snap when drag ends (only in freeflow mode)
-	export function finalizeSnap(cardId: string, x: number, y: number, width: number, height: number) {
-		// Only finalize snapping in freeflow mode
-		if (!isSnappingEnabled) {
-			hideSnapPreview();
-			return;
-		}
-		const snapTo = getSnapZone(x, y, width, height);
-		if (snapTo) {
-			onCardSnap(cardId, snapTo);
-		}
-		hideSnapPreview();
 	}
 
 	// Card type config for create menu (used in empty state)
@@ -441,36 +141,6 @@
 			onFocusNavigate={onFocusNavigate}
 		/>
 	{/if}
-
-	<!-- Snap Preview Guide -->
-	{#if snapPreview.show}
-		<div
-			class="snap-preview"
-			style:left="{snapPreview.x}px"
-			style:top="{snapPreview.y}px"
-			style:width="{snapPreview.width}px"
-			style:height="{snapPreview.height}px"
-		></div>
-	{/if}
-
-	<!-- Card-to-Card Snap Guides -->
-	{#each snapGuides as guide}
-		{#if guide.type === 'vertical'}
-			<div
-				class="snap-guide snap-guide-vertical"
-				style:left="{guide.position}px"
-				style:top="{guide.start}px"
-				style:height="{guide.end - guide.start}px"
-			></div>
-		{:else}
-			<div
-				class="snap-guide snap-guide-horizontal"
-				style:left="{guide.start}px"
-				style:top="{guide.position}px"
-				style:width="{guide.end - guide.start}px"
-			></div>
-		{/if}
-	{/each}
 
 	<!-- Render cards via children snippet -->
 	{#if children}
@@ -527,36 +197,6 @@
 	.workspace.has-maximized {
 		/* Placeholder for maximized card styling - prevents z-index conflicts */
 		overflow: hidden;
-	}
-
-	/* Snap Preview */
-	.snap-preview {
-		position: absolute;
-		background: hsl(var(--primary) / 0.15);
-		border: 2px dashed hsl(var(--primary) / 0.5);
-		border-radius: 8px;
-		pointer-events: none;
-		z-index: 0;
-		transition: all 0.15s ease;
-	}
-
-	/* Card-to-Card Snap Guides */
-	.snap-guide {
-		position: absolute;
-		pointer-events: none;
-		z-index: 9999;
-	}
-
-	.snap-guide-vertical {
-		width: 1px;
-		background: hsl(var(--primary) / 0.7);
-		box-shadow: 0 0 4px hsl(var(--primary) / 0.5);
-	}
-
-	.snap-guide-horizontal {
-		height: 1px;
-		background: hsl(var(--primary) / 0.7);
-		box-shadow: 0 0 4px hsl(var(--primary) / 0.5);
 	}
 
 	/* Empty State */

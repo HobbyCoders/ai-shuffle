@@ -43,10 +43,6 @@ export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }>
   project: { width: 360, height: 300 },
 };
 
-export const SNAP_THRESHOLD = 20;
-export const SNAP_GRID = 10;
-export const CARD_SNAP_THRESHOLD = 12; // Threshold for card-to-card snapping
-
 /**
  * Workspace padding to keep cards visible and accessible
  * Left padding accounts for floating activity pill (56px wide + 16px from edge + 12px gap)
@@ -58,22 +54,3 @@ export const WORKSPACE_PADDING = {
   right: 10,     // Small right padding
   minVisible: 100 // Minimum visible area of card (header must stay visible)
 };
-
-/**
- * Represents a snap guide line for card-to-card alignment
- */
-export interface SnapGuide {
-  type: 'horizontal' | 'vertical';
-  position: number; // x for vertical, y for horizontal
-  start: number;    // start of the line
-  end: number;      // end of the line
-}
-
-/**
- * Result of checking for card-to-card snap alignment
- */
-export interface SnapResult {
-  x: number;
-  y: number;
-  guides: SnapGuide[];
-}
