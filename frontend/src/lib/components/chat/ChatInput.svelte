@@ -955,12 +955,16 @@
 	selectedProject={tab.project}
 	selectedModel={tab.modelOverride}
 	selectedMode={tab.permissionModeOverride}
+	effectiveModel={effectiveModel}
+	effectiveMode={effectiveMode}
 	contextUsage={{
 		used: contextUsed,
 		total: contextMax,
 		percentage: contextPercent
 	}}
 	{isBackgroundMode}
+	{isProfileLocked}
+	{isProjectLocked}
 	profiles={$profiles}
 	projects={$projects}
 	models={modelOptions}

@@ -19,10 +19,14 @@
 		onClose: () => void;
 		selectedProfile: string | null;
 		selectedProject: string | null;
-		selectedModel: string | null;
-		selectedMode: string | null;
+		selectedModel: string | null;  // Override value (null = use profile default)
+		selectedMode: string | null;   // Override value (null = use profile default)
+		effectiveModel: string;        // Actual model being used (override or profile default)
+		effectiveMode: string;         // Actual mode being used (override or profile default)
 		contextUsage: ContextUsage;
 		isBackgroundMode: boolean;
+		isProfileLocked?: boolean;
+		isProjectLocked?: boolean;
 		profiles: Profile[];
 		projects: Project[];
 		models: { value: string; label: string }[];
@@ -41,8 +45,12 @@
 		selectedProject,
 		selectedModel,
 		selectedMode,
+		effectiveModel,
+		effectiveMode,
 		contextUsage,
 		isBackgroundMode,
+		isProfileLocked = false,
+		isProjectLocked = false,
 		profiles,
 		projects,
 		models,
@@ -75,12 +83,15 @@
 	const selectedProjectName = $derived(
 		projects.find(p => p.id === selectedProject)?.name || 'Select Project'
 	);
-	const selectedModelLabel = $derived(
-		models.find(m => m.value === selectedModel)?.label || 'Default'
+	// For Model/Mode, show effective value with indicator if it's inherited from profile
+	const effectiveModelLabel = $derived(
+		models.find(m => m.value === effectiveModel)?.label || effectiveModel || 'Sonnet'
 	);
-	const selectedModeLabel = $derived(
-		modes.find(m => m.value === selectedMode)?.label || 'Default'
+	const effectiveModeLabel = $derived(
+		modes.find(m => m.value === effectiveMode)?.label || effectiveMode || 'Ask'
 	);
+	const isModelOverridden = $derived(selectedModel !== null);
+	const isModeOverridden = $derived(selectedMode !== null);
 
 	// Context usage color
 	const contextColor = $derived(
@@ -156,12 +167,18 @@
 			<div class="drawer-content">
 				<!-- Profile Selector -->
 				<div class="setting-group">
-					<label for="profile-select" class="setting-label">Profile</label>
+					<div class="setting-label-row">
+						<label for="profile-select" class="setting-label">Profile</label>
+						{#if isProfileLocked}
+							<span class="locked-badge">Locked</span>
+						{/if}
+					</div>
 					<select
 						id="profile-select"
 						value={selectedProfile || ''}
 						onchange={(e) => onProfileChange((e.target as HTMLSelectElement).value)}
 						class="setting-select"
+						disabled={isProfileLocked}
 					>
 						<option value="" disabled>Select Profile</option>
 						{#each profiles as profile}
@@ -172,12 +189,18 @@
 
 				<!-- Project Selector -->
 				<div class="setting-group">
-					<label for="project-select" class="setting-label">Project</label>
+					<div class="setting-label-row">
+						<label for="project-select" class="setting-label">Project</label>
+						{#if isProjectLocked}
+							<span class="locked-badge">Locked</span>
+						{/if}
+					</div>
 					<select
 						id="project-select"
 						value={selectedProject || ''}
 						onchange={(e) => onProjectChange((e.target as HTMLSelectElement).value)}
 						class="setting-select"
+						disabled={isProjectLocked}
 					>
 						<option value="" disabled>Select Project</option>
 						{#each projects as project}
@@ -191,17 +214,31 @@
 
 				<!-- Model Selector -->
 				<div class="setting-group">
-					<label for="model-select" class="setting-label">Model</label>
+					<div class="setting-label-row">
+						<label for="model-select" class="setting-label">Model</label>
+						{#if isModelOverridden}
+							<button
+								type="button"
+								class="reset-btn"
+								onclick={() => onModelChange(null)}
+								title="Reset to profile default"
+							>
+								Reset
+							</button>
+						{:else}
+							<span class="inherited-badge">From Profile</span>
+						{/if}
+					</div>
 					<select
 						id="model-select"
-						value={selectedModel || ''}
+						value={effectiveModel}
 						onchange={(e) => {
 							const value = (e.target as HTMLSelectElement).value;
-							onModelChange(value === '' ? null : value);
+							onModelChange(value);
 						}}
 						class="setting-select"
+						class:inherited={!isModelOverridden}
 					>
-						<option value="">Default</option>
 						{#each models as model}
 							<option value={model.value}>{model.label}</option>
 						{/each}
@@ -210,17 +247,31 @@
 
 				<!-- Permission Mode Selector -->
 				<div class="setting-group">
-					<label for="mode-select" class="setting-label">Permission Mode</label>
+					<div class="setting-label-row">
+						<label for="mode-select" class="setting-label">Permission Mode</label>
+						{#if isModeOverridden}
+							<button
+								type="button"
+								class="reset-btn"
+								onclick={() => onModeChange(null)}
+								title="Reset to profile default"
+							>
+								Reset
+							</button>
+						{:else}
+							<span class="inherited-badge">From Profile</span>
+						{/if}
+					</div>
 					<select
 						id="mode-select"
-						value={selectedMode || ''}
+						value={effectiveMode}
 						onchange={(e) => {
 							const value = (e.target as HTMLSelectElement).value;
-							onModeChange(value === '' ? null : value);
+							onModeChange(value);
 						}}
 						class="setting-select"
+						class:inherited={!isModeOverridden}
 					>
-						<option value="">Default</option>
 						{#each modes as mode}
 							<option value={mode.value}>{mode.label}</option>
 						{/each}
@@ -396,6 +447,47 @@
 		user-select: none;
 	}
 
+	.setting-label-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+	}
+
+	.locked-badge {
+		font-size: 0.6875rem;
+		font-weight: 500;
+		color: var(--muted-foreground);
+		background: color-mix(in srgb, var(--muted) 50%, transparent);
+		padding: 0.125rem 0.5rem;
+		border-radius: 9999px;
+		text-transform: uppercase;
+		letter-spacing: 0.03em;
+	}
+
+	.inherited-badge {
+		font-size: 0.6875rem;
+		font-weight: 500;
+		color: var(--primary);
+		opacity: 0.8;
+	}
+
+	.reset-btn {
+		font-size: 0.6875rem;
+		font-weight: 500;
+		color: var(--primary);
+		background: transparent;
+		border: none;
+		padding: 0.125rem 0.375rem;
+		border-radius: 0.25rem;
+		cursor: pointer;
+		transition: background-color 0.15s;
+	}
+
+	.reset-btn:hover {
+		background: color-mix(in srgb, var(--primary) 15%, transparent);
+	}
+
 	/* Select */
 	.setting-select {
 		width: 100%;
@@ -422,6 +514,17 @@
 	:global(.dark) .setting-select {
 		background: oklch(0.18 0.01 260);
 		border-color: oklch(0.3 0.01 260);
+	}
+
+	.setting-select:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+		background: color-mix(in srgb, var(--muted) 20%, transparent);
+	}
+
+	.setting-select.inherited {
+		border-style: dashed;
+		opacity: 0.85;
 	}
 
 	/* Divider */
