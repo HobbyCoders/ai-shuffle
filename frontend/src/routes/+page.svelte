@@ -152,7 +152,8 @@
 
 	// Derived overlay data - automatically updates when dependencies change
 	const chatSettingsOverlayData = $derived.by(() => {
-		if (overlayType !== 'chat-settings') return {};
+		// Compute data when desktop overlay OR mobile bottom sheet is open
+		if (overlayType !== 'chat-settings' && !showMobileSettingsSheet) return {};
 
 		const tab = $activeTab;
 		console.log('[OverlayData] Recomputing for activeTab:', tab?.id, 'backgroundEnabled:', tab?.backgroundEnabled, 'branch:', tab?.backgroundBranch);
