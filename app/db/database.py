@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 
 # Schema version for migrations
 # v21: Force re-run to ensure agent_runs, agent_tasks, agent_logs tables exist
-SCHEMA_VERSION = 21
+# v22: Add credential_policies and api_user_credentials tables
+SCHEMA_VERSION = 22
 
 
 def get_connection() -> sqlite3.Connection:
