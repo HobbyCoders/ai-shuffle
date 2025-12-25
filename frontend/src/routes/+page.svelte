@@ -67,6 +67,10 @@
 	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
 	import CreateMenu from '$lib/components/deck/CreateMenu.svelte';
 
+	// Mobile components
+	import BottomSheet from '$lib/components/chat/BottomSheet.svelte';
+	import ChatSettingsOverlay from '$lib/components/deck/overlays/ChatSettingsOverlay.svelte';
+
 	// Types from deck/types
 	import type {
 		ActivityMode,
@@ -88,6 +92,9 @@
 	// Activity Panel State
 	let activityPanelTab = $state<ActivityTabType>('threads');
 	let overlayType = $state<OverlayType>(null);
+
+	// Mobile Settings Sheet
+	let showMobileSettingsSheet = $state(false);
 
 	// Stable callbacks for chat settings (defined once, reused)
 	function handleChatSettingsProfileChange(profileId: string) {
@@ -1040,7 +1047,13 @@
 	}
 
 	function handleOpenChatSettings() {
-		// Toggle overlay if already open
+		// On mobile, use the bottom sheet instead of the hidden side panel
+		if (isMobile) {
+			showMobileSettingsSheet = !showMobileSettingsSheet;
+			return;
+		}
+
+		// Desktop: Toggle overlay if already open
 		if (overlayType === 'chat-settings') {
 			overlayType = null;
 			// Also collapse the side panel when closing settings
@@ -1053,6 +1066,10 @@
 
 		// Just set the overlay type - data is derived reactively
 		overlayType = 'chat-settings';
+	}
+
+	function handleCloseMobileSettings() {
+		showMobileSettingsSheet = false;
 	}
 
 	function handleOpenProjectCard(editId?: string) {
@@ -1582,6 +1599,18 @@
 			onClose={closeTerminalModal}
 		/>
 	{/if}
+
+	<!-- Mobile Settings Bottom Sheet -->
+	<BottomSheet
+		open={showMobileSettingsSheet}
+		onClose={handleCloseMobileSettings}
+		title="Chat Settings"
+	>
+		<ChatSettingsOverlay
+			{...chatSettingsOverlayData}
+			onClose={handleCloseMobileSettings}
+		/>
+	</BottomSheet>
 
 {/if}
 

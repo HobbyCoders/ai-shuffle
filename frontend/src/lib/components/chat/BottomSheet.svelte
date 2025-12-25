@@ -1,19 +1,19 @@
 <script lang="ts">
 	/**
-	 * BottomSheet - Mobile-optimized selection UI
+	 * BottomSheet - Mobile-optimized full-screen modal
 	 *
 	 * Features:
-	 * - Slides up from bottom of screen
+	 * - Slides up from bottom to full screen
 	 * - Dark backdrop with blur
 	 * - Rounded top corners
-	 * - Drag handle (pill shape)
+	 * - Drag handle (pill shape) - swipe down to close
 	 * - Close button in header
-	 * - Maximum height of 80vh
+	 * - Full height (100dvh) with safe area support
 	 * - Scrollable content area
 	 * - Touch-friendly tap targets (min 44px)
 	 * - Prevents body scroll when open
 	 * - Close on backdrop tap or Escape key
-	 * - Safe area padding for iOS notch
+	 * - Safe area padding for iOS notch (top and bottom)
 	 */
 
 	import type { Snippet } from 'svelte';
@@ -129,27 +129,40 @@
 		<div
 			bind:this={sheetElement}
 			class="
-				relative w-full max-w-2xl
+				relative w-full
 				bg-card border-t border-l border-r border-border
 				rounded-t-3xl
 				shadow-2xl
 				flex flex-col
-				max-h-[80vh]
-				animate-slide-up
+				h-[100dvh]
+				pt-[env(safe-area-inset-top,0px)]
 				pb-[env(safe-area-inset-bottom,0px)]
+				animate-slide-up
 			"
 			onclick={handleSheetClick}
-			ontouchstart={handleSwipeStart}
-			ontouchmove={handleSwipeMove}
-			ontouchend={handleSwipeEnd}
 		>
-			<!-- Drag Handle -->
-			<div class="flex justify-center pt-3 pb-2">
+			<!-- Drag Handle Area - swipe here to close -->
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div
+				class="flex justify-center pt-3 pb-2 cursor-grab active:cursor-grabbing touch-none"
+				ontouchstart={handleSwipeStart}
+				ontouchmove={handleSwipeMove}
+				ontouchend={handleSwipeEnd}
+				onpointerdown={handleSwipeStart}
+				onpointermove={handleSwipeMove}
+				onpointerup={handleSwipeEnd}
+			>
 				<div class="w-12 h-1.5 bg-muted-foreground/30 rounded-full"></div>
 			</div>
 
-			<!-- Header -->
-			<header class="shrink-0 px-6 py-3 flex items-center justify-between">
+			<!-- Header - also draggable -->
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<header
+				class="shrink-0 px-6 py-3 flex items-center justify-between touch-none"
+				ontouchstart={handleSwipeStart}
+				ontouchmove={handleSwipeMove}
+				ontouchend={handleSwipeEnd}
+			>
 				<h2 id="bottom-sheet-title" class="text-lg font-semibold text-foreground">
 					{title}
 				</h2>
