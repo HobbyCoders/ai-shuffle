@@ -66,7 +66,6 @@
 	import Canvas from '$lib/components/canvas/Canvas.svelte';
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
-	import NewItemModal from '$lib/components/NewItemModal.svelte';
 
 	// Types from deck/types
 	import type {
@@ -99,7 +98,6 @@
 	let showCanvas = $state(false);
 	let showSpotlight = $state(false);
 	let showAdvancedSearch = $state(false);
-	let showNewItemModal = $state(false);
 
 	// Terminal modal state
 	let terminalCommand = $state('/resume');
@@ -393,9 +391,7 @@
 				category: 'general',
 				allowInInput: true,
 				action: () => {
-					if (showNewItemModal) {
-						showNewItemModal = false;
-					} else if (showKeyboardShortcuts) {
+					if (showKeyboardShortcuts) {
 						showKeyboardShortcuts = false;
 					} else if (showAdvancedSearch) {
 						showAdvancedSearch = false;
@@ -934,7 +930,7 @@
 		currentSession={null}
 		{runningProcesses}
 		onModeChange={handleModeChange}
-		onLogoClick={() => showNewItemModal = true}
+		onLogoClick={() => handleCreateCard('chat')}
 		onSettingsClick={() => handleCreateCard('settings')}
 		onContextToggle={() => deck.toggleContextPanel()}
 		onSessionClick={handleSessionClick}
@@ -1333,13 +1329,6 @@
 		/>
 	{/if}
 
-	<!-- New Item Modal (Plus Button Popup) -->
-	<NewItemModal
-		bind:show={showNewItemModal}
-		on:close={() => showNewItemModal = false}
-		on:newChat={() => handleCreateCard('chat')}
-		on:newAgent={() => handleCreateCard('agent')}
-	/>
 {/if}
 
 <style>
