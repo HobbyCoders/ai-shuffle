@@ -900,9 +900,93 @@
 	}
 
 	function handleOpenChatSettings() {
-		// Open the chat settings overlay in the Activity Panel
+		// Toggle overlay if already open
+		if (overlayType === 'chat-settings') {
+			overlayType = null;
+			overlayData = {};
+			return;
+		}
+
+		// Expand the context panel if collapsed
+		deck.expandContextPanel();
+
+		// Get current tab data
+		const tab = $activeTab;
+		if (!tab) {
+			overlayType = 'chat-settings';
+			overlayData = {};
+			return;
+		}
+
+		// Get profile settings for effective values
+		const currentProfile = $profiles.find(p => p.id === tab.profile);
+		const profileModel = currentProfile?.config?.model || 'sonnet';
+		const profileMode = currentProfile?.config?.permission_mode || 'default';
+
+		// Calculate context usage
+		const autocompactBuffer = 45000;
+		const contextUsed = (tab.contextUsed ?? (tab.totalTokensIn + tab.totalCacheCreationTokens + tab.totalCacheReadTokens)) + autocompactBuffer;
+		const contextMax = tab.contextMax || 200000;
+		const contextPercent = Math.min((contextUsed / contextMax) * 100, 100);
+
+		// Build overlay data with all settings
 		overlayType = 'chat-settings';
-		overlayData = {};
+		overlayData = {
+			// Current values
+			selectedProfile: tab.profile,
+			selectedProject: tab.project,
+			selectedModel: tab.modelOverride,
+			selectedMode: tab.permissionModeOverride,
+			effectiveModel: tab.modelOverride || profileModel,
+			effectiveMode: tab.permissionModeOverride || profileMode,
+			contextUsage: {
+				used: contextUsed,
+				total: contextMax,
+				percentage: contextPercent
+			},
+
+			// Locked states
+			isProfileLocked: false, // Could be locked by API user
+			isProjectLocked: !!tab.sessionId, // Locked if session exists
+
+			// Options
+			profiles: $profiles,
+			projects: $projects,
+			models: [
+				{ value: 'sonnet', label: 'Sonnet' },
+				{ value: 'sonnet-1m', label: 'Sonnet 1M' },
+				{ value: 'opus', label: 'Opus' },
+				{ value: 'haiku', label: 'Haiku' }
+			],
+			modes: [
+				{ value: 'default', label: 'Ask' },
+				{ value: 'acceptEdits', label: 'Auto-Accept' },
+				{ value: 'plan', label: 'Plan' },
+				{ value: 'bypassPermissions', label: 'Bypass' }
+			],
+
+			// Callbacks
+			onProfileChange: (profileId: string) => {
+				if (tab) tabs.setTabProfile(tab.id, profileId);
+				// Refresh overlay data
+				handleOpenChatSettings();
+			},
+			onProjectChange: (projectId: string) => {
+				if (tab) tabs.setTabProject(tab.id, projectId);
+				// Refresh overlay data
+				handleOpenChatSettings();
+			},
+			onModelChange: (model: string | null) => {
+				if (tab) tabs.setTabModelOverride(tab.id, model);
+				// Refresh overlay data
+				handleOpenChatSettings();
+			},
+			onModeChange: (mode: string | null) => {
+				if (tab) tabs.setTabPermissionModeOverride(tab.id, mode);
+				// Refresh overlay data
+				handleOpenChatSettings();
+			}
+		};
 	}
 
 	function handleOpenProjectCard(editId?: string) {

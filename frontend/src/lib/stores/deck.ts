@@ -1126,6 +1126,16 @@ function createDeckStore() {
 		},
 
 		/**
+		 * Expand context panel (set collapsed to false)
+		 */
+		expandContextPanel(): void {
+			updateAndPersist((state) => ({
+				...state,
+				contextPanelCollapsed: false
+			}));
+		},
+
+		/**
 		 * Set snap enabled
 		 */
 		setSnapEnabled(enabled: boolean): void {

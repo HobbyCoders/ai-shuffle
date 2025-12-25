@@ -1,13 +1,13 @@
 <script lang="ts">
 	/**
-	 * ActivityOverlay - Slide-up overlay container for settings panels
+	 * ActivityOverlay - Full-screen overlay for settings panels
 	 *
-	 * Slides up from the bottom of the Activity Panel to show context-specific
+	 * Takes over the entire Activity Panel to show context-specific
 	 * settings like chat configuration, agent setup, etc.
 	 */
 
 	import { X } from 'lucide-svelte';
-	import { fade, fly } from 'svelte/transition';
+	import { fade } from 'svelte/transition';
 	import type { OverlayType } from './ActivityPanel.svelte';
 	import ChatSettingsOverlay from './overlays/ChatSettingsOverlay.svelte';
 
@@ -26,12 +26,6 @@
 	// Type-safe data for overlays
 	const chatSettingsData = $derived(data as Record<string, unknown>);
 
-	function handleBackdropClick(e: MouseEvent) {
-		if (e.target === e.currentTarget) {
-			onClose?.();
-		}
-	}
-
 	function handleKeyDown(e: KeyboardEvent) {
 		if (e.key === 'Escape') {
 			onClose?.();
@@ -42,62 +36,43 @@
 <svelte:window onkeydown={handleKeyDown} />
 
 {#if type}
-	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 	<div
-		class="overlay-backdrop"
-		onclick={handleBackdropClick}
+		class="overlay-panel"
 		transition:fade={{ duration: 150 }}
 	>
-		<div
-			class="overlay-panel"
-			transition:fly={{ y: 200, duration: 200 }}
-		>
-			<!-- Overlay Header -->
-			<div class="overlay-header">
-				<span class="overlay-title">
-					{#if type === 'chat-settings'}
-						Chat Settings
-					{/if}
-				</span>
-				<button
-					type="button"
-					class="close-btn"
-					onclick={() => onClose?.()}
-					aria-label="Close overlay"
-				>
-					<X size={16} />
-				</button>
-			</div>
-
-			<!-- Overlay Content -->
-			<div class="overlay-content">
+		<!-- Overlay Header -->
+		<div class="overlay-header">
+			<span class="overlay-title">
 				{#if type === 'chat-settings'}
-					<ChatSettingsOverlay {...chatSettingsData} onClose={onClose} />
+					Chat Settings
 				{/if}
-			</div>
+			</span>
+			<button
+				type="button"
+				class="close-btn"
+				onclick={() => onClose?.()}
+				aria-label="Close overlay"
+			>
+				<X size={16} />
+			</button>
+		</div>
+
+		<!-- Overlay Content -->
+		<div class="overlay-content">
+			{#if type === 'chat-settings'}
+				<ChatSettingsOverlay {...chatSettingsData} onClose={onClose} />
+			{/if}
 		</div>
 	</div>
 {/if}
 
 <style>
-	.overlay-backdrop {
-		position: absolute;
-		inset: 0;
-		background: rgba(0, 0, 0, 0.4);
-		z-index: 100;
-		display: flex;
-		flex-direction: column;
-		justify-content: flex-end;
-	}
-
 	.overlay-panel {
-		background: var(--card);
-		border-top: 1px solid var(--border);
-		border-radius: 12px 12px 0 0;
-		max-height: 85%;
 		display: flex;
 		flex-direction: column;
-		box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.15);
+		height: 100%;
+		width: 100%;
+		background: var(--card);
 	}
 
 	.overlay-header {
@@ -107,6 +82,7 @@
 		padding: 12px 16px;
 		border-bottom: 1px solid var(--border);
 		flex-shrink: 0;
+		background: var(--card);
 	}
 
 	.overlay-title {

@@ -122,51 +122,52 @@
 
 	{#if !collapsed}
 		<div class="panel-content">
-			<!-- Fixed Header: Active Sessions -->
-			<ActivityHeader
-				sessions={activeSessions}
-				onSessionClick={onSessionClick}
-			/>
-
-			<!-- Tab Navigation -->
-			<ActivityTabs
-				{activeTab}
-				badges={tabBadges}
-				onTabChange={handleTabChange}
-			/>
-
-			<!-- Tab Content Area -->
-			<div class="tab-content" class:has-overlay={hasActiveOverlay}>
-				{#if activeTab === 'threads'}
-					<ThreadsTabContent
-						{recentSessions}
-						{onHistorySessionClick}
-					/>
-				{:else if activeTab === 'agents'}
-					<AgentsTabContent
-						running={runningAgents}
-						completed={completedAgents}
-						{onAgentClick}
-					/>
-				{:else if activeTab === 'studio'}
-					<StudioTabContent
-						{generations}
-						{onGenerationClick}
-					/>
-				{:else if activeTab === 'info'}
-					<InfoTabContent
-						{sessionInfo}
-					/>
-				{/if}
-			</div>
-
-			<!-- Overlay Container -->
 			{#if hasActiveOverlay}
+				<!-- Full-screen overlay mode -->
 				<ActivityOverlay
 					type={overlayType}
 					data={overlayData}
 					onClose={onOverlayClose}
 				/>
+			{:else}
+				<!-- Normal panel mode -->
+				<!-- Fixed Header: Active Sessions -->
+				<ActivityHeader
+					sessions={activeSessions}
+					onSessionClick={onSessionClick}
+				/>
+
+				<!-- Tab Navigation -->
+				<ActivityTabs
+					{activeTab}
+					badges={tabBadges}
+					onTabChange={handleTabChange}
+				/>
+
+				<!-- Tab Content Area -->
+				<div class="tab-content">
+					{#if activeTab === 'threads'}
+						<ThreadsTabContent
+							{recentSessions}
+							{onHistorySessionClick}
+						/>
+					{:else if activeTab === 'agents'}
+						<AgentsTabContent
+							running={runningAgents}
+							completed={completedAgents}
+							{onAgentClick}
+						/>
+					{:else if activeTab === 'studio'}
+						<StudioTabContent
+							{generations}
+							{onGenerationClick}
+						/>
+					{:else if activeTab === 'info'}
+						<InfoTabContent
+							{sessionInfo}
+						/>
+					{/if}
+				</div>
 			{/if}
 		</div>
 	{/if}
@@ -239,11 +240,5 @@
 		overflow-x: hidden;
 		padding: 12px;
 		min-height: 0;
-	}
-
-	.tab-content.has-overlay {
-		/* Dim content when overlay is active */
-		opacity: 0.3;
-		pointer-events: none;
 	}
 </style>
