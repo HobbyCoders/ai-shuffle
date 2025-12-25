@@ -2856,6 +2856,8 @@ function createTabsStore() {
 					baseBranch: tab.backgroundBranch || 'main',
 					// PR configuration
 					autoPr: tab.backgroundAutoPR,
+					// Auto-merge and cleanup (merge PR, delete branch, remove worktree)
+					autoMerge: tab.backgroundAutoMerge,
 					// Duration (0 = unlimited)
 					maxDurationMinutes: tab.backgroundMaxDurationMinutes
 				});

@@ -53,6 +53,7 @@ class AgentLaunchRequest(BaseModel):
     project_id: Optional[str] = Field(None, description="Project ID to work in")
     auto_branch: bool = Field(True, description="Automatically create a git branch (always enabled)")
     auto_pr: bool = Field(True, description="Automatically create a pull request on completion (always enabled)")
+    auto_merge: bool = Field(False, description="Automatically merge the PR and cleanup worktree/branches after completion")
     auto_review: bool = Field(False, description="Automatically review the PR after creation (disabled)")
     max_duration_minutes: int = Field(0, ge=0, le=480, description="Maximum run duration in minutes (0 = unlimited, default)")
     base_branch: Optional[str] = Field(None, description="Base branch for worktree (defaults to main/master)")
@@ -205,6 +206,7 @@ async def launch_agent(request: AgentLaunchRequest, token: str = Depends(require
         project_id=request.project_id,
         auto_branch=request.auto_branch,
         auto_pr=request.auto_pr,
+        auto_merge=request.auto_merge,
         auto_review=request.auto_review,
         max_duration_minutes=request.max_duration_minutes,
         base_branch=request.base_branch

@@ -469,6 +469,7 @@ function createAgentsStore() {
 			projectId?: string;
 			autoBranch?: boolean;
 			autoPr?: boolean;
+			autoMerge?: boolean;
 			autoReview?: boolean;
 			maxDurationMinutes?: number;
 			baseBranch?: string;
@@ -482,6 +483,7 @@ function createAgentsStore() {
 					project_id: options.projectId,
 					auto_branch: options.autoBranch ?? true,
 					auto_pr: options.autoPr ?? true,
+					auto_merge: options.autoMerge ?? false,
 					auto_review: options.autoReview ?? false,
 					max_duration_minutes: options.maxDurationMinutes ?? 0,
 					base_branch: options.baseBranch

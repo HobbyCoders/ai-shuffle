@@ -601,6 +601,7 @@ def _create_schema(cursor: sqlite3.Cursor):
             pr_url TEXT,
             auto_branch BOOLEAN DEFAULT TRUE,
             auto_pr BOOLEAN DEFAULT FALSE,
+            auto_merge BOOLEAN DEFAULT FALSE,
             auto_review BOOLEAN DEFAULT FALSE,
             max_duration_minutes INTEGER DEFAULT 30,
             sdk_session_id TEXT,
@@ -617,6 +618,12 @@ def _create_schema(cursor: sqlite3.Cursor):
     # Migration: Add base_branch column to agent_runs (for existing DBs)
     try:
         cursor.execute("ALTER TABLE agent_runs ADD COLUMN base_branch TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
+    # Migration: Add auto_merge column to agent_runs (for existing DBs)
+    try:
+        cursor.execute("ALTER TABLE agent_runs ADD COLUMN auto_merge BOOLEAN DEFAULT FALSE")
     except sqlite3.OperationalError:
         pass  # Column already exists
 
@@ -3856,6 +3863,7 @@ def create_agent_run(
     project_id: Optional[str] = None,
     auto_branch: bool = True,
     auto_pr: bool = False,
+    auto_merge: bool = False,
     auto_review: bool = False,
     max_duration_minutes: int = 30,
     base_branch: Optional[str] = None
@@ -3867,10 +3875,10 @@ def create_agent_run(
         cursor.execute(
             """INSERT INTO agent_runs
                (id, name, prompt, status, progress, profile_id, project_id,
-                auto_branch, auto_pr, auto_review, max_duration_minutes, base_branch, started_at)
-               VALUES (?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                auto_branch, auto_pr, auto_merge, auto_review, max_duration_minutes, base_branch, started_at)
+               VALUES (?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (agent_run_id, name, prompt, profile_id, project_id,
-             auto_branch, auto_pr, auto_review, max_duration_minutes, base_branch, now)
+             auto_branch, auto_pr, auto_merge, auto_review, max_duration_minutes, base_branch, now)
         )
     return get_agent_run(agent_run_id)
 

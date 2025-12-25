@@ -411,7 +411,7 @@
 					<span class="checkbox-text">Auto-create PR when done</span>
 				</label>
 
-				<!-- Auto-Merge (dangerous) -->
+				<!-- Auto-Merge & Cleanup (dangerous) -->
 				<label class="checkbox-label" class:dangerous={backgroundConfig.autoMerge}>
 					<input
 						type="checkbox"
@@ -421,7 +421,7 @@
 					/>
 					<span class="checkbox-box"></span>
 					<span class="checkbox-text">
-						Auto-merge to {defaultBranch}
+						Auto-merge & cleanup ({backgroundConfig.branch || defaultBranch})
 						{#if backgroundConfig.autoMerge}
 							<span class="warning-badge">Dangerous</span>
 						{/if}

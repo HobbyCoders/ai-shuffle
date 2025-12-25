@@ -199,6 +199,7 @@ class AgentExecutionEngine:
         project_id: Optional[str] = None,
         auto_branch: bool = True,
         auto_pr: bool = True,
+        auto_merge: bool = False,
         auto_review: bool = False,
         max_duration_minutes: int = 0,
         base_branch: Optional[str] = None
@@ -211,6 +212,7 @@ class AgentExecutionEngine:
         Simplified workflow:
         - Always creates a new feature branch (auto_branch=True)
         - Always creates a PR on completion (auto_pr=True)
+        - Optionally merge PR and cleanup (auto_merge=False)
         - Runs until completion (max_duration_minutes=0 = unlimited)
         - No auto-review (auto_review=False)
         """
@@ -225,6 +227,7 @@ class AgentExecutionEngine:
             project_id=project_id,
             auto_branch=auto_branch,
             auto_pr=auto_pr,
+            auto_merge=auto_merge,
             auto_review=auto_review,
             max_duration_minutes=max_duration_minutes,
             base_branch=base_branch
@@ -597,6 +600,11 @@ class AgentExecutionEngine:
         if agent_run.get("auto_review") and agent_run_updated.get("pr_url"):
             await self._trigger_auto_review(agent_run_id, agent_run_updated)
 
+        # Handle auto-merge if enabled and PR was created
+        agent_run_updated = database.get_agent_run(agent_run_id)
+        if agent_run.get("auto_merge") and agent_run_updated.get("pr_url"):
+            await self._merge_and_cleanup(agent_run_id, agent_run, state, agent_run_updated.get("pr_url"))
+
         await self._broadcast(agent_run_id, "agent_completed", {
             "status": AgentStatus.COMPLETED.value,
             "progress": 100,
@@ -898,6 +906,103 @@ class AgentExecutionEngine:
             self._log(agent_run_id, "PR creation timed out", "error")
         except Exception as e:
             self._log(agent_run_id, f"PR creation failed: {type(e).__name__}: {e}", "error")
+
+    async def _merge_and_cleanup(
+        self,
+        agent_run_id: str,
+        agent_run: Dict[str, Any],
+        state: AgentRunState,
+        pr_url: str
+    ):
+        """
+        Merge the PR and cleanup:
+        1. Merge the PR using gh CLI
+        2. Delete the remote branch
+        3. Delete the local branch
+        4. Remove the worktree
+        """
+        import subprocess
+
+        if not pr_url or not state.worktree_path or not state.branch_name:
+            self._log(agent_run_id, "Cannot merge: missing PR URL, worktree, or branch", "warning")
+            return
+
+        self._log(agent_run_id, f"Auto-merging PR and cleaning up: {pr_url}")
+
+        try:
+            # Step 1: Merge the PR
+            self._log(agent_run_id, "Merging PR...")
+            merge_result = subprocess.run(
+                ["gh", "pr", "merge", pr_url, "--squash", "--delete-branch"],
+                capture_output=True,
+                text=True,
+                cwd=state.worktree_path,
+                timeout=120
+            )
+
+            if merge_result.returncode != 0:
+                self._log(agent_run_id, f"Failed to merge PR: {merge_result.stderr}", "error")
+                return
+
+            self._log(agent_run_id, "PR merged successfully")
+
+            # Step 2: Remove the worktree
+            self._log(agent_run_id, f"Removing worktree at {state.worktree_path}...")
+            project_id = agent_run.get("project_id")
+            if project_id:
+                project = database.get_project(project_id)
+                if project:
+                    project_path = str(settings.workspace_dir / project["path"])
+
+                    # Remove worktree using git command
+                    remove_result = subprocess.run(
+                        ["git", "worktree", "remove", state.worktree_path, "--force"],
+                        capture_output=True,
+                        text=True,
+                        cwd=project_path,
+                        timeout=60
+                    )
+
+                    if remove_result.returncode == 0:
+                        self._log(agent_run_id, "Worktree removed successfully")
+                    else:
+                        self._log(agent_run_id, f"Failed to remove worktree: {remove_result.stderr}", "warning")
+
+                    # Prune worktrees
+                    subprocess.run(
+                        ["git", "worktree", "prune"],
+                        capture_output=True,
+                        cwd=project_path,
+                        timeout=30
+                    )
+
+                    # Step 3: Delete local branch if it still exists
+                    self._log(agent_run_id, f"Deleting local branch {state.branch_name}...")
+                    delete_result = subprocess.run(
+                        ["git", "branch", "-D", state.branch_name],
+                        capture_output=True,
+                        text=True,
+                        cwd=project_path,
+                        timeout=30
+                    )
+
+                    if delete_result.returncode == 0:
+                        self._log(agent_run_id, "Local branch deleted")
+                    else:
+                        # Branch might already be deleted by gh pr merge --delete-branch
+                        self._log(agent_run_id, f"Local branch cleanup: {delete_result.stderr.strip()}", "debug")
+
+            # Update worktree status in database
+            worktree_id = agent_run.get("worktree_id")
+            if worktree_id:
+                database.update_worktree(worktree_id, status="removed")
+
+            self._log(agent_run_id, "Merge and cleanup completed successfully")
+
+        except subprocess.TimeoutExpired as e:
+            self._log(agent_run_id, f"Merge/cleanup operation timed out: {e}", "error")
+        except Exception as e:
+            self._log(agent_run_id, f"Merge/cleanup failed: {type(e).__name__}: {e}", "error")
 
     async def _trigger_auto_review(self, agent_run_id: str, agent_run: Dict[str, Any]):
         """Trigger an automatic code review for the PR"""
