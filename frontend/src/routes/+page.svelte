@@ -1044,7 +1044,7 @@
 		if (overlayType === 'chat-settings') {
 			overlayType = null;
 			// Also collapse the side panel when closing settings
-			deck.toggleContextPanel();
+			deck.collapseContextPanel();
 			return;
 		}
 
@@ -1176,7 +1176,13 @@
 		onModeChange={handleModeChange}
 		onLogoClick={() => showCreateMenu = !showCreateMenu}
 		onSettingsClick={() => handleCreateCard('settings')}
-		onContextToggle={() => deck.toggleContextPanel()}
+		onContextToggle={() => {
+			deck.toggleContextPanel();
+			// Close chat settings overlay when collapsing the panel
+			if (overlayType === 'chat-settings') {
+				overlayType = null;
+			}
+		}}
 		onTabChange={(tab) => activityPanelTab = tab}
 		onSessionClick={handleSessionClick}
 		onHistorySessionClick={handleHistorySessionClick}
@@ -1191,7 +1197,11 @@
 			console.log('[onAgentClick] Opened/focused card:', cardId, 'with dataId:', agent.id);
 		}}
 		onGenerationClick={() => {}}
-		onOverlayClose={() => { overlayType = null; }}
+		onOverlayClose={() => {
+			overlayType = null;
+			// Collapse activity panel when closing chat settings
+			deck.collapseContextPanel();
+		}}
 		onProcessClick={() => {}}
 	>
 		{#if activeMode === 'workspace'}
