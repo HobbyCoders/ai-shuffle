@@ -109,6 +109,14 @@ export interface ChatTab {
 	draft: string;
 	// Scroll position (preserved when switching cards)
 	scrollTop: number;
+	// Background mode settings (per-tab)
+	backgroundEnabled: boolean;
+	backgroundTaskName: string;
+	backgroundBranch: string;
+	backgroundCreateNewBranch: boolean;
+	backgroundAutoPR: boolean;
+	backgroundAutoMerge: boolean;
+	backgroundMaxDurationMinutes: number;
 }
 
 interface TabsState {
@@ -2548,7 +2556,14 @@ function createTabsStore() {
 						pendingQuestions: [],
 						todos: [],
 						draft: '',
-						scrollTop: 0
+						scrollTop: 0,
+						backgroundEnabled: false,
+						backgroundTaskName: '',
+						backgroundBranch: 'main',
+						backgroundCreateNewBranch: false,
+						backgroundAutoPR: false,
+						backgroundAutoMerge: false,
+						backgroundMaxDurationMinutes: 30
 					}));
 
 					update(s => ({
@@ -2620,7 +2635,14 @@ function createTabsStore() {
 				pendingQuestions: [],
 				todos: [],
 				draft: '',
-				scrollTop: 0
+				scrollTop: 0,
+				backgroundEnabled: false,
+				backgroundTaskName: '',
+				backgroundBranch: 'main',
+				backgroundCreateNewBranch: false,
+				backgroundAutoPR: false,
+				backgroundAutoMerge: false,
+				backgroundMaxDurationMinutes: 30
 			};
 
 			update(s => ({
@@ -2994,6 +3016,55 @@ function createTabsStore() {
 		},
 
 		/**
+		 * Set background mode enabled for a tab
+		 */
+		setTabBackgroundEnabled(tabId: string, enabled: boolean) {
+			updateTab(tabId, { backgroundEnabled: enabled });
+		},
+
+		/**
+		 * Set background task name for a tab
+		 */
+		setTabBackgroundTaskName(tabId: string, taskName: string) {
+			updateTab(tabId, { backgroundTaskName: taskName });
+		},
+
+		/**
+		 * Set background branch for a tab
+		 */
+		setTabBackgroundBranch(tabId: string, branch: string) {
+			updateTab(tabId, { backgroundBranch: branch });
+		},
+
+		/**
+		 * Set background create new branch flag for a tab
+		 */
+		setTabBackgroundCreateNewBranch(tabId: string, createNew: boolean) {
+			updateTab(tabId, { backgroundCreateNewBranch: createNew });
+		},
+
+		/**
+		 * Set background auto PR for a tab
+		 */
+		setTabBackgroundAutoPR(tabId: string, autoPR: boolean) {
+			updateTab(tabId, { backgroundAutoPR: autoPR });
+		},
+
+		/**
+		 * Set background auto merge for a tab
+		 */
+		setTabBackgroundAutoMerge(tabId: string, autoMerge: boolean) {
+			updateTab(tabId, { backgroundAutoMerge: autoMerge });
+		},
+
+		/**
+		 * Set background max duration minutes for a tab
+		 */
+		setTabBackgroundMaxDuration(tabId: string, minutes: number) {
+			updateTab(tabId, { backgroundMaxDurationMinutes: minutes });
+		},
+
+		/**
 		 * Update a tab's state (exposed for direct updates like todos)
 		 */
 		updateTab(tabId: string, updates: Partial<ChatTab>) {
@@ -3038,7 +3109,14 @@ function createTabsStore() {
 				pendingQuestions: [],
 				todos: [],
 				draft: '',
-				scrollTop: 0
+				scrollTop: 0,
+				backgroundEnabled: false,
+				backgroundTaskName: '',
+				backgroundBranch: 'main',
+				backgroundCreateNewBranch: false,
+				backgroundAutoPR: false,
+				backgroundAutoMerge: false,
+				backgroundMaxDurationMinutes: 30
 			});
 			connectTab(tabId);
 			// Save tabs state (debounced)

@@ -91,6 +91,21 @@ function createGitStore() {
         },
 
         /**
+         * Clear repository data (used when switching to a tab with no project)
+         */
+        clearRepository() {
+            set({
+                projectId: null,
+                status: null,
+                branches: [],
+                commits: [],
+                worktrees: [],
+                loading: false,
+                error: null
+            });
+        },
+
+        /**
          * Refresh the git status
          */
         async refreshStatus() {

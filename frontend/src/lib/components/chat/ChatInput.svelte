@@ -3,20 +3,14 @@
 	 * ChatInput - Modern chat input island with progressive disclosure
 	 *
 	 * Layer 1: Minimal - textarea + essential buttons
-	 * Layer 2: Context Bar - compact profile/project display + settings gear
-	 * Layer 3: Settings Drawer - on-demand detailed controls
+	 * Layer 2: Context Bar - compact profile/project display (cosmetic) + settings gear
 	 */
-	import { tick, onDestroy, createEventDispatcher, onMount } from 'svelte';
-	import { tabs, profiles, projects, type ChatTab, type Project } from '$lib/stores/tabs';
-	import { claudeAuthenticated, isAdmin, apiUser } from '$lib/stores/auth';
-	import { api, type FileUploadResponse, type Profile } from '$lib/api/client';
-	import { groups, organizeByGroups } from '$lib/stores/groups';
+	import { tick, onDestroy } from 'svelte';
+	import { tabs, profiles, projects, type ChatTab } from '$lib/stores/tabs';
+	import { claudeAuthenticated, apiUser } from '$lib/stores/auth';
+	import { api, type FileUploadResponse } from '$lib/api/client';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
-	import DropdownContextMenu from './DropdownContextMenu.svelte';
-	import SettingsDrawer from './SettingsDrawer.svelte';
-	import BottomSheet from './BottomSheet.svelte';
-	import { agents } from '$lib/stores/agents';
 
 	interface Command {
 		name: string;
@@ -30,17 +24,10 @@
 		tab: ChatTab;
 		compact?: boolean;
 		onOpenTerminalModal?: (tabId: string, command: string) => void;
-		onOpenProfileCard?: (editId?: string) => void;
-		onOpenProjectCard?: (editId?: string) => void;
 		onOpenSettings?: () => void;
 	}
 
-	let { tab, compact = false, onOpenTerminalModal, onOpenProfileCard, onOpenProjectCard, onOpenSettings }: Props = $props();
-
-	const dispatch = createEventDispatcher<{
-		openProfileCard: { editId?: string };
-		openProjectCard: { editId?: string };
-	}>();
+	let { tab, compact = false, onOpenTerminalModal, onOpenSettings }: Props = $props();
 
 	// Context usage calculation
 	function formatTokenCount(count: number): string {
@@ -58,118 +45,6 @@
 	const contextMax = 200000;
 	const contextPercent = $derived(Math.min((contextUsed / contextMax) * 100, 100));
 
-	// Organize profiles and projects by groups
-	const profilesOrganized = $derived(organizeByGroups($profiles, 'profiles', $groups));
-	const hasProfileGroups = $derived(profilesOrganized.groupOrder.length > 0);
-	const projectsOrganized = $derived(organizeByGroups($projects, 'projects', $groups));
-	const hasProjectGroups = $derived(projectsOrganized.groupOrder.length > 0);
-
-	// Context menu state for profiles
-	let profileContextMenu = $state<{
-		show: boolean;
-		x: number;
-		y: number;
-		profile: Profile | null;
-	}>({ show: false, x: 0, y: 0, profile: null });
-
-	// Context menu state for projects
-	let projectContextMenu = $state<{
-		show: boolean;
-		x: number;
-		y: number;
-		project: Project | null;
-	}>({ show: false, x: 0, y: 0, project: null });
-
-	function handleProfileContextMenu(e: MouseEvent, profile: Profile) {
-		e.preventDefault();
-		e.stopPropagation();
-		profileContextMenu = {
-			show: true,
-			x: e.clientX,
-			y: e.clientY,
-			profile
-		};
-	}
-
-	function handleProjectContextMenu(e: MouseEvent, project: Project) {
-		e.preventDefault();
-		e.stopPropagation();
-		projectContextMenu = {
-			show: true,
-			x: e.clientX,
-			y: e.clientY,
-			project
-		};
-	}
-
-	function closeProfileContextMenu() {
-		profileContextMenu = { show: false, x: 0, y: 0, profile: null };
-	}
-
-	function closeProjectContextMenu() {
-		projectContextMenu = { show: false, x: 0, y: 0, project: null };
-	}
-
-	// Profile context menu handlers
-	function handleProfileSelect(e: CustomEvent<{ id: string }>) {
-		tabs.setTabProfile(tab.id, e.detail.id);
-	}
-
-	function handleProfileEdit(e: CustomEvent<{ id: string }>) {
-		onOpenProfileCard?.(e.detail.id);
-		dispatch('openProfileCard', { editId: e.detail.id });
-	}
-
-	async function handleProfileDuplicate(e: CustomEvent<{ id: string }>) {
-		const profile = $profiles.find(p => p.id === e.detail.id);
-		if (!profile) return;
-
-		const newId = `${profile.id}-copy-${Date.now().toString(36)}`;
-		const newName = `${profile.name} (Copy)`;
-
-		try {
-			await tabs.createProfile({
-				id: newId,
-				name: newName,
-				description: profile.description || undefined,
-				config: (profile.config || {}) as Record<string, unknown>
-			});
-		} catch (err) {
-			console.error('Failed to duplicate profile:', err);
-		}
-	}
-
-	async function handleProfileDelete(e: CustomEvent<{ id: string }>) {
-		if (confirm(`Delete profile "${$profiles.find(p => p.id === e.detail.id)?.name}"? This cannot be undone.`)) {
-			await tabs.deleteProfile(e.detail.id);
-		}
-	}
-
-	function handleProfileOpenCard(e: CustomEvent<{ type: 'profile' | 'project'; editId?: string }>) {
-		onOpenProfileCard?.(e.detail.editId);
-		dispatch('openProfileCard', { editId: e.detail.editId });
-	}
-
-	// Project context menu handlers
-	function handleProjectSelect(e: CustomEvent<{ id: string }>) {
-		tabs.setTabProject(tab.id, e.detail.id);
-	}
-
-	function handleProjectEdit(e: CustomEvent<{ id: string }>) {
-		onOpenProjectCard?.(e.detail.id);
-		dispatch('openProjectCard', { editId: e.detail.id });
-	}
-
-	async function handleProjectDelete(e: CustomEvent<{ id: string }>) {
-		if (confirm(`Delete project "${$projects.find(p => p.id === e.detail.id)?.name}"? This cannot be undone.`)) {
-			await tabs.deleteProject(e.detail.id);
-		}
-	}
-
-	function handleProjectOpenCard(e: CustomEvent<{ type: 'profile' | 'project'; editId?: string }>) {
-		onOpenProjectCard?.(e.detail.editId);
-		dispatch('openProjectCard', { editId: e.detail.editId });
-	}
 
 	// Input state - use tab.draft for persistence across card switches
 	let inputValue = $state(tab.draft || '');
@@ -239,139 +114,16 @@
 	let commandAutocompleteRef = $state<CommandAutocomplete | null>(null);
 	let fileAutocompleteRef = $state<FileAutocomplete | null>(null);
 
-	// Settings drawer state
-	let showSettingsDrawer = $state(false);
-	let isBackgroundMode = $state(false);
-	let taskName = $state('');
-
-	// Mobile bottom sheet state
-	let showProfileSheet = $state(false);
-	let showProjectSheet = $state(false);
-	let isMobile = $state(false);
-
-	// Check if mobile on mount
-	onMount(() => {
-		const checkMobile = () => {
-			isMobile = window.innerWidth < 640;
-		};
-		checkMobile();
-		window.addEventListener('resize', checkMobile);
-		return () => window.removeEventListener('resize', checkMobile);
-	});
-
 	// Island ref
 	let islandRef = $state<HTMLDivElement | null>(null);
 
-	// Get current profile settings
-	const currentProfile = $derived($profiles.find(p => p.id === tab.profile));
-	const profileModel = $derived(currentProfile?.config?.model || 'sonnet');
-	const profilePermissionMode = $derived(currentProfile?.config?.permission_mode || 'default');
-	const effectiveModel = $derived(tab.modelOverride || profileModel);
-	const effectiveMode = $derived(tab.permissionModeOverride || profilePermissionMode);
-
-	const modelLabels: Record<string, string> = {
-		sonnet: 'Sonnet',
-		'sonnet-1m': 'Sonnet 1M',
-		opus: 'Opus',
-		haiku: 'Haiku'
-	};
-
-	const modeLabels: Record<string, string> = {
-		default: 'Ask',
-		acceptEdits: 'Auto-Accept',
-		plan: 'Plan',
-		bypassPermissions: 'Bypass'
-	};
-
-	// Get selected profile/project names for display
+	// Get selected profile/project names for display (cosmetic only)
 	const selectedProfileName = $derived($profiles.find(p => p.id === tab.profile)?.name || 'Profile');
 	const selectedProjectName = $derived($projects.find(p => p.id === tab.project)?.name || 'Project');
-	const isProfileLocked = $derived(!!$apiUser?.profile_id);
-	const isProjectLocked = $derived(!!$apiUser?.project_id || !!tab.sessionId);
 
-	// Open settings drawer or mobile sheets
-	function openProfileSelector() {
-		if (isMobile) {
-			showProfileSheet = true;
-		} else {
-			showSettingsDrawer = true;
-		}
-	}
-
-	function openProjectSelector() {
-		if (isMobile) {
-			showProjectSheet = true;
-		} else {
-			showSettingsDrawer = true;
-		}
-	}
-
+	// Open settings in Activity Panel
 	function openSettings() {
-		if (onOpenSettings) {
-			onOpenSettings();
-		} else {
-			showSettingsDrawer = true;
-		}
-	}
-
-	// Model and mode options for settings drawer
-	const modelOptions = [
-		{ value: 'sonnet', label: 'Sonnet' },
-		{ value: 'sonnet-1m', label: 'Sonnet 1M' },
-		{ value: 'opus', label: 'Opus' },
-		{ value: 'haiku', label: 'Haiku' }
-	];
-
-	const modeOptions = [
-		{ value: 'default', label: 'Ask' },
-		{ value: 'acceptEdits', label: 'Auto-Accept' },
-		{ value: 'plan', label: 'Plan' },
-		{ value: 'bypassPermissions', label: 'Bypass' }
-	];
-
-	// Auto-generate task name from prompt
-	$effect(() => {
-		if (isBackgroundMode && inputValue.trim() && !taskName) {
-			// Generate task name from first line/sentence of prompt
-			const firstLine = inputValue.split('\n')[0].slice(0, 50);
-			taskName = firstLine.length < inputValue.split('\n')[0].length ? firstLine + '...' : firstLine;
-		}
-	});
-
-	// Launch background agent
-	async function launchBackgroundAgent() {
-		if (!inputValue.trim() || !tab.profile || !tab.project) return;
-
-		const name = taskName || inputValue.split('\n')[0].slice(0, 50);
-		let prompt = inputValue;
-
-		// Append file references
-		if (uploadedFiles.length > 0) {
-			const fileRefs = uploadedFiles.map(f => `@${f.path}`).join(' ');
-			prompt = inputValue.trim() + '\n\n' + fileRefs;
-		}
-
-		try {
-			await agents.launchAgent({
-				name,
-				prompt,
-				profileId: tab.profile,
-				projectId: tab.project
-			});
-
-			// Clear input
-			inputValue = '';
-			uploadedFiles = [];
-			taskName = '';
-			isBackgroundMode = false;
-
-			if (textareaRef) {
-				textareaRef.style.height = '';
-			}
-		} catch (error) {
-			console.error('Failed to launch agent:', error);
-			tabs.setTabError(tab.id, 'Failed to launch background agent');
-		}
+		onOpenSettings?.();
 	}
 
 	// Check if input contains an active @ mention
@@ -798,93 +550,25 @@
 					</div>
 				</div>
 
-				<!-- Background Mode Indicator -->
-				{#if isBackgroundMode}
-					<div class="background-mode-bar">
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-						</svg>
-						<span>Background Mode</span>
-						<button
-							type="button"
-							onclick={() => isBackgroundMode = false}
-							class="background-mode-close"
-							title="Exit background mode"
-						>
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-							</svg>
-						</button>
-					</div>
-
-					<!-- Task Name Input -->
-					<div class="task-name-row">
-						<label for="task-name" class="task-name-label">Task Name</label>
-						<input
-							id="task-name"
-							type="text"
-							bind:value={taskName}
-							placeholder="Auto-generated from prompt"
-							class="task-name-input"
-						/>
-					</div>
-				{/if}
-
-				<!-- Simplified Context Bar -->
+				<!-- Simplified Context Bar - cosmetic display only -->
 				<div class="context-bar">
-					<!-- Left: Profile & Project as tappable text -->
+					<!-- Left: Profile & Project as display text (not interactive) -->
 					<div class="context-selectors">
-						{#if !isProfileLocked}
-							<button
-								type="button"
-								onclick={openProfileSelector}
-								class="context-selector {tab.profile ? '' : 'unset'}"
-								disabled={tab.isStreaming}
-								oncontextmenu={(e) => {
-									const profile = $profiles.find(p => p.id === tab.profile);
-									if (profile) handleProfileContextMenu(e, profile);
-								}}
-							>
-								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-								</svg>
-								<span>{selectedProfileName}</span>
-							</button>
-						{:else}
-							<span class="context-selector locked">
-								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-								</svg>
-								<span>{selectedProfileName}</span>
-							</span>
-						{/if}
+						<span class="context-selector {tab.profile ? '' : 'unset'}">
+							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+							</svg>
+							<span>{selectedProfileName}</span>
+						</span>
 
 						<span class="context-separator">•</span>
 
-						{#if !isProjectLocked}
-							<button
-								type="button"
-								onclick={openProjectSelector}
-								class="context-selector {tab.project ? '' : 'unset'}"
-								disabled={tab.isStreaming}
-								oncontextmenu={(e) => {
-									const project = $projects.find(p => p.id === tab.project);
-									if (project) handleProjectContextMenu(e, project);
-								}}
-							>
-								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-								</svg>
-								<span>{selectedProjectName}</span>
-							</button>
-						{:else}
-							<span class="context-selector locked">
-								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-								</svg>
-								<span>{selectedProjectName}</span>
-							</span>
-						{/if}
+						<span class="context-selector {tab.project ? '' : 'unset'}">
+							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+							</svg>
+							<span>{selectedProjectName}</span>
+						</span>
 					</div>
 
 					<!-- Right: Context % and Settings gear -->
@@ -910,126 +594,6 @@
 		</form>
 	</div>
 </div>
-
-<!-- Profile Context Menu -->
-{#if profileContextMenu.show && profileContextMenu.profile}
-	<DropdownContextMenu
-		show={profileContextMenu.show}
-		x={profileContextMenu.x}
-		y={profileContextMenu.y}
-		itemId={profileContextMenu.profile.id}
-		itemName={profileContextMenu.profile.name}
-		itemType="profile"
-		isSelected={tab.profile === profileContextMenu.profile.id}
-		isBuiltin={profileContextMenu.profile.is_builtin}
-		currentGroup={$groups.profiles.assignments[profileContextMenu.profile.id]}
-		onClose={closeProfileContextMenu}
-		on:select={handleProfileSelect}
-		on:edit={handleProfileEdit}
-		on:duplicate={handleProfileDuplicate}
-		on:delete={handleProfileDelete}
-		on:openCard={handleProfileOpenCard}
-	/>
-{/if}
-
-<!-- Project Context Menu -->
-{#if projectContextMenu.show && projectContextMenu.project}
-	<DropdownContextMenu
-		show={projectContextMenu.show}
-		x={projectContextMenu.x}
-		y={projectContextMenu.y}
-		itemId={projectContextMenu.project.id}
-		itemName={projectContextMenu.project.name}
-		itemType="project"
-		isSelected={tab.project === projectContextMenu.project.id}
-		isBuiltin={false}
-		currentGroup={$groups.projects.assignments[projectContextMenu.project.id]}
-		onClose={closeProjectContextMenu}
-		on:select={handleProjectSelect}
-		on:edit={handleProjectEdit}
-		on:delete={handleProjectDelete}
-		on:openCard={handleProjectOpenCard}
-	/>
-{/if}
-
-<!-- Settings Drawer -->
-<SettingsDrawer
-	bind:open={showSettingsDrawer}
-	onClose={() => showSettingsDrawer = false}
-	selectedProfile={tab.profile}
-	selectedProject={tab.project}
-	selectedModel={tab.modelOverride}
-	selectedMode={tab.permissionModeOverride}
-	effectiveModel={effectiveModel}
-	effectiveMode={effectiveMode}
-	contextUsage={{
-		used: contextUsed,
-		total: contextMax,
-		percentage: contextPercent
-	}}
-	{isBackgroundMode}
-	{isProfileLocked}
-	{isProjectLocked}
-	profiles={$profiles}
-	projects={$projects}
-	models={modelOptions}
-	modes={modeOptions}
-	onProfileChange={(id) => tabs.setTabProfile(tab.id, id)}
-	onProjectChange={(id) => tabs.setTabProject(tab.id, id)}
-	onModelChange={(model) => tabs.setTabModelOverride(tab.id, model)}
-	onModeChange={(mode) => tabs.setTabPermissionModeOverride(tab.id, mode)}
-	onBackgroundModeChange={(enabled) => isBackgroundMode = enabled}
-/>
-
-<!-- Mobile Profile Bottom Sheet -->
-<BottomSheet
-	open={showProfileSheet}
-	onClose={() => showProfileSheet = false}
-	title="Select Profile"
->
-	{#each $profiles as profile}
-		<button
-			class="bottom-sheet-option w-full text-left"
-			data-selected={tab.profile === profile.id}
-			onclick={() => {
-				tabs.setTabProfile(tab.id, profile.id);
-				showProfileSheet = false;
-			}}
-		>
-			<span class="flex-1">{profile.name}</span>
-			{#if tab.profile === profile.id}
-				<svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-				</svg>
-			{/if}
-		</button>
-	{/each}
-</BottomSheet>
-
-<!-- Mobile Project Bottom Sheet -->
-<BottomSheet
-	open={showProjectSheet}
-	onClose={() => showProjectSheet = false}
-	title="Select Project"
->
-	{#each $projects as project}
-		<button
-			class="bottom-sheet-option w-full text-left"
-			data-selected={tab.project === project.id}
-			onclick={() => {
-				tabs.setTabProject(tab.id, project.id);
-				showProjectSheet = false;
-			}}
-		>
-			<span class="flex-1">{project.name}</span>
-			{#if tab.project === project.id}
-				<svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-				</svg>
-			{/if}
-		</button>
-	{/each}
-</BottomSheet>
 
 <style>
 	/* Wrapper - provides safe spacing */
@@ -1270,66 +834,6 @@
 		background: color-mix(in srgb, var(--destructive) 25%, transparent);
 	}
 
-	/* Background Mode Bar */
-	.background-mode-bar {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		padding: 0.5rem 0.75rem;
-		background: color-mix(in srgb, var(--primary) 15%, transparent);
-		border-top: 1px solid color-mix(in srgb, var(--primary) 30%, transparent);
-		font-size: 0.8125rem;
-		font-weight: 500;
-		color: var(--primary);
-	}
-
-	.background-mode-close {
-		margin-left: auto;
-		opacity: 0.7;
-		transition: opacity 0.15s;
-	}
-
-	.background-mode-close:hover {
-		opacity: 1;
-	}
-
-	/* Task Name Row */
-	.task-name-row {
-		display: flex;
-		align-items: center;
-		gap: 0.75rem;
-		padding: 0.5rem 0.75rem;
-		border-top: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
-	}
-
-	.task-name-label {
-		font-size: 0.75rem;
-		font-weight: 500;
-		color: var(--muted-foreground);
-		white-space: nowrap;
-	}
-
-	.task-name-input {
-		flex: 1;
-		padding: 0.375rem 0.5rem;
-		font-size: 0.8125rem;
-		color: var(--foreground);
-		background: transparent;
-		border: 1px solid var(--border);
-		border-radius: 0.5rem;
-		outline: none;
-		transition: border-color 0.15s;
-	}
-
-	.task-name-input:focus {
-		border-color: var(--primary);
-	}
-
-	.task-name-input::placeholder {
-		color: var(--muted-foreground);
-		opacity: 0.6;
-	}
-
 	/* Simplified Context Bar */
 	.context-bar {
 		display: flex;
@@ -1362,27 +866,10 @@
 		font-weight: 500;
 		color: var(--muted-foreground);
 		border-radius: 0.5rem;
-		transition: all 0.15s;
-		cursor: pointer;
-	}
-
-	.context-selector:hover:not(:disabled):not(.locked) {
-		background: var(--accent);
-		color: var(--foreground);
-	}
-
-	.context-selector:disabled {
-		opacity: 0.4;
-		cursor: not-allowed;
 	}
 
 	.context-selector.unset {
 		color: var(--warning);
-	}
-
-	.context-selector.locked {
-		opacity: 0.6;
-		cursor: default;
 	}
 
 	.context-selector span {

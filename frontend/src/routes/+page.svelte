@@ -91,25 +91,6 @@
 	let activityPanelTab = $state<ActivityTabType>('threads');
 	let overlayType = $state<OverlayType>(null);
 
-	// Background Mode State (per-tab)
-	interface BackgroundConfig {
-		taskName: string;
-		branch: string;
-		createNewBranch: boolean;
-		autoPR: boolean;
-		autoMerge: boolean;
-		maxDurationMinutes: number;
-	}
-	let backgroundModeEnabled = $state(false);
-	let backgroundConfig = $state<BackgroundConfig>({
-		taskName: '',
-		branch: 'main',
-		createNewBranch: false,
-		autoPR: false,
-		autoMerge: false,
-		maxDurationMinutes: 30
-	});
-
 	// Stable callbacks for chat settings (defined once, reused)
 	function handleChatSettingsProfileChange(profileId: string) {
 		const tab = $activeTab;
@@ -133,15 +114,35 @@
 	}
 
 	function handleChatSettingsBackgroundModeChange(enabled: boolean) {
-		backgroundModeEnabled = enabled;
 		const tab = $activeTab;
-		if (enabled && tab?.project) {
-			git.loadRepository(tab.project);
+		if (tab) {
+			tabs.setTabBackgroundEnabled(tab.id, enabled);
+			if (enabled && tab.project) {
+				git.loadRepository(tab.project);
+			}
 		}
 	}
 
-	function handleChatSettingsBackgroundConfigChange(config: Partial<BackgroundConfig>) {
-		backgroundConfig = { ...backgroundConfig, ...config };
+	// Background config uses individual setters per field
+	interface BackgroundConfigUpdate {
+		taskName?: string;
+		branch?: string;
+		createNewBranch?: boolean;
+		autoPR?: boolean;
+		autoMerge?: boolean;
+		maxDurationMinutes?: number;
+	}
+
+	function handleChatSettingsBackgroundConfigChange(config: BackgroundConfigUpdate) {
+		const tab = $activeTab;
+		if (!tab) return;
+
+		if (config.taskName !== undefined) tabs.setTabBackgroundTaskName(tab.id, config.taskName);
+		if (config.branch !== undefined) tabs.setTabBackgroundBranch(tab.id, config.branch);
+		if (config.createNewBranch !== undefined) tabs.setTabBackgroundCreateNewBranch(tab.id, config.createNewBranch);
+		if (config.autoPR !== undefined) tabs.setTabBackgroundAutoPR(tab.id, config.autoPR);
+		if (config.autoMerge !== undefined) tabs.setTabBackgroundAutoMerge(tab.id, config.autoMerge);
+		if (config.maxDurationMinutes !== undefined) tabs.setTabBackgroundMaxDuration(tab.id, config.maxDurationMinutes);
 	}
 
 	// Derived overlay data - automatically updates when dependencies change
@@ -196,15 +197,22 @@
 				{ value: 'bypassPermissions', label: 'Bypass' }
 			],
 
-			// Background mode state
-			isBackgroundMode: backgroundModeEnabled,
-			backgroundConfig: backgroundConfig,
+			// Background mode state (from tab)
+			isBackgroundMode: tab.backgroundEnabled,
+			backgroundConfig: {
+				taskName: tab.backgroundTaskName,
+				branch: tab.backgroundBranch,
+				createNewBranch: tab.backgroundCreateNewBranch,
+				autoPR: tab.backgroundAutoPR,
+				autoMerge: tab.backgroundAutoMerge,
+				maxDurationMinutes: tab.backgroundMaxDurationMinutes
+			},
 
-			// Branch data
-			branches: $gitBranches.filter(b => !b.remote).map(b => b.name),
-			currentBranch: $currentBranch?.name || 'main',
+			// Branch data - only show if tab has a project selected
+			branches: tab.project ? $gitBranches.filter(b => !b.remote).map(b => b.name) : [],
+			currentBranch: tab.project ? ($currentBranch?.name || 'main') : 'main',
 			defaultBranch: 'main',
-			loadingBranches: $gitLoading,
+			loadingBranches: tab.project ? $gitLoading : false,
 
 			// Stable callbacks (don't change on re-render)
 			onProfileChange: handleChatSettingsProfileChange,
@@ -214,6 +222,28 @@
 			onBackgroundModeChange: handleChatSettingsBackgroundModeChange,
 			onBackgroundConfigChange: handleChatSettingsBackgroundConfigChange
 		};
+	});
+
+	// Track last loaded git project to avoid unnecessary reloads
+	let lastGitProjectId: string | null = null;
+
+	// Sync git repository data when active tab's project changes
+	$effect(() => {
+		const tab = $activeTab;
+		const currentProjectId = tab?.project || null;
+
+		// Only reload if project actually changed
+		if (currentProjectId !== lastGitProjectId) {
+			lastGitProjectId = currentProjectId;
+
+			if (currentProjectId) {
+				// Load git data for the new project
+				git.loadRepository(currentProjectId);
+			} else {
+				// Clear git data when no project selected
+				git.clearRepository();
+			}
+		}
 	});
 
 	// ============================================
