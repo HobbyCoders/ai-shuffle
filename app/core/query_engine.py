@@ -207,8 +207,11 @@ def _build_plugins_list(enabled_plugins: Optional[list]) -> Optional[list]:
         return None
 
     # Try to load installed plugins registry to resolve plugin IDs
+    # Import here to avoid circular imports
+    from app.core.plugin_service import get_plugin_service
+    service = get_plugin_service()
     installed_plugins = {}
-    installed_plugins_file = Path("/home/appuser/.claude/plugins/installed_plugins.json")
+    installed_plugins_file = service.INSTALLED_FILE
     try:
         if installed_plugins_file.exists():
             import json

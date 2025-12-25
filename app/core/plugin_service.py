@@ -1,10 +1,14 @@
 """
 Plugin Service - Core business logic for Claude Code plugin management.
 
-This service reads and writes to Claude's native plugin configuration files:
-- /home/appuser/.claude/plugins/known_marketplaces.json
-- /home/appuser/.claude/plugins/installed_plugins.json
-- /home/appuser/.claude/settings.json
+This service reads and writes to Claude's native plugin configuration files.
+
+Plugin Scopes:
+- USER: ~/.claude/plugins/ (user-global plugins)
+- LOCAL: <project>/.claude/plugins/ (project-local, gitignored)
+- PROJECT: <project>/plugins/ (project plugins, committed to git)
+
+Docker mode uses /home/appuser/.claude/ for user scope.
 
 It provides a Python API for managing marketplaces, installing/uninstalling plugins,
 and enabling/disabling plugins.
@@ -20,12 +24,15 @@ from typing import List, Optional, Dict, Any
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 
+from app.core.platform import is_docker_mode, get_claude_credentials_dir
+
 logger = logging.getLogger(__name__)
 
 
 class PluginScope(str, Enum):
-    USER = "user"
-    PROJECT = "project"
+    USER = "user"       # ~/.claude/plugins/
+    LOCAL = "local"     # <project>/.claude/plugins/
+    PROJECT = "project" # <project>/plugins/
 
 
 @dataclass
@@ -131,31 +138,98 @@ class AvailablePlugin:
         return asdict(self)
 
 
+def _get_claude_dir() -> Path:
+    """
+    Get the Claude configuration directory based on deployment mode.
+
+    Returns:
+        - Docker: /home/appuser/.claude
+        - Local (Windows/macOS/Linux): ~/.claude
+    """
+    if is_docker_mode():
+        return Path("/home/appuser/.claude")
+    return get_claude_credentials_dir()
+
+
 class PluginService:
     """
     Service for managing Claude Code plugins.
 
     Reads and writes to Claude's native configuration files to maintain
     compatibility with the Claude CLI.
+
+    Plugin Scopes:
+        - USER: ~/.claude/plugins/ - User-global plugins
+        - LOCAL: <project>/.claude/plugins/ - Project-local (gitignored)
+        - PROJECT: <project>/plugins/ - Project plugins (committed)
     """
 
-    CLAUDE_DIR = Path("/home/appuser/.claude")
-    PLUGINS_DIR = CLAUDE_DIR / "plugins"
-    SETTINGS_FILE = CLAUDE_DIR / "settings.json"
-    MARKETPLACES_FILE = PLUGINS_DIR / "known_marketplaces.json"
-    INSTALLED_FILE = PLUGINS_DIR / "installed_plugins.json"
-    CACHE_DIR = PLUGINS_DIR / "cache"
-    MARKETPLACES_DIR = PLUGINS_DIR / "marketplaces"
+    def __init__(self, project_dir: Optional[Path] = None):
+        """
+        Initialize the plugin service.
 
-    def __init__(self):
-        """Initialize the plugin service"""
+        Args:
+            project_dir: Optional project directory for LOCAL/PROJECT scope plugins.
+                        If not provided, only USER scope is available.
+        """
+        # User scope paths (always available)
+        self.CLAUDE_DIR = _get_claude_dir()
+        self.PLUGINS_DIR = self.CLAUDE_DIR / "plugins"
+        self.SETTINGS_FILE = self.CLAUDE_DIR / "settings.json"
+        self.MARKETPLACES_FILE = self.PLUGINS_DIR / "known_marketplaces.json"
+        self.INSTALLED_FILE = self.PLUGINS_DIR / "installed_plugins.json"
+        self.CACHE_DIR = self.PLUGINS_DIR / "cache"
+        self.MARKETPLACES_DIR = self.PLUGINS_DIR / "marketplaces"
+
+        # Project scope paths (optional)
+        self.project_dir = project_dir
+        if project_dir:
+            self.LOCAL_PLUGINS_DIR = project_dir / ".claude" / "plugins"
+            self.PROJECT_PLUGINS_DIR = project_dir / "plugins"
+        else:
+            self.LOCAL_PLUGINS_DIR = None
+            self.PROJECT_PLUGINS_DIR = None
+
         self._ensure_directories()
 
     def _ensure_directories(self):
-        """Ensure required directories exist"""
+        """Ensure required directories exist for USER scope"""
         self.PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
         self.CACHE_DIR.mkdir(parents=True, exist_ok=True)
         self.MARKETPLACES_DIR.mkdir(parents=True, exist_ok=True)
+
+    def get_plugins_dir_for_scope(self, scope: PluginScope) -> Optional[Path]:
+        """
+        Get the plugins directory for a given scope.
+
+        Args:
+            scope: The plugin scope (USER, LOCAL, or PROJECT)
+
+        Returns:
+            Path to the plugins directory, or None if scope is not available
+        """
+        if scope == PluginScope.USER:
+            return self.PLUGINS_DIR
+        elif scope == PluginScope.LOCAL:
+            return self.LOCAL_PLUGINS_DIR
+        elif scope == PluginScope.PROJECT:
+            return self.PROJECT_PLUGINS_DIR
+        return None
+
+    def ensure_scope_directory(self, scope: PluginScope) -> Optional[Path]:
+        """
+        Ensure the plugins directory exists for a given scope.
+
+        Args:
+            scope: The plugin scope
+
+        Returns:
+            Path to the created/existing directory, or None if scope unavailable
+        """
+        plugins_dir = self.get_plugins_dir_for_scope(scope)
+        if plugins_dir:
+            plugins_dir.mkdir(parents=True, exist_ok=True)
+        return plugins_dir
 
     def _read_json_file(self, path: Path, default: Any = None) -> Any:
         """Safely read a JSON file"""
@@ -839,13 +913,30 @@ class PluginService:
         return result
 
 
-# Global service instance
-_plugin_service: Optional[PluginService] = None
+# Global service instance cache (keyed by project_dir)
+_plugin_services: Dict[Optional[str], PluginService] = {}
 
 
-def get_plugin_service() -> PluginService:
-    """Get the global plugin service instance"""
-    global _plugin_service
-    if _plugin_service is None:
-        _plugin_service = PluginService()
-    return _plugin_service
+def get_plugin_service(project_dir: Optional[Path] = None) -> PluginService:
+    """
+    Get a plugin service instance, optionally scoped to a project directory.
+
+    Args:
+        project_dir: Optional project directory for LOCAL/PROJECT scope support.
+                    If None, only USER scope plugins are accessible.
+
+    Returns:
+        PluginService instance (cached per project_dir)
+    """
+    cache_key = str(project_dir) if project_dir else None
+
+    if cache_key not in _plugin_services:
+        _plugin_services[cache_key] = PluginService(project_dir=project_dir)
+
+    return _plugin_services[cache_key]
+
+
+def clear_plugin_service_cache():
+    """Clear the plugin service cache (useful for testing)"""
+    global _plugin_services
+    _plugin_services = {}
