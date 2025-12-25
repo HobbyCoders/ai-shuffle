@@ -32,6 +32,7 @@
 	} from '$lib/stores/deck';
 	import type { DeckCard, DeckCardType, LayoutMode } from '$lib/stores/deck';
 	import { groups } from '$lib/stores/groups';
+	import { git, branches as gitBranches, currentBranch, gitLoading } from '$lib/stores/git';
 	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
 	import { getTags, type Tag } from '$lib/api/client';
 	import type { Command } from '$lib/api/commands';
@@ -90,6 +91,25 @@
 	let activityPanelTab = $state<ActivityTabType>('threads');
 	let overlayType = $state<OverlayType>(null);
 	let overlayData = $state<Record<string, unknown>>({});
+
+	// Background Mode State (per-tab)
+	interface BackgroundConfig {
+		taskName: string;
+		branch: string;
+		createNewBranch: boolean;
+		autoPR: boolean;
+		autoMerge: boolean;
+		maxDurationMinutes: number;
+	}
+	let backgroundModeEnabled = $state(false);
+	let backgroundConfig = $state<BackgroundConfig>({
+		taskName: '',
+		branch: 'main',
+		createNewBranch: false,
+		autoPR: false,
+		autoMerge: false,
+		maxDurationMinutes: 30
+	});
 
 	// ============================================
 	// State: Modals
@@ -904,6 +924,8 @@
 		if (overlayType === 'chat-settings') {
 			overlayType = null;
 			overlayData = {};
+			// Also collapse the side panel when closing settings
+			deck.toggleContextPanel();
 			return;
 		}
 
@@ -965,6 +987,16 @@
 				{ value: 'bypassPermissions', label: 'Bypass' }
 			],
 
+			// Background mode state
+			isBackgroundMode: backgroundModeEnabled,
+			backgroundConfig: backgroundConfig,
+
+			// Branch data
+			branches: $gitBranches.filter(b => !b.remote).map(b => b.name),
+			currentBranch: $currentBranch?.name || 'main',
+			defaultBranch: 'main',
+			loadingBranches: $gitLoading,
+
 			// Callbacks
 			onProfileChange: (profileId: string) => {
 				if (tab) tabs.setTabProfile(tab.id, profileId);
@@ -973,6 +1005,8 @@
 			},
 			onProjectChange: (projectId: string) => {
 				if (tab) tabs.setTabProject(tab.id, projectId);
+				// Load branches for the new project
+				git.loadRepository(projectId);
 				// Refresh overlay data
 				handleOpenChatSettings();
 			},
@@ -985,6 +1019,24 @@
 				if (tab) tabs.setTabPermissionModeOverride(tab.id, mode);
 				// Refresh overlay data
 				handleOpenChatSettings();
+			},
+			onBackgroundModeChange: (enabled: boolean) => {
+				backgroundModeEnabled = enabled;
+				// Load branches when enabling background mode if we have a project
+				if (enabled && tab?.project) {
+					git.loadRepository(tab.project);
+				}
+				// Refresh overlay data
+				handleOpenChatSettings();
+			},
+			onBackgroundConfigChange: (config: Partial<BackgroundConfig>) => {
+				backgroundConfig = { ...backgroundConfig, ...config };
+				// Refresh overlay data
+				handleOpenChatSettings();
+			},
+			onLaunchAgent: () => {
+				// TODO: Launch background agent with config
+				console.log('Launch agent with config:', backgroundConfig);
 			}
 		};
 	}
