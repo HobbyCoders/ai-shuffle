@@ -43,21 +43,24 @@
 		children
 	}: Props = $props();
 
+	// Visible cards (not minimized) - must be defined before focus mode state
+	const visibleCards = $derived(cards.filter((c) => !c.minimized));
+
 	// Focus mode navigation state
 	const isFocusMode = $derived(layoutMode === 'focus');
-	const focusModeCards = $derived(() => {
-		if (!isFocusMode) return [];
-		return [...visibleCards].sort(
-			(a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-		);
-	});
-	const focusModeIndex = $derived(() => {
-		const cards = focusModeCards();
-		if (cards.length === 0 || !focusedCardId) return 0;
-		const idx = cards.findIndex((c) => c.id === focusedCardId);
+	const focusModeCards = $derived(
+		isFocusMode
+			? [...visibleCards].sort(
+					(a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+				)
+			: []
+	);
+	const focusModeIndex = $derived.by(() => {
+		if (focusModeCards.length === 0 || !focusedCardId) return 0;
+		const idx = focusModeCards.findIndex((c) => c.id === focusedCardId);
 		return idx >= 0 ? idx : 0;
 	});
-	const focusModeTotal = $derived(() => focusModeCards().length);
+	const focusModeTotal = $derived(focusModeCards.length);
 
 	// Handle layout mode change
 	function handleLayoutModeChange(mode: LayoutMode) {
@@ -87,9 +90,6 @@
 
 		return () => resizeObserver.disconnect();
 	});
-
-	// Visible cards (not minimized)
-	const visibleCards = $derived(cards.filter((c) => !c.minimized));
 
 	// Sorted by z-index for rendering
 	const sortedCards = $derived([...visibleCards].sort((a, b) => a.zIndex - b.zIndex));
@@ -136,8 +136,8 @@
 		<CardShuffle
 			currentMode={layoutMode}
 			onModeChange={handleLayoutModeChange}
-			focusModeIndex={focusModeIndex()}
-			focusModeTotal={focusModeTotal()}
+			focusModeIndex={focusModeIndex}
+			focusModeTotal={focusModeTotal}
 			onFocusNavigate={onFocusNavigate}
 		/>
 	{/if}
