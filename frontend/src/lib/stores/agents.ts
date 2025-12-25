@@ -296,25 +296,9 @@ function createAgentsStore() {
 					break;
 
 				case 'agent_launched':
-				case 'agent_started':
-				case 'agent_progress':
-				case 'agent_paused':
-				case 'agent_resumed':
-				case 'agent_completed':
-				case 'agent_failed':
-				case 'agent_cancelled':
-					// Update agent in store
-					console.log(`[Agents WS] ${message.type}:`, message.agent_id, message.data?.status);
+					// New agent - full data expected
+					console.log(`[Agents WS] ${message.type}:`, message.agent_id, message.data?.name);
 					if (message.data) {
-						update((state) => ({
-							...state,
-							agents: state.agents.map((a) =>
-								a.id === message.agent_id ? convertApiAgent(message.data) : a
-							)
-						}));
-					}
-					// If it's a new agent (launched), add it
-					if (message.type === 'agent_launched' && message.data) {
 						update((state) => {
 							const exists = state.agents.some((a) => a.id === message.agent_id);
 							if (!exists) {
@@ -323,8 +307,57 @@ function createAgentsStore() {
 									agents: [...state.agents, convertApiAgent(message.data)]
 								};
 							}
-							return state;
+							// If exists, update with full data but preserve logs
+							return {
+								...state,
+								agents: state.agents.map((a) => {
+									if (a.id === message.agent_id) {
+										const converted = convertApiAgent(message.data);
+										return { ...converted, logs: a.logs };
+									}
+									return a;
+								})
+							};
 						});
+					}
+					break;
+
+				case 'agent_started':
+				case 'agent_progress':
+				case 'agent_paused':
+				case 'agent_resumed':
+				case 'agent_completed':
+				case 'agent_failed':
+				case 'agent_cancelled':
+					// Partial or full update - merge with existing data
+					console.log(`[Agents WS] ${message.type}:`, message.agent_id, message.data?.status);
+					if (message.data) {
+						update((state) => ({
+							...state,
+							agents: state.agents.map((a) => {
+								if (a.id !== message.agent_id) return a;
+
+								// Check if this is a full agent response (has name/prompt) or partial update
+								if (message.data.name && message.data.prompt) {
+									// Full update - replace agent data but preserve logs
+									const converted = convertApiAgent(message.data);
+									return { ...converted, logs: a.logs };
+								} else {
+									// Partial update - only update provided fields
+									return {
+										...a,
+										status: message.data.status ?? a.status,
+										progress: message.data.progress ?? a.progress,
+										error: message.data.error ?? a.error,
+										prUrl: message.data.pr_url ?? a.prUrl,
+										branch: message.data.branch ?? a.branch,
+										resultSummary: message.data.result_summary ?? a.resultSummary,
+										tasks: message.data.tasks ?? a.tasks,
+										completedAt: message.data.completed_at ? new Date(message.data.completed_at) : a.completedAt
+									};
+								}
+							})
+						}));
 					}
 					break;
 

@@ -25,6 +25,7 @@
 	import type { DeckCard } from './types';
 	import {
 		agents,
+		allAgents,
 		type BackgroundAgent,
 		type AgentTask,
 		type AgentLogEntry
@@ -60,11 +61,21 @@
 	console.log('[AgentCard] Component created with agentId:', agentId, 'card:', card?.id, card?.dataId);
 
 	// ============================================
-	// MONITOR STATE
+	// MONITOR STATE - Reactive subscription to store
 	// ============================================
-	let agent = $state<BackgroundAgent | null>(null);
-	let loading = $state(true);
-	let error = $state<string | null>(null);
+	// Subscribe to the agents store reactively - this will update whenever the store changes
+	const agent = $derived.by(() => {
+		const agentsList = $allAgents;
+		return agentsList.find(a => a.id === agentId) || null;
+	});
+
+	// Loading state: show loading only if agent not yet in store and we haven't finished initial fetch
+	let initialFetchDone = $state(false);
+	let fetchError = $state<string | null>(null);
+
+	// Derived loading state - shows loading spinner only when needed
+	const loading = $derived(!agent && !initialFetchDone);
+	const error = $derived(fetchError);
 
 	// Task tree expanded state
 	let expandedTasks = $state<Set<string>>(new Set());
@@ -76,7 +87,7 @@
 	// Time remaining for timeout
 	let timeRemaining = $state<string | null>(null);
 
-	// Fetch agent data
+	// Fetch agent data initially
 	async function fetchAgent() {
 		console.log('[AgentCard] fetchAgent called, agentId:', agentId);
 		if (!agentId) {
@@ -84,14 +95,12 @@
 			return;
 		}
 
-		loading = true;
-		error = null;
+		fetchError = null;
 		try {
 			console.log('[AgentCard] Calling agents.fetchAgent...');
 			const fetchedAgent = await agents.fetchAgent(agentId);
 			console.log('[AgentCard] fetchedAgent result:', fetchedAgent);
 			if (fetchedAgent) {
-				agent = fetchedAgent;
 				// Auto-expand tasks with running children
 				const runningTaskIds = new Set<string>();
 				function findRunningParents(tasks: AgentTask[], parentIds: string[] = []) {
@@ -109,63 +118,69 @@
 
 				// Fetch logs
 				await agents.fetchLogs(agentId, { limit: 10 });
-				// Update agent with logs
-				agent = agents.getAgent(agentId) || agent;
 			} else {
-				error = 'Agent not found';
+				fetchError = 'Agent not found';
 			}
 		} catch (e) {
 			console.error('[AgentCard] Error fetching agent:', e);
-			error = e instanceof Error ? e.message : 'Failed to load agent';
+			fetchError = e instanceof Error ? e.message : 'Failed to load agent';
 		} finally {
-			console.log('[AgentCard] fetchAgent complete, loading=false, error:', error, 'agent:', agent);
-			loading = false;
+			initialFetchDone = true;
+			console.log('[AgentCard] fetchAgent complete, initialFetchDone=true, fetchError:', fetchError);
 		}
 	}
 
-	// Subscribe to agent updates via store
+	// Initial fetch and WebSocket subscription
 	$effect(() => {
-		if (agentId) {
+		if (agentId && !initialFetchDone) {
 			fetchAgent();
 			agents.subscribeToAgent(agentId);
 		}
 	});
 
-	// Poll for updates every 5 seconds as backup
-	let pollInterval: ReturnType<typeof setInterval> | null = null;
+	// Auto-expand tasks when agent updates (for running tasks)
+	$effect(() => {
+		if (agent?.tasks) {
+			const runningTaskIds = new Set<string>();
+			function findRunningParents(tasks: AgentTask[], parentIds: string[] = []) {
+				for (const task of tasks) {
+					if (task.status === 'in_progress') {
+						parentIds.forEach((id) => runningTaskIds.add(id));
+					}
+					if (task.children) {
+						findRunningParents(task.children, [...parentIds, task.id]);
+					}
+				}
+			}
+			findRunningParents(agent.tasks);
+			// Merge with existing expanded tasks (don't collapse user-expanded ones)
+			expandedTasks = new Set([...expandedTasks, ...runningTaskIds]);
+		}
+	});
+
+	// Periodic log refresh for running agents (logs don't always come through WebSocket)
+	let logRefreshInterval: ReturnType<typeof setInterval> | null = null;
 
 	$effect(() => {
-		if (pollInterval) {
-			clearInterval(pollInterval);
-			pollInterval = null;
+		if (logRefreshInterval) {
+			clearInterval(logRefreshInterval);
+			logRefreshInterval = null;
 		}
 
-		if (agentId) {
-			pollInterval = setInterval(() => {
-				const updated = agents.getAgent(agentId);
-				if (updated && agent) {
-					// Only update if status, progress, or logs changed
-					const hasChanged =
-						updated.status !== agent.status ||
-						updated.progress !== agent.progress ||
-						updated.error !== agent.error ||
-						updated.prUrl !== agent.prUrl ||
-						(updated.logs?.length || 0) !== (agent.logs?.length || 0) ||
-						(updated.tasks?.length || 0) !== (agent.tasks?.length || 0);
-
-					if (hasChanged) {
-						agent = updated;
-					}
-				} else if (updated && !agent) {
-					agent = updated;
+		if (agentId && agent?.status === 'running') {
+			logRefreshInterval = setInterval(async () => {
+				try {
+					await agents.fetchLogs(agentId, { limit: 10 });
+				} catch (e) {
+					console.error('[AgentCard] Failed to refresh logs:', e);
 				}
-			}, 5000);
+			}, 3000); // Refresh logs every 3 seconds while running
 		}
 
 		return () => {
-			if (pollInterval) {
-				clearInterval(pollInterval);
-				pollInterval = null;
+			if (logRefreshInterval) {
+				clearInterval(logRefreshInterval);
+				logRefreshInterval = null;
 			}
 		};
 	});
@@ -181,8 +196,8 @@
 		if (durationInterval) {
 			clearInterval(durationInterval);
 		}
-		if (pollInterval) {
-			clearInterval(pollInterval);
+		if (logRefreshInterval) {
+			clearInterval(logRefreshInterval);
 		}
 	});
 
@@ -260,12 +275,12 @@
 		}
 	}
 
-	// Control actions
+	// Control actions - store updates automatically via optimistic updates + WebSocket
 	async function handlePause() {
 		if (!agent || !agentId) return;
 		try {
 			await agents.pauseAgent(agentId);
-			agent = agents.getAgent(agentId) || agent;
+			// Store updates automatically via optimistic update
 		} catch (e) {
 			console.error('Failed to pause agent:', e);
 		}
@@ -275,7 +290,7 @@
 		if (!agent || !agentId) return;
 		try {
 			await agents.resumeAgent(agentId);
-			agent = agents.getAgent(agentId) || agent;
+			// Store updates automatically via optimistic update
 		} catch (e) {
 			console.error('Failed to resume agent:', e);
 		}
@@ -285,7 +300,7 @@
 		if (!agent || !agentId) return;
 		try {
 			await agents.cancelAgent(agentId);
-			agent = agents.getAgent(agentId) || agent;
+			// Store updates automatically via optimistic update
 		} catch (e) {
 			console.error('Failed to cancel agent:', e);
 		}

@@ -328,7 +328,7 @@
 		...$activeAgents.map(agent => ({
 			id: agent.id,
 			type: 'agent' as const,
-			title: agent.name,
+			title: agent.name || agent.prompt?.slice(0, 30) || `Agent ${agent.id.slice(0, 8)}`,
 			status: agent.status === 'running' ? 'running' as const :
 			        agent.status === 'paused' ? 'idle' as const :
 			        agent.status === 'failed' ? 'error' as const : 'idle' as const,
