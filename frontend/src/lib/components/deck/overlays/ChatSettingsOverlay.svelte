@@ -72,7 +72,6 @@
 		onModeChange?: (mode: string | null) => void;
 		onBackgroundModeChange?: (enabled: boolean) => void;
 		onBackgroundConfigChange?: (config: Partial<BackgroundAgentConfig>) => void;
-		onLaunchAgent?: () => void;
 		onClose?: () => void;
 	}
 
@@ -109,7 +108,6 @@
 		onModeChange,
 		onBackgroundModeChange,
 		onBackgroundConfigChange,
-		onLaunchAgent,
 		onClose
 	}: Props = $props();
 
@@ -444,14 +442,6 @@
 					</select>
 				</div>
 
-				<!-- Launch Button -->
-				<button
-					type="button"
-					class="launch-btn"
-					onclick={onLaunchAgent}
-				>
-					Launch Agent
-				</button>
 			</div>
 		{/if}
 	</div>
@@ -818,24 +808,5 @@
 		padding: 2px 6px;
 		border-radius: 4px;
 		margin-left: 6px;
-	}
-
-	/* Launch Button */
-	.launch-btn {
-		width: 100%;
-		padding: 10px 16px;
-		font-size: 0.875rem;
-		font-weight: 600;
-		color: var(--primary-foreground);
-		background: var(--primary);
-		border: none;
-		border-radius: 6px;
-		cursor: pointer;
-		transition: opacity 0.15s;
-		margin-top: 4px;
-	}
-
-	.launch-btn:hover {
-		opacity: 0.9;
 	}
 </style>

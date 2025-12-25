@@ -90,7 +90,6 @@
 	// Activity Panel State
 	let activityPanelTab = $state<ActivityTabType>('threads');
 	let overlayType = $state<OverlayType>(null);
-	let overlayData = $state<Record<string, unknown>>({});
 
 	// Background Mode State (per-tab)
 	interface BackgroundConfig {
@@ -109,6 +108,112 @@
 		autoPR: false,
 		autoMerge: false,
 		maxDurationMinutes: 30
+	});
+
+	// Stable callbacks for chat settings (defined once, reused)
+	function handleChatSettingsProfileChange(profileId: string) {
+		const tab = $activeTab;
+		if (tab) tabs.setTabProfile(tab.id, profileId);
+	}
+
+	function handleChatSettingsProjectChange(projectId: string) {
+		const tab = $activeTab;
+		if (tab) tabs.setTabProject(tab.id, projectId);
+		git.loadRepository(projectId);
+	}
+
+	function handleChatSettingsModelChange(model: string | null) {
+		const tab = $activeTab;
+		if (tab) tabs.setTabModelOverride(tab.id, model);
+	}
+
+	function handleChatSettingsModeChange(mode: string | null) {
+		const tab = $activeTab;
+		if (tab) tabs.setTabPermissionModeOverride(tab.id, mode);
+	}
+
+	function handleChatSettingsBackgroundModeChange(enabled: boolean) {
+		backgroundModeEnabled = enabled;
+		const tab = $activeTab;
+		if (enabled && tab?.project) {
+			git.loadRepository(tab.project);
+		}
+	}
+
+	function handleChatSettingsBackgroundConfigChange(config: Partial<BackgroundConfig>) {
+		backgroundConfig = { ...backgroundConfig, ...config };
+	}
+
+	// Derived overlay data - automatically updates when dependencies change
+	const chatSettingsOverlayData = $derived.by(() => {
+		if (overlayType !== 'chat-settings') return {};
+
+		const tab = $activeTab;
+		if (!tab) return {};
+
+		// Get profile settings for effective values
+		const currentProfile = $profiles.find(p => p.id === tab.profile);
+		const profileModel = currentProfile?.config?.model || 'sonnet';
+		const profileMode = currentProfile?.config?.permission_mode || 'default';
+
+		// Calculate context usage
+		const autocompactBuffer = 45000;
+		const contextUsed = (tab.contextUsed ?? (tab.totalTokensIn + tab.totalCacheCreationTokens + tab.totalCacheReadTokens)) + autocompactBuffer;
+		const contextMax = tab.contextMax || 200000;
+		const contextPercent = Math.min((contextUsed / contextMax) * 100, 100);
+
+		return {
+			// Current values
+			selectedProfile: tab.profile,
+			selectedProject: tab.project,
+			selectedModel: tab.modelOverride,
+			selectedMode: tab.permissionModeOverride,
+			effectiveModel: tab.modelOverride || profileModel,
+			effectiveMode: tab.permissionModeOverride || profileMode,
+			contextUsage: {
+				used: contextUsed,
+				total: contextMax,
+				percentage: contextPercent
+			},
+
+			// Locked states
+			isProfileLocked: false,
+			isProjectLocked: !!tab.sessionId,
+
+			// Options
+			profiles: $profiles,
+			projects: $projects,
+			models: [
+				{ value: 'sonnet', label: 'Sonnet' },
+				{ value: 'sonnet-1m', label: 'Sonnet 1M' },
+				{ value: 'opus', label: 'Opus' },
+				{ value: 'haiku', label: 'Haiku' }
+			],
+			modes: [
+				{ value: 'default', label: 'Ask' },
+				{ value: 'acceptEdits', label: 'Auto-Accept' },
+				{ value: 'plan', label: 'Plan' },
+				{ value: 'bypassPermissions', label: 'Bypass' }
+			],
+
+			// Background mode state
+			isBackgroundMode: backgroundModeEnabled,
+			backgroundConfig: backgroundConfig,
+
+			// Branch data
+			branches: $gitBranches.filter(b => !b.remote).map(b => b.name),
+			currentBranch: $currentBranch?.name || 'main',
+			defaultBranch: 'main',
+			loadingBranches: $gitLoading,
+
+			// Stable callbacks (don't change on re-render)
+			onProfileChange: handleChatSettingsProfileChange,
+			onProjectChange: handleChatSettingsProjectChange,
+			onModelChange: handleChatSettingsModelChange,
+			onModeChange: handleChatSettingsModeChange,
+			onBackgroundModeChange: handleChatSettingsBackgroundModeChange,
+			onBackgroundConfigChange: handleChatSettingsBackgroundConfigChange
+		};
 	});
 
 	// ============================================
@@ -923,7 +1028,6 @@
 		// Toggle overlay if already open
 		if (overlayType === 'chat-settings') {
 			overlayType = null;
-			overlayData = {};
 			// Also collapse the side panel when closing settings
 			deck.toggleContextPanel();
 			return;
@@ -932,113 +1036,8 @@
 		// Expand the context panel if collapsed
 		deck.expandContextPanel();
 
-		// Get current tab data
-		const tab = $activeTab;
-		if (!tab) {
-			overlayType = 'chat-settings';
-			overlayData = {};
-			return;
-		}
-
-		// Get profile settings for effective values
-		const currentProfile = $profiles.find(p => p.id === tab.profile);
-		const profileModel = currentProfile?.config?.model || 'sonnet';
-		const profileMode = currentProfile?.config?.permission_mode || 'default';
-
-		// Calculate context usage
-		const autocompactBuffer = 45000;
-		const contextUsed = (tab.contextUsed ?? (tab.totalTokensIn + tab.totalCacheCreationTokens + tab.totalCacheReadTokens)) + autocompactBuffer;
-		const contextMax = tab.contextMax || 200000;
-		const contextPercent = Math.min((contextUsed / contextMax) * 100, 100);
-
-		// Build overlay data with all settings
+		// Just set the overlay type - data is derived reactively
 		overlayType = 'chat-settings';
-		overlayData = {
-			// Current values
-			selectedProfile: tab.profile,
-			selectedProject: tab.project,
-			selectedModel: tab.modelOverride,
-			selectedMode: tab.permissionModeOverride,
-			effectiveModel: tab.modelOverride || profileModel,
-			effectiveMode: tab.permissionModeOverride || profileMode,
-			contextUsage: {
-				used: contextUsed,
-				total: contextMax,
-				percentage: contextPercent
-			},
-
-			// Locked states
-			isProfileLocked: false, // Could be locked by API user
-			isProjectLocked: !!tab.sessionId, // Locked if session exists
-
-			// Options
-			profiles: $profiles,
-			projects: $projects,
-			models: [
-				{ value: 'sonnet', label: 'Sonnet' },
-				{ value: 'sonnet-1m', label: 'Sonnet 1M' },
-				{ value: 'opus', label: 'Opus' },
-				{ value: 'haiku', label: 'Haiku' }
-			],
-			modes: [
-				{ value: 'default', label: 'Ask' },
-				{ value: 'acceptEdits', label: 'Auto-Accept' },
-				{ value: 'plan', label: 'Plan' },
-				{ value: 'bypassPermissions', label: 'Bypass' }
-			],
-
-			// Background mode state
-			isBackgroundMode: backgroundModeEnabled,
-			backgroundConfig: backgroundConfig,
-
-			// Branch data
-			branches: $gitBranches.filter(b => !b.remote).map(b => b.name),
-			currentBranch: $currentBranch?.name || 'main',
-			defaultBranch: 'main',
-			loadingBranches: $gitLoading,
-
-			// Callbacks
-			onProfileChange: (profileId: string) => {
-				if (tab) tabs.setTabProfile(tab.id, profileId);
-				// Refresh overlay data
-				handleOpenChatSettings();
-			},
-			onProjectChange: (projectId: string) => {
-				if (tab) tabs.setTabProject(tab.id, projectId);
-				// Load branches for the new project
-				git.loadRepository(projectId);
-				// Refresh overlay data
-				handleOpenChatSettings();
-			},
-			onModelChange: (model: string | null) => {
-				if (tab) tabs.setTabModelOverride(tab.id, model);
-				// Refresh overlay data
-				handleOpenChatSettings();
-			},
-			onModeChange: (mode: string | null) => {
-				if (tab) tabs.setTabPermissionModeOverride(tab.id, mode);
-				// Refresh overlay data
-				handleOpenChatSettings();
-			},
-			onBackgroundModeChange: (enabled: boolean) => {
-				backgroundModeEnabled = enabled;
-				// Load branches when enabling background mode if we have a project
-				if (enabled && tab?.project) {
-					git.loadRepository(tab.project);
-				}
-				// Refresh overlay data
-				handleOpenChatSettings();
-			},
-			onBackgroundConfigChange: (config: Partial<BackgroundConfig>) => {
-				backgroundConfig = { ...backgroundConfig, ...config };
-				// Refresh overlay data
-				handleOpenChatSettings();
-			},
-			onLaunchAgent: () => {
-				// TODO: Launch background agent with config
-				console.log('Launch agent with config:', backgroundConfig);
-			}
-		};
 	}
 
 	function handleOpenProjectCard(editId?: string) {
@@ -1155,7 +1154,7 @@
 		generations={deckGenerations}
 		currentSession={null}
 		{overlayType}
-		{overlayData}
+		overlayData={chatSettingsOverlayData}
 		sessions={deckSessions}
 		agents={deckAgents}
 		{runningProcesses}
@@ -1175,7 +1174,7 @@
 			});
 		}}
 		onGenerationClick={() => {}}
-		onOverlayClose={() => { overlayType = null; overlayData = {}; }}
+		onOverlayClose={() => { overlayType = null; }}
 		onProcessClick={() => {}}
 	>
 		{#if activeMode === 'workspace'}
