@@ -841,7 +841,9 @@ class AgentExecutionEngine:
                 self._log(agent_run_id, "Cannot create PR: not a GitHub repository", "warning")
                 return
 
-            default_branch = repo.get("default_branch", "main") if repo else "main"
+            # Use the base_branch the agent was started from, not the repo's default branch
+            # This ensures PRs target the correct branch (e.g., ai-shuffle instead of main)
+            target_branch = agent_run.get("base_branch") or repo.get("default_branch", "main") if repo else "main"
 
             # Create PR using gh CLI
             pr_title = f"Agent: {agent_run['name']}"
@@ -865,7 +867,7 @@ class AgentExecutionEngine:
                     "gh", "pr", "create",
                     "--repo", github_repo,
                     "--head", state.branch_name,
-                    "--base", default_branch,
+                    "--base", target_branch,
                     "--title", pr_title,
                     "--body", pr_body
                 ],
