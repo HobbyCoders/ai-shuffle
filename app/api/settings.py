@@ -1924,7 +1924,8 @@ def _compute_effective_status(policy: str, admin_has_key: bool) -> str:
 @router.get("/internal/resolve-credential/{credential_type}")
 async def resolve_credential(
     credential_type: str,
-    user_id: Optional[str] = None
+    user_id: Optional[str] = None,
+    _: str = Depends(require_admin)
 ):
     """
     Internal endpoint to resolve which API key to use.
@@ -1935,6 +1936,7 @@ async def resolve_credential(
     3. If not found: return error
 
     This endpoint is for internal use by AI tools only.
+    Requires admin authentication as it returns decrypted API keys.
     """
     from app.core import encryption as enc
 

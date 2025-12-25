@@ -12,6 +12,10 @@ from pydantic import BaseModel
 from app.db import database
 from app.api.auth import get_current_api_user
 from app.core import encryption
+from app.core.credential_service import (
+    validate_credential,
+    ValidationResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -366,63 +370,27 @@ async def set_my_credential(
     if not value:
         raise HTTPException(status_code=400, detail="Credential value cannot be empty")
 
-    # Validate the credential based on type
-    if credential_type == "openai_api_key":
-        if not value.startswith("sk-"):
-            raise HTTPException(status_code=400, detail="Invalid OpenAI API key format")
-        # Optionally validate with OpenAI API
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(
-                    "https://api.openai.com/v1/models",
-                    headers={"Authorization": f"Bearer {value}"}
-                )
-                if response.status_code == 401:
-                    raise HTTPException(status_code=400, detail="Invalid OpenAI API key")
-        except httpx.TimeoutException:
-            pass  # Don't fail on timeout
-        except HTTPException:
-            raise
+    # Validate the credential using the credential service
+    validation_response = await validate_credential(credential_type, value)
 
-    elif credential_type == "gemini_api_key":
-        # Validate with Google AI API
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(
-                    f"https://generativelanguage.googleapis.com/v1beta/models?key={value}"
-                )
-                if response.status_code == 400 and "API_KEY_INVALID" in response.text:
-                    raise HTTPException(status_code=400, detail="Invalid Google AI API key")
-        except httpx.TimeoutException:
-            pass
-        except HTTPException:
-            raise
+    if validation_response.result == ValidationResult.INVALID:
+        raise HTTPException(status_code=400, detail=validation_response.message)
+    elif validation_response.result == ValidationResult.ERROR:
+        # Log the error but allow the user to decide whether to proceed
+        logger.warning(f"Credential validation error for {credential_type}: {validation_response.message}")
+        raise HTTPException(
+            status_code=422,
+            detail=f"Could not validate credential: {validation_response.message}. Please verify the key is correct."
+        )
+    # ValidationResult.VALID and ValidationResult.TIMEOUT allow proceeding
 
-    elif credential_type == "github_pat":
-        # Validate with GitHub API and get user info
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(
-                    "https://api.github.com/user",
-                    headers={
-                        "Authorization": f"Bearer {value}",
-                        "Accept": "application/vnd.github+json"
-                    }
-                )
-                if response.status_code == 401:
-                    raise HTTPException(status_code=400, detail="Invalid GitHub Personal Access Token")
-                elif response.status_code == 200:
-                    # Store GitHub user info
-                    github_user = response.json()
-                    database.set_user_github_config(
-                        api_user["id"],
-                        github_username=github_user.get("login"),
-                        github_avatar_url=github_user.get("avatar_url")
-                    )
-        except httpx.TimeoutException:
-            pass
-        except HTTPException:
-            raise
+    # For GitHub, store user info from validation metadata
+    if credential_type == "github_pat" and validation_response.metadata:
+        database.set_user_github_config(
+            api_user["id"],
+            github_username=validation_response.metadata.get("github_username"),
+            github_avatar_url=validation_response.metadata.get("github_avatar_url")
+        )
 
     # Encrypt and store
     if encryption.is_encryption_ready():
