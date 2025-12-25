@@ -105,14 +105,18 @@
 
 {#if $selectedItem}
 	<!-- Backdrop -->
+	<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 	<div
-		class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+		class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
 		onclick={handleBackdropClick}
+		onkeydown={(e) => e.key === 'Escape' && handleClose()}
 		role="dialog"
 		aria-modal="true"
 		aria-labelledby="preview-title"
+		tabindex="-1"
 	>
 		<!-- Modal Container -->
+		<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 		<div
 			class="relative bg-card rounded-2xl border border-border shadow-2xl max-w-6xl w-full max-h-[90vh] overflow-hidden flex flex-col lg:flex-row animate-modal-in"
 			onclick={(e) => e.stopPropagation()}
@@ -162,7 +166,7 @@
 
 					<!-- Prompt -->
 					<div>
-						<label class="text-xs font-medium text-muted-foreground mb-1 block">Prompt</label>
+						<span class="text-xs font-medium text-muted-foreground mb-1 block">Prompt</span>
 						<p class="text-sm text-foreground bg-muted/50 rounded-lg p-3 border border-border">
 							{$selectedItem.prompt}
 						</p>
@@ -170,7 +174,7 @@
 
 					<!-- Settings -->
 					<div>
-						<label class="text-xs font-medium text-muted-foreground mb-2 block">Settings</label>
+						<span class="text-xs font-medium text-muted-foreground mb-2 block">Settings</span>
 						<div class="space-y-2 text-sm">
 							<div class="flex justify-between">
 								<span class="text-muted-foreground">Provider</span>
@@ -211,7 +215,7 @@
 
 					<!-- Created Date -->
 					<div>
-						<label class="text-xs font-medium text-muted-foreground mb-1 block">Created</label>
+						<span class="text-xs font-medium text-muted-foreground mb-1 block">Created</span>
 						<p class="text-sm text-foreground">{formatDate($selectedItem.createdAt)}</p>
 					</div>
 

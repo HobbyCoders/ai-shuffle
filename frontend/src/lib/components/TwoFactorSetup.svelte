@@ -150,7 +150,7 @@
 		<div class="status-view">
 			<div class="status-header">
 				<div class="status-icon" class:enabled={status.enabled}>
-					{status.enabled ? '&#128274;' : '&#128275;'}
+					{status.enabled ? '🔒' : '🔓'}
 				</div>
 				<div class="status-text">
 					<h3>Two-Factor Authentication</h3>

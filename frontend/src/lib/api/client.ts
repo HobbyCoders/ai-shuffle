@@ -932,7 +932,7 @@ export async function getKnowledgeStats(projectId: string): Promise<KnowledgeSta
  * Upload a document to the knowledge base
  */
 export async function uploadKnowledgeDocument(projectId: string, file: File): Promise<KnowledgeDocumentSummary> {
-	return api.uploadFile(`/projects/${projectId}/knowledge`, file);
+	return api.uploadFile(`/projects/${projectId}/knowledge`, file) as unknown as Promise<KnowledgeDocumentSummary>;
 }
 
 /**
@@ -968,4 +968,43 @@ export async function getKnowledgeDocumentPreview(
 ): Promise<{ id: string; filename: string; preview: string; total_length: number; truncated: boolean }> {
 	const params = maxLength ? `?max_length=${maxLength}` : '';
 	return api.get(`/projects/${projectId}/knowledge/${documentId}/preview${params}`);
+}
+
+// ============================================================================
+// User Preferences API (for cross-device sync)
+// ============================================================================
+
+export interface PreferenceResponse {
+	key: string;
+	value: unknown;
+	updated_at?: string;
+}
+
+/**
+ * Get a user preference by key
+ */
+export async function getPreference<T = unknown>(key: string): Promise<PreferenceResponse | null> {
+	try {
+		return await api.get<PreferenceResponse>(`/preferences/${key}`);
+	} catch (e) {
+		// Return null if not found (404)
+		if ((e as ApiError).status === 404) {
+			return null;
+		}
+		throw e;
+	}
+}
+
+/**
+ * Set a user preference
+ */
+export async function setPreference<T = unknown>(key: string, value: T): Promise<PreferenceResponse> {
+	return api.put<PreferenceResponse>(`/preferences/${key}`, { key, value });
+}
+
+/**
+ * Delete a user preference
+ */
+export async function deletePreference(key: string): Promise<{ deleted: boolean }> {
+	return api.delete<{ deleted: boolean }>(`/preferences/${key}`) as Promise<{ deleted: boolean }>;
 }

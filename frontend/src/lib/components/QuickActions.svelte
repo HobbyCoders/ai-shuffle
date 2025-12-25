@@ -125,7 +125,7 @@
 			</div>
 
 			<!-- Mobile bottom sheet -->
-			<div class="sm:hidden fixed inset-0 bg-black/50 z-50 flex items-end justify-center">
+			<div class="sm:hidden fixed inset-0 bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] bg-black/50 z-50 flex items-end justify-center">
 				<div class="w-full bg-card border-t border-border rounded-t-2xl shadow-lg max-h-[70vh] overflow-hidden">
 					<div class="flex items-center justify-between px-4 py-3 border-b border-border">
 						<span class="text-sm font-medium text-foreground">Quick Actions</span>

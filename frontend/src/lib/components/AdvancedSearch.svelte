@@ -210,7 +210,7 @@
 {#if visible}
 	<!-- Backdrop with blur -->
 	<div
-		class="fixed inset-0 z-50 flex items-start justify-center pt-[10vh] bg-black/60 backdrop-blur-sm"
+		class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-start justify-center pt-[10vh] bg-black/60 backdrop-blur-sm"
 		onclick={handleBackdropClick}
 		role="dialog"
 		aria-modal="true"

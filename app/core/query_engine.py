@@ -193,12 +193,12 @@ def _build_plugins_list(enabled_plugins: Optional[list]) -> Optional[list]:
     According to the Claude Agent SDK documentation, plugins are specified as:
     [{"type": "local", "path": "./my-plugin"}, ...]
 
-    Paths can be:
-    - Relative paths: Resolved relative to workspace directory
-    - Absolute paths: Used as-is
+    Supports two formats for enabled_plugins entries:
+    1. Plugin IDs: "plugin-name@marketplace" - resolved via installed_plugins.json
+    2. Direct paths: "/path/to/plugin" or "relative/path" - used directly
 
     Args:
-        enabled_plugins: List of plugin paths from profile config
+        enabled_plugins: List of plugin IDs or paths from profile config
 
     Returns:
         List of plugin dicts for SDK, or None if no plugins enabled
@@ -206,24 +206,59 @@ def _build_plugins_list(enabled_plugins: Optional[list]) -> Optional[list]:
     if not enabled_plugins:
         return None
 
+    # Try to load installed plugins registry to resolve plugin IDs
+    installed_plugins = {}
+    installed_plugins_file = Path("/home/appuser/.claude/plugins/installed_plugins.json")
+    try:
+        if installed_plugins_file.exists():
+            import json
+            with open(installed_plugins_file, 'r') as f:
+                data = json.load(f)
+                installed_plugins = data.get("plugins", {})
+    except Exception as e:
+        logger.warning(f"Failed to load installed_plugins.json: {e}")
+
     plugins = []
-    for plugin_path in enabled_plugins:
-        if not plugin_path:
+    seen_paths = set()  # Avoid duplicates
+
+    for plugin_entry in enabled_plugins:
+        if not plugin_entry:
             continue
 
-        # Resolve path - if relative, resolve from workspace_dir
-        path = Path(plugin_path)
-        if not path.is_absolute():
-            resolved_path = settings.workspace_dir / plugin_path
-        else:
-            resolved_path = path
+        resolved_path = None
 
-        # Convert to string for SDK
-        plugins.append({
-            "type": "local",
-            "path": str(resolved_path)
-        })
-        logger.info(f"Adding plugin: {resolved_path}")
+        # Check if this is a plugin ID format (name@marketplace)
+        if "@" in plugin_entry and not plugin_entry.startswith("/") and not plugin_entry.startswith("."):
+            # Look up in installed_plugins registry
+            if plugin_entry in installed_plugins:
+                installations = installed_plugins[plugin_entry]
+                if installations:
+                    resolved_path = Path(installations[0].get("installPath", ""))
+                    if not resolved_path.exists():
+                        logger.warning(f"Plugin install path not found: {resolved_path}")
+                        resolved_path = None
+            else:
+                logger.warning(f"Plugin not found in installed_plugins.json: {plugin_entry}")
+        else:
+            # Direct path format
+            path = Path(plugin_entry)
+            if path.is_absolute():
+                resolved_path = path
+            else:
+                resolved_path = settings.workspace_dir / plugin_entry
+
+        if resolved_path and str(resolved_path) not in seen_paths:
+            # Verify the plugin directory exists and has plugin.json
+            plugin_manifest = resolved_path / ".claude-plugin" / "plugin.json"
+            if resolved_path.exists():
+                plugins.append({
+                    "type": "local",
+                    "path": str(resolved_path)
+                })
+                seen_paths.add(str(resolved_path))
+                logger.info(f"Adding plugin: {resolved_path}")
+            else:
+                logger.warning(f"Plugin directory not found: {resolved_path}")
 
     if not plugins:
         return None
@@ -280,28 +315,51 @@ SECURITY_INSTRUCTIONS = """
 Chat and its Capabilities:
 ## Displaying Media and Files in Chat
 
-The chat UI can render images, videos, and file download cards. Use these markdown formats:
+The chat UI can render images, videos, and file download cards.
 
-**Images:** `![Description](/api/generated-images/filename.png)`
-**Videos:** `[Description](/api/generated-videos/filename.mp4)`
-**Files:** `📎[filename.ext](/api/files/filename.ext)`
+### Media Formats
+- **Images:** `![Description](/api/generated-images/filename.png)`
+- **Videos:** `[Description](/api/generated-videos/filename.mp4)`
+- **Files:** `📎[filename.ext](/api/files/by-path?path=/full/path/to/shared-files/filename.ext)`
 
-### Sharing Files for Download
+---
 
-When you need to share a file for the user to download (e.g., generated reports, exports, compiled outputs, plans):
+### Sharing Files for Download (IMPORTANT!)
 
-1. Save the file to the `shared-files` directory in the current working directory:
-   ```bash
-   mkdir -p shared-files
-   # Then save your file there (e.g., shared-files/report.pdf)
-   ```
+**ALWAYS provide a download link** when you create or work on a standalone file that the user might want to download. This includes:
+- Generated documents (reports, configs, prompts, plans)
+- Exported data (JSON, CSV, spreadsheets)
+- Created scripts or templates
+- Any single file the user asked you to create or produce
 
-2. Display the download link using the full path: `📎[filename.ext](/api/files/by-path?path=/full/path/to/shared-files/filename.ext)`
+**Two-step process - BOTH steps required:**
 
-Example: If working directory is `/workspace/my-project`, after saving to `shared-files/report.pdf`:
+**Step 1: Copy to shared-files folder**
+```bash
+mkdir -p /workspace/<project>/shared-files
+cp /path/to/file.ext /workspace/<project>/shared-files/
 ```
-📎[report.pdf](/api/files/by-path?path=/workspace/my-project/shared-files/report.pdf)
+
+**Step 2: Display the download link**
 ```
+📎[filename.ext](/api/files/by-path?path=/workspace/<project>/shared-files/filename.ext)
+```
+
+**Example workflow:**
+```bash
+# You created a file at /workspace/my-app/prompts/agent.md
+mkdir -p /workspace/my-app/shared-files
+cp /workspace/my-app/prompts/agent.md /workspace/my-app/shared-files/
+```
+Then in your response:
+```
+📎[agent.md](/api/files/by-path?path=/workspace/my-app/shared-files/agent.md)
+```
+
+**Common mistakes to avoid:**
+- DON'T link directly to the original file path - it won't work
+- DON'T forget to copy the file first - the link will 404
+- DON'T use relative paths - always use full absolute paths starting with /workspace/
 """
 
 
@@ -923,8 +981,16 @@ def build_options_from_profile(
     overrides = overrides or {}
 
     # Determine working directory first (needed for env details injection)
-    # Check if session has associated worktree - worktree takes priority
-    if resume_session_id:
+    # Priority order:
+    # 1. Override cwd (explicit worktree path from agent engine)
+    # 2. Session worktree (for resumed sessions)
+    # 3. Project path
+    # 4. Profile config cwd
+    # 5. Default workspace
+    if overrides.get("cwd"):
+        # Override takes highest priority - used by agent engine for worktrees
+        working_dir = overrides.get("cwd")
+    elif resume_session_id:
         worktree = database.get_worktree_by_session(resume_session_id)
         if worktree and worktree.get("status") == "active":
             working_dir = str(settings.workspace_dir / worktree["worktree_path"])

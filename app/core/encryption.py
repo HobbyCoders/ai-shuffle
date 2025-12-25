@@ -3,10 +3,13 @@ Encryption utilities for securing sensitive data at rest.
 
 Uses Fernet symmetric encryption with keys derived from the admin password.
 The encryption key is never stored - it's derived at runtime from the password.
+
+Alternatively, set ADMIN_PASSWORD env var to auto-derive the key on startup.
 """
 
 import base64
 import hashlib
+import os
 import secrets
 import logging
 from typing import Optional, Tuple
@@ -19,6 +22,25 @@ logger = logging.getLogger(__name__)
 # Global cache for the encryption key (only in memory, never persisted)
 _encryption_key: Optional[bytes] = None
 _key_salt: Optional[bytes] = None
+
+
+def init_encryption_from_env(db_module) -> bool:
+    """
+    Initialize encryption key from ADMIN_PASSWORD environment variable.
+    This allows headless operation without requiring admin login.
+
+    Call this at app startup to enable API key decryption.
+
+    Returns:
+        True if encryption was initialized, False if env var not set
+    """
+    admin_password = os.environ.get("ADMIN_PASSWORD")
+    if not admin_password:
+        return False
+
+    set_encryption_key(admin_password, db_module)
+    logger.info("Encryption key initialized from ADMIN_PASSWORD environment variable")
+    return True
 
 
 def get_or_create_salt(db_module) -> bytes:

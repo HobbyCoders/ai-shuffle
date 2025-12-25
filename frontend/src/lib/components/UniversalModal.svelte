@@ -92,7 +92,7 @@
 				max-h-[90vh]
 				sm:max-h-[85vh]
 
-				max-sm:fixed max-sm:inset-3 max-sm:bottom-[4.5rem] max-sm:w-auto max-sm:max-w-none max-sm:max-h-none max-sm:rounded-2xl
+				max-sm:fixed max-sm:inset-3 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] max-sm:w-auto max-sm:max-w-none max-sm:max-h-none max-sm:rounded-2xl
 
 				transform transition-all duration-200 ease-out
 				animate-modal-in

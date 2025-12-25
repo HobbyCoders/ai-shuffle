@@ -91,6 +91,21 @@ function createGitStore() {
         },
 
         /**
+         * Clear repository data (used when switching to a tab with no project)
+         */
+        clearRepository() {
+            set({
+                projectId: null,
+                status: null,
+                branches: [],
+                commits: [],
+                worktrees: [],
+                loading: false,
+                error: null
+            });
+        },
+
+        /**
          * Refresh the git status
          */
         async refreshStatus() {
@@ -262,14 +277,14 @@ function createGitStore() {
             createNew?: boolean,
             baseBranch?: string,
             profileId?: string
-        ) {
+        ): Promise<gitApi.Worktree | undefined> {
             const state = getCurrentState();
-            if (!state.projectId) return;
+            if (!state.projectId) return undefined;
 
             update(s => ({ ...s, loading: true, error: null }));
 
             try {
-                await gitApi.createWorktree(state.projectId, {
+                const worktree = await gitApi.createWorktree(state.projectId, {
                     branch_name: branchName,
                     create_new: createNew,
                     base_branch: baseBranch,
@@ -278,6 +293,7 @@ function createGitStore() {
                 await this.loadWorktrees();
                 await this.loadBranches();
                 update(s => ({ ...s, loading: false }));
+                return worktree;
             } catch (e) {
                 const error = e as { detail?: string };
                 update(s => ({

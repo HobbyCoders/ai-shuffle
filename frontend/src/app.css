@@ -288,7 +288,27 @@ code {
 	border: 1px solid var(--border);
 	border-radius: 0.5rem;
 	color: var(--foreground);
-	transition: border-color 0.2s, box-shadow 0.2s;
+	transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s;
+}
+
+/* Dark mode inputs - deeper background for contrast */
+.dark .input {
+	background-color: oklch(0.12 0.008 260);
+	border-color: oklch(0.30 0.012 260);
+}
+
+.dark .input:hover:not(:focus) {
+	border-color: oklch(0.38 0.015 260);
+}
+
+/* Light mode inputs - subtle gray background */
+.light .input {
+	background-color: oklch(0.97 0.003 260);
+	border-color: oklch(0.82 0.01 260);
+}
+
+.light .input:hover:not(:focus) {
+	border-color: oklch(0.72 0.015 260);
 }
 
 .input::placeholder {
@@ -298,6 +318,47 @@ code {
 .input:focus {
 	outline: none;
 	box-shadow: 0 0 0 2px var(--ring);
+}
+
+.dark .input:focus {
+	border-color: var(--ring);
+	background-color: oklch(0.14 0.01 260);
+}
+
+.light .input:focus {
+	border-color: var(--ring);
+	background-color: oklch(1 0 0);
+}
+
+/* Select element styling */
+select.input {
+	cursor: pointer;
+	appearance: none;
+	-webkit-appearance: none;
+	-moz-appearance: none;
+	background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+	background-position: right 0.5rem center;
+	background-repeat: no-repeat;
+	background-size: 1.25em 1.25em;
+	padding-right: 2.5rem;
+}
+
+.dark select.input {
+	background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%239ca3af' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+}
+
+select.input option {
+	background-color: var(--card);
+	color: var(--foreground);
+	padding: 0.5rem;
+}
+
+.dark select.input option {
+	background-color: oklch(0.18 0.01 260);
+}
+
+.light select.input option {
+	background-color: oklch(1 0 0);
 }
 
 /* Card styles */
@@ -459,8 +520,139 @@ code {
 	font-style: italic;
 }
 
-/* Mobile optimizations */
-@media (max-width: 640px) {
+/* ========================================
+   RESPONSIVE BREAKPOINTS & CSS CUSTOM PROPERTIES
+   Mobile: < 640px
+   Tablet: 640px - 1024px
+   Desktop: > 1024px
+   ======================================== */
+
+:root {
+	--breakpoint-mobile: 640px;
+	--breakpoint-tablet: 1024px;
+}
+
+/* ========================================
+   RESPONSIVE UTILITY CLASSES
+   Provide CSS fallback for JS-based responsive behavior
+   ======================================== */
+
+/* Hide on mobile (< 640px) */
+@media (max-width: 639px) {
+	.mobile-hidden,
+	.desktop-only {
+		display: none !important;
+	}
+}
+
+/* Hide on desktop (>= 640px) */
+@media (min-width: 640px) {
+	.desktop-hidden,
+	.mobile-only {
+		display: none !important;
+	}
+}
+
+/* Tablet-specific visibility */
+@media (min-width: 640px) and (max-width: 1023px) {
+	.tablet-hidden {
+		display: none !important;
+	}
+}
+
+@media (max-width: 639px), (min-width: 1024px) {
+	.tablet-only {
+		display: none !important;
+	}
+}
+
+/* ========================================
+   MOBILE LAYOUT FALLBACKS
+   CSS backup for JS-based mobile detection
+   ======================================== */
+
+/* Mobile: Hide desktop-only elements via CSS as fallback */
+@media (max-width: 639px) {
+	/* Hide context panel on mobile */
+	.context-panel-desktop,
+	[data-layout="context-panel"] {
+		display: none !important;
+	}
+
+	/* Hide dock on mobile */
+	.dock-desktop,
+	[data-layout="dock"] {
+		display: none !important;
+	}
+
+	/* Desktop activity rail hidden on mobile */
+	.rail-desktop,
+	[data-layout="rail-desktop"] {
+		display: none !important;
+	}
+
+	/* Mobile activity rail visible and positioned at bottom */
+	.rail-mobile,
+	[data-layout="rail-mobile"] {
+		display: flex !important;
+		position: fixed;
+		bottom: 0;
+		left: 0;
+		right: 0;
+		z-index: 100;
+		background: var(--card);
+		height: calc(64px + env(safe-area-inset-bottom, 0px));
+		padding-bottom: env(safe-area-inset-bottom, 0px);
+	}
+
+	/* Main content takes full width on mobile */
+	.main-content-responsive {
+		grid-column: 1 !important;
+		margin-left: 0 !important;
+		width: 100% !important;
+	}
+
+	/* Ensure proper spacing for mobile bottom rail */
+	.has-mobile-rail {
+		padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px));
+	}
+}
+
+/* Desktop: Hide mobile-only elements via CSS as fallback */
+@media (min-width: 640px) {
+	.rail-mobile,
+	[data-layout="rail-mobile"] {
+		display: none !important;
+	}
+}
+
+/* ========================================
+   TABLET LAYOUT ADJUSTMENTS
+   Intermediate sizing for 640px - 1024px
+   ======================================== */
+
+@media (min-width: 640px) and (max-width: 1023px) {
+	/* Narrower context panel on tablets */
+	.context-panel-responsive {
+		width: 280px !important;
+	}
+
+	/* Slightly narrower activity rail on tablets */
+	.rail-responsive {
+		width: 56px !important;
+	}
+
+	/* Adjust grid for tablet */
+	.deck-layout-responsive {
+		grid-template-columns: 56px 1fr !important;
+	}
+}
+
+/* ========================================
+   MOBILE OPTIMIZATIONS
+   ======================================== */
+
+@media (max-width: 639px) {
 	html {
 		font-size: 16px;
 		-webkit-text-size-adjust: 100%;
@@ -479,6 +671,45 @@ code {
 
 	select.input {
 		font-size: 16px;
+	}
+
+	/* Larger touch targets on mobile */
+	.touch-target {
+		min-width: 44px;
+		min-height: 44px;
+	}
+}
+
+/* ========================================
+   ACCESSIBILITY: REDUCED MOTION
+   ======================================== */
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
+	}
+
+	/* Disable specific animations */
+	.panel-slide-in {
+		animation: none !important;
+	}
+
+	.theme-toggle-icon.rotating {
+		transform: none !important;
+	}
+
+	/* Keep visual feedback but remove motion */
+	.context-container {
+		transition: none !important;
+	}
+
+	.floating-panel {
+		animation: none !important;
 	}
 }
 
@@ -549,3 +780,31 @@ button, a, .clickable {
 .theme-toggle-icon.rotating {
 	transform: rotate(180deg);
 }
+
+/* Floating Island Input Container */
+.floating-island {
+	background-color: var(--input);
+	border: 1px solid var(--border);
+	border-radius: 1rem;
+	box-shadow: var(--shadow-m);
+	transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s;
+}
+
+.floating-island:focus-within {
+	border-color: var(--ring);
+	box-shadow: var(--shadow-l), 0 0 0 2px oklch(from var(--ring) l c h / 0.15);
+}
+
+/* Dark mode floating island - slightly elevated */
+.dark .floating-island {
+	background-color: oklch(0.16 0.01 260);
+	border-color: oklch(0.32 0.012 260);
+}
+
+/* Light mode floating island - pure white with subtle shadow */
+.light .floating-island {
+	background-color: oklch(1 0 0);
+	border-color: oklch(0.82 0.01 260);
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+

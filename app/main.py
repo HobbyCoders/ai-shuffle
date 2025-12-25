@@ -22,9 +22,11 @@ from app.core.auth import auth_service
 from app.core.query_engine import cleanup_stale_sessions
 from app.core.sync_engine import sync_engine
 from app.core.cleanup_manager import cleanup_manager
+from app.core import encryption
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, knowledge, rate_limits, github, git, canvas
+from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, knowledge, rate_limits, github, git, canvas, agents, studio, plugins
+from app.api.agents import start_agent_engine, stop_agent_engine
 
 # Import middleware
 from app.middleware.rate_limit import RateLimitMiddleware
@@ -136,12 +138,18 @@ async def lifespan(app: FastAPI):
     # Run database migrations
     run_migrations()
 
-    # Clear all sessions on startup - forces re-login to restore encryption key
-    # This is required because the encryption key (derived from admin password)
-    # is only kept in memory and lost on restart
-    admin_cleared, api_cleared = database.clear_all_sessions()
-    if admin_cleared or api_cleared:
-        logger.info(f"Cleared {admin_cleared} admin and {api_cleared} API user sessions (re-login required)")
+    # Try to initialize encryption from ADMIN_PASSWORD env var
+    # This enables headless operation without requiring admin login
+    if encryption.init_encryption_from_env(database):
+        logger.info("Encryption initialized from ADMIN_PASSWORD environment variable")
+    else:
+        # Clear all sessions on startup - forces re-login to restore encryption key
+        # This is required because the encryption key (derived from admin password)
+        # is only kept in memory and lost on restart
+        admin_cleared, api_cleared = database.clear_all_sessions()
+        if admin_cleared or api_cleared:
+            logger.info(f"Cleared {admin_cleared} admin and {api_cleared} API user sessions (re-login required)")
+        logger.info("Set ADMIN_PASSWORD env var for automatic encryption key loading")
 
     # Load user-configured workspace path from database (for local mode)
     load_workspace_from_database()
@@ -168,6 +176,9 @@ async def lifespan(app: FastAPI):
     global _cleanup_task
     _cleanup_task = asyncio.create_task(periodic_cleanup())
 
+    # Start agent execution engine
+    await start_agent_engine()
+
     yield
 
     # Stop background cleanup scheduler
@@ -178,6 +189,9 @@ async def lifespan(app: FastAPI):
             await _cleanup_task
         except asyncio.CancelledError:
             pass
+
+    # Stop agent execution engine
+    await stop_agent_engine()
 
 
 # Create FastAPI application
@@ -274,6 +288,9 @@ app.include_router(rate_limits.router)
 app.include_router(github.router)
 app.include_router(git.router)
 app.include_router(canvas.router)
+app.include_router(agents.router)
+app.include_router(studio.router)
+app.include_router(plugins.router)
 
 # Serve static files (Svelte build) if they exist
 static_dir = Path(__file__).parent / "static"
@@ -315,6 +332,10 @@ if static_dir.exists():
 
     @app.get("/workspace")
     async def serve_spa_workspace():
+        return FileResponse(static_dir / "index.html")
+
+    @app.get("/deck")
+    async def serve_spa_deck():
         return FileResponse(static_dir / "index.html")
 
     @app.get("/favicon.svg")

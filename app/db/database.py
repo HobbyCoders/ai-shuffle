@@ -16,7 +16,8 @@ logger = logging.getLogger(__name__)
 
 
 # Schema version for migrations
-SCHEMA_VERSION = 19
+# v21: Force re-run to ensure agent_runs, agent_tasks, agent_logs tables exist
+SCHEMA_VERSION = 21
 
 
 def get_connection() -> sqlite3.Connection:
@@ -468,7 +469,6 @@ def _create_schema(cursor: sqlite3.Cursor):
         cursor.execute("ALTER TABLE admin ADD COLUMN totp_verified_at TIMESTAMP")
     except sqlite3.OperationalError:
         pass  # Column already exists
-
     # Create indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_templates_category ON templates(category)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_templates_profile ON templates(profile_id)")
@@ -580,6 +580,91 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_session ON worktrees(session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_branch ON worktrees(branch_name)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_status ON worktrees(status)")
+
+    # =========================================================================
+    # Background Agent Runs (autonomous agent execution)
+    # =========================================================================
+
+    # Agent runs - tracks background agent executions
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_runs (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            status TEXT DEFAULT 'queued',
+            progress REAL DEFAULT 0,
+            profile_id TEXT,
+            project_id TEXT,
+            worktree_id TEXT,
+            branch TEXT,
+            base_branch TEXT,
+            pr_url TEXT,
+            auto_branch BOOLEAN DEFAULT TRUE,
+            auto_pr BOOLEAN DEFAULT FALSE,
+            auto_merge BOOLEAN DEFAULT FALSE,
+            auto_review BOOLEAN DEFAULT FALSE,
+            max_duration_minutes INTEGER DEFAULT 30,
+            sdk_session_id TEXT,
+            started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            completed_at TIMESTAMP,
+            error TEXT,
+            result_summary TEXT,
+            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
+            FOREIGN KEY (worktree_id) REFERENCES worktrees(id) ON DELETE SET NULL
+        )
+    """)
+
+    # Migration: Add base_branch column to agent_runs (for existing DBs)
+    try:
+        cursor.execute("ALTER TABLE agent_runs ADD COLUMN base_branch TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
+    # Migration: Add auto_merge column to agent_runs (for existing DBs)
+    try:
+        cursor.execute("ALTER TABLE agent_runs ADD COLUMN auto_merge BOOLEAN DEFAULT FALSE")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
+    # Agent tasks - hierarchical task tracking within agent runs
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_tasks (
+            id TEXT PRIMARY KEY,
+            agent_run_id TEXT NOT NULL,
+            parent_task_id TEXT,
+            name TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            order_index INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (agent_run_id) REFERENCES agent_runs(id) ON DELETE CASCADE,
+            FOREIGN KEY (parent_task_id) REFERENCES agent_tasks(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Agent logs - detailed logs for agent runs
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_run_id TEXT NOT NULL,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            level TEXT DEFAULT 'info',
+            message TEXT NOT NULL,
+            metadata JSON,
+            FOREIGN KEY (agent_run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Create agent run indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_status ON agent_runs(status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_project ON agent_runs(project_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_profile ON agent_runs(profile_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_started ON agent_runs(started_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_tasks_run ON agent_tasks(agent_run_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_tasks_parent ON agent_tasks(parent_task_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_logs_run ON agent_logs(agent_run_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_logs_timestamp ON agent_logs(timestamp)")
 
 
 def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
@@ -3764,3 +3849,443 @@ def delete_worktrees_for_repository(repository_id: str) -> int:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM worktrees WHERE repository_id = ?", (repository_id,))
         return cursor.rowcount
+
+
+# ============================================================================
+# Agent Run Operations (Background Autonomous Agents)
+# ============================================================================
+
+def create_agent_run(
+    agent_run_id: str,
+    name: str,
+    prompt: str,
+    profile_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    auto_branch: bool = True,
+    auto_pr: bool = False,
+    auto_merge: bool = False,
+    auto_review: bool = False,
+    max_duration_minutes: int = 30,
+    base_branch: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Create a new agent run record"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO agent_runs
+               (id, name, prompt, status, progress, profile_id, project_id,
+                auto_branch, auto_pr, auto_merge, auto_review, max_duration_minutes, base_branch, started_at)
+               VALUES (?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (agent_run_id, name, prompt, profile_id, project_id,
+             auto_branch, auto_pr, auto_merge, auto_review, max_duration_minutes, base_branch, now)
+        )
+    return get_agent_run(agent_run_id)
+
+
+def get_agent_run(agent_run_id: str) -> Optional[Dict[str, Any]]:
+    """Get an agent run by ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM agent_runs WHERE id = ?", (agent_run_id,))
+        return row_to_dict(cursor.fetchone())
+
+
+def get_agent_runs(
+    status: Optional[str] = None,
+    project_id: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+) -> List[Dict[str, Any]]:
+    """Get agent runs with optional filtering"""
+    query = "SELECT * FROM agent_runs WHERE 1=1"
+    params = []
+
+    if status:
+        query += " AND status = ?"
+        params.append(status)
+    if project_id:
+        query += " AND project_id = ?"
+        params.append(project_id)
+
+    query += " ORDER BY started_at DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        return rows_to_list(cursor.fetchall())
+
+
+def get_agent_runs_count(
+    status: Optional[str] = None,
+    project_id: Optional[str] = None
+) -> int:
+    """Get count of agent runs with optional filtering"""
+    query = "SELECT COUNT(*) as count FROM agent_runs WHERE 1=1"
+    params = []
+
+    if status:
+        query += " AND status = ?"
+        params.append(status)
+    if project_id:
+        query += " AND project_id = ?"
+        params.append(project_id)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+        return row["count"]
+
+
+def get_running_agent_runs() -> List[Dict[str, Any]]:
+    """Get all currently running or paused agent runs"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM agent_runs WHERE status IN ('running', 'paused') ORDER BY started_at DESC"
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def get_queued_agent_runs() -> List[Dict[str, Any]]:
+    """Get all queued agent runs"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM agent_runs WHERE status = 'queued' ORDER BY started_at ASC"
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def update_agent_run(
+    agent_run_id: str,
+    status: Optional[str] = None,
+    progress: Optional[float] = None,
+    worktree_id: Optional[str] = None,
+    branch: Optional[str] = None,
+    pr_url: Optional[str] = None,
+    sdk_session_id: Optional[str] = None,
+    completed_at: Optional[str] = None,
+    error: Optional[str] = None,
+    result_summary: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Update an agent run"""
+    existing = get_agent_run(agent_run_id)
+    if not existing:
+        return None
+
+    updates = []
+    values = []
+
+    if status is not None:
+        updates.append("status = ?")
+        values.append(status)
+    if progress is not None:
+        updates.append("progress = ?")
+        values.append(progress)
+    if worktree_id is not None:
+        updates.append("worktree_id = ?")
+        values.append(worktree_id)
+    if branch is not None:
+        updates.append("branch = ?")
+        values.append(branch)
+    if pr_url is not None:
+        updates.append("pr_url = ?")
+        values.append(pr_url)
+    if sdk_session_id is not None:
+        updates.append("sdk_session_id = ?")
+        values.append(sdk_session_id)
+    if completed_at is not None:
+        updates.append("completed_at = ?")
+        values.append(completed_at)
+    if error is not None:
+        updates.append("error = ?")
+        values.append(error)
+    if result_summary is not None:
+        updates.append("result_summary = ?")
+        values.append(result_summary)
+
+    if updates:
+        values.append(agent_run_id)
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE agent_runs SET {', '.join(updates)} WHERE id = ?",
+                values
+            )
+
+    return get_agent_run(agent_run_id)
+
+
+def delete_agent_run(agent_run_id: str) -> bool:
+    """Delete an agent run and its associated tasks/logs"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM agent_runs WHERE id = ?", (agent_run_id,))
+        return cursor.rowcount > 0
+
+
+# ============================================================================
+# Agent Task Operations
+# ============================================================================
+
+def create_agent_task(
+    task_id: str,
+    agent_run_id: str,
+    name: str,
+    parent_task_id: Optional[str] = None,
+    status: str = "pending",
+    order_index: int = 0
+) -> Optional[Dict[str, Any]]:
+    """Create a new agent task"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO agent_tasks
+               (id, agent_run_id, parent_task_id, name, status, order_index, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (task_id, agent_run_id, parent_task_id, name, status, order_index, now, now)
+        )
+    return get_agent_task(task_id)
+
+
+def get_agent_task(task_id: str) -> Optional[Dict[str, Any]]:
+    """Get an agent task by ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM agent_tasks WHERE id = ?", (task_id,))
+        return row_to_dict(cursor.fetchone())
+
+
+def get_agent_tasks(agent_run_id: str) -> List[Dict[str, Any]]:
+    """Get all tasks for an agent run"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM agent_tasks WHERE agent_run_id = ? ORDER BY order_index, created_at",
+            (agent_run_id,)
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def get_agent_tasks_tree(agent_run_id: str) -> List[Dict[str, Any]]:
+    """Get tasks as a hierarchical tree structure"""
+    tasks = get_agent_tasks(agent_run_id)
+
+    # Build parent -> children map
+    children_map: Dict[Optional[str], List[Dict[str, Any]]] = {}
+    for task in tasks:
+        parent_id = task.get("parent_task_id")
+        if parent_id not in children_map:
+            children_map[parent_id] = []
+        children_map[parent_id].append(task)
+
+    def build_tree(parent_id: Optional[str]) -> List[Dict[str, Any]]:
+        children = children_map.get(parent_id, [])
+        result = []
+        for child in children:
+            child_copy = dict(child)
+            child_copy["children"] = build_tree(child["id"])
+            result.append(child_copy)
+        return result
+
+    return build_tree(None)
+
+
+def update_agent_task(
+    task_id: str,
+    name: Optional[str] = None,
+    status: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Update an agent task"""
+    existing = get_agent_task(task_id)
+    if not existing:
+        return None
+
+    updates = ["updated_at = ?"]
+    values = [datetime.utcnow().isoformat()]
+
+    if name is not None:
+        updates.append("name = ?")
+        values.append(name)
+    if status is not None:
+        updates.append("status = ?")
+        values.append(status)
+
+    values.append(task_id)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"UPDATE agent_tasks SET {', '.join(updates)} WHERE id = ?",
+            values
+        )
+
+    return get_agent_task(task_id)
+
+
+def delete_agent_task(task_id: str) -> bool:
+    """Delete an agent task"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM agent_tasks WHERE id = ?", (task_id,))
+        return cursor.rowcount > 0
+
+
+# ============================================================================
+# Agent Log Operations
+# ============================================================================
+
+def add_agent_log(
+    agent_run_id: str,
+    message: str,
+    level: str = "info",
+    metadata: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, Any]]:
+    """Add a log entry for an agent run"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO agent_logs (agent_run_id, timestamp, level, message, metadata)
+               VALUES (?, ?, ?, ?, ?)""",
+            (agent_run_id, now, level, message, json.dumps(metadata) if metadata else None)
+        )
+        return {
+            "id": cursor.lastrowid,
+            "agent_run_id": agent_run_id,
+            "timestamp": now,
+            "level": level,
+            "message": message,
+            "metadata": metadata
+        }
+
+
+def get_agent_logs(
+    agent_run_id: str,
+    level: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0
+) -> List[Dict[str, Any]]:
+    """Get logs for an agent run"""
+    query = "SELECT * FROM agent_logs WHERE agent_run_id = ?"
+    params = [agent_run_id]
+
+    if level:
+        query += " AND level = ?"
+        params.append(level)
+
+    query += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        rows = rows_to_list(cursor.fetchall())
+        # Parse JSON metadata
+        for row in rows:
+            if row.get("metadata") and isinstance(row["metadata"], str):
+                try:
+                    row["metadata"] = json.loads(row["metadata"])
+                except json.JSONDecodeError:
+                    pass
+        return rows
+
+
+def get_agent_logs_count(agent_run_id: str, level: Optional[str] = None) -> int:
+    """Get count of logs for an agent run"""
+    query = "SELECT COUNT(*) as count FROM agent_logs WHERE agent_run_id = ?"
+    params = [agent_run_id]
+
+    if level:
+        query += " AND level = ?"
+        params.append(level)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+        return row["count"]
+
+
+def clear_agent_logs(agent_run_id: str) -> int:
+    """Clear all logs for an agent run. Returns count of deleted logs."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM agent_logs WHERE agent_run_id = ?", (agent_run_id,))
+        return cursor.rowcount
+
+
+def get_agent_run_stats(
+    days: int = 7,
+    project_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """Get statistics about agent runs for the specified period"""
+    from datetime import timedelta
+
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+
+    base_where = "WHERE started_at >= ?"
+    params = [cutoff]
+
+    if project_id:
+        base_where += " AND project_id = ?"
+        params.append(project_id)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # Total count
+        cursor.execute(f"SELECT COUNT(*) as count FROM agent_runs {base_where}", params)
+        total = cursor.fetchone()["count"]
+
+        # By status
+        cursor.execute(
+            f"""SELECT status, COUNT(*) as count
+                FROM agent_runs {base_where}
+                GROUP BY status""",
+            params
+        )
+        by_status = {row["status"]: row["count"] for row in cursor.fetchall()}
+
+        # Calculate success rate
+        completed = by_status.get("completed", 0)
+        failed = by_status.get("failed", 0)
+        finished = completed + failed
+        success_rate = (completed / finished * 100) if finished > 0 else 0
+
+        # Average duration (for completed runs)
+        cursor.execute(
+            f"""SELECT AVG(
+                    (julianday(completed_at) - julianday(started_at)) * 24 * 60
+                ) as avg_minutes
+                FROM agent_runs
+                {base_where} AND status = 'completed' AND completed_at IS NOT NULL""",
+            params
+        )
+        row = cursor.fetchone()
+        avg_duration_minutes = row["avg_minutes"] if row["avg_minutes"] else 0
+
+        # Runs by day
+        cursor.execute(
+            f"""SELECT date(started_at) as day, COUNT(*) as count
+                FROM agent_runs {base_where}
+                GROUP BY date(started_at)
+                ORDER BY day""",
+            params
+        )
+        by_day = {row["day"]: row["count"] for row in cursor.fetchall()}
+
+        return {
+            "total": total,
+            "by_status": by_status,
+            "success_rate": round(success_rate, 1),
+            "avg_duration_minutes": round(avg_duration_minutes, 1),
+            "by_day": by_day,
+            "running": by_status.get("running", 0),
+            "queued": by_status.get("queued", 0),
+            "completed": completed,
+            "failed": failed
+        }
