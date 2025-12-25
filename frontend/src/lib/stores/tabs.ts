@@ -8,6 +8,7 @@
 import { writable, derived, get } from 'svelte/store';
 import type { Session, Profile, PermissionRequest as PermissionRequestType, UserQuestionRequest } from '$lib/api/client';
 import { api } from '$lib/api/client';
+import { agents } from './agents';
 
 export interface ApiUser {
 	id: string;
@@ -2745,12 +2746,19 @@ function createTabsStore() {
 
 		/**
 		 * Send message in a specific tab.
+		 * If background mode is enabled, launches a background agent instead.
 		 * If the tab is currently streaming, this will interrupt the current response
 		 * and then send the new message.
 		 */
-		sendMessage(tabId: string, prompt: string) {
+		async sendMessage(tabId: string, prompt: string) {
 			const tab = getTab(tabId);
 			if (!tab) return;
+
+			// Check if background mode is enabled - launch as background agent
+			if (tab.backgroundEnabled) {
+				await this.launchBackgroundAgent(tabId, prompt);
+				return;
+			}
 
 			const ws = tabConnections.get(tabId);
 			if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -2810,6 +2818,76 @@ function createTabsStore() {
 				project: tab.project || undefined,
 				overrides: Object.keys(overrides).length > 0 ? overrides : undefined
 			}));
+		},
+
+		/**
+		 * Launch a background agent from a tab's message
+		 * Uses the tab's background config settings
+		 */
+		async launchBackgroundAgent(tabId: string, prompt: string) {
+			const tab = getTab(tabId);
+			if (!tab) return;
+
+			// Validate required fields
+			if (!tab.profile) {
+				updateTab(tabId, { error: 'Please select a profile before launching a background agent' });
+				return;
+			}
+			if (!tab.project) {
+				updateTab(tabId, { error: 'Please select a project before launching a background agent' });
+				return;
+			}
+
+			// Generate task name from prompt if not provided
+			const taskName = tab.backgroundTaskName || prompt.split('\n')[0].slice(0, 50);
+
+			try {
+				// Launch the background agent
+				const agent = await agents.launchAgent({
+					name: taskName,
+					prompt: prompt,
+					profileId: tab.profile,
+					projectId: tab.project,
+					// Branch configuration
+					autoBranch: tab.backgroundCreateNewBranch,
+					baseBranch: tab.backgroundBranch || 'main',
+					// PR configuration
+					autoPr: tab.backgroundAutoPR,
+					// Duration (0 = unlimited)
+					maxDurationMinutes: tab.backgroundMaxDurationMinutes
+				});
+
+				console.log(`[Tab ${tabId}] Launched background agent: ${agent.id}`);
+
+				// Add a system message to the chat indicating the agent was launched
+				const systemMsgId = `system-${Date.now()}`;
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(t => {
+						if (t.id !== tabId) return t;
+						return {
+							...t,
+							messages: [...t.messages, {
+								id: systemMsgId,
+								role: 'system' as const,
+								content: `🚀 Background agent "${taskName}" launched successfully!\n\nYour task is now running in the background. You can monitor its progress in the Agents tab of the Activity Panel.`,
+								type: 'system' as const,
+								systemSubtype: 'agent_launched'
+							}],
+							// Reset background mode after launching
+							backgroundEnabled: false,
+							backgroundTaskName: ''
+						};
+					})
+				}));
+
+			} catch (error) {
+				console.error('Failed to launch background agent:', error);
+				const err = error as { detail?: string; message?: string };
+				updateTab(tabId, {
+					error: `Failed to launch background agent: ${err.detail || err.message || 'Unknown error'}`
+				});
+			}
 		},
 
 		/**
