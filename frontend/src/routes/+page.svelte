@@ -930,6 +930,15 @@
 
 	function handleCardFocus(id: string) {
 		deck.focusCard(id);
+
+		// If this is a chat card, sync the active tab
+		const card = deck.getCard(id);
+		if (card?.type === 'chat') {
+			const tabId = getTabIdForCard(card);
+			if (tabId) {
+				tabs.setActiveTab(tabId);
+			}
+		}
 	}
 
 	function handleCardMove(id: string, x: number, y: number) {
