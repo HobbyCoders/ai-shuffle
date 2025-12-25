@@ -33,6 +33,7 @@ export type DeckCardType =
 	| 'agent-launcher'
 	| 'file-browser'
 	| 'settings'
+	| 'user-settings'
 	| 'profile'
 	| 'terminal'
 	| 'subagent'

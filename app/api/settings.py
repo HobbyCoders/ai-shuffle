@@ -1766,3 +1766,233 @@ async def wake_from_sleep(token: str = Depends(require_auth)):
     """
     cleanup_manager.record_activity()
     return {"success": True, "is_sleeping": cleanup_manager.is_sleeping()}
+
+
+# ============================================================================
+# Credential Policies (Admin control over which keys users must provide)
+# ============================================================================
+
+class CredentialPolicyResponse(BaseModel):
+    """A credential policy"""
+    id: str
+    policy: str  # 'admin_provided', 'user_provided', 'optional'
+    description: Optional[str]
+    updated_at: str
+
+
+class UpdateCredentialPolicyRequest(BaseModel):
+    """Request to update a credential policy"""
+    policy: str  # 'admin_provided', 'user_provided', 'optional'
+
+
+class AllCredentialPoliciesResponse(BaseModel):
+    """All credential policies"""
+    policies: list[CredentialPolicyResponse]
+
+
+CREDENTIAL_POLICY_INFO = {
+    "openai_api_key": {
+        "name": "OpenAI API Key",
+        "description": "For TTS, STT, GPT Image, and Sora video generation",
+        "admin_has_key": lambda: bool(get_decrypted_api_key("openai_api_key"))
+    },
+    "gemini_api_key": {
+        "name": "Google Gemini API Key",
+        "description": "For Nano Banana image generation, Imagen, and Veo video",
+        "admin_has_key": lambda: bool(get_decrypted_api_key("image_api_key"))
+    },
+    "github_pat": {
+        "name": "GitHub Personal Access Token",
+        "description": "For accessing GitHub repositories",
+        "admin_has_key": lambda: False  # Admin can't provide this for users
+    }
+}
+
+
+@router.get("/credential-policies", response_model=AllCredentialPoliciesResponse)
+async def get_credential_policies(token: str = Depends(require_auth)):
+    """
+    Get all credential policies.
+
+    Returns policies that control whether users must provide their own API keys
+    or can use admin-provided keys.
+    """
+    policies = database.get_all_credential_policies()
+    enriched = []
+    for policy in policies:
+        info = CREDENTIAL_POLICY_INFO.get(policy["id"], {})
+        enriched.append({
+            **policy,
+            "name": info.get("name", policy["id"]),
+            "admin_has_key": info.get("admin_has_key", lambda: False)()
+        })
+    return AllCredentialPoliciesResponse(
+        policies=[CredentialPolicyResponse(**p) for p in policies]
+    )
+
+
+@router.put("/credential-policies/{policy_id}")
+async def update_credential_policy(
+    policy_id: str,
+    request: UpdateCredentialPolicyRequest,
+    token: str = Depends(require_admin)
+):
+    """
+    Update a credential policy (admin only).
+
+    Policy options:
+    - 'admin_provided': All users use admin's key, users cannot set their own
+    - 'user_provided': Each user must provide their own key
+    - 'optional': Users can optionally provide their own key, falls back to admin's
+    """
+    valid_policies = ['admin_provided', 'user_provided', 'optional']
+    if request.policy not in valid_policies:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid policy. Must be one of: {', '.join(valid_policies)}"
+        )
+
+    # Special case: github_pat cannot be admin_provided (doesn't make sense)
+    if policy_id == "github_pat" and request.policy == "admin_provided":
+        raise HTTPException(
+            status_code=400,
+            detail="GitHub PAT cannot be admin-provided. Each user must use their own GitHub account."
+        )
+
+    # Special case: can't set to admin_provided if admin doesn't have the key
+    if request.policy == "admin_provided" and policy_id in CREDENTIAL_POLICY_INFO:
+        info = CREDENTIAL_POLICY_INFO[policy_id]
+        if not info.get("admin_has_key", lambda: False)():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot set to 'admin_provided' - admin has not configured this key yet"
+            )
+
+    updated = database.update_credential_policy(policy_id, request.policy)
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Policy '{policy_id}' not found")
+
+    return {
+        "success": True,
+        "id": policy_id,
+        "policy": request.policy
+    }
+
+
+@router.get("/credential-policies/summary")
+async def get_credential_policies_summary(token: str = Depends(require_admin)):
+    """
+    Get a summary of credential policies with admin key status.
+
+    Used by admin UI to show which keys are configured and policy status.
+    """
+    policies = database.get_all_credential_policies()
+    summary = []
+
+    for policy in policies:
+        info = CREDENTIAL_POLICY_INFO.get(policy["id"], {})
+        admin_has_key = info.get("admin_has_key", lambda: False)()
+
+        summary.append({
+            "id": policy["id"],
+            "name": info.get("name", policy["id"]),
+            "description": info.get("description", policy.get("description", "")),
+            "policy": policy["policy"],
+            "admin_has_key": admin_has_key,
+            # Compute effective status
+            "effective_status": _compute_effective_status(policy["policy"], admin_has_key),
+            "updated_at": policy["updated_at"]
+        })
+
+    return {"policies": summary}
+
+
+def _compute_effective_status(policy: str, admin_has_key: bool) -> str:
+    """Compute the effective status for a credential policy"""
+    if policy == "admin_provided":
+        return "admin_provides" if admin_has_key else "needs_admin_key"
+    elif policy == "user_provided":
+        return "user_must_provide"
+    else:  # optional
+        return "optional_with_fallback" if admin_has_key else "optional_no_fallback"
+
+
+# ============================================================================
+# Credential Resolution (for internal use by AI tools)
+# ============================================================================
+
+@router.get("/internal/resolve-credential/{credential_type}")
+async def resolve_credential(
+    credential_type: str,
+    user_id: Optional[str] = None
+):
+    """
+    Internal endpoint to resolve which API key to use.
+
+    Resolution order based on policy:
+    1. If policy is 'user_provided' or 'optional': check user's credential first
+    2. If not found and policy is 'admin_provided' or 'optional': use admin's key
+    3. If not found: return error
+
+    This endpoint is for internal use by AI tools only.
+    """
+    from app.core import encryption as enc
+
+    # Map credential types to admin settings
+    admin_setting_map = {
+        "openai_api_key": "openai_api_key",
+        "gemini_api_key": "image_api_key",
+        "github_pat": None  # No admin fallback
+    }
+
+    if credential_type not in admin_setting_map:
+        raise HTTPException(status_code=400, detail=f"Unknown credential type: {credential_type}")
+
+    # Get policy
+    policy_obj = database.get_credential_policy(credential_type)
+    policy = policy_obj.get("policy", "optional") if policy_obj else "optional"
+
+    resolved_key = None
+    source = None
+
+    # Try user's credential if applicable
+    if user_id and policy in ["user_provided", "optional"]:
+        user_cred = database.get_user_credential(user_id, credential_type)
+        if user_cred:
+            encrypted = user_cred.get("encrypted_value")
+            if encrypted:
+                if enc.is_encrypted(encrypted) and enc.is_encryption_ready():
+                    try:
+                        resolved_key = enc.decrypt_value(encrypted)
+                        source = "user"
+                    except Exception:
+                        pass
+                elif not enc.is_encrypted(encrypted):
+                    resolved_key = encrypted
+                    source = "user"
+
+    # Try admin's key if applicable
+    if not resolved_key and policy in ["admin_provided", "optional"]:
+        admin_setting = admin_setting_map.get(credential_type)
+        if admin_setting:
+            resolved_key = get_decrypted_api_key(admin_setting)
+            if resolved_key:
+                source = "admin"
+
+    if not resolved_key:
+        if policy == "user_provided":
+            raise HTTPException(
+                status_code=404,
+                detail=f"Credential '{credential_type}' not configured. User must provide this key."
+            )
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Credential '{credential_type}' not configured."
+            )
+
+    return {
+        "key": resolved_key,
+        "source": source,
+        "credential_type": credential_type
+    }

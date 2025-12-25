@@ -49,6 +49,7 @@
 		ProjectCard,
 		SubagentCard,
 		SettingsCard,
+		UserSettingsCard,
 		CardShuffle
 	} from '$lib/components/deck/cards';
 	import type { CardType, DeckCard as CardsDeckCard } from '$lib/components/deck/cards/types';
@@ -438,6 +439,8 @@
 				return 'terminal';
 			case 'settings':
 				return 'settings';
+			case 'user-settings':
+				return 'user-settings';
 			case 'profile':
 				return 'profile';
 			case 'subagent':
@@ -931,6 +934,17 @@
 				title = 'Projects';
 				break;
 			}
+			case 'user-settings': {
+				// Singleton - only one user settings card at a time
+				const existingUserSettings = $allCards.find(c => c.type === 'user-settings');
+				if (existingUserSettings) {
+					deck.focusCard(existingUserSettings.id);
+					return;
+				}
+				deckCardType = 'user-settings';
+				title = 'My Settings';
+				break;
+			}
 			default:
 				deckCardType = 'chat';
 				title = 'New Card';
@@ -1161,6 +1175,7 @@
 		{activeMode}
 		{badges}
 		contextCollapsed={contextCollapsed}
+		isAdmin={$isAdmin}
 		activeTab={activityPanelTab}
 		{activeSessions}
 		{recentSessions}
@@ -1176,6 +1191,7 @@
 		onModeChange={handleModeChange}
 		onLogoClick={() => showCreateMenu = !showCreateMenu}
 		onSettingsClick={() => handleCreateCard('settings')}
+		onUserSettingsClick={() => handleCreateCard('user-settings')}
 		onContextToggle={() => {
 			deck.toggleContextPanel();
 			// Close chat settings overlay when collapsing the panel
@@ -1260,6 +1276,16 @@
 								mobile={true}
 								onClose={() => handleCardClose(card.id)}
 																onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
+						{:else if card.type === 'user-settings'}
+							<UserSettingsCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
 								onFocus={() => handleCardFocus(card.id)}
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1388,6 +1414,17 @@
 											onDragEnd={() => handleCardDragEnd(card.id)}
 											onResizeEnd={() => handleCardResizeEnd(card.id)}
 										/>
+									{:else if card.type === 'user-settings'}
+										<UserSettingsCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
+										/>
 									{:else if card.type === 'profile'}
 										<ProfileCard
 											{card}
@@ -1465,6 +1502,8 @@
 		onOpenProfiles={() => handleCreateCard('profile')}
 		onOpenProjects={() => handleCreateCard('project')}
 		onOpenSettings={() => handleCreateCard('settings')}
+		onOpenUserSettings={() => handleCreateCard('user-settings')}
+		isAdmin={$isAdmin}
 		{isMobile}
 	/>
 

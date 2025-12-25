@@ -666,6 +666,66 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_logs_run ON agent_logs(agent_run_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_logs_timestamp ON agent_logs(timestamp)")
 
+    # =========================================================================
+    # API User Credentials & Policies (per-user API keys and GitHub auth)
+    # =========================================================================
+
+    # Credential policies - admin controls which keys are admin-provided vs user-provided
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS credential_policies (
+            id TEXT PRIMARY KEY,
+            policy TEXT NOT NULL DEFAULT 'admin_provided',
+            description TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Per-user credentials (encrypted API keys, GitHub PAT)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS api_user_credentials (
+            id TEXT PRIMARY KEY,
+            api_user_id TEXT NOT NULL,
+            credential_type TEXT NOT NULL,
+            encrypted_value TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE,
+            UNIQUE(api_user_id, credential_type)
+        )
+    """)
+
+    # Per-user GitHub configuration
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS api_user_github_config (
+            id TEXT PRIMARY KEY,
+            api_user_id TEXT NOT NULL UNIQUE,
+            github_username TEXT,
+            github_avatar_url TEXT,
+            default_repo TEXT,
+            default_branch TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Create indexes for new tables
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_user_credentials_user ON api_user_credentials(api_user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_user_credentials_type ON api_user_credentials(credential_type)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_user_github_config_user ON api_user_github_config(api_user_id)")
+
+    # Initialize default credential policies if not exist
+    default_policies = [
+        ('openai_api_key', 'optional', 'OpenAI API key for AI tools (TTS, STT, GPT Image, Sora)'),
+        ('gemini_api_key', 'optional', 'Google Gemini API key for Nano Banana, Imagen, Veo'),
+        ('github_pat', 'user_provided', 'GitHub Personal Access Token for repository access'),
+    ]
+    for policy_id, policy, description in default_policies:
+        cursor.execute("""
+            INSERT OR IGNORE INTO credential_policies (id, policy, description)
+            VALUES (?, ?, ?)
+        """, (policy_id, policy, description))
+
 
 def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
     """Convert a sqlite3.Row to a dictionary"""
@@ -1831,6 +1891,218 @@ def is_username_taken(username: str) -> bool:
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM api_users WHERE username = ?", (username,))
         return cursor.fetchone() is not None
+
+
+# ============================================================================
+# Credential Policies Operations (admin controls which keys users must provide)
+# ============================================================================
+
+def get_all_credential_policies() -> List[Dict[str, Any]]:
+    """Get all credential policies"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM credential_policies ORDER BY id")
+        return rows_to_list(cursor.fetchall())
+
+
+def get_credential_policy(policy_id: str) -> Optional[Dict[str, Any]]:
+    """Get a specific credential policy"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM credential_policies WHERE id = ?", (policy_id,))
+        return row_to_dict(cursor.fetchone())
+
+
+def update_credential_policy(policy_id: str, policy: str, description: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Update a credential policy.
+
+    policy: 'admin_provided', 'user_provided', or 'optional'
+    - admin_provided: All users use admin's key, users cannot set their own
+    - user_provided: Each user must provide their own key
+    - optional: Users can optionally provide their own key, falls back to admin's
+    """
+    valid_policies = ['admin_provided', 'user_provided', 'optional']
+    if policy not in valid_policies:
+        return None
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if description is not None:
+            cursor.execute(
+                "UPDATE credential_policies SET policy = ?, description = ?, updated_at = ? WHERE id = ?",
+                (policy, description, datetime.utcnow().isoformat(), policy_id)
+            )
+        else:
+            cursor.execute(
+                "UPDATE credential_policies SET policy = ?, updated_at = ? WHERE id = ?",
+                (policy, datetime.utcnow().isoformat(), policy_id)
+            )
+    return get_credential_policy(policy_id)
+
+
+# ============================================================================
+# API User Credentials Operations (per-user encrypted API keys)
+# ============================================================================
+
+def get_user_credential(api_user_id: str, credential_type: str) -> Optional[Dict[str, Any]]:
+    """Get a specific credential for a user (returns encrypted value)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM api_user_credentials WHERE api_user_id = ? AND credential_type = ?",
+            (api_user_id, credential_type)
+        )
+        return row_to_dict(cursor.fetchone())
+
+
+def get_all_user_credentials(api_user_id: str) -> List[Dict[str, Any]]:
+    """Get all credentials for a user (returns encrypted values)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM api_user_credentials WHERE api_user_id = ? ORDER BY credential_type",
+            (api_user_id,)
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def set_user_credential(api_user_id: str, credential_type: str, encrypted_value: str) -> Dict[str, Any]:
+    """Set or update a credential for a user (value should be pre-encrypted)"""
+    import uuid
+    now = datetime.utcnow().isoformat()
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Try to update existing
+        cursor.execute(
+            """UPDATE api_user_credentials
+               SET encrypted_value = ?, updated_at = ?
+               WHERE api_user_id = ? AND credential_type = ?""",
+            (encrypted_value, now, api_user_id, credential_type)
+        )
+
+        if cursor.rowcount == 0:
+            # Insert new
+            cred_id = str(uuid.uuid4())
+            cursor.execute(
+                """INSERT INTO api_user_credentials (id, api_user_id, credential_type, encrypted_value, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (cred_id, api_user_id, credential_type, encrypted_value, now, now)
+            )
+
+    return get_user_credential(api_user_id, credential_type)
+
+
+def delete_user_credential(api_user_id: str, credential_type: str) -> bool:
+    """Delete a user's credential"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM api_user_credentials WHERE api_user_id = ? AND credential_type = ?",
+            (api_user_id, credential_type)
+        )
+        return cursor.rowcount > 0
+
+
+def user_has_credential(api_user_id: str, credential_type: str) -> bool:
+    """Check if a user has a specific credential set"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM api_user_credentials WHERE api_user_id = ? AND credential_type = ?",
+            (api_user_id, credential_type)
+        )
+        return cursor.fetchone() is not None
+
+
+# ============================================================================
+# API User GitHub Config Operations (per-user GitHub settings)
+# ============================================================================
+
+def get_user_github_config(api_user_id: str) -> Optional[Dict[str, Any]]:
+    """Get GitHub configuration for a user"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM api_user_github_config WHERE api_user_id = ?",
+            (api_user_id,)
+        )
+        return row_to_dict(cursor.fetchone())
+
+
+def set_user_github_config(
+    api_user_id: str,
+    github_username: Optional[str] = None,
+    github_avatar_url: Optional[str] = None,
+    default_repo: Optional[str] = None,
+    default_branch: Optional[str] = None
+) -> Dict[str, Any]:
+    """Set or update GitHub configuration for a user"""
+    import uuid
+    now = datetime.utcnow().isoformat()
+
+    existing = get_user_github_config(api_user_id)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        if existing:
+            # Build update query dynamically for provided fields
+            updates = ["updated_at = ?"]
+            values = [now]
+
+            if github_username is not None:
+                updates.append("github_username = ?")
+                values.append(github_username)
+            if github_avatar_url is not None:
+                updates.append("github_avatar_url = ?")
+                values.append(github_avatar_url)
+            if default_repo is not None:
+                updates.append("default_repo = ?")
+                values.append(default_repo)
+            if default_branch is not None:
+                updates.append("default_branch = ?")
+                values.append(default_branch)
+
+            values.append(api_user_id)
+            cursor.execute(
+                f"UPDATE api_user_github_config SET {', '.join(updates)} WHERE api_user_id = ?",
+                values
+            )
+        else:
+            # Insert new
+            config_id = str(uuid.uuid4())
+            cursor.execute(
+                """INSERT INTO api_user_github_config
+                   (id, api_user_id, github_username, github_avatar_url, default_repo, default_branch, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (config_id, api_user_id, github_username, github_avatar_url, default_repo, default_branch, now, now)
+            )
+
+    return get_user_github_config(api_user_id)
+
+
+def delete_user_github_config(api_user_id: str) -> bool:
+    """Delete GitHub configuration for a user (disconnect GitHub)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM api_user_github_config WHERE api_user_id = ?",
+            (api_user_id,)
+        )
+        return cursor.rowcount > 0
+
+
+def update_api_user_password(api_user_id: str, password_hash: str) -> bool:
+    """Update an API user's password"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE api_users SET password_hash = ?, updated_at = ? WHERE id = ?",
+            (password_hash, datetime.utcnow().isoformat(), api_user_id)
+        )
+        return cursor.rowcount > 0
 
 
 # ============================================================================
