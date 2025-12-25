@@ -322,28 +322,54 @@
 	);
 
 	// Active Sessions for Activity Panel: Combines open cards and active agents (running + paused)
+	// Track which agent IDs have open cards to avoid duplicates
+	const openAgentCardIds = $derived(
+		new Set($allCards.filter(c => c.type === 'agent').map(c => c.dataId))
+	);
+
 	const activeSessions = $derived<ActiveSession[]>([
-		// Open cards
-		...$allCards.map((c) => ({
-			id: c.id,
-			type: 'chat' as const,
-			title: c.title || 'Untitled',
-			status: c.id === $focusedCardId ? 'active' as const : 'idle' as const,
-			isSelected: c.id === $focusedCardId,
-			unread: false
-		})),
-		// Active agents (running + paused)
-		...$activeAgents.map(agent => ({
-			id: agent.id,
-			type: 'agent' as const,
-			title: agent.name || agent.prompt?.slice(0, 30) || `Agent ${agent.id.slice(0, 8)}`,
-			status: agent.status === 'running' ? 'running' as const :
-			        agent.status === 'paused' ? 'idle' as const :
-			        agent.status === 'failed' ? 'error' as const : 'idle' as const,
-			progress: agent.progress,
-			isSelected: false,
-			unread: false
-		}))
+		// Open cards - map to correct types, get agent status from store
+		...$allCards.map((c) => {
+			if (c.type === 'agent') {
+				// Agent card - get status from agent store
+				const agentData = $allAgents.find(a => a.id === c.dataId);
+				return {
+					id: c.id, // Use card ID for focusing
+					type: 'agent' as const,
+					title: agentData?.name || c.title || 'Agent',
+					status: agentData?.status === 'running' ? 'running' as const :
+					        agentData?.status === 'paused' ? 'idle' as const :
+					        agentData?.status === 'failed' ? 'error' as const :
+					        c.id === $focusedCardId ? 'active' as const : 'idle' as const,
+					progress: agentData?.progress,
+					isSelected: c.id === $focusedCardId,
+					unread: false
+				};
+			}
+			// Regular chat card
+			return {
+				id: c.id,
+				type: 'chat' as const,
+				title: c.title || 'Untitled',
+				status: c.id === $focusedCardId ? 'active' as const : 'idle' as const,
+				isSelected: c.id === $focusedCardId,
+				unread: false
+			};
+		}),
+		// Active agents that don't have an open card yet (running + paused)
+		...$activeAgents
+			.filter(agent => !openAgentCardIds.has(agent.id))
+			.map(agent => ({
+				id: agent.id,
+				type: 'agent' as const,
+				title: agent.name || agent.prompt?.slice(0, 30) || `Agent ${agent.id.slice(0, 8)}`,
+				status: agent.status === 'running' ? 'running' as const :
+				        agent.status === 'paused' ? 'idle' as const :
+				        agent.status === 'failed' ? 'error' as const : 'idle' as const,
+				progress: agent.progress,
+				isSelected: false,
+				unread: false
+			}))
 	]);
 
 	// Recent Sessions: Session history for loading old chats
@@ -843,13 +869,29 @@
 
 	function handleSessionClick(session: ActiveSession) {
 		if (session.type === 'chat') {
-			// It's a card - focus it
+			// It's a chat card - focus it
 			const existingCard = $allCards.find((c) => c.id === session.id);
 			if (existingCard) {
 				deck.focusCard(existingCard.id);
 			}
 		} else if (session.type === 'agent') {
-			// It's an agent - open/focus the agent card
+			// It's an agent session - could be a card ID or agent ID
+			// First check if session.id is a card ID (for already open agent cards)
+			const existingCardById = $allCards.find((c) => c.id === session.id);
+			if (existingCardById) {
+				// It's an open card - just focus it
+				deck.focusCard(existingCardById.id);
+				return;
+			}
+
+			// Check if there's already an agent card with this dataId
+			const existingAgentCard = $allCards.find((c) => c.type === 'agent' && c.dataId === session.id);
+			if (existingAgentCard) {
+				deck.focusCard(existingAgentCard.id);
+				return;
+			}
+
+			// No existing card - open a new one
 			deck.setMode('workspace');
 			deck.openOrFocusCard('agent', session.id, {
 				title: session.title,

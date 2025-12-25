@@ -6,7 +6,7 @@
 	 * background agents. Agent launching is handled separately.
 	 */
 
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount, onDestroy, untrack } from 'svelte';
 	import {
 		Play,
 		Pause,
@@ -154,7 +154,13 @@
 			}
 			findRunningParents(agent.tasks);
 			// Merge with existing expanded tasks (don't collapse user-expanded ones)
-			expandedTasks = new Set([...expandedTasks, ...runningTaskIds]);
+			// Use untrack to prevent reading expandedTasks from triggering the effect again
+			const currentExpanded = untrack(() => expandedTasks);
+			const merged = new Set([...currentExpanded, ...runningTaskIds]);
+			// Only update if there are new items to add (prevents unnecessary re-renders)
+			if (merged.size !== currentExpanded.size) {
+				expandedTasks = merged;
+			}
 		}
 	});
 
