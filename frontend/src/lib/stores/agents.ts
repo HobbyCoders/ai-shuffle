@@ -304,6 +304,7 @@ function createAgentsStore() {
 				case 'agent_failed':
 				case 'agent_cancelled':
 					// Update agent in store
+					console.log(`[Agents WS] ${message.type}:`, message.agent_id, message.data?.status);
 					if (message.data) {
 						update((state) => ({
 							...state,

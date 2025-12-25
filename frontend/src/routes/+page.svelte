@@ -21,7 +21,7 @@
 		sessions,
 		sessionsTagFilter
 	} from '$lib/stores/tabs';
-	import { agents, activeAgents } from '$lib/stores/agents';
+	import { agents, activeAgents, allAgents, runningAgents, completedAgents, failedAgents } from '$lib/stores/agents';
 	import {
 		deck,
 		visibleCards,
@@ -363,18 +363,20 @@
 		files: undefined
 	});
 
-	// Map active agents to DeckAgent format for ContextPanel
+	// Map all agents to DeckAgent format for ContextPanel
+	// Uses allAgents so we track status changes including completed/failed
 	const deckAgents = $derived.by<DeckAgent[]>(() => {
-		const mapped = $activeAgents.map(agent => ({
+		const mapped = $allAgents.map(agent => ({
 			id: agent.id,
 			name: agent.name,
 			status: agent.status === 'running' ? 'running' :
 			        agent.status === 'paused' ? 'paused' :
+			        agent.status === 'completed' ? 'idle' :
 			        agent.status === 'failed' ? 'error' : 'idle',
 			task: agent.prompt?.slice(0, 50),
 			progress: agent.progress
 		}));
-		console.log('[DeckAgents] activeAgents count:', $activeAgents.length, 'mapped:', mapped);
+		console.log('[DeckAgents] allAgents count:', $allAgents.length, 'mapped:', mapped);
 		return mapped;
 	});
 
@@ -1239,7 +1241,7 @@
 								onOpenProjectCard={handleOpenProjectCard}
 								onOpenSettings={handleOpenChatSettings}
 							/>
-						{:else if card.type === 'agent'}
+						{:else if card.type === 'agent' || card.type === 'agent-monitor' || card.type === 'agent-launcher'}
 							<div class="p-4">
 								<p class="text-muted-foreground">Agent view (mobile)</p>
 							</div>
@@ -1356,10 +1358,10 @@
 												<p>Initializing chat...</p>
 											</div>
 										{/if}
-									{:else if card.type === 'agent'}
+									{:else if card.type === 'agent' || card.type === 'agent-monitor' || card.type === 'agent-launcher'}
 										<AgentCard
 											{card}
-											agentId={card.data?.dataId as string || card.id}
+											agentId={card.dataId || card.meta?.agentId as string || card.id}
 											onClose={() => handleCardClose(card.id)}
 																						onMaximize={() => handleCardMaximize(card.id)}
 											onFocus={() => handleCardFocus(card.id)}
