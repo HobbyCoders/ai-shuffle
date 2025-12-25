@@ -40,6 +40,7 @@
 		onResize: (w: number, h: number) => void;
 		onDragEnd?: () => void;
 		onResizeEnd?: () => void;
+		mobile?: boolean;
 	}
 
 	let {
@@ -51,7 +52,8 @@
 		onMove,
 		onResize,
 		onDragEnd,
-		onResizeEnd
+		onResizeEnd,
+		mobile = false
 	}: Props = $props();
 
 	// Debug: Log props on mount
@@ -314,8 +316,10 @@
 	}
 </script>
 
-<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
-	<div class="agent-content">
+{#if mobile}
+	<!-- Mobile: Full-screen card with no BaseCard wrapper -->
+	<!-- MobileWorkspace provides the header with title and close button -->
+	<div class="agent-content mobile">
 		{#if loading}
 			<div class="loading-state">
 				<Loader2 size={24} class="animate-spin text-muted-foreground" />
@@ -495,7 +499,191 @@
 			</div>
 		{/if}
 	</div>
-</BaseCard>
+{:else}
+	<!-- Desktop: Full BaseCard with all features -->
+	<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
+		<div class="agent-content">
+			{#if loading}
+				<div class="loading-state">
+					<Loader2 size={24} class="animate-spin text-muted-foreground" />
+					<span class="text-sm text-muted-foreground">Loading agent...</span>
+				</div>
+			{:else if error}
+				<div class="error-state">
+					<AlertCircle size={24} class="text-destructive" />
+					<span class="text-sm text-destructive">{error}</span>
+					<button class="retry-btn" onclick={fetchAgent}>Retry</button>
+				</div>
+			{:else if agent}
+				<!-- Status Header -->
+				<div class="status-header">
+					<div class="status-left">
+						<span class="status-indicator {statusConfig[agent.status].color}">
+							{#if agent.status === 'running'}
+								<Loader2 size={14} class="animate-spin" />
+							{:else if agent.status === 'completed'}
+								<CheckCircle size={14} />
+							{:else if agent.status === 'failed'}
+								<AlertCircle size={14} />
+							{:else if agent.status === 'paused'}
+								<Pause size={14} />
+							{:else}
+								<Circle size={14} />
+							{/if}
+							<span>{statusConfig[agent.status].label}</span>
+						</span>
+						{#if agent.status === 'running'}
+							<span class="duration">{duration}</span>
+							{#if timeRemaining !== null}
+								<span class="time-remaining" title="Time remaining">({timeRemaining} left)</span>
+							{:else}
+								<span class="time-remaining unlimited" title="Unlimited duration">(Unlimited)</span>
+							{/if}
+						{/if}
+					</div>
+
+					<div class="header-right">
+						{#if agent.prUrl}
+							<a
+								href={agent.prUrl}
+								target="_blank"
+								rel="noopener noreferrer"
+								class="pr-badge"
+								title="View Pull Request"
+							>
+								<ExternalLink size={12} />
+								<span>PR</span>
+							</a>
+						{/if}
+						{#if agent.branch}
+							<div class="branch-badge">
+								<GitBranch size={12} />
+								<span>{agent.branch}</span>
+							</div>
+						{/if}
+					</div>
+				</div>
+
+				<!-- Progress Bar -->
+				{#if agent.progress !== undefined && agent.status === 'running'}
+					<div class="progress-container">
+						<div class="progress-bar" style:width="{agent.progress}%"></div>
+					</div>
+				{/if}
+
+				<!-- Error Message -->
+				{#if agent.status === 'failed' && agent.error}
+					<div class="error-banner">
+						<AlertCircle size={14} />
+						<span>{agent.error}</span>
+					</div>
+				{/if}
+
+				<!-- Result Summary -->
+				{#if agent.status === 'completed' && agent.resultSummary}
+					<div class="result-banner">
+						<CheckCircle size={14} />
+						<span>{agent.resultSummary}</span>
+					</div>
+				{/if}
+
+				<!-- Task Tree -->
+				{#if agent.tasks && agent.tasks.length > 0}
+					<div class="task-tree">
+						<div class="section-label">Tasks</div>
+						<div class="tasks">
+							{#each agent.tasks as task}
+								{@const TaskIcon = taskStatusIcons[task.status]}
+								{@const hasChildren = task.children && task.children.length > 0}
+								{@const isExpanded = expandedTasks.has(task.id)}
+
+								<div class="task-item">
+									<button
+										class="task-row"
+										onclick={() => hasChildren && toggleTask(task.id)}
+										class:has-children={hasChildren}
+									>
+										{#if hasChildren}
+											{#if isExpanded}
+												<ChevronDown size={14} class="expand-icon" />
+											{:else}
+												<ChevronRight size={14} class="expand-icon" />
+											{/if}
+										{:else}
+											<span class="expand-placeholder"></span>
+										{/if}
+										<TaskIcon
+											size={14}
+											class="task-icon {task.status === 'in_progress' ? 'animate-spin' : ''} {task.status === 'completed' ? 'task-completed' : task.status === 'failed' ? 'task-failed' : ''}"
+										/>
+										<span class="task-title">{task.name}</span>
+									</button>
+
+									{#if hasChildren && isExpanded}
+										<div class="task-children">
+											{#each task.children as child}
+												{@const ChildIcon = taskStatusIcons[child.status]}
+												<div class="task-row child">
+													<span class="expand-placeholder"></span>
+													<ChildIcon
+														size={12}
+														class="task-icon {child.status === 'in_progress' ? 'animate-spin' : ''} {child.status === 'completed' ? 'task-completed' : child.status === 'failed' ? 'task-failed' : ''}"
+													/>
+													<span class="task-title">{child.name}</span>
+												</div>
+											{/each}
+										</div>
+									{/if}
+								</div>
+							{/each}
+						</div>
+					</div>
+				{/if}
+
+				<!-- Log Lines -->
+				{#if agent.logs && agent.logs.length > 0}
+					<div class="logs-section">
+						<div class="section-label">Recent Logs</div>
+						<div class="logs">
+							{#each agent.logs.slice(-4) as log}
+								<div class="log-line">{formatLog(log)}</div>
+							{/each}
+						</div>
+					</div>
+				{/if}
+
+				<!-- Control Buttons -->
+				<div class="controls">
+					{#if agent.status === 'running'}
+						<button class="control-btn pause" onclick={handlePause}>
+							<Pause size={14} />
+							<span>Pause</span>
+						</button>
+					{:else if agent.status === 'paused'}
+						<button class="control-btn resume" onclick={handleResume}>
+							<Play size={14} />
+							<span>Resume</span>
+						</button>
+					{/if}
+
+					{#if agent.status === 'running' || agent.status === 'paused' || agent.status === 'queued'}
+						<button class="control-btn cancel" onclick={handleCancel}>
+							<Square size={14} />
+							<span>Cancel</span>
+						</button>
+					{/if}
+
+					{#if agent.status === 'completed' || agent.status === 'failed'}
+						<button class="control-btn delete" onclick={handleDelete}>
+							<Trash2 size={14} />
+							<span>Delete</span>
+						</button>
+					{/if}
+				</div>
+			{/if}
+		</div>
+	</BaseCard>
+{/if}
 
 <style>
 	/* ============================================
@@ -507,6 +695,11 @@
 		height: 100%;
 		overflow: hidden;
 		background: var(--card);
+	}
+
+	.agent-content.mobile {
+		height: 100%;
+		border-radius: 0;
 	}
 
 	/* Loading/Error States */
