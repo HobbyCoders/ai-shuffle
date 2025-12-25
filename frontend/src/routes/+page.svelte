@@ -66,6 +66,7 @@
 	import Canvas from '$lib/components/canvas/Canvas.svelte';
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
+	import CreateMenu from '$lib/components/deck/CreateMenu.svelte';
 
 	// Types from deck/types
 	import type {
@@ -98,6 +99,7 @@
 	let showCanvas = $state(false);
 	let showSpotlight = $state(false);
 	let showAdvancedSearch = $state(false);
+	let showCreateMenu = $state(false);
 
 	// Terminal modal state
 	let terminalCommand = $state('/resume');
@@ -362,6 +364,38 @@
 				cmdOrCtrl: true,
 				category: 'chat',
 				action: () => { handleCreateCard('chat'); }
+			}),
+
+			// Background agent (Cmd+Shift+B)
+			registerShortcut({
+				id: 'new-agent',
+				description: 'New background agent',
+				key: 'b',
+				cmdOrCtrl: true,
+				shift: true,
+				category: 'agents',
+				action: () => { handleCreateCard('agent'); }
+			}),
+
+			// Studio (Cmd+Shift+S)
+			registerShortcut({
+				id: 'open-studio',
+				description: 'Open studio',
+				key: 's',
+				cmdOrCtrl: true,
+				shift: true,
+				category: 'studio',
+				action: () => { handleCreateCard('studio'); }
+			}),
+
+			// Terminal (Cmd+T)
+			registerShortcut({
+				id: 'new-terminal',
+				description: 'New terminal',
+				key: 't',
+				cmdOrCtrl: true,
+				category: 'general',
+				action: () => { handleCreateCard('terminal'); }
 			}),
 
 			// Show keyboard shortcuts (Cmd+/)
@@ -930,7 +964,7 @@
 		currentSession={null}
 		{runningProcesses}
 		onModeChange={handleModeChange}
-		onLogoClick={() => handleCreateCard('chat')}
+		onLogoClick={() => showCreateMenu = !showCreateMenu}
 		onSettingsClick={() => handleCreateCard('settings')}
 		onContextToggle={() => deck.toggleContextPanel()}
 		onSessionClick={handleSessionClick}
@@ -1213,6 +1247,20 @@
 	<!-- ========================================== -->
 	<!-- MODALS -->
 	<!-- ========================================== -->
+
+	<!-- Create Menu -->
+	<CreateMenu
+		open={showCreateMenu}
+		onClose={() => showCreateMenu = false}
+		onCreateChat={() => handleCreateCard('chat')}
+		onCreateAgent={() => handleCreateCard('agent')}
+		onCreateStudio={() => handleCreateCard('studio')}
+		onCreateTerminal={() => handleCreateCard('terminal')}
+		onOpenProfiles={() => handleCreateCard('profile')}
+		onOpenProjects={() => handleCreateCard('project')}
+		onOpenSettings={() => handleCreateCard('settings')}
+		{isMobile}
+	/>
 
 	<!-- Spotlight Search (Cmd+K) -->
 	<SpotlightSearch
