@@ -301,10 +301,17 @@ class AgentExecutionEngine:
             # Build SDK options
             # Use worktree path if we created one, otherwise project path
             working_dir = state.worktree_path
+            self._log(agent_run_id, f"DEBUG: state.worktree_path = {state.worktree_path}")
+            self._log(agent_run_id, f"DEBUG: settings.workspace_dir = {settings.workspace_dir}")
+
             if not working_dir and project:
                 working_dir = str(settings.workspace_dir / project["path"])
+                self._log(agent_run_id, f"DEBUG: Using project path: {working_dir}")
             elif not working_dir:
                 working_dir = str(settings.workspace_dir)
+                self._log(agent_run_id, f"DEBUG: Using workspace_dir: {working_dir}")
+            else:
+                self._log(agent_run_id, f"DEBUG: Using worktree path: {working_dir}")
 
             # Build options from profile with custom cwd
             options, agents_dict = build_options_from_profile(
@@ -313,6 +320,7 @@ class AgentExecutionEngine:
                 overrides={"cwd": working_dir}
             )
             options.cwd = working_dir
+            self._log(agent_run_id, f"DEBUG: Final options.cwd = {options.cwd}")
 
             # Write agents to filesystem if needed (Windows workaround)
             if agents_dict and detect_deployment_mode() == DeploymentMode.LOCAL:
