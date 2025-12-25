@@ -473,7 +473,17 @@ class AgentExecutionEngine:
             )
 
             if worktree:
+                # Get absolute path to worktree - use same base as worktree_manager
+                # The worktree is created relative to the project's git repo location
+                project_path = str(settings.workspace_dir / project["path"])
+                # Worktree path is stored as relative: .worktrees/{project_id}/{branch}
+                # But the actual worktree is created relative to workspace_dir, not project
                 state.worktree_path = str(settings.workspace_dir / worktree["worktree_path"])
+
+                # Log for debugging
+                self._log(agent_run_id, f"Workspace dir: {settings.workspace_dir}")
+                self._log(agent_run_id, f"Worktree relative path: {worktree['worktree_path']}")
+
                 database.update_agent_run(
                     agent_run_id,
                     worktree_id=worktree["id"],
