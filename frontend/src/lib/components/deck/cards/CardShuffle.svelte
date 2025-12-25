@@ -82,7 +82,7 @@
 		{
 			mode: 'focus',
 			label: 'Focus',
-			description: 'One main card, others minimized',
+			description: 'Fullscreen cards, navigate between them',
 			icon: Maximize2
 		}
 	];

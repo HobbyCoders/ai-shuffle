@@ -6,9 +6,9 @@
 	 * - Header with drag handle and window controls
 	 * - Card type icon (Lucide icons)
 	 * - Editable title on double-click
-	 * - Window controls: minimize, maximize/restore, close
+	 * - Window controls: maximize/restore, close
 	 * - 8 resize handles (n, s, e, w, ne, nw, se, sw)
-	 * - States: focused, minimized, maximized
+	 * - States: focused, maximized
 	 * - Glassmorphism styling
 	 */
 
@@ -224,7 +224,6 @@
 	class="base-card"
 	class:focused={card.focused}
 	class:maximized={card.maximized}
-	class:minimized={card.minimized}
 	class:dragging={isDragging}
 	class:resizing={isResizing}
 	onclick={handleCardClick}
@@ -384,10 +383,6 @@
 		border-radius: 0;
 		border: none;
 		box-shadow: none;
-	}
-
-	.base-card.minimized {
-		display: none;
 	}
 
 	.base-card.dragging,

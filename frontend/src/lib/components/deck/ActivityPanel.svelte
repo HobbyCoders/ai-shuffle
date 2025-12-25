@@ -153,7 +153,6 @@
 						/>
 					{:else if activeTab === 'agents'}
 						<AgentsTabContent
-							running={runningAgents}
 							completed={completedAgents}
 							{onAgentClick}
 						/>

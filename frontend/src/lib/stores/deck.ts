@@ -3,7 +3,7 @@
  *
  * "The Deck" is a card-based UI paradigm for AI Hub, managing:
  * - Multiple card types (chat, agents, studio, files, settings)
- * - Window-like card behaviors (drag, resize, minimize, maximize, snap)
+ * - Window-like card behaviors (drag, resize, maximize)
  * - Workspace persistence across sessions
  * - Mobile-responsive card navigation
  */
@@ -64,7 +64,6 @@ export interface DeckCard {
 	type: DeckCardType;
 	title: string;
 	// State
-	minimized: boolean;
 	maximized: boolean;
 	// Position and size
 	position: DeckCardPosition;
@@ -291,13 +290,8 @@ function calculateCascadePosition(existingCards: DeckCard[], bounds: { width: nu
 		return { x: 50, y: 50 };
 	}
 
-	// Find the topmost (highest zIndex) non-minimized card
-	const visibleCards = existingCards.filter((c) => !c.minimized);
-	if (visibleCards.length === 0) {
-		return { x: 50, y: 50 };
-	}
-
-	const topCard = visibleCards.reduce((a, b) => (a.zIndex > b.zIndex ? a : b));
+	// Find the topmost (highest zIndex) card
+	const topCard = existingCards.reduce((a, b) => (a.zIndex > b.zIndex ? a : b));
 	let x = topCard.position.x + CASCADE_OFFSET;
 	let y = topCard.position.y + CASCADE_OFFSET;
 
@@ -476,7 +470,6 @@ function createDeckStore() {
 					id: cardId,
 					type,
 					title: data?.title || getDefaultTitle(type),
-					minimized: false,
 					maximized: isFocusMode, // Maximize in focus mode
 					position,
 					size: data?.size || { ...DEFAULT_CARD_SIZE },
@@ -493,14 +486,10 @@ function createDeckStore() {
 				let updatedCards: DeckCard[];
 
 				if (isFocusMode) {
-					// In focus mode: minimize currently maximized card, then add new maximized card
+					// In focus mode: unmaximize currently maximized card, then add new maximized card
 					updatedCards = state.cards.map((c) => {
 						if (c.maximized) {
-							return {
-								...c,
-								minimized: true,
-								maximized: false
-							};
+							return { ...c, maximized: false };
 						}
 						return c;
 					});
@@ -514,9 +503,9 @@ function createDeckStore() {
 					cards: updatedCards,
 					focusedCardId: cardId,
 					nextZIndex: newZIndex + 1,
-					// On mobile, navigate to the newly added card (it's the last visible card)
+					// On mobile, navigate to the newly added card
 					mobileActiveCardIndex: state.isMobile
-						? updatedCards.filter(c => !c.minimized).length - 1
+						? updatedCards.length - 1
 						: state.mobileActiveCardIndex
 				};
 
@@ -537,48 +526,35 @@ function createDeckStore() {
 		 * Remove a card from the deck
 		 * Automatically reapplies the current layout mode if not freeflow
 		 * On mobile, adjusts the active card index to show the previous card
-		 * In focus mode, if removing the maximized card, automatically opens the first minimized card
+		 * In focus mode, if removing the maximized card, automatically maximizes the first remaining card
 		 */
 		removeCard(id: string): void {
 			update((state) => {
-				// Find the index of the card being removed (among visible cards)
-				const visibleCards = state.cards.filter((c) => !c.minimized);
-				const removedCardIndex = visibleCards.findIndex((c) => c.id === id);
+				const removedCardIndex = state.cards.findIndex((c) => c.id === id);
 				const removedCard = state.cards.find((c) => c.id === id);
 
 				// Filter out the removed card
 				let newCards = state.cards.filter((c) => c.id !== id);
 
-				// In focus mode, if we're removing the maximized card, restore the first minimized card
-				if (state.layoutMode === 'focus' && removedCard?.maximized) {
-					const minimizedCards = newCards.filter((c) => c.minimized);
-					if (minimizedCards.length > 0) {
-						// Find the first minimized card (by creation time for consistency)
-						const firstMinimized = minimizedCards.sort(
-							(a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-						)[0];
+				// In focus mode, if we're removing the maximized card, maximize the first remaining card
+				if (state.layoutMode === 'focus' && removedCard?.maximized && newCards.length > 0) {
+					// Find the first card (by creation time for consistency)
+					const firstCard = [...newCards].sort(
+						(a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+					)[0];
 
-						// Restore and maximize the first minimized card
-						const highestZ = Math.max(...newCards.map((c) => c.zIndex), 0);
-						newCards = newCards.map((c) => {
-							if (c.id === firstMinimized.id) {
-								return {
-									...c,
-									minimized: false,
-									maximized: true,
-									zIndex: highestZ + 1
-								};
-							}
-							return c;
-						});
-					}
+					const highestZ = Math.max(...newCards.map((c) => c.zIndex), 0);
+					newCards = newCards.map((c) => {
+						if (c.id === firstCard.id) {
+							return { ...c, maximized: true, zIndex: highestZ + 1 };
+						}
+						return c;
+					});
 				}
-
-				const newVisibleCards = newCards.filter((c) => !c.minimized);
 
 				// Calculate new mobile active card index
 				let newMobileActiveCardIndex = state.mobileActiveCardIndex;
-				if (state.isMobile && newVisibleCards.length > 0) {
+				if (state.isMobile && newCards.length > 0) {
 					// If we removed the active card, show the previous card (or first if at start)
 					if (removedCardIndex === state.mobileActiveCardIndex) {
 						newMobileActiveCardIndex = Math.max(0, removedCardIndex - 1);
@@ -587,9 +563,9 @@ function createDeckStore() {
 						newMobileActiveCardIndex = state.mobileActiveCardIndex - 1;
 					}
 					// Ensure index is within bounds
-					newMobileActiveCardIndex = Math.min(newMobileActiveCardIndex, newVisibleCards.length - 1);
+					newMobileActiveCardIndex = Math.min(newMobileActiveCardIndex, newCards.length - 1);
 					newMobileActiveCardIndex = Math.max(0, newMobileActiveCardIndex);
-				} else if (newVisibleCards.length === 0) {
+				} else if (newCards.length === 0) {
 					newMobileActiveCardIndex = 0;
 				}
 
@@ -642,7 +618,7 @@ function createDeckStore() {
 		focusCard(id: string): void {
 			update((state) => {
 				const card = state.cards.find((c) => c.id === id);
-				if (!card || card.minimized) {
+				if (!card) {
 					return state;
 				}
 
@@ -727,111 +703,6 @@ function createDeckStore() {
 		},
 
 		// ========================================================================
-		// Minimize/Restore
-		// ========================================================================
-
-		/**
-		 * Minimize a card
-		 * Automatically reapplies the current layout mode if not freeflow
-		 */
-		minimizeCard(id: string): void {
-			update((state) => {
-				let newState: DeckState = {
-					...state,
-					cards: state.cards.map((c) =>
-						c.id === id
-							? {
-									...c,
-									minimized: true,
-									maximized: false
-								}
-							: c
-					),
-					focusedCardId: state.focusedCardId === id ? null : state.focusedCardId
-				};
-
-				// Auto-reapply layout mode if not freeflow
-				if (state.layoutMode !== 'freeflow') {
-					newState = this.applyLayout(newState, state.layoutMode);
-				}
-
-				saveToStorage(newState);
-				saveToServer(newState);
-				return newState;
-			});
-		},
-
-		/**
-		 * Restore a card from minimized state
-		 * In focus mode: minimizes the current maximized card and maximizes the restored card
-		 * In other modes: automatically reapplies the current layout mode
-		 */
-		restoreCard(id: string): void {
-			update((state) => {
-				// Ensure restored card gets the highest zIndex
-				const maxExistingZ = state.cards.length > 0
-					? Math.max(...state.cards.map(c => c.zIndex))
-					: 0;
-				const newZIndex = Math.max(state.nextZIndex, maxExistingZ + 1);
-
-				let newState: DeckState;
-
-				if (state.layoutMode === 'focus') {
-					// Focus mode: swap maximized card with restored card
-					newState = {
-						...state,
-						cards: state.cards.map((c) => {
-							if (c.id === id) {
-								// Restore and maximize this card
-								return {
-									...c,
-									minimized: false,
-									maximized: true,
-									zIndex: newZIndex
-								};
-							} else if (c.maximized) {
-								// Minimize the currently maximized card
-								return {
-									...c,
-									minimized: true,
-									maximized: false
-								};
-							}
-							return c;
-						}),
-						focusedCardId: id,
-						nextZIndex: newZIndex + 1
-					};
-				} else {
-					// Other modes: just restore the card
-					newState = {
-						...state,
-						cards: state.cards.map((c) =>
-							c.id === id
-								? {
-										...c,
-										minimized: false,
-										zIndex: newZIndex
-									}
-								: c
-						),
-						focusedCardId: id,
-						nextZIndex: newZIndex + 1
-					};
-
-					// Auto-reapply layout mode if not freeflow
-					if (state.layoutMode !== 'freeflow') {
-						newState = this.applyLayout(newState, state.layoutMode);
-					}
-				}
-
-				saveToStorage(newState);
-				saveToServer(newState);
-				return newState;
-			});
-		},
-
-		// ========================================================================
 		// Maximize/Unmaximize
 		// ========================================================================
 
@@ -853,7 +724,6 @@ function createDeckStore() {
 							? {
 									...c,
 									maximized: true,
-									minimized: false,
 									// Save current position/size for restore
 									savedPosition: c.savedPosition || { ...c.position },
 									savedSize: c.savedSize || { ...c.size },
@@ -990,7 +860,6 @@ function createDeckStore() {
 									savedPosition: c.savedPosition || { ...card.position },
 									savedSize: c.savedSize || { ...card.size },
 									maximized: false,
-									minimized: false,
 									zIndex: newZIndex
 								}
 							: c
@@ -1027,17 +896,14 @@ function createDeckStore() {
 		// ========================================================================
 
 		/**
-		 * Cascade all visible cards
+		 * Cascade all cards
 		 */
 		cascadeCards(): void {
 			updateAndPersist((state) => {
-				const visibleCards = state.cards.filter((c) => !c.minimized);
 				let x = 50;
 				let y = 50;
 
 				const updatedCards = state.cards.map((card) => {
-					if (card.minimized) return card;
-
 					const newCard = {
 						...card,
 						position: { x, y },
@@ -1070,14 +936,13 @@ function createDeckStore() {
 		},
 
 		/**
-		 * Tile all visible cards
+		 * Tile all cards
 		 */
 		tileCards(): void {
 			updateAndPersist((state) => {
-				const visibleCards = state.cards.filter((c) => !c.minimized);
-				if (visibleCards.length === 0) return state;
+				if (state.cards.length === 0) return state;
 
-				const count = visibleCards.length;
+				const count = state.cards.length;
 				const cols = Math.ceil(Math.sqrt(count));
 				const rows = Math.ceil(count / cols);
 
@@ -1086,8 +951,6 @@ function createDeckStore() {
 
 				let idx = 0;
 				const updatedCards = state.cards.map((card) => {
-					if (card.minimized) return card;
-
 					const col = idx % cols;
 					const row = Math.floor(idx / cols);
 					idx++;
@@ -1194,9 +1057,8 @@ function createDeckStore() {
 		 */
 		setMobileActiveCardIndex(index: number): void {
 			update((state) => {
-				const visibleCards = state.cards.filter((c) => !c.minimized);
-				const clampedIndex = Math.max(0, Math.min(index, visibleCards.length - 1));
-				const activeCard = visibleCards[clampedIndex];
+				const clampedIndex = Math.max(0, Math.min(index, state.cards.length - 1));
+				const activeCard = state.cards[clampedIndex];
 
 				return {
 					...state,
@@ -1274,11 +1136,7 @@ function createDeckStore() {
 			const existingCard = state.cards.find((c) => c.dataId === dataId && c.type === type);
 
 			if (existingCard) {
-				if (existingCard.minimized) {
-					this.restoreCard(existingCard.id);
-				} else {
-					this.focusCard(existingCard.id);
-				}
+				this.focusCard(existingCard.id);
 				return existingCard.id;
 			}
 
@@ -1312,22 +1170,19 @@ function createDeckStore() {
 
 		/**
 		 * Set layout mode and rearrange cards accordingly
-		 * When leaving focus mode, restores all minimized cards to visible state
+		 * When leaving focus mode, restores card positions/sizes
 		 */
 		setLayoutMode(mode: LayoutMode): void {
 			updateAndPersist((state) => {
 				let newState = { ...state, layoutMode: mode };
 
-				// If leaving focus mode, restore all cards first
+				// If leaving focus mode, restore all cards to their saved positions
 				if (state.layoutMode === 'focus' && mode !== 'focus') {
 					newState = {
 						...newState,
 						cards: newState.cards.map((card) => ({
 							...card,
-							// Unmaximize any maximized cards
 							maximized: false,
-							// Restore minimized cards (that were minimized by focus mode)
-							minimized: false,
 							// Restore saved position/size if available
 							position: card.savedPosition || card.position,
 							size: card.savedSize || card.size,
@@ -1358,12 +1213,10 @@ function createDeckStore() {
 		 * Apply layout arrangement to cards
 		 */
 		applyLayout(state: DeckState, mode: LayoutMode): DeckState {
-			const visibleCards = state.cards.filter((c) => !c.minimized);
-			if (visibleCards.length === 0) return state;
+			if (state.cards.length === 0) return state;
 
 			const { width: boundsW, height: boundsH } = state.workspaceBounds;
 			const padding = 8; // Padding between cards
-			const count = visibleCards.length;
 
 			let updatedCards: DeckCard[];
 
@@ -1400,8 +1253,7 @@ function createDeckStore() {
 		 * Side-by-side layout: Cards arranged in equal-width vertical columns
 		 */
 		applySideBySideLayout(cards: DeckCard[], boundsW: number, boundsH: number, padding: number): DeckCard[] {
-			const visibleCards = cards.filter((c) => !c.minimized);
-			const count = visibleCards.length;
+			const count = cards.length;
 			if (count === 0) return cards;
 
 			// Calculate column width - max 4 columns, then start scrolling
@@ -1409,12 +1261,8 @@ function createDeckStore() {
 			const cardWidth = (boundsW - (maxCols + 1) * padding) / maxCols;
 			const cardHeight = boundsH - padding * 2;
 
-			let colIndex = 0;
-			return cards.map((card) => {
-				if (card.minimized) return card;
-
-				const x = padding + colIndex * (cardWidth + padding);
-				colIndex++;
+			return cards.map((card, index) => {
+				const x = padding + index * (cardWidth + padding);
 
 				return {
 					...card,
@@ -1432,8 +1280,7 @@ function createDeckStore() {
 		 * Tile layout: Cards tiled in a grid pattern with equal sizes
 		 */
 		applyTileLayout(cards: DeckCard[], boundsW: number, boundsH: number, padding: number): DeckCard[] {
-			const visibleCards = cards.filter((c) => !c.minimized);
-			const count = visibleCards.length;
+			const count = cards.length;
 			if (count === 0) return cards;
 
 			// Calculate optimal grid dimensions
@@ -1443,13 +1290,9 @@ function createDeckStore() {
 			const cardWidth = (boundsW - (cols + 1) * padding) / cols;
 			const cardHeight = (boundsH - (rows + 1) * padding) / rows;
 
-			let idx = 0;
-			return cards.map((card) => {
-				if (card.minimized) return card;
-
+			return cards.map((card, idx) => {
 				const col = idx % cols;
 				const row = Math.floor(idx / cols);
-				idx++;
 
 				return {
 					...card,
@@ -1471,8 +1314,7 @@ function createDeckStore() {
 		 * Like a hand of cards fanned down on the left, with one card "in play" on the right
 		 */
 		applyStackLayout(cards: DeckCard[], boundsW: number, boundsH: number, focusedCardId?: string | null): DeckCard[] {
-			const visibleCards = cards.filter((c) => !c.minimized);
-			if (visibleCards.length === 0) return cards;
+			if (cards.length === 0) return cards;
 
 			// Stack panel width for the card deck on the left
 			const stackPanelWidth = 260;
@@ -1486,22 +1328,20 @@ function createDeckStore() {
 
 			// Find the focused card - use the highest z-index card or the last one
 			let focusedCard = focusedCardId
-				? visibleCards.find(c => c.id === focusedCardId)
+				? cards.find(c => c.id === focusedCardId)
 				: null;
 			if (!focusedCard) {
 				// Default to highest z-index card
-				focusedCard = visibleCards.reduce((a, b) => a.zIndex > b.zIndex ? a : b);
+				focusedCard = cards.reduce((a, b) => a.zIndex > b.zIndex ? a : b);
 			}
 
 			let nextZ = Math.max(...cards.map(c => c.zIndex), 0) + 1;
 
 			// Stack cards (non-focused) - sort by creation time for consistent ordering
-			const stackCards = visibleCards.filter(c => c.id !== focusedCard?.id)
+			const stackCards = cards.filter(c => c.id !== focusedCard?.id)
 				.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 
 			return cards.map((card) => {
-				if (card.minimized) return card;
-
 				const isMainCard = card.id === focusedCard?.id;
 
 				if (isMainCard) {
@@ -1510,7 +1350,7 @@ function createDeckStore() {
 						...card,
 						position: { x: mainCardX, y: stackPadding },
 						size: { width: mainCardWidth, height: mainCardHeight },
-						zIndex: nextZ + visibleCards.length + 1,
+						zIndex: nextZ + cards.length + 1,
 						maximized: false,
 						snappedTo: null as SnapZone,
 						savedPosition: card.savedPosition || { ...card.position },
@@ -1542,27 +1382,23 @@ function createDeckStore() {
 		 * Navigation buttons switch which card is on top
 		 */
 		applyFocusLayout(cards: DeckCard[], boundsW: number, boundsH: number, padding: number, focusedCardId: string | null): DeckCard[] {
-			const visibleCards = cards.filter((c) => !c.minimized);
-			if (visibleCards.length === 0) return cards;
+			if (cards.length === 0) return cards;
 
-			// Find the focused card, or use the first visible card
+			// Find the focused card, or use the first card
 			const focusedCard = focusedCardId
-				? visibleCards.find(c => c.id === focusedCardId) || visibleCards[0]
-				: visibleCards[0];
+				? cards.find(c => c.id === focusedCardId) || cards[0]
+				: cards[0];
 
 			const highestZ = Math.max(...cards.map(c => c.zIndex), 0);
 
-			return cards.map((card) => {
-				if (card.minimized) return card;
-
+			return cards.map((card, index) => {
 				const isFocused = card.id === focusedCard?.id;
 
-				// All visible cards are maximized, but only focused one has highest z-index
+				// All cards are maximized, but only focused one has highest z-index
 				return {
 					...card,
-					minimized: false,
 					maximized: true,
-					zIndex: isFocused ? highestZ + visibleCards.length + 1 : highestZ + visibleCards.indexOf(card),
+					zIndex: isFocused ? highestZ + cards.length + 1 : highestZ + index,
 					// Save current position/size for when we exit focus mode
 					savedPosition: card.savedPosition || { ...card.position },
 					savedSize: card.savedSize || { ...card.size }
@@ -1591,12 +1427,10 @@ function createDeckStore() {
 		navigateFocusMode(direction: 'prev' | 'next'): void {
 			update((state) => {
 				if (state.layoutMode !== 'focus') return state;
-
-				const visibleCards = state.cards.filter((c) => !c.minimized);
-				if (visibleCards.length <= 1) return state;
+				if (state.cards.length <= 1) return state;
 
 				// Sort by creation time for consistent ordering
-				const sortedCards = [...visibleCards].sort(
+				const sortedCards = [...state.cards].sort(
 					(a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
 				);
 
@@ -1641,16 +1475,6 @@ export const activeMode = derived(deck, ($deck) => $deck.activeMode);
 
 // All cards
 export const allCards = derived(deck, ($deck) => $deck.cards);
-
-// Visible cards (not minimized)
-export const visibleCards = derived(deck, ($deck) =>
-	$deck.cards.filter((c) => !c.minimized)
-);
-
-// Minimized cards
-export const minimizedCards = derived(deck, ($deck) =>
-	$deck.cards.filter((c) => c.minimized)
-);
 
 // Focused card
 export const focusedCard = derived(deck, ($deck) => {

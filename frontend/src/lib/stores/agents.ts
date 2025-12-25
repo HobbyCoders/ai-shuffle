@@ -603,14 +603,26 @@ function createAgentsStore() {
 		 */
 		async fetchAgent(id: string): Promise<BackgroundAgent | null> {
 			try {
+				console.log(`[Agents] Fetching agent ${id}...`);
 				const response = await apiRequest<ApiAgentResponse>(`/${id}`);
+				console.log(`[Agents] Got response for agent ${id}:`, response);
 				const agent = convertApiAgent(response);
 
-				// Update in store
-				update((state) => ({
-					...state,
-					agents: state.agents.map((a) => (a.id === id ? agent : a))
-				}));
+				// Update or add agent in store
+				update((state) => {
+					const exists = state.agents.some(a => a.id === id);
+					if (exists) {
+						return {
+							...state,
+							agents: state.agents.map((a) => (a.id === id ? agent : a))
+						};
+					} else {
+						return {
+							...state,
+							agents: [...state.agents, agent]
+						};
+					}
+				});
 
 				return agent;
 			} catch (error) {

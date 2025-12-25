@@ -24,7 +24,7 @@
 	import { agents, activeAgents, allAgents, runningAgents, completedAgents, failedAgents } from '$lib/stores/agents';
 	import {
 		deck,
-		visibleCards,
+		allCards,
 		focusedCardId,
 		mobileActiveCardIndex,
 		layoutMode
@@ -276,7 +276,7 @@
 	// Derived State: Cards for Workspace
 	// ============================================
 	const workspaceCards = $derived<CardsDeckCard[]>(
-		$visibleCards.map((c) => ({
+		$allCards.map((c) => ({
 			id: c.id,
 			type: mapDeckCardType(c.type),
 			title: c.title,
@@ -285,7 +285,6 @@
 			width: c.size.width,
 			height: c.size.height,
 			zIndex: c.zIndex,
-			minimized: c.minimized,
 			maximized: c.maximized,
 			focused: c.id === $focusedCardId,
 			snappedTo: mapSnapZone(c.snappedTo),
@@ -305,7 +304,7 @@
 
 	// Active Threads: Show all open cards in the sidebar (legacy)
 	const deckSessions = $derived<DeckSession[]>(
-		$visibleCards.map((c) => ({
+		$allCards.map((c) => ({
 			id: c.id,
 			title: c.title || 'Untitled',
 			lastMessage: c.type === 'chat' ? 'Chat' : c.type === 'terminal' ? 'Terminal' : c.type,
@@ -317,7 +316,7 @@
 	// Active Sessions for Activity Panel: Combines open cards and active agents (running + paused)
 	const activeSessions = $derived<ActiveSession[]>([
 		// Open cards
-		...$visibleCards.map((c) => ({
+		...$allCards.map((c) => ({
 			id: c.id,
 			type: 'chat' as const,
 			title: c.title || 'Untitled',
@@ -342,7 +341,7 @@
 	// Recent Sessions: Session history for loading old chats
 	// Shows sessions that are NOT currently open as cards
 	const openSessionIds = $derived(
-		new Set($visibleCards
+		new Set($allCards
 			.filter(c => c.dataId)
 			.map(c => c.dataId))
 	);
@@ -357,7 +356,7 @@
 	);
 
 	const badges = $derived<import('$lib/components/deck/types').ActivityBadges>({
-		workspace: $visibleCards.length > 0 ? $visibleCards.length : undefined,
+		workspace: $allCards.length > 0 ? $allCards.length : undefined,
 		studio: undefined,
 		files: undefined
 	});
@@ -370,18 +369,19 @@
 			name: agent.name,
 			status: agent.status === 'running' ? 'running' :
 			        agent.status === 'paused' ? 'paused' :
+			        agent.status === 'queued' ? 'queued' :
 			        agent.status === 'completed' ? 'idle' :
 			        agent.status === 'failed' ? 'error' : 'idle',
 			task: agent.prompt?.slice(0, 50),
 			progress: agent.progress
-		}));
+		} as DeckAgent));
 		console.log('[DeckAgents] allAgents count:', $allAgents.length, 'mapped:', mapped);
 		return mapped;
 	});
 
-	// Split agents for Activity Panel tabs
+	// Split agents for Activity Panel tabs (running/queued go to active sessions)
 	const runningAgentsForPanel = $derived<DeckAgent[]>(
-		deckAgents.filter(a => a.status === 'running' || a.status === 'paused')
+		deckAgents.filter(a => a.status === 'running' || a.status === 'paused' || a.status === 'queued')
 	);
 	const completedAgentsForPanel = $derived<DeckAgent[]>(
 		deckAgents.filter(a => a.status === 'idle' || a.status === 'error')
@@ -389,6 +389,41 @@
 
 	const deckGenerations: DeckGeneration[] = [];
 	const runningProcesses = $derived<RunningProcess[]>([]);
+
+	// Compute current session info from focused chat card
+	const currentSessionInfo = $derived.by<import('$lib/components/deck/types').SessionInfo | null>(() => {
+		// Find the focused card
+		const focusedCard = $allCards.find(c => c.id === $focusedCardId);
+		if (!focusedCard || focusedCard.type !== 'chat') return null;
+
+		// Get the tab for this card (by dataId which is the tabId)
+		const tabId = focusedCard.dataId;
+		if (!tabId) return null;
+
+		const tab = $allTabs.find(t => t.id === tabId);
+		if (!tab) return null;
+
+		// Get the profile to find the model name
+		const profilesList = $profiles;
+		const profile = profilesList.find(p => p.id === tab.profile);
+		const modelName = tab.modelOverride || profile?.config?.model || 'claude-sonnet-4-20250514';
+
+		// Calculate cost (rough estimate based on Claude pricing)
+		// Sonnet: $3/$15 per 1M tokens (input/output)
+		const inputCost = (tab.totalTokensIn / 1_000_000) * 3;
+		const outputCost = (tab.totalTokensOut / 1_000_000) * 15;
+		const totalCost = inputCost + outputCost;
+
+		return {
+			model: modelName,
+			tokens: {
+				input: tab.totalTokensIn,
+				output: tab.totalTokensOut,
+				total: tab.totalTokensIn + tab.totalTokensOut
+			},
+			cost: totalCost
+		};
+	});
 
 	// ============================================
 	// Helper Functions
@@ -440,8 +475,8 @@
 	function syncDeckCardsWithTabs() {
 		const currentTabs = $allTabs;
 
-		// Use visible cards from deck store
-		const allDeckCards = $visibleCards;
+		// Use all cards from deck store
+		const allDeckCards = $allCards;
 
 		for (const card of allDeckCards) {
 			if (card.type !== 'chat') continue;
@@ -801,7 +836,7 @@
 	function handleSessionClick(session: ActiveSession) {
 		if (session.type === 'chat') {
 			// It's a card - focus it
-			const existingCard = $visibleCards.find((c) => c.id === session.id);
+			const existingCard = $allCards.find((c) => c.id === session.id);
 			if (existingCard) {
 				deck.focusCard(existingCard.id);
 			}
@@ -860,7 +895,7 @@
 				break;
 			case 'settings': {
 				// Singleton - check if already open
-				const existingSettings = $visibleCards.find(c => c.type === 'settings');
+				const existingSettings = $allCards.find(c => c.type === 'settings');
 				if (existingSettings) {
 					deck.focusCard(existingSettings.id);
 					return;
@@ -876,7 +911,7 @@
 			}
 			case 'subagent': {
 				// Singleton
-				const existingSubagent = $visibleCards.find(c => c.type === 'subagent');
+				const existingSubagent = $allCards.find(c => c.type === 'subagent');
 				if (existingSubagent) {
 					deck.focusCard(existingSubagent.id);
 					return;
@@ -887,7 +922,7 @@
 			}
 			case 'project': {
 				// Singleton
-				const existingProject = $visibleCards.find(c => c.type === 'project');
+				const existingProject = $allCards.find(c => c.type === 'project');
 				if (existingProject) {
 					deck.focusCard(existingProject.id);
 					return;
@@ -989,7 +1024,7 @@
 	// ============================================
 	function handleOpenProfileCard(editId?: string) {
 		// Find or create profile card
-		const existingProfile = $visibleCards.find(c => c.type === 'profile');
+		const existingProfile = $allCards.find(c => c.type === 'profile');
 		if (existingProfile) {
 			deck.focusCard(existingProfile.id);
 			// If editing a specific profile, set metadata to open in edit mode
@@ -1022,7 +1057,7 @@
 
 	function handleOpenProjectCard(editId?: string) {
 		// Find or create project card
-		const existingProject = $visibleCards.find(c => c.type === 'project');
+		const existingProject = $allCards.find(c => c.type === 'project');
 		if (existingProject) {
 			deck.focusCard(existingProject.id);
 			// If editing a specific project, set metadata to open in edit mode
@@ -1061,7 +1096,7 @@
 		// For interactive commands, open terminal modal
 		if (command.type === 'interactive') {
 			// Need an active session for terminal
-			const activeCard = $visibleCards.find((c) => c.id === $focusedCardId);
+			const activeCard = $allCards.find((c) => c.id === $focusedCardId);
 			if (activeCard?.dataId) {
 				terminalSessionId = activeCard.dataId;
 				terminalCommand = `/${command.name}`;
@@ -1132,7 +1167,7 @@
 		runningAgents={runningAgentsForPanel}
 		completedAgents={completedAgentsForPanel}
 		generations={deckGenerations}
-		currentSession={null}
+		currentSession={currentSessionInfo}
 		{overlayType}
 		overlayData={chatSettingsOverlayData}
 		sessions={deckSessions}
@@ -1147,11 +1182,13 @@
 		onHistorySessionClick={handleHistorySessionClick}
 		onAgentClick={(agent) => {
 			// Open agent card in workspace
+			console.log('[onAgentClick] Clicked agent:', agent.id, agent.name);
 			deck.setMode('workspace');
-			deck.openOrFocusCard('agent', agent.id, {
+			const cardId = deck.openOrFocusCard('agent', agent.id, {
 				title: agent.name,
 				meta: { agentId: agent.id }
 			});
+			console.log('[onAgentClick] Opened/focused card:', cardId, 'with dataId:', agent.id);
 		}}
 		onGenerationClick={() => {}}
 		onOverlayClose={() => { overlayType = null; }}
@@ -1265,8 +1302,7 @@
 						<!-- Sorting would cause DOM reordering which resets scroll positions -->
 						{#each workspaceCards as card (card.id)}
 							{@const tabId = getTabIdForCard(card)}
-							{#if !card.minimized}
-								<div
+							<div
 									class="card-wrapper"
 									class:maximized={card.maximized}
 									style:position="absolute"
@@ -1303,7 +1339,7 @@
 									{:else if card.type === 'agent'}
 										<AgentCard
 											{card}
-											agentId={card.dataId || card.meta?.agentId as string}
+											agentId={card.data?.dataId || card.data?.meta?.agentId as string}
 											onClose={() => handleCardClose(card.id)}
 											onMaximize={() => handleCardMaximize(card.id)}
 											onFocus={() => handleCardFocus(card.id)}
@@ -1376,7 +1412,6 @@
 										</div>
 									{/if}
 								</div>
-							{/if}
 						{/each}
 					{/snippet}
 				</Workspace>

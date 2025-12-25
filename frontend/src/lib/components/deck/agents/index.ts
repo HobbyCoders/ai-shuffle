@@ -2,7 +2,6 @@
  * Agent mode components for The Deck
  *
  * These components provide the agent management interface:
- * - AgentsView: Main view with tabs and agent lists
  * - AgentLauncher: Modal for launching new agents
  * - AgentListItem: Individual agent in list
  * - AgentDetails: Full agent details panel
@@ -11,7 +10,6 @@
  * - AgentStats: Statistics panel
  */
 
-export { default as AgentsView } from './AgentsView.svelte';
 export { default as AgentLauncher } from './AgentLauncher.svelte';
 export { default as AgentListItem } from './AgentListItem.svelte';
 export { default as AgentDetails } from './AgentDetails.svelte';

@@ -13,7 +13,6 @@ export interface DeckCard {
   width: number;
   height: number;
   zIndex: number;
-  minimized: boolean;
   maximized: boolean;
   focused: boolean;
   snappedTo?: 'left' | 'right' | 'top' | 'bottom' | 'topleft' | 'topright' | 'bottomleft' | 'bottomright';
