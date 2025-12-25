@@ -617,7 +617,7 @@ class AgentExecutionEngine:
         agent_run_id: str,
         agent_run: Dict[str, Any],
         state: AgentRunState
-    ) -> bool:
+    ) -> tuple[bool, Optional[str]]:
         """
         Commit any uncommitted changes and push to remote.
 
@@ -627,13 +627,17 @@ class AgentExecutionEngine:
         3. Fetch and rebase on base branch
         4. Push to remote
 
-        Returns True if there are changes to create a PR for, False otherwise.
+        Returns:
+            tuple[bool, Optional[str]]: (success, conflict_info)
+            - (True, None): Changes pushed successfully
+            - (False, None): No changes to push or non-conflict error
+            - (False, conflict_info): Merge conflict detected, conflict_info contains details
         """
         import subprocess
 
         if not state.worktree_path or not state.branch_name:
             self._log(agent_run_id, "Cannot commit: no worktree or branch", "warning")
-            return False
+            return False, None
 
         base_branch = agent_run.get('base_branch', 'main')
 
@@ -664,7 +668,7 @@ class AgentExecutionEngine:
                 )
                 if add_result.returncode != 0:
                     self._log(agent_run_id, f"Failed to stage changes: {add_result.stderr}", "error")
-                    return False
+                    return False, None
 
                 # Step 3: Create commit with descriptive message
                 commit_msg = f"feat: {agent_run['name']}\n\nAutomated changes by background agent.\n\nTask: {agent_run['prompt'][:200]}"
@@ -682,7 +686,7 @@ class AgentExecutionEngine:
                         self._log(agent_run_id, "No changes to commit (already committed by agent)")
                     else:
                         self._log(agent_run_id, f"Failed to commit: {commit_result.stderr}", "error")
-                        return False
+                        return False, None
                 else:
                     self._log(agent_run_id, "Changes committed successfully")
             else:
@@ -715,7 +719,7 @@ class AgentExecutionEngine:
 
             if commit_count == 0:
                 self._log(agent_run_id, "No commits ahead of base branch - nothing to push", "warning")
-                return False
+                return False, None
 
             self._log(agent_run_id, f"Found {commit_count} commit(s) to push")
 
@@ -746,8 +750,26 @@ class AgentExecutionEngine:
                     timeout=60
                 )
                 if merge_result.returncode != 0:
-                    self._log(agent_run_id, f"Merge also failed: {merge_result.stderr}", "error")
-                    return False
+                    # Check if this is a merge conflict
+                    merge_output = merge_result.stdout + merge_result.stderr
+                    if "CONFLICT" in merge_output or "Automatic merge failed" in merge_output:
+                        self._log(agent_run_id, "Merge conflict detected - will ask agent to resolve", "warning")
+
+                        # Get conflict details before aborting
+                        conflict_info = self._get_conflict_details(state.worktree_path, base_branch)
+
+                        # Abort the merge to leave working directory clean for agent
+                        subprocess.run(
+                            ["git", "merge", "--abort"],
+                            capture_output=True,
+                            cwd=state.worktree_path,
+                            timeout=30
+                        )
+
+                        return False, conflict_info
+                    else:
+                        self._log(agent_run_id, f"Merge failed (not a conflict): {merge_result.stderr}", "error")
+                        return False, None
                 self._log(agent_run_id, "Merged base branch successfully")
             else:
                 self._log(agent_run_id, "Rebased successfully")
@@ -763,23 +785,72 @@ class AgentExecutionEngine:
             )
             if push_result.returncode != 0:
                 self._log(agent_run_id, f"Failed to push: {push_result.stderr}", "error")
-                return False
+                return False, None
 
             self._log(agent_run_id, "Branch pushed successfully")
-            return True
+            return True, None
 
         except subprocess.TimeoutExpired as e:
             self._log(agent_run_id, f"Git operation timed out: {e}", "error")
-            return False
+            return False, None
         except Exception as e:
             self._log(agent_run_id, f"Git operation failed: {type(e).__name__}: {e}", "error")
-            return False
+            return False, None
+
+    def _get_conflict_details(self, worktree_path: str, base_branch: str) -> str:
+        """Get details about merge conflicts for the agent to resolve."""
+        import subprocess
+
+        details = []
+
+        # Get list of conflicted files
+        status = subprocess.run(
+            ["git", "diff", "--name-only", "--diff-filter=U"],
+            capture_output=True,
+            text=True,
+            cwd=worktree_path,
+            timeout=30
+        )
+
+        conflicted_files = [f.strip() for f in status.stdout.strip().split('\n') if f.strip()]
+
+        if conflicted_files:
+            details.append(f"Files with conflicts: {', '.join(conflicted_files)}")
+
+            # Get the actual conflict markers for each file (first 50 lines of diff)
+            for file in conflicted_files[:5]:  # Limit to first 5 files
+                diff = subprocess.run(
+                    ["git", "diff", file],
+                    capture_output=True,
+                    text=True,
+                    cwd=worktree_path,
+                    timeout=30
+                )
+                if diff.stdout:
+                    # Truncate if too long
+                    diff_text = diff.stdout[:2000] + "..." if len(diff.stdout) > 2000 else diff.stdout
+                    details.append(f"\nConflict in {file}:\n{diff_text}")
+
+        # Get a summary of what changed on the base branch that caused the conflict
+        log = subprocess.run(
+            ["git", "log", "--oneline", f"HEAD..origin/{base_branch}", "-5"],
+            capture_output=True,
+            text=True,
+            cwd=worktree_path,
+            timeout=30
+        )
+
+        if log.stdout.strip():
+            details.append(f"\nRecent commits on {base_branch} that may have caused conflict:\n{log.stdout.strip()}")
+
+        return "\n".join(details) if details else "Merge conflict detected (no additional details available)"
 
     async def _create_pull_request(
         self,
         agent_run_id: str,
         agent_run: Dict[str, Any],
-        state: AgentRunState
+        state: AgentRunState,
+        max_conflict_retries: int = 2
     ):
         """Create a pull request for the agent's changes"""
         import subprocess
@@ -792,9 +863,29 @@ class AgentExecutionEngine:
 
         try:
             # Step 1: Commit and push any changes (handles the full git workflow)
-            has_changes = await self._commit_and_push_changes(agent_run_id, agent_run, state)
-            if not has_changes:
-                self._log(agent_run_id, "No changes to create PR for", "warning")
+            # This may detect merge conflicts if another agent modified the same files
+            success, conflict_info = await self._commit_and_push_changes(agent_run_id, agent_run, state)
+
+            # Handle merge conflicts by asking the agent to resolve them
+            conflict_retry_count = 0
+            while not success and conflict_info and conflict_retry_count < max_conflict_retries:
+                conflict_retry_count += 1
+                self._log(agent_run_id, f"Attempting conflict resolution (attempt {conflict_retry_count}/{max_conflict_retries})")
+
+                # Ask the agent to resolve the conflict
+                resolved = await self._resolve_merge_conflict(agent_run_id, agent_run, state, conflict_info)
+                if not resolved:
+                    self._log(agent_run_id, "Agent could not resolve merge conflict", "error")
+                    return
+
+                # Try again
+                success, conflict_info = await self._commit_and_push_changes(agent_run_id, agent_run, state)
+
+            if not success:
+                if conflict_info:
+                    self._log(agent_run_id, f"Failed to resolve merge conflict after {max_conflict_retries} attempts", "error")
+                else:
+                    self._log(agent_run_id, "No changes to create PR for", "warning")
                 return
 
             # Step 2: Check if gh is authenticated
@@ -906,6 +997,100 @@ class AgentExecutionEngine:
             self._log(agent_run_id, "PR creation timed out", "error")
         except Exception as e:
             self._log(agent_run_id, f"PR creation failed: {type(e).__name__}: {e}", "error")
+
+    async def _resolve_merge_conflict(
+        self,
+        agent_run_id: str,
+        agent_run: Dict[str, Any],
+        state: AgentRunState,
+        conflict_info: str
+    ) -> bool:
+        """
+        Send a follow-up query to the agent to resolve merge conflicts.
+
+        The agent is given the conflict details and asked to:
+        1. Fetch and merge the base branch
+        2. Resolve any conflicts
+        3. Commit the resolution
+
+        Returns True if the agent successfully resolved the conflict.
+        """
+        self._log(agent_run_id, "Asking agent to resolve merge conflict...")
+
+        # Build the conflict resolution prompt
+        base_branch = agent_run.get('base_branch', 'main')
+        conflict_prompt = f"""
+MERGE CONFLICT DETECTED - Please resolve it.
+
+While trying to push your changes, a merge conflict was detected with the base branch ({base_branch}).
+Another process has modified some of the same files you worked on.
+
+Here are the conflict details:
+{conflict_info}
+
+Please:
+1. Run `git fetch origin` to get the latest changes
+2. Run `git merge origin/{base_branch}` to merge the base branch
+3. Resolve any conflicts in the affected files (remove conflict markers, keep the correct code)
+4. Run `git add -A` to stage resolved files
+5. Run `git commit -m "Resolve merge conflict with {base_branch}"` to commit the resolution
+
+After resolving, I will attempt to push your changes again.
+"""
+
+        try:
+            # Get profile for the follow-up query
+            profile_id = agent_run.get("profile_id")
+            profile = get_profile(profile_id) if profile_id else None
+            if not profile:
+                profiles = database.get_all_profiles()
+                if profiles:
+                    profile = profiles[0]
+                else:
+                    self._log(agent_run_id, "No profile available for conflict resolution", "error")
+                    return False
+
+            # Get project
+            project_id = agent_run.get("project_id")
+            project = database.get_project(project_id) if project_id else None
+
+            # Build options with the worktree path
+            options, agents_dict = build_options_from_profile(
+                profile=profile,
+                project=project,
+                overrides={"cwd": state.worktree_path},
+                resume_session_id=state.sdk_session_id  # Resume the existing session
+            )
+
+            # Write agents to filesystem if needed (Windows workaround)
+            if agents_dict and detect_deployment_mode() == DeploymentMode.LOCAL:
+                write_agents_to_filesystem(agents_dict, state.worktree_path)
+
+            self._log(agent_run_id, "Sending conflict resolution request to agent...")
+
+            # Execute the follow-up query
+            response_text = []
+            async for message in query(prompt=conflict_prompt, options=options):
+                if isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if isinstance(block, TextBlock):
+                            response_text.append(block.text)
+                            # Log progress
+                            if len(block.text) > 10:
+                                preview = block.text[:200] + "..." if len(block.text) > 200 else block.text
+                                self._log(agent_run_id, f"[Conflict Resolution] {preview}")
+                        elif isinstance(block, ToolUseBlock):
+                            self._log(agent_run_id, f"[Conflict Resolution] Using tool: {block.name}")
+
+                elif isinstance(message, ResultMessage):
+                    self._log(agent_run_id, f"Conflict resolution completed. Turns: {message.num_turns}")
+
+            self._log(agent_run_id, "Agent finished conflict resolution attempt")
+            return True
+
+        except Exception as e:
+            self._log(agent_run_id, f"Conflict resolution failed: {type(e).__name__}: {e}", "error")
+            return False
 
     async def _merge_and_cleanup(
         self,
