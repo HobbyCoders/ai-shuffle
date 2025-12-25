@@ -189,10 +189,8 @@
 			<div class="border-b border-border"></div>
 
 			<!-- Content Area - scrollable -->
-			<div class="flex-1 overflow-y-auto overflow-x-hidden">
-				<div class="p-4">
-					{@render children()}
-				</div>
+			<div class="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
+				{@render children()}
 			</div>
 		</div>
 	</div>
