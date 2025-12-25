@@ -869,8 +869,16 @@ function createDeckStore() {
 
 		/**
 		 * Restore a card from maximized state
+		 * In focus mode, cards cannot be unmaximized - they are always fullscreen
 		 */
 		unmaximizeCard(id: string): void {
+			const state = get({ subscribe });
+
+			// In focus mode, don't allow unmaximizing - cards must stay fullscreen
+			if (state.layoutMode === 'focus') {
+				return;
+			}
+
 			updateAndPersist((state) => ({
 				...state,
 				cards: state.cards.map((c) =>
@@ -890,10 +898,17 @@ function createDeckStore() {
 
 		/**
 		 * Toggle maximize state
+		 * In focus mode, cards cannot be unmaximized - they are always fullscreen
 		 */
 		toggleMaximize(id: string): void {
 			const state = get({ subscribe });
 			const card = state.cards.find((c) => c.id === id);
+
+			// In focus mode, don't allow unmaximizing - cards must stay fullscreen
+			if (state.layoutMode === 'focus' && card?.maximized) {
+				return;
+			}
+
 			if (card?.maximized) {
 				this.unmaximizeCard(id);
 			} else {

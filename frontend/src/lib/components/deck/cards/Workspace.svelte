@@ -50,8 +50,8 @@
 		children
 	}: Props = $props();
 
-	// In freeflow mode, disable all snapping
-	const isSnappingEnabled = $derived(layoutMode !== 'freeflow');
+	// Only enable snapping in freeflow mode - all other layouts manage card positions automatically
+	const isSnappingEnabled = $derived(layoutMode === 'freeflow');
 
 	// Focus mode navigation state
 	const isFocusMode = $derived(layoutMode === 'focus');
@@ -121,9 +121,9 @@
 	const maximizedCard = $derived(cards.find((c) => c.maximized));
 	const hasMaximizedCard = $derived(!!maximizedCard);
 
-	// Snap detection helper - only active when snapping is enabled (non-freeflow modes)
+	// Snap detection helper - only active in freeflow mode (all other layouts manage positions automatically)
 	function getSnapZone(x: number, y: number, width: number, height: number): DeckCard['snappedTo'] | undefined {
-		// In freeflow mode, no edge snapping
+		// Only enable snapping in freeflow mode
 		if (!isSnappingEnabled) return undefined;
 
 		const bounds = workspaceBounds;
@@ -207,7 +207,7 @@
 	/**
 	 * Check for card-to-card snapping alignment
 	 * Returns adjusted position and snap guides to display
-	 * Disabled in freeflow mode
+	 * Only enabled in freeflow mode (all other layouts manage positions automatically)
 	 */
 	export function checkCardSnapping(
 		cardId: string,
@@ -216,7 +216,7 @@
 		width: number,
 		height: number
 	): SnapResult {
-		// In freeflow mode, no card-to-card snapping
+		// Only enable card-to-card snapping in freeflow mode
 		if (!cardSnapEnabled || !isSnappingEnabled) {
 			return { x, y, guides: [] };
 		}
@@ -384,9 +384,9 @@
 		snapGuides = [];
 	}
 
-	// Show snap preview while dragging (disabled in freeflow mode)
+	// Show snap preview while dragging (only in freeflow mode)
 	export function showSnapPreview(x: number, y: number, width: number, height: number) {
-		// In freeflow mode, never show snap preview
+		// Only show snap preview in freeflow mode
 		if (!isSnappingEnabled) {
 			snapPreview = { show: false, x: 0, y: 0, width: 0, height: 0 };
 			return;
@@ -404,9 +404,9 @@
 		snapPreview = { show: false, x: 0, y: 0, width: 0, height: 0 };
 	}
 
-	// Finalize snap when drag ends (disabled in freeflow mode)
+	// Finalize snap when drag ends (only in freeflow mode)
 	export function finalizeSnap(cardId: string, x: number, y: number, width: number, height: number) {
-		// In freeflow mode, never finalize snapping
+		// Only finalize snapping in freeflow mode
 		if (!isSnappingEnabled) {
 			hideSnapPreview();
 			return;
