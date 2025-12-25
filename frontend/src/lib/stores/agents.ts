@@ -391,10 +391,12 @@ function createAgentsStore() {
 		 * This is idempotent - safe to call multiple times
 		 */
 		async init(): Promise<void> {
+			console.log('[Agents Store] init() called, browser:', browser, 'initialized:', initialized);
 			if (!browser) return;
 
 			// If already initialized and WebSocket is connected, just refresh data
 			if (initialized && wsManager) {
+				console.log('[Agents Store] Already initialized, refreshing...');
 				await this.refresh();
 				return;
 			}
@@ -403,7 +405,9 @@ function createAgentsStore() {
 
 			try {
 				// Fetch initial agents list
+				console.log('[Agents Store] Fetching agents from API...');
 				const response = await apiRequest<{ agents: ApiAgentResponse[]; total: number }>('');
+				console.log('[Agents Store] API response:', response.agents.length, 'agents, total:', response.total);
 
 				update((s) => ({
 					...s,
@@ -414,6 +418,7 @@ function createAgentsStore() {
 				// Connect WebSocket for real-time updates
 				this.connectWebSocket();
 				initialized = true;
+				console.log('[Agents Store] Initialization complete');
 			} catch (error) {
 				console.error('[Agents] Failed to initialize:', error);
 				update((s) => ({

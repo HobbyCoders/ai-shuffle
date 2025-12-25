@@ -21,7 +21,7 @@
 		sessions,
 		sessionsTagFilter
 	} from '$lib/stores/tabs';
-	import { runningAgents } from '$lib/stores/agents';
+	import { agents, activeAgents } from '$lib/stores/agents';
 	import {
 		deck,
 		visibleCards,
@@ -315,7 +315,7 @@
 		}))
 	);
 
-	// Active Sessions for Activity Panel: Combines open cards and running agents
+	// Active Sessions for Activity Panel: Combines open cards and active agents (running + paused)
 	const activeSessions = $derived<ActiveSession[]>([
 		// Open cards
 		...$visibleCards.map((c) => ({
@@ -326,12 +326,13 @@
 			isSelected: c.id === $focusedCardId,
 			unread: false
 		})),
-		// Running agents
-		...$runningAgents.map(agent => ({
+		// Active agents (running + paused)
+		...$activeAgents.map(agent => ({
 			id: agent.id,
 			type: 'agent' as const,
 			title: agent.name,
 			status: agent.status === 'running' ? 'running' as const :
+			        agent.status === 'paused' ? 'idle' as const :
 			        agent.status === 'failed' ? 'error' as const : 'idle' as const,
 			progress: agent.progress,
 			isSelected: false,
@@ -362,9 +363,9 @@
 		files: undefined
 	});
 
-	// Map running agents to DeckAgent format for ContextPanel
-	const deckAgents = $derived<DeckAgent[]>(
-		$runningAgents.map(agent => ({
+	// Map active agents to DeckAgent format for ContextPanel
+	const deckAgents = $derived.by<DeckAgent[]>(() => {
+		const mapped = $activeAgents.map(agent => ({
 			id: agent.id,
 			name: agent.name,
 			status: agent.status === 'running' ? 'running' :
@@ -372,8 +373,10 @@
 			        agent.status === 'failed' ? 'error' : 'idle',
 			task: agent.prompt?.slice(0, 50),
 			progress: agent.progress
-		}))
-	);
+		}));
+		console.log('[DeckAgents] activeAgents count:', $activeAgents.length, 'mapped:', mapped);
+		return mapped;
+	});
 
 	// Split agents for Activity Panel tabs
 	const runningAgentsForPanel = $derived<DeckAgent[]>(
@@ -498,7 +501,8 @@
 			tabs.loadProfiles(),
 			tabs.loadSessions(),
 			tabs.loadProjects(),
-			loadAllTags()
+			loadAllTags(),
+			agents.init() // Initialize agents store for background agent tracking
 		]);
 
 		if ($isAdmin) {
