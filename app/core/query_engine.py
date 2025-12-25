@@ -981,8 +981,16 @@ def build_options_from_profile(
     overrides = overrides or {}
 
     # Determine working directory first (needed for env details injection)
-    # Check if session has associated worktree - worktree takes priority
-    if resume_session_id:
+    # Priority order:
+    # 1. Override cwd (explicit worktree path from agent engine)
+    # 2. Session worktree (for resumed sessions)
+    # 3. Project path
+    # 4. Profile config cwd
+    # 5. Default workspace
+    if overrides.get("cwd"):
+        # Override takes highest priority - used by agent engine for worktrees
+        working_dir = overrides.get("cwd")
+    elif resume_session_id:
         worktree = database.get_worktree_by_session(resume_session_id)
         if worktree and worktree.get("status") == "active":
             working_dir = str(settings.workspace_dir / worktree["worktree_path"])
