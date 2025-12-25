@@ -1,15 +1,22 @@
 <script lang="ts">
 	/**
-	 * ChatInput - Modern chat input island with dropdowns and file upload
+	 * ChatInput - Modern chat input island with progressive disclosure
+	 *
+	 * Layer 1: Minimal - textarea + essential buttons
+	 * Layer 2: Context Bar - compact profile/project display + settings gear
+	 * Layer 3: Settings Drawer - on-demand detailed controls
 	 */
 	import { tick, onDestroy, createEventDispatcher, onMount } from 'svelte';
-	import { tabs, profiles, projects, type ChatTab, type Profile, type Project } from '$lib/stores/tabs';
+	import { tabs, profiles, projects, type ChatTab, type Project } from '$lib/stores/tabs';
 	import { claudeAuthenticated, isAdmin, apiUser } from '$lib/stores/auth';
-	import { api, type FileUploadResponse } from '$lib/api/client';
+	import { api, type FileUploadResponse, type Profile } from '$lib/api/client';
 	import { groups, organizeByGroups } from '$lib/stores/groups';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
 	import DropdownContextMenu from './DropdownContextMenu.svelte';
+	import SettingsDrawer from './SettingsDrawer.svelte';
+	import BottomSheet from './BottomSheet.svelte';
+	import { agents } from '$lib/stores/agents';
 
 	interface Command {
 		name: string;
@@ -123,8 +130,8 @@
 			await tabs.createProfile({
 				id: newId,
 				name: newName,
-				description: profile.description,
-				config: profile.config || {}
+				description: profile.description || undefined,
+				config: (profile.config || {}) as Record<string, unknown>
 			});
 		} catch (err) {
 			console.error('Failed to duplicate profile:', err);
@@ -231,15 +238,27 @@
 	let commandAutocompleteRef = $state<CommandAutocomplete | null>(null);
 	let fileAutocompleteRef = $state<FileAutocomplete | null>(null);
 
-	// Dropdown state - which dropdown is open
-	let activeDropdown = $state<'profile' | 'project' | 'model' | 'mode' | 'context' | null>(null);
+	// Settings drawer state
+	let showSettingsDrawer = $state(false);
+	let isBackgroundMode = $state(false);
+	let taskName = $state('');
 
-	// Dropdown container refs for positioning
-	let profileContainerRef = $state<HTMLDivElement | null>(null);
-	let projectContainerRef = $state<HTMLDivElement | null>(null);
-	let modelContainerRef = $state<HTMLDivElement | null>(null);
-	let modeContainerRef = $state<HTMLDivElement | null>(null);
-	let contextContainerRef = $state<HTMLDivElement | null>(null);
+	// Mobile bottom sheet state
+	let showProfileSheet = $state(false);
+	let showProjectSheet = $state(false);
+	let isMobile = $state(false);
+
+	// Check if mobile on mount
+	onMount(() => {
+		const checkMobile = () => {
+			isMobile = window.innerWidth < 640;
+		};
+		checkMobile();
+		window.addEventListener('resize', checkMobile);
+		return () => window.removeEventListener('resize', checkMobile);
+	});
+
+	// Island ref
 	let islandRef = $state<HTMLDivElement | null>(null);
 
 	// Get current profile settings
@@ -269,33 +288,86 @@
 	const isProfileLocked = $derived(!!$apiUser?.profile_id);
 	const isProjectLocked = $derived(!!$apiUser?.project_id || !!tab.sessionId);
 
-	// Toggle dropdown
-	function toggleDropdown(dropdown: typeof activeDropdown) {
-		activeDropdown = activeDropdown === dropdown ? null : dropdown;
-	}
-
-	// Close all dropdowns
-	function closeAllDropdowns() {
-		activeDropdown = null;
-	}
-
-	// Handle click outside to close dropdowns
-	function handleClickOutside(e: MouseEvent) {
-		if (!activeDropdown) return;
-
-		const target = e.target as HTMLElement;
-		const containers = [profileContainerRef, projectContainerRef, modelContainerRef, modeContainerRef, contextContainerRef];
-		const isInsideDropdown = containers.some(ref => ref?.contains(target));
-
-		if (!isInsideDropdown) {
-			closeAllDropdowns();
+	// Open settings drawer or mobile sheets
+	function openProfileSelector() {
+		if (isMobile) {
+			showProfileSheet = true;
+		} else {
+			showSettingsDrawer = true;
 		}
 	}
 
-	onMount(() => {
-		document.addEventListener('click', handleClickOutside, true);
-		return () => document.removeEventListener('click', handleClickOutside, true);
+	function openProjectSelector() {
+		if (isMobile) {
+			showProjectSheet = true;
+		} else {
+			showSettingsDrawer = true;
+		}
+	}
+
+	function openSettings() {
+		showSettingsDrawer = true;
+	}
+
+	// Model and mode options for settings drawer
+	const modelOptions = [
+		{ value: 'sonnet', label: 'Sonnet' },
+		{ value: 'sonnet-1m', label: 'Sonnet 1M' },
+		{ value: 'opus', label: 'Opus' },
+		{ value: 'haiku', label: 'Haiku' }
+	];
+
+	const modeOptions = [
+		{ value: 'default', label: 'Ask' },
+		{ value: 'acceptEdits', label: 'Auto-Accept' },
+		{ value: 'plan', label: 'Plan' },
+		{ value: 'bypassPermissions', label: 'Bypass' }
+	];
+
+	// Auto-generate task name from prompt
+	$effect(() => {
+		if (isBackgroundMode && inputValue.trim() && !taskName) {
+			// Generate task name from first line/sentence of prompt
+			const firstLine = inputValue.split('\n')[0].slice(0, 50);
+			taskName = firstLine.length < inputValue.split('\n')[0].length ? firstLine + '...' : firstLine;
+		}
 	});
+
+	// Launch background agent
+	async function launchBackgroundAgent() {
+		if (!inputValue.trim() || !tab.profile || !tab.project) return;
+
+		const name = taskName || inputValue.split('\n')[0].slice(0, 50);
+		let prompt = inputValue;
+
+		// Append file references
+		if (uploadedFiles.length > 0) {
+			const fileRefs = uploadedFiles.map(f => `@${f.path}`).join(' ');
+			prompt = inputValue.trim() + '\n\n' + fileRefs;
+		}
+
+		try {
+			await agents.launchAgent({
+				name,
+				prompt,
+				profileId: tab.profile,
+				projectId: tab.project
+			});
+
+			// Clear input
+			inputValue = '';
+			uploadedFiles = [];
+			taskName = '';
+			isBackgroundMode = false;
+
+			if (textareaRef) {
+				textareaRef.style.height = '';
+			}
+		} catch (error) {
+			console.error('Failed to launch agent:', error);
+			tabs.setTabError(tab.id, 'Failed to launch background agent');
+		}
+	}
 
 	// Check if input contains an active @ mention
 	function hasActiveAtMention(input: string): boolean {
@@ -721,391 +793,112 @@
 					</div>
 				</div>
 
-				<!-- Bottom Controls Bar -->
-				<div class="controls-bar">
-					<!-- Left: Context indicator -->
-					<div class="controls-left">
-						<div class="dropdown-container" bind:this={contextContainerRef}>
-							<button
-								type="button"
-								class="control-pill context-pill"
-								onclick={() => toggleDropdown('context')}
-								title="Context usage"
-							>
-								<svg class="w-3.5 h-3.5 -rotate-90 {contextColor}" viewBox="0 0 20 20">
-									<circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="2" opacity="0.2" />
-									<circle
-										cx="10" cy="10" r="8" fill="none"
-										stroke="currentColor"
-										stroke-width="2"
-										stroke-dasharray={2 * Math.PI * 8}
-										stroke-dashoffset={2 * Math.PI * 8 * (1 - contextPercent / 100)}
-										stroke-linecap="round"
-									/>
-								</svg>
-								<span class="hidden sm:inline">{Math.round(contextPercent)}%</span>
-							</button>
-
-							{#if activeDropdown === 'context'}
-								<div class="dropdown-menu dropdown-up context-dropdown">
-									<div class="dropdown-header">
-										<span>Context Window</span>
-										<span class="dropdown-header-value">{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}</span>
-									</div>
-									<div class="dropdown-divider"></div>
-									<div class="context-stats">
-										<div class="stat-row">
-											<span class="stat-label">
-												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4" />
-												</svg>
-												Input
-											</span>
-											<span class="stat-value">{formatTokenCount(tab.totalTokensIn)}</span>
-										</div>
-										<div class="stat-row">
-											<span class="stat-label">
-												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8v12m0 0l4-4m-4 4l-4-4" />
-												</svg>
-												Output
-											</span>
-											<span class="stat-value">{formatTokenCount(tab.totalTokensOut)}</span>
-										</div>
-										{#if tab.totalCacheCreationTokens > 0}
-											<div class="stat-row">
-												<span class="stat-label">
-													<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-													</svg>
-													Cache Create
-												</span>
-												<span class="stat-value">{formatTokenCount(tab.totalCacheCreationTokens)}</span>
-											</div>
-										{/if}
-										{#if tab.totalCacheReadTokens > 0}
-											<div class="stat-row">
-												<span class="stat-label text-blue-400">
-													<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-													</svg>
-													Cache Read
-												</span>
-												<span class="stat-value text-blue-400">{formatTokenCount(tab.totalCacheReadTokens)}</span>
-											</div>
-										{/if}
-									</div>
-								</div>
-							{/if}
-						</div>
+				<!-- Background Mode Indicator -->
+				{#if isBackgroundMode}
+					<div class="background-mode-bar">
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+						</svg>
+						<span>Background Mode</span>
+						<button
+							type="button"
+							onclick={() => isBackgroundMode = false}
+							class="background-mode-close"
+							title="Exit background mode"
+						>
+							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+							</svg>
+						</button>
 					</div>
 
-					<!-- Center: Profile & Project selectors -->
-					<div class="controls-center">
-						<!-- Profile Selector -->
-						{#if !isProfileLocked}
-							<div class="dropdown-container" bind:this={profileContainerRef}>
-								<button
-									type="button"
-									onclick={() => toggleDropdown('profile')}
-									class="control-pill {tab.profile ? '' : 'unset'}"
-									disabled={tab.isStreaming}
-								>
-									<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-									</svg>
-									<span class="pill-text">{selectedProfileName}</span>
-									<svg class="chevron {activeDropdown === 'profile' ? 'open' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-									</svg>
-								</button>
+					<!-- Task Name Input -->
+					<div class="task-name-row">
+						<label for="task-name" class="task-name-label">Task Name</label>
+						<input
+							id="task-name"
+							type="text"
+							bind:value={taskName}
+							placeholder="Auto-generated from prompt"
+							class="task-name-input"
+						/>
+					</div>
+				{/if}
 
-								{#if activeDropdown === 'profile'}
-									<div class="dropdown-menu dropdown-up">
-										{#if $profiles.length === 0}
-											<div class="dropdown-empty">No profiles</div>
-										{:else}
-											{#each profilesOrganized.groupOrder as groupItem}
-												{@const groupProfiles = profilesOrganized.grouped.get(groupItem.name) || []}
-												{#if groupProfiles.length > 0}
-													<button
-														type="button"
-														class="dropdown-group-header"
-														onclick={() => groups.toggleGroupCollapsed('profiles', groupItem.name)}
-													>
-														<svg class="w-3 h-3 transition-transform {groupItem.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-														</svg>
-														<span>{groupItem.name}</span>
-														<span class="group-count">({groupProfiles.length})</span>
-													</button>
-													{#if !groupItem.collapsed}
-														{#each groupProfiles as profile}
-															<button
-																type="button"
-																onclick={() => {
-																	tabs.setTabProfile(tab.id, profile.id);
-																	closeAllDropdowns();
-																}}
-																oncontextmenu={(e) => handleProfileContextMenu(e, profile)}
-																class="dropdown-item {tab.profile === profile.id ? 'active' : ''}"
-															>
-																<span class="item-text">{profile.name}</span>
-																{#if tab.profile === profile.id}
-																	<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																		<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
-																	</svg>
-																{/if}
-															</button>
-														{/each}
-													{/if}
-												{/if}
-											{/each}
-											{#if profilesOrganized.ungrouped.length > 0}
-												{#if hasProfileGroups}
-													<div class="dropdown-group-header static">
-														<span>Other</span>
-													</div>
-												{/if}
-												{#each profilesOrganized.ungrouped as profile}
-													<button
-														type="button"
-														onclick={() => {
-															tabs.setTabProfile(tab.id, profile.id);
-															closeAllDropdowns();
-														}}
-														oncontextmenu={(e) => handleProfileContextMenu(e, profile)}
-														class="dropdown-item {tab.profile === profile.id ? 'active' : ''}"
-													>
-														<span class="item-text">{profile.name}</span>
-														{#if tab.profile === profile.id}
-															<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
-															</svg>
-														{/if}
-													</button>
-												{/each}
-											{/if}
-										{/if}
-									</div>
-								{/if}
-							</div>
-						{:else}
-							<div class="control-pill locked">
+				<!-- Simplified Context Bar -->
+				<div class="context-bar">
+					<!-- Left: Profile & Project as tappable text -->
+					<div class="context-selectors">
+						{#if !isProfileLocked}
+							<button
+								type="button"
+								onclick={openProfileSelector}
+								class="context-selector {tab.profile ? '' : 'unset'}"
+								disabled={tab.isStreaming}
+								oncontextmenu={(e) => {
+									const profile = $profiles.find(p => p.id === tab.profile);
+									if (profile) handleProfileContextMenu(e, profile);
+								}}
+							>
 								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
 								</svg>
-								<span class="pill-text">{selectedProfileName}</span>
-								<svg class="w-3 h-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+								<span>{selectedProfileName}</span>
+							</button>
+						{:else}
+							<span class="context-selector locked">
+								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
 								</svg>
-							</div>
+								<span>{selectedProfileName}</span>
+							</span>
 						{/if}
 
-						<!-- Project Selector -->
-						{#if !isProjectLocked}
-							<div class="dropdown-container" bind:this={projectContainerRef}>
-								<button
-									type="button"
-									onclick={() => toggleDropdown('project')}
-									class="control-pill {tab.project ? '' : 'unset'}"
-									disabled={tab.isStreaming}
-								>
-									<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-									</svg>
-									<span class="pill-text">{selectedProjectName}</span>
-									<svg class="chevron {activeDropdown === 'project' ? 'open' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-									</svg>
-								</button>
+						<span class="context-separator">•</span>
 
-								{#if activeDropdown === 'project'}
-									<div class="dropdown-menu dropdown-up">
-										{#if $projects.length === 0}
-											<div class="dropdown-empty">No projects</div>
-										{:else}
-											{#each projectsOrganized.groupOrder as groupItem}
-												{@const groupProjects = projectsOrganized.grouped.get(groupItem.name) || []}
-												{#if groupProjects.length > 0}
-													<button
-														type="button"
-														class="dropdown-group-header"
-														onclick={() => groups.toggleGroupCollapsed('projects', groupItem.name)}
-													>
-														<svg class="w-3 h-3 transition-transform {groupItem.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-														</svg>
-														<span>{groupItem.name}</span>
-														<span class="group-count">({groupProjects.length})</span>
-													</button>
-													{#if !groupItem.collapsed}
-														{#each groupProjects as project}
-															<button
-																type="button"
-																onclick={() => {
-																	tabs.setTabProject(tab.id, project.id);
-																	closeAllDropdowns();
-																}}
-																oncontextmenu={(e) => handleProjectContextMenu(e, project)}
-																class="dropdown-item {tab.project === project.id ? 'active' : ''}"
-															>
-																<span class="item-text">{project.name}</span>
-																{#if tab.project === project.id}
-																	<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																		<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
-																	</svg>
-																{/if}
-															</button>
-														{/each}
-													{/if}
-												{/if}
-											{/each}
-											{#if projectsOrganized.ungrouped.length > 0}
-												{#if hasProjectGroups}
-													<div class="dropdown-group-header static">
-														<span>Other</span>
-													</div>
-												{/if}
-												{#each projectsOrganized.ungrouped as project}
-													<button
-														type="button"
-														onclick={() => {
-															tabs.setTabProject(tab.id, project.id);
-															closeAllDropdowns();
-														}}
-														oncontextmenu={(e) => handleProjectContextMenu(e, project)}
-														class="dropdown-item {tab.project === project.id ? 'active' : ''}"
-													>
-														<span class="item-text">{project.name}</span>
-														{#if tab.project === project.id}
-															<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
-															</svg>
-														{/if}
-													</button>
-												{/each}
-											{/if}
-										{/if}
-									</div>
-								{/if}
-							</div>
-						{:else}
-							<div class="control-pill locked">
+						{#if !isProjectLocked}
+							<button
+								type="button"
+								onclick={openProjectSelector}
+								class="context-selector {tab.project ? '' : 'unset'}"
+								disabled={tab.isStreaming}
+								oncontextmenu={(e) => {
+									const project = $projects.find(p => p.id === tab.project);
+									if (project) handleProjectContextMenu(e, project);
+								}}
+							>
 								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 								</svg>
-								<span class="pill-text">{selectedProjectName}</span>
-								<svg class="w-3 h-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+								<span>{selectedProjectName}</span>
+							</button>
+						{:else}
+							<span class="context-selector locked">
+								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 								</svg>
-							</div>
+								<span>{selectedProjectName}</span>
+							</span>
 						{/if}
 					</div>
 
-					<!-- Right: Model & Mode (Admin only) -->
-					<div class="controls-right">
-						{#if $isAdmin}
-							<!-- Model Selector -->
-							<div class="dropdown-container" bind:this={modelContainerRef}>
-								<button
-									type="button"
-									onclick={() => toggleDropdown('model')}
-									class="control-pill compact {tab.modelOverride ? 'override' : ''}"
-									disabled={tab.isStreaming}
-								>
-									<span>{modelLabels[effectiveModel] || effectiveModel}</span>
-									<svg class="chevron {activeDropdown === 'model' ? 'open' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-									</svg>
-								</button>
+					<!-- Right: Context % and Settings gear -->
+					<div class="context-right">
+						<span class="context-percent {contextColor}" title="{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)} tokens">
+							{Math.round(contextPercent)}%
+						</span>
 
-								{#if activeDropdown === 'model'}
-									<div class="dropdown-menu dropdown-up dropdown-right">
-										{#each [['sonnet', 'Sonnet'], ['sonnet-1m', 'Sonnet 1M'], ['opus', 'Opus'], ['haiku', 'Haiku']] as [value, label]}
-											<button
-												type="button"
-												onclick={() => {
-													if (value === profileModel) {
-														tabs.setTabModelOverride(tab.id, null);
-													} else {
-														tabs.setTabModelOverride(tab.id, value);
-													}
-													closeAllDropdowns();
-												}}
-												class="dropdown-item {effectiveModel === value ? 'active' : ''}"
-											>
-												<span class="item-text">{label}</span>
-												{#if effectiveModel === value}
-													<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
-													</svg>
-												{/if}
-											</button>
-										{/each}
-									</div>
-								{/if}
-							</div>
-
-							<!-- Mode Selector -->
-							<div class="dropdown-container" bind:this={modeContainerRef}>
-								<button
-									type="button"
-									onclick={() => toggleDropdown('mode')}
-									class="control-pill compact {tab.permissionModeOverride ? 'override' : ''}"
-									disabled={tab.isStreaming}
-								>
-									<span>{modeLabels[effectiveMode] || effectiveMode}</span>
-									<svg class="chevron {activeDropdown === 'mode' ? 'open' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-									</svg>
-								</button>
-
-								{#if activeDropdown === 'mode'}
-									<div class="dropdown-menu dropdown-up dropdown-right">
-										{#each [['default', 'Ask'], ['acceptEdits', 'Auto-Accept'], ['plan', 'Plan'], ['bypassPermissions', 'Bypass']] as [value, label]}
-											<button
-												type="button"
-												onclick={() => {
-													if (value === profilePermissionMode) {
-														tabs.setTabPermissionModeOverride(tab.id, null);
-													} else {
-														tabs.setTabPermissionModeOverride(tab.id, value);
-													}
-													closeAllDropdowns();
-												}}
-												class="dropdown-item {effectiveMode === value ? 'active' : ''}"
-											>
-												<span class="item-text">{label}</span>
-												{#if effectiveMode === value}
-													<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
-													</svg>
-												{/if}
-											</button>
-										{/each}
-									</div>
-								{/if}
-							</div>
-
-							<!-- Reset Button -->
-							{#if tab.modelOverride || tab.permissionModeOverride}
-								<button
-									type="button"
-									onclick={() => {
-										tabs.setTabModelOverride(tab.id, null);
-										tabs.setTabPermissionModeOverride(tab.id, null);
-									}}
-									class="reset-btn"
-									title="Reset to defaults"
-									disabled={tab.isStreaming}
-								>
-									<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-									</svg>
-								</button>
-							{/if}
-						{/if}
+						<button
+							type="button"
+							onclick={openSettings}
+							class="settings-btn"
+							title="Open settings"
+						>
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+							</svg>
+						</button>
 					</div>
 				</div>
 			</div>
@@ -1153,6 +946,81 @@
 		on:openCard={handleProjectOpenCard}
 	/>
 {/if}
+
+<!-- Settings Drawer -->
+<SettingsDrawer
+	bind:open={showSettingsDrawer}
+	onClose={() => showSettingsDrawer = false}
+	selectedProfile={tab.profile}
+	selectedProject={tab.project}
+	selectedModel={tab.modelOverride}
+	selectedMode={tab.permissionModeOverride}
+	contextUsage={{
+		used: contextUsed,
+		total: contextMax,
+		percentage: contextPercent
+	}}
+	{isBackgroundMode}
+	profiles={$profiles}
+	projects={$projects}
+	models={modelOptions}
+	modes={modeOptions}
+	onProfileChange={(id) => tabs.setTabProfile(tab.id, id)}
+	onProjectChange={(id) => tabs.setTabProject(tab.id, id)}
+	onModelChange={(model) => tabs.setTabModelOverride(tab.id, model)}
+	onModeChange={(mode) => tabs.setTabPermissionModeOverride(tab.id, mode)}
+	onBackgroundModeChange={(enabled) => isBackgroundMode = enabled}
+/>
+
+<!-- Mobile Profile Bottom Sheet -->
+<BottomSheet
+	open={showProfileSheet}
+	onClose={() => showProfileSheet = false}
+	title="Select Profile"
+>
+	{#each $profiles as profile}
+		<button
+			class="bottom-sheet-option w-full text-left"
+			data-selected={tab.profile === profile.id}
+			onclick={() => {
+				tabs.setTabProfile(tab.id, profile.id);
+				showProfileSheet = false;
+			}}
+		>
+			<span class="flex-1">{profile.name}</span>
+			{#if tab.profile === profile.id}
+				<svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+				</svg>
+			{/if}
+		</button>
+	{/each}
+</BottomSheet>
+
+<!-- Mobile Project Bottom Sheet -->
+<BottomSheet
+	open={showProjectSheet}
+	onClose={() => showProjectSheet = false}
+	title="Select Project"
+>
+	{#each $projects as project}
+		<button
+			class="bottom-sheet-option w-full text-left"
+			data-selected={tab.project === project.id}
+			onclick={() => {
+				tabs.setTabProject(tab.id, project.id);
+				showProjectSheet = false;
+			}}
+		>
+			<span class="flex-1">{project.name}</span>
+			{#if tab.project === project.id}
+				<svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+				</svg>
+			{/if}
+		</button>
+	{/each}
+</BottomSheet>
 
 <style>
 	/* Wrapper - provides safe spacing */
@@ -1393,324 +1261,164 @@
 		background: color-mix(in srgb, var(--destructive) 25%, transparent);
 	}
 
-	/* Controls bar */
-	.controls-bar {
+	/* Background Mode Bar */
+	.background-mode-bar {
 		display: flex;
 		align-items: center;
+		gap: 0.5rem;
+		padding: 0.5rem 0.75rem;
+		background: color-mix(in srgb, var(--primary) 15%, transparent);
+		border-top: 1px solid color-mix(in srgb, var(--primary) 30%, transparent);
+		font-size: 0.8125rem;
+		font-weight: 500;
+		color: var(--primary);
+	}
+
+	.background-mode-close {
+		margin-left: auto;
+		opacity: 0.7;
+		transition: opacity 0.15s;
+	}
+
+	.background-mode-close:hover {
+		opacity: 1;
+	}
+
+	/* Task Name Row */
+	.task-name-row {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		padding: 0.5rem 0.75rem;
+		border-top: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+	}
+
+	.task-name-label {
+		font-size: 0.75rem;
+		font-weight: 500;
+		color: var(--muted-foreground);
+		white-space: nowrap;
+	}
+
+	.task-name-input {
+		flex: 1;
+		padding: 0.375rem 0.5rem;
+		font-size: 0.8125rem;
+		color: var(--foreground);
+		background: transparent;
+		border: 1px solid var(--border);
+		border-radius: 0.5rem;
+		outline: none;
+		transition: border-color 0.15s;
+	}
+
+	.task-name-input:focus {
+		border-color: var(--primary);
+	}
+
+	.task-name-input::placeholder {
+		color: var(--muted-foreground);
+		opacity: 0.6;
+	}
+
+	/* Simplified Context Bar */
+	.context-bar {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
 		gap: 0.5rem;
 		padding: 0.375rem 0.625rem;
 		border-top: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
 	}
 
 	@media (min-width: 640px) {
-		.controls-bar {
+		.context-bar {
 			padding: 0.5rem 0.75rem;
 		}
 	}
 
-	.controls-left {
-		flex-shrink: 0;
-	}
-
-	.controls-center {
-		flex: 1;
+	.context-selectors {
 		display: flex;
-		justify-content: center;
+		align-items: center;
 		gap: 0.375rem;
 		flex-wrap: wrap;
 	}
 
-	.controls-right {
-		flex-shrink: 0;
-		display: flex;
-		align-items: center;
-		gap: 0.375rem;
-	}
-
-	/* Dropdown container */
-	.dropdown-container {
-		position: relative;
-	}
-
-	/* Control pill buttons */
-	.control-pill {
+	.context-selector {
 		display: inline-flex;
 		align-items: center;
 		gap: 0.375rem;
-		padding: 0.3125rem 0.625rem;
-		font-size: 0.6875rem;
+		padding: 0.25rem 0.5rem;
+		font-size: 0.75rem;
 		font-weight: 500;
 		color: var(--muted-foreground);
-		background: color-mix(in srgb, var(--accent) 50%, transparent);
-		border: 1px solid transparent;
-		border-radius: 9999px;
+		border-radius: 0.5rem;
 		transition: all 0.15s;
-		white-space: nowrap;
+		cursor: pointer;
 	}
 
-	.control-pill:hover:not(:disabled) {
+	.context-selector:hover:not(:disabled):not(.locked) {
 		background: var(--accent);
 		color: var(--foreground);
-		border-color: color-mix(in srgb, var(--border) 50%, transparent);
 	}
 
-	.control-pill:disabled {
+	.context-selector:disabled {
 		opacity: 0.4;
 		cursor: not-allowed;
 	}
 
-	.control-pill.unset {
-		background: color-mix(in srgb, var(--warning) 15%, transparent);
+	.context-selector.unset {
 		color: var(--warning);
-		border-color: color-mix(in srgb, var(--warning) 30%, transparent);
 	}
 
-	.control-pill.unset:hover:not(:disabled) {
-		background: color-mix(in srgb, var(--warning) 25%, transparent);
-	}
-
-	.control-pill.override {
-		background: color-mix(in srgb, var(--primary) 15%, transparent);
-		color: var(--primary);
-		border-color: color-mix(in srgb, var(--primary) 30%, transparent);
-	}
-
-	.control-pill.locked {
+	.context-selector.locked {
 		opacity: 0.6;
 		cursor: default;
 	}
 
-	.control-pill.compact {
-		padding: 0.3125rem 0.5rem;
-	}
-
-	.control-pill.context-pill {
-		gap: 0.25rem;
-		padding: 0.3125rem 0.5rem;
-	}
-
-	.pill-text {
-		max-width: 80px;
+	.context-selector span {
+		max-width: 100px;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
 
 	@media (min-width: 640px) {
-		.pill-text {
-			max-width: 100px;
+		.context-selector span {
+			max-width: 140px;
 		}
 	}
 
-	.chevron {
-		width: 0.625rem;
-		height: 0.625rem;
-		opacity: 0.5;
-		transition: transform 0.2s;
-	}
-
-	.chevron.open {
-		transform: rotate(180deg);
-	}
-
-	/* Dropdown menu */
-	.dropdown-menu {
-		position: absolute;
-		z-index: 100;
-		min-width: 140px;
-		max-height: 260px;
-		overflow-y: auto;
-		background: var(--card);
-		border: 1px solid var(--border);
-		border-radius: 0.75rem;
-		box-shadow: 0 4px 16px -2px rgba(0, 0, 0, 0.12), 0 2px 4px rgba(0, 0, 0, 0.06);
-		animation: dropdownIn 0.15s ease-out;
-	}
-
-	.dropdown-menu.dropdown-up {
-		bottom: calc(100% + 0.375rem);
-		left: 50%;
-		transform: translateX(-50%);
-	}
-
-	.dropdown-menu.dropdown-right {
-		left: auto;
-		right: 0;
-		transform: none;
-	}
-
-	@keyframes dropdownIn {
-		from {
-			opacity: 0;
-			transform: translateX(-50%) translateY(4px);
-		}
-		to {
-			opacity: 1;
-			transform: translateX(-50%) translateY(0);
-		}
-	}
-
-	.dropdown-menu.dropdown-right {
-		animation-name: dropdownInRight;
-	}
-
-	@keyframes dropdownInRight {
-		from {
-			opacity: 0;
-			transform: translateY(4px);
-		}
-		to {
-			opacity: 1;
-			transform: translateY(0);
-		}
-	}
-
-	:global(.dark) .dropdown-menu {
-		background: oklch(0.18 0.01 260);
-		border-color: oklch(0.3 0.01 260);
-	}
-
-	.dropdown-empty {
-		padding: 0.625rem 0.75rem;
+	.context-separator {
+		color: var(--muted-foreground);
+		opacity: 0.4;
 		font-size: 0.75rem;
-		color: var(--muted-foreground);
 	}
 
-	.dropdown-group-header {
+	.context-right {
 		display: flex;
 		align-items: center;
-		gap: 0.375rem;
-		width: 100%;
-		padding: 0.375rem 0.625rem;
-		font-size: 0.625rem;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		color: var(--muted-foreground);
-		background: color-mix(in srgb, var(--muted) 30%, transparent);
-		transition: color 0.15s;
-	}
-
-	.dropdown-group-header:hover {
-		color: var(--foreground);
-	}
-
-	.dropdown-group-header.static {
-		cursor: default;
-	}
-
-	.group-count {
-		margin-left: auto;
-		opacity: 0.6;
-	}
-
-	.dropdown-item {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
 		gap: 0.5rem;
-		width: 100%;
-		padding: 0.5rem 0.75rem;
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-		text-align: left;
-		transition: background-color 0.1s, color 0.1s;
 	}
 
-	.dropdown-item:hover {
-		background: var(--accent);
-		color: var(--foreground);
-	}
-
-	.dropdown-item.active {
-		background: color-mix(in srgb, var(--accent) 60%, transparent);
-		color: var(--foreground);
-		font-weight: 500;
-	}
-
-	.item-text {
-		flex: 1;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.check-icon {
-		flex-shrink: 0;
-		width: 0.875rem;
-		height: 0.875rem;
-		color: var(--primary);
-	}
-
-	/* Context dropdown specific styles */
-	.context-dropdown {
-		min-width: 180px;
-		padding: 0.5rem 0;
-	}
-
-	.dropdown-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 0.375rem 0.75rem;
+	.context-percent {
 		font-size: 0.6875rem;
-		color: var(--muted-foreground);
+		font-weight: 600;
 	}
 
-	.dropdown-header-value {
-		font-weight: 500;
-		color: var(--foreground);
-	}
-
-	.dropdown-divider {
-		height: 1px;
-		margin: 0.375rem 0;
-		background: var(--border);
-	}
-
-	.context-stats {
-		padding: 0.25rem 0.75rem;
-	}
-
-	.stat-row {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 0.25rem 0;
-		font-size: 0.6875rem;
-	}
-
-	.stat-label {
-		display: flex;
-		align-items: center;
-		gap: 0.375rem;
-		color: var(--muted-foreground);
-	}
-
-	.stat-value {
-		font-weight: 500;
-		color: var(--foreground);
-	}
-
-	/* Reset button */
-	.reset-btn {
+	.settings-btn {
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 28px;
-		height: 28px;
-		border-radius: 9999px;
+		width: 32px;
+		height: 32px;
+		border-radius: 0.5rem;
 		color: var(--muted-foreground);
 		transition: background-color 0.15s, color 0.15s;
 	}
 
-	.reset-btn:hover:not(:disabled) {
+	.settings-btn:hover {
 		background: var(--accent);
 		color: var(--foreground);
-	}
-
-	.reset-btn:disabled {
-		opacity: 0.4;
-		cursor: not-allowed;
 	}
 </style>

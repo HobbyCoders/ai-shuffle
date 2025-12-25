@@ -12,6 +12,7 @@ Based on patterns from query_engine.py but adapted for long-running background e
 
 import asyncio
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -622,8 +623,10 @@ class AgentExecutionEngine:
                 return
 
             # Check if there are any commits on the branch
+            base_branch = agent_run.get('base_branch', 'main')
+            self._log(agent_run_id, f"Checking for commits on branch relative to origin/{base_branch}")
             diff_check = subprocess.run(
-                ["git", "log", "--oneline", f"HEAD...origin/{agent_run.get('base_branch', 'main')}", "--"],
+                ["git", "log", "--oneline", f"HEAD...origin/{base_branch}"],
                 capture_output=True,
                 text=True,
                 cwd=state.worktree_path,
@@ -632,6 +635,21 @@ class AgentExecutionEngine:
             if not diff_check.stdout.strip():
                 self._log(agent_run_id, "No commits to push - branch has no changes", "warning")
                 return
+
+            # Fetch from origin to ensure we're up to date
+            self._log(agent_run_id, "Fetching from origin to sync remote state")
+            fetch_result = subprocess.run(
+                ["git", "fetch", "origin"],
+                capture_output=True,
+                text=True,
+                cwd=state.worktree_path,
+                timeout=60
+            )
+            if fetch_result.returncode != 0:
+                self._log(agent_run_id, f"Warning: git fetch failed: {fetch_result.stderr}", "warning")
+                # Continue anyway - fetch failure is not critical
+            else:
+                self._log(agent_run_id, "Successfully fetched from origin")
 
             # Push the branch
             self._log(agent_run_id, f"Pushing branch {state.branch_name} to origin")
@@ -655,12 +673,39 @@ class AgentExecutionEngine:
                 return
 
             repo = database.get_git_repository_by_project(project_id)
-            if not repo or not repo.get("github_repo_name"):
+            github_repo = repo.get("github_repo_name") if repo else None
+
+            # Fallback: try to extract github repo from git remote URL
+            if not github_repo:
+                self._log(agent_run_id, "github_repo_name not in database, attempting to extract from git remote")
+                try:
+                    remote_result = subprocess.run(
+                        ["git", "remote", "get-url", "origin"],
+                        capture_output=True,
+                        text=True,
+                        cwd=state.worktree_path,
+                        timeout=10
+                    )
+                    if remote_result.returncode == 0:
+                        url = remote_result.stdout.strip()
+                        self._log(agent_run_id, f"Found remote URL: {url}")
+                        # Parse: https://github.com/owner/repo.git or git@github.com:owner/repo.git
+                        match = re.search(r'github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$', url)
+                        if match:
+                            github_repo = match.group(1)
+                            self._log(agent_run_id, f"Extracted GitHub repo: {github_repo}")
+                        else:
+                            self._log(agent_run_id, f"Could not parse GitHub repo from URL: {url}", "warning")
+                    else:
+                        self._log(agent_run_id, f"Failed to get git remote URL: {remote_result.stderr}", "warning")
+                except Exception as e:
+                    self._log(agent_run_id, f"Error extracting GitHub repo from remote: {e}", "warning")
+
+            if not github_repo:
                 self._log(agent_run_id, "Cannot create PR: not a GitHub repository", "warning")
                 return
 
-            github_repo = repo["github_repo_name"]
-            default_branch = repo.get("default_branch", "main")
+            default_branch = repo.get("default_branch", "main") if repo else "main"
 
             # Create PR using gh CLI
             pr_title = f"Agent: {agent_run['name']}"
@@ -695,9 +740,17 @@ class AgentExecutionEngine:
             )
 
             if result.returncode == 0:
-                pr_url = result.stdout.strip()
-                database.update_agent_run(agent_run_id, pr_url=pr_url)
-                self._log(agent_run_id, f"Pull request created: {pr_url}")
+                output = result.stdout.strip()
+                # Extract PR URL using regex to handle different gh CLI output formats
+                url_match = re.search(r'https://github\.com/\S+/pull/\d+', output)
+                if url_match:
+                    pr_url = url_match.group(0)
+                    database.update_agent_run(agent_run_id, pr_url=pr_url)
+                    self._log(agent_run_id, f"Pull request created: {pr_url}")
+                else:
+                    self._log(agent_run_id, f"PR created but could not extract URL from output: {output}", "warning")
+                    # Still update with the full output as fallback
+                    database.update_agent_run(agent_run_id, pr_url=output)
             else:
                 self._log(agent_run_id, f"Failed to create PR (exit code {result.returncode}): {result.stderr}", "error")
                 if result.stdout:
