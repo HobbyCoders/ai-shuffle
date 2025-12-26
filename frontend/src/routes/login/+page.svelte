@@ -20,7 +20,14 @@
 	let verifying2FA = false;
 	let twoFactorError = '';
 
+	// Local error state for non-store errors (admin login errors)
+	let loginError = '';
+
 	async function handleLogin() {
+		// Clear any previous errors
+		auth.clearError();
+		loginError = '';
+
 		try {
 			// Try admin login first
 			try {
@@ -33,7 +40,7 @@
 				const data: LoginResponse = await response.json();
 
 				if (!response.ok) {
-					throw { detail: data.message || 'Login failed' };
+					throw { detail: data.message || 'Login failed', isAdminError: true };
 				}
 
 				// Check if 2FA is required
@@ -50,17 +57,21 @@
 			} catch (adminError: any) {
 				// If admin login fails with invalid credentials, try API user login
 				if (adminError.detail === 'Invalid credentials') {
+					// loginApiUser will set error in store if it fails
 					await auth.loginApiUser(username, password);
 					goto('/');
 					return;
 				}
+				// Non-credential errors (rate limiting, etc.) should be shown
 				throw adminError;
 			}
 		} catch (e: any) {
-			// Set error in store manually since we're not using the store for login
-			auth.clearError();
-			// Re-throw to trigger store error
-			throw e;
+			// If this was an admin error (not from loginApiUser store), show it as loginError
+			// The loginApiUser method sets error in auth store, so $authError will show those
+			// For admin errors, we need to set loginError since they're not going through the store
+			if (e.isAdminError || !$authError) {
+				loginError = e.detail || 'Login failed';
+			}
 		}
 	}
 
@@ -104,6 +115,7 @@
 	function toggleMode() {
 		isRegistering = !isRegistering;
 		auth.clearError();
+		loginError = '';
 	}
 </script>
 
@@ -241,9 +253,9 @@
 				</div>
 			{/if}
 
-			{#if $authError}
+			{#if $authError || loginError}
 				<div class="bg-destructive/10 border border-destructive text-destructive px-3 sm:px-4 py-3 rounded-lg text-sm">
-					{$authError}
+					{$authError || loginError}
 				</div>
 			{/if}
 
