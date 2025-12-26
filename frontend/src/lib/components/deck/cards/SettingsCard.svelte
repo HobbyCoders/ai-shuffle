@@ -1489,12 +1489,22 @@
 										<span class="badge primary">@{user.username}</span>
 									{/if}
 									<span class="badge {user.is_active ? 'success' : 'error'}">{user.is_active ? 'Active' : 'Inactive'}</span>
+									{#if user.web_login_allowed}
+										<span class="badge info" title="Can login via web with username/password">🌐 Web</span>
+									{/if}
 								</div>
 								{#if user.description}
 									<p class="user-desc">{user.description}</p>
 								{/if}
 								<div class="user-meta">
 									<span>Profile: {profiles.find(p => p.id === user.profile_id)?.name || 'Any'}</span>
+									{#if user.username}
+										<span>Web Login: ✓ Registered</span>
+									{:else if user.web_login_allowed}
+										<span>Web Login: Pending registration</span>
+									{:else}
+										<span>Web Login: Disabled</span>
+									{/if}
 									<span>Last used: {formatDate(user.last_used_at)}</span>
 								</div>
 							</div>
@@ -2208,6 +2218,19 @@
 								</select>
 							</div>
 						</div>
+						<div class="checkbox-row">
+							<label class="checkbox-label">
+								<input type="checkbox" bind:checked={formData.web_login_allowed} />
+								<span>Allow web login</span>
+							</label>
+							<p class="text-muted text-xs">User can register with the API key and set a username/password for web access</p>
+						</div>
+						{#if editingUser?.username}
+							<div class="info-box">
+								<p class="text-sm"><strong>Registered as:</strong> @{editingUser.username}</p>
+								<p class="text-xs text-muted">User has set up web login credentials</p>
+							</div>
+						{/if}
 						<div class="form-row">
 							<button onclick={resetForm} class="btn btn-secondary flex-1">Cancel</button>
 							<button onclick={saveApiUser} class="btn btn-primary flex-1">
@@ -2463,6 +2486,46 @@
 		display: grid;
 		grid-template-columns: 1fr 1fr;
 		gap: 12px;
+	}
+
+	.checkbox-row {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+
+	.checkbox-label {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		cursor: pointer;
+	}
+
+	.checkbox-label input[type="checkbox"] {
+		width: 16px;
+		height: 16px;
+		cursor: pointer;
+	}
+
+	.info-box {
+		background: oklch(0.2 0.02 260);
+		border: 1px solid oklch(0.3 0.02 260);
+		border-radius: 6px;
+		padding: 10px 12px;
+	}
+
+	:global(.light) .info-box {
+		background: oklch(0.95 0.01 260);
+		border-color: oklch(0.85 0.01 260);
+	}
+
+	.badge.info {
+		background: oklch(0.45 0.12 220);
+		color: white;
+	}
+
+	:global(.light) .badge.info {
+		background: oklch(0.55 0.12 220);
 	}
 
 	/* Buttons */

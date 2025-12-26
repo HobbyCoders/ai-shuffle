@@ -21,46 +21,44 @@
 	let twoFactorError = '';
 
 	async function handleLogin() {
-		try {
-			// Try admin login first
-			try {
-				const response = await fetch('/api/v1/auth/login', {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ username, password }),
-					credentials: 'include'
-				});
-				const data: LoginResponse = await response.json();
+		// Clear any previous errors at the start
+		auth.clearError();
 
-				if (!response.ok) {
-					throw { detail: data.message || 'Login failed' };
-				}
+		// Try admin login first
+		const response = await fetch('/api/v1/auth/login', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ username, password }),
+			credentials: 'include'
+		});
+		const data: LoginResponse = await response.json();
 
-				// Check if 2FA is required
-				if (data.requires_2fa && data.pending_2fa_token) {
-					requires2FA = true;
-					pending2FAToken = data.pending_2fa_token;
-					return;
-				}
-
-				// Login successful, refresh auth status and redirect
-				await auth.checkAuth();
-				goto('/');
+		if (response.ok) {
+			// Check if 2FA is required
+			if (data.requires_2fa && data.pending_2fa_token) {
+				requires2FA = true;
+				pending2FAToken = data.pending_2fa_token;
 				return;
-			} catch (adminError: any) {
-				// If admin login fails with invalid credentials, try API user login
-				if (adminError.detail === 'Invalid credentials') {
-					await auth.loginApiUser(username, password);
-					goto('/');
-					return;
-				}
-				throw adminError;
 			}
-		} catch (e: any) {
-			// Set error in store manually since we're not using the store for login
-			auth.clearError();
-			// Re-throw to trigger store error
-			throw e;
+
+			// Admin login successful, refresh auth status and redirect
+			await auth.checkAuth();
+			goto('/');
+			return;
+		}
+
+		// Admin login failed - if "Invalid credentials", try API user login
+		if (data.message === 'Invalid credentials') {
+			try {
+				// This sets error in auth store on failure
+				await auth.loginApiUser(username, password);
+				goto('/');
+			} catch {
+				// Error already set in auth store by loginApiUser
+			}
+		} else {
+			// Some other admin login error (rate limit, 2FA issue, etc)
+			auth.setError(data.message || 'Login failed');
 		}
 	}
 
