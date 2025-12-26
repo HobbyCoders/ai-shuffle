@@ -273,6 +273,20 @@
 	let currentTtsOutputFormat = $state('mp3');
 	let savingTtsSettings = $state(false);
 
+	// Meshy settings
+	let meshyApiKey = $state('');
+	let meshyApiKeyMasked = $state('');
+	let savingMeshyKey = $state(false);
+	let meshyKeySuccess = $state('');
+	let meshyKeyError = $state('');
+
+	// 3D Model settings
+	let selected3DModel = $state('meshy-6');
+	let current3DModel = $state('meshy-6');
+	let saving3DModel = $state(false);
+	let model3DSuccess = $state('');
+	let model3DError = $state('');
+
 	// Helper function to get available voices for selected TTS model
 	function getAvailableVoices(): TTSVoice[] {
 		const model = ALL_TTS_MODELS.find(m => m.id === selectedTtsModel);
@@ -508,6 +522,9 @@
 				tts_speed: number | null;
 				tts_output_format: string | null;
 				stt_model: string | null;
+				meshy_api_key_set: boolean;
+				meshy_api_key_masked: string;
+				model_3d_model: string | null;
 			}>('/settings/integrations');
 			openaiApiKeyMasked = settings.openai_api_key_masked;
 			imageProvider = settings.image_provider || '';
@@ -528,6 +545,10 @@
 			ttsSpeed = currentTtsSpeed;
 			currentTtsOutputFormat = settings.tts_output_format || 'mp3';
 			ttsOutputFormat = currentTtsOutputFormat;
+			// Meshy settings
+			meshyApiKeyMasked = settings.meshy_api_key_masked || '';
+			selected3DModel = settings.model_3d_model || 'meshy-6';
+			current3DModel = selected3DModel;
 		} catch (e) {
 			console.error('Failed to load integration settings:', e);
 		}
@@ -614,6 +635,45 @@
 		} finally {
 			savingOpenaiKey = false;
 		}
+	}
+
+	// Meshy API Key function
+	async function saveMeshyKey() {
+		if (!meshyApiKey.trim()) return;
+		savingMeshyKey = true;
+		meshyKeyError = '';
+		meshyKeySuccess = '';
+		try {
+			await api.put('/settings/integrations', {
+				meshy_api_key: meshyApiKey
+			});
+			meshyKeySuccess = 'Meshy API key saved';
+			meshyApiKey = '';
+			await loadIntegrationSettings();
+			setTimeout(() => meshyKeySuccess = '', 3000);
+		} catch (e: any) {
+			meshyKeyError = e.detail || 'Failed to save Meshy key';
+		}
+		savingMeshyKey = false;
+	}
+
+	// 3D Model function
+	async function save3DModel() {
+		if (selected3DModel === current3DModel) return;
+		saving3DModel = true;
+		model3DError = '';
+		model3DSuccess = '';
+		try {
+			await api.put('/settings/integrations', {
+				model_3d_model: selected3DModel
+			});
+			current3DModel = selected3DModel;
+			model3DSuccess = '3D model saved';
+			setTimeout(() => model3DSuccess = '', 3000);
+		} catch (e: any) {
+			model3DError = e.detail || 'Failed to save 3D model';
+		}
+		saving3DModel = false;
 	}
 
 	// Image config functions
@@ -1606,6 +1666,44 @@
 					{/if}
 				</div>
 			</div>
+
+			<!-- Meshy AI -->
+			<div class="api-key-card">
+				<div class="api-key-header">
+					<div class="api-icon meshy">
+						<svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+							<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+							<polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+							<line x1="12" y1="22.08" x2="12" y2="12"/>
+						</svg>
+					</div>
+					<div>
+						<div class="api-title">
+							<span>Meshy AI</span>
+							{#if meshyApiKeyMasked}
+								<span class="badge success">Configured</span>
+							{/if}
+						</div>
+						<p class="text-muted text-sm">3D model generation</p>
+					</div>
+				</div>
+				<div class="api-key-form">
+					{#if meshyApiKeyMasked}
+						<p class="text-muted text-sm font-mono">{meshyApiKeyMasked}</p>
+					{/if}
+					<div class="input-row">
+						<input type="password" bind:value={meshyApiKey} placeholder={meshyApiKeyMasked ? 'Enter new key...' : 'msy_...'} class="input flex-1 font-mono" />
+						<button onclick={saveMeshyKey} disabled={savingMeshyKey || !meshyApiKey.trim()} class="btn btn-primary">
+							{savingMeshyKey ? '...' : 'Save'}
+						</button>
+					</div>
+					{#if meshyKeySuccess}
+						<p class="text-success text-sm">{meshyKeySuccess}</p>
+					{:else if meshyKeyError}
+						<p class="text-error text-sm">{meshyKeyError}</p>
+					{/if}
+				</div>
+			</div>
 		</div>
 	{/if}
 
@@ -1848,6 +1946,34 @@
 						</div>
 					</div>
 				{/each}
+			</div>
+
+			<!-- 3D Generation Models -->
+			<div class="settings-group">
+				<h4>3D Generation</h4>
+				<p class="group-description">Select the AI model for 3D generation.</p>
+
+				<div class="provider-section">
+					<div class="provider-header">Meshy AI</div>
+					<div class="input-group">
+						<select
+							class="input"
+							bind:value={selected3DModel}
+							onchange={save3DModel}
+							disabled={saving3DModel}
+						>
+							<option value="meshy-6">Meshy 6 (Latest) - Best Quality</option>
+							<option value="meshy-5">Meshy 5 - Balanced</option>
+							<option value="meshy-4">Meshy 4 - Fast</option>
+						</select>
+					</div>
+					{#if model3DSuccess}
+						<p class="text-success text-sm mt-2">{model3DSuccess}</p>
+					{/if}
+					{#if model3DError}
+						<p class="text-error text-sm mt-2">{model3DError}</p>
+					{/if}
+				</div>
 			</div>
 		</div>
 	{/if}

@@ -5,7 +5,7 @@
  * Providers register themselves on import, and tools query the registry
  * to get the appropriate provider based on configuration.
  */
-import { ImageProvider, VideoProvider, AudioProvider, VideoAnalysisProvider, ModelInfo } from './types.js';
+import { ImageProvider, VideoProvider, AudioProvider, VideoAnalysisProvider, Model3DProvider, ModelInfo } from './types.js';
 /**
  * Central registry for managing AI providers
  */
@@ -14,6 +14,7 @@ declare class ProviderRegistry {
     private videoProviders;
     private audioProviders;
     private videoAnalysisProviders;
+    private model3DProviders;
     /**
      * Register an image generation provider
      */
@@ -31,6 +32,10 @@ declare class ProviderRegistry {
      */
     registerVideoAnalysisProvider(provider: VideoAnalysisProvider): void;
     /**
+     * Register a 3D model provider
+     */
+    registerModel3DProvider(provider: Model3DProvider): void;
+    /**
      * Get an image provider by ID
      */
     getImageProvider(id: string): ImageProvider | undefined;
@@ -46,6 +51,10 @@ declare class ProviderRegistry {
      * Get a video analysis provider by ID
      */
     getVideoAnalysisProvider(id: string): VideoAnalysisProvider | undefined;
+    /**
+     * Get a 3D model provider by ID
+     */
+    getModel3DProvider(id: string): Model3DProvider | undefined;
     /**
      * List all registered image providers
      */
@@ -63,6 +72,10 @@ declare class ProviderRegistry {
      */
     listVideoAnalysisProviders(): VideoAnalysisProvider[];
     /**
+     * List all registered 3D model providers
+     */
+    listModel3DProviders(): Model3DProvider[];
+    /**
      * Get all available image models across all providers
      */
     getAllImageModels(): Array<ModelInfo & {
@@ -75,6 +88,12 @@ declare class ProviderRegistry {
         providerId: string;
     }>;
     /**
+     * Get all available 3D models across all providers
+     */
+    getAllModel3DModels(): Array<ModelInfo & {
+        providerId: string;
+    }>;
+    /**
      * Find which provider owns a specific model
      */
     findImageProviderByModel(modelId: string): ImageProvider | undefined;
@@ -83,6 +102,10 @@ declare class ProviderRegistry {
      */
     findVideoProviderByModel(modelId: string): VideoProvider | undefined;
     /**
+     * Find which provider owns a specific 3D model
+     */
+    findModel3DProviderByModel(modelId: string): Model3DProvider | undefined;
+    /**
      * Check if a provider supports a specific capability
      */
     imageProviderSupports(providerId: string, capability: string): boolean;
@@ -90,6 +113,10 @@ declare class ProviderRegistry {
      * Check if a video provider supports a specific capability
      */
     videoProviderSupports(providerId: string, capability: string): boolean;
+    /**
+     * Check if a 3D model provider supports a specific capability
+     */
+    model3DProviderSupports(providerId: string, capability: string): boolean;
 }
 export declare const registry: ProviderRegistry;
 export default registry;

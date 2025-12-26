@@ -289,6 +289,12 @@
 		if (aiTools.video_extend) enabledAITools.push('video_extend');
 		if (aiTools.video_bridge) enabledAITools.push('video_bridge');
 		if (aiTools.video_understanding) enabledAITools.push('video_understanding');
+		// 3D Model Generation Tools
+		if (aiTools.text_to_3d) enabledAITools.push('text_to_3d');
+		if (aiTools.image_to_3d) enabledAITools.push('image_to_3d');
+		if (aiTools.retexture_3d) enabledAITools.push('retexture_3d');
+		if (aiTools.rig_3d) enabledAITools.push('rig_3d');
+		if (aiTools.animate_3d) enabledAITools.push('animate_3d');
 
 		// Determine tool selection mode
 		if (allowedTools.length > 0) {
@@ -510,7 +516,13 @@
 				image_to_video: effectiveAITools.includes('image_to_video'),
 				video_extend: effectiveAITools.includes('video_extend'),
 				video_bridge: effectiveAITools.includes('video_bridge'),
-				video_understanding: effectiveAITools.includes('video_understanding')
+				video_understanding: effectiveAITools.includes('video_understanding'),
+				// 3D Model Generation Tools
+				text_to_3d: effectiveAITools.includes('text_to_3d'),
+				image_to_3d: effectiveAITools.includes('image_to_3d'),
+				retexture_3d: effectiveAITools.includes('retexture_3d'),
+				rig_3d: effectiveAITools.includes('rig_3d'),
+				animate_3d: effectiveAITools.includes('animate_3d')
 			};
 		}
 

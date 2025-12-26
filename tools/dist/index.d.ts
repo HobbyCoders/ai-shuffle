@@ -45,6 +45,35 @@
  * });
  * ```
  *
+ * ### 3D Model Generation (Meshy AI)
+ * Generate, retexture, rig, and animate 3D models.
+ * ```typescript
+ * import { textTo3D, imageTo3D, rig3D, animate3D } from '/opt/ai-tools/dist/model3d-generation/index.js';
+ *
+ * // Generate from text
+ * const model = await textTo3D({
+ *   prompt: 'A medieval castle',
+ *   wait_for_completion: true
+ * });
+ *
+ * // Convert image to 3D
+ * const fromImage = await imageTo3D({
+ *   image_path: '/path/to/character.png',
+ *   wait_for_completion: true
+ * });
+ *
+ * // Rig and animate a character
+ * const rigged = await rig3D({
+ *   model_path_or_task_id: fromImage.task_id,
+ *   wait_for_completion: true
+ * });
+ * const animated = await animate3D({
+ *   rig_task_id: rigged.task_id,
+ *   action_id: 'walk_forward',
+ *   wait_for_completion: true
+ * });
+ * ```
+ *
  * ## How to Use
  *
  * 1. Import the tool module you need
@@ -73,5 +102,6 @@
 export * as imageGeneration from './image-generation/index.js';
 export * as videoGeneration from './video-generation/index.js';
 export * as videoAnalysis from './video-analysis/index.js';
+export * as model3dGeneration from './model3d-generation/index.js';
 export { callTool, getTool, uploadTool, getApiBaseUrl } from './client.js';
 //# sourceMappingURL=index.d.ts.map

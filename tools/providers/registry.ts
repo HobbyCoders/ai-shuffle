@@ -6,7 +6,7 @@
  * to get the appropriate provider based on configuration.
  */
 
-import { ImageProvider, VideoProvider, AudioProvider, VideoAnalysisProvider, ModelInfo } from './types.js';
+import { ImageProvider, VideoProvider, AudioProvider, VideoAnalysisProvider, Model3DProvider, ModelInfo } from './types.js';
 
 /**
  * Central registry for managing AI providers
@@ -16,6 +16,7 @@ class ProviderRegistry {
   private videoProviders = new Map<string, VideoProvider>();
   private audioProviders = new Map<string, AudioProvider>();
   private videoAnalysisProviders = new Map<string, VideoAnalysisProvider>();
+  private model3DProviders = new Map<string, Model3DProvider>();
 
   // ============================================================================
   // Registration
@@ -61,6 +62,16 @@ class ProviderRegistry {
     this.videoAnalysisProviders.set(provider.id, provider);
   }
 
+  /**
+   * Register a 3D model provider
+   */
+  registerModel3DProvider(provider: Model3DProvider): void {
+    if (this.model3DProviders.has(provider.id)) {
+      console.warn(`3D model provider '${provider.id}' is already registered. Overwriting.`);
+    }
+    this.model3DProviders.set(provider.id, provider);
+  }
+
 
   // ============================================================================
   // Retrieval
@@ -94,6 +105,13 @@ class ProviderRegistry {
     return this.videoAnalysisProviders.get(id);
   }
 
+  /**
+   * Get a 3D model provider by ID
+   */
+  getModel3DProvider(id: string): Model3DProvider | undefined {
+    return this.model3DProviders.get(id);
+  }
+
 
   /**
    * List all registered image providers
@@ -121,6 +139,13 @@ class ProviderRegistry {
    */
   listVideoAnalysisProviders(): VideoAnalysisProvider[] {
     return Array.from(this.videoAnalysisProviders.values());
+  }
+
+  /**
+   * List all registered 3D model providers
+   */
+  listModel3DProviders(): Model3DProvider[] {
+    return Array.from(this.model3DProviders.values());
   }
 
 
@@ -155,6 +180,19 @@ class ProviderRegistry {
   }
 
   /**
+   * Get all available 3D models across all providers
+   */
+  getAllModel3DModels(): Array<ModelInfo & { providerId: string }> {
+    const models: Array<ModelInfo & { providerId: string }> = [];
+    for (const provider of this.model3DProviders.values()) {
+      for (const model of provider.models) {
+        models.push({ ...model, providerId: provider.id });
+      }
+    }
+    return models;
+  }
+
+  /**
    * Find which provider owns a specific model
    */
   findImageProviderByModel(modelId: string): ImageProvider | undefined {
@@ -171,6 +209,18 @@ class ProviderRegistry {
    */
   findVideoProviderByModel(modelId: string): VideoProvider | undefined {
     for (const provider of this.videoProviders.values()) {
+      if (provider.models.some(m => m.id === modelId)) {
+        return provider;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Find which provider owns a specific 3D model
+   */
+  findModel3DProviderByModel(modelId: string): Model3DProvider | undefined {
+    for (const provider of this.model3DProviders.values()) {
       if (provider.models.some(m => m.id === modelId)) {
         return provider;
       }
@@ -199,6 +249,15 @@ class ProviderRegistry {
     if (!provider) return false;
     return provider.models.some(m => m.capabilities.includes(capability as any));
   }
+
+  /**
+   * Check if a 3D model provider supports a specific capability
+   */
+  model3DProviderSupports(providerId: string, capability: string): boolean {
+    const provider = this.model3DProviders.get(providerId);
+    if (!provider) return false;
+    return provider.models.some(m => m.capabilities.includes(capability as any));
+  }
 }
 
 // Singleton instance
@@ -224,6 +283,9 @@ import { openaiSoraProvider } from './video/openai-sora.js';
 // Audio providers (for app features like TTS/STT, not model tools)
 import { openaiAudioProvider } from './audio/openai-audio.js';
 
+// 3D model providers
+import { meshyProvider } from './model3d/meshy.js';
+
 // Register image providers
 registry.registerImageProvider(googleGeminiProvider);
 registry.registerImageProvider(googleImagenProvider);
@@ -238,6 +300,9 @@ registry.registerVideoAnalysisProvider(googleGeminiVideoProvider);
 
 // Register audio providers (for app features)
 registry.registerAudioProvider(openaiAudioProvider);
+
+// Register 3D model providers
+registry.registerModel3DProvider(meshyProvider);
 
 // Future providers:
 // import { stabilityAiProvider } from './image/stability-ai.js';

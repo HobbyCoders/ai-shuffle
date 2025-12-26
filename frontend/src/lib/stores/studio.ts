@@ -15,10 +15,14 @@ import { api } from '$lib/api/client';
 import type {
 	ImageProvider,
 	VideoProvider,
+	Model3DProvider,
 	TTSProvider,
 	STTProvider,
 	ImageModel,
 	VideoModel,
+	Model3DModel,
+	Model3DArtStyle,
+	Model3DTopology,
 	TTSModel,
 	STTModel,
 	TTSVoice
@@ -26,10 +30,12 @@ import type {
 import {
 	ALL_IMAGE_MODELS,
 	ALL_VIDEO_MODELS,
+	ALL_3D_MODELS,
 	ALL_TTS_MODELS,
 	ALL_STT_MODELS,
 	getImageModel,
 	getVideoModel,
+	get3DModel,
 	getTTSModel,
 	getSTTModel
 } from '$lib/types/ai-models';
@@ -38,9 +44,9 @@ import {
 // Types
 // ============================================================================
 
-export type { ImageProvider, VideoProvider, TTSProvider, STTProvider };
+export type { ImageProvider, VideoProvider, Model3DProvider, TTSProvider, STTProvider };
 
-export type GenerationType = 'image' | 'video' | 'audio' | 'tts' | 'stt';
+export type GenerationType = 'image' | 'video' | '3d' | 'audio' | 'tts' | 'stt';
 export type GenerationStatus = 'pending' | 'generating' | 'completed' | 'failed';
 
 export interface GenerationSettings {
@@ -68,13 +74,14 @@ export interface GenerationSettings {
 	diarization?: boolean;
 	translate?: boolean;
 	timestampGranularity?: 'word' | 'segment';
+// 3D specific	artStyle?: Model3DArtStyle;	topology?: Model3DTopology;	targetPolycount?: number;	enablePbr?: boolean;	sourceImageUrl?: string;
 }
 
 export interface DeckGeneration {
 	id: string;
 	type: GenerationType;
 	prompt: string;
-	provider: ImageProvider | VideoProvider | TTSProvider | STTProvider;
+	provider: ImageProvider | VideoProvider | Model3DProvider | TTSProvider | STTProvider;
 	model: string;
 	status: GenerationStatus;
 	progress: number; // 0-100
@@ -118,6 +125,8 @@ export interface StudioState {
 	// Video settings
 	videoProvider: VideoProvider;
 	videoModel: string;
+	model3DProvider: Model3DProvider;
+	model3DModel: string;
 	// TTS settings
 	ttsProvider: TTSProvider;
 	ttsModel: string;
@@ -138,7 +147,7 @@ export interface StudioState {
 	isLoading: boolean;
 	error: string | null;
 	// Active tab in studio
-	activeTab: 'image' | 'video' | 'tts' | 'stt';
+	activeTab: 'image' | 'video' | '3d' | 'tts' | 'stt';
 }
 
 // ============================================================================
@@ -161,6 +170,8 @@ interface PersistedStudioState {
 	imageModel: string;
 	videoProvider: VideoProvider;
 	videoModel: string;
+	model3DProvider: Model3DProvider;
+	model3DModel: string;
 	ttsProvider: TTSProvider;
 	ttsModel: string;
 	ttsVoice: string;
@@ -171,7 +182,7 @@ interface PersistedStudioState {
 	defaultVideoDuration: number;
 	defaultTTSSpeed: number;
 	defaultTTSFormat: string;
-	activeTab: 'image' | 'video' | 'tts' | 'stt';
+	activeTab: 'image' | 'video' | '3d' | 'tts' | 'stt';
 }
 
 /**
@@ -251,6 +262,8 @@ function loadFromStorage(): Partial<StudioState> | null {
 				imageModel,
 				videoProvider: parsed.videoProvider,
 				videoModel: parsed.videoModel || 'veo-3.1-generate-preview',
+				model3DProvider: parsed.model3DProvider || 'meshy',
+				model3DModel: parsed.model3DModel || 'meshy-6',
 				ttsProvider: parsed.ttsProvider || 'openai-tts',
 				ttsModel: parsed.ttsModel || 'gpt-4o-mini-tts',
 				ttsVoice: parsed.ttsVoice || 'alloy',
@@ -289,6 +302,8 @@ function saveToStorage(state: StudioState) {
 				imageModel: state.imageModel,
 				videoProvider: state.videoProvider,
 				videoModel: state.videoModel,
+				model3DProvider: state.model3DProvider,
+				model3DModel: state.model3DModel,
 				ttsProvider: state.ttsProvider,
 				ttsModel: state.ttsModel,
 				ttsVoice: state.ttsVoice,
@@ -376,6 +391,8 @@ function createStudioStore() {
 		imageModel: persisted?.imageModel || 'gemini-2.5-flash-image',
 		videoProvider: persisted?.videoProvider || 'google-veo',
 		videoModel: persisted?.videoModel || 'veo-3.1-generate-preview',
+		model3DProvider: persisted?.model3DProvider || 'meshy',
+		model3DModel: persisted?.model3DModel || 'meshy-6',
 		ttsProvider: persisted?.ttsProvider || 'openai-tts',
 		ttsModel: persisted?.ttsModel || 'gpt-4o-mini-tts',
 		ttsVoice: persisted?.ttsVoice || 'alloy',
@@ -441,7 +458,7 @@ function createStudioStore() {
 		/**
 		 * Set active tab
 		 */
-		setActiveTab(tab: 'image' | 'video' | 'tts' | 'stt'): void {
+		setActiveTab(tab: 'image' | 'video' | '3d' | 'tts' | 'stt'): void {
 			updateAndPersist((state) => ({ ...state, activeTab: tab }));
 		},
 
@@ -1097,6 +1114,7 @@ function createStudioStore() {
 				diarization?: boolean;
 				translate?: boolean;
 				timestampGranularity?: 'word' | 'segment';
+// 3D specific	artStyle?: Model3DArtStyle;	topology?: Model3DTopology;	targetPolycount?: number;	enablePbr?: boolean;	sourceImageUrl?: string;
 			}
 		): Promise<DeckGeneration | null> {
 			const state = get({ subscribe });
@@ -1392,6 +1410,8 @@ function createStudioStore() {
 				imageModel: 'gemini-2.5-flash-image',
 				videoProvider: 'google-veo',
 				videoModel: 'veo-3.1-generate-preview',
+				model3DProvider: 'meshy',
+				model3DModel: 'meshy-6',
 				ttsProvider: 'openai-tts',
 				ttsModel: 'gpt-4o-mini-tts',
 				ttsVoice: 'alloy',

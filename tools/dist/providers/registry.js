@@ -13,6 +13,7 @@ class ProviderRegistry {
     videoProviders = new Map();
     audioProviders = new Map();
     videoAnalysisProviders = new Map();
+    model3DProviders = new Map();
     // ============================================================================
     // Registration
     // ============================================================================
@@ -52,6 +53,15 @@ class ProviderRegistry {
         }
         this.videoAnalysisProviders.set(provider.id, provider);
     }
+    /**
+     * Register a 3D model provider
+     */
+    registerModel3DProvider(provider) {
+        if (this.model3DProviders.has(provider.id)) {
+            console.warn(`3D model provider '${provider.id}' is already registered. Overwriting.`);
+        }
+        this.model3DProviders.set(provider.id, provider);
+    }
     // ============================================================================
     // Retrieval
     // ============================================================================
@@ -80,6 +90,12 @@ class ProviderRegistry {
         return this.videoAnalysisProviders.get(id);
     }
     /**
+     * Get a 3D model provider by ID
+     */
+    getModel3DProvider(id) {
+        return this.model3DProviders.get(id);
+    }
+    /**
      * List all registered image providers
      */
     listImageProviders() {
@@ -102,6 +118,12 @@ class ProviderRegistry {
      */
     listVideoAnalysisProviders() {
         return Array.from(this.videoAnalysisProviders.values());
+    }
+    /**
+     * List all registered 3D model providers
+     */
+    listModel3DProviders() {
+        return Array.from(this.model3DProviders.values());
     }
     // ============================================================================
     // Model Discovery
@@ -131,6 +153,18 @@ class ProviderRegistry {
         return models;
     }
     /**
+     * Get all available 3D models across all providers
+     */
+    getAllModel3DModels() {
+        const models = [];
+        for (const provider of this.model3DProviders.values()) {
+            for (const model of provider.models) {
+                models.push({ ...model, providerId: provider.id });
+            }
+        }
+        return models;
+    }
+    /**
      * Find which provider owns a specific model
      */
     findImageProviderByModel(modelId) {
@@ -146,6 +180,17 @@ class ProviderRegistry {
      */
     findVideoProviderByModel(modelId) {
         for (const provider of this.videoProviders.values()) {
+            if (provider.models.some(m => m.id === modelId)) {
+                return provider;
+            }
+        }
+        return undefined;
+    }
+    /**
+     * Find which provider owns a specific 3D model
+     */
+    findModel3DProviderByModel(modelId) {
+        for (const provider of this.model3DProviders.values()) {
             if (provider.models.some(m => m.id === modelId)) {
                 return provider;
             }
@@ -173,6 +218,15 @@ class ProviderRegistry {
             return false;
         return provider.models.some(m => m.capabilities.includes(capability));
     }
+    /**
+     * Check if a 3D model provider supports a specific capability
+     */
+    model3DProviderSupports(providerId, capability) {
+        const provider = this.model3DProviders.get(providerId);
+        if (!provider)
+            return false;
+        return provider.models.some(m => m.capabilities.includes(capability));
+    }
 }
 // Singleton instance
 export const registry = new ProviderRegistry();
@@ -191,6 +245,8 @@ import { googleGeminiVideoProvider } from './video/google-gemini-video.js';
 import { openaiSoraProvider } from './video/openai-sora.js';
 // Audio providers (for app features like TTS/STT, not model tools)
 import { openaiAudioProvider } from './audio/openai-audio.js';
+// 3D model providers
+import { meshyProvider } from './model3d/meshy.js';
 // Register image providers
 registry.registerImageProvider(googleGeminiProvider);
 registry.registerImageProvider(googleImagenProvider);
@@ -202,6 +258,8 @@ registry.registerVideoProvider(openaiSoraProvider);
 registry.registerVideoAnalysisProvider(googleGeminiVideoProvider);
 // Register audio providers (for app features)
 registry.registerAudioProvider(openaiAudioProvider);
+// Register 3D model providers
+registry.registerModel3DProvider(meshyProvider);
 // Future providers:
 // import { stabilityAiProvider } from './image/stability-ai.js';
 // import { runwayMlProvider } from './video/runway-ml.js';
