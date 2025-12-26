@@ -1,25 +1,25 @@
 version: '3.8'
 
 services:
-  ai-hub:
+  ai-shuffle:
     # Use pre-built image from GitHub Container Registry
     # Replace <your-username> with your GitHub username
     # Or comment out 'image' and uncomment 'build' to build locally
-    # image: ghcr.io/<your-username>/ai-hub:latest
+    # image: ghcr.io/<your-username>/ai-shuffle:latest
 
     # Build locally (recommended for development)
     build:
       context: .
       dockerfile: Dockerfile
 
-    container_name: ai-hub
+    container_name: ai-shuffle
     restart: unless-stopped
 
     # Environment variables (override with .env file or Unraid template)
     environment:
       - HOST=0.0.0.0
       - PORT=8000
-      - SERVICE_NAME=${SERVICE_NAME:-ai-hub}
+      - SERVICE_NAME=${SERVICE_NAME:-ai-shuffle}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - COMMAND_TIMEOUT=${COMMAND_TIMEOUT:-300}
       - PUID=${PUID:-99}
@@ -38,7 +38,7 @@ services:
       # Persist GitHub CLI authentication
       - gh-auth:/home/appuser/.config/gh
       # Persist database and session data
-      - ai-hub-data:/data
+      - ai-shuffle-data:/data
       # Mount workspace directory for projects
       - ${WORKSPACE_DIR:-./workspace}:/workspace
 
@@ -86,8 +86,8 @@ volumes:
   # Named volume for GitHub CLI authentication persistence
   gh-auth:
     driver: local
-  # Named volume for AI Hub data (database, sessions)
-  ai-hub-data:
+  # Named volume for AI Shuffle data (database, sessions)
+  ai-shuffle-data:
     driver: local
 
 networks:

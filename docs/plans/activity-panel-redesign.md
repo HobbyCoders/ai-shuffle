@@ -155,7 +155,7 @@ The settings overlay needs to support full background agent configuration, not j
 │  CONTEXT                            │
 │  ┌─────────────────────────────────┐│
 │  │ Profile    [Default ▾]         ││
-│  │ Project    [ai-hub ▾]          ││
+│  │ Project    [ai-shuffle ▾]          ││
 │  └─────────────────────────────────┘│
 ├─────────────────────────────────────┤
 │  MODEL                              │

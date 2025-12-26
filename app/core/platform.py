@@ -1,7 +1,7 @@
 """
 Platform detection and OS-specific path handling for local mode.
 
-This module provides cross-platform support for running AI Hub outside of Docker,
+This module provides cross-platform support for running AI Shuffle outside of Docker,
 detecting the deployment mode (Docker vs Local) and providing appropriate paths.
 """
 
@@ -56,9 +56,9 @@ def get_app_data_dir() -> Path:
     Get the application data directory based on the current platform.
 
     Returns:
-        - Windows: %APPDATA%/ai-hub
-        - macOS: ~/Library/Application Support/ai-hub
-        - Linux: ~/.local/share/ai-hub
+        - Windows: %APPDATA%/ai-shuffle
+        - macOS: ~/Library/Application Support/ai-shuffle
+        - Linux: ~/.local/share/ai-shuffle
         - Docker: /data
     """
     if detect_deployment_mode() == DeploymentMode.DOCKER:
@@ -70,19 +70,19 @@ def get_app_data_dir() -> Path:
         # but direct USERPROFILE access is not virtualized
         userprofile = os.environ.get("USERPROFILE")
         if userprofile:
-            return Path(userprofile) / ".ai-hub"
-        return Path.home() / ".ai-hub"
+            return Path(userprofile) / ".ai-shuffle"
+        return Path.home() / ".ai-shuffle"
 
     elif sys.platform == "darwin":
         # macOS: Use Application Support
-        return Path.home() / "Library" / "Application Support" / "ai-hub"
+        return Path.home() / "Library" / "Application Support" / "ai-shuffle"
 
     else:
         # Linux and other Unix-like systems
         xdg_data = os.environ.get("XDG_DATA_HOME")
         if xdg_data:
-            return Path(xdg_data) / "ai-hub"
-        return Path.home() / ".local" / "share" / "ai-hub"
+            return Path(xdg_data) / "ai-shuffle"
+        return Path.home() / ".local" / "share" / "ai-shuffle"
 
 
 def get_default_workspace_dir() -> Path:
@@ -90,8 +90,8 @@ def get_default_workspace_dir() -> Path:
     Get the default workspace directory based on the current platform.
 
     Returns:
-        - Windows: %USERPROFILE%/Documents/ai-hub-workspace
-        - macOS/Linux: ~/ai-hub-workspace
+        - Windows: %USERPROFILE%/Documents/ai-shuffle-workspace
+        - macOS/Linux: ~/ai-shuffle-workspace
         - Docker: /workspace
     """
     if detect_deployment_mode() == DeploymentMode.DOCKER:
@@ -101,12 +101,12 @@ def get_default_workspace_dir() -> Path:
         # Windows: Use Documents folder
         docs = os.environ.get("USERPROFILE")
         if docs:
-            return Path(docs) / "Documents" / "ai-hub-workspace"
-        return Path.home() / "Documents" / "ai-hub-workspace"
+            return Path(docs) / "Documents" / "ai-shuffle-workspace"
+        return Path.home() / "Documents" / "ai-shuffle-workspace"
 
     else:
         # macOS/Linux: Use home directory
-        return Path.home() / "ai-hub-workspace"
+        return Path.home() / "ai-shuffle-workspace"
 
 
 def get_claude_credentials_dir() -> Path:

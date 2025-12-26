@@ -2,7 +2,7 @@
 
 ## Overview
 
-Transform AI Hub from a chat-only interface into a **full AI workspace** with a desktop-like environment. This plan provides step-by-step instructions for implementing "The Deck" architecture.
+Transform AI Shuffle from a chat-only interface into a **full AI workspace** with a desktop-like environment. This plan provides step-by-step instructions for implementing "The Deck" architecture.
 
 ---
 
@@ -1300,7 +1300,7 @@ Add tables for persistence:
 ### Verification Checkpoint 7
 
 ```bash
-cd /workspace/ai-hub && python -c "from app.main import app; print('OK')"
+cd /workspace/ai-shuffle && python -c "from app.main import app; print('OK')"
 ```
 
 ---
@@ -1696,7 +1696,7 @@ cd frontend && npm run build
 cd frontend && npm run check
 
 # Check backend imports
-cd /workspace/ai-hub && python -c "from app.main import app; print('OK')"
+cd /workspace/ai-shuffle && python -c "from app.main import app; print('OK')"
 
 # Deploy to running app (Docker)
 cd frontend && npm run build && rm -rf /app/app/static/* && cp -r build/* /app/app/static/

@@ -173,7 +173,7 @@ async function loadSelectionFromBackend(): Promise<{ selectedProfile: string; se
  * Get or create persistent device ID
  */
 function getOrCreateDeviceId(): string {
-	const key = 'ai-hub-device-id';
+	const key = 'ai-shuffle-device-id';
 	if (typeof window === 'undefined') {
 		return 'server-' + Math.random().toString(36).substr(2, 9);
 	}
