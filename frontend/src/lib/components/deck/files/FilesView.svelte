@@ -532,11 +532,17 @@
 		color: hsl(var(--foreground));
 		cursor: pointer;
 		appearance: none;
+		color-scheme: dark light;
 	}
 
 	.project-select:focus {
 		outline: none;
 		border-color: hsl(var(--primary));
+	}
+
+	.project-select option {
+		background: hsl(var(--popover));
+		color: hsl(var(--popover-foreground));
 	}
 
 	.select-icon {
