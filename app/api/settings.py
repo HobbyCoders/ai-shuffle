@@ -414,21 +414,61 @@ TTS_MODELS = {
 
 # Available STT models
 STT_MODELS = {
+    # Google STT Models
+    "gemini-2.5-flash": {
+        "name": "Gemini Audio",
+        "provider": "google-stt",
+        "description": "Long-form audio, diarization, context-aware transcription",
+        "price_display": "~$0.006/min",
+        "price_per_minute": 0.006
+    },
+    "chirp-3": {
+        "name": "Chirp 3",
+        "provider": "google-stt",
+        "description": "Multilingual, noisy environments, latest accuracy",
+        "price_display": "~$0.016/min",
+        "price_per_minute": 0.016
+    },
+    "latest-long": {
+        "name": "Latest Long",
+        "provider": "google-stt",
+        "description": "Long-form content, media, conversations",
+        "price_display": "~$0.016/min",
+        "price_per_minute": 0.016
+    },
+    "latest-short": {
+        "name": "Latest Short",
+        "provider": "google-stt",
+        "description": "Voice commands, short utterances",
+        "price_display": "~$0.016/min",
+        "price_per_minute": 0.016
+    },
+    # OpenAI STT Models
+    "gpt-4o-transcribe-diarize": {
+        "name": "GPT-4o Transcribe + Diarize",
+        "provider": "openai-stt",
+        "description": "Ultra-fast transcription with speaker identification",
+        "price_display": "~$0.006/min",
+        "price_per_minute": 0.006
+    },
     "gpt-4o-transcribe": {
         "name": "GPT-4o Transcribe",
-        "description": "Best quality transcription with improved accuracy",
+        "provider": "openai-stt",
+        "description": "Fast transcription (10 min in ~15 seconds)",
         "price_display": "~$0.006/min",
         "price_per_minute": 0.006
     },
     "gpt-4o-mini-transcribe": {
         "name": "GPT-4o Mini Transcribe",
-        "description": "Fast, affordable transcription",
+        "provider": "openai-stt",
+        "description": "Cost-efficient transcription",
         "price_display": "~$0.003/min",
         "price_per_minute": 0.003
     },
     "whisper-1": {
         "name": "Whisper",
-        "description": "Original Whisper model for transcription",
+        "provider": "openai-stt",
+        "description": "General-purpose with translation to English",
         "price_display": "~$0.006/min",
         "price_per_minute": 0.006
     }
