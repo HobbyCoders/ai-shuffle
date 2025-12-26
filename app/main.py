@@ -25,7 +25,7 @@ from app.core.cleanup_manager import cleanup_manager
 from app.core import encryption
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, knowledge, rate_limits, github, git, canvas, agents, studio, plugins, user_self_service
+from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, knowledge, rate_limits, github, git, canvas, agents, studio, plugins, user_self_service, meshy
 from app.api.agents import start_agent_engine, stop_agent_engine
 
 # Import middleware
@@ -292,6 +292,7 @@ app.include_router(agents.router)
 app.include_router(studio.router)
 app.include_router(plugins.router)
 app.include_router(user_self_service.router)
+app.include_router(meshy.router)
 
 # Serve static files (Svelte build) if they exist
 static_dir = Path(__file__).parent / "static"

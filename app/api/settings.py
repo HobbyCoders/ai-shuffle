@@ -73,7 +73,7 @@ async def get_internal_api_key(key_name: str):
 
     Only allows specific key names to prevent arbitrary setting access.
     """
-    allowed_keys = ["openai_api_key", "image_api_key", "gemini_api_key", "video_api_key"]
+    allowed_keys = ["openai_api_key", "image_api_key", "gemini_api_key", "video_api_key", "meshy_api_key"]
 
     if key_name not in allowed_keys:
         raise HTTPException(status_code=400, detail=f"Invalid key name. Allowed: {allowed_keys}")
@@ -150,6 +150,11 @@ class IntegrationSettingsResponse(BaseModel):
     # Audio settings (TTS/STT)
     tts_model: Optional[str] = None  # "gpt-4o-mini-tts", "tts-1", "tts-1-hd"
     stt_model: Optional[str] = None  # "gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"
+    # 3D Model generation settings (Meshy)
+    meshy_api_key_set: bool = False
+    meshy_api_key_masked: str = ""
+    model3d_provider: Optional[str] = None  # "meshy"
+    model3d_model: Optional[str] = None  # "meshy-6", etc.
 
 
 class OpenAIKeyRequest(BaseModel):
@@ -295,6 +300,7 @@ async def get_integration_settings(token: str = Depends(require_auth)):
     # Get decrypted API keys for masking display
     openai_key = get_decrypted_api_key("openai_api_key")
     image_api_key = get_decrypted_api_key("image_api_key")
+    meshy_api_key = get_decrypted_api_key("meshy_api_key")
 
     # Non-sensitive settings
     image_provider = database.get_system_setting("image_provider")
@@ -303,6 +309,8 @@ async def get_integration_settings(token: str = Depends(require_auth)):
     video_model = database.get_system_setting("video_model")
     tts_model = database.get_system_setting("tts_model") or "gpt-4o-mini-tts"
     stt_model = database.get_system_setting("stt_model") or "whisper-1"
+    model3d_provider = database.get_system_setting("model3d_provider")
+    model3d_model = database.get_system_setting("model3d_model")
 
     return IntegrationSettingsResponse(
         openai_api_key_set=bool(openai_key),
@@ -314,7 +322,11 @@ async def get_integration_settings(token: str = Depends(require_auth)):
         video_provider=video_provider,
         video_model=video_model,
         tts_model=tts_model,
-        stt_model=stt_model
+        stt_model=stt_model,
+        meshy_api_key_set=bool(meshy_api_key),
+        meshy_api_key_masked=mask_api_key(meshy_api_key) if meshy_api_key else "",
+        model3d_provider=model3d_provider,
+        model3d_model=model3d_model
     )
 
 
@@ -1347,6 +1359,37 @@ AI_TOOLS = {
         "description": "Analyze videos up to 2 hours and answer questions about content",
         "category": "video",
         "providers": ["google-gemini-video"]
+    },
+    # 3D Model tools (Meshy)
+    "text_to_3d": {
+        "name": "Text to 3D",
+        "description": "Generate 3D models from text descriptions",
+        "category": "3d",
+        "providers": ["meshy"]
+    },
+    "image_to_3d": {
+        "name": "Image to 3D",
+        "description": "Generate 3D models from reference images",
+        "category": "3d",
+        "providers": ["meshy"]
+    },
+    "retexture_3d": {
+        "name": "3D Retexturing",
+        "description": "Apply new textures to existing 3D models",
+        "category": "3d",
+        "providers": ["meshy"]
+    },
+    "rig_3d": {
+        "name": "3D Rigging",
+        "description": "Add animation skeleton to 3D models",
+        "category": "3d",
+        "providers": ["meshy"]
+    },
+    "animate_3d": {
+        "name": "3D Animation",
+        "description": "Animate rigged 3D models with preset animations",
+        "category": "3d",
+        "providers": ["meshy"]
     }
 }
 
@@ -1357,7 +1400,8 @@ PROVIDER_KEY_MAP = {
     "openai-gpt-image": "openai_api_key",
     "google-veo": "image_api_key",
     "openai-sora": "openai_api_key",
-    "google-gemini-video": "image_api_key"
+    "google-gemini-video": "image_api_key",
+    "meshy": "meshy_api_key"
 }
 
 
@@ -1372,6 +1416,7 @@ async def get_available_ai_tools(token: str = Depends(require_auth)):
     # Check which API keys are configured
     openai_key = get_decrypted_api_key("openai_api_key")
     image_api_key = get_decrypted_api_key("image_api_key")
+    meshy_api_key = get_decrypted_api_key("meshy_api_key")
 
     # Determine which providers are available (for model tools only)
     available_providers = set()
@@ -1383,10 +1428,13 @@ async def get_available_ai_tools(token: str = Depends(require_auth)):
     if openai_key:
         available_providers.add("openai-gpt-image")
         available_providers.add("openai-sora")
+    if meshy_api_key:
+        available_providers.add("meshy")
 
     # Get current configured providers
     current_image_provider = database.get_system_setting("image_provider")
     current_video_provider = database.get_system_setting("video_provider")
+    current_model3d_provider = database.get_system_setting("model3d_provider")
 
     # Build tools list with availability
     tools = []
@@ -1403,6 +1451,8 @@ async def get_available_ai_tools(token: str = Depends(require_auth)):
             active_provider = current_image_provider
         elif tool_info["category"] == "video" and current_video_provider in tool_providers:
             active_provider = current_video_provider
+        elif tool_info["category"] == "3d" and current_model3d_provider in tool_providers:
+            active_provider = current_model3d_provider
         elif is_available:
             # Use first available provider
             for p in tool_providers:
