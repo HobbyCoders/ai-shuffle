@@ -94,6 +94,12 @@ class AIToolsConfig(BaseModel):
     video_extend: bool = False  # Extend existing Veo videos
     video_bridge: bool = False  # Generate smooth transitions between two images
     video_understanding: bool = False  # Analyze videos and answer questions about content
+    # 3D Model tools (Meshy)
+    text_to_3d: bool = False  # Generate 3D models from text descriptions
+    image_to_3d: bool = False  # Generate 3D models from reference images
+    retexture_3d: bool = False  # Apply new textures to existing 3D models
+    rig_3d: bool = False  # Add animation skeleton to 3D models
+    animate_3d: bool = False  # Animate rigged 3D models with preset animations
 
 
 class SystemPromptConfig(BaseModel):
