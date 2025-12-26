@@ -238,12 +238,74 @@ async def validate_github_pat(pat: str) -> CredentialValidationResponse:
         )
 
 
+async def validate_meshy_api_key(api_key: str) -> CredentialValidationResponse:
+    """
+    Validate a Meshy API key by calling the text-to-3d list endpoint.
+
+    Args:
+        api_key: The Meshy API key to validate
+
+    Returns:
+        CredentialValidationResponse with validation result
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                "https://api.meshy.ai/openapi/v2/text-to-3d?pageSize=1",
+                headers={"Authorization": f"Bearer {api_key}"}
+            )
+
+            if response.status_code == 200:
+                return CredentialValidationResponse(
+                    result=ValidationResult.VALID,
+                    message="Meshy API key is valid"
+                )
+            elif response.status_code == 401 or response.status_code == 403:
+                return CredentialValidationResponse(
+                    result=ValidationResult.INVALID,
+                    message="Invalid Meshy API key"
+                )
+            elif response.status_code == 402:
+                # No credits but key is valid
+                return CredentialValidationResponse(
+                    result=ValidationResult.VALID,
+                    message="Meshy API key is valid (no credits remaining)"
+                )
+            elif response.status_code == 429:
+                # Rate limited but key is valid
+                return CredentialValidationResponse(
+                    result=ValidationResult.VALID,
+                    message="Meshy API key is valid (rate limited)"
+                )
+            else:
+                logger.warning(
+                    f"Meshy API returned unexpected status {response.status_code}: {response.text}"
+                )
+                return CredentialValidationResponse(
+                    result=ValidationResult.ERROR,
+                    message=f"Could not validate key: API returned status {response.status_code}"
+                )
+
+    except httpx.TimeoutException:
+        logger.warning("Timeout while validating Meshy API key")
+        return CredentialValidationResponse(
+            result=ValidationResult.TIMEOUT,
+            message="Validation timed out - key may still be valid"
+        )
+    except httpx.RequestError as e:
+        logger.error(f"Request error validating Meshy API key: {e}")
+        return CredentialValidationResponse(
+            result=ValidationResult.ERROR,
+            message=f"Could not connect to Meshy API: {str(e)}"
+        )
+
+
 async def validate_credential(credential_type: str, value: str) -> CredentialValidationResponse:
     """
     Validate a credential based on its type.
 
     Args:
-        credential_type: Type of credential ('openai_api_key', 'gemini_api_key', 'github_pat')
+        credential_type: Type of credential ('openai_api_key', 'gemini_api_key', 'meshy_api_key', 'github_pat')
         value: The credential value to validate
 
     Returns:
@@ -256,6 +318,8 @@ async def validate_credential(credential_type: str, value: str) -> CredentialVal
         return await validate_openai_api_key(value)
     elif credential_type == "gemini_api_key":
         return await validate_gemini_api_key(value)
+    elif credential_type == "meshy_api_key":
+        return await validate_meshy_api_key(value)
     elif credential_type == "github_pat":
         return await validate_github_pat(value)
     else:

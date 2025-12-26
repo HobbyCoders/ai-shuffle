@@ -1750,6 +1750,11 @@ CREDENTIAL_POLICY_INFO = {
         "description": "For Nano Banana image generation, Imagen, and Veo video",
         "admin_has_key": lambda: bool(get_decrypted_api_key("image_api_key"))
     },
+    "meshy_api_key": {
+        "name": "Meshy API Key",
+        "description": "For 3D model generation (text-to-3D, image-to-3D, rigging, animation)",
+        "admin_has_key": lambda: bool(get_decrypted_api_key("meshy_api_key"))
+    },
     "github_pat": {
         "name": "GitHub Personal Access Token",
         "description": "For accessing GitHub repositories",
@@ -1867,6 +1872,167 @@ def _compute_effective_status(policy: str, admin_has_key: bool) -> str:
 
 
 # ============================================================================
+# Per-User Credential Policy Overrides (Admin control per user)
+# ============================================================================
+
+class UserCredentialPolicyResponse(BaseModel):
+    """A user's credential policy override"""
+    api_user_id: str
+    credential_type: str
+    policy: str  # 'admin_provided', 'user_provided', 'optional'
+    source: str  # 'user' (override) or 'global' (fallback)
+
+
+class SetUserCredentialPolicyRequest(BaseModel):
+    """Request to set a user's credential policy override"""
+    policy: str  # 'admin_provided', 'user_provided', 'optional'
+
+
+@router.get("/users/{user_id}/credential-policies")
+async def get_user_credential_policies(
+    user_id: str,
+    token: str = Depends(require_admin)
+):
+    """
+    Get all credential policies for a specific user (admin only).
+
+    Returns the effective policy for each credential type, indicating
+    whether it's a user-specific override or the global default.
+    """
+    # Verify user exists
+    user = database.get_api_user(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Get global policies
+    global_policies = database.get_all_credential_policies()
+
+    # Get user overrides
+    user_overrides = {
+        p["credential_type"]: p["policy"]
+        for p in database.get_all_user_credential_policies(user_id)
+    }
+
+    result = []
+    for gp in global_policies:
+        credential_type = gp["id"]
+        info = CREDENTIAL_POLICY_INFO.get(credential_type, {})
+
+        if credential_type in user_overrides:
+            policy = user_overrides[credential_type]
+            source = "user"
+        else:
+            policy = gp["policy"]
+            source = "global"
+
+        result.append({
+            "credential_type": credential_type,
+            "name": info.get("name", credential_type),
+            "description": info.get("description", gp.get("description", "")),
+            "policy": policy,
+            "source": source,
+            "global_policy": gp["policy"]  # For comparison in UI
+        })
+
+    return {
+        "user_id": user_id,
+        "user_name": user.get("name", "Unknown"),
+        "policies": result
+    }
+
+
+@router.put("/users/{user_id}/credential-policies/{credential_type}")
+async def set_user_credential_policy(
+    user_id: str,
+    credential_type: str,
+    request: SetUserCredentialPolicyRequest,
+    token: str = Depends(require_admin)
+):
+    """
+    Set a credential policy override for a specific user (admin only).
+
+    This overrides the global policy for this user only.
+    """
+    # Verify user exists
+    user = database.get_api_user(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Validate policy
+    valid_policies = ['admin_provided', 'user_provided', 'optional']
+    if request.policy not in valid_policies:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid policy. Must be one of: {', '.join(valid_policies)}"
+        )
+
+    # Validate credential type
+    if credential_type not in CREDENTIAL_POLICY_INFO:
+        raise HTTPException(status_code=400, detail=f"Unknown credential type: {credential_type}")
+
+    # Special case: github_pat cannot be admin_provided
+    if credential_type == "github_pat" and request.policy == "admin_provided":
+        raise HTTPException(
+            status_code=400,
+            detail="GitHub PAT cannot be admin-provided. Each user must use their own GitHub account."
+        )
+
+    # Special case: can't set to admin_provided if admin doesn't have the key
+    if request.policy == "admin_provided":
+        info = CREDENTIAL_POLICY_INFO[credential_type]
+        if not info.get("admin_has_key", lambda: False)():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot set to 'admin_provided' - admin has not configured this key yet"
+            )
+
+    # Set the override
+    updated = database.set_user_credential_policy(user_id, credential_type, request.policy)
+    if not updated:
+        raise HTTPException(status_code=500, detail="Failed to set policy override")
+
+    return {
+        "success": True,
+        "user_id": user_id,
+        "credential_type": credential_type,
+        "policy": request.policy,
+        "source": "user"
+    }
+
+
+@router.delete("/users/{user_id}/credential-policies/{credential_type}")
+async def delete_user_credential_policy(
+    user_id: str,
+    credential_type: str,
+    token: str = Depends(require_admin)
+):
+    """
+    Remove a credential policy override for a user (admin only).
+
+    The user will revert to using the global policy for this credential type.
+    """
+    # Verify user exists
+    user = database.get_api_user(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    deleted = database.delete_user_credential_policy(user_id, credential_type)
+
+    # Get the global policy they'll fall back to
+    global_policy = database.get_credential_policy(credential_type)
+    fallback_policy = global_policy.get("policy", "optional") if global_policy else "optional"
+
+    return {
+        "success": True,
+        "user_id": user_id,
+        "credential_type": credential_type,
+        "deleted": deleted,
+        "fallback_policy": fallback_policy,
+        "source": "global"
+    }
+
+
+# ============================================================================
 # Credential Resolution (for internal use by AI tools)
 # ============================================================================
 
@@ -1893,15 +2059,20 @@ async def resolve_credential(
     admin_setting_map = {
         "openai_api_key": "openai_api_key",
         "gemini_api_key": "image_api_key",
+        "meshy_api_key": "meshy_api_key",
         "github_pat": None  # No admin fallback
     }
 
     if credential_type not in admin_setting_map:
         raise HTTPException(status_code=400, detail=f"Unknown credential type: {credential_type}")
 
-    # Get policy
-    policy_obj = database.get_credential_policy(credential_type)
-    policy = policy_obj.get("policy", "optional") if policy_obj else "optional"
+    # Get effective policy (user override takes precedence over global)
+    if user_id:
+        effective = database.get_effective_credential_policy(user_id, credential_type)
+        policy = effective.get("policy", "optional")
+    else:
+        policy_obj = database.get_credential_policy(credential_type)
+        policy = policy_obj.get("policy", "optional") if policy_obj else "optional"
 
     resolved_key = None
     source = None

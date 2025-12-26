@@ -1252,7 +1252,6 @@
 		onModeChange={handleModeChange}
 		onLogoClick={() => showCreateMenu = !showCreateMenu}
 		onSettingsClick={() => handleCreateCard('settings')}
-		onUserSettingsClick={() => handleCreateCard('user-settings')}
 		onContextToggle={() => {
 			deck.toggleContextPanel();
 			// Close chat settings overlay when collapsing the panel

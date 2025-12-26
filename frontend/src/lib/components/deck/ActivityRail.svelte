@@ -6,7 +6,8 @@
 	 * Switches to horizontal layout on mobile.
 	 */
 
-	import { Plus, Monitor, Palette, FolderOpen, Settings, UserCog } from 'lucide-svelte';
+	import { Plus, Monitor, Palette, FolderOpen, Settings, LogOut } from 'lucide-svelte';
+	import { auth } from '$lib/stores/auth';
 	import type { ActivityMode, ActivityBadges } from './types';
 
 	interface Props {
@@ -17,7 +18,6 @@
 		onModeChange?: (mode: ActivityMode) => void;
 		onLogoClick?: () => void;
 		onSettingsClick?: () => void;
-		onUserSettingsClick?: () => void;
 	}
 
 	let {
@@ -27,9 +27,21 @@
 		isAdmin = false,
 		onModeChange,
 		onLogoClick,
-		onSettingsClick,
-		onUserSettingsClick
+		onSettingsClick
 	}: Props = $props();
+
+	let loggingOut = $state(false);
+
+	async function handleLogout() {
+		if (loggingOut) return;
+		loggingOut = true;
+		try {
+			await auth.logout();
+		} catch (e) {
+			console.error('Logout failed:', e);
+		}
+		loggingOut = false;
+	}
 
 	// Activity button configurations with colors
 	const activities: Array<{
@@ -98,20 +110,27 @@
 		{/each}
 	</div>
 
-	<!-- Settings button at bottom - admin sees Settings, non-admin sees My Settings -->
-	<button
-		class="settings-button"
-		onclick={() => isAdmin ? onSettingsClick?.() : onUserSettingsClick?.()}
-		title={isAdmin ? 'Settings' : 'My Settings'}
-	>
-		{#if isAdmin}
+	<!-- Bottom button - admin sees Settings, non-admin sees Logout -->
+	{#if isAdmin}
+		<button
+			class="settings-button"
+			onclick={() => onSettingsClick?.()}
+			title="Settings"
+		>
 			<Settings size={20} strokeWidth={1.5} />
 			<span class="tooltip">Settings</span>
-		{:else}
-			<UserCog size={20} strokeWidth={1.5} />
-			<span class="tooltip">My Settings</span>
-		{/if}
-	</button>
+		</button>
+	{:else}
+		<button
+			class="settings-button logout-button"
+			onclick={handleLogout}
+			disabled={loggingOut}
+			title="Logout"
+		>
+			<LogOut size={20} strokeWidth={1.5} />
+			<span class="tooltip">{loggingOut ? 'Logging out...' : 'Logout'}</span>
+		</button>
+	{/if}
 </div>
 
 <style>
@@ -384,6 +403,17 @@
 
 	.settings-button:active {
 		transform: scale(0.92);
+	}
+
+	.settings-button:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	/* Logout button hover state - subtle red tint */
+	.logout-button:hover {
+		color: var(--destructive, #ef4444);
+		background: color-mix(in srgb, var(--destructive, #ef4444) 10%, transparent);
 	}
 
 	/* Mobile-specific settings button styling - ensure 44x44px touch target */

@@ -50,7 +50,6 @@
 		onModeChange?: (mode: ActivityMode) => void;
 		onLogoClick?: () => void;
 		onSettingsClick?: () => void;
-		onUserSettingsClick?: () => void;
 		onContextToggle?: () => void;
 		onTabChange?: (tab: ActivityTabType) => void;
 		onSessionClick?: (session: ActiveSession) => void;
@@ -86,7 +85,6 @@
 		onModeChange,
 		onLogoClick,
 		onSettingsClick,
-		onUserSettingsClick,
 		onContextToggle,
 		onTabChange,
 		onSessionClick,
@@ -136,7 +134,6 @@
 				{onModeChange}
 				{onLogoClick}
 				{onSettingsClick}
-				{onUserSettingsClick}
 			/>
 		</aside>
 	{/if}
@@ -204,7 +201,6 @@
 				{onModeChange}
 				{onLogoClick}
 				{onSettingsClick}
-				{onUserSettingsClick}
 			/>
 		</footer>
 	{/if}

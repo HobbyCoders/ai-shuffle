@@ -172,6 +172,11 @@ CREDENTIAL_INFO = {
         "description": "For Nano Banana image generation, Imagen, and Veo video",
         "admin_setting": "image_api_key"
     },
+    "meshy_api_key": {
+        "name": "Meshy API Key",
+        "description": "For 3D model generation (text-to-3D, image-to-3D, rigging, animation)",
+        "admin_setting": "meshy_api_key"
+    },
     "github_pat": {
         "name": "GitHub Personal Access Token",
         "description": "For accessing your GitHub repositories",
@@ -266,16 +271,20 @@ async def get_my_credentials(api_user: dict = Depends(get_current_api_user)):
 
     Shows which credentials are required, optional, or admin-provided,
     and whether the user has set their own values.
+
+    Uses per-user policy overrides if set, otherwise falls back to global policy.
     """
-    policies = {p["id"]: p for p in database.get_all_credential_policies()}
     credentials = []
     has_missing_required = False
+    user_id = api_user["id"]
 
     for cred_type, info in CREDENTIAL_INFO.items():
-        policy = policies.get(cred_type, {}).get("policy", "optional")
+        # Get effective policy (user override or global fallback)
+        effective = database.get_effective_credential_policy(user_id, cred_type)
+        policy = effective.get("policy", "optional")
 
         # Check if user has set their own
-        user_cred = get_decrypted_user_credential(api_user["id"], cred_type)
+        user_cred = get_decrypted_user_credential(user_id, cred_type)
         is_set = bool(user_cred)
 
         # Check if admin has set a fallback
