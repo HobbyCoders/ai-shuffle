@@ -361,6 +361,24 @@ select.input option {
 	background-color: oklch(1 0 0);
 }
 
+/* Global select element styling (for selects without .input class) */
+select {
+	color-scheme: light dark;
+}
+
+select option {
+	background-color: var(--popover);
+	color: var(--popover-foreground);
+}
+
+.dark select option {
+	background-color: oklch(0.20 0.01 260);
+}
+
+.light select option {
+	background-color: oklch(1 0 0);
+}
+
 /* Card styles */
 .card {
 	background-color: var(--card);
