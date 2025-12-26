@@ -644,8 +644,8 @@
 		meshyKeyError = '';
 		meshyKeySuccess = '';
 		try {
-			await api.put('/settings/integrations', {
-				meshy_api_key: meshyApiKey
+			await api.post('/meshy/config/api-key', {
+				api_key: meshyApiKey
 			});
 			meshyKeySuccess = 'Meshy API key saved';
 			meshyApiKey = '';
@@ -664,8 +664,8 @@
 		model3DError = '';
 		model3DSuccess = '';
 		try {
-			await api.put('/settings/integrations', {
-				model_3d_model: selected3DModel
+			await api.put('/meshy/config/settings', {
+				model: selected3DModel
 			});
 			current3DModel = selected3DModel;
 			model3DSuccess = '3D model saved';

@@ -403,6 +403,49 @@ async def remove_meshy_api_key(token: str = Depends(require_admin)):
     return {"success": True}
 
 
+class Model3DSettingsRequest(BaseModel):
+    """Request to update 3D model settings"""
+    model: Optional[str] = None  # meshy-6, meshy-5, meshy-4
+    provider: Optional[str] = None  # meshy
+
+
+@router.put("/config/settings")
+async def update_meshy_settings(
+    request: Model3DSettingsRequest,
+    token: str = Depends(require_admin)
+):
+    """
+    Update 3D model generation settings (admin only).
+
+    Allows setting the default model and provider for 3D generation.
+    """
+    if request.model:
+        valid_models = ["meshy-6", "meshy-5", "meshy-4"]
+        if request.model not in valid_models:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid model. Valid options: {valid_models}"
+            )
+        database.set_system_setting("model3d_model", request.model)
+        logger.info(f"3D model set to: {request.model}")
+
+    if request.provider:
+        valid_providers = ["meshy"]
+        if request.provider not in valid_providers:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid provider. Valid options: {valid_providers}"
+            )
+        database.set_system_setting("model3d_provider", request.provider)
+        logger.info(f"3D provider set to: {request.provider}")
+
+    return {
+        "success": True,
+        "model": request.model or database.get_system_setting("model3d_model"),
+        "provider": request.provider or database.get_system_setting("model3d_provider")
+    }
+
+
 # ============================================================================
 # Internal Endpoint for AI Tools
 # ============================================================================
