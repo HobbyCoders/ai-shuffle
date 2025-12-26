@@ -81,25 +81,9 @@ class SubagentDefinition(BaseModel):
 # Profile Models
 # ============================================================================
 
-class AIToolsConfig(BaseModel):
-    """Configuration for individual AI tools - each tool can be enabled/disabled"""
-    # Image tools (Nano Banana)
-    image_generation: bool = False  # Generate AI images from text prompts
-    image_editing: bool = False  # Edit existing images
-    image_reference: bool = False  # Reference-based generation (character/style consistency)
-    # Video tools (Veo)
-    video_generation: bool = False  # Generate AI videos from text prompts
-    video_with_audio: bool = False  # Generate video with native audio (Veo 3)
-    image_to_video: bool = False  # Animate a still image into a video
-    video_extend: bool = False  # Extend existing Veo videos
-    video_bridge: bool = False  # Generate smooth transitions between two images
-    video_understanding: bool = False  # Analyze videos and answer questions about content
-    # 3D Model tools (Meshy)
-    text_to_3d: bool = False  # Generate 3D models from text descriptions
-    image_to_3d: bool = False  # Generate 3D models from reference images
-    retexture_3d: bool = False  # Apply new textures to existing 3D models
-    rig_3d: bool = False  # Add animation skeleton to 3D models
-    animate_3d: bool = False  # Animate rigged 3D models with preset animations
+# AIToolsConfig is dynamically generated from the AI_TOOLS registry
+# This ensures the model always matches available tools - no manual sync needed
+from app.core.ai_tools import AIToolsConfig  # noqa: E402
 
 
 class SystemPromptConfig(BaseModel):
