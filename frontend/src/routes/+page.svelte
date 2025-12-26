@@ -1552,6 +1552,7 @@
 		onCreateTerminal={() => handleCreateCard('terminal')}
 		onOpenProfiles={() => handleCreateCard('profile')}
 		onOpenProjects={() => handleCreateCard('project')}
+		onOpenSubagents={() => handleCreateCard('subagent')}
 		onOpenSettings={() => handleCreateCard('settings')}
 		onOpenUserSettings={() => handleCreateCard('user-settings')}
 		isAdmin={$isAdmin}

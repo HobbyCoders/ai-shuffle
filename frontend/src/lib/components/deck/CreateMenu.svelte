@@ -3,7 +3,7 @@
 	 * CreateMenu - Dropdown menu for creating new cards
 	 * Shows card type options with icons and keyboard shortcuts
 	 */
-	import { MessageSquare, Terminal, User, FolderKanban, Settings, UserCog, X } from 'lucide-svelte';
+	import { MessageSquare, Terminal, User, FolderKanban, Settings, UserCog, Bot, X } from 'lucide-svelte';
 
 	interface Props {
 		open: boolean;
@@ -12,6 +12,7 @@
 		onCreateTerminal: () => void;
 		onOpenProfiles: () => void;
 		onOpenProjects: () => void;
+		onOpenSubagents: () => void;
 		onOpenSettings: () => void;
 		onOpenUserSettings?: () => void;
 		isAdmin?: boolean;
@@ -26,6 +27,7 @@
 		onCreateTerminal,
 		onOpenProfiles,
 		onOpenProjects,
+		onOpenSubagents,
 		onOpenSettings,
 		onOpenUserSettings,
 		isAdmin = false,
@@ -42,10 +44,11 @@
 		];
 
 		if (isAdmin) {
-			// Admin gets full access to profiles, projects, and admin settings
+			// Admin gets full access to profiles, projects, subagents, and admin settings
 			items.push(
 				{ id: 'profiles', label: 'Profiles', icon: User, shortcut: '⌘⇧P', action: onOpenProfiles },
 				{ id: 'projects', label: 'Projects', icon: FolderKanban, shortcut: '⌘⇧J', action: onOpenProjects },
+				{ id: 'subagents', label: 'Subagents', icon: Bot, shortcut: '⌘⇧A', action: onOpenSubagents },
 				{ id: 'settings', label: 'Settings', icon: Settings, shortcut: '⌘,', action: onOpenSettings }
 			);
 		} else {
