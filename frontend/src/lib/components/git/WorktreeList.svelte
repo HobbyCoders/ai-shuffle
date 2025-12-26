@@ -170,8 +170,9 @@
             {#if createNewBranch}
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
-                        <label class="block text-xs text-muted-foreground mb-1">New Branch Name <span class="text-destructive">*</span></label>
+                        <label for="worktree-path" class="block text-xs text-muted-foreground mb-1">New Branch Name <span class="text-destructive">*</span></label>
                         <input
+                            id="worktree-path"
                             type="text"
                             bind:value={newBranchName}
                             placeholder="feature/my-worktree"
@@ -179,8 +180,9 @@
                         />
                     </div>
                     <div>
-                        <label class="block text-xs text-muted-foreground mb-1">Base Branch (optional)</label>
+                        <label for="worktree-branch" class="block text-xs text-muted-foreground mb-1">Base Branch (optional)</label>
                         <select
+                            id="worktree-branch"
                             bind:value={baseBranch}
                             class="w-full px-3 py-2 bg-muted border border-border rounded-lg text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
                         >
@@ -193,11 +195,12 @@
                 </div>
             {:else}
                 <div>
-                    <label class="block text-xs text-muted-foreground mb-1">Select Branch <span class="text-destructive">*</span></label>
+                    <label for="existing-branch" class="block text-xs text-muted-foreground mb-1">Select Branch <span class="text-destructive">*</span></label>
                     {#if availableBranches().length === 0}
                         <p class="text-sm text-muted-foreground py-2">No available branches. All local branches are already in use by worktrees.</p>
                     {:else}
                         <select
+                            id="existing-branch"
                             bind:value={existingBranch}
                             class="w-full px-3 py-2 bg-muted border border-border rounded-lg text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
                         >

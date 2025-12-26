@@ -41,7 +41,7 @@
     }
   },
   "devDependencies": {
-    "@types/node": "^24.10.2",
+    "@types/node": "^24.10.4",
     "typescript": "^5.3.0"
   }
 }

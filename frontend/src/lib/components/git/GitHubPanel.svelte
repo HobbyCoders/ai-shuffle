@@ -268,6 +268,7 @@
                 <button
                     onclick={() => github.clearError()}
                     class="text-destructive hover:text-destructive/80"
+                    aria-label="Dismiss error"
                 >
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
@@ -365,8 +366,9 @@
 
                             <div class="space-y-3">
                                 <div>
-                                    <label class="block text-xs text-muted-foreground mb-1">Title <span class="text-destructive">*</span></label>
+                                    <label for="pr-title" class="block text-xs text-muted-foreground mb-1">Title <span class="text-destructive">*</span></label>
                                     <input
+                                        id="pr-title"
                                         type="text"
                                         bind:value={prTitle}
                                         placeholder="Add amazing feature"
@@ -376,8 +378,9 @@
 
                                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                                     <div>
-                                        <label class="block text-xs text-muted-foreground mb-1">Head Branch <span class="text-destructive">*</span></label>
+                                        <label for="pr-head" class="block text-xs text-muted-foreground mb-1">Head Branch <span class="text-destructive">*</span></label>
                                         <select
+                                            id="pr-head"
                                             bind:value={prHead}
                                             class="w-full px-3 py-2 bg-muted border border-border rounded-lg text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
                                         >
@@ -388,8 +391,9 @@
                                         </select>
                                     </div>
                                     <div>
-                                        <label class="block text-xs text-muted-foreground mb-1">Base Branch <span class="text-destructive">*</span></label>
+                                        <label for="pr-base" class="block text-xs text-muted-foreground mb-1">Base Branch <span class="text-destructive">*</span></label>
                                         <select
+                                            id="pr-base"
                                             bind:value={prBase}
                                             class="w-full px-3 py-2 bg-muted border border-border rounded-lg text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
                                         >
@@ -404,8 +408,9 @@
                                 </div>
 
                                 <div>
-                                    <label class="block text-xs text-muted-foreground mb-1">Description</label>
+                                    <label for="pr-body" class="block text-xs text-muted-foreground mb-1">Description</label>
                                     <textarea
+                                        id="pr-body"
                                         bind:value={prBody}
                                         rows="3"
                                         placeholder="Describe your changes..."
@@ -673,7 +678,7 @@
 
             <div class="p-4 space-y-4">
                 <div>
-                    <label class="block text-sm font-medium text-foreground mb-2">Merge Method</label>
+                    <span class="block text-sm font-medium text-foreground mb-2">Merge Method</span>
                     <div class="space-y-2">
                         <label class="flex items-start gap-3 p-3 border border-border rounded-lg cursor-pointer hover:bg-muted/50 transition-colors {mergeMethod === 'merge' ? 'border-primary bg-primary/5' : ''}">
                             <input

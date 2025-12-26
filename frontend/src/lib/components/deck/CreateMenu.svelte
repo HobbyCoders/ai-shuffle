@@ -115,7 +115,7 @@
 							role="menuitem"
 						>
 							{#if item.icon}
-								<svelte:component this={item.icon} size={18} strokeWidth={1.5} />
+								<item.icon size={18} strokeWidth={1.5} />
 							{/if}
 							<span class="item-label">{item.label}</span>
 							{#if item.shortcut && !isMobile}

@@ -353,7 +353,6 @@
 								bind:value={newBranchName}
 								placeholder="feature/my-branch"
 								class="setting-input"
-								autofocus
 							/>
 							<button
 								type="button"

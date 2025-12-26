@@ -56,6 +56,7 @@
 	{:else}
 		<div class="sessions-list">
 			{#each sessions as session (session.id)}
+				{@const Icon = getStatusIcon(session)}
 				<button
 					class="session-item"
 					class:selected={session.isSelected}
@@ -63,8 +64,7 @@
 					onclick={() => onSessionClick?.(session)}
 				>
 					<div class="session-icon" class:animating={isAnimating(session.status)}>
-						<svelte:component
-							this={getStatusIcon(session)}
+						<Icon
 							size={14}
 							strokeWidth={1.5}
 							style="color: {getStatusColor(session.status)}"

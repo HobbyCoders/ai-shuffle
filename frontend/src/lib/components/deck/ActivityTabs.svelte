@@ -51,7 +51,7 @@
 			aria-selected={activeTab === tab.id}
 			role="tab"
 		>
-			<svelte:component this={tab.icon} size={14} strokeWidth={1.5} />
+			<tab.icon size={14} strokeWidth={1.5} />
 			<span class="tab-label">{tab.label}</span>
 			{#if badges[tab.id]}
 				<span class="tab-badge">{badges[tab.id]}</span>

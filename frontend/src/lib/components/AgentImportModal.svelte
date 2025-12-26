@@ -265,8 +265,9 @@
 							<h4 class="text-sm font-medium text-foreground">Import Options</h4>
 
 							<div>
-								<label class="block text-xs text-muted-foreground mb-1.5">Name (required)</label>
+								<label for="import-agent-name" class="block text-xs text-muted-foreground mb-1.5">Name (required)</label>
 								<input
+									id="import-agent-name"
 									bind:value={overrideName}
 									class="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
 									placeholder="Agent name"
@@ -274,8 +275,9 @@
 							</div>
 
 							<div>
-								<label class="block text-xs text-muted-foreground mb-1.5">ID (optional - auto-generated if empty)</label>
+								<label for="import-agent-id" class="block text-xs text-muted-foreground mb-1.5">ID (optional - auto-generated if empty)</label>
 								<input
+									id="import-agent-id"
 									bind:value={overrideId}
 									class="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 font-mono"
 									placeholder="my-agent-id"

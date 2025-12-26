@@ -19,8 +19,8 @@
   let searchQuery = $state('');
   let commands = $state<Command[]>([]);
   let selectedIndex = $state(0);
-  let searchInput: HTMLInputElement;
-  let listElement: HTMLDivElement;
+  let searchInput = $state<HTMLInputElement | undefined>(undefined);
+  let listElement = $state<HTMLDivElement | undefined>(undefined);
 
   // Quick actions
   const quickActions = [
