@@ -1,4 +1,4 @@
-# AI Hub
+# AI Shuffle
 A full-featured web interface and API server for Claude Code, providing a Claude.ai-like chat experience with multi-user support, API access, and advanced AI agent management.
 
 ![Version](https://img.shields.io/badge/version-4.0.0-blue)
@@ -38,7 +38,7 @@ A full-featured web interface and API server for Claude Code, providing a Claude
 
 ## Overview
 
-AI Hub lets you self-host a Claude Code web interface and access Claude's capabilities without the cost of API keys. It acts as a bridge between Claude Code CLI and your applications, exposing Claude through:
+AI Shuffle lets you self-host a Claude Code web interface and access Claude's capabilities without the cost of API keys. It acts as a bridge between Claude Code CLI and your applications, exposing Claude through:
 
 - **Web UI** - Modern chat interface similar to Claude.ai
 - **REST API** - OpenAI-compatible endpoints for programmatic access
@@ -86,8 +86,8 @@ No API keys required (Can be used though *requires login from cli inside contain
 ### Docker Compose (Recommended)
 
 # Pull and run
-docker pull ghcr.io/quickkill0/ai-hub:latest
-docker run -d -p 8000:8000 -v ai-hub-data:/data ghcr.io/quickkill0/ai-hub:latest
+docker pull ghcr.io/quickkill0/ai-shuffle:latest
+docker run -d -p 8000:8000 -v ai-shuffle-data:/data ghcr.io/quickkill0/ai-shuffle:latest
 
 ### First-Time Setup
 
@@ -116,7 +116,7 @@ docker run -d -p 8000:8000 -v ai-hub-data:/data ghcr.io/quickkill0/ai-hub:latest
 |--------|----------------|---------|
 | `claude-auth` | `/home/appuser/.claude` | Claude OAuth credentials |
 | `gh-auth` | `/home/appuser/.config/gh` | GitHub CLI authentication |
-| `ai-hub-data` | `/data` | SQLite database |
+| `ai-shuffle-data` | `/data` | SQLite database |
 | `workspace` | `/workspace` | Project files |
 
 ## Architecture
@@ -219,7 +219,7 @@ npm run build
 ### Project Structure
 
 ```
-ai-hub/
+ai-shuffle/
 ├── app/                    # FastAPI application
 │   ├── main.py             # Entry point
 │   ├── api/                # Route handlers

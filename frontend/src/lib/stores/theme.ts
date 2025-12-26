@@ -18,7 +18,7 @@ interface ThemeState {
 	resolved: 'light' | 'dark'; // Actual applied theme
 }
 
-const STORAGE_KEY = 'ai-hub-theme';
+const STORAGE_KEY = 'ai-shuffle-theme';
 
 function getSystemTheme(): 'light' | 'dark' {
 	if (!browser) return 'dark';

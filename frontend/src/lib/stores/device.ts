@@ -5,7 +5,7 @@
 
 import { readable } from 'svelte/store';
 
-const DEVICE_ID_KEY = 'ai-hub-device-id';
+const DEVICE_ID_KEY = 'ai-shuffle-device-id';
 
 /**
  * Generate a UUID v4

@@ -1,7 +1,7 @@
-// AI Hub Service Worker
+// AI Shuffle Service Worker
 // Version: 1.0.2
 
-const CACHE_NAME = 'ai-hub-v2';
+const CACHE_NAME = 'ai-shuffle-v2';
 const OFFLINE_URL = '/offline.html';
 
 // Static assets to cache on install
@@ -128,7 +128,7 @@ async function handleRequest(request, url) {
   if (url.pathname.startsWith('/api/')) {
     // For session list and chat history, cache for offline reading
     if (url.pathname.includes('/sessions') || url.pathname.includes('/messages')) {
-      const response = await CACHE_STRATEGIES.networkFirst(request, 'ai-hub-api-v1');
+      const response = await CACHE_STRATEGIES.networkFirst(request, 'ai-shuffle-api-v1');
       if (response) {
         return response;
       }
@@ -238,7 +238,7 @@ self.addEventListener('push', (event) => {
   };
 
   event.waitUntil(
-    self.registration.showNotification(data.title || 'AI Hub', options)
+    self.registration.showNotification(data.title || 'AI Shuffle', options)
   );
 });
 

@@ -49,7 +49,7 @@
 	<!-- Prevent flash of wrong theme by applying theme class before paint -->
 	{@html `<script>
 		(function() {
-			var stored = localStorage.getItem('ai-hub-theme');
+			var stored = localStorage.getItem('ai-shuffle-theme');
 			var theme = stored || 'system';
 			var resolved = theme;
 			if (theme === 'system') {

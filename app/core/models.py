@@ -735,7 +735,7 @@ class AgentExportData(BaseModel):
 class AgentExport(BaseModel):
     """Full agent export format"""
     version: str = "1.0"
-    type: str = "ai-hub-agent"
+    type: str = "ai-shuffle-agent"
     exported_at: str
     agent: AgentExportData
 
@@ -743,7 +743,7 @@ class AgentExport(BaseModel):
 class AgentImportRequest(BaseModel):
     """Request to import an agent from JSON data"""
     version: str = Field(..., description="Export format version")
-    type: str = Field(..., description="Must be 'ai-hub-agent'")
+    type: str = Field(..., description="Must be 'ai-shuffle-agent'")
     exported_at: Optional[str] = None
     agent: AgentExportData
 

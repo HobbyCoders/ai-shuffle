@@ -1,6 +1,6 @@
-# AI Hub - Local Installation Guide
+# AI Shuffle - Local Installation Guide
 
-Run AI Hub directly on your PC without Docker! Perfect for game development, local file access, and working with native applications.
+Run AI Shuffle directly on your PC without Docker! Perfect for game development, local file access, and working with native applications.
 
 ## Quick Start
 
@@ -43,8 +43,8 @@ If you prefer to set things up manually:
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/yourusername/ai-hub.git
-cd ai-hub
+git clone https://github.com/yourusername/ai-shuffle.git
+cd ai-shuffle
 ```
 
 ### 2. Create Virtual Environment
@@ -115,13 +115,13 @@ COOKIE_SECURE=false
 
 ### Data Locations
 
-In local mode, AI Hub stores data in platform-specific locations:
+In local mode, AI Shuffle stores data in platform-specific locations:
 
 | Platform | Data Directory | Workspace |
 |----------|---------------|-----------|
-| Windows | `%APPDATA%\ai-hub` | `Documents\ai-hub-workspace` |
-| macOS | `~/Library/Application Support/ai-hub` | `~/ai-hub-workspace` |
-| Linux | `~/.local/share/ai-hub` | `~/ai-hub-workspace` |
+| Windows | `%APPDATA%\ai-shuffle` | `Documents\ai-shuffle-workspace` |
+| macOS | `~/Library/Application Support/ai-shuffle` | `~/ai-shuffle-workspace` |
+| Linux | `~/.local/share/ai-shuffle` | `~/ai-shuffle-workspace` |
 
 Override with environment variables:
 ```env
@@ -183,13 +183,13 @@ The SQLite database is stored in your data directory. To reset:
 ```bash
 # Find and delete db.sqlite
 # Windows:
-del "%APPDATA%\ai-hub\db.sqlite"
+del "%APPDATA%\ai-shuffle\db.sqlite"
 
 # macOS:
-rm ~/Library/Application\ Support/ai-hub/db.sqlite
+rm ~/Library/Application\ Support/ai-shuffle/db.sqlite
 
 # Linux:
-rm ~/.local/share/ai-hub/db.sqlite
+rm ~/.local/share/ai-shuffle/db.sqlite
 ```
 
 ## Development Mode
@@ -237,4 +237,4 @@ cd ..
 
 - Check prerequisites: `python run_local.py --check`
 - View logs: Check terminal output
-- Report issues: https://github.com/yourusername/ai-hub/issues
+- Report issues: https://github.com/yourusername/ai-shuffle/issues
