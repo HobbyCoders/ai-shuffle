@@ -39,6 +39,7 @@
 	// Deck components
 	import { DeckLayout } from '$lib/components/deck';
 	import { StudioView } from '$lib/components/deck/studio';
+	import { FilesView } from '$lib/components/deck/files';
 	import {
 		Workspace,
 		ChatCard,
@@ -1534,18 +1535,8 @@
 		{:else if activeMode === 'studio'}
 			<StudioView />
 		{:else}
-			<!-- Files mode placeholder -->
-			<div class="flex items-center justify-center h-full">
-				<div class="text-center">
-					<div class="w-16 h-16 mx-auto mb-4 rounded-2xl bg-muted/50 flex items-center justify-center">
-						<svg class="w-8 h-8 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-						</svg>
-					</div>
-					<p class="text-lg text-muted-foreground mb-2">File Browser</p>
-					<p class="text-sm text-muted-foreground/70">Coming soon</p>
-				</div>
-			</div>
+			<!-- Files workspace -->
+			<FilesView />
 		{/if}
 	</DeckLayout>
 
