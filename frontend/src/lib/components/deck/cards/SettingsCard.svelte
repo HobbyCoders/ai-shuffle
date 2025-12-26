@@ -806,7 +806,7 @@
 		audioConfigError = '';
 		audioConfigSuccess = '';
 		try {
-			await api.patch<{success: boolean, model: string}>('/settings/integrations/stt', {
+			await api.patch<{success: boolean, model: string}>('/settings/integrations/audio/stt', {
 				model: selectedSttModel
 			});
 			currentSttModel = selectedSttModel;
