@@ -1063,7 +1063,7 @@
 		flex-wrap: wrap;
 	}
 
-	.subagent-card :global(.card-footer) .card-btn-primary {
+	.subagent-card :global(.card-footer .card-btn-primary) {
 		flex: 1;
 	}
 </style>
