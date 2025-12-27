@@ -11,7 +11,7 @@
 </script>
 
 <div class="title-container" class:mounted>
-	<span class="title-prefix">ai</span>
+	<span class="title-prefix">AI</span>
 	<div class="title-deck">
 		{#each letters as letter, i}
 			<span class="title-letter" style="--delay: {i * 60}ms" class:gold={i === 0}>
@@ -36,7 +36,7 @@
 		font-weight: 500;
 		letter-spacing: 0.5em;
 		color: var(--muted-foreground);
-		text-transform: lowercase;
+		text-transform: uppercase;
 		opacity: 0;
 		transform: translateY(15px);
 		transition:

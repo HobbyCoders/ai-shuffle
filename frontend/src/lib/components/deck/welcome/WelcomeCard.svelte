@@ -101,9 +101,6 @@
 	}
 
 	.welcome-card:hover {
-		transform: rotateZ(0deg) rotateY(var(--mouse-x)) rotateX(var(--mouse-y)) translateY(-12px)
-			scale(1.04);
-
 		border-color: var(--gold);
 
 		box-shadow:
@@ -113,6 +110,22 @@
 			inset 0 1px 0 rgba(255, 255, 255, 0.05);
 
 		z-index: 10;
+		animation: cardBounce 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+	}
+
+	@keyframes cardBounce {
+		0% {
+			transform: rotateZ(var(--rotation)) rotateY(var(--mouse-x)) rotateX(var(--mouse-y));
+		}
+		40% {
+			transform: rotateZ(0deg) rotateY(var(--mouse-x)) rotateX(var(--mouse-y)) translateY(-18px) scale(1.06);
+		}
+		70% {
+			transform: rotateZ(0deg) rotateY(var(--mouse-x)) rotateX(var(--mouse-y)) translateY(-10px) scale(1.03);
+		}
+		100% {
+			transform: rotateZ(0deg) rotateY(var(--mouse-x)) rotateX(var(--mouse-y)) translateY(-12px) scale(1.04);
+		}
 	}
 
 	.welcome-card:active {

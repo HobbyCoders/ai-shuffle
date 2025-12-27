@@ -6,7 +6,7 @@
 	 * Switches to horizontal layout on mobile.
 	 */
 
-	import { Plus, Monitor, Palette, FolderOpen, Settings, LogOut } from 'lucide-svelte';
+	import { Plus, Monitor, Sparkles, FolderOpen, Settings, LogOut } from 'lucide-svelte';
 	import { auth } from '$lib/stores/auth';
 	import type { ActivityMode, ActivityBadges } from './types';
 
@@ -95,7 +95,7 @@
 					{#if activity.mode === 'workspace'}
 						<Monitor size={22} strokeWidth={1.5} />
 					{:else if activity.mode === 'studio'}
-						<Palette size={22} strokeWidth={1.5} />
+						<Sparkles size={22} strokeWidth={1.5} />
 					{:else if activity.mode === 'files'}
 						<FolderOpen size={22} strokeWidth={1.5} />
 					{/if}
@@ -355,6 +355,8 @@
 		flex-direction: column;
 		gap: 4px;
 		flex: 1;
+		padding: 0 8px;
+		width: 100%;
 	}
 
 	.mobile .activities {
@@ -368,14 +370,14 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 48px;
-		height: 48px;
+		width: 100%;
+		height: 56px;
 		background: transparent;
 		border: none;
-		border-radius: 12px;
+		border-radius: 10px;
 		color: var(--muted-foreground);
 		cursor: pointer;
-		transition: all 0.2s ease;
+		transition: all 0.25s ease;
 		-webkit-tap-highlight-color: transparent;
 	}
 
@@ -389,7 +391,7 @@
 
 	.activity-button:hover {
 		color: var(--foreground);
-		background: color-mix(in srgb, var(--foreground) 8%, transparent);
+		background: color-mix(in srgb, var(--activity-color) 8%, transparent);
 	}
 
 	.activity-button:active {
@@ -398,8 +400,19 @@
 
 	.activity-button.active {
 		color: var(--activity-color);
-		background: color-mix(in srgb, var(--activity-color) 15%, transparent);
-		box-shadow: 0 0 16px -2px color-mix(in srgb, var(--activity-color) 30%, transparent);
+		background: linear-gradient(135deg,
+			color-mix(in srgb, var(--activity-color) 15%, transparent) 0%,
+			color-mix(in srgb, var(--activity-color) 8%, transparent) 100%
+		);
+	}
+
+	.activity-button.active .icon-wrapper {
+		background: color-mix(in srgb, var(--activity-color) 20%, transparent);
+		box-shadow: 0 0 16px color-mix(in srgb, var(--activity-color) 30%, transparent);
+	}
+
+	.activity-button.active :global(svg) {
+		filter: drop-shadow(0 0 6px var(--activity-color));
 	}
 
 	.active-indicator {
@@ -408,10 +421,19 @@
 		top: 50%;
 		transform: translateY(-50%);
 		width: 3px;
-		height: 24px;
+		height: 28px;
 		background: var(--activity-color);
-		border-radius: 0 2px 2px 0;
-		box-shadow: 0 0 12px var(--activity-color), 0 0 24px color-mix(in srgb, var(--activity-color) 60%, transparent);
+		border-radius: 0 3px 3px 0;
+		box-shadow:
+			0 0 12px var(--activity-color),
+			0 0 24px color-mix(in srgb, var(--activity-color) 60%, transparent),
+			4px 0 16px color-mix(in srgb, var(--activity-color) 40%, transparent);
+		animation: pulseGlow 2s ease-in-out infinite;
+	}
+
+	@keyframes pulseGlow {
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0.7; }
 	}
 
 	.mobile .active-indicator {
@@ -428,6 +450,10 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
+		width: 40px;
+		height: 40px;
+		border-radius: 10px;
+		transition: all 0.25s ease;
 	}
 
 	.badge {
