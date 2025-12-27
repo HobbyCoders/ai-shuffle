@@ -3,7 +3,7 @@
 	 * CreateMenu - Card Fan-Out menu for creating new cards
 	 * Casino-themed dropdown with staggered card dealing animation
 	 */
-	import { MessageSquare, Terminal, User, FolderKanban, Settings, UserCog, Bot } from 'lucide-svelte';
+	import { MessageSquare, Terminal, User, FolderKanban, Settings, UserCog, Bot, Image, Box, AudioLines, Files } from 'lucide-svelte';
 
 	interface Props {
 		open: boolean;
@@ -15,6 +15,10 @@
 		onOpenSubagents: () => void;
 		onOpenSettings: () => void;
 		onOpenUserSettings?: () => void;
+		onOpenImageStudio?: () => void;
+		onOpenModelStudio?: () => void;
+		onOpenAudioStudio?: () => void;
+		onOpenFileBrowser?: () => void;
 		isAdmin?: boolean;
 		anchorPosition?: 'left' | 'right';
 		isMobile?: boolean;
@@ -30,6 +34,10 @@
 		onOpenSubagents,
 		onOpenSettings,
 		onOpenUserSettings,
+		onOpenImageStudio,
+		onOpenModelStudio,
+		onOpenAudioStudio,
+		onOpenFileBrowser,
 		isAdmin = false,
 		anchorPosition = 'left',
 		isMobile = false
@@ -50,7 +58,13 @@
 		}> = [
 			{ id: 'chat', label: 'New Chat', icon: MessageSquare, shortcut: '⌘N', action: onCreateChat, suit: '♠' },
 			{ id: 'terminal', label: 'Terminal', icon: Terminal, shortcut: '⌘T', action: onCreateTerminal, suit: '♦' },
-			{ id: 'divider', label: '', icon: null, shortcut: '', action: () => {}, suit: '' }
+			{ id: 'divider1', label: '', icon: null, shortcut: '', action: () => {}, suit: '' },
+			// Studio cards
+			{ id: 'image-studio', label: 'Image Studio', icon: Image, shortcut: '', action: onOpenImageStudio || (() => {}), suit: '♥' },
+			{ id: 'model-studio', label: '3D Models', icon: Box, shortcut: '', action: onOpenModelStudio || (() => {}), suit: '♣' },
+			{ id: 'audio-studio', label: 'Audio Studio', icon: AudioLines, shortcut: '', action: onOpenAudioStudio || (() => {}), suit: '♠' },
+			{ id: 'file-browser', label: 'Files', icon: Files, shortcut: '', action: onOpenFileBrowser || (() => {}), suit: '♦' },
+			{ id: 'divider2', label: '', icon: null, shortcut: '', action: () => {}, suit: '' }
 		];
 
 		if (isAdmin) {
@@ -102,7 +116,7 @@
 		>
 			<!-- Menu Cards - Fan out animation -->
 			{#each menuItems as item, index}
-				{#if item.id === 'divider'}
+				{#if item.id.startsWith('divider')}
 					<div class="menu-divider" style="--card-index: {index}"></div>
 				{:else}
 					<button
@@ -157,7 +171,7 @@
 
 	.create-menu {
 		position: fixed;
-		top: 16px;
+		bottom: 96px; /* Above the floating dealer button */
 		display: flex;
 		flex-direction: column;
 		gap: 0;
@@ -165,17 +179,16 @@
 	}
 
 	.create-menu.anchor-left {
-		left: 88px; /* 76px rail width + 12px padding */
+		left: 24px;
 	}
 
 	.create-menu.anchor-right {
-		right: 12px;
+		right: 24px;
 	}
 
 	.create-menu.mobile {
 		position: fixed;
-		top: auto;
-		bottom: 80px;
+		bottom: 100px;
 		left: 50%;
 		transform: translateX(-50%);
 	}

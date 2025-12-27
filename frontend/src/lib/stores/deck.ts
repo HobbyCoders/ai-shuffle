@@ -38,7 +38,10 @@ export type DeckCardType =
 	| 'profile'
 	| 'terminal'
 	| 'subagent'
-	| 'project';
+	| 'project'
+	| 'image-studio'
+	| 'model-studio'
+	| 'audio-studio';
 
 export type SnapZone =
 	| 'left'

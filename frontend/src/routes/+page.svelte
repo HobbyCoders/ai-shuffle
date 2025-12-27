@@ -38,8 +38,6 @@
 
 	// Deck components
 	import { DeckLayout } from '$lib/components/deck';
-	import { StudioView } from '$lib/components/deck/studio';
-	import { FilesView } from '$lib/components/deck/files';
 	import {
 		Workspace,
 		ChatCard,
@@ -51,7 +49,11 @@
 		SubagentCard,
 		SettingsCard,
 		UserSettingsCard,
-		CardShuffle
+		CardShuffle,
+		ImageStudioCard,
+		ModelStudioCard,
+		AudioStudioCard,
+		FileBrowserCard
 	} from '$lib/components/deck/cards';
 	import type { CardType, DeckCard as CardsDeckCard } from '$lib/components/deck/cards/types';
 
@@ -482,6 +484,14 @@
 				return 'subagent';
 			case 'project':
 				return 'project';
+			case 'image-studio':
+				return 'image-studio';
+			case 'model-studio':
+				return 'model-studio';
+			case 'audio-studio':
+				return 'audio-studio';
+			case 'file-browser':
+				return 'file-browser';
 			default:
 				return 'chat';
 		}
@@ -996,6 +1006,26 @@
 				title = 'My Settings';
 				break;
 			}
+			case 'image-studio': {
+				deckCardType = 'image-studio';
+				title = 'Image Studio';
+				break;
+			}
+			case 'model-studio': {
+				deckCardType = 'model-studio';
+				title = '3D Models';
+				break;
+			}
+			case 'audio-studio': {
+				deckCardType = 'audio-studio';
+				title = 'Audio Studio';
+				break;
+			}
+			case 'file-browser': {
+				deckCardType = 'file-browser';
+				title = 'Files';
+				break;
+			}
 			default:
 				deckCardType = 'chat';
 				title = 'New Card';
@@ -1280,8 +1310,7 @@
 		}}
 		onProcessClick={() => {}}
 	>
-		{#if activeMode === 'workspace'}
-			{#if isMobile}
+		{#if isMobile}
 				<!-- Mobile Workspace -->
 				<MobileWorkspace
 					cards={workspaceCards}
@@ -1375,7 +1404,47 @@
 								{card}
 								mobile={true}
 								onClose={() => handleCardClose(card.id)}
-																onMaximize={() => handleCardMaximize(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
+						{:else if card.type === 'image-studio'}
+							<ImageStudioCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
+						{:else if card.type === 'model-studio'}
+							<ModelStudioCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
+						{:else if card.type === 'audio-studio'}
+							<AudioStudioCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
+						{:else if card.type === 'file-browser'}
+							<FileBrowserCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
 								onFocus={() => handleCardFocus(card.id)}
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1511,7 +1580,51 @@
 										<ProjectCard
 											{card}
 											onClose={() => handleCardClose(card.id)}
-																						onMaximize={() => handleCardMaximize(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
+										/>
+									{:else if card.type === 'image-studio'}
+										<ImageStudioCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
+										/>
+									{:else if card.type === 'model-studio'}
+										<ModelStudioCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
+										/>
+									{:else if card.type === 'audio-studio'}
+										<AudioStudioCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
+										/>
+									{:else if card.type === 'file-browser'}
+										<FileBrowserCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
 											onFocus={() => handleCardFocus(card.id)}
 											onMove={(x, y) => handleCardMove(card.id, x, y)}
 											onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1530,12 +1643,6 @@
 						{/each}
 					{/snippet}
 				</Workspace>
-			{/if}
-		{:else if activeMode === 'studio'}
-			<StudioView />
-		{:else}
-			<!-- Files workspace -->
-			<FilesView />
 		{/if}
 	</DeckLayout>
 
@@ -1554,6 +1661,10 @@
 		onOpenSubagents={() => handleCreateCard('subagent')}
 		onOpenSettings={() => handleCreateCard('settings')}
 		onOpenUserSettings={() => handleCreateCard('user-settings')}
+		onOpenImageStudio={() => handleCreateCard('image-studio')}
+		onOpenModelStudio={() => handleCreateCard('model-studio')}
+		onOpenAudioStudio={() => handleCreateCard('audio-studio')}
+		onOpenFileBrowser={() => handleCreateCard('file-browser')}
 		isAdmin={$isAdmin}
 		{isMobile}
 	/>
