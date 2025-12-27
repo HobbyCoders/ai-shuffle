@@ -58,10 +58,21 @@
 		/* Scrollbar colors */
 		--scrollbar-thumb: oklch(0.35 0.01 260);
 		--scrollbar-thumb-hover: oklch(0.45 0.01 260);
+		--scrollbar-track: transparent;
 
 		/* Glass effects */
 		--glass-bg: oklch(0.18 0.01 260 / 0.8);
 		--glass-border: oklch(0.4 0.01 260 / 0.15);
+		--glass-blur: 12px;
+
+		/* Border variations */
+		--border-subtle: oklch(0.28 0.01 260 / 0.1);
+		--border-medium: oklch(0.28 0.01 260 / 0.2);
+
+		/* Primary variations */
+		--primary-10: oklch(0.72 0.14 180 / 0.1);
+		--primary-20: oklch(0.72 0.14 180 / 0.2);
+		--primary-30: oklch(0.72 0.14 180 / 0.3);
 
 		/* Floating panel */
 		--panel-bg: oklch(0.16 0.012 260 / 0.85);
@@ -797,6 +808,22 @@ button, a, .clickable {
 
 .theme-toggle-icon.rotating {
 	transform: rotate(180deg);
+}
+
+/* Custom scrollbar styling */
+.custom-scrollbar::-webkit-scrollbar {
+	width: 8px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+	background: var(--scrollbar-track);
+	border-radius: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+	background: var(--scrollbar-thumb);
+	border-radius: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+	background: var(--primary-30);
 }
 
 /* Floating Island Input Container */
