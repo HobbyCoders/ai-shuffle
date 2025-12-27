@@ -1,3 +1,6 @@
+/* Playfair Display for welcome page display text */
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -10,6 +13,32 @@
 	.dark {
 		/* Background colors */
 		--background: oklch(0.14 0.008 260);
+
+		/* Casino Noir Palette - Welcome Page */
+		--felt: oklch(0.12 0.03 145);
+		--felt-highlight: oklch(0.15 0.035 145);
+		--felt-deep: oklch(0.08 0.02 145);
+		--spotlight: oklch(0.92 0.05 85);
+		--gold: oklch(0.72 0.15 85);
+		--gold-dim: oklch(0.58 0.12 85);
+		--gold-bright: oklch(0.82 0.18 85);
+		--gold-glow: oklch(0.72 0.15 85 / 0.3);
+		--gold-glow-strong: oklch(0.72 0.15 85 / 0.5);
+		--card-surface-welcome: oklch(0.16 0.01 260);
+		--card-bg-welcome: oklch(0.13 0.008 260);
+
+		/* Dealer Button */
+		--dealer-white: #f8f6f0;
+		--dealer-cream: #e8e4d9;
+		--dealer-shadow: #d4d0c5;
+		--dealer-text: #1a1a1a;
+
+		/* Menu Card */
+		--menu-card-bg: oklch(0.14 0.015 260);
+		--menu-card-border: oklch(0.25 0.01 260);
+
+		/* Display font */
+		--font-display: 'Playfair Display', Georgia, serif;
 		--foreground: oklch(0.95 0.01 260);
 
 		/* Elevated surfaces */
@@ -98,6 +127,16 @@
 		/* Background colors */
 		--background: oklch(0.98 0.005 260);
 		--foreground: oklch(0.15 0.01 260);
+
+		/* Casino Noir Palette - Light theme variant */
+		--felt: oklch(0.94 0.02 90);
+		--felt-highlight: oklch(0.97 0.01 90);
+		--spotlight: oklch(0.35 0.05 50);
+		--gold: oklch(0.55 0.15 70);
+		--gold-glow: oklch(0.55 0.15 70 / 0.25);
+		--gold-glow-strong: oklch(0.55 0.15 70 / 0.4);
+		--card-surface-welcome: oklch(0.98 0.005 260);
+		--card-bg-welcome: oklch(0.96 0.003 260);
 
 		/* Elevated surfaces */
 		--card: oklch(1 0 0);

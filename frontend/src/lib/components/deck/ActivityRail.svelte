@@ -64,14 +64,16 @@
 </script>
 
 <div class="activity-rail" class:mobile={isMobile}>
-	<!-- Plus button - top on desktop, included in mobile rail -->
+	<!-- Dealer Button - Casino style plus button -->
 	<button
-		class="plus-button"
+		class="dealer-button"
 		onclick={() => onLogoClick?.()}
-		title="New"
+		title="Deal New Card"
 	>
-		<Plus size={24} strokeWidth={2} />
-		<span class="tooltip">New</span>
+		<div class="dealer-button-disc">
+			<Plus size={20} strokeWidth={2.5} class="dealer-icon" />
+		</div>
+		<span class="tooltip">Deal New Card</span>
 	</button>
 
 	<!-- Activity buttons -->
@@ -135,18 +137,50 @@
 
 <style>
 	.activity-rail {
+		position: relative;
 		display: flex;
 		flex-direction: column;
 		align-items: center;
-		width: 64px;
+		width: 76px;
 		height: 100%;
-		background: color-mix(in srgb, var(--card) 85%, transparent);
-		backdrop-filter: blur(16px);
-		-webkit-backdrop-filter: blur(16px);
-		border-right: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-		padding: 12px 0;
+		background: linear-gradient(180deg,
+			var(--felt-deep) 0%,
+			var(--felt) 15%,
+			var(--felt) 85%,
+			var(--felt-deep) 100%
+		);
+		border-right: 1px solid color-mix(in srgb, var(--border) 25%, transparent);
+		padding: 16px 0;
 		gap: 8px;
-		box-shadow: 2px 0 20px -5px rgba(0, 0, 0, 0.1);
+		box-shadow:
+			2px 0 20px rgba(0, 0, 0, 0.3),
+			inset -1px 0 0 color-mix(in srgb, var(--border) 25%, transparent);
+	}
+
+	/* Art deco ornament - top */
+	.activity-rail::before {
+		content: '';
+		position: absolute;
+		top: 12px;
+		left: 50%;
+		transform: translateX(-50%);
+		width: 40px;
+		height: 1px;
+		background: linear-gradient(90deg, transparent, var(--gold-dim), transparent);
+		opacity: 0.5;
+	}
+
+	/* Art deco ornament - bottom */
+	.activity-rail::after {
+		content: '';
+		position: absolute;
+		bottom: 12px;
+		left: 50%;
+		transform: translateX(-50%);
+		width: 40px;
+		height: 1px;
+		background: linear-gradient(90deg, transparent, var(--gold-dim), transparent);
+		opacity: 0.5;
 	}
 
 	.activity-rail.mobile {
@@ -155,81 +189,165 @@
 		height: auto;
 		min-height: 64px;
 		border-right: none;
-		border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-		/* Safe area support for notched devices */
+		border-top: 1px solid color-mix(in srgb, var(--border) 40%, transparent);
+		background: color-mix(in srgb, var(--felt) 95%, transparent);
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
 		padding: 8px 16px;
 		padding-bottom: max(12px, env(safe-area-inset-bottom, 12px));
 		padding-left: max(16px, env(safe-area-inset-left, 16px));
 		padding-right: max(16px, env(safe-area-inset-right, 16px));
 		justify-content: space-around;
-		box-shadow: 0 -2px 20px -5px rgba(0, 0, 0, 0.1);
+		box-shadow: 0 -2px 20px rgba(0, 0, 0, 0.3);
 	}
 
-	.plus-button {
+	.activity-rail.mobile::before,
+	.activity-rail.mobile::after {
+		display: none;
+	}
+
+	/* ===================================
+	   DEALER BUTTON - Casino chip style
+	   =================================== */
+
+	.dealer-button {
 		position: relative;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 40px;
-		height: 40px;
-		background: linear-gradient(135deg, var(--primary) 0%, color-mix(in srgb, var(--primary) 80%, #8b5cf6) 100%);
-		border: none;
-		border-radius: 12px;
-		color: var(--primary-foreground);
+		width: 52px;
+		height: 52px;
+		margin-bottom: 20px;
 		cursor: pointer;
-		transition: all 0.2s ease;
-		margin-bottom: 16px;
-		box-shadow: 0 4px 12px -2px color-mix(in srgb, var(--primary) 40%, transparent);
+		border: none;
+		background: transparent;
 		-webkit-tap-highlight-color: transparent;
 	}
 
-	.plus-button:hover {
-		transform: scale(1.08);
-		box-shadow: 0 6px 20px -2px color-mix(in srgb, var(--primary) 50%, transparent);
-	}
-
-	.plus-button:active {
-		transform: scale(0.95);
-	}
-
-	.mobile .plus-button {
-		margin-bottom: 0;
-		/* Apple HIG: minimum 44x44px touch target */
+	.dealer-button-disc {
+		position: relative;
 		width: 48px;
 		height: 48px;
-		border-radius: 12px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+
+		/* Classic dealer button - white/cream plastic look */
+		background:
+			radial-gradient(ellipse 80% 50% at 50% 20%,
+				rgba(255, 255, 255, 0.9) 0%,
+				transparent 60%
+			),
+			linear-gradient(180deg,
+				var(--dealer-white) 0%,
+				var(--dealer-cream) 50%,
+				var(--dealer-shadow) 100%
+			);
+
+		border-radius: 50%;
+
+		/* Embossed edge effect */
+		box-shadow:
+			inset 0 2px 4px rgba(255, 255, 255, 0.8),
+			inset 0 -3px 6px rgba(0, 0, 0, 0.15),
+			0 4px 12px rgba(0, 0, 0, 0.4),
+			0 2px 4px rgba(0, 0, 0, 0.3);
+
+		transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
 	}
 
-	.plus-button .tooltip {
+	/* Gold ring border */
+	.dealer-button-disc::before {
+		content: '';
 		position: absolute;
-		left: calc(100% + 12px);
+		inset: 4px;
+		border: 2px solid var(--gold);
+		border-radius: 50%;
+		opacity: 0.6;
+		transition: opacity 0.2s ease;
+	}
+
+	.dealer-button:hover .dealer-button-disc {
+		transform: scale(1.08) translateY(-2px);
+		box-shadow:
+			inset 0 2px 4px rgba(255, 255, 255, 0.9),
+			inset 0 -3px 6px rgba(0, 0, 0, 0.1),
+			0 8px 20px rgba(0, 0, 0, 0.5),
+			0 4px 8px rgba(0, 0, 0, 0.3),
+			0 0 20px var(--gold-glow);
+	}
+
+	.dealer-button:hover .dealer-button-disc::before {
+		opacity: 0.9;
+	}
+
+	.dealer-button:active .dealer-button-disc {
+		transform: scale(0.95);
+		transition-duration: 0.1s;
+	}
+
+	.dealer-button :global(.dealer-icon) {
+		color: var(--dealer-text);
+		filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.5));
+		transition: transform 0.25s ease;
+	}
+
+	.dealer-button:hover :global(.dealer-icon) {
+		transform: rotate(90deg);
+	}
+
+	.dealer-button .tooltip {
+		position: absolute;
+		left: calc(100% + 14px);
 		top: 50%;
-		transform: translateY(-50%);
-		padding: 6px 10px;
-		background: var(--popover);
+		transform: translateY(-50%) translateX(-4px);
+		padding: 8px 14px;
+		background: color-mix(in srgb, var(--felt) 92%, transparent);
+		backdrop-filter: blur(12px);
+		-webkit-backdrop-filter: blur(12px);
 		border: 1px solid var(--border);
-		border-radius: 6px;
+		border-radius: 8px;
 		font-size: 0.75rem;
-		color: var(--popover-foreground);
+		font-weight: 500;
+		color: var(--foreground);
 		white-space: nowrap;
 		opacity: 0;
 		visibility: hidden;
-		transition: all 0.15s ease;
+		transition: all 0.2s ease;
 		pointer-events: none;
 		z-index: 100;
-		box-shadow: var(--shadow-m);
+		box-shadow:
+			inset 3px 0 0 var(--gold),
+			0 4px 20px rgba(0, 0, 0, 0.3);
 	}
 
-	.mobile .plus-button .tooltip {
+	.dealer-button:hover .tooltip {
+		opacity: 1;
+		visibility: visible;
+		transform: translateY(-50%) translateX(0);
+	}
+
+	/* Mobile dealer button */
+	.mobile .dealer-button {
+		margin-bottom: 0;
+		width: 48px;
+		height: 48px;
+	}
+
+	.mobile .dealer-button-disc {
+		width: 44px;
+		height: 44px;
+	}
+
+	.mobile .dealer-button .tooltip {
 		left: 50%;
 		top: auto;
 		bottom: calc(100% + 12px);
-		transform: translateX(-50%);
+		transform: translateX(-50%) translateY(4px);
 	}
 
-	.plus-button:hover .tooltip {
-		opacity: 1;
-		visibility: visible;
+	.mobile .dealer-button:hover .tooltip {
+		transform: translateX(-50%) translateY(0);
 	}
 
 	.activities {
@@ -374,7 +492,7 @@
 	/* Disable tooltips on mobile - touch hover states cause layout issues */
 	.mobile .activity-button:hover .tooltip,
 	.mobile .settings-button:hover .tooltip,
-	.mobile .plus-button:hover .tooltip {
+	.mobile .dealer-button:hover .tooltip {
 		opacity: 0;
 		visibility: hidden;
 	}
@@ -435,7 +553,7 @@
 	/* Tablet adjustments - medium screens */
 	@media (min-width: 600px) and (max-width: 1024px) {
 		/* Increase icon sizes for tablet */
-		.mobile .plus-button {
+		.mobile .dealer-button {
 			width: 52px;
 			height: 52px;
 		}
@@ -477,7 +595,7 @@
 			padding-bottom: max(8px, env(safe-area-inset-bottom, 8px));
 		}
 
-		.mobile .plus-button,
+		.mobile .dealer-button,
 		.mobile .activity-button,
 		.mobile .settings-button {
 			width: 44px;
