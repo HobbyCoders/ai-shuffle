@@ -1542,11 +1542,38 @@ function createTabsStore() {
 
 			// StreamEvent handlers for real-time character-by-character streaming
 			case 'stream_start': {
-				// Start of a new streaming response - just log it
+				// Start of a new streaming response
 				// DON'T create empty message here - wait for actual content via stream_delta
 				// This prevents empty message boxes when Claude's response starts with a tool call
-				console.log('[WS] Stream start received');
-				// No message created - stream_delta will create message when text arrives
+				// BUT we can extract input token usage from the message_start event
+				const message = data.message as { usage?: Record<string, number> } | undefined;
+				const usage = message?.usage;
+				if (usage) {
+					console.log('[WS] Stream start with input usage:', usage);
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(tab => {
+							if (tab.id !== tabId) return tab;
+
+							// Extract input token counts from message_start
+							// These represent the full context sent to Claude for this turn
+							const inputTokens = usage.input_tokens || 0;
+							const cacheCreationTokens = usage.cache_creation_input_tokens || 0;
+							const cacheReadTokens = usage.cache_read_input_tokens || 0;
+
+							return {
+								...tab,
+								totalTokensIn: tab.totalTokensIn + inputTokens,
+								totalCacheCreationTokens: cacheCreationTokens,
+								totalCacheReadTokens: cacheReadTokens,
+								// Update context used based on current turn's input tokens
+								contextUsed: inputTokens + cacheCreationTokens + cacheReadTokens
+							};
+						})
+					}));
+				} else {
+					console.log('[WS] Stream start received (no usage data)');
+				}
 				break;
 			}
 
@@ -1685,9 +1712,29 @@ function createTabsStore() {
 			}
 
 			case 'stream_message_delta': {
-				// Final message metadata
-				console.log('[WS] Stream message delta received');
-				// Contains stop_reason and usage - we'll get final data from done event
+				// Final message metadata with output token usage
+				// Per Anthropic API: message_delta contains cumulative output_tokens for current response
+				const usage = data.usage as Record<string, number> | undefined;
+				if (usage && usage.output_tokens) {
+					console.log('[WS] Stream message delta with output usage:', usage);
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(tab => {
+							if (tab.id !== tabId) return tab;
+
+							// Update output token count
+							// output_tokens in message_delta is the total for this response
+							const outputTokens = usage.output_tokens || 0;
+
+							return {
+								...tab,
+								totalTokensOut: tab.totalTokensOut + outputTokens
+							};
+						})
+					}));
+				} else {
+					console.log('[WS] Stream message delta received (no output usage)');
+				}
 				break;
 			}
 
