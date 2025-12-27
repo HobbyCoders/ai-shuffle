@@ -484,35 +484,46 @@
 
 	.tooltip {
 		position: absolute;
-		left: calc(100% + 12px);
+		left: calc(100% + 14px);
 		top: 50%;
-		transform: translateY(-50%);
-		padding: 6px 10px;
-		background: var(--popover);
+		transform: translateY(-50%) translateX(-4px);
+		padding: 8px 14px;
+		background: color-mix(in srgb, var(--felt) 92%, transparent);
+		backdrop-filter: blur(12px);
+		-webkit-backdrop-filter: blur(12px);
 		border: 1px solid var(--border);
-		border-radius: 6px;
+		border-radius: 8px;
 		font-size: 0.75rem;
-		color: var(--popover-foreground);
+		font-weight: 500;
+		color: var(--foreground);
 		white-space: nowrap;
 		opacity: 0;
 		visibility: hidden;
-		transition: all 0.15s ease;
+		transition: all 0.2s ease;
 		pointer-events: none;
 		z-index: 100;
-		box-shadow: var(--shadow-m);
+		box-shadow:
+			inset 3px 0 0 var(--gold),
+			0 4px 20px rgba(0, 0, 0, 0.3);
 	}
 
 	.mobile .tooltip {
 		left: 50%;
 		top: auto;
 		bottom: calc(100% + 12px);
-		transform: translateX(-50%);
+		transform: translateX(-50%) translateY(4px);
 	}
 
 	.activity-button:hover .tooltip,
 	.settings-button:hover .tooltip {
 		opacity: 1;
 		visibility: visible;
+		transform: translateY(-50%) translateX(0);
+	}
+
+	.mobile .activity-button:hover .tooltip,
+	.mobile .settings-button:hover .tooltip {
+		transform: translateX(-50%) translateY(0);
 	}
 
 	/* Disable tooltips on mobile - touch hover states cause layout issues */

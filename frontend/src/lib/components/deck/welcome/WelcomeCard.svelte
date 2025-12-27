@@ -90,10 +90,8 @@
 		animation: dealCard 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 		animation-delay: calc(1s + var(--index) * 0.1s);
 
-		transition:
-			transform 0.12s ease-out,
-			box-shadow 0.25s ease-out,
-			border-color 0.25s ease-out;
+		/* Spring transition for hover bounce effect */
+		transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
 
 		box-shadow:
 			0 8px 24px rgba(0, 0, 0, 0.4),
@@ -101,6 +99,8 @@
 	}
 
 	.welcome-card:hover {
+		/* Straighten card, lift up with scale - spring easing creates bounce */
+		transform: rotateZ(0deg) rotateY(var(--mouse-x)) rotateX(var(--mouse-y)) translateY(-12px) scale(1.04);
 		border-color: var(--gold);
 
 		box-shadow:
@@ -110,26 +110,10 @@
 			inset 0 1px 0 rgba(255, 255, 255, 0.05);
 
 		z-index: 10;
-		animation: cardBounce 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
-	}
-
-	@keyframes cardBounce {
-		0% {
-			transform: rotateZ(var(--rotation)) rotateY(var(--mouse-x)) rotateX(var(--mouse-y));
-		}
-		40% {
-			transform: rotateZ(0deg) rotateY(var(--mouse-x)) rotateX(var(--mouse-y)) translateY(-18px) scale(1.06);
-		}
-		70% {
-			transform: rotateZ(0deg) rotateY(var(--mouse-x)) rotateX(var(--mouse-y)) translateY(-10px) scale(1.03);
-		}
-		100% {
-			transform: rotateZ(0deg) rotateY(var(--mouse-x)) rotateX(var(--mouse-y)) translateY(-12px) scale(1.04);
-		}
 	}
 
 	.welcome-card:active {
-		transform: translateY(-6px) scale(1);
+		transform: rotateZ(0deg) translateY(-6px) scale(0.98);
 		transition-duration: 0.08s;
 	}
 

@@ -36,15 +36,21 @@
 		align-items: center;
 		justify-content: center;
 
-		/* Felt background with spotlight gradient */
+		/* Felt background with dramatic spotlight gradient - matching mockup */
 		background:
 			radial-gradient(
 				ellipse 70% 55% at 50% 42%,
-				oklch(from var(--spotlight) l c h / 0.07) 0%,
-				oklch(from var(--spotlight) l c h / 0.025) 35%,
-				oklch(from var(--spotlight) l c h / 0) 65%
+				oklch(0.92 0.05 85 / 0.08) 0%,
+				oklch(0.92 0.05 85 / 0.03) 35%,
+				oklch(0.92 0.05 85 / 0) 65%
 			),
-			linear-gradient(180deg, var(--felt) 0%, var(--felt-highlight) 50%, var(--felt) 100%);
+			linear-gradient(180deg,
+				oklch(0.08 0.02 145) 0%,
+				oklch(0.12 0.03 145) 30%,
+				oklch(0.15 0.035 145) 50%,
+				oklch(0.12 0.03 145) 70%,
+				oklch(0.08 0.02 145) 100%
+			);
 
 		overflow: hidden;
 	}
