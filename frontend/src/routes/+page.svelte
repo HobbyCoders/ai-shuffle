@@ -1201,6 +1201,8 @@
 		onOpenModelStudio={() => handleCreateCard('model-studio')}
 		onOpenAudioStudio={() => handleCreateCard('audio-studio')}
 		onOpenFileBrowser={() => handleCreateCard('file-browser')}
+		onOpenProjects={() => handleCreateCard('project')}
+		onOpenProfiles={() => handleCreateCard('profile')}
 		onOpenSettings={() => handleCreateCard('settings')}
 		isAdmin={$isAdmin}
 		{isMobile}

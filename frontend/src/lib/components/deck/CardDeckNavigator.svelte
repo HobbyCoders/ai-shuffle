@@ -15,7 +15,7 @@
 	 * - AI streaming state indicators
 	 */
 
-	import { MessageSquare, Terminal, Bot, Clock, Image, Box, AudioLines, Settings, FolderOpen, X, Cpu, Files } from 'lucide-svelte';
+	import { MessageSquare, Terminal, Bot, Clock, Image, Box, AudioLines, Settings, FolderOpen, X, Cpu, Files, User } from 'lucide-svelte';
 	import { tabs, type Session } from '$lib/stores/tabs';
 	import { deck, type DeckCard as DeckCardType } from '$lib/stores/deck';
 	import { fly, fade } from 'svelte/transition';
@@ -32,6 +32,8 @@
 		onOpenModelStudio?: () => void;
 		onOpenAudioStudio?: () => void;
 		onOpenFileBrowser?: () => void;
+		onOpenProjects?: () => void;
+		onOpenProfiles?: () => void;
 		onOpenSettings?: () => void;
 		isAdmin?: boolean;
 		isMobile?: boolean;
@@ -48,6 +50,8 @@
 		onOpenModelStudio,
 		onOpenAudioStudio,
 		onOpenFileBrowser,
+		onOpenProjects,
+		onOpenProfiles,
 		onOpenSettings,
 		isAdmin = false,
 		isMobile = false
@@ -61,8 +65,7 @@
 	}
 
 	let navStack = $state<NavItem[]>([{ id: 'root', name: 'AI Shuffle', type: 'root' }]);
-	let currentView = $state<'main' | 'recent' | 'projects' | 'project-detail'>('main');
-	let selectedProjectId = $state<string | null>(null);
+	let currentView = $state<'main' | 'recent'>('main');
 
 	// Carousel state
 	let carouselRef = $state<HTMLDivElement | null>(null);
@@ -74,7 +77,7 @@
 	const DRAG_THRESHOLD = 5; // pixels before considering it a drag
 
 	// Card types for main deck
-	type CardAction = 'new-chat' | 'new-agent' | 'terminal' | 'recent' | 'image-studio' | 'model-studio' | 'audio-studio' | 'file-browser' | 'projects' | 'settings';
+	type CardAction = 'new-chat' | 'new-agent' | 'terminal' | 'recent' | 'image-studio' | 'model-studio' | 'audio-studio' | 'file-browser' | 'projects' | 'profiles' | 'settings';
 
 	interface NavigatorCard {
 		id: string;
@@ -190,19 +193,25 @@
 			}
 		];
 
-		// Add projects if there are any
-		const projects = $tabs.projects;
-		if (projects.length > 0) {
-			cards.push({
-				id: 'projects',
-				type: 'category',
-				category: 'projects',
-				title: 'Projects',
-				subtitle: `${projects.length} workspaces`,
-				icon: FolderOpen,
-				hasChildren: true
-			});
-		}
+		// Add projects card (opens project manager directly)
+		cards.push({
+			id: 'projects',
+			type: 'action',
+			action: 'projects',
+			title: 'Projects',
+			subtitle: 'Manage workspaces',
+			icon: FolderOpen
+		});
+
+		// Add profiles card
+		cards.push({
+			id: 'profiles',
+			type: 'action',
+			action: 'profiles',
+			title: 'Profiles',
+			subtitle: 'Agent configurations',
+			icon: User
+		});
 
 		// Add settings for admin
 		if (isAdmin) {
@@ -236,43 +245,11 @@
 			}));
 	});
 
-	// Build projects cards
-	const projectCards = $derived.by((): NavigatorCard[] => {
-		return $tabs.projects.map(project => {
-			const projectSessions = sessions.filter((s: Session) => s.project_id === project.id);
-			return {
-				id: `project-${project.id}`,
-				type: 'category' as const,
-				category: `project-${project.id}`,
-				title: project.name,
-				subtitle: `${projectSessions.length} conversations`,
-				icon: FolderOpen,
-				hasChildren: true
-			};
-		});
-	});
-
 	// Get current deck of cards based on view
 	const currentCards = $derived.by((): NavigatorCard[] => {
 		switch (currentView) {
 			case 'recent':
 				return recentThreadCards;
-			case 'projects':
-				return projectCards;
-			case 'project-detail':
-				if (!selectedProjectId) return [];
-				const projectSessions = sessions.filter((s: Session) => s.project_id === selectedProjectId);
-				return projectSessions.map((session: Session): NavigatorCard => ({
-					id: `thread-${session.id}`,
-					type: 'thread',
-					title: session.title || 'Untitled',
-					subtitle: '',
-					icon: MessageSquare,
-					sessionId: session.id,
-					isStreaming: isSessionStreaming(session.id),
-					messageCount: session.message_count,
-					lastActive: formatRelativeTime(session.updated_at)
-				}));
 			default:
 				return mainDeckCards;
 		}
@@ -318,6 +295,12 @@
 			case 'file-browser':
 				onOpenFileBrowser?.();
 				break;
+			case 'projects':
+				onOpenProjects?.();
+				break;
+			case 'profiles':
+				onOpenProfiles?.();
+				break;
 			case 'settings':
 				onOpenSettings?.();
 				break;
@@ -329,14 +312,6 @@
 		if (card.category === 'recent') {
 			currentView = 'recent';
 			navStack = [...navStack, { id: 'recent', name: 'Recent', type: 'category' }];
-		} else if (card.category === 'projects') {
-			currentView = 'projects';
-			navStack = [...navStack, { id: 'projects', name: 'Projects', type: 'category' }];
-		} else if (card.category?.startsWith('project-')) {
-			const projectId = card.category.replace('project-', '');
-			selectedProjectId = projectId;
-			currentView = 'project-detail';
-			navStack = [...navStack, { id: card.category, name: card.title, type: 'project' }];
 		}
 
 		// Reset scroll
@@ -354,12 +329,8 @@
 
 		if (target.type === 'root') {
 			currentView = 'main';
-			selectedProjectId = null;
 		} else if (target.id === 'recent') {
 			currentView = 'recent';
-		} else if (target.id === 'projects') {
-			currentView = 'projects';
-			selectedProjectId = null;
 		}
 
 		// Reset scroll
@@ -375,7 +346,6 @@
 		setTimeout(() => {
 			navStack = [{ id: 'root', name: 'AI Shuffle', type: 'root' }];
 			currentView = 'main';
-			selectedProjectId = null;
 			scrollProgress = 0;
 		}, 300);
 	}
