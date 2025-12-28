@@ -99,6 +99,9 @@
 	let pointerDragPosition = $state({ x: 0, y: 0 });
 	let pointerDragOffset = $state({ x: 0, y: 0 });
 	let draggedCardElement = $state<HTMLElement | null>(null);
+	let didDragInEditMode = $state(false); // Track if drag occurred to prevent click
+	let dragStartPosition = $state({ x: 0, y: 0 }); // Track start position for drag threshold
+	const DRAG_START_THRESHOLD = 8; // Pixels to move before drag starts
 
 	// Context menu state
 	let contextMenuOpen = $state(false);
@@ -396,8 +399,13 @@
 
 	// Handle card click
 	function handleCardClick(card: NavigatorCard, e: MouseEvent) {
-		// Block click if in edit mode and dragging
-		if (isEditMode && draggedCardId) return;
+		// Block click if we just finished dragging
+		if (didDragInEditMode) {
+			didDragInEditMode = false;
+			return;
+		}
+		// Block click if in edit mode and currently dragging
+		if (isEditMode && isPointerDragging) return;
 		if (hasDragged) return;
 
 		// In edit mode, show context menu on click
@@ -530,54 +538,24 @@
 	// DRAG AND DROP FOR REORDERING
 	// ========================================
 
-	function handleCardPointerDown(e: PointerEvent, card: NavigatorCard, index: number) {
-		if (!isEditMode || card.type === 'add-deck') return;
-
-		// Start long press timer for mobile
-		if (isMobile) {
-			longPressTimer = setTimeout(() => {
-				// Mobile long-press triggers edit drag
-				handleEditPointerDown(e, card, index);
-			}, LONG_PRESS_DURATION);
-		} else {
-			// Desktop: immediately start drag
-			handleEditPointerDown(e, card, index);
-		}
-	}
-
-	function handleCardPointerUp(e: PointerEvent) {
-		if (longPressTimer) {
-			clearTimeout(longPressTimer);
-			longPressTimer = null;
-		}
-		// Handle the pointer-based drag end
-		if (isPointerDragging) {
-			handleEditPointerUp(e);
-		}
-	}
-
-	function handleCardPointerMove(e: PointerEvent) {
-		// Clear long press if we're moving
-		if (longPressTimer && !isPointerDragging) {
-			const threshold = 10;
-			// If pointer has moved, cancel long press
-			clearTimeout(longPressTimer);
-			longPressTimer = null;
-		}
-		// Handle the pointer-based drag move
-		if (isPointerDragging) {
-			handleEditPointerMove(e);
-		}
-	}
-
 	// Track if we're hovering over a deck for drop-into-deck
 	let dragOverDeckId = $state<string | null>(null);
 
-	// Start pointer drag (for smooth animation)
-	function handleEditPointerDown(e: PointerEvent, card: NavigatorCard, index: number) {
+	// Pending drag state (before threshold is met)
+	let pendingDragCard = $state<NavigatorCard | null>(null);
+	let pendingDragIndex = $state<number>(-1);
+	let pendingDragElement = $state<HTMLElement | null>(null);
+
+	function handleCardPointerDown(e: PointerEvent, card: NavigatorCard, index: number) {
 		if (!isEditMode || card.type === 'add-deck') return;
 
 		const target = e.currentTarget as HTMLElement;
+
+		// Store the start position and card info
+		dragStartPosition = { x: e.clientX, y: e.clientY };
+		pendingDragCard = card;
+		pendingDragIndex = index;
+		pendingDragElement = target;
 
 		// Calculate offset from card top-left to pointer
 		const rect = target.getBoundingClientRect();
@@ -586,10 +564,25 @@
 			y: e.clientY - rect.top
 		};
 
-		draggedCardId = card.id;
-		draggedCardIndex = index;
-		draggedCardElement = target;
+		// Start long press timer for mobile
+		if (isMobile) {
+			longPressTimer = setTimeout(() => {
+				// Mobile long-press triggers drag immediately
+				startDragging(e);
+			}, LONG_PRESS_DURATION);
+		}
+
+		// Don't prevent default yet - allow click to work if no drag
+	}
+
+	function startDragging(e: PointerEvent | { clientX: number; clientY: number }) {
+		if (!pendingDragCard || !pendingDragElement) return;
+
+		draggedCardId = pendingDragCard.id;
+		draggedCardIndex = pendingDragIndex;
+		draggedCardElement = pendingDragElement;
 		isPointerDragging = true;
+		didDragInEditMode = true;
 
 		// Set initial position
 		pointerDragPosition = {
@@ -597,18 +590,61 @@
 			y: e.clientY - pointerDragOffset.y
 		};
 
-		// Capture pointer for smooth dragging
-		target.setPointerCapture(e.pointerId);
-
 		// Haptic feedback on mobile
 		if (window.navigator.vibrate) {
 			window.navigator.vibrate(50);
 		}
-
-		e.preventDefault();
 	}
 
-	function handleEditPointerMove(e: PointerEvent) {
+	function handleCardPointerUp(e: PointerEvent) {
+		// Clear long press timer
+		if (longPressTimer) {
+			clearTimeout(longPressTimer);
+			longPressTimer = null;
+		}
+
+		// Clear pending drag state
+		pendingDragCard = null;
+		pendingDragIndex = -1;
+		pendingDragElement = null;
+
+		// Handle the pointer-based drag end
+		if (isPointerDragging) {
+			handleEditPointerUp(e);
+		}
+	}
+
+	function handleCardPointerMove(e: PointerEvent) {
+		// Clear long press if we're moving (for mobile)
+		if (longPressTimer) {
+			const dx = e.clientX - dragStartPosition.x;
+			const dy = e.clientY - dragStartPosition.y;
+			const distance = Math.sqrt(dx * dx + dy * dy);
+			if (distance > DRAG_START_THRESHOLD) {
+				clearTimeout(longPressTimer);
+				longPressTimer = null;
+			}
+		}
+
+		// If we have a pending drag and haven't started yet, check threshold
+		if (pendingDragCard && !isPointerDragging && !isMobile) {
+			const dx = e.clientX - dragStartPosition.x;
+			const dy = e.clientY - dragStartPosition.y;
+			const distance = Math.sqrt(dx * dx + dy * dy);
+
+			if (distance > DRAG_START_THRESHOLD) {
+				// Start dragging
+				startDragging(e);
+			}
+		}
+
+		// Handle the pointer-based drag move
+		if (isPointerDragging) {
+			handleEditPointerMove(e);
+		}
+	}
+
+	function handleEditPointerMove(e: PointerEvent | MouseEvent) {
 		if (!isPointerDragging || !draggedCardId) return;
 
 		// Update drag position
@@ -662,11 +698,6 @@
 	function handleEditPointerUp(e: PointerEvent) {
 		if (!isPointerDragging || !draggedCardId) return;
 
-		// Release pointer capture
-		if (draggedCardElement) {
-			draggedCardElement.releasePointerCapture(e.pointerId);
-		}
-
 		// Handle drop into deck
 		if (dragOverDeckId) {
 			navigator.addCardToDeck(dragOverDeckId, draggedCardId);
@@ -700,13 +731,26 @@
 		dragOverIndex = -1;
 		dragOverDeckId = null;
 		draggedCardElement = null;
+
+		// Clear pending state
+		pendingDragCard = null;
+		pendingDragIndex = -1;
+		pendingDragElement = null;
 	}
 
 	function handleEditPointerCancel(e: PointerEvent) {
-		// Reset without applying changes
-		if (draggedCardElement) {
-			draggedCardElement.releasePointerCapture(e.pointerId);
+		// Clear long press timer
+		if (longPressTimer) {
+			clearTimeout(longPressTimer);
+			longPressTimer = null;
 		}
+
+		// Clear pending state
+		pendingDragCard = null;
+		pendingDragIndex = -1;
+		pendingDragElement = null;
+
+		// Reset drag state without applying changes
 		isPointerDragging = false;
 		draggedCardId = null;
 		draggedCardIndex = -1;
@@ -911,8 +955,8 @@
 
 <svelte:window
 	onkeydown={handleKeyDown}
-	onpointermove={isPointerDragging ? handleEditPointerMove : undefined}
-	onpointerup={isPointerDragging ? handleEditPointerUp : undefined}
+	onpointermove={(isPointerDragging || pendingDragCard) ? handleCardPointerMove : undefined}
+	onpointerup={(isPointerDragging || pendingDragCard) ? handleCardPointerUp : undefined}
 />
 
 {#if open}
