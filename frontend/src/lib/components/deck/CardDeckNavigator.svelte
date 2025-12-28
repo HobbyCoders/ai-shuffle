@@ -447,7 +447,7 @@
 	const activeDot = $derived(Math.round(scrollProgress * (dotCount - 1)));
 </script>
 
-<svelte:window on:keydown={handleKeyDown} />
+<svelte:window onkeydown={handleKeyDown} />
 
 {#if open}
 	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -483,36 +483,38 @@
 
 		<!-- Card carousel -->
 		<div class="carousel-stage">
-			<div
-				class="carousel"
-				class:dragging={isDragging}
-				bind:this={carouselRef}
-				onmousedown={handleMouseDown}
-				onmousemove={handleMouseMove}
-				onmouseup={handleMouseUp}
-				onmouseleave={handleMouseLeave}
-				ontouchstart={handleTouchStart}
-				ontouchmove={handleTouchMove}
-				ontouchend={handleTouchEnd}
-				onscroll={handleScroll}
-				role="listbox"
-				aria-label="Card navigator"
-			>
-				{#each currentCards as card, index (card.id)}
-					<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
-					<article
-						class="card"
-						class:thread-card={card.type === 'thread'}
-						data-ai-active={card.isStreaming}
-						data-has-children={card.hasChildren}
-						style="--card-index: {index}"
-						onclick={() => handleCardClick(card)}
-						onkeydown={(e) => e.key === 'Enter' && handleCardClick(card)}
-						in:fly={{ x: 60, duration: 350, delay: index * 30, easing: cubicOut }}
-						role="option"
-						tabindex="0"
-						aria-selected="false"
-					>
+			{#key currentView}
+				<div
+					class="carousel"
+					class:dragging={isDragging}
+					bind:this={carouselRef}
+					onmousedown={handleMouseDown}
+					onmousemove={handleMouseMove}
+					onmouseup={handleMouseUp}
+					onmouseleave={handleMouseLeave}
+					ontouchstart={handleTouchStart}
+					ontouchmove={handleTouchMove}
+					ontouchend={handleTouchEnd}
+					onscroll={handleScroll}
+					role="listbox"
+					aria-label="Card navigator"
+					in:fly={{ x: 100, duration: 300, easing: cubicOut }}
+					out:fly={{ x: -100, duration: 200, easing: cubicOut }}
+				>
+					{#each currentCards as card, index (card.id)}
+						<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+						<article
+							class="card"
+							class:thread-card={card.type === 'thread'}
+							data-ai-active={card.isStreaming}
+							data-has-children={card.hasChildren}
+							style:animation-delay="{index * 50}ms"
+							onclick={() => handleCardClick(card)}
+							onkeydown={(e) => e.key === 'Enter' && handleCardClick(card)}
+							role="option"
+							tabindex="0"
+							aria-selected="false"
+						>
 						<div class="card-inner">
 							{#if card.isStreaming}
 								<div class="card-status">Streaming</div>
@@ -551,7 +553,8 @@
 						<p>No items to show</p>
 					</div>
 				{/if}
-			</div>
+				</div>
+			{/key}
 
 			<!-- Scroll hint with dots -->
 			{#if currentCards.length > 3}
@@ -760,6 +763,22 @@
 		scroll-snap-align: center;
 		cursor: pointer;
 		transition: transform 0.2s var(--ease-out);
+
+		/* Staggered entrance animation - delay set via inline style */
+		opacity: 0;
+		transform: translateX(40px) scale(0.95);
+		animation: cardEnter 0.4s var(--ease-spring) forwards;
+	}
+
+	@keyframes cardEnter {
+		0% {
+			opacity: 0;
+			transform: translateX(40px) scale(0.95);
+		}
+		100% {
+			opacity: 1;
+			transform: translateX(0) scale(1);
+		}
 	}
 
 	.card:hover {
