@@ -712,6 +712,7 @@
 
 			<!-- Tab Content -->
 			<div class="card-content">
+				<div class="centered-content">
 				{#if activeTab === 'general'}
 					<!-- General Tab -->
 					<div class="card-form-section">
@@ -1328,6 +1329,7 @@
 						</div>
 					</div>
 				{/if}
+				</div>
 			</div>
 
 			<!-- Form Footer -->
@@ -1386,6 +1388,7 @@
 
 			<!-- Profile List -->
 			<div class="card-content">
+				<div class="centered-content">
 				{#if filteredProfiles.length === 0}
 					<div class="card-empty-state">
 						{#if searchQuery}
@@ -1518,6 +1521,7 @@
 						</div>
 					{/each}
 				{/if}
+				</div>
 			</div>
 
 			<!-- List Footer -->
@@ -1607,6 +1611,13 @@
 
 	.hidden {
 		display: none;
+	}
+
+	/* Centered content wrapper - prevents content from stretching too wide on large screens */
+	.centered-content {
+		width: 100%;
+		max-width: 900px;
+		margin: 0 auto;
 	}
 
 	/* Search Wrapper - for padding around search */

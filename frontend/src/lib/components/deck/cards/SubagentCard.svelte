@@ -428,6 +428,7 @@
 
 			<!-- Content -->
 			<div class="card-content">
+				<div class="centered-content">
 				{#if error}
 					<div class="card-error-banner">
 						<span class="flex-1">{error}</span>
@@ -534,6 +535,7 @@
 						</div>
 					{/each}
 				{/if}
+				</div>
 			</div>
 
 			<!-- Footer -->
@@ -602,6 +604,7 @@
 
 			<!-- Tab Content -->
 			<div class="card-content">
+				<div class="centered-content">
 				{#if error}
 					<div class="card-error-banner">
 						<span class="flex-1">{error}</span>
@@ -805,6 +808,7 @@
 						</p>
 					</div>
 				{/if}
+				</div>
 			</div>
 
 			<!-- Footer -->
@@ -858,6 +862,13 @@
 		height: 100%;
 		background: var(--card);
 		overflow: hidden;
+	}
+
+	/* Centered content wrapper - prevents content from stretching too wide on large screens */
+	.centered-content {
+		width: 100%;
+		max-width: 800px;
+		margin: 0 auto;
 	}
 
 	.hidden {
