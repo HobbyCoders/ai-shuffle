@@ -122,45 +122,12 @@
 		if (tab) tabs.setTabPermissionModeOverride(tab.id, mode);
 	}
 
-	function handleChatSettingsBackgroundModeChange(enabled: boolean) {
-		const tab = $activeTab;
-		if (tab) {
-			tabs.setTabBackgroundEnabled(tab.id, enabled);
-			if (enabled && tab.project) {
-				git.loadRepository(tab.project);
-			}
-		}
-	}
-
-	// Background config uses individual setters per field
-	interface BackgroundConfigUpdate {
-		taskName?: string;
-		branch?: string;
-		createNewBranch?: boolean;
-		autoPR?: boolean;
-		autoMerge?: boolean;
-		maxDurationMinutes?: number;
-	}
-
-	function handleChatSettingsBackgroundConfigChange(config: BackgroundConfigUpdate) {
-		const tab = $activeTab;
-		if (!tab) return;
-
-		if (config.taskName !== undefined) tabs.setTabBackgroundTaskName(tab.id, config.taskName);
-		if (config.branch !== undefined) tabs.setTabBackgroundBranch(tab.id, config.branch);
-		if (config.createNewBranch !== undefined) tabs.setTabBackgroundCreateNewBranch(tab.id, config.createNewBranch);
-		if (config.autoPR !== undefined) tabs.setTabBackgroundAutoPR(tab.id, config.autoPR);
-		if (config.autoMerge !== undefined) tabs.setTabBackgroundAutoMerge(tab.id, config.autoMerge);
-		if (config.maxDurationMinutes !== undefined) tabs.setTabBackgroundMaxDuration(tab.id, config.maxDurationMinutes);
-	}
-
 	// Derived overlay data - automatically updates when dependencies change
 	const chatSettingsOverlayData = $derived.by(() => {
 		// Compute data when desktop overlay OR mobile bottom sheet is open
 		if (overlayType !== 'chat-settings' && !showMobileSettingsSheet) return {};
 
 		const tab = $activeTab;
-		console.log('[OverlayData] Recomputing for activeTab:', tab?.id, 'backgroundEnabled:', tab?.backgroundEnabled, 'branch:', tab?.backgroundBranch);
 		if (!tab) return {};
 
 		// Get profile settings for effective values
@@ -208,30 +175,11 @@
 				{ value: 'bypassPermissions', label: 'Bypass' }
 			],
 
-			// Background mode state (from tab)
-			isBackgroundMode: tab.backgroundEnabled,
-			backgroundConfig: {
-				taskName: tab.backgroundTaskName,
-				branch: tab.backgroundBranch,
-				createNewBranch: tab.backgroundCreateNewBranch,
-				autoPR: tab.backgroundAutoPR,
-				autoMerge: tab.backgroundAutoMerge,
-				maxDurationMinutes: tab.backgroundMaxDurationMinutes
-			},
-
-			// Branch data - only show if tab has a project selected
-			branches: tab.project ? $gitBranches.filter(b => !b.remote).map(b => b.name) : [],
-			currentBranch: tab.project ? ($currentBranch?.name || 'main') : 'main',
-			defaultBranch: 'main',
-			loadingBranches: tab.project ? $gitLoading : false,
-
 			// Stable callbacks (don't change on re-render)
 			onProfileChange: handleChatSettingsProfileChange,
 			onProjectChange: handleChatSettingsProjectChange,
 			onModelChange: handleChatSettingsModelChange,
-			onModeChange: handleChatSettingsModeChange,
-			onBackgroundModeChange: handleChatSettingsBackgroundModeChange,
-			onBackgroundConfigChange: handleChatSettingsBackgroundConfigChange
+			onModeChange: handleChatSettingsModeChange
 		};
 	});
 
