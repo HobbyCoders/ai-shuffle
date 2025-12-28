@@ -14,10 +14,10 @@
 		/* Background colors */
 		--background: oklch(0.14 0.008 260);
 
-		/* Casino Noir Palette - Welcome Page */
-		--felt: oklch(0.12 0.03 145);
-		--felt-highlight: oklch(0.15 0.035 145);
-		--felt-deep: oklch(0.08 0.02 145);
+		/* Casino Noir Palette - Welcome Page (blueish-green matching UI) */
+		--felt: oklch(0.12 0.03 180);
+		--felt-highlight: oklch(0.15 0.035 180);
+		--felt-deep: oklch(0.08 0.02 180);
 		--spotlight: oklch(0.92 0.05 85);
 		--gold: oklch(0.72 0.15 85);
 		--gold-dim: oklch(0.58 0.12 85);

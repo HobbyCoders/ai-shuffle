@@ -36,7 +36,7 @@
 		align-items: center;
 		justify-content: center;
 
-		/* Felt background with dramatic spotlight gradient - matching mockup */
+		/* Felt background with dramatic spotlight gradient - blueish-green matching UI */
 		background:
 			radial-gradient(
 				ellipse 70% 55% at 50% 42%,
@@ -45,11 +45,11 @@
 				oklch(0.92 0.05 85 / 0) 65%
 			),
 			linear-gradient(180deg,
-				oklch(0.08 0.02 145) 0%,
-				oklch(0.12 0.03 145) 30%,
-				oklch(0.15 0.035 145) 50%,
-				oklch(0.12 0.03 145) 70%,
-				oklch(0.08 0.02 145) 100%
+				oklch(0.08 0.02 180) 0%,
+				oklch(0.12 0.03 180) 30%,
+				oklch(0.15 0.035 180) 50%,
+				oklch(0.12 0.03 180) 70%,
+				oklch(0.08 0.02 180) 100%
 			);
 
 		overflow: hidden;
