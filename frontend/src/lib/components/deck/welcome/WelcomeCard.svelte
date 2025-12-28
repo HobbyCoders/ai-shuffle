@@ -84,14 +84,20 @@
 
 		cursor: pointer;
 		transform-style: preserve-3d;
-		transform: rotateZ(var(--rotation)) rotateY(var(--mouse-x)) rotateX(var(--mouse-y));
+		transform:
+			rotateZ(var(--rotation))
+			rotateY(var(--mouse-x))
+			rotateX(var(--mouse-y));
 
 		opacity: 0;
 		animation: dealCard 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 		animation-delay: calc(1s + var(--index) * 0.1s);
 
-		/* Spring transition for hover bounce effect */
-		transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+		/* Spring bounce transition - cubic-bezier overshoots for bounce */
+		/* Override global * selector transition from app.css */
+		transition-property: transform, border-color, box-shadow !important;
+		transition-duration: 0.4s, 0.2s, 0.3s !important;
+		transition-timing-function: cubic-bezier(0.34, 1.56, 0.64, 1), ease, ease !important;
 
 		box-shadow:
 			0 8px 24px rgba(0, 0, 0, 0.4),
@@ -99,22 +105,30 @@
 	}
 
 	.welcome-card:hover {
-		/* Straighten card, lift up with scale - spring easing creates bounce */
-		transform: rotateZ(0deg) rotateY(var(--mouse-x)) rotateX(var(--mouse-y)) translateY(-12px) scale(1.04);
+		transform:
+			rotateZ(0deg)
+			rotateY(var(--mouse-x))
+			rotateX(var(--mouse-y))
+			translateY(-16px)
+			scale(1.06);
 		border-color: var(--gold);
 
 		box-shadow:
-			0 20px 48px rgba(0, 0, 0, 0.5),
-			0 8px 16px rgba(0, 0, 0, 0.4),
-			0 0 30px var(--gold-glow),
-			inset 0 1px 0 rgba(255, 255, 255, 0.05);
+			0 28px 56px rgba(0, 0, 0, 0.5),
+			0 14px 28px rgba(0, 0, 0, 0.4),
+			0 0 50px var(--gold-glow),
+			inset 0 1px 0 rgba(255, 255, 255, 0.08);
 
 		z-index: 10;
 	}
 
 	.welcome-card:active {
-		transform: rotateZ(0deg) translateY(-6px) scale(0.98);
-		transition-duration: 0.08s;
+		transform:
+			rotateZ(0deg)
+			translateY(-6px)
+			scale(0.97);
+		transition-duration: 0.1s !important;
+		transition-timing-function: ease-out !important;
 	}
 
 	@keyframes dealCard {
@@ -241,10 +255,11 @@
 			animation: none;
 			opacity: 1;
 			transform: rotateZ(var(--rotation, 0deg));
+			transition: border-color 0.2s ease, box-shadow 0.2s ease;
 		}
 
 		.welcome-card:hover {
-			transform: translateY(-4px);
+			transform: rotateZ(0deg) translateY(-4px);
 		}
 	}
 </style>
