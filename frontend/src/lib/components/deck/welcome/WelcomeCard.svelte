@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { Component } from 'svelte';
+	import { onMount } from 'svelte';
 
 	interface Props {
 		type: string;
@@ -18,6 +19,16 @@
 
 	let cardEl: HTMLButtonElement | undefined = $state();
 	let isHovered = $state(false);
+	let animationComplete = $state(false);
+
+	onMount(() => {
+		// Wait for deal animation to complete, then enable hover transitions
+		const delay = 1000 + index * 100 + 600; // animation-delay + animation-duration
+		const timer = setTimeout(() => {
+			animationComplete = true;
+		}, delay);
+		return () => clearTimeout(timer);
+	});
 
 	function handleMouseMove(e: MouseEvent) {
 		if (!cardEl) return;
@@ -40,6 +51,7 @@
 	bind:this={cardEl}
 	class="welcome-card"
 	class:hovered={isHovered}
+	class:animation-complete={animationComplete}
 	style="--rotation: {rotation}deg; --index: {index}"
 	onmouseenter={() => (isHovered = true)}
 	onmouseleave={handleMouseLeave}
@@ -129,6 +141,22 @@
 			scale(0.97);
 		transition-duration: 0.1s !important;
 		transition-timing-function: ease-out !important;
+	}
+
+	/* After deal animation completes, remove it to allow hover transitions */
+	.welcome-card.animation-complete {
+		animation: none;
+		opacity: 1;
+		transform: rotateZ(var(--rotation)) rotateY(var(--mouse-x)) rotateX(var(--mouse-y));
+	}
+
+	.welcome-card.animation-complete:hover {
+		transform:
+			rotateZ(0deg)
+			rotateY(var(--mouse-x))
+			rotateX(var(--mouse-y))
+			translateY(-16px)
+			scale(1.06);
 	}
 
 	@keyframes dealCard {
