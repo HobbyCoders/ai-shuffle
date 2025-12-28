@@ -67,9 +67,11 @@
 	// Carousel state
 	let carouselRef = $state<HTMLDivElement | null>(null);
 	let isDragging = $state(false);
+	let hasDragged = $state(false); // Track if user actually dragged (moved > threshold)
 	let startX = $state(0);
 	let scrollLeft = $state(0);
 	let scrollProgress = $state(0);
+	const DRAG_THRESHOLD = 5; // pixels before considering it a drag
 
 	// Card types for main deck
 	type CardAction = 'new-chat' | 'new-agent' | 'terminal' | 'recent' | 'image-studio' | 'model-studio' | 'audio-studio' | 'file-browser' | 'projects' | 'settings';
@@ -278,13 +280,22 @@
 
 	// Handle card click
 	function handleCardClick(card: NavigatorCard) {
-		if (isDragging) return;
+		// Only block click if user actually dragged
+		if (hasDragged) {
+			console.log('[CardClick] Blocked - user was dragging');
+			return;
+		}
+
+		console.log('[CardClick] Card clicked:', card.id, card.type, card.action || card.category);
 
 		if (card.type === 'action' && card.action) {
+			console.log('[CardClick] Handling action:', card.action);
 			handleAction(card.action);
 		} else if (card.type === 'category' && card.category) {
+			console.log('[CardClick] Navigating to category:', card.category);
 			navigateToCategory(card);
 		} else if (card.type === 'thread' && card.sessionId) {
+			console.log('[CardClick] Opening thread:', card.sessionId);
 			onOpenThread(card.sessionId);
 			onClose();
 		}
@@ -392,32 +403,43 @@
 	function handleMouseDown(e: MouseEvent) {
 		if (!carouselRef) return;
 		isDragging = true;
+		hasDragged = false; // Reset drag state
 		startX = e.pageX - carouselRef.offsetLeft;
 		scrollLeft = carouselRef.scrollLeft;
 	}
 
 	function handleMouseMove(e: MouseEvent) {
 		if (!isDragging || !carouselRef) return;
-		e.preventDefault();
 		const x = e.pageX - carouselRef.offsetLeft;
 		const walk = (x - startX) * 1.5;
+
+		// Only mark as dragged if moved beyond threshold
+		if (Math.abs(x - startX) > DRAG_THRESHOLD) {
+			hasDragged = true;
+			e.preventDefault();
+		}
+
 		carouselRef.scrollLeft = scrollLeft - walk;
 	}
 
 	function handleMouseUp() {
+		isDragging = false;
+		// Reset hasDragged after a short delay to allow click events to check it
 		setTimeout(() => {
-			isDragging = false;
-		}, 10);
+			hasDragged = false;
+		}, 50);
 	}
 
 	function handleMouseLeave() {
 		isDragging = false;
+		hasDragged = false;
 	}
 
 	// Touch handlers for mobile
 	function handleTouchStart(e: TouchEvent) {
 		if (!carouselRef) return;
 		isDragging = true;
+		hasDragged = false;
 		startX = e.touches[0].pageX - carouselRef.offsetLeft;
 		scrollLeft = carouselRef.scrollLeft;
 	}
@@ -426,13 +448,20 @@
 		if (!isDragging || !carouselRef) return;
 		const x = e.touches[0].pageX - carouselRef.offsetLeft;
 		const walk = (x - startX) * 1.5;
+
+		// Only mark as dragged if moved beyond threshold
+		if (Math.abs(x - startX) > DRAG_THRESHOLD) {
+			hasDragged = true;
+		}
+
 		carouselRef.scrollLeft = scrollLeft - walk;
 	}
 
 	function handleTouchEnd() {
+		isDragging = false;
 		setTimeout(() => {
-			isDragging = false;
-		}, 10);
+			hasDragged = false;
+		}, 50);
 	}
 
 	// Update scroll progress for dots
@@ -705,6 +734,8 @@
 		display: flex;
 		align-items: center;
 		overflow: hidden;
+		width: 100%;
+		min-height: 0; /* Important for flexbox */
 	}
 
 	.carousel {
@@ -712,13 +743,16 @@
 		align-items: center;
 		gap: var(--card-gap);
 		padding: 40px 60px;
-		height: 100%;
+		width: 100%;
+		min-height: var(--card-height);
+		max-height: 100%;
 		overflow-x: auto;
 		overflow-y: hidden;
 		scroll-snap-type: x mandatory;
 		scroll-behavior: smooth;
 		scrollbar-width: none;
 		cursor: grab;
+		-webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
 	}
 
 	.carousel::-webkit-scrollbar {

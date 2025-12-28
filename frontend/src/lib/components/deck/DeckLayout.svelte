@@ -229,94 +229,64 @@
 	}
 
 	/* ===================================
-	   FLOATING DEALER BUTTON
+	   FLOATING DEALER BUTTON (AI Shuffle Style)
+	   Clean rounded rectangle with + icon
 	   =================================== */
 
 	.dealer-button {
+		--btn-bg: oklch(0.17 0.01 260);
+		--btn-bg-hover: oklch(0.20 0.01 260);
+		--btn-border: rgba(255, 255, 255, 0.1);
+		--btn-border-hover: #22d3ee;
+		--btn-text: #a1a1aa;
+		--btn-text-hover: #22d3ee;
+		--btn-glow: rgba(34, 211, 238, 0.25);
+
 		position: absolute;
-		bottom: 24px;
-		left: 24px;
+		bottom: 28px;
+		left: 28px;
 		z-index: 9999;
+		width: 56px;
+		height: 56px;
+		border-radius: 16px;
+		border: 1px solid var(--btn-border);
+		cursor: pointer;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 56px;
-		height: 56px;
-		cursor: pointer;
-		border: none;
-		background: transparent;
+		background: var(--btn-bg);
+		box-shadow:
+			0 4px 20px rgba(0, 0, 0, 0.4),
+			0 0 0 1px rgba(255, 255, 255, 0.06);
+		transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 		-webkit-tap-highlight-color: transparent;
 	}
 
+	.dealer-button:hover {
+		background: var(--btn-bg-hover);
+		border-color: var(--btn-border-hover);
+		box-shadow:
+			0 8px 32px rgba(0, 0, 0, 0.5),
+			0 0 20px var(--btn-glow);
+		transform: translateY(-2px);
+	}
+
+	.dealer-button:active {
+		transform: translateY(0) scale(0.96);
+	}
+
+	/* Hide the old disc wrapper - we don't need it anymore */
 	.dealer-button-disc {
-		position: relative;
-		width: 52px;
-		height: 52px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-
-		/* Classic dealer button - white/cream plastic look */
-		background:
-			radial-gradient(ellipse 80% 50% at 50% 20%,
-				rgba(255, 255, 255, 0.9) 0%,
-				transparent 60%
-			),
-			linear-gradient(180deg,
-				var(--dealer-white) 0%,
-				var(--dealer-cream) 50%,
-				var(--dealer-shadow) 100%
-			);
-
-		border-radius: 50%;
-
-		/* Embossed edge effect */
-		box-shadow:
-			inset 0 2px 4px rgba(255, 255, 255, 0.8),
-			inset 0 -3px 6px rgba(0, 0, 0, 0.15),
-			0 4px 16px rgba(0, 0, 0, 0.4),
-			0 2px 6px rgba(0, 0, 0, 0.3);
-
-		transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
-	}
-
-	/* Gold ring border */
-	.dealer-button-disc::before {
-		content: '';
-		position: absolute;
-		inset: 4px;
-		border: 2px solid var(--gold);
-		border-radius: 50%;
-		opacity: 0.6;
-		transition: opacity 0.2s ease;
-	}
-
-	.dealer-button:hover .dealer-button-disc {
-		transform: scale(1.08) translateY(-2px);
-		box-shadow:
-			inset 0 2px 4px rgba(255, 255, 255, 0.9),
-			inset 0 -3px 6px rgba(0, 0, 0, 0.1),
-			0 8px 24px rgba(0, 0, 0, 0.5),
-			0 4px 10px rgba(0, 0, 0, 0.3),
-			0 0 24px var(--gold-glow);
-	}
-
-	.dealer-button:hover .dealer-button-disc::before {
-		opacity: 0.9;
-	}
-
-	.dealer-button:active .dealer-button-disc {
-		transform: scale(0.95);
-		transition-duration: 0.1s;
+		display: contents;
 	}
 
 	.dealer-button :global(.dealer-icon) {
-		color: var(--dealer-text);
-		filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.5));
-		transition: transform 0.25s ease;
+		color: var(--btn-text);
+		transition: all 0.2s ease;
 	}
 
 	.dealer-button:hover :global(.dealer-icon) {
+		color: var(--btn-text-hover);
 		transform: rotate(90deg);
 	}
 
@@ -327,22 +297,20 @@
 		top: 50%;
 		transform: translateY(-50%) translateX(-4px);
 		padding: 8px 14px;
-		background: color-mix(in srgb, var(--felt) 92%, transparent);
+		background: oklch(0.13 0.01 260 / 0.95);
 		backdrop-filter: blur(12px);
 		-webkit-backdrop-filter: blur(12px);
-		border: 1px solid var(--border);
+		border: 1px solid rgba(255, 255, 255, 0.1);
 		border-radius: 8px;
 		font-size: 0.75rem;
 		font-weight: 500;
-		color: var(--foreground);
+		color: #f4f4f5;
 		white-space: nowrap;
 		opacity: 0;
 		visibility: hidden;
 		transition: all 0.2s ease;
 		pointer-events: none;
-		box-shadow:
-			inset 3px 0 0 var(--gold),
-			0 4px 20px rgba(0, 0, 0, 0.3);
+		box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
 	}
 
 	.dealer-button:hover .tooltip {
@@ -353,16 +321,19 @@
 
 	/* Mobile dealer button - bottom center */
 	.dealer-button.mobile {
-		bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+		bottom: max(20px, env(safe-area-inset-bottom, 20px));
 		left: 50%;
 		transform: translateX(-50%);
 		width: 52px;
 		height: 52px;
 	}
 
-	.dealer-button.mobile .dealer-button-disc {
-		width: 48px;
-		height: 48px;
+	.dealer-button.mobile:hover {
+		transform: translateX(-50%) translateY(-2px);
+	}
+
+	.dealer-button.mobile:active {
+		transform: translateX(-50%) scale(0.96);
 	}
 
 	/* ===================================
