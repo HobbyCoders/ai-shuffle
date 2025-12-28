@@ -54,9 +54,15 @@
 		if (containerRef) {
 			isScrollingProgrammatically = true;
 			containerRef.scrollTop = containerRef.scrollHeight;
-			// Reset flag after scroll animation completes
+			// Double RAF to ensure all child components (like expanded TodoLists) have rendered
+			// First RAF: browser has painted current frame
+			// Second RAF: all layout calculations complete, scroll to true bottom
 			requestAnimationFrame(() => {
 				requestAnimationFrame(() => {
+					// Scroll again in case child components added height after initial scroll
+					if (containerRef) {
+						containerRef.scrollTop = containerRef.scrollHeight;
+					}
 					isScrollingProgrammatically = false;
 				});
 			});
@@ -142,7 +148,13 @@
 		const hasContentChange = currentContent !== prevLastContent;
 
 		if ((hasNewMessage || hasContentChange) && shouldAutoScroll && containerRef) {
-			tick().then(scrollToBottom);
+			// Use tick + RAF to ensure DOM is fully updated including child components
+			// tick() waits for Svelte's DOM updates, RAF waits for browser layout
+			tick().then(() => {
+				requestAnimationFrame(() => {
+					scrollToBottom();
+				});
+			});
 		}
 
 		// Update previous values
