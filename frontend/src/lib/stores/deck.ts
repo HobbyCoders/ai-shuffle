@@ -29,9 +29,6 @@ export type LayoutMode = 'freeflow' | 'sidebyside' | 'tile' | 'stack' | 'focus';
 
 export type DeckCardType =
 	| 'chat'
-	| 'agent'
-	| 'agent-monitor'
-	| 'agent-launcher'
 	| 'file-browser'
 	| 'settings'
 	| 'user-settings'
@@ -315,12 +312,6 @@ function getDefaultTitle(type: DeckCardType): string {
 	switch (type) {
 		case 'chat':
 			return 'New Chat';
-		case 'agent':
-			return 'Agent';
-		case 'agent-monitor':
-			return 'Agent Monitor';
-		case 'agent-launcher':
-			return 'Launch Agent';
 		case 'file-browser':
 			return 'Files';
 		case 'settings':

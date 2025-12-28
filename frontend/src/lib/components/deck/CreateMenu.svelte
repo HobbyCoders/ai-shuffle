@@ -3,13 +3,12 @@
 	 * CreateMenu - Card Fan-Out menu for creating new cards
 	 * Casino-themed dropdown with staggered card dealing animation
 	 */
-	import { MessageSquare, Terminal, User, FolderKanban, Settings, UserCog, Bot, Image, Box, AudioLines, Files, Cpu } from 'lucide-svelte';
+	import { MessageSquare, Terminal, User, FolderKanban, Settings, UserCog, Bot, Image, Box, AudioLines, Files } from 'lucide-svelte';
 
 	interface Props {
 		open: boolean;
 		onClose: () => void;
 		onCreateChat: () => void;
-		onCreateAgent: () => void;
 		onCreateTerminal: () => void;
 		onOpenProfiles: () => void;
 		onOpenProjects: () => void;
@@ -29,7 +28,6 @@
 		open,
 		onClose,
 		onCreateChat,
-		onCreateAgent,
 		onCreateTerminal,
 		onOpenProfiles,
 		onOpenProjects,
@@ -59,7 +57,6 @@
 			suit: string;
 		}> = [
 			{ id: 'chat', label: 'New Chat', icon: MessageSquare, shortcut: '⌘N', action: onCreateChat, suit: '♠' },
-			{ id: 'agent', label: 'New Agent', icon: Cpu, shortcut: '⌘⇧B', action: onCreateAgent, suit: '♦' },
 			{ id: 'terminal', label: 'Terminal', icon: Terminal, shortcut: '⌘T', action: onCreateTerminal, suit: '♥' },
 			{ id: 'divider1', label: '', icon: null, shortcut: '', action: () => {}, suit: '' },
 			// Studio cards

@@ -21,7 +21,6 @@
 		sessions,
 		sessionsTagFilter
 	} from '$lib/stores/tabs';
-	import { agents, activeAgents, allAgents, runningAgents, completedAgents, failedAgents } from '$lib/stores/agents';
 	import {
 		deck,
 		allCards,
@@ -41,7 +40,6 @@
 	import {
 		Workspace,
 		ChatCard,
-		AgentCard,
 		TerminalCard,
 		MobileWorkspace,
 		ProfileCard,
@@ -62,7 +60,6 @@
 	import AnalyticsModal from '$lib/components/AnalyticsModal.svelte';
 	import TerminalModal from '$lib/components/TerminalModal.svelte';
 	import ImportSessionModal from '$lib/components/ImportSessionModal.svelte';
-	import AgentImportModal from '$lib/components/AgentImportModal.svelte';
 	import GitModal from '$lib/components/git/GitModal.svelte';
 	import TagManager from '$lib/components/TagManager.svelte';
 	import KnowledgeManager from '$lib/components/KnowledgeManager.svelte';
@@ -107,7 +104,6 @@
 	let showAnalyticsModal = $state(false);
 	let showTerminalModal = $state(false);
 	let showImportModal = $state(false);
-	let showAgentImportModal = $state(false);
 	let showGitModal = $state(false);
 	let showTagManager = $state(false);
 	let showKnowledgeModal = $state(false);
@@ -164,8 +160,6 @@
 		switch (type) {
 			case 'chat':
 				return 'chat';
-			case 'agent':
-				return 'agent';
 			case 'terminal':
 				return 'terminal';
 			case 'settings':
@@ -268,8 +262,7 @@
 			tabs.loadProfiles(),
 			tabs.loadSessions(),
 			tabs.loadProjects(),
-			loadAllTags(),
-			agents.init() // Initialize agents store for background agent tracking
+			loadAllTags()
 		]);
 
 		if ($isAdmin) {
@@ -320,17 +313,6 @@
 				cmdOrCtrl: true,
 				category: 'chat',
 				action: () => { handleCreateCard('chat'); }
-			}),
-
-			// Background agent (Cmd+Shift+B)
-			registerShortcut({
-				id: 'new-agent',
-				description: 'New background agent',
-				key: 'b',
-				cmdOrCtrl: true,
-				shift: true,
-				category: 'general',
-				action: () => { handleCreateCard('agent'); }
 			}),
 
 			// Terminal (Cmd+T)
@@ -388,8 +370,6 @@
 						showCanvas = false;
 					} else if (showAnalyticsModal) {
 						showAnalyticsModal = false;
-					} else if (showAgentImportModal) {
-						showAgentImportModal = false;
 					} else if (showTagManager) {
 						showTagManager = false;
 					}
@@ -600,10 +580,6 @@
 				meta = { tabId };
 				break;
 			}
-			case 'agent':
-				deckCardType = 'agent';
-				title = 'Agent';
-				break;
 			case 'terminal':
 				deckCardType = 'terminal';
 				title = 'Terminal';
@@ -880,17 +856,6 @@
 									handleFork(card.id, sessionId, messageIndex, messageId)
 								}
 							/>
-						{:else if card.type === 'agent'}
-							<AgentCard
-								{card}
-								agentId={card.data?.dataId || card.data?.meta?.agentId as string}
-								mobile={true}
-								onClose={() => handleCardClose(card.id)}
-								onMaximize={() => handleCardMaximize(card.id)}
-								onFocus={() => handleCardFocus(card.id)}
-								onMove={(x, y) => handleCardMove(card.id, x, y)}
-								onResize={(w, h) => handleCardResize(card.id, w, h)}
-							/>
 						{:else if card.type === 'terminal'}
 							<TerminalCard
 								{card}
@@ -1048,18 +1013,6 @@
 												<p>Initializing chat...</p>
 											</div>
 										{/if}
-									{:else if card.type === 'agent'}
-										<AgentCard
-											{card}
-											agentId={card.data?.dataId || card.data?.meta?.agentId as string}
-											onClose={() => handleCardClose(card.id)}
-											onMaximize={() => handleCardMaximize(card.id)}
-											onFocus={() => handleCardFocus(card.id)}
-											onMove={(x, y) => handleCardMove(card.id, x, y)}
-											onResize={(w, h) => handleCardResize(card.id, w, h)}
-											onDragEnd={() => handleCardDragEnd(card.id)}
-											onResizeEnd={() => handleCardResizeEnd(card.id)}
-										/>
 									{:else if card.type === 'terminal'}
 										<TerminalCard
 											{card}
@@ -1194,7 +1147,6 @@
 		open={showCardNavigator}
 		onClose={() => showCardNavigator = false}
 		onCreateChat={() => handleCreateCard('chat')}
-		onCreateAgent={() => handleCreateCard('agent')}
 		onCreateTerminal={() => handleCreateCard('terminal')}
 		onOpenThread={handleNavigatorOpenThread}
 		onOpenImageStudio={() => handleCreateCard('image-studio')}
@@ -1213,7 +1165,6 @@
 		open={showCreateMenu}
 		onClose={() => showCreateMenu = false}
 		onCreateChat={() => handleCreateCard('chat')}
-		onCreateAgent={() => handleCreateCard('agent')}
 		onCreateTerminal={() => handleCreateCard('terminal')}
 		onOpenProfiles={() => handleCreateCard('profile')}
 		onOpenProjects={() => handleCreateCard('project')}
@@ -1289,16 +1240,6 @@
 			on:tagsUpdated={() => loadAllTags()}
 		/>
 	{/if}
-
-	<!-- Agent Import Modal -->
-	<AgentImportModal
-		show={showAgentImportModal}
-		on:close={() => showAgentImportModal = false}
-		on:imported={async () => {
-			await tabs.loadProfiles();
-			showAgentImportModal = false;
-		}}
-	/>
 
 	<!-- Knowledge Base Modal -->
 	{#if showKnowledgeModal && $activeTab?.project}

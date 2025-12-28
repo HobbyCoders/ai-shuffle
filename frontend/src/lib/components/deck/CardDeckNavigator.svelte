@@ -20,7 +20,7 @@
 	import { onMount } from 'svelte';
 	import {
 		MessageSquare, Terminal, Clock, Image, Box, AudioLines,
-		Settings, FolderOpen, X, Cpu, Files, User, Pencil, Check,
+		Settings, FolderOpen, X, Files, User, Pencil, Check,
 		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronRight
 	} from 'lucide-svelte';
 	import { tabs, type Session } from '$lib/stores/tabs';
@@ -34,7 +34,6 @@
 		open: boolean;
 		onClose: () => void;
 		onCreateChat: () => void;
-		onCreateAgent: () => void;
 		onCreateTerminal: () => void;
 		onOpenThread: (sessionId: string) => void;
 		onOpenImageStudio?: () => void;
@@ -52,7 +51,6 @@
 		open,
 		onClose,
 		onCreateChat,
-		onCreateAgent,
 		onCreateTerminal,
 		onOpenThread,
 		onOpenImageStudio,
@@ -119,7 +117,7 @@
 	let renameDeckName = $state('');
 
 	// Card types for main deck
-	type CardAction = 'new-chat' | 'new-agent' | 'terminal' | 'recent' | 'image-studio' | 'model-studio' | 'audio-studio' | 'file-browser' | 'projects' | 'profiles' | 'settings';
+	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'image-studio' | 'model-studio' | 'audio-studio' | 'file-browser' | 'projects' | 'profiles' | 'settings';
 
 	interface NavigatorCard {
 		id: string;
@@ -191,14 +189,6 @@
 				title: 'New Chat',
 				subtitle: 'Start a conversation with AI',
 				icon: MessageSquare
-			},
-			{
-				id: 'new-agent',
-				type: 'action',
-				action: 'new-agent',
-				title: 'New Agent',
-				subtitle: 'Autonomous background task',
-				icon: Cpu
 			},
 			{
 				id: 'terminal',
@@ -436,7 +426,6 @@
 		onClose();
 		switch (action) {
 			case 'new-chat': onCreateChat(); break;
-			case 'new-agent': onCreateAgent(); break;
 			case 'terminal': onCreateTerminal(); break;
 			case 'image-studio': onOpenImageStudio?.(); break;
 			case 'model-studio': onOpenModelStudio?.(); break;
