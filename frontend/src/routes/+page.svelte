@@ -972,41 +972,6 @@
 	}
 
 	// ============================================
-	// Profile/Project Card Handlers (from ChatHeader context menu)
-	// ============================================
-	function handleOpenProfileCard(editId?: string) {
-		// Find or create profile card
-		const existingProfile = $allCards.find(c => c.type === 'profile');
-		if (existingProfile) {
-			deck.focusCard(existingProfile.id);
-			// If editing a specific profile, set metadata to open in edit mode
-			if (editId) {
-				deck.setCardMeta(existingProfile.id, { editProfileId: editId });
-			}
-		} else {
-			deck.addCard('profile', {
-				title: 'Profiles',
-				meta: editId ? { editProfileId: editId } : undefined
-			});
-		}
-	}
-
-	function handleOpenProjectCard(editId?: string) {
-		// Find or create project card
-		const existingProject = $allCards.find(c => c.type === 'project');
-		if (existingProject) {
-			deck.focusCard(existingProject.id);
-			// If editing a specific project, set metadata to open in edit mode
-			if (editId) {
-				deck.setCardMeta(existingProject.id, { editProjectId: editId });
-			}
-		} else {
-			deck.addCard('project', {
-				title: 'Projects',
-				meta: editId ? { editProjectId: editId } : undefined
-			});
-		}
-	}
 
 	// ============================================
 	// Spotlight Search Handlers
@@ -1152,8 +1117,6 @@
 								onFork={(sessionId, messageIndex, messageId) =>
 									handleFork(card.id, sessionId, messageIndex, messageId)
 								}
-								onOpenProfileCard={handleOpenProfileCard}
-								onOpenProjectCard={handleOpenProjectCard}
 							/>
 						{:else if card.type === 'agent'}
 							<AgentCard
@@ -1317,8 +1280,6 @@
 												onFork={(sessionId, messageIndex, messageId) =>
 													handleFork(card.id, sessionId, messageIndex, messageId)
 												}
-												onOpenProfileCard={handleOpenProfileCard}
-												onOpenProjectCard={handleOpenProjectCard}
 											/>
 										{:else}
 											<div class="card-loading">

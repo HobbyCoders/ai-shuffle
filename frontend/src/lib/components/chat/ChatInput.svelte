@@ -3,9 +3,9 @@
 	 * ChatInput - Modern chat input island with progressive disclosure
 	 *
 	 * Layer 1: Minimal - textarea + essential buttons
-	 * Layer 2: Context Bar - clickable profile/project selectors to open cards
+	 * Layer 2: Context Bar - inline profile/project dropdown selectors
 	 */
-	import { tick, onDestroy } from 'svelte';
+	import { tick, onDestroy, onMount } from 'svelte';
 	import { tabs, profiles, projects, type ChatTab } from '$lib/stores/tabs';
 	import { claudeAuthenticated, apiUser } from '$lib/stores/auth';
 	import { api, type FileUploadResponse } from '$lib/api/client';
@@ -24,11 +24,9 @@
 		tab: ChatTab;
 		compact?: boolean;
 		onOpenTerminalModal?: (tabId: string, command: string) => void;
-		onOpenProfileCard?: (editId?: string) => void;
-		onOpenProjectCard?: (editId?: string) => void;
 	}
 
-	let { tab, compact = false, onOpenTerminalModal, onOpenProfileCard, onOpenProjectCard }: Props = $props();
+	let { tab, compact = false, onOpenTerminalModal }: Props = $props();
 
 	// Context usage calculation
 	function formatTokenCount(count: number): string {
@@ -118,19 +116,69 @@
 	// Island ref
 	let islandRef = $state<HTMLDivElement | null>(null);
 
+	// Dropdown state for profile/project selection
+	let showProfileDropdown = $state(false);
+	let showProjectDropdown = $state(false);
+	let profileDropdownRef = $state<HTMLDivElement | null>(null);
+	let projectDropdownRef = $state<HTMLDivElement | null>(null);
+
 	// Get selected profile/project names for display
 	const selectedProfileName = $derived($profiles.find(p => p.id === tab.profile)?.name || 'Profile');
 	const selectedProjectName = $derived($projects.find(p => p.id === tab.project)?.name || 'Project');
 
-	// Open profile card for changing profile
-	function handleProfileClick() {
-		onOpenProfileCard?.();
+	// Toggle profile dropdown
+	function handleProfileClick(e: MouseEvent) {
+		e.stopPropagation();
+		showProjectDropdown = false;
+		showProfileDropdown = !showProfileDropdown;
 	}
 
-	// Open project card for changing project
-	function handleProjectClick() {
-		onOpenProjectCard?.();
+	// Toggle project dropdown
+	function handleProjectClick(e: MouseEvent) {
+		e.stopPropagation();
+		showProfileDropdown = false;
+		showProjectDropdown = !showProjectDropdown;
 	}
+
+	// Select a profile
+	function selectProfile(profileId: string) {
+		tabs.setTabProfile(tab.id, profileId);
+		showProfileDropdown = false;
+	}
+
+	// Select a project
+	function selectProject(projectId: string) {
+		tabs.setTabProject(tab.id, projectId);
+		showProjectDropdown = false;
+	}
+
+	// Close dropdowns when clicking outside
+	function handleClickOutside(e: MouseEvent) {
+		const target = e.target as Node;
+		if (profileDropdownRef && !profileDropdownRef.contains(target)) {
+			showProfileDropdown = false;
+		}
+		if (projectDropdownRef && !projectDropdownRef.contains(target)) {
+			showProjectDropdown = false;
+		}
+	}
+
+	// Close dropdowns on escape
+	function handleEscape(e: KeyboardEvent) {
+		if (e.key === 'Escape') {
+			showProfileDropdown = false;
+			showProjectDropdown = false;
+		}
+	}
+
+	onMount(() => {
+		document.addEventListener('click', handleClickOutside);
+		document.addEventListener('keydown', handleEscape);
+		return () => {
+			document.removeEventListener('click', handleClickOutside);
+			document.removeEventListener('keydown', handleEscape);
+		};
+	});
 
 	// Check if input contains an active @ mention
 	function hasActiveAtMention(input: string): boolean {
@@ -560,37 +608,97 @@
 				<div class="context-bar">
 					<!-- Left: Clickable Profile & Project selectors -->
 					<div class="context-selectors">
-						<button
-							type="button"
-							class="context-selector-btn {tab.profile ? '' : 'unset'}"
-							onclick={handleProfileClick}
-							title="Change profile"
-						>
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-							</svg>
-							<span>{selectedProfileName}</span>
-							<svg class="w-3 h-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-							</svg>
-						</button>
+						<!-- Profile Selector -->
+						<div class="selector-wrapper" bind:this={profileDropdownRef}>
+							<button
+								type="button"
+								class="context-selector-btn {tab.profile ? '' : 'unset'}"
+								onclick={handleProfileClick}
+								title="Change profile"
+							>
+								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+								</svg>
+								<span>{selectedProfileName}</span>
+								<svg class="w-3 h-3 opacity-50 chevron" class:open={showProfileDropdown} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+								</svg>
+							</button>
+
+							{#if showProfileDropdown}
+								<div class="selector-dropdown">
+									{#if $profiles.length === 0}
+										<div class="dropdown-empty">No profiles available</div>
+									{:else}
+										{#each $profiles as profile}
+											<button
+												type="button"
+												class="dropdown-item"
+												class:selected={profile.id === tab.profile}
+												onclick={() => selectProfile(profile.id)}
+											>
+												<svg class="w-3.5 h-3.5 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+												</svg>
+												<span>{profile.name}</span>
+												{#if profile.id === tab.profile}
+													<svg class="w-3.5 h-3.5 ml-auto text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+													</svg>
+												{/if}
+											</button>
+										{/each}
+									{/if}
+								</div>
+							{/if}
+						</div>
 
 						<span class="context-separator">•</span>
 
-						<button
-							type="button"
-							class="context-selector-btn {tab.project ? '' : 'unset'}"
-							onclick={handleProjectClick}
-							title="Change project"
-						>
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-							</svg>
-							<span>{selectedProjectName}</span>
-							<svg class="w-3 h-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-							</svg>
-						</button>
+						<!-- Project Selector -->
+						<div class="selector-wrapper" bind:this={projectDropdownRef}>
+							<button
+								type="button"
+								class="context-selector-btn {tab.project ? '' : 'unset'}"
+								onclick={handleProjectClick}
+								title="Change project"
+							>
+								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+								</svg>
+								<span>{selectedProjectName}</span>
+								<svg class="w-3 h-3 opacity-50 chevron" class:open={showProjectDropdown} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+								</svg>
+							</button>
+
+							{#if showProjectDropdown}
+								<div class="selector-dropdown">
+									{#if $projects.length === 0}
+										<div class="dropdown-empty">No projects available</div>
+									{:else}
+										{#each $projects as project}
+											<button
+												type="button"
+												class="dropdown-item"
+												class:selected={project.id === tab.project}
+												onclick={() => selectProject(project.id)}
+											>
+												<svg class="w-3.5 h-3.5 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+												</svg>
+												<span>{project.name}</span>
+												{#if project.id === tab.project}
+													<svg class="w-3.5 h-3.5 ml-auto text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+													</svg>
+												{/if}
+											</button>
+										{/each}
+									{/if}
+								</div>
+							{/if}
+						</div>
 					</div>
 
 					<!-- Right: Context % -->
@@ -924,5 +1032,104 @@
 	.context-percent {
 		font-size: 0.6875rem;
 		font-weight: 600;
+	}
+
+	/* Selector wrapper for dropdown positioning */
+	.selector-wrapper {
+		position: relative;
+	}
+
+	/* Chevron rotation animation */
+	.chevron {
+		transition: transform 0.2s ease;
+	}
+
+	.chevron.open {
+		transform: rotate(180deg);
+	}
+
+	/* Dropdown menu */
+	.selector-dropdown {
+		position: absolute;
+		bottom: calc(100% + 4px);
+		left: 0;
+		min-width: 180px;
+		max-width: 280px;
+		max-height: 240px;
+		overflow-y: auto;
+		background: var(--popover);
+		border: 1px solid var(--border);
+		border-radius: 0.75rem;
+		box-shadow: 0 4px 16px -2px rgba(0, 0, 0, 0.15), 0 2px 8px -2px rgba(0, 0, 0, 0.1);
+		z-index: 50;
+		padding: 0.375rem;
+		animation: dropdown-fade-in 0.15s ease;
+	}
+
+	@keyframes dropdown-fade-in {
+		from {
+			opacity: 0;
+			transform: translateY(4px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
+	}
+
+	.dropdown-empty {
+		padding: 0.75rem 1rem;
+		font-size: 0.8125rem;
+		color: var(--muted-foreground);
+		text-align: center;
+	}
+
+	.dropdown-item {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		width: 100%;
+		padding: 0.5rem 0.75rem;
+		font-size: 0.8125rem;
+		color: var(--foreground);
+		background: transparent;
+		border: none;
+		border-radius: 0.5rem;
+		cursor: pointer;
+		transition: background-color 0.15s;
+		text-align: left;
+	}
+
+	.dropdown-item:hover {
+		background: var(--accent);
+	}
+
+	.dropdown-item.selected {
+		background: color-mix(in srgb, var(--primary) 12%, transparent);
+	}
+
+	.dropdown-item span {
+		flex: 1;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	/* Scrollbar styling for dropdown */
+	.selector-dropdown::-webkit-scrollbar {
+		width: 6px;
+	}
+
+	.selector-dropdown::-webkit-scrollbar-track {
+		background: transparent;
+	}
+
+	.selector-dropdown::-webkit-scrollbar-thumb {
+		background: var(--border);
+		border-radius: 3px;
+	}
+
+	.selector-dropdown::-webkit-scrollbar-thumb:hover {
+		background: var(--muted-foreground);
 	}
 </style>
