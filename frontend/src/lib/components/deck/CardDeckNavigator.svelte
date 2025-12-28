@@ -5,7 +5,7 @@
 	 * Full-screen card carousel for browsing and managing:
 	 * - Quick actions (new chat, new agent, terminal, etc.)
 	 * - Recent threads/conversations
-	 * - Projects and their threads
+	 * - Custom decks (user-created groupings)
 	 * - Studio tools
 	 *
 	 * Features:
@@ -13,13 +13,22 @@
 	 * - Sub-deck drill-down with breadcrumb navigation
 	 * - Mobile swipe gestures
 	 * - AI streaming state indicators
+	 * - Edit mode for reordering cards
+	 * - Custom deck management
 	 */
 
-	import { MessageSquare, Terminal, Bot, Clock, Image, Box, AudioLines, Settings, FolderOpen, X, Cpu, Files, User } from 'lucide-svelte';
+	import { onMount } from 'svelte';
+	import {
+		MessageSquare, Terminal, Clock, Image, Box, AudioLines,
+		Settings, FolderOpen, X, Cpu, Files, User, Pencil, Check,
+		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronRight
+	} from 'lucide-svelte';
 	import { tabs, type Session } from '$lib/stores/tabs';
 	import { deck, type DeckCard as DeckCardType } from '$lib/stores/deck';
-	import { fly, fade } from 'svelte/transition';
+	import { navigator, type CustomDeck, DECK_COLORS } from '$lib/stores/navigator';
+	import { fly, fade, scale } from 'svelte/transition';
 	import { cubicOut } from 'svelte/easing';
+	import { flip } from 'svelte/animate';
 
 	interface Props {
 		open: boolean;
@@ -61,39 +70,62 @@
 	interface NavItem {
 		id: string;
 		name: string;
-		type: 'root' | 'category' | 'project';
+		type: 'root' | 'category' | 'deck';
 	}
 
 	let navStack = $state<NavItem[]>([{ id: 'root', name: 'AI Shuffle', type: 'root' }]);
-	let currentView = $state<'main' | 'recent'>('main');
+	let currentView = $state<'main' | 'recent' | 'deck'>('main');
+	let currentDeckId = $state<string | null>(null);
 
 	// Carousel state
 	let carouselRef = $state<HTMLDivElement | null>(null);
 	let isDragging = $state(false);
-	let hasDragged = $state(false); // Track if user actually dragged (moved > threshold)
+	let hasDragged = $state(false);
 	let startX = $state(0);
 	let scrollLeft = $state(0);
 	let scrollProgress = $state(0);
-	const DRAG_THRESHOLD = 5; // pixels before considering it a drag
+	const DRAG_THRESHOLD = 5;
+
+	// Edit mode state
+	let isEditMode = $state(false);
+	let draggedCardId = $state<string | null>(null);
+	let draggedCardIndex = $state<number>(-1);
+	let dragOverIndex = $state<number>(-1);
+	let longPressTimer = $state<ReturnType<typeof setTimeout> | null>(null);
+	const LONG_PRESS_DURATION = 500;
+
+	// Context menu state
+	let contextMenuOpen = $state(false);
+	let contextMenuCardId = $state<string | null>(null);
+	let contextMenuPosition = $state({ x: 0, y: 0 });
+
+	// New deck dialog state
+	let showNewDeckDialog = $state(false);
+	let newDeckName = $state('');
 
 	// Card types for main deck
 	type CardAction = 'new-chat' | 'new-agent' | 'terminal' | 'recent' | 'image-studio' | 'model-studio' | 'audio-studio' | 'file-browser' | 'projects' | 'profiles' | 'settings';
 
 	interface NavigatorCard {
 		id: string;
-		type: 'action' | 'category' | 'thread';
+		type: 'action' | 'category' | 'thread' | 'deck' | 'add-deck';
 		action?: CardAction;
 		category?: string;
+		deckId?: string;
 		title: string;
 		subtitle: string;
 		icon: typeof MessageSquare;
+		iconColor?: string;
 		hasChildren?: boolean;
-		// Thread-specific
 		sessionId?: string;
 		isStreaming?: boolean;
 		messageCount?: number;
 		lastActive?: string;
 	}
+
+	// Get navigator state
+	const navigatorState = $derived($navigator);
+	const userDecks = $derived(navigatorState.decks);
 
 	// Get sessions from tabs store
 	const sessions = $derived($tabs.sessions);
@@ -123,8 +155,19 @@
 		return date.toLocaleDateString();
 	}
 
-	// Build main deck cards
-	const mainDeckCards = $derived.by((): NavigatorCard[] => {
+	// Get all card IDs that are in any deck
+	const cardsInDecks = $derived.by((): Set<string> => {
+		const ids = new Set<string>();
+		for (const deck of userDecks) {
+			for (const cardId of deck.cardIds) {
+				ids.add(cardId);
+			}
+		}
+		return ids;
+	});
+
+	// Build base action cards (before filtering by deck membership)
+	const baseActionCards = $derived.by((): NavigatorCard[] => {
 		const cards: NavigatorCard[] = [
 			{
 				id: 'new-chat',
@@ -190,30 +233,25 @@
 				title: 'Files',
 				subtitle: 'Browse & manage files',
 				icon: Files
+			},
+			{
+				id: 'projects',
+				type: 'action',
+				action: 'projects',
+				title: 'Projects',
+				subtitle: 'Manage workspaces',
+				icon: FolderOpen
+			},
+			{
+				id: 'profiles',
+				type: 'action',
+				action: 'profiles',
+				title: 'Profiles',
+				subtitle: 'Agent configurations',
+				icon: User
 			}
 		];
 
-		// Add projects card (opens project manager directly)
-		cards.push({
-			id: 'projects',
-			type: 'action',
-			action: 'projects',
-			title: 'Projects',
-			subtitle: 'Manage workspaces',
-			icon: FolderOpen
-		});
-
-		// Add profiles card
-		cards.push({
-			id: 'profiles',
-			type: 'action',
-			action: 'profiles',
-			title: 'Profiles',
-			subtitle: 'Agent configurations',
-			icon: User
-		});
-
-		// Add settings for admin
 		if (isAdmin) {
 			cards.push({
 				id: 'settings',
@@ -228,10 +266,53 @@
 		return cards;
 	});
 
+	// Build main deck cards (filtered - excludes cards in custom decks)
+	const mainDeckCards = $derived.by((): NavigatorCard[] => {
+		// Filter out cards that are in decks
+		const filteredCards = baseActionCards.filter(card => !cardsInDecks.has(card.id));
+
+		// Add custom deck cards
+		const deckCards: NavigatorCard[] = userDecks.map(deck => ({
+			id: `deck-${deck.id}`,
+			type: 'deck' as const,
+			deckId: deck.id,
+			title: deck.name,
+			subtitle: `${deck.cardIds.length} items`,
+			icon: Folder,
+			iconColor: deck.color,
+			hasChildren: true
+		}));
+
+		// Add "New Deck" card in edit mode
+		const addDeckCard: NavigatorCard[] = isEditMode ? [{
+			id: 'add-deck',
+			type: 'add-deck' as const,
+			title: 'New Deck',
+			subtitle: 'Create a group',
+			icon: Plus
+		}] : [];
+
+		// Sort by persisted order
+		const order = navigatorState.cardOrder;
+		const allCards = [...filteredCards, ...deckCards, ...addDeckCard];
+
+		if (order.length === 0) return allCards;
+
+		return allCards.sort((a, b) => {
+			const aIdx = order.indexOf(a.id);
+			const bIdx = order.indexOf(b.id);
+			// Unordered items go to the end
+			if (aIdx === -1 && bIdx === -1) return 0;
+			if (aIdx === -1) return 1;
+			if (bIdx === -1) return -1;
+			return aIdx - bIdx;
+		});
+	});
+
 	// Build recent threads cards
 	const recentThreadCards = $derived.by((): NavigatorCard[] => {
 		return sessions
-			.slice(0, 20) // Limit to 20 recent
+			.slice(0, 20)
 			.map((session: Session): NavigatorCard => ({
 				id: `thread-${session.id}`,
 				type: 'thread',
@@ -245,25 +326,78 @@
 			}));
 	});
 
+	// Build cards for a specific custom deck
+	function getDeckCards(deckId: string): NavigatorCard[] {
+		const deck = userDecks.find(d => d.id === deckId);
+		if (!deck) return [];
+
+		const cards: NavigatorCard[] = [];
+
+		for (const cardId of deck.cardIds) {
+			// Check if it's a thread
+			if (cardId.startsWith('thread-')) {
+				const sessionId = cardId.replace('thread-', '');
+				const session = sessions.find((s: Session) => s.id === sessionId);
+				if (session) {
+					cards.push({
+						id: cardId,
+						type: 'thread',
+						title: session.title || 'Untitled',
+						subtitle: '',
+						icon: MessageSquare,
+						sessionId: session.id,
+						isStreaming: isSessionStreaming(session.id),
+						messageCount: session.message_count,
+						lastActive: formatRelativeTime(session.updated_at)
+					});
+				}
+			} else {
+				// It's an action card
+				const actionCard = baseActionCards.find(c => c.id === cardId);
+				if (actionCard) {
+					cards.push(actionCard);
+				}
+			}
+		}
+
+		return cards;
+	}
+
 	// Get current deck of cards based on view
 	const currentCards = $derived.by((): NavigatorCard[] => {
 		switch (currentView) {
 			case 'recent':
 				return recentThreadCards;
+			case 'deck':
+				return currentDeckId ? getDeckCards(currentDeckId) : [];
 			default:
 				return mainDeckCards;
 		}
 	});
 
 	// Handle card click
-	function handleCardClick(card: NavigatorCard) {
-		// Only block click if user actually dragged
+	function handleCardClick(card: NavigatorCard, e: MouseEvent) {
+		// Block click if in edit mode and dragging
+		if (isEditMode && draggedCardId) return;
 		if (hasDragged) return;
+
+		// In edit mode, show context menu on click
+		if (isEditMode && card.type !== 'add-deck') {
+			showContextMenu(card.id, e);
+			return;
+		}
+
+		if (card.type === 'add-deck') {
+			showNewDeckDialog = true;
+			return;
+		}
 
 		if (card.type === 'action' && card.action) {
 			handleAction(card.action);
 		} else if (card.type === 'category' && card.category) {
 			navigateToCategory(card);
+		} else if (card.type === 'deck' && card.deckId) {
+			navigateToDeck(card.deckId, card.title);
 		} else if (card.type === 'thread' && card.sessionId) {
 			onOpenThread(card.sessionId);
 			onClose();
@@ -274,36 +408,16 @@
 	function handleAction(action: CardAction) {
 		onClose();
 		switch (action) {
-			case 'new-chat':
-				onCreateChat();
-				break;
-			case 'new-agent':
-				onCreateAgent();
-				break;
-			case 'terminal':
-				onCreateTerminal();
-				break;
-			case 'image-studio':
-				onOpenImageStudio?.();
-				break;
-			case 'model-studio':
-				onOpenModelStudio?.();
-				break;
-			case 'audio-studio':
-				onOpenAudioStudio?.();
-				break;
-			case 'file-browser':
-				onOpenFileBrowser?.();
-				break;
-			case 'projects':
-				onOpenProjects?.();
-				break;
-			case 'profiles':
-				onOpenProfiles?.();
-				break;
-			case 'settings':
-				onOpenSettings?.();
-				break;
+			case 'new-chat': onCreateChat(); break;
+			case 'new-agent': onCreateAgent(); break;
+			case 'terminal': onCreateTerminal(); break;
+			case 'image-studio': onOpenImageStudio?.(); break;
+			case 'model-studio': onOpenModelStudio?.(); break;
+			case 'audio-studio': onOpenAudioStudio?.(); break;
+			case 'file-browser': onOpenFileBrowser?.(); break;
+			case 'projects': onOpenProjects?.(); break;
+			case 'profiles': onOpenProfiles?.(); break;
+			case 'settings': onOpenSettings?.(); break;
 		}
 	}
 
@@ -313,11 +427,15 @@
 			currentView = 'recent';
 			navStack = [...navStack, { id: 'recent', name: 'Recent', type: 'category' }];
 		}
+		if (carouselRef) carouselRef.scrollLeft = 0;
+	}
 
-		// Reset scroll
-		if (carouselRef) {
-			carouselRef.scrollLeft = 0;
-		}
+	// Navigate to custom deck
+	function navigateToDeck(deckId: string, name: string) {
+		currentView = 'deck';
+		currentDeckId = deckId;
+		navStack = [...navStack, { id: deckId, name, type: 'deck' }];
+		if (carouselRef) carouselRef.scrollLeft = 0;
 	}
 
 	// Navigate back via breadcrumb
@@ -329,31 +447,59 @@
 
 		if (target.type === 'root') {
 			currentView = 'main';
+			currentDeckId = null;
 		} else if (target.id === 'recent') {
 			currentView = 'recent';
+			currentDeckId = null;
+		} else if (target.type === 'deck') {
+			currentView = 'deck';
+			currentDeckId = target.id;
 		}
 
-		// Reset scroll
-		if (carouselRef) {
-			carouselRef.scrollLeft = 0;
-		}
+		if (carouselRef) carouselRef.scrollLeft = 0;
 	}
 
 	// Reset state when closing
 	function handleClose() {
+		if (isEditMode) {
+			navigator.exitEditMode();
+			isEditMode = false;
+		}
+		contextMenuOpen = false;
+		showNewDeckDialog = false;
 		onClose();
-		// Delay reset to allow exit animation
 		setTimeout(() => {
 			navStack = [{ id: 'root', name: 'AI Shuffle', type: 'root' }];
 			currentView = 'main';
+			currentDeckId = null;
 			scrollProgress = 0;
 		}, 300);
+	}
+
+	// Toggle edit mode
+	function toggleEditMode() {
+		if (isEditMode) {
+			// Save card order when exiting
+			const cardIds = currentCards.map(c => c.id);
+			navigator.setCardOrder(cardIds);
+			navigator.exitEditMode();
+		} else {
+			navigator.enterEditMode();
+		}
+		isEditMode = !isEditMode;
+		contextMenuOpen = false;
 	}
 
 	// Handle keyboard
 	function handleKeyDown(e: KeyboardEvent) {
 		if (e.key === 'Escape') {
-			if (navStack.length > 1) {
+			if (showNewDeckDialog) {
+				showNewDeckDialog = false;
+			} else if (contextMenuOpen) {
+				contextMenuOpen = false;
+			} else if (isEditMode) {
+				toggleEditMode();
+			} else if (navStack.length > 1) {
 				navigateBack(navStack.length - 2);
 			} else {
 				handleClose();
@@ -361,21 +507,162 @@
 		}
 	}
 
-	// Drag to scroll handlers
+	// ========================================
+	// DRAG AND DROP FOR REORDERING
+	// ========================================
+
+	function handleCardPointerDown(e: PointerEvent, card: NavigatorCard, index: number) {
+		if (!isEditMode || card.type === 'add-deck') return;
+
+		// Start long press timer for mobile
+		if (isMobile) {
+			longPressTimer = setTimeout(() => {
+				startDrag(card, index, e);
+			}, LONG_PRESS_DURATION);
+		}
+	}
+
+	function handleCardPointerUp() {
+		if (longPressTimer) {
+			clearTimeout(longPressTimer);
+			longPressTimer = null;
+		}
+	}
+
+	function startDrag(card: NavigatorCard, index: number, e: PointerEvent) {
+		draggedCardId = card.id;
+		draggedCardIndex = index;
+
+		// Haptic feedback on mobile
+		if (navigator.vibrate) {
+			navigator.vibrate(50);
+		}
+	}
+
+	function handleDragStart(e: DragEvent, card: NavigatorCard, index: number) {
+		if (!isEditMode || card.type === 'add-deck') {
+			e.preventDefault();
+			return;
+		}
+
+		draggedCardId = card.id;
+		draggedCardIndex = index;
+
+		if (e.dataTransfer) {
+			e.dataTransfer.effectAllowed = 'move';
+			e.dataTransfer.setData('text/plain', card.id);
+		}
+	}
+
+	function handleDragOver(e: DragEvent, index: number) {
+		if (!isEditMode || draggedCardId === null) return;
+		e.preventDefault();
+		dragOverIndex = index;
+	}
+
+	function handleDragLeave() {
+		dragOverIndex = -1;
+	}
+
+	function handleDrop(e: DragEvent, targetIndex: number) {
+		e.preventDefault();
+		if (draggedCardId === null || draggedCardIndex === -1) return;
+
+		// Reorder cards
+		const cardIds = currentCards.map(c => c.id);
+		const [removed] = cardIds.splice(draggedCardIndex, 1);
+		cardIds.splice(targetIndex, 0, removed);
+
+		navigator.setCardOrder(cardIds);
+
+		// Reset drag state
+		draggedCardId = null;
+		draggedCardIndex = -1;
+		dragOverIndex = -1;
+	}
+
+	function handleDragEnd() {
+		draggedCardId = null;
+		draggedCardIndex = -1;
+		dragOverIndex = -1;
+	}
+
+	// ========================================
+	// CONTEXT MENU
+	// ========================================
+
+	function showContextMenu(cardId: string, e: MouseEvent) {
+		e.preventDefault();
+		e.stopPropagation();
+		contextMenuCardId = cardId;
+		contextMenuPosition = { x: e.clientX, y: e.clientY };
+		contextMenuOpen = true;
+	}
+
+	function closeContextMenu() {
+		contextMenuOpen = false;
+		contextMenuCardId = null;
+	}
+
+	function handleMoveToDeck(deckId: string) {
+		if (!contextMenuCardId) return;
+		navigator.addCardToDeck(deckId, contextMenuCardId);
+		closeContextMenu();
+	}
+
+	function handleRemoveFromDeck() {
+		if (!contextMenuCardId || !currentDeckId) return;
+		navigator.removeCardFromDeck(currentDeckId, contextMenuCardId);
+		closeContextMenu();
+	}
+
+	function handleCreateNewDeckFromMenu() {
+		closeContextMenu();
+		showNewDeckDialog = true;
+	}
+
+	// ========================================
+	// NEW DECK DIALOG
+	// ========================================
+
+	function createNewDeck() {
+		if (!newDeckName.trim()) return;
+		const deckId = navigator.createDeck(newDeckName.trim());
+
+		// If we came from context menu, add the card to the new deck
+		if (contextMenuCardId) {
+			navigator.addCardToDeck(deckId, contextMenuCardId);
+		}
+
+		newDeckName = '';
+		showNewDeckDialog = false;
+	}
+
+	function handleDeleteDeck(deckId: string) {
+		navigator.deleteDeck(deckId);
+		if (currentDeckId === deckId) {
+			navigateBack(0); // Go back to root
+		}
+	}
+
+	// ========================================
+	// CAROUSEL SCROLL HANDLERS
+	// ========================================
+
 	function handleMouseDown(e: MouseEvent) {
+		if (isEditMode) return; // Disable scroll-drag in edit mode
 		if (!carouselRef) return;
 		isDragging = true;
-		hasDragged = false; // Reset drag state
+		hasDragged = false;
 		startX = e.pageX - carouselRef.offsetLeft;
 		scrollLeft = carouselRef.scrollLeft;
 	}
 
 	function handleMouseMove(e: MouseEvent) {
-		if (!isDragging || !carouselRef) return;
+		if (!isDragging || !carouselRef || isEditMode) return;
 		const x = e.pageX - carouselRef.offsetLeft;
 		const walk = (x - startX) * 1.5;
 
-		// Only mark as dragged if moved beyond threshold
 		if (Math.abs(x - startX) > DRAG_THRESHOLD) {
 			hasDragged = true;
 			e.preventDefault();
@@ -386,10 +673,7 @@
 
 	function handleMouseUp() {
 		isDragging = false;
-		// Reset hasDragged after a short delay to allow click events to check it
-		setTimeout(() => {
-			hasDragged = false;
-		}, 50);
+		setTimeout(() => { hasDragged = false; }, 50);
 	}
 
 	function handleMouseLeave() {
@@ -397,8 +681,8 @@
 		hasDragged = false;
 	}
 
-	// Touch handlers for mobile
 	function handleTouchStart(e: TouchEvent) {
+		if (isEditMode) return;
 		if (!carouselRef) return;
 		isDragging = true;
 		hasDragged = false;
@@ -407,11 +691,10 @@
 	}
 
 	function handleTouchMove(e: TouchEvent) {
-		if (!isDragging || !carouselRef) return;
+		if (!isDragging || !carouselRef || isEditMode) return;
 		const x = e.touches[0].pageX - carouselRef.offsetLeft;
 		const walk = (x - startX) * 1.5;
 
-		// Only mark as dragged if moved beyond threshold
 		if (Math.abs(x - startX) > DRAG_THRESHOLD) {
 			hasDragged = true;
 		}
@@ -421,38 +704,32 @@
 
 	function handleTouchEnd() {
 		isDragging = false;
-		setTimeout(() => {
-			hasDragged = false;
-		}, 50);
+		handleCardPointerUp();
+		setTimeout(() => { hasDragged = false; }, 50);
 	}
 
-	// Handle mouse wheel for horizontal scrolling
 	function handleWheel(e: WheelEvent) {
 		if (!carouselRef) return;
-
-		// Prevent default vertical scroll and convert to horizontal
 		e.preventDefault();
-
-		// Use deltaY for horizontal scrolling (more natural with trackpads/wheels)
-		// Multiply by 3 for faster scrolling
 		const scrollAmount = (e.deltaY !== 0 ? e.deltaY : e.deltaX) * 3;
 		const newScrollLeft = carouselRef.scrollLeft + scrollAmount;
-
-		// Clamp to valid range
 		const maxScroll = carouselRef.scrollWidth - carouselRef.clientWidth;
 		carouselRef.scrollLeft = Math.max(0, Math.min(newScrollLeft, maxScroll));
 	}
 
-	// Update scroll progress for dots
 	function handleScroll() {
 		if (!carouselRef) return;
 		const maxScroll = carouselRef.scrollWidth - carouselRef.clientWidth;
 		scrollProgress = maxScroll > 0 ? carouselRef.scrollLeft / maxScroll : 0;
 	}
 
-	// Calculate number of dots based on cards
 	const dotCount = $derived(Math.min(5, Math.ceil(currentCards.length / 3)));
 	const activeDot = $derived(Math.round(scrollProgress * (dotCount - 1)));
+
+	// Initialize navigator store
+	onMount(() => {
+		navigator.initialize();
+	});
 </script>
 
 <svelte:window onkeydown={handleKeyDown} />
@@ -462,6 +739,7 @@
 	<div
 		class="navigator"
 		class:open
+		class:edit-mode={isEditMode}
 		transition:fade={{ duration: 200 }}
 	>
 		<!-- Backdrop -->
@@ -484,17 +762,45 @@
 					</button>
 				{/each}
 			</nav>
-			<button class="nav-close" onclick={handleClose} aria-label="Close">
-				<X size={18} strokeWidth={2} />
-			</button>
+
+			<div class="nav-actions">
+				<!-- Edit Mode Toggle -->
+				{#if currentView === 'main' || currentView === 'deck'}
+					<button
+						class="nav-action-btn"
+						class:active={isEditMode}
+						onclick={toggleEditMode}
+						aria-label={isEditMode ? 'Done editing' : 'Edit cards'}
+						title={isEditMode ? 'Done' : 'Edit'}
+					>
+						{#if isEditMode}
+							<Check size={18} strokeWidth={2} />
+						{:else}
+							<Pencil size={18} strokeWidth={2} />
+						{/if}
+					</button>
+				{/if}
+
+				<button class="nav-close" onclick={handleClose} aria-label="Close">
+					<X size={18} strokeWidth={2} />
+				</button>
+			</div>
 		</header>
+
+		<!-- Edit mode hint -->
+		{#if isEditMode}
+			<div class="edit-mode-hint" transition:fade={{ duration: 150 }}>
+				{isMobile ? 'Long press to drag • Tap for options' : 'Drag to reorder • Click for options'}
+			</div>
+		{/if}
 
 		<!-- Card carousel -->
 		<div class="carousel-stage">
-			{#key currentView}
+			{#key `${currentView}-${currentDeckId}`}
 				<div
 					class="carousel"
 					class:dragging={isDragging}
+					class:edit-mode={isEditMode}
 					bind:this={carouselRef}
 					onmousedown={handleMouseDown}
 					onmousemove={handleMouseMove}
@@ -515,58 +821,91 @@
 						<article
 							class="card"
 							class:thread-card={card.type === 'thread'}
+							class:deck-card={card.type === 'deck'}
+							class:add-deck-card={card.type === 'add-deck'}
+							class:dragging={draggedCardId === card.id}
+							class:drag-over={dragOverIndex === index && draggedCardId !== card.id}
 							data-ai-active={card.isStreaming}
 							data-has-children={card.hasChildren}
 							style:animation-delay="{index * 50}ms"
-							onclick={() => handleCardClick(card)}
-							onkeydown={(e) => e.key === 'Enter' && handleCardClick(card)}
+							style:--deck-color={card.iconColor}
+							onclick={(e) => handleCardClick(card, e)}
+							oncontextmenu={(e) => isEditMode && showContextMenu(card.id, e)}
+							onkeydown={(e) => e.key === 'Enter' && handleCardClick(card, e as unknown as MouseEvent)}
+							onpointerdown={(e) => handleCardPointerDown(e, card, index)}
+							onpointerup={handleCardPointerUp}
+							onpointercancel={handleCardPointerUp}
+							draggable={isEditMode && card.type !== 'add-deck'}
+							ondragstart={(e) => handleDragStart(e, card, index)}
+							ondragover={(e) => handleDragOver(e, index)}
+							ondragleave={handleDragLeave}
+							ondrop={(e) => handleDrop(e, index)}
+							ondragend={handleDragEnd}
 							role="option"
 							tabindex="0"
 							aria-selected="false"
+							animate:flip={{ duration: 200 }}
 						>
-						<div class="card-inner">
-							{#if card.isStreaming}
-								<div class="card-status">Streaming</div>
-							{/if}
+							<div class="card-inner">
+								{#if isEditMode && card.type !== 'add-deck'}
+									<div class="drag-handle">
+										<GripVertical size={16} />
+									</div>
+								{/if}
 
-							<div class="card-icon">
-								<card.icon size={20} strokeWidth={1.75} />
-							</div>
+								{#if card.isStreaming}
+									<div class="card-status">Streaming</div>
+								{/if}
 
-							<h3 class="card-title">{card.title}</h3>
-
-							{#if card.type === 'thread'}
-								<div class="card-meta">
-									{#if card.lastActive}
-										<span class="card-meta-item">
-											<Clock size={12} />
-											{card.lastActive}
-										</span>
-									{/if}
-									{#if card.messageCount}
-										<span class="card-meta-item">
-											<MessageSquare size={12} />
-											{card.messageCount}
-										</span>
-									{/if}
+								<div class="card-icon" style:--icon-color={card.iconColor}>
+									<card.icon size={20} strokeWidth={1.75} />
 								</div>
-							{:else if card.subtitle}
-								<p class="card-subtitle">{card.subtitle}</p>
+
+								<h3 class="card-title">{card.title}</h3>
+
+								{#if card.type === 'thread'}
+									<div class="card-meta">
+										{#if card.lastActive}
+											<span class="card-meta-item">
+												<Clock size={12} />
+												{card.lastActive}
+											</span>
+										{/if}
+										{#if card.messageCount}
+											<span class="card-meta-item">
+												<MessageSquare size={12} />
+												{card.messageCount}
+											</span>
+										{/if}
+									</div>
+								{:else if card.subtitle}
+									<p class="card-subtitle">{card.subtitle}</p>
+								{/if}
+
+								{#if card.hasChildren}
+									<div class="card-chevron">
+										<ChevronRight size={16} />
+									</div>
+								{/if}
+							</div>
+						</article>
+					{/each}
+
+					{#if currentCards.length === 0}
+						<div class="empty-state">
+							{#if currentView === 'deck'}
+								<p>This deck is empty</p>
+								<p class="empty-hint">Add cards from the main view</p>
+							{:else}
+								<p>No items to show</p>
 							{/if}
 						</div>
-					</article>
-				{/each}
-
-				{#if currentCards.length === 0}
-					<div class="empty-state">
-						<p>No items to show</p>
-					</div>
-				{/if}
+					{/if}
 				</div>
 			{/key}
 
 			<!-- Scroll hint with dots -->
-			{#if currentCards.length > 3}
+			{#if currentCards.length > 3 && !isEditMode}
 				<div class="scroll-hint">
 					<span class="scroll-hint-text">{isMobile ? 'Swipe' : 'Scroll'} to browse</span>
 					<div class="scroll-dots">
@@ -577,16 +916,72 @@
 				</div>
 			{/if}
 		</div>
+
+		<!-- Context Menu -->
+		{#if contextMenuOpen}
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div class="context-menu-backdrop" onclick={closeContextMenu}></div>
+			<div
+				class="context-menu"
+				style:left="{contextMenuPosition.x}px"
+				style:top="{contextMenuPosition.y}px"
+				transition:scale={{ duration: 150, start: 0.9 }}
+			>
+				{#if currentView === 'deck' && currentDeckId}
+					<button class="context-menu-item" onclick={handleRemoveFromDeck}>
+						<X size={16} />
+						Remove from Deck
+					</button>
+				{:else}
+					{#if userDecks.length > 0}
+						<div class="context-menu-label">Move to Deck</div>
+						{#each userDecks as deck}
+							<button class="context-menu-item" onclick={() => handleMoveToDeck(deck.id)}>
+								<Folder size={16} style="color: {deck.color}" />
+								{deck.name}
+							</button>
+						{/each}
+						<div class="context-menu-divider"></div>
+					{/if}
+					<button class="context-menu-item" onclick={handleCreateNewDeckFromMenu}>
+						<Plus size={16} />
+						New Deck...
+					</button>
+				{/if}
+			</div>
+		{/if}
+
+		<!-- New Deck Dialog -->
+		{#if showNewDeckDialog}
+			<div class="dialog-backdrop" onclick={() => showNewDeckDialog = false} transition:fade={{ duration: 150 }}></div>
+			<div class="dialog" transition:scale={{ duration: 200, start: 0.9 }}>
+				<h2 class="dialog-title">Create New Deck</h2>
+				<input
+					type="text"
+					class="dialog-input"
+					placeholder="Deck name..."
+					bind:value={newDeckName}
+					onkeydown={(e) => e.key === 'Enter' && createNewDeck()}
+					autofocus
+				/>
+				<div class="dialog-actions">
+					<button class="dialog-btn cancel" onclick={() => showNewDeckDialog = false}>
+						Cancel
+					</button>
+					<button class="dialog-btn primary" onclick={createNewDeck} disabled={!newDeckName.trim()}>
+						Create
+					</button>
+				</div>
+			</div>
+		{/if}
 	</div>
 {/if}
 
 <style>
 	/* ========================================
 	   AI SHUFFLE DESIGN SYSTEM
-	   Clean, modern AI workspace aesthetic
 	   ======================================== */
 
-	/* Base Colors - using CSS variables from app.css with fallbacks */
 	.navigator {
 		--bg-deep: oklch(0.08 0.01 260);
 		--bg-base: oklch(0.10 0.01 260);
@@ -685,6 +1080,38 @@
 		font-size: 0.75rem;
 	}
 
+	.nav-actions {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.nav-action-btn {
+		width: 40px;
+		height: 40px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: var(--bg-elevated);
+		border: 1px solid var(--border-default);
+		border-radius: 50%;
+		color: var(--text-secondary);
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.nav-action-btn:hover {
+		background: var(--bg-card);
+		border-color: var(--border-strong);
+		color: var(--text-primary);
+	}
+
+	.nav-action-btn.active {
+		background: var(--ai-subtle);
+		border-color: var(--ai-primary);
+		color: var(--ai-primary);
+	}
+
 	.nav-close {
 		width: 40px;
 		height: 40px;
@@ -706,6 +1133,21 @@
 	}
 
 	/* ========================================
+	   EDIT MODE HINT
+	   ======================================== */
+	.edit-mode-hint {
+		position: relative;
+		z-index: 10;
+		text-align: center;
+		padding: 8px 16px;
+		font-size: 0.8125rem;
+		color: var(--ai-primary);
+		background: var(--ai-subtle);
+		border-top: 1px solid rgba(34, 211, 238, 0.15);
+		border-bottom: 1px solid rgba(34, 211, 238, 0.15);
+	}
+
+	/* ========================================
 	   CARD CAROUSEL
 	   ======================================== */
 	.carousel-stage {
@@ -716,7 +1158,7 @@
 		justify-content: center;
 		overflow: hidden;
 		width: 100%;
-		min-height: 0; /* Important for flexbox */
+		min-height: 0;
 	}
 
 	.carousel {
@@ -728,10 +1170,9 @@
 		padding: 40px 60px;
 		overflow-x: scroll;
 		overflow-y: hidden;
-		/* Removed scroll-snap - was interfering with programmatic scrolling */
 		scrollbar-width: none;
 		cursor: grab;
-		-webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
+		-webkit-overflow-scrolling: touch;
 	}
 
 	.carousel::-webkit-scrollbar {
@@ -742,6 +1183,10 @@
 	.carousel.dragging {
 		cursor: grabbing;
 		scroll-behavior: auto;
+	}
+
+	.carousel.edit-mode {
+		cursor: default;
 	}
 
 	/* Edge fade */
@@ -774,9 +1219,7 @@
 		width: var(--card-width);
 		height: var(--card-height);
 		cursor: pointer;
-		transition: transform 0.2s var(--ease-out);
-
-		/* Staggered entrance animation - delay set via inline style */
+		transition: transform 0.2s var(--ease-out), opacity 0.2s ease;
 		opacity: 0;
 		transform: translateX(40px) scale(0.95);
 		animation: cardEnter 0.4s var(--ease-spring) forwards;
@@ -793,12 +1236,34 @@
 		}
 	}
 
-	.card:hover {
+	/* Edit mode shake animation */
+	.navigator.edit-mode .card:not(.add-deck-card) {
+		animation: cardEnter 0.4s var(--ease-spring) forwards, cardShake 0.4s ease-in-out infinite;
+		animation-delay: calc(var(--index, 0) * 50ms), 0ms;
+	}
+
+	@keyframes cardShake {
+		0%, 100% { transform: rotate(0deg); }
+		25% { transform: rotate(-0.5deg); }
+		75% { transform: rotate(0.5deg); }
+	}
+
+	.card:hover:not(.dragging) {
 		transform: translateY(-6px);
 	}
 
-	.card:active {
+	.card:active:not(.dragging) {
 		transform: translateY(-4px) scale(0.98);
+	}
+
+	.card.dragging {
+		opacity: 0.5;
+		transform: scale(1.05);
+		z-index: 100;
+	}
+
+	.card.drag-over {
+		transform: translateX(20px);
 	}
 
 	.card-inner {
@@ -831,6 +1296,23 @@
 			0 8px 32px rgba(0, 0, 0, 0.3);
 	}
 
+	/* Drag handle */
+	.drag-handle {
+		position: absolute;
+		top: 8px;
+		right: 8px;
+		padding: 4px;
+		color: var(--text-dim);
+		opacity: 0.6;
+		cursor: grab;
+		transition: all 0.15s ease;
+	}
+
+	.card:hover .drag-handle {
+		opacity: 1;
+		color: var(--text-secondary);
+	}
+
 	/* Card icon */
 	.card-icon {
 		width: 40px;
@@ -842,14 +1324,38 @@
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-md);
 		margin-bottom: 16px;
-		color: var(--text-secondary);
+		color: var(--icon-color, var(--text-secondary));
 		transition: all 0.2s ease;
 	}
 
 	.card:hover .card-icon {
 		background: var(--ai-subtle);
 		border-color: rgba(34, 211, 238, 0.2);
-		color: var(--ai-primary);
+		color: var(--icon-color, var(--ai-primary));
+	}
+
+	/* Deck card styling */
+	.card.deck-card .card-icon {
+		background: color-mix(in srgb, var(--deck-color, var(--ai-primary)) 15%, transparent);
+		border-color: color-mix(in srgb, var(--deck-color, var(--ai-primary)) 30%, transparent);
+		color: var(--deck-color, var(--ai-primary));
+	}
+
+	/* Add deck card styling */
+	.card.add-deck-card .card-inner {
+		border-style: dashed;
+		border-color: var(--border-default);
+		background: transparent;
+	}
+
+	.card.add-deck-card:hover .card-inner {
+		border-color: var(--ai-primary);
+		background: var(--ai-subtle);
+	}
+
+	.card.add-deck-card .card-icon {
+		background: transparent;
+		border-style: dashed;
 	}
 
 	.card[data-ai-active="true"] .card-icon {
@@ -902,21 +1408,18 @@
 		gap: 4px;
 	}
 
-	/* Category indicator - chevron */
-	.card[data-has-children="true"] .card-inner::after {
-		content: '\203A';
+	/* Chevron for cards with children */
+	.card-chevron {
 		position: absolute;
-		right: 16px;
+		right: 12px;
 		top: 50%;
 		transform: translateY(-50%);
-		font-size: 1.25rem;
-		font-weight: 300;
 		color: var(--text-dim);
 		opacity: 0.6;
 		transition: all 0.2s ease;
 	}
 
-	.card[data-has-children="true"]:hover .card-inner::after {
+	.card:hover .card-chevron {
 		opacity: 1;
 		color: var(--ai-primary);
 		transform: translateY(-50%) translateX(2px);
@@ -965,11 +1468,19 @@
 	.empty-state {
 		width: 100%;
 		display: flex;
+		flex-direction: column;
 		align-items: center;
 		justify-content: center;
 		padding: 40px;
 		color: var(--text-muted);
 		font-size: 0.9375rem;
+		text-align: center;
+	}
+
+	.empty-hint {
+		font-size: 0.8125rem;
+		color: var(--text-dim);
+		margin-top: 8px;
 	}
 
 	/* ========================================
@@ -1013,6 +1524,158 @@
 		width: 16px;
 		border-radius: 3px;
 		background: var(--ai-primary);
+	}
+
+	/* ========================================
+	   CONTEXT MENU
+	   ======================================== */
+	.context-menu-backdrop {
+		position: fixed;
+		inset: 0;
+		z-index: 100001;
+	}
+
+	.context-menu {
+		position: fixed;
+		z-index: 100002;
+		min-width: 180px;
+		background: var(--bg-elevated);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-md);
+		padding: 6px;
+		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+	}
+
+	.context-menu-label {
+		padding: 6px 10px;
+		font-size: 0.6875rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--text-dim);
+	}
+
+	.context-menu-item {
+		width: 100%;
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 10px 12px;
+		font-size: 0.875rem;
+		color: var(--text-secondary);
+		background: none;
+		border: none;
+		border-radius: var(--radius-sm);
+		cursor: pointer;
+		transition: all 0.15s ease;
+		text-align: left;
+	}
+
+	.context-menu-item:hover {
+		background: var(--bg-card);
+		color: var(--text-primary);
+	}
+
+	.context-menu-divider {
+		height: 1px;
+		background: var(--border-subtle);
+		margin: 6px 0;
+	}
+
+	/* ========================================
+	   DIALOG
+	   ======================================== */
+	.dialog-backdrop {
+		position: fixed;
+		inset: 0;
+		z-index: 100003;
+		background: rgba(0, 0, 0, 0.5);
+	}
+
+	.dialog {
+		position: fixed;
+		top: 50%;
+		left: 50%;
+		transform: translate(-50%, -50%);
+		z-index: 100004;
+		width: 90%;
+		max-width: 360px;
+		background: var(--bg-elevated);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-lg);
+		padding: 24px;
+		box-shadow: 0 16px 64px rgba(0, 0, 0, 0.5);
+	}
+
+	.dialog-title {
+		font-size: 1.125rem;
+		font-weight: 600;
+		color: var(--text-primary);
+		margin-bottom: 16px;
+	}
+
+	.dialog-input {
+		width: 100%;
+		padding: 12px 14px;
+		font-size: 0.9375rem;
+		color: var(--text-primary);
+		background: var(--bg-card);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-md);
+		outline: none;
+		transition: all 0.15s ease;
+	}
+
+	.dialog-input:focus {
+		border-color: var(--ai-primary);
+		box-shadow: 0 0 0 3px var(--ai-subtle);
+	}
+
+	.dialog-input::placeholder {
+		color: var(--text-dim);
+	}
+
+	.dialog-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 10px;
+		margin-top: 20px;
+	}
+
+	.dialog-btn {
+		padding: 10px 18px;
+		font-size: 0.875rem;
+		font-weight: 500;
+		border-radius: var(--radius-md);
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.dialog-btn.cancel {
+		background: none;
+		border: 1px solid var(--border-default);
+		color: var(--text-secondary);
+	}
+
+	.dialog-btn.cancel:hover {
+		background: var(--bg-card);
+		border-color: var(--border-strong);
+		color: var(--text-primary);
+	}
+
+	.dialog-btn.primary {
+		background: var(--ai-primary);
+		border: none;
+		color: #000;
+	}
+
+	.dialog-btn.primary:hover:not(:disabled) {
+		background: var(--ai-secondary);
+	}
+
+	.dialog-btn.primary:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
 	}
 
 	/* ========================================
@@ -1067,6 +1730,10 @@
 
 		.scroll-hint {
 			bottom: max(100px, calc(env(safe-area-inset-bottom) + 80px));
+		}
+
+		.edit-mode-hint {
+			font-size: 0.75rem;
 		}
 	}
 

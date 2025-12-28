@@ -54,15 +54,10 @@
 		if (containerRef) {
 			isScrollingProgrammatically = true;
 			containerRef.scrollTop = containerRef.scrollHeight;
-			// Double RAF to ensure all child components (like expanded TodoLists) have rendered
-			// First RAF: browser has painted current frame
-			// Second RAF: all layout calculations complete, scroll to true bottom
+			// Use double RAF to ensure scroll events from this programmatic scroll are ignored
+			// Single RAF isn't enough - browser may fire scroll events across multiple frames
 			requestAnimationFrame(() => {
 				requestAnimationFrame(() => {
-					// Scroll again in case child components added height after initial scroll
-					if (containerRef) {
-						containerRef.scrollTop = containerRef.scrollHeight;
-					}
 					isScrollingProgrammatically = false;
 				});
 			});
@@ -128,10 +123,15 @@
 	let prevMessagesLength = $state(0);
 	let prevLastContent = $state('');
 
-	// Get last message content for streaming detection
+	// Get last message content for streaming detection (includes toolInput for TodoWrite)
 	const lastMessageContent = $derived(() => {
 		const lastMsg = tab.messages[tab.messages.length - 1];
-		return lastMsg?.content || '';
+		if (!lastMsg) return '';
+		// For tool_use messages, track toolInput changes (especially TodoWrite)
+		if (lastMsg.type === 'tool_use' && lastMsg.toolInput) {
+			return JSON.stringify(lastMsg.toolInput);
+		}
+		return lastMsg.content || '';
 	});
 
 	// Watch for message changes and streaming content updates
@@ -148,13 +148,7 @@
 		const hasContentChange = currentContent !== prevLastContent;
 
 		if ((hasNewMessage || hasContentChange) && shouldAutoScroll && containerRef) {
-			// Use tick + RAF to ensure DOM is fully updated including child components
-			// tick() waits for Svelte's DOM updates, RAF waits for browser layout
-			tick().then(() => {
-				requestAnimationFrame(() => {
-					scrollToBottom();
-				});
-			});
+			tick().then(scrollToBottom);
 		}
 
 		// Update previous values
