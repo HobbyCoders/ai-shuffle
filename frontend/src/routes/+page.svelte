@@ -589,7 +589,7 @@
 				key: 'b',
 				cmdOrCtrl: true,
 				shift: true,
-				category: 'agents',
+				category: 'general',
 				action: () => { handleCreateCard('agent'); }
 			}),
 
