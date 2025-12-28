@@ -14,7 +14,6 @@ export { default as StreamingIndicator } from './StreamingIndicator.svelte';
 export { default as ChatHeader } from './ChatHeader.svelte';
 export { default as MessageArea } from './MessageArea.svelte';
 export { default as ChatInput } from './ChatInput.svelte';
-export { default as FloatingToolbar } from './FloatingToolbar.svelte';
 
 // Banner components
 export { default as PermissionBanner } from './PermissionBanner.svelte';

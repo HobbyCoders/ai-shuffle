@@ -4,14 +4,11 @@
 	 *
 	 * Integrates all extracted chat components for full feature parity
 	 * with the main chat interface.
-	 *
-	 * Includes FloatingToolbar for inline settings management (profile, project, model, mode)
 	 */
 	import BaseCard from './BaseCard.svelte';
 	import type { DeckCard } from './types';
-	import { tabs, allTabs, profiles, projects } from '$lib/stores/tabs';
+	import { tabs, allTabs } from '$lib/stores/tabs';
 	import { MessageArea, ChatInput } from '$lib/components/chat';
-	import FloatingToolbar from '$lib/components/chat/FloatingToolbar.svelte';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import ConnectionStatus from '$lib/components/ConnectionStatus.svelte';
@@ -52,52 +49,6 @@
 
 	// Get the tab data from the tabs store
 	const tab = $derived($allTabs.find((t) => t.id === tabId));
-
-	// Compute settings data for FloatingToolbar
-	const currentProfile = $derived($profiles.find(p => p.id === tab?.profile));
-	const profileModel = $derived(currentProfile?.config?.model || 'sonnet');
-	const profileMode = $derived(currentProfile?.config?.permission_mode || 'default');
-
-	// Context usage calculation
-	const autocompactBuffer = 45000;
-	const contextUsed = $derived(
-		(tab?.contextUsed ?? ((tab?.totalTokensIn || 0) + (tab?.totalCacheCreationTokens || 0) + (tab?.totalCacheReadTokens || 0))) + autocompactBuffer
-	);
-	const contextMax = $derived(tab?.contextMax || 200000);
-	const contextPercent = $derived(Math.min((contextUsed / contextMax) * 100, 100));
-
-	const toolbarData = $derived({
-		selectedProfile: tab?.profile || null,
-		selectedProject: tab?.project || null,
-		effectiveModel: tab?.modelOverride || profileModel,
-		effectiveMode: tab?.permissionModeOverride || profileMode,
-		isModelOverridden: !!tab?.modelOverride,
-		isModeOverridden: !!tab?.permissionModeOverride,
-		contextUsage: {
-			used: contextUsed,
-			total: contextMax,
-			percentage: contextPercent
-		},
-		profiles: $profiles,
-		projects: $projects
-	});
-
-	// Toolbar callbacks
-	function handleProfileChange(profileId: string) {
-		if (tab) tabs.setTabProfile(tab.id, profileId);
-	}
-
-	function handleProjectChange(projectId: string) {
-		if (tab) tabs.setTabProject(tab.id, projectId);
-	}
-
-	function handleModelChange(model: string | null) {
-		if (tab) tabs.setTabModelOverride(tab.id, model);
-	}
-
-	function handleModeChange(mode: string | null) {
-		if (tab) tabs.setTabPermissionModeOverride(tab.id, mode);
-	}
 
 	// Handle permission response
 	function handlePermissionResponse(
@@ -166,17 +117,8 @@
 				</div>
 			{/if}
 
-			<!-- Floating Toolbar for settings -->
-			<FloatingToolbar
-				{...toolbarData}
-				onProfileChange={handleProfileChange}
-				onProjectChange={handleProjectChange}
-				onModelChange={handleModelChange}
-				onModeChange={handleModeChange}
-			/>
-
 			<!-- Input at the bottom -->
-			<ChatInput {tab} compact {onOpenProfileCard} {onOpenProjectCard} />
+			<ChatInput {tab} compact {onOpenProfileCard} {onOpenProjectCard} {onOpenSettings} />
 		{:else}
 			<div class="chat-loading">
 				<div class="spinner"></div>
@@ -218,17 +160,8 @@
 					</div>
 				{/if}
 
-				<!-- Floating Toolbar for settings -->
-				<FloatingToolbar
-					{...toolbarData}
-					onProfileChange={handleProfileChange}
-					onProjectChange={handleProjectChange}
-					onModelChange={handleModelChange}
-					onModeChange={handleModeChange}
-				/>
-
 				<!-- Input area -->
-				<ChatInput {tab} compact {onOpenProfileCard} {onOpenProjectCard} />
+				<ChatInput {tab} compact {onOpenProfileCard} {onOpenProjectCard} {onOpenSettings} />
 			{:else}
 				<div class="chat-loading">
 					<div class="spinner"></div>
