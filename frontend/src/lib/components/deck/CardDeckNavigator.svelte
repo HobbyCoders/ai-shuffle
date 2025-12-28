@@ -1817,7 +1817,11 @@
 
 	/* Thread card variant */
 	.card.thread-card {
-		height: 200px;
+		height: 220px;
+	}
+
+	.card.thread-card .card-title {
+		-webkit-line-clamp: 3;
 	}
 
 	/* Empty state */
@@ -2090,7 +2094,11 @@
 		}
 
 		.card.thread-card {
-			height: 180px;
+			height: 200px;
+		}
+
+		.card.thread-card .card-title {
+			-webkit-line-clamp: 3;
 		}
 
 		.scroll-hint {
@@ -2111,7 +2119,11 @@
 		}
 
 		.card.thread-card {
-			height: 220px;
+			height: 240px;
+		}
+
+		.card.thread-card .card-title {
+			-webkit-line-clamp: 3;
 		}
 	}
 
