@@ -2949,9 +2949,12 @@ function createTabsStore() {
 
 			} catch (error) {
 				console.error('Failed to create worktree session:', error);
-				const err = error as { detail?: string; message?: string };
+				// API client throws { detail: string, status: number } on error
+				const err = error as { detail?: string; message?: string; status?: number };
+				const errorMessage = err.detail || err.message || 'Unknown error';
+				console.error('Worktree error detail:', errorMessage);
 				updateTab(tabId, {
-					error: `Failed to create worktree: ${err.detail || err.message || 'Unknown error'}`
+					error: `Failed to create worktree: ${errorMessage}`
 				});
 			}
 		},

@@ -8,7 +8,7 @@
 	 * Only shown in empty state - disappears once chat starts.
 	 */
 	import { tabs, type ChatTab, type ExecutionMode } from '$lib/stores/tabs';
-	import { getBranches, type Branch } from '$lib/api/git';
+	import { getBranches, syncWorktrees, type Branch } from '$lib/api/git';
 	import { onMount } from 'svelte';
 
 	interface Props {
@@ -24,6 +24,18 @@
 	let showBaseBranchDropdown = $state(false);
 	let baseBranchDropdownRef = $state<HTMLDivElement | null>(null);
 	let lastLoadedProject = $state<string | null>(null);
+	let lastSyncedProject = $state<string | null>(null);
+
+	// Sync worktrees when project changes (clean up stale database records)
+	$effect(() => {
+		const project = tab.project;
+
+		// Sync worktrees whenever the project changes (regardless of mode)
+		// This cleans up stale database records for worktrees deleted outside the app
+		if (project && project !== lastSyncedProject) {
+			syncProjectWorktrees(project);
+		}
+	});
 
 	// Load branches when project changes or mode switches to worktree
 	$effect(() => {
@@ -35,6 +47,20 @@
 			loadBranches(project);
 		}
 	});
+
+	async function syncProjectWorktrees(projectId: string) {
+		try {
+			const result = await syncWorktrees(projectId);
+			lastSyncedProject = projectId;
+
+			if (result.cleaned_up.length > 0) {
+				console.log(`[WorktreeSync] Cleaned up ${result.cleaned_up.length} stale worktree records for project ${projectId}:`, result.cleaned_up);
+			}
+		} catch (e) {
+			// Don't block on sync errors - just log them
+			console.warn('[WorktreeSync] Failed to sync worktrees:', e);
+		}
+	}
 
 	async function loadBranches(projectId: string) {
 		loadingBranches = true;

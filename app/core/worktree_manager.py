@@ -104,6 +104,59 @@ class WorktreeManager:
         logger.info(f"Created git repository record for project {project_id}: {repo_id}")
         return repo
 
+    def sync_worktrees_for_project(self, project_id: str) -> Dict[str, Any]:
+        """
+        Sync database worktree records with actual state on disk.
+
+        This should be called when a chat card loads for a git project to ensure
+        the database reflects reality (worktrees may have been deleted outside the app).
+
+        Args:
+            project_id: The project to sync worktrees for
+
+        Returns:
+            Dict with sync results: cleaned_up (list of deleted worktree ids), active (count)
+        """
+        project = database.get_project(project_id)
+        if not project:
+            logger.warning(f"Project not found for sync: {project_id}")
+            return {"cleaned_up": [], "active": 0, "error": "Project not found"}
+
+        repo = database.get_git_repository_by_project(project_id)
+        if not repo:
+            # Not a git repo, nothing to sync
+            return {"cleaned_up": [], "active": 0, "is_git_repo": False}
+
+        # Get all active worktrees from database
+        active_worktrees = database.get_active_worktrees_for_repository(repo["id"])
+
+        cleaned_up = []
+        still_active = 0
+
+        for wt in active_worktrees:
+            worktree_full_path = settings.workspace_dir / wt["worktree_path"]
+
+            if not worktree_full_path.exists():
+                # Stale record - worktree was deleted outside the app
+                logger.info(f"Cleaning up stale worktree record: {wt['branch_name']} (path: {worktree_full_path})")
+                database.update_worktree(wt["id"], status="deleted")
+                cleaned_up.append({
+                    "id": wt["id"],
+                    "branch_name": wt["branch_name"],
+                    "reason": "path_not_found"
+                })
+            else:
+                still_active += 1
+
+        if cleaned_up:
+            logger.info(f"Cleaned up {len(cleaned_up)} stale worktree records for project {project_id}")
+
+        return {
+            "cleaned_up": cleaned_up,
+            "active": still_active,
+            "is_git_repo": True
+        }
+
     def create_worktree_session(
         self,
         project_id: str,
@@ -143,9 +196,18 @@ class WorktreeManager:
         main_dir = str(settings.workspace_dir / project["path"])
 
         # Check if branch already has a worktree
+        # Also clean up stale records where worktree no longer exists on disk
         existing_worktrees = database.get_active_worktrees_for_repository(repo["id"])
         for wt in existing_worktrees:
             if wt["branch_name"] == branch_name:
+                # Verify the worktree still exists on disk
+                worktree_full_path = settings.workspace_dir / wt["worktree_path"]
+                if not worktree_full_path.exists():
+                    # Stale record - worktree was deleted outside the app
+                    logger.info(f"Cleaning up stale worktree record for branch '{branch_name}' (path no longer exists: {worktree_full_path})")
+                    database.update_worktree(wt["id"], status="deleted")
+                    continue  # Allow creation to proceed
+
                 logger.error(f"Branch {branch_name} already has an active worktree")
                 raise WorktreeError(f"Branch '{branch_name}' already has an active worktree. Delete the existing worktree first or use a different branch name.")
 

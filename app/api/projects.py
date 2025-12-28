@@ -504,3 +504,54 @@ async def delete_file_or_folder(
         )
 
     return {"deleted": path}
+
+
+# ============================================================================
+# Git/Worktree Sync
+# ============================================================================
+
+class WorktreeSyncResponse(BaseModel):
+    """Response from worktree sync operation"""
+    is_git_repo: bool
+    active_worktrees: int
+    cleaned_up: List[dict]
+
+
+@router.post("/{project_id}/sync-worktrees", response_model=WorktreeSyncResponse)
+async def sync_project_worktrees(
+    request: Request,
+    project_id: str,
+    token: str = Depends(require_auth)
+):
+    """
+    Sync worktree database records with actual state on disk.
+
+    Should be called when loading a chat card for a project to ensure
+    the database reflects reality (worktrees deleted outside the app).
+
+    Returns:
+        is_git_repo: Whether this project is a git repository
+        active_worktrees: Count of valid active worktrees
+        cleaned_up: List of stale worktree records that were cleaned up
+    """
+    from app.core.worktree_manager import worktree_manager
+
+    # Check project access
+    check_project_access(request, project_id)
+
+    # Verify project exists
+    project = database.get_project(project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {project_id}"
+        )
+
+    # Run sync
+    result = worktree_manager.sync_worktrees_for_project(project_id)
+
+    return WorktreeSyncResponse(
+        is_git_repo=result.get("is_git_repo", False),
+        active_worktrees=result.get("active", 0),
+        cleaned_up=result.get("cleaned_up", [])
+    )

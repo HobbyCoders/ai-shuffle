@@ -88,6 +88,13 @@
 			{#if isEmptyState}
 				<!-- Empty state: Centered layout with mode selector -->
 				<div class="empty-state">
+					<!-- Error display for empty state (e.g., worktree creation failures) -->
+					{#if tab.error}
+						<div class="error-banner">
+							<span>{tab.error}</span>
+							<button onclick={() => tabs.clearTabError(tab.id)}>&times;</button>
+						</div>
+					{/if}
 					<div class="empty-state-content">
 						<ExecutionModeSelector {tab} />
 						<ChatInput {tab} />
@@ -142,6 +149,13 @@
 				{#if isEmptyState}
 					<!-- Empty state: Centered layout with mode selector -->
 					<div class="empty-state">
+						<!-- Error display for empty state (e.g., worktree creation failures) -->
+						{#if tab.error}
+							<div class="error-banner">
+								<span>{tab.error}</span>
+								<button onclick={() => tabs.clearTabError(tab.id)}>&times;</button>
+							</div>
+						{/if}
 						<div class="empty-state-content">
 							<ExecutionModeSelector {tab} />
 							<ChatInput {tab} />
@@ -216,9 +230,11 @@
 	.empty-state {
 		flex: 1;
 		display: flex;
+		flex-direction: column;
 		align-items: center;
 		justify-content: center;
 		padding: 1rem;
+		position: relative;
 	}
 
 	.empty-state-content {
@@ -227,6 +243,40 @@
 		gap: 1rem;
 		width: 100%;
 		max-width: 600px;
+	}
+
+	/* Error banner for empty state - positioned at top */
+	.error-banner {
+		position: absolute;
+		top: 1rem;
+		left: 1rem;
+		right: 1rem;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 1rem;
+		padding: 0.75rem 1rem;
+		background: hsl(var(--destructive) / 0.1);
+		border: 1px solid hsl(var(--destructive) / 0.3);
+		border-radius: 0.5rem;
+		color: hsl(var(--destructive));
+		font-size: 0.875rem;
+	}
+
+	.error-banner button {
+		flex-shrink: 0;
+		background: none;
+		border: none;
+		color: hsl(var(--destructive));
+		font-size: 1.25rem;
+		cursor: pointer;
+		padding: 0;
+		line-height: 1;
+		opacity: 0.7;
+	}
+
+	.error-banner button:hover {
+		opacity: 1;
 	}
 
 	.chat-loading {
