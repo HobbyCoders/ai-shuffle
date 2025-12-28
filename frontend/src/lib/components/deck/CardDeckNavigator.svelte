@@ -281,21 +281,13 @@
 	// Handle card click
 	function handleCardClick(card: NavigatorCard) {
 		// Only block click if user actually dragged
-		if (hasDragged) {
-			console.log('[CardClick] Blocked - user was dragging');
-			return;
-		}
-
-		console.log('[CardClick] Card clicked:', card.id, card.type, card.action || card.category);
+		if (hasDragged) return;
 
 		if (card.type === 'action' && card.action) {
-			console.log('[CardClick] Handling action:', card.action);
 			handleAction(card.action);
 		} else if (card.type === 'category' && card.category) {
-			console.log('[CardClick] Navigating to category:', card.category);
 			navigateToCategory(card);
 		} else if (card.type === 'thread' && card.sessionId) {
-			console.log('[CardClick] Opening thread:', card.sessionId);
 			onOpenThread(card.sessionId);
 			onClose();
 		}
@@ -479,9 +471,6 @@
 		// Clamp to valid range
 		const maxScroll = carouselRef.scrollWidth - carouselRef.clientWidth;
 		carouselRef.scrollLeft = Math.max(0, Math.min(newScrollLeft, maxScroll));
-
-		// Debug: log scroll info
-		console.log('[Scroll] scrollLeft:', carouselRef.scrollLeft, 'target:', newScrollLeft, 'maxScroll:', maxScroll);
 	}
 
 	// Update scroll progress for dots

@@ -72,26 +72,11 @@
 	import CreateMenu from '$lib/components/deck/CreateMenu.svelte';
 	import CardDeckNavigator from '$lib/components/deck/CardDeckNavigator.svelte';
 
-	// Types from deck/types
-	import type {
-		ActivityMode,
-		DeckSession,
-		DeckAgent,
-		DeckGeneration,
-		RunningProcess
-	} from '$lib/components/deck/types';
-	import type { ActiveSession, HistorySession, ActivityTabType } from '$lib/components/deck';
-
 	// ============================================
 	// State: Deck Layout
 	// ============================================
-	let activeMode = $state<ActivityMode>('workspace');
-	let contextCollapsed = $state(false);
 	let isMobile = $state(false);
 	let workspaceRef: Workspace | undefined = $state();
-
-	// Activity Panel State
-	let activityPanelTab = $state<ActivityTabType>('threads');
 
 	// Track last loaded git project to avoid unnecessary reloads
 	let lastGitProjectId: string | null = null;
@@ -172,155 +157,6 @@
 			updatedAt: c.createdAt
 		}))
 	);
-
-	// Active Threads: Show all open cards in the sidebar (legacy)
-	const deckSessions = $derived<DeckSession[]>(
-		$allCards.map((c) => ({
-			id: c.id,
-			title: c.title || 'Untitled',
-			lastMessage: c.type === 'chat' ? 'Chat' : c.type === 'terminal' ? 'Terminal' : c.type,
-			timestamp: new Date(c.createdAt),
-			isActive: c.id === $focusedCardId
-		}))
-	);
-
-	// Active Sessions for Activity Panel: Combines open cards and active agents (running + paused)
-	// Track which agent IDs have open cards to avoid duplicates
-	const openAgentCardIds = $derived(
-		new Set($allCards.filter(c => c.type === 'agent').map(c => c.dataId))
-	);
-
-	const activeSessions = $derived<ActiveSession[]>([
-		// Open cards - map to correct types, get agent status from store
-		...$allCards.map((c) => {
-			if (c.type === 'agent') {
-				// Agent card - get status from agent store
-				const agentData = $allAgents.find(a => a.id === c.dataId);
-				return {
-					id: c.id, // Use card ID for focusing
-					type: 'agent' as const,
-					title: agentData?.name || c.title || 'Agent',
-					status: agentData?.status === 'running' ? 'running' as const :
-					        agentData?.status === 'paused' ? 'idle' as const :
-					        agentData?.status === 'failed' ? 'error' as const :
-					        c.id === $focusedCardId ? 'active' as const : 'idle' as const,
-					progress: agentData?.progress,
-					isSelected: c.id === $focusedCardId,
-					unread: false
-				};
-			}
-			// Regular chat card
-			return {
-				id: c.id,
-				type: 'chat' as const,
-				title: c.title || 'Untitled',
-				status: c.id === $focusedCardId ? 'active' as const : 'idle' as const,
-				isSelected: c.id === $focusedCardId,
-				unread: false
-			};
-		}),
-		// Active agents that don't have an open card yet (running + paused)
-		...$activeAgents
-			.filter(agent => !openAgentCardIds.has(agent.id))
-			.map(agent => ({
-				id: agent.id,
-				type: 'agent' as const,
-				title: agent.name || agent.prompt?.slice(0, 30) || `Agent ${agent.id.slice(0, 8)}`,
-				status: agent.status === 'running' ? 'running' as const :
-				        agent.status === 'paused' ? 'idle' as const :
-				        agent.status === 'failed' ? 'error' as const : 'idle' as const,
-				progress: agent.progress,
-				isSelected: false,
-				unread: false
-			}))
-	]);
-
-	// Recent Sessions: Session history for loading old chats
-	// Shows sessions that are NOT currently open as cards
-	const openSessionIds = $derived(
-		new Set($allCards
-			.filter(c => c.dataId)
-			.map(c => c.dataId))
-	);
-
-	const recentSessions = $derived<HistorySession[]>(
-		$sessions.slice(0, 20).map((s) => ({
-			id: s.id,
-			title: s.title || 'Untitled',
-			timestamp: new Date(s.updated_at),
-			isOpen: openSessionIds.has(s.id)
-		}))
-	);
-
-	const badges = $derived<import('$lib/components/deck/types').ActivityBadges>({
-		workspace: $allCards.length > 0 ? $allCards.length : undefined,
-		studio: undefined,
-		files: undefined
-	});
-
-	// Map all agents to DeckAgent format for ContextPanel
-	// Uses allAgents so we track status changes including completed/failed
-	const deckAgents = $derived.by<DeckAgent[]>(() => {
-		const mapped = $allAgents.map(agent => ({
-			id: agent.id,
-			name: agent.name,
-			status: agent.status === 'running' ? 'running' :
-			        agent.status === 'paused' ? 'paused' :
-			        agent.status === 'queued' ? 'queued' :
-			        agent.status === 'completed' ? 'idle' :
-			        agent.status === 'failed' ? 'error' : 'idle',
-			task: agent.prompt?.slice(0, 50),
-			progress: agent.progress
-		} as DeckAgent));
-		console.log('[DeckAgents] allAgents count:', $allAgents.length, 'mapped:', mapped);
-		return mapped;
-	});
-
-	// Split agents for Activity Panel tabs (running/queued go to active sessions)
-	const runningAgentsForPanel = $derived<DeckAgent[]>(
-		deckAgents.filter(a => a.status === 'running' || a.status === 'paused' || a.status === 'queued')
-	);
-	const completedAgentsForPanel = $derived<DeckAgent[]>(
-		deckAgents.filter(a => a.status === 'idle' || a.status === 'error')
-	);
-
-	const deckGenerations: DeckGeneration[] = [];
-	const runningProcesses = $derived<RunningProcess[]>([]);
-
-	// Compute current session info from focused chat card
-	const currentSessionInfo = $derived.by<import('$lib/components/deck/types').SessionInfo | null>(() => {
-		// Find the focused card
-		const focusedCard = $allCards.find(c => c.id === $focusedCardId);
-		if (!focusedCard || focusedCard.type !== 'chat') return null;
-
-		// Get the tab for this card (by dataId which is the tabId)
-		const tabId = focusedCard.dataId;
-		if (!tabId) return null;
-
-		const tab = $allTabs.find(t => t.id === tabId);
-		if (!tab) return null;
-
-		// Get the profile to find the model name
-		const profilesList = $profiles;
-		const profile = profilesList.find(p => p.id === tab.profile);
-		const modelName = tab.modelOverride || profile?.config?.model || 'claude-sonnet-4-20250514';
-
-		// Calculate cost (rough estimate based on Claude pricing)
-		// Sonnet: $3/$15 per 1M tokens (input/output)
-		const inputCost = (tab.totalTokensIn / 1_000_000) * 3;
-		const outputCost = (tab.totalTokensOut / 1_000_000) * 15;
-		const totalCost = inputCost + outputCost;
-
-		return {
-			model: modelName,
-			tokens: {
-				input: tab.totalTokensIn,
-				output: tab.totalTokensOut,
-				total: tab.totalTokensIn + tab.totalTokensOut
-			},
-			cost: totalCost
-		};
-	});
 
 	// ============================================
 	// Helper Functions
@@ -735,61 +571,6 @@
 	// ============================================
 	// Mode & Navigation Handlers
 	// ============================================
-	function handleModeChange(mode: ActivityMode) {
-		activeMode = mode;
-		deck.setMode(mode as 'workspace' | 'studio' | 'files');
-	}
-
-	function handleSessionClick(session: ActiveSession) {
-		if (session.type === 'chat') {
-			// It's a chat card - focus it
-			const existingCard = $allCards.find((c) => c.id === session.id);
-			if (existingCard) {
-				deck.focusCard(existingCard.id);
-			}
-		} else if (session.type === 'agent') {
-			// It's an agent session - could be a card ID or agent ID
-			// First check if session.id is a card ID (for already open agent cards)
-			const existingCardById = $allCards.find((c) => c.id === session.id);
-			if (existingCardById) {
-				// It's an open card - just focus it
-				deck.focusCard(existingCardById.id);
-				return;
-			}
-
-			// Check if there's already an agent card with this dataId
-			const existingAgentCard = $allCards.find((c) => c.type === 'agent' && c.dataId === session.id);
-			if (existingAgentCard) {
-				deck.focusCard(existingAgentCard.id);
-				return;
-			}
-
-			// No existing card - open a new one
-			deck.setMode('workspace');
-			deck.openOrFocusCard('agent', session.id, {
-				title: session.title,
-				meta: { agentId: session.id }
-			});
-		}
-	}
-
-	function handleHistorySessionClick(historySession: HistorySession) {
-		// Check if this session is already open as a card
-		const existingCard = deck.findCardByDataId(historySession.id);
-		if (existingCard) {
-			// Focus the existing card
-			deck.focusCard(existingCard.id);
-		} else {
-			// Open the session as a new card
-			const tabId = tabs.openSession(historySession.id);
-			deck.addCard('chat', {
-				title: historySession.title || 'Chat',
-				dataId: historySession.id,
-				meta: { tabId }
-			});
-		}
-	}
-
 	/**
 	 * Open a thread from the CardDeckNavigator
 	 */
@@ -1082,39 +863,7 @@
 {:else}
 	<!-- Main Deck Layout -->
 	<DeckLayout
-		{activeMode}
-		{badges}
-		contextCollapsed={contextCollapsed}
-		isAdmin={$isAdmin}
-		activeTab={activityPanelTab}
-		{activeSessions}
-		{recentSessions}
-		runningAgents={runningAgentsForPanel}
-		completedAgents={completedAgentsForPanel}
-		generations={deckGenerations}
-		currentSession={currentSessionInfo}
-		sessions={deckSessions}
-		agents={deckAgents}
-		{runningProcesses}
-		onModeChange={handleModeChange}
 		onLogoClick={() => showCardNavigator = !showCardNavigator}
-		onSettingsClick={() => handleCreateCard('settings')}
-		onContextToggle={() => deck.toggleContextPanel()}
-		onTabChange={(tab) => activityPanelTab = tab}
-		onSessionClick={handleSessionClick}
-		onHistorySessionClick={handleHistorySessionClick}
-		onAgentClick={(agent) => {
-			// Open agent card in workspace
-			console.log('[onAgentClick] Clicked agent:', agent.id, agent.name);
-			deck.setMode('workspace');
-			const cardId = deck.openOrFocusCard('agent', agent.id, {
-				title: agent.name,
-				meta: { agentId: agent.id }
-			});
-			console.log('[onAgentClick] Opened/focused card:', cardId, 'with dataId:', agent.id);
-		}}
-		onGenerationClick={() => {}}
-		onProcessClick={() => {}}
 	>
 		{#if isMobile}
 				<!-- Mobile Workspace -->
