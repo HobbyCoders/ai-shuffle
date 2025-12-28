@@ -957,10 +957,12 @@
 		top: calc(100% + 0.5rem);
 		left: 0;
 		right: 0;
-		background: hsl(var(--popover));
-		border: 1px solid var(--border);
+		background: oklch(0.13 0.01 260);
+		border: 1px solid oklch(0.25 0.015 260);
 		border-radius: 0.75rem;
-		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+		box-shadow:
+			0 8px 32px rgba(0, 0, 0, 0.5),
+			0 0 0 1px oklch(0.2 0.01 260);
 		z-index: 100;
 		overflow: hidden;
 		animation: slideDown 0.15s ease;
@@ -983,8 +985,9 @@
 		font-weight: 600;
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
-		color: hsl(var(--muted-foreground));
-		border-bottom: 1px solid var(--border);
+		color: oklch(0.6 0.01 260);
+		background: oklch(0.11 0.008 260);
+		border-bottom: 1px solid oklch(0.2 0.01 260);
 	}
 
 	.dropdown-list {
@@ -1008,11 +1011,11 @@
 	}
 
 	.dropdown-item:hover {
-		background: hsl(var(--muted));
+		background: oklch(0.18 0.012 260);
 	}
 
 	.dropdown-item.active {
-		background: hsl(var(--primary) / 0.15);
+		background: oklch(0.2 0.04 180);
 	}
 
 	.dropdown-item :global(.item-icon) {
@@ -1749,10 +1752,12 @@
 	.context-menu {
 		position: fixed;
 		min-width: 180px;
-		background: hsl(var(--popover));
-		border: 1px solid var(--border);
+		background: oklch(0.13 0.01 260);
+		border: 1px solid oklch(0.25 0.015 260);
 		border-radius: 0.75rem;
-		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+		box-shadow:
+			0 8px 32px rgba(0, 0, 0, 0.5),
+			0 0 0 1px oklch(0.2 0.01 260);
 		z-index: 100;
 		overflow: hidden;
 		padding: 0.375rem;
@@ -1787,7 +1792,7 @@
 	}
 
 	.ctx-btn:hover {
-		background: hsl(var(--muted));
+		background: oklch(0.18 0.012 260);
 	}
 
 	.ctx-btn :global(svg) {
@@ -1811,12 +1816,12 @@
 	}
 
 	.ctx-btn.danger:hover {
-		background: hsl(var(--destructive) / 0.1);
+		background: oklch(0.25 0.08 25);
 	}
 
 	.ctx-divider {
 		height: 1px;
-		background: var(--border);
+		background: oklch(0.2 0.01 260);
 		margin: 0.375rem 0;
 	}
 
