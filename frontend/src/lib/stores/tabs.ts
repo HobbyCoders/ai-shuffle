@@ -2087,6 +2087,16 @@ function createTabsStore() {
 					break;
 				}
 
+				// Filter out spurious status messages with no meaningful status
+				// The SDK sometimes sends empty status messages during compaction
+				if (subtype === 'status') {
+					const status = systemData?.status as string | undefined;
+					if (!status || status === 'unknown') {
+						console.log('[WS] Ignoring empty/unknown status message:', systemData);
+						break;
+					}
+				}
+
 				// Extract content for display - for local_command, the content is in data.content
 				let displayContent = '';
 				if (systemData?.content && typeof systemData.content === 'string') {
