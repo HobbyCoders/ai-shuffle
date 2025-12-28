@@ -24,16 +24,16 @@
 
 		function createParticles() {
 			particles = [];
-			const count = Math.min(35, Math.floor(window.innerWidth / 35));
+			const count = Math.min(30, Math.floor(window.innerWidth / 40));
 
 			for (let i = 0; i < count; i++) {
 				particles.push({
 					x: Math.random() * canvas.width,
 					y: Math.random() * canvas.height,
-					vx: (Math.random() - 0.5) * 0.2,
-					vy: (Math.random() - 0.5) * 0.15,
-					size: Math.random() * 2 + 0.5,
-					opacity: Math.random() * 0.25 + 0.05,
+					vx: (Math.random() - 0.5) * 0.15,
+					vy: (Math.random() - 0.5) * 0.12,
+					size: Math.random() * 1.5 + 0.5,
+					opacity: Math.random() * 0.2 + 0.05,
 					pulse: Math.random() * Math.PI * 2
 				});
 			}
@@ -46,7 +46,7 @@
 				// Update position
 				p.x += p.vx;
 				p.y += p.vy;
-				p.pulse += 0.01;
+				p.pulse += 0.008;
 
 				// Wrap around edges
 				if (p.x < 0) p.x = canvas.width;
@@ -57,10 +57,10 @@
 				// Pulsing opacity
 				const opacity = p.opacity * (0.7 + 0.3 * Math.sin(p.pulse));
 
-				// Draw particle
+				// Draw particle - cyan tint for AI aesthetic
 				ctx.beginPath();
 				ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-				ctx.fillStyle = `rgba(245, 230, 200, ${opacity})`;
+				ctx.fillStyle = `rgba(150, 220, 235, ${opacity})`;
 				ctx.fill();
 			});
 

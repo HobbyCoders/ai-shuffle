@@ -14,7 +14,6 @@
 			label: 'CHAT',
 			description: 'Start a conversation',
 			icon: MessageSquare,
-			suit: '♠' as const,
 			shortcut: '⌘N',
 			rotation: -5
 		},
@@ -23,7 +22,6 @@
 			label: 'AGENT',
 			description: 'Deploy an AI ally',
 			icon: Bot,
-			suit: '♥' as const,
 			shortcut: '⌘⇧B',
 			rotation: 0
 		},
@@ -32,7 +30,6 @@
 			label: 'TERMINAL',
 			description: 'Open command line',
 			icon: Terminal,
-			suit: '♦' as const,
 			shortcut: '⌘T',
 			rotation: 5
 		}

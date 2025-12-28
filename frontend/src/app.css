@@ -14,18 +14,21 @@
 		/* Background colors */
 		--background: oklch(0.14 0.008 260);
 
-		/* Casino Noir Palette - Welcome Page (blueish-green matching UI) */
-		--felt: oklch(0.12 0.03 180);
-		--felt-highlight: oklch(0.15 0.035 180);
-		--felt-deep: oklch(0.08 0.02 180);
-		--spotlight: oklch(0.92 0.05 85);
-		--gold: oklch(0.72 0.15 85);
-		--gold-dim: oklch(0.58 0.12 85);
-		--gold-bright: oklch(0.82 0.18 85);
-		--gold-glow: oklch(0.72 0.15 85 / 0.3);
-		--gold-glow-strong: oklch(0.72 0.15 85 / 0.5);
-		--card-surface-welcome: oklch(0.16 0.01 260);
-		--card-bg-welcome: oklch(0.13 0.008 260);
+		/* AI Shuffle Palette - Welcome Page */
+		--accent-cyan: oklch(0.75 0.15 195);
+		--accent-cyan-dim: oklch(0.60 0.12 195);
+		--accent-cyan-bright: oklch(0.85 0.18 195);
+		--accent-glow: oklch(0.75 0.15 195 / 0.3);
+		--accent-glow-strong: oklch(0.75 0.15 195 / 0.5);
+		--card-surface-welcome: oklch(0.17 0.01 260);
+		--card-bg-welcome: oklch(0.14 0.008 260);
+
+		/* Legacy aliases for compatibility */
+		--gold: var(--accent-cyan);
+		--gold-dim: var(--accent-cyan-dim);
+		--gold-bright: var(--accent-cyan-bright);
+		--gold-glow: var(--accent-glow);
+		--gold-glow-strong: var(--accent-glow-strong);
 
 		/* Dealer Button */
 		--dealer-white: #f8f6f0;
@@ -128,15 +131,21 @@
 		--background: oklch(0.98 0.005 260);
 		--foreground: oklch(0.15 0.01 260);
 
-		/* Casino Noir Palette - Light theme variant */
-		--felt: oklch(0.94 0.02 90);
-		--felt-highlight: oklch(0.97 0.01 90);
-		--spotlight: oklch(0.35 0.05 50);
-		--gold: oklch(0.55 0.15 70);
-		--gold-glow: oklch(0.55 0.15 70 / 0.25);
-		--gold-glow-strong: oklch(0.55 0.15 70 / 0.4);
+		/* AI Shuffle Palette - Light theme variant */
+		--accent-cyan: oklch(0.55 0.16 195);
+		--accent-cyan-dim: oklch(0.45 0.14 195);
+		--accent-cyan-bright: oklch(0.65 0.18 195);
+		--accent-glow: oklch(0.55 0.16 195 / 0.25);
+		--accent-glow-strong: oklch(0.55 0.16 195 / 0.4);
 		--card-surface-welcome: oklch(0.98 0.005 260);
 		--card-bg-welcome: oklch(0.96 0.003 260);
+
+		/* Legacy aliases for compatibility */
+		--gold: var(--accent-cyan);
+		--gold-dim: var(--accent-cyan-dim);
+		--gold-bright: var(--accent-cyan-bright);
+		--gold-glow: var(--accent-glow);
+		--gold-glow-strong: var(--accent-glow-strong);
 
 		/* Elevated surfaces */
 		--card: oklch(1 0 0);
