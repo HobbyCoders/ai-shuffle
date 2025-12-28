@@ -3,7 +3,7 @@
 	 * ChatInput - Modern chat input island with progressive disclosure
 	 *
 	 * Layer 1: Minimal - textarea + essential buttons
-	 * Layer 2: Context Bar - compact profile/project display (cosmetic) + settings gear
+	 * Layer 2: Context Bar - clickable profile/project selectors to open cards
 	 */
 	import { tick, onDestroy } from 'svelte';
 	import { tabs, profiles, projects, type ChatTab } from '$lib/stores/tabs';
@@ -24,10 +24,11 @@
 		tab: ChatTab;
 		compact?: boolean;
 		onOpenTerminalModal?: (tabId: string, command: string) => void;
-		onOpenSettings?: () => void;
+		onOpenProfileCard?: (editId?: string) => void;
+		onOpenProjectCard?: (editId?: string) => void;
 	}
 
-	let { tab, compact = false, onOpenTerminalModal, onOpenSettings }: Props = $props();
+	let { tab, compact = false, onOpenTerminalModal, onOpenProfileCard, onOpenProjectCard }: Props = $props();
 
 	// Context usage calculation
 	function formatTokenCount(count: number): string {
@@ -117,13 +118,18 @@
 	// Island ref
 	let islandRef = $state<HTMLDivElement | null>(null);
 
-	// Get selected profile/project names for display (cosmetic only)
+	// Get selected profile/project names for display
 	const selectedProfileName = $derived($profiles.find(p => p.id === tab.profile)?.name || 'Profile');
 	const selectedProjectName = $derived($projects.find(p => p.id === tab.project)?.name || 'Project');
 
-	// Open settings in Activity Panel
-	function openSettings() {
-		onOpenSettings?.();
+	// Open profile card for changing profile
+	function handleProfileClick() {
+		onOpenProfileCard?.();
+	}
+
+	// Open project card for changing project
+	function handleProjectClick() {
+		onOpenProjectCard?.();
 	}
 
 	// Check if input contains an active @ mention
@@ -550,44 +556,48 @@
 					</div>
 				</div>
 
-				<!-- Simplified Context Bar - cosmetic display only -->
+				<!-- Context Bar - clickable profile/project selectors -->
 				<div class="context-bar">
-					<!-- Left: Profile & Project as display text (not interactive) -->
+					<!-- Left: Clickable Profile & Project selectors -->
 					<div class="context-selectors">
-						<span class="context-selector {tab.profile ? '' : 'unset'}">
+						<button
+							type="button"
+							class="context-selector-btn {tab.profile ? '' : 'unset'}"
+							onclick={handleProfileClick}
+							title="Change profile"
+						>
 							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
 							</svg>
 							<span>{selectedProfileName}</span>
-						</span>
+							<svg class="w-3 h-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+							</svg>
+						</button>
 
 						<span class="context-separator">•</span>
 
-						<span class="context-selector {tab.project ? '' : 'unset'}">
+						<button
+							type="button"
+							class="context-selector-btn {tab.project ? '' : 'unset'}"
+							onclick={handleProjectClick}
+							title="Change project"
+						>
 							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 							</svg>
 							<span>{selectedProjectName}</span>
-						</span>
+							<svg class="w-3 h-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+							</svg>
+						</button>
 					</div>
 
-					<!-- Right: Context % and Settings gear -->
+					<!-- Right: Context % -->
 					<div class="context-right">
 						<span class="context-percent {contextColor}" title="{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)} tokens">
 							{Math.round(contextPercent)}%
 						</span>
-
-						<button
-							type="button"
-							onclick={openSettings}
-							class="settings-btn"
-							title="Open settings"
-						>
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-							</svg>
-						</button>
 					</div>
 				</div>
 			</div>
@@ -857,7 +867,7 @@
 		flex-wrap: wrap;
 	}
 
-	.context-selector {
+	.context-selector-btn {
 		display: inline-flex;
 		align-items: center;
 		gap: 0.375rem;
@@ -866,13 +876,27 @@
 		font-weight: 500;
 		color: var(--muted-foreground);
 		border-radius: 0.5rem;
+		background: transparent;
+		border: none;
+		cursor: pointer;
+		transition: background-color 0.15s, color 0.15s;
 	}
 
-	.context-selector.unset {
+	.context-selector-btn:hover {
+		background: var(--accent);
+		color: var(--foreground);
+	}
+
+	.context-selector-btn.unset {
 		color: var(--warning);
 	}
 
-	.context-selector span {
+	.context-selector-btn.unset:hover {
+		background: color-mix(in srgb, var(--warning) 15%, transparent);
+		color: var(--warning);
+	}
+
+	.context-selector-btn span {
 		max-width: 100px;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -880,7 +904,7 @@
 	}
 
 	@media (min-width: 640px) {
-		.context-selector span {
+		.context-selector-btn span {
 			max-width: 140px;
 		}
 	}
@@ -900,21 +924,5 @@
 	.context-percent {
 		font-size: 0.6875rem;
 		font-weight: 600;
-	}
-
-	.settings-btn {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 32px;
-		height: 32px;
-		border-radius: 0.5rem;
-		color: var(--muted-foreground);
-		transition: background-color 0.15s, color 0.15s;
-	}
-
-	.settings-btn:hover {
-		background: var(--accent);
-		color: var(--foreground);
 	}
 </style>

@@ -26,7 +26,6 @@
 		onFork?: (sessionId: string, messageIndex: number, messageId: string) => void;
 		onOpenProfileCard?: (editId?: string) => void;
 		onOpenProjectCard?: (editId?: string) => void;
-		onOpenSettings?: () => void;
 		mobile?: boolean;
 	}
 
@@ -43,7 +42,6 @@
 		onFork,
 		onOpenProfileCard,
 		onOpenProjectCard,
-		onOpenSettings,
 		mobile = false
 	}: Props = $props();
 
@@ -118,7 +116,7 @@
 			{/if}
 
 			<!-- Input at the bottom -->
-			<ChatInput {tab} compact {onOpenProfileCard} {onOpenProjectCard} {onOpenSettings} />
+			<ChatInput {tab} compact {onOpenProfileCard} {onOpenProjectCard} />
 		{:else}
 			<div class="chat-loading">
 				<div class="spinner"></div>
@@ -161,7 +159,7 @@
 				{/if}
 
 				<!-- Input area -->
-				<ChatInput {tab} compact {onOpenProfileCard} {onOpenProjectCard} {onOpenSettings} />
+				<ChatInput {tab} compact {onOpenProfileCard} {onOpenProjectCard} />
 			{:else}
 				<div class="chat-loading">
 					<div class="spinner"></div>

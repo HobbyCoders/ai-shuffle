@@ -71,10 +71,6 @@
 	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
 	import CreateMenu from '$lib/components/deck/CreateMenu.svelte';
 
-	// Mobile components
-	import BottomSheet from '$lib/components/chat/BottomSheet.svelte';
-	import ChatSettingsOverlay from '$lib/components/deck/overlays/ChatSettingsOverlay.svelte';
-
 	// Types from deck/types
 	import type {
 		ActivityMode,
@@ -83,7 +79,7 @@
 		DeckGeneration,
 		RunningProcess
 	} from '$lib/components/deck/types';
-	import type { ActiveSession, HistorySession, ActivityTabType, OverlayType } from '$lib/components/deck';
+	import type { ActiveSession, HistorySession, ActivityTabType } from '$lib/components/deck';
 
 	// ============================================
 	// State: Deck Layout
@@ -95,93 +91,6 @@
 
 	// Activity Panel State
 	let activityPanelTab = $state<ActivityTabType>('threads');
-	let overlayType = $state<OverlayType>(null);
-
-	// Mobile Settings Sheet
-	let showMobileSettingsSheet = $state(false);
-
-	// Stable callbacks for chat settings (defined once, reused)
-	function handleChatSettingsProfileChange(profileId: string) {
-		const tab = $activeTab;
-		if (tab) tabs.setTabProfile(tab.id, profileId);
-	}
-
-	function handleChatSettingsProjectChange(projectId: string) {
-		const tab = $activeTab;
-		if (tab) tabs.setTabProject(tab.id, projectId);
-		git.loadRepository(projectId);
-	}
-
-	function handleChatSettingsModelChange(model: string | null) {
-		const tab = $activeTab;
-		if (tab) tabs.setTabModelOverride(tab.id, model);
-	}
-
-	function handleChatSettingsModeChange(mode: string | null) {
-		const tab = $activeTab;
-		if (tab) tabs.setTabPermissionModeOverride(tab.id, mode);
-	}
-
-	// Derived overlay data - automatically updates when dependencies change
-	const chatSettingsOverlayData = $derived.by(() => {
-		// Compute data when desktop overlay OR mobile bottom sheet is open
-		if (overlayType !== 'chat-settings' && !showMobileSettingsSheet) return {};
-
-		const tab = $activeTab;
-		if (!tab) return {};
-
-		// Get profile settings for effective values
-		const currentProfile = $profiles.find(p => p.id === tab.profile);
-		const profileModel = currentProfile?.config?.model || 'sonnet';
-		const profileMode = currentProfile?.config?.permission_mode || 'default';
-
-		// Calculate context usage
-		const autocompactBuffer = 45000;
-		const contextUsed = (tab.contextUsed ?? (tab.totalTokensIn + tab.totalCacheCreationTokens + tab.totalCacheReadTokens)) + autocompactBuffer;
-		const contextMax = tab.contextMax || 200000;
-		const contextPercent = Math.min((contextUsed / contextMax) * 100, 100);
-
-		return {
-			// Current values
-			selectedProfile: tab.profile,
-			selectedProject: tab.project,
-			selectedModel: tab.modelOverride,
-			selectedMode: tab.permissionModeOverride,
-			effectiveModel: tab.modelOverride || profileModel,
-			effectiveMode: tab.permissionModeOverride || profileMode,
-			contextUsage: {
-				used: contextUsed,
-				total: contextMax,
-				percentage: contextPercent
-			},
-
-			// Locked states
-			isProfileLocked: false,
-			isProjectLocked: !!tab.sessionId,
-
-			// Options
-			profiles: $profiles,
-			projects: $projects,
-			models: [
-				{ value: 'sonnet', label: 'Sonnet' },
-				{ value: 'sonnet-1m', label: 'Sonnet 1M' },
-				{ value: 'opus', label: 'Opus' },
-				{ value: 'haiku', label: 'Haiku' }
-			],
-			modes: [
-				{ value: 'default', label: 'Ask' },
-				{ value: 'acceptEdits', label: 'Auto-Accept' },
-				{ value: 'plan', label: 'Plan' },
-				{ value: 'bypassPermissions', label: 'Bypass' }
-			],
-
-			// Stable callbacks (don't change on re-render)
-			onProfileChange: handleChatSettingsProfileChange,
-			onProjectChange: handleChatSettingsProjectChange,
-			onModelChange: handleChatSettingsModelChange,
-			onModeChange: handleChatSettingsModeChange
-		};
-	});
 
 	// Track last loaded git project to avoid unnecessary reloads
 	let lastGitProjectId: string | null = null;
@@ -1082,32 +991,6 @@
 		}
 	}
 
-	function handleOpenChatSettings() {
-		// On mobile, use the bottom sheet instead of the hidden side panel
-		if (isMobile) {
-			showMobileSettingsSheet = !showMobileSettingsSheet;
-			return;
-		}
-
-		// Desktop: Toggle overlay if already open
-		if (overlayType === 'chat-settings') {
-			overlayType = null;
-			// Also collapse the side panel when closing settings
-			deck.collapseContextPanel();
-			return;
-		}
-
-		// Expand the context panel if collapsed
-		deck.expandContextPanel();
-
-		// Just set the overlay type - data is derived reactively
-		overlayType = 'chat-settings';
-	}
-
-	function handleCloseMobileSettings() {
-		showMobileSettingsSheet = false;
-	}
-
 	function handleOpenProjectCard(editId?: string) {
 		// Find or create project card
 		const existingProject = $allCards.find(c => c.type === 'project');
@@ -1222,21 +1105,13 @@
 		completedAgents={completedAgentsForPanel}
 		generations={deckGenerations}
 		currentSession={currentSessionInfo}
-		{overlayType}
-		overlayData={chatSettingsOverlayData}
 		sessions={deckSessions}
 		agents={deckAgents}
 		{runningProcesses}
 		onModeChange={handleModeChange}
 		onLogoClick={() => showCreateMenu = !showCreateMenu}
 		onSettingsClick={() => handleCreateCard('settings')}
-		onContextToggle={() => {
-			deck.toggleContextPanel();
-			// Close chat settings overlay when collapsing the panel
-			if (overlayType === 'chat-settings') {
-				overlayType = null;
-			}
-		}}
+		onContextToggle={() => deck.toggleContextPanel()}
 		onTabChange={(tab) => activityPanelTab = tab}
 		onSessionClick={handleSessionClick}
 		onHistorySessionClick={handleHistorySessionClick}
@@ -1251,11 +1126,6 @@
 			console.log('[onAgentClick] Opened/focused card:', cardId, 'with dataId:', agent.id);
 		}}
 		onGenerationClick={() => {}}
-		onOverlayClose={() => {
-			overlayType = null;
-			// Collapse activity panel when closing chat settings
-			deck.collapseContextPanel();
-		}}
 		onProcessClick={() => {}}
 	>
 		{#if isMobile}
@@ -1275,7 +1145,7 @@
 								{tabId}
 								mobile={true}
 								onClose={() => handleCardClose(card.id)}
-																onMaximize={() => handleCardMaximize(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
 								onFocus={() => handleCardFocus(card.id)}
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1284,7 +1154,6 @@
 								}
 								onOpenProfileCard={handleOpenProfileCard}
 								onOpenProjectCard={handleOpenProjectCard}
-								onOpenSettings={handleOpenChatSettings}
 							/>
 						{:else if card.type === 'agent'}
 							<AgentCard
@@ -1439,7 +1308,7 @@
 												{card}
 												{tabId}
 												onClose={() => handleCardClose(card.id)}
-																								onMaximize={() => handleCardMaximize(card.id)}
+												onMaximize={() => handleCardMaximize(card.id)}
 												onFocus={() => handleCardFocus(card.id)}
 												onMove={(x, y) => handleCardMove(card.id, x, y)}
 												onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1450,7 +1319,6 @@
 												}
 												onOpenProfileCard={handleOpenProfileCard}
 												onOpenProjectCard={handleOpenProjectCard}
-												onOpenSettings={handleOpenChatSettings}
 											/>
 										{:else}
 											<div class="card-loading">
@@ -1732,18 +1600,6 @@
 			onClose={closeTerminalModal}
 		/>
 	{/if}
-
-	<!-- Mobile Settings Bottom Sheet -->
-	<BottomSheet
-		open={showMobileSettingsSheet}
-		onClose={handleCloseMobileSettings}
-		title="Chat Settings"
-	>
-		<ChatSettingsOverlay
-			{...chatSettingsOverlayData}
-			onClose={handleCloseMobileSettings}
-		/>
-	</BottomSheet>
 
 {/if}
 
