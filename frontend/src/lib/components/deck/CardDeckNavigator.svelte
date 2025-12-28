@@ -94,14 +94,26 @@
 	let longPressTimer = $state<ReturnType<typeof setTimeout> | null>(null);
 	const LONG_PRESS_DURATION = 500;
 
+	// Pointer-based drag state for smooth animation
+	let isPointerDragging = $state(false);
+	let pointerDragPosition = $state({ x: 0, y: 0 });
+	let pointerDragOffset = $state({ x: 0, y: 0 });
+	let draggedCardElement = $state<HTMLElement | null>(null);
+
 	// Context menu state
 	let contextMenuOpen = $state(false);
 	let contextMenuCardId = $state<string | null>(null);
 	let contextMenuPosition = $state({ x: 0, y: 0 });
+	let contextMenuIsDeck = $state(false); // Track if context menu is for a deck card
 
 	// New deck dialog state
 	let showNewDeckDialog = $state(false);
 	let newDeckName = $state('');
+
+	// Rename deck dialog state
+	let showRenameDeckDialog = $state(false);
+	let renameDeckId = $state<string | null>(null);
+	let renameDeckName = $state('');
 
 	// Card types for main deck
 	type CardAction = 'new-chat' | 'new-agent' | 'terminal' | 'recent' | 'image-studio' | 'model-studio' | 'audio-studio' | 'file-browser' | 'projects' | 'profiles' | 'settings';
@@ -524,118 +536,183 @@
 		// Start long press timer for mobile
 		if (isMobile) {
 			longPressTimer = setTimeout(() => {
-				startDrag(card, index, e);
+				// Mobile long-press triggers edit drag
+				handleEditPointerDown(e, card, index);
 			}, LONG_PRESS_DURATION);
+		} else {
+			// Desktop: immediately start drag
+			handleEditPointerDown(e, card, index);
 		}
 	}
 
-	function handleCardPointerUp() {
+	function handleCardPointerUp(e: PointerEvent) {
 		if (longPressTimer) {
 			clearTimeout(longPressTimer);
 			longPressTimer = null;
 		}
+		// Handle the pointer-based drag end
+		if (isPointerDragging) {
+			handleEditPointerUp(e);
+		}
 	}
 
-	function startDrag(card: NavigatorCard, index: number, e: PointerEvent) {
-		draggedCardId = card.id;
-		draggedCardIndex = index;
-
-		// Haptic feedback on mobile
-		if (navigator.vibrate) {
-			navigator.vibrate(50);
+	function handleCardPointerMove(e: PointerEvent) {
+		// Clear long press if we're moving
+		if (longPressTimer && !isPointerDragging) {
+			const threshold = 10;
+			// If pointer has moved, cancel long press
+			clearTimeout(longPressTimer);
+			longPressTimer = null;
+		}
+		// Handle the pointer-based drag move
+		if (isPointerDragging) {
+			handleEditPointerMove(e);
 		}
 	}
 
 	// Track if we're hovering over a deck for drop-into-deck
 	let dragOverDeckId = $state<string | null>(null);
 
-	function handleDragStart(e: DragEvent, card: NavigatorCard, index: number) {
-		if (!isEditMode || card.type === 'add-deck') {
-			e.preventDefault();
-			return;
-		}
+	// Start pointer drag (for smooth animation)
+	function handleEditPointerDown(e: PointerEvent, card: NavigatorCard, index: number) {
+		if (!isEditMode || card.type === 'add-deck') return;
+
+		const target = e.currentTarget as HTMLElement;
+
+		// Calculate offset from card top-left to pointer
+		const rect = target.getBoundingClientRect();
+		pointerDragOffset = {
+			x: e.clientX - rect.left,
+			y: e.clientY - rect.top
+		};
 
 		draggedCardId = card.id;
 		draggedCardIndex = index;
+		draggedCardElement = target;
+		isPointerDragging = true;
 
-		if (e.dataTransfer) {
-			e.dataTransfer.effectAllowed = 'move';
-			e.dataTransfer.setData('text/plain', card.id);
+		// Set initial position
+		pointerDragPosition = {
+			x: e.clientX - pointerDragOffset.x,
+			y: e.clientY - pointerDragOffset.y
+		};
+
+		// Capture pointer for smooth dragging
+		target.setPointerCapture(e.pointerId);
+
+		// Haptic feedback on mobile
+		if (window.navigator.vibrate) {
+			window.navigator.vibrate(50);
 		}
+
+		e.preventDefault();
 	}
 
-	function handleDragOver(e: DragEvent, index: number, card: NavigatorCard) {
-		if (!isEditMode || draggedCardId === null) return;
-		e.preventDefault();
+	function handleEditPointerMove(e: PointerEvent) {
+		if (!isPointerDragging || !draggedCardId) return;
 
-		// Check if hovering over a deck card (for drop-into-deck)
-		if (card.type === 'deck' && card.deckId && draggedCardId !== card.id) {
-			// Don't allow dropping a deck into another deck
-			const draggedCard = currentCards.find(c => c.id === draggedCardId);
-			if (draggedCard?.type !== 'deck') {
-				dragOverDeckId = card.deckId;
-				dragOverIndex = -1; // Not reordering, dropping into deck
-				return;
+		// Update drag position
+		pointerDragPosition = {
+			x: e.clientX - pointerDragOffset.x,
+			y: e.clientY - pointerDragOffset.y
+		};
+
+		// Find which card we're over using elementsFromPoint
+		const elements = document.elementsFromPoint(e.clientX, e.clientY);
+
+		let hoveredIndex = -1;
+		let hoveredDeckId: string | null = null;
+
+		// Find the first card element under the pointer (excluding the dragged one)
+		for (const el of elements) {
+			const cardEl = el.closest('[data-card-id]') as HTMLElement;
+			if (!cardEl) continue;
+
+			const cardId = cardEl.dataset.cardId;
+			if (!cardId || cardId === draggedCardId) continue;
+
+			const card = currentCards.find(c => c.id === cardId);
+			if (!card) continue;
+
+			const idx = currentCards.findIndex(c => c.id === cardId);
+
+			// Check if it's a deck card (for drop-into)
+			if (card.type === 'deck' && card.deckId) {
+				const draggedCard = currentCards.find(c => c.id === draggedCardId);
+				if (draggedCard?.type !== 'deck') {
+					hoveredDeckId = card.deckId;
+					hoveredIndex = -1;
+					break;
+				}
+			}
+
+			// Regular card - use for reordering
+			if (card.type !== 'add-deck') {
+				hoveredIndex = idx;
+			}
+			break;
+		}
+
+		dragOverDeckId = hoveredDeckId;
+		dragOverIndex = hoveredIndex;
+
+		e.preventDefault();
+	}
+
+	function handleEditPointerUp(e: PointerEvent) {
+		if (!isPointerDragging || !draggedCardId) return;
+
+		// Release pointer capture
+		if (draggedCardElement) {
+			draggedCardElement.releasePointerCapture(e.pointerId);
+		}
+
+		// Handle drop into deck
+		if (dragOverDeckId) {
+			navigator.addCardToDeck(dragOverDeckId, draggedCardId);
+		}
+		// Handle reorder
+		else if (dragOverIndex !== -1 && dragOverIndex !== draggedCardIndex) {
+			// Don't allow dropping past the add-deck card
+			let targetIndex = dragOverIndex;
+			const addDeckIndex = currentCards.findIndex(c => c.type === 'add-deck');
+			if (addDeckIndex !== -1 && targetIndex >= addDeckIndex) {
+				targetIndex = addDeckIndex - 1;
+			}
+
+			// Reorder cards (exclude add-deck from the order)
+			const cardIds = currentCards.filter(c => c.type !== 'add-deck').map(c => c.id);
+			const currentIdx = cardIds.indexOf(draggedCardId);
+			if (currentIdx !== -1) {
+				cardIds.splice(currentIdx, 1);
+				// Adjust target index if needed
+				const adjustedTarget = targetIndex > currentIdx ? targetIndex - 1 : targetIndex;
+				cardIds.splice(Math.min(adjustedTarget, cardIds.length), 0, draggedCardId);
+
+				navigator.setCardOrder(cardIds);
 			}
 		}
 
-		// Regular reorder
-		dragOverDeckId = null;
-		dragOverIndex = index;
-	}
-
-	function handleDragLeave() {
-		dragOverIndex = -1;
-		dragOverDeckId = null;
-	}
-
-	function handleDrop(e: DragEvent, targetIndex: number, targetCard: NavigatorCard) {
-		e.preventDefault();
-		if (draggedCardId === null || draggedCardIndex === -1) return;
-
-		// Check if dropping onto a deck card
-		if (dragOverDeckId && targetCard.type === 'deck' && targetCard.deckId) {
-			// Add the dragged card to the deck
-			navigator.addCardToDeck(targetCard.deckId, draggedCardId);
-
-			// Reset drag state
-			draggedCardId = null;
-			draggedCardIndex = -1;
-			dragOverIndex = -1;
-			dragOverDeckId = null;
-			return;
-		}
-
-		// Don't allow dropping past the add-deck card
-		const addDeckIndex = currentCards.findIndex(c => c.type === 'add-deck');
-		if (addDeckIndex !== -1 && targetIndex >= addDeckIndex) {
-			targetIndex = addDeckIndex - 1;
-		}
-
-		// Reorder cards (exclude add-deck from the order)
-		const cardIds = currentCards.filter(c => c.type !== 'add-deck').map(c => c.id);
-		const currentIdx = cardIds.indexOf(draggedCardId);
-		if (currentIdx !== -1) {
-			cardIds.splice(currentIdx, 1);
-			// Adjust target index if needed
-			const adjustedTarget = targetIndex > currentIdx ? targetIndex - 1 : targetIndex;
-			cardIds.splice(Math.min(adjustedTarget, cardIds.length), 0, draggedCardId);
-		}
-
-		navigator.setCardOrder(cardIds);
-
 		// Reset drag state
+		isPointerDragging = false;
 		draggedCardId = null;
 		draggedCardIndex = -1;
 		dragOverIndex = -1;
 		dragOverDeckId = null;
+		draggedCardElement = null;
 	}
 
-	function handleDragEnd() {
+	function handleEditPointerCancel(e: PointerEvent) {
+		// Reset without applying changes
+		if (draggedCardElement) {
+			draggedCardElement.releasePointerCapture(e.pointerId);
+		}
+		isPointerDragging = false;
 		draggedCardId = null;
 		draggedCardIndex = -1;
 		dragOverIndex = -1;
 		dragOverDeckId = null;
+		draggedCardElement = null;
 	}
 
 	// ========================================
@@ -647,12 +724,18 @@
 		e.stopPropagation();
 		contextMenuCardId = cardId;
 		contextMenuPosition = { x: e.clientX, y: e.clientY };
+
+		// Check if this is a deck card
+		const card = currentCards.find(c => c.id === cardId);
+		contextMenuIsDeck = card?.type === 'deck';
+
 		contextMenuOpen = true;
 	}
 
 	function closeContextMenu() {
 		contextMenuOpen = false;
 		contextMenuCardId = null;
+		contextMenuIsDeck = false;
 	}
 
 	function handleMoveToDeck(deckId: string) {
@@ -672,8 +755,37 @@
 		showNewDeckDialog = true;
 	}
 
+	// Get the deck ID from a deck card's context menu
+	function getContextMenuDeckId(): string | null {
+		if (!contextMenuCardId || !contextMenuIsDeck) return null;
+		// Deck card IDs are formatted as "deck-{deckId}"
+		return contextMenuCardId.replace('deck-', '');
+	}
+
+	function handleRenameDeckFromMenu() {
+		const deckId = getContextMenuDeckId();
+		if (!deckId) return;
+
+		const deck = userDecks.find(d => d.id === deckId);
+		if (!deck) return;
+
+		renameDeckId = deckId;
+		renameDeckName = deck.name;
+		closeContextMenu();
+		showRenameDeckDialog = true;
+	}
+
+	function handleDeleteDeckFromMenu() {
+		const deckId = getContextMenuDeckId();
+		if (!deckId) return;
+
+		// Cards will automatically return to main view when deck is deleted
+		navigator.deleteDeck(deckId);
+		closeContextMenu();
+	}
+
 	// ========================================
-	// NEW DECK DIALOG
+	// DECK DIALOGS
 	// ========================================
 
 	function createNewDeck() {
@@ -681,12 +793,22 @@
 		const deckId = navigator.createDeck(newDeckName.trim());
 
 		// If we came from context menu, add the card to the new deck
-		if (contextMenuCardId) {
+		if (contextMenuCardId && !contextMenuIsDeck) {
 			navigator.addCardToDeck(deckId, contextMenuCardId);
 		}
 
 		newDeckName = '';
 		showNewDeckDialog = false;
+		contextMenuCardId = null;
+	}
+
+	function renameDeck() {
+		if (!renameDeckId || !renameDeckName.trim()) return;
+		navigator.renameDeck(renameDeckId, renameDeckName.trim());
+
+		renameDeckId = null;
+		renameDeckName = '';
+		showRenameDeckDialog = false;
 	}
 
 	function handleDeleteDeck(deckId: string) {
@@ -753,9 +875,13 @@
 		carouselRef.scrollLeft = scrollLeft - walk;
 	}
 
-	function handleTouchEnd() {
+	function handleTouchEnd(e: TouchEvent) {
 		isDragging = false;
-		handleCardPointerUp();
+		// Clear long press timer if active
+		if (longPressTimer) {
+			clearTimeout(longPressTimer);
+			longPressTimer = null;
+		}
 		setTimeout(() => { hasDragged = false; }, 50);
 	}
 
@@ -783,7 +909,11 @@
 	});
 </script>
 
-<svelte:window onkeydown={handleKeyDown} />
+<svelte:window
+	onkeydown={handleKeyDown}
+	onpointermove={isPointerDragging ? handleEditPointerMove : undefined}
+	onpointerup={isPointerDragging ? handleEditPointerUp : undefined}
+/>
 
 {#if open}
 	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -874,25 +1004,21 @@
 							class:thread-card={card.type === 'thread'}
 							class:deck-card={card.type === 'deck'}
 							class:add-deck-card={card.type === 'add-deck'}
-							class:dragging={draggedCardId === card.id}
+							class:dragging={isPointerDragging && draggedCardId === card.id}
 							class:drag-over={dragOverIndex === index && draggedCardId !== card.id}
 							class:drop-into-deck={card.type === 'deck' && card.deckId === dragOverDeckId}
 							data-ai-active={card.isStreaming}
 							data-has-children={card.hasChildren}
+							data-card-id={card.id}
 							style:animation-delay="{index * 50}ms"
 							style:--deck-color={card.iconColor}
 							onclick={(e) => handleCardClick(card, e)}
 							oncontextmenu={(e) => isEditMode && showContextMenu(card.id, e)}
 							onkeydown={(e) => e.key === 'Enter' && handleCardClick(card, e as unknown as MouseEvent)}
 							onpointerdown={(e) => handleCardPointerDown(e, card, index)}
+							onpointermove={handleCardPointerMove}
 							onpointerup={handleCardPointerUp}
-							onpointercancel={handleCardPointerUp}
-							draggable={isEditMode && card.type !== 'add-deck'}
-							ondragstart={(e) => handleDragStart(e, card, index)}
-							ondragover={(e) => handleDragOver(e, index, card)}
-							ondragleave={handleDragLeave}
-							ondrop={(e) => handleDrop(e, index, card)}
-							ondragend={handleDragEnd}
+							onpointercancel={(e) => handleEditPointerCancel(e)}
 							role="option"
 							tabindex="0"
 							aria-selected="false"
@@ -969,6 +1095,29 @@
 			{/if}
 		</div>
 
+		<!-- Floating drag clone -->
+		{#if isPointerDragging && draggedCardId}
+			{@const draggedCard = currentCards.find(c => c.id === draggedCardId)}
+			{#if draggedCard}
+				<div
+					class="floating-drag-card"
+					style:left="{pointerDragPosition.x}px"
+					style:top="{pointerDragPosition.y}px"
+					style:--deck-color={draggedCard.iconColor}
+				>
+					<div class="card-inner">
+						<div class="card-icon" style:--icon-color={draggedCard.iconColor}>
+							<draggedCard.icon size={20} strokeWidth={1.75} />
+						</div>
+						<h3 class="card-title">{draggedCard.title}</h3>
+						{#if draggedCard.subtitle}
+							<p class="card-subtitle">{draggedCard.subtitle}</p>
+						{/if}
+					</div>
+				</div>
+			{/if}
+		{/if}
+
 		<!-- Context Menu -->
 		{#if contextMenuOpen}
 			<!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -979,12 +1128,24 @@
 				style:top="{contextMenuPosition.y}px"
 				transition:scale={{ duration: 150, start: 0.9 }}
 			>
-				{#if currentView === 'deck' && currentDeckId}
+				{#if contextMenuIsDeck}
+					<!-- Deck card context menu: rename/delete -->
+					<button class="context-menu-item" onclick={handleRenameDeckFromMenu}>
+						<Pencil size={16} />
+						Rename Deck
+					</button>
+					<button class="context-menu-item danger" onclick={handleDeleteDeckFromMenu}>
+						<Trash2 size={16} />
+						Delete Deck
+					</button>
+				{:else if currentView === 'deck' && currentDeckId}
+					<!-- Card inside a deck: remove option -->
 					<button class="context-menu-item" onclick={handleRemoveFromDeck}>
 						<X size={16} />
 						Remove from Deck
 					</button>
 				{:else}
+					<!-- Regular card: move to deck options -->
 					{#if userDecks.length > 0}
 						<div class="context-menu-label">Move to Deck</div>
 						{#each userDecks as deck}
@@ -1022,6 +1183,30 @@
 					</button>
 					<button class="dialog-btn primary" onclick={createNewDeck} disabled={!newDeckName.trim()}>
 						Create
+					</button>
+				</div>
+			</div>
+		{/if}
+
+		<!-- Rename Deck Dialog -->
+		{#if showRenameDeckDialog}
+			<div class="dialog-backdrop" onclick={() => showRenameDeckDialog = false} transition:fade={{ duration: 150 }}></div>
+			<div class="dialog" transition:scale={{ duration: 200, start: 0.9 }}>
+				<h2 class="dialog-title">Rename Deck</h2>
+				<input
+					type="text"
+					class="dialog-input"
+					placeholder="Deck name..."
+					bind:value={renameDeckName}
+					onkeydown={(e) => e.key === 'Enter' && renameDeck()}
+					autofocus
+				/>
+				<div class="dialog-actions">
+					<button class="dialog-btn cancel" onclick={() => showRenameDeckDialog = false}>
+						Cancel
+					</button>
+					<button class="dialog-btn primary" onclick={renameDeck} disabled={!renameDeckName.trim()}>
+						Rename
 					</button>
 				</div>
 			</div>
@@ -1309,13 +1494,75 @@
 	}
 
 	.card.dragging {
-		opacity: 0.5;
-		transform: scale(1.05);
-		z-index: 100;
+		opacity: 0.3;
+		transform: scale(0.95);
+		animation: none !important;
 	}
 
 	.card.drag-over {
-		transform: translateX(20px);
+		transform: translateX(30px);
+		transition: transform 0.15s var(--ease-out);
+	}
+
+	/* Floating drag clone - physically picked up card */
+	.floating-drag-card {
+		position: fixed;
+		width: var(--card-width);
+		height: var(--card-height);
+		z-index: 100010;
+		pointer-events: none;
+		transform: rotate(3deg) scale(1.08);
+		animation: pickUp 0.15s var(--ease-spring) forwards;
+	}
+
+	.floating-drag-card .card-inner {
+		width: 100%;
+		height: 100%;
+		background: var(--bg-card);
+		border: 1px solid var(--ai-primary);
+		border-radius: var(--radius-lg);
+		padding: 20px;
+		display: flex;
+		flex-direction: column;
+		box-shadow:
+			0 20px 60px rgba(0, 0, 0, 0.6),
+			0 0 30px var(--ai-glow),
+			0 0 0 2px rgba(34, 211, 238, 0.3);
+	}
+
+	.floating-drag-card .card-icon {
+		width: 40px;
+		height: 40px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: var(--ai-subtle);
+		border: 1px solid rgba(34, 211, 238, 0.3);
+		border-radius: var(--radius-md);
+		margin-bottom: 16px;
+		color: var(--icon-color, var(--ai-primary));
+	}
+
+	.floating-drag-card .card-title {
+		font-size: 0.9375rem;
+		font-weight: 600;
+		color: var(--text-primary);
+		margin-bottom: 4px;
+	}
+
+	.floating-drag-card .card-subtitle {
+		font-size: 0.8125rem;
+		color: var(--text-muted);
+	}
+
+	@keyframes pickUp {
+		0% {
+			transform: rotate(0deg) scale(1);
+			box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+		}
+		100% {
+			transform: rotate(3deg) scale(1.08);
+		}
 	}
 
 	/* Visual feedback when dropping a card INTO a deck */
@@ -1639,6 +1886,15 @@
 	.context-menu-item:hover {
 		background: var(--bg-card);
 		color: var(--text-primary);
+	}
+
+	.context-menu-item.danger {
+		color: #f87171;
+	}
+
+	.context-menu-item.danger:hover {
+		background: rgba(248, 113, 113, 0.1);
+		color: #ef4444;
 	}
 
 	.context-menu-divider {
