@@ -1603,6 +1603,7 @@
 		open={showCreateMenu}
 		onClose={() => showCreateMenu = false}
 		onCreateChat={() => handleCreateCard('chat')}
+		onCreateAgent={() => handleCreateCard('agent')}
 		onCreateTerminal={() => handleCreateCard('terminal')}
 		onOpenProfiles={() => handleCreateCard('profile')}
 		onOpenProjects={() => handleCreateCard('project')}
