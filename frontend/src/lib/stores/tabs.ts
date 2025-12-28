@@ -8,7 +8,6 @@
 import { writable, derived, get } from 'svelte/store';
 import type { Session, Profile, PermissionRequest as PermissionRequestType, UserQuestionRequest } from '$lib/api/client';
 import { api } from '$lib/api/client';
-import { agents } from './agents';
 
 export interface ApiUser {
 	id: string;
@@ -80,6 +79,9 @@ export interface Project {
 	updated_at: string;
 }
 
+// Execution mode for chat sessions
+export type ExecutionMode = 'local' | 'worktree';
+
 export interface ChatTab {
 	id: string;
 	title: string;
@@ -110,14 +112,10 @@ export interface ChatTab {
 	draft: string;
 	// Scroll position (preserved when switching cards)
 	scrollTop: number;
-	// Background mode settings (per-tab)
-	backgroundEnabled: boolean;
-	backgroundTaskName: string;
-	backgroundBranch: string;
-	backgroundCreateNewBranch: boolean;
-	backgroundAutoPR: boolean;
-	backgroundAutoMerge: boolean;
-	backgroundMaxDurationMinutes: number;
+	// Execution mode settings (per-tab)
+	executionMode: ExecutionMode;
+	worktreeBranch: string;      // The new branch name for worktree mode
+	worktreeBaseBranch: string;  // Branch to base from (and PR target)
 }
 
 interface TabsState {
@@ -2615,13 +2613,9 @@ function createTabsStore() {
 						todos: [],
 						draft: '',
 						scrollTop: 0,
-						backgroundEnabled: false,
-						backgroundTaskName: '',
-						backgroundBranch: 'main',
-						backgroundCreateNewBranch: false,
-						backgroundAutoPR: true,  // Default to true - auto-create PR when background agent completes
-						backgroundAutoMerge: false,
-						backgroundMaxDurationMinutes: 30
+						executionMode: 'local',
+						worktreeBranch: '',
+						worktreeBaseBranch: 'main'
 					}));
 
 					update(s => ({
@@ -2702,13 +2696,9 @@ function createTabsStore() {
 				todos: [],
 				draft: '',
 				scrollTop: 0,
-				backgroundEnabled: false,
-				backgroundTaskName: '',
-				backgroundBranch: 'main',
-				backgroundCreateNewBranch: false,
-				backgroundAutoPR: true,  // Default to true - auto-create PR when background agent completes
-				backgroundAutoMerge: false,
-				backgroundMaxDurationMinutes: 30
+				executionMode: 'local',
+				worktreeBranch: '',
+				worktreeBaseBranch: 'main'
 			};
 
 			update(s => ({
@@ -2811,7 +2801,7 @@ function createTabsStore() {
 
 		/**
 		 * Send message in a specific tab.
-		 * If background mode is enabled, launches a background agent instead.
+		 * If in worktree mode and first message, creates worktree session first.
 		 * If the tab is currently streaming, this will interrupt the current response
 		 * and then send the new message.
 		 */
@@ -2819,9 +2809,9 @@ function createTabsStore() {
 			const tab = getTab(tabId);
 			if (!tab) return;
 
-			// Check if background mode is enabled - launch as background agent
-			if (tab.backgroundEnabled) {
-				await this.launchBackgroundAgent(tabId, prompt);
+			// If worktree mode and no session yet, create worktree session first
+			if (tab.executionMode === 'worktree' && !tab.sessionId && tab.messages.length === 0) {
+				await this.createWorktreeSession(tabId, prompt);
 				return;
 			}
 
@@ -2886,50 +2876,49 @@ function createTabsStore() {
 		},
 
 		/**
-		 * Launch a background agent from a tab's message
-		 * Uses the tab's background config settings
+		 * Create a worktree session for worktree mode
+		 * Called on first message when in worktree mode
 		 */
-		async launchBackgroundAgent(tabId: string, prompt: string) {
+		async createWorktreeSession(tabId: string, prompt: string) {
 			const tab = getTab(tabId);
 			if (!tab) return;
 
 			// Validate required fields
 			if (!tab.profile) {
-				updateTab(tabId, { error: 'Please select a profile before launching a background agent' });
+				updateTab(tabId, { error: 'Please select a profile before starting a worktree session' });
 				return;
 			}
 			if (!tab.project) {
-				updateTab(tabId, { error: 'Please select a project before launching a background agent' });
+				updateTab(tabId, { error: 'Please select a project before starting a worktree session' });
+				return;
+			}
+			if (!tab.worktreeBranch) {
+				updateTab(tabId, { error: 'Please enter a branch name for the worktree' });
 				return;
 			}
 
-			// Generate task name from prompt if not provided
-			const taskName = tab.backgroundTaskName || prompt.split('\n')[0].slice(0, 50);
-
 			try {
-				// Launch the background agent
-				// Note: autoBranch=true always - this creates an isolated worktree for the agent
-				// The agent will create a new branch based on baseBranch
-				const agent = await agents.launchAgent({
-					name: taskName,
-					prompt: prompt,
-					profileId: tab.profile,
-					projectId: tab.project,
-					// Always create isolated worktree for background agents
-					autoBranch: true,
-					// Base branch to create the agent's feature branch from
-					baseBranch: tab.backgroundBranch || 'main',
-					// PR configuration
-					autoPr: tab.backgroundAutoPR,
-					// Auto-merge and cleanup (merge PR, delete branch, remove worktree)
-					autoMerge: tab.backgroundAutoMerge,
-					// Duration (0 = unlimited)
-					maxDurationMinutes: tab.backgroundMaxDurationMinutes
+				// Create worktree session via API
+				const response = await api.post<{
+					session_id: string;
+					worktree_id: string;
+					branch_name: string;
+					base_branch: string;
+					worktree_path: string;
+					status: string;
+				}>('/api/v1/sessions/with-worktree', {
+					project_id: tab.project,
+					branch_name: tab.worktreeBranch,
+					base_branch: tab.worktreeBaseBranch || 'main',
+					profile_id: tab.profile
 				});
 
-				console.log(`[Tab ${tabId}] Launched background agent: ${agent.id}`);
+				console.log(`[Tab ${tabId}] Created worktree session: ${response.session_id}`);
 
-				// Add a system message to the chat indicating the agent was launched
+				// Update tab with new session ID
+				updateTab(tabId, { sessionId: response.session_id });
+
+				// Add system message about worktree creation
 				const systemMsgId = `system-${Date.now()}`;
 				update(s => ({
 					...s,
@@ -2940,22 +2929,28 @@ function createTabsStore() {
 							messages: [...t.messages, {
 								id: systemMsgId,
 								role: 'system' as const,
-								content: `🚀 Background agent "${taskName}" launched successfully!\n\nYour task is now running in the background. You can monitor its progress in the Agents tab of the Activity Panel.`,
+								content: `🌿 Work tree created on branch \`${response.branch_name}\` (based on \`${response.base_branch}\`)`,
 								type: 'system' as const,
-								systemSubtype: 'agent_launched'
-							}],
-							// Reset background mode after launching
-							backgroundEnabled: false,
-							backgroundTaskName: ''
+								systemSubtype: 'worktree_created'
+							}]
 						};
 					})
 				}));
 
+				// Reconnect WebSocket with new session
+				disconnectTab(tabId);
+				connectTab(tabId);
+
+				// Wait a moment for WebSocket to connect, then send the message
+				setTimeout(() => {
+					this.sendMessage(tabId, prompt);
+				}, 500);
+
 			} catch (error) {
-				console.error('Failed to launch background agent:', error);
+				console.error('Failed to create worktree session:', error);
 				const err = error as { detail?: string; message?: string };
 				updateTab(tabId, {
-					error: `Failed to launch background agent: ${err.detail || err.message || 'Unknown error'}`
+					error: `Failed to create worktree: ${err.detail || err.message || 'Unknown error'}`
 				});
 			}
 		},
@@ -3164,52 +3159,24 @@ function createTabsStore() {
 		},
 
 		/**
-		 * Set background mode enabled for a tab
+		 * Set execution mode for a tab
 		 */
-		setTabBackgroundEnabled(tabId: string, enabled: boolean) {
-			updateTab(tabId, { backgroundEnabled: enabled });
+		setTabExecutionMode(tabId: string, mode: ExecutionMode) {
+			updateTab(tabId, { executionMode: mode });
 		},
 
 		/**
-		 * Set background task name for a tab
+		 * Set worktree branch name for a tab
 		 */
-		setTabBackgroundTaskName(tabId: string, taskName: string) {
-			updateTab(tabId, { backgroundTaskName: taskName });
+		setTabWorktreeBranch(tabId: string, branch: string) {
+			updateTab(tabId, { worktreeBranch: branch });
 		},
 
 		/**
-		 * Set background branch for a tab
+		 * Set worktree base branch for a tab
 		 */
-		setTabBackgroundBranch(tabId: string, branch: string) {
-			updateTab(tabId, { backgroundBranch: branch });
-		},
-
-		/**
-		 * Set background create new branch flag for a tab
-		 */
-		setTabBackgroundCreateNewBranch(tabId: string, createNew: boolean) {
-			updateTab(tabId, { backgroundCreateNewBranch: createNew });
-		},
-
-		/**
-		 * Set background auto PR for a tab
-		 */
-		setTabBackgroundAutoPR(tabId: string, autoPR: boolean) {
-			updateTab(tabId, { backgroundAutoPR: autoPR });
-		},
-
-		/**
-		 * Set background auto merge for a tab
-		 */
-		setTabBackgroundAutoMerge(tabId: string, autoMerge: boolean) {
-			updateTab(tabId, { backgroundAutoMerge: autoMerge });
-		},
-
-		/**
-		 * Set background max duration minutes for a tab
-		 */
-		setTabBackgroundMaxDuration(tabId: string, minutes: number) {
-			updateTab(tabId, { backgroundMaxDurationMinutes: minutes });
+		setTabWorktreeBaseBranch(tabId: string, baseBranch: string) {
+			updateTab(tabId, { worktreeBaseBranch: baseBranch });
 		},
 
 		/**
@@ -3258,13 +3225,9 @@ function createTabsStore() {
 				todos: [],
 				draft: '',
 				scrollTop: 0,
-				backgroundEnabled: false,
-				backgroundTaskName: '',
-				backgroundBranch: 'main',
-				backgroundCreateNewBranch: false,
-				backgroundAutoPR: true,  // Default to true - auto-create PR when background agent completes
-				backgroundAutoMerge: false,
-				backgroundMaxDurationMinutes: 30
+				executionMode: 'local',
+				worktreeBranch: '',
+				worktreeBaseBranch: 'main'
 			});
 			connectTab(tabId);
 			// Save tabs state (debounced)

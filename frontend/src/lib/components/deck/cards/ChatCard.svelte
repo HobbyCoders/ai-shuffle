@@ -8,7 +8,7 @@
 	import BaseCard from './BaseCard.svelte';
 	import type { DeckCard } from './types';
 	import { tabs, allTabs } from '$lib/stores/tabs';
-	import { MessageArea, ChatInput } from '$lib/components/chat';
+	import { MessageArea, ChatInput, ExecutionModeSelector } from '$lib/components/chat';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import ConnectionStatus from '$lib/components/ConnectionStatus.svelte';
@@ -43,6 +43,9 @@
 
 	// Get the tab data from the tabs store
 	const tab = $derived($allTabs.find((t) => t.id === tabId));
+
+	// Check if this is an empty state (no messages yet)
+	const isEmptyState = $derived(tab ? tab.messages.length === 0 : true);
 
 	// Handle permission response
 	function handlePermissionResponse(
@@ -82,50 +85,17 @@
 	<!-- MobileWorkspace provides the header with title and close button -->
 	<div class="chat-card-content mobile">
 		{#if tab}
-			<!-- Messages fill the space -->
-			<MessageArea {tab} onFork={handleFork} />
-
-			<!-- Permission Queue -->
-			{#if tab.pendingPermissions && tab.pendingPermissions.length > 0}
-				<div class="border-t border-warning/30 bg-warning/5 p-3">
-					<div class="max-w-full">
-						<PermissionQueue
-							requests={tab.pendingPermissions}
-							on:respond={handlePermissionResponse}
-						/>
+			{#if isEmptyState}
+				<!-- Empty state: Centered layout with mode selector -->
+				<div class="empty-state">
+					<div class="empty-state-content">
+						<ExecutionModeSelector {tab} />
+						<ChatInput {tab} />
 					</div>
 				</div>
-			{/if}
-
-			<!-- User Question Queue -->
-			{#if tab.pendingQuestions && tab.pendingQuestions.length > 0}
-				<div class="border-t border-info/30 bg-info/5 p-3">
-					<div class="max-w-full">
-						{#each tab.pendingQuestions as question (question.request_id)}
-							<UserQuestion
-								data={question}
-								on:respond={handleQuestionResponse}
-							/>
-						{/each}
-					</div>
-				</div>
-			{/if}
-
-			<!-- Input at the bottom -->
-			<ChatInput {tab} compact />
-		{:else}
-			<div class="chat-loading">
-				<div class="spinner"></div>
-				<p>Loading chat...</p>
-			</div>
-		{/if}
-	</div>
-{:else}
-	<!-- Desktop: Full BaseCard with all features -->
-	<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
-		<div class="chat-card-content">
-			{#if tab}
-				<!-- Main message area -->
+			{:else}
+				<!-- Normal chat view -->
+				<!-- Messages fill the space -->
 				<MessageArea {tab} onFork={handleFork} />
 
 				<!-- Permission Queue -->
@@ -154,8 +124,63 @@
 					</div>
 				{/if}
 
-				<!-- Input area -->
+				<!-- Input at the bottom -->
 				<ChatInput {tab} compact />
+			{/if}
+		{:else}
+			<div class="chat-loading">
+				<div class="spinner"></div>
+				<p>Loading chat...</p>
+			</div>
+		{/if}
+	</div>
+{:else}
+	<!-- Desktop: Full BaseCard with all features -->
+	<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
+		<div class="chat-card-content">
+			{#if tab}
+				{#if isEmptyState}
+					<!-- Empty state: Centered layout with mode selector -->
+					<div class="empty-state">
+						<div class="empty-state-content">
+							<ExecutionModeSelector {tab} />
+							<ChatInput {tab} />
+						</div>
+					</div>
+				{:else}
+					<!-- Normal chat view -->
+					<!-- Main message area -->
+					<MessageArea {tab} onFork={handleFork} />
+
+					<!-- Permission Queue -->
+					{#if tab.pendingPermissions && tab.pendingPermissions.length > 0}
+						<div class="border-t border-warning/30 bg-warning/5 p-3">
+							<div class="max-w-full">
+								<PermissionQueue
+									requests={tab.pendingPermissions}
+									on:respond={handlePermissionResponse}
+								/>
+							</div>
+						</div>
+					{/if}
+
+					<!-- User Question Queue -->
+					{#if tab.pendingQuestions && tab.pendingQuestions.length > 0}
+						<div class="border-t border-info/30 bg-info/5 p-3">
+							<div class="max-w-full">
+								{#each tab.pendingQuestions as question (question.request_id)}
+									<UserQuestion
+										data={question}
+										on:respond={handleQuestionResponse}
+									/>
+								{/each}
+							</div>
+						</div>
+					{/if}
+
+					<!-- Input area -->
+					<ChatInput {tab} compact />
+				{/if}
 			{:else}
 				<div class="chat-loading">
 					<div class="spinner"></div>
@@ -185,6 +210,23 @@
 
 	.chat-card-content.mobile {
 		height: 100%;
+	}
+
+	/* Empty state - centered layout */
+	.empty-state {
+		flex: 1;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 1rem;
+	}
+
+	.empty-state-content {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+		width: 100%;
+		max-width: 600px;
 	}
 
 	.chat-loading {
