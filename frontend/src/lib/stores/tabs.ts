@@ -2899,6 +2899,7 @@ function createTabsStore() {
 
 			try {
 				// Create worktree session via API
+				// Note: api.post already prepends /api/v1, so we use relative path
 				const response = await api.post<{
 					session_id: string;
 					worktree_id: string;
@@ -2906,7 +2907,7 @@ function createTabsStore() {
 					base_branch: string;
 					worktree_path: string;
 					status: string;
-				}>('/api/v1/sessions/with-worktree', {
+				}>('/sessions/with-worktree', {
 					project_id: tab.project,
 					branch_name: tab.worktreeBranch,
 					base_branch: tab.worktreeBaseBranch || 'main',
