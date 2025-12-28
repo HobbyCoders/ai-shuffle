@@ -464,6 +464,18 @@
 		}, 50);
 	}
 
+	// Handle mouse wheel for horizontal scrolling
+	function handleWheel(e: WheelEvent) {
+		if (!carouselRef) return;
+
+		// Prevent default vertical scroll and convert to horizontal
+		e.preventDefault();
+
+		// Use deltaY for horizontal scrolling (more natural with trackpads/wheels)
+		const scrollAmount = e.deltaY !== 0 ? e.deltaY : e.deltaX;
+		carouselRef.scrollLeft += scrollAmount;
+	}
+
 	// Update scroll progress for dots
 	function handleScroll() {
 		if (!carouselRef) return;
@@ -524,6 +536,7 @@
 					ontouchstart={handleTouchStart}
 					ontouchmove={handleTouchMove}
 					ontouchend={handleTouchEnd}
+					onwheel={handleWheel}
 					onscroll={handleScroll}
 					role="listbox"
 					aria-label="Card navigator"
@@ -733,19 +746,19 @@
 		position: relative;
 		display: flex;
 		align-items: center;
+		justify-content: center;
 		overflow: hidden;
 		width: 100%;
 		min-height: 0; /* Important for flexbox */
 	}
 
 	.carousel {
+		position: absolute;
+		inset: 0;
 		display: flex;
 		align-items: center;
 		gap: var(--card-gap);
 		padding: 40px 60px;
-		width: 100%;
-		min-height: var(--card-height);
-		max-height: 100%;
 		overflow-x: auto;
 		overflow-y: hidden;
 		scroll-snap-type: x mandatory;
