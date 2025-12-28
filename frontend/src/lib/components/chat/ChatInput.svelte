@@ -234,6 +234,10 @@
 		inputValue = '';
 		uploadedFiles = [];
 
+		// Clear draft immediately (not debounced) - important because
+		// the component may be destroyed/recreated when isEmptyState changes
+		saveDraftImmediately(tab.id, '');
+
 		// Reset textarea height
 		if (textareaRef) {
 			textareaRef.style.height = '';
