@@ -20,27 +20,44 @@
 	// State
 	let branches = $state<Branch[]>([]);
 	let loadingBranches = $state(false);
+	let branchesError = $state<string | null>(null);
 	let showBaseBranchDropdown = $state(false);
 	let baseBranchDropdownRef = $state<HTMLDivElement | null>(null);
+	let lastLoadedProject = $state<string | null>(null);
 
 	// Load branches when project changes or mode switches to worktree
 	$effect(() => {
-		if (tab.project && tab.executionMode === 'worktree') {
-			loadBranches();
+		const project = tab.project;
+		const mode = tab.executionMode;
+
+		// Only load if in worktree mode, have a project, and haven't loaded for this project yet
+		if (mode === 'worktree' && project && project !== lastLoadedProject && !loadingBranches) {
+			loadBranches(project);
 		}
 	});
 
-	async function loadBranches() {
-		if (!tab.project || loadingBranches) return;
-
+	async function loadBranches(projectId: string) {
 		loadingBranches = true;
+		branchesError = null;
+
 		try {
-			branches = await getBranches(tab.project, false);
+			const result = await getBranches(projectId, false);
+			branches = result;
+			lastLoadedProject = projectId;
 		} catch (e) {
 			console.error('Failed to load branches:', e);
+			branchesError = e instanceof Error ? e.message : 'Failed to load branches';
 			branches = [];
 		} finally {
 			loadingBranches = false;
+		}
+	}
+
+	// Force reload branches (for retry button)
+	function retryLoadBranches() {
+		if (tab.project) {
+			lastLoadedProject = null; // Reset to allow reload
+			loadBranches(tab.project);
 		}
 	}
 
@@ -128,7 +145,17 @@
 					{#if showBaseBranchDropdown}
 						<div class="branch-dropdown">
 							{#if loadingBranches}
-								<div class="dropdown-loading">Loading branches...</div>
+								<div class="dropdown-loading">
+									<svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
+									</svg>
+									<span>Loading branches...</span>
+								</div>
+							{:else if branchesError}
+								<div class="dropdown-error">
+									<span>{branchesError}</span>
+									<button type="button" class="retry-btn" onclick={retryLoadBranches}>Retry</button>
+								</div>
 							{:else if branches.length === 0}
 								<div class="dropdown-empty">No branches found</div>
 							{:else}
@@ -328,10 +355,48 @@
 
 	.dropdown-loading,
 	.dropdown-empty {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 0.5rem;
 		padding: 0.75rem;
 		font-size: 0.75rem;
 		color: var(--muted-foreground);
 		text-align: center;
+	}
+
+	.dropdown-error {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.75rem;
+		font-size: 0.75rem;
+		color: var(--destructive);
+		text-align: center;
+	}
+
+	.retry-btn {
+		padding: 0.25rem 0.5rem;
+		font-size: 0.6875rem;
+		background: var(--primary);
+		color: var(--primary-foreground);
+		border-radius: 0.25rem;
+		transition: opacity 0.15s;
+	}
+
+	.retry-btn:hover {
+		opacity: 0.9;
+	}
+
+	@keyframes spin {
+		to {
+			transform: rotate(360deg);
+		}
+	}
+
+	.animate-spin {
+		animation: spin 1s linear infinite;
 	}
 
 	/* Branch Input */
