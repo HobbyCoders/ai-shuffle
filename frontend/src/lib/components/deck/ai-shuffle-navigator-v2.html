@@ -409,25 +409,24 @@
       fill: none;
     }
 
-    /* Category indicator */
+    /* Category indicator - proper chevron > */
     .card[data-has-children="true"] .card-inner::after {
-      content: '';
+      content: '›';
       position: absolute;
       right: 16px;
       top: 50%;
       transform: translateY(-50%);
-      width: 6px;
-      height: 10px;
-      border-right: 2px solid var(--text-dim);
-      border-bottom: 2px solid var(--text-dim);
-      transform: translateY(-50%) rotate(-45deg);
-      opacity: 0.5;
-      transition: opacity 0.2s ease;
+      font-size: 1.25rem;
+      font-weight: 300;
+      color: var(--text-dim);
+      opacity: 0.6;
+      transition: all 0.2s ease;
     }
 
     .card[data-has-children="true"]:hover .card-inner::after {
       opacity: 1;
-      border-color: var(--ai-primary);
+      color: var(--ai-primary);
+      transform: translateY(-50%) translateX(2px);
     }
 
     /* Status badge */

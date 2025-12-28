@@ -70,6 +70,7 @@
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
 	import CreateMenu from '$lib/components/deck/CreateMenu.svelte';
+	import CardDeckNavigator from '$lib/components/deck/CardDeckNavigator.svelte';
 
 	// Types from deck/types
 	import type {
@@ -129,6 +130,7 @@
 	let showSpotlight = $state(false);
 	let showAdvancedSearch = $state(false);
 	let showCreateMenu = $state(false);
+	let showCardNavigator = $state(false);
 
 	// Terminal modal state
 	let terminalCommand = $state('/resume');
@@ -788,6 +790,27 @@
 		}
 	}
 
+	/**
+	 * Open a thread from the CardDeckNavigator
+	 */
+	function handleNavigatorOpenThread(sessionId: string) {
+		// Check if this session is already open as a card
+		const existingCard = deck.findCardByDataId(sessionId);
+		if (existingCard) {
+			// Focus the existing card
+			deck.focusCard(existingCard.id);
+		} else {
+			// Open the session as a new card
+			const tabId = tabs.openSession(sessionId);
+			const sessionData = $sessions.find(s => s.id === sessionId);
+			deck.addCard('chat', {
+				title: sessionData?.title || 'Chat',
+				dataId: sessionId,
+				meta: { tabId }
+			});
+		}
+	}
+
 	// ============================================
 	// Card Lifecycle Handlers
 	// ============================================
@@ -1074,7 +1097,7 @@
 		agents={deckAgents}
 		{runningProcesses}
 		onModeChange={handleModeChange}
-		onLogoClick={() => showCreateMenu = !showCreateMenu}
+		onLogoClick={() => showCardNavigator = !showCardNavigator}
 		onSettingsClick={() => handleCreateCard('settings')}
 		onContextToggle={() => deck.toggleContextPanel()}
 		onTabChange={(tab) => activityPanelTab = tab}
@@ -1427,7 +1450,24 @@
 	<!-- MODALS -->
 	<!-- ========================================== -->
 
-	<!-- Create Menu -->
+	<!-- Card Deck Navigator (AI Shuffle themed) -->
+	<CardDeckNavigator
+		open={showCardNavigator}
+		onClose={() => showCardNavigator = false}
+		onCreateChat={() => handleCreateCard('chat')}
+		onCreateAgent={() => handleCreateCard('agent')}
+		onCreateTerminal={() => handleCreateCard('terminal')}
+		onOpenThread={handleNavigatorOpenThread}
+		onOpenImageStudio={() => handleCreateCard('image-studio')}
+		onOpenModelStudio={() => handleCreateCard('model-studio')}
+		onOpenAudioStudio={() => handleCreateCard('audio-studio')}
+		onOpenFileBrowser={() => handleCreateCard('file-browser')}
+		onOpenSettings={() => handleCreateCard('settings')}
+		isAdmin={$isAdmin}
+		{isMobile}
+	/>
+
+	<!-- Create Menu (legacy - kept for potential fallback) -->
 	<CreateMenu
 		open={showCreateMenu}
 		onClose={() => showCreateMenu = false}
