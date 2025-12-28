@@ -1277,18 +1277,27 @@ async def create_session_with_worktree(
             )
 
     # Create worktree and session
-    worktree, session = worktree_manager.create_worktree_session(
-        project_id=body.project_id,
-        branch_name=body.branch_name,
-        create_new_branch=True,
-        base_branch=body.base_branch,
-        profile_id=body.profile_id
-    )
+    from app.core.worktree_manager import WorktreeError
 
-    if not worktree or not session:
+    try:
+        worktree, session = worktree_manager.create_worktree_session(
+            project_id=body.project_id,
+            branch_name=body.branch_name,
+            create_new_branch=True,
+            base_branch=body.base_branch,
+            profile_id=body.profile_id
+        )
+    except WorktreeError as e:
+        logger.warning(f"Worktree creation failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error creating worktree: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create worktree session. Check if branch name is valid and doesn't already exist."
+            detail=f"Unexpected error: {str(e)}"
         )
 
     logger.info(f"Created worktree session: {session['id']} with worktree: {worktree['id']}")

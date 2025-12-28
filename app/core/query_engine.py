@@ -1095,7 +1095,8 @@ def build_options_from_profile(
     resume_session_id: Optional[str] = None,
     can_use_tool: Optional[callable] = None,
     hooks: Optional[Dict[str, list]] = None,
-    api_user_id: Optional[str] = None
+    api_user_id: Optional[str] = None,
+    session_id: Optional[str] = None
 ) -> tuple[ClaudeAgentOptions, Optional[Dict[str, AgentDefinition]]]:
     """
     Convert a profile to ClaudeAgentOptions with all available options.
@@ -1109,10 +1110,11 @@ def build_options_from_profile(
         profile: Profile configuration dict
         project: Optional project configuration
         overrides: Optional override settings
-        resume_session_id: Optional session ID to resume
+        resume_session_id: Optional SDK session ID to resume (from Claude SDK)
         can_use_tool: Optional permission callback
         hooks: Optional hooks configuration
         api_user_id: Optional API user ID for user-specific credential resolution
+        session_id: Optional our session ID (for worktree lookup)
 
     Note: On Windows local mode, --agents CLI flag has a bug where agents are not discovered.
     Callers should use write_agents_to_filesystem() on Windows only. On Docker/Linux, agents
@@ -1138,8 +1140,9 @@ def build_options_from_profile(
         if overrides.get("worktree_info"):
             execution_mode = "worktree"
             worktree_info = overrides.get("worktree_info")
-    elif resume_session_id:
-        worktree = database.get_worktree_by_session(resume_session_id)
+    elif session_id:
+        # Check if this session has an associated worktree
+        worktree = database.get_worktree_by_session(session_id)
         if worktree and worktree.get("status") == "active":
             working_dir = str(settings.workspace_dir / worktree["worktree_path"])
             execution_mode = "worktree"
@@ -1424,7 +1427,8 @@ async def execute_query(
         project=project,
         overrides=overrides,
         resume_session_id=resume_id,
-        api_user_id=api_user_id
+        api_user_id=api_user_id,
+        session_id=session_id
     )
 
     # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
@@ -1641,7 +1645,8 @@ async def stream_query(
         project=project,
         overrides=overrides,
         resume_session_id=resume_id,
-        api_user_id=api_user_id
+        api_user_id=api_user_id,
+        session_id=session_id
     )
 
     # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
@@ -2015,7 +2020,8 @@ async def _run_background_query(
         project=project,
         overrides=overrides,
         resume_session_id=resume_id,
-        api_user_id=api_user_id
+        api_user_id=api_user_id,
+        session_id=session_id
     )
 
     # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
@@ -2622,7 +2628,8 @@ async def stream_to_websocket(
         resume_session_id=resume_id,
         can_use_tool=can_use_tool_callback,
         hooks=hooks_config,
-        api_user_id=api_user_id
+        api_user_id=api_user_id,
+        session_id=session_id
     )
 
     # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)

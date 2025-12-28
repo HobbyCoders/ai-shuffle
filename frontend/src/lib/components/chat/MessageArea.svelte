@@ -164,26 +164,37 @@
 >
 	{#if tab.messages.length === 0}
 		<!-- Empty State -->
-		<div class="h-full flex items-center justify-center">
-			<div class="text-center max-w-md px-6">
-				<div class="w-16 h-16 mx-auto mb-6 rounded-2xl bg-primary/10 flex items-center justify-center shadow-s">
-					<svg class="w-8 h-8 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							stroke-width="1.5"
-							d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"
-						/>
-					</svg>
-				</div>
-				<h2 class="text-xl font-semibold text-foreground mb-2">Start a Conversation</h2>
-				<p class="text-muted-foreground mb-4">Ask Claude anything - code, questions, ideas, or just chat.</p>
-				{#if currentProfile}
-					<div class="text-sm text-muted-foreground">
-						<span>Profile:</span>
-						<span class="text-foreground ml-1">{currentProfile.name}</span>
+		<div class="h-full flex flex-col">
+			<!-- Error display for empty state (e.g., worktree creation failures) -->
+			{#if tab.error}
+				<div class="max-w-5xl mx-auto w-full px-4 sm:px-8 pt-4">
+					<div class="bg-destructive/10 border border-destructive/30 text-destructive px-4 py-3 rounded-lg flex items-center justify-between shadow-s">
+						<span class="text-sm">{tab.error}</span>
+						<button onclick={() => tabs.clearTabError(tab.id)} class="text-destructive hover:opacity-80">&times;</button>
 					</div>
-				{/if}
+				</div>
+			{/if}
+			<div class="flex-1 flex items-center justify-center">
+				<div class="text-center max-w-md px-6">
+					<div class="w-16 h-16 mx-auto mb-6 rounded-2xl bg-primary/10 flex items-center justify-center shadow-s">
+						<svg class="w-8 h-8 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								stroke-width="1.5"
+								d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"
+							/>
+						</svg>
+					</div>
+					<h2 class="text-xl font-semibold text-foreground mb-2">Start a Conversation</h2>
+					<p class="text-muted-foreground mb-4">Ask Claude anything - code, questions, ideas, or just chat.</p>
+					{#if currentProfile}
+						<div class="text-sm text-muted-foreground">
+							<span>Profile:</span>
+							<span class="text-foreground ml-1">{currentProfile.name}</span>
+						</div>
+					{/if}
+				</div>
 			</div>
 		</div>
 	{:else}

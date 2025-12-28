@@ -21,6 +21,11 @@ from app.db import database
 logger = logging.getLogger(__name__)
 
 
+class WorktreeError(Exception):
+    """Exception raised for worktree creation/management errors with user-friendly messages."""
+    pass
+
+
 class WorktreeManager:
     """
     Manages worktree lifecycle and links them to chat sessions.
@@ -118,19 +123,22 @@ class WorktreeManager:
             profile_id: Profile for the new session
 
         Returns:
-            Tuple of (worktree_dict, session_dict) or (None, None) on failure
+            Tuple of (worktree_dict, session_dict)
+
+        Raises:
+            WorktreeError: With descriptive message on failure
         """
         # Get project
         project = database.get_project(project_id)
         if not project:
             logger.error(f"Project not found: {project_id}")
-            return None, None
+            raise WorktreeError(f"Project not found: {project_id}")
 
         # Ensure repository record exists
         repo = self._ensure_repository_record(project_id, project["path"])
         if not repo:
             logger.error(f"Project {project_id} is not a git repository")
-            return None, None
+            raise WorktreeError("This project is not a git repository. Initialize git first.")
 
         main_dir = str(settings.workspace_dir / project["path"])
 
@@ -139,7 +147,7 @@ class WorktreeManager:
         for wt in existing_worktrees:
             if wt["branch_name"] == branch_name:
                 logger.error(f"Branch {branch_name} already has an active worktree")
-                return None, None
+                raise WorktreeError(f"Branch '{branch_name}' already has an active worktree. Delete the existing worktree first or use a different branch name.")
 
         # Verify the branch exists if not creating a new one
         if not create_new_branch:
@@ -151,7 +159,15 @@ class WorktreeManager:
                 remote_name = f"origin/{branch_name}"
                 if not any(b["name"] == remote_name for b in remote_branches):
                     logger.error(f"Branch {branch_name} does not exist")
-                    return None, None
+                    raise WorktreeError(f"Branch '{branch_name}' does not exist. Create the branch first or enable 'create new branch'.")
+
+        # Check if branch name already exists when creating new branch
+        if create_new_branch:
+            branches = self.git_service.list_branches(main_dir, include_remote=False)
+            local_branch_names = [b["name"] for b in branches if not b["is_remote"]]
+            if branch_name in local_branch_names:
+                logger.error(f"Branch {branch_name} already exists")
+                raise WorktreeError(f"Branch '{branch_name}' already exists. Use a different name or select 'existing branch' mode.")
 
         # Calculate worktree path
         worktree_path = self._get_worktree_path(project_id, branch_name)
@@ -160,13 +176,13 @@ class WorktreeManager:
         # Check if path already exists
         if worktree_path.exists():
             logger.error(f"Worktree path already exists: {worktree_path}")
-            return None, None
+            raise WorktreeError(f"Worktree directory already exists at '{worktree_path}'. This may be from a previous worktree that wasn't cleaned up properly.")
 
         # Ensure base directory exists
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Create git worktree
-        success = self.git_service.add_worktree(
+        success, error_msg = self.git_service.add_worktree(
             main_dir=main_dir,
             path=str(worktree_path),
             branch=branch_name,
@@ -175,8 +191,8 @@ class WorktreeManager:
         )
 
         if not success:
-            logger.error(f"Failed to create git worktree for branch {branch_name}")
-            return None, None
+            logger.error(f"Failed to create git worktree for branch {branch_name}: {error_msg}")
+            raise WorktreeError(f"Git failed to create worktree: {error_msg or 'Unknown git error'}")
 
         # Determine the profile ID for the session
         if not profile_id:
@@ -192,7 +208,7 @@ class WorktreeManager:
                     logger.error("No profiles available for session creation")
                     # Clean up the created worktree
                     self.git_service.remove_worktree(main_dir, str(worktree_path), force=True)
-                    return None, None
+                    raise WorktreeError("No profiles available. Please create a profile first.")
 
         # Create session
         session_id = f"ses-{uuid.uuid4().hex[:12]}"
@@ -209,7 +225,7 @@ class WorktreeManager:
             logger.error(f"Failed to create session: {e}")
             # Clean up the created worktree
             self.git_service.remove_worktree(main_dir, str(worktree_path), force=True)
-            return None, None
+            raise WorktreeError(f"Failed to create chat session: {str(e)}")
 
         # Create worktree record
         worktree_id = f"wt-{uuid.uuid4().hex[:12]}"
@@ -228,7 +244,7 @@ class WorktreeManager:
             # Clean up the created worktree and session
             self.git_service.remove_worktree(main_dir, str(worktree_path), force=True)
             database.delete_session(session_id)
-            return None, None
+            raise WorktreeError(f"Failed to create worktree record: {str(e)}")
 
         logger.info(f"Created worktree {worktree_id} at {worktree_path} for branch {branch_name}")
         return worktree, session
