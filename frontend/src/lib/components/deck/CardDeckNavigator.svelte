@@ -1742,6 +1742,11 @@
 		overflow: hidden;
 	}
 
+	/* Thread cards show more title lines */
+	.thread-card .card-title {
+		-webkit-line-clamp: 4;
+	}
+
 	.card-subtitle {
 		font-size: 0.8125rem;
 		color: var(--text-muted);
@@ -1818,10 +1823,6 @@
 	/* Thread card variant */
 	.card.thread-card {
 		height: 220px;
-	}
-
-	.card.thread-card .card-title {
-		-webkit-line-clamp: 3;
 	}
 
 	/* Empty state */
@@ -2097,10 +2098,6 @@
 			height: 200px;
 		}
 
-		.card.thread-card .card-title {
-			-webkit-line-clamp: 3;
-		}
-
 		.scroll-hint {
 			bottom: max(100px, calc(env(safe-area-inset-bottom) + 80px));
 		}
@@ -2120,10 +2117,6 @@
 
 		.card.thread-card {
 			height: 240px;
-		}
-
-		.card.thread-card .card-title {
-			-webkit-line-clamp: 3;
 		}
 	}
 
