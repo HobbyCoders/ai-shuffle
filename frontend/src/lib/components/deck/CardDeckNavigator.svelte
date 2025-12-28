@@ -1743,7 +1743,7 @@
 	}
 
 	/* Thread cards show more title lines */
-	.thread-card .card-title {
+	.card.thread-card .card-inner .card-title {
 		-webkit-line-clamp: 4;
 	}
 
