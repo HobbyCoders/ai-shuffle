@@ -126,7 +126,6 @@
 
 	// Shortcut registrations for cleanup
 	let shortcutRegistrations: ShortcutRegistration[] = [];
-	let deckUnsubscribe: (() => void) | null = null;
 
 	// ============================================
 	// Derived State: Cards for Workspace
@@ -300,12 +299,6 @@
 
 		// Initial workspace bounds
 		updateWorkspaceBounds();
-
-		// Sync activeMode from deck store
-		deckUnsubscribe = deck.subscribe((state) => {
-			activeMode = state.activeMode as ActivityMode;
-			contextCollapsed = state.contextPanelCollapsed;
-		});
 
 		// Register keyboard shortcuts
 		shortcutRegistrations = [
@@ -532,9 +525,6 @@
 			if (visibilityChangeHandler) {
 				document.removeEventListener('visibilitychange', visibilityChangeHandler);
 			}
-		}
-		if (deckUnsubscribe) {
-			deckUnsubscribe();
 		}
 		shortcutRegistrations.forEach((reg) => reg.unregister());
 		shortcutRegistrations = [];
