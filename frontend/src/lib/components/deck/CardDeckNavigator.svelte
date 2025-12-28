@@ -472,11 +472,16 @@
 		e.preventDefault();
 
 		// Use deltaY for horizontal scrolling (more natural with trackpads/wheels)
-		const scrollAmount = e.deltaY !== 0 ? e.deltaY : e.deltaX;
-		carouselRef.scrollLeft += scrollAmount;
+		// Multiply by 3 for faster scrolling
+		const scrollAmount = (e.deltaY !== 0 ? e.deltaY : e.deltaX) * 3;
+		const newScrollLeft = carouselRef.scrollLeft + scrollAmount;
+
+		// Clamp to valid range
+		const maxScroll = carouselRef.scrollWidth - carouselRef.clientWidth;
+		carouselRef.scrollLeft = Math.max(0, Math.min(newScrollLeft, maxScroll));
 
 		// Debug: log scroll info
-		console.log('[Scroll] scrollLeft:', carouselRef.scrollLeft, 'scrollWidth:', carouselRef.scrollWidth, 'clientWidth:', carouselRef.clientWidth, 'maxScroll:', carouselRef.scrollWidth - carouselRef.clientWidth);
+		console.log('[Scroll] scrollLeft:', carouselRef.scrollLeft, 'target:', newScrollLeft, 'maxScroll:', maxScroll);
 	}
 
 	// Update scroll progress for dots
@@ -764,7 +769,7 @@
 		padding: 40px 60px;
 		overflow-x: scroll;
 		overflow-y: hidden;
-		scroll-snap-type: x proximity; /* Less aggressive snapping */
+		/* Removed scroll-snap - was interfering with programmatic scrolling */
 		scrollbar-width: none;
 		cursor: grab;
 		-webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
@@ -809,7 +814,6 @@
 		flex-shrink: 0;
 		width: var(--card-width);
 		height: var(--card-height);
-		scroll-snap-align: center;
 		cursor: pointer;
 		transition: transform 0.2s var(--ease-out);
 
