@@ -1817,7 +1817,7 @@
 
 	/* Thread card variant */
 	.card.thread-card {
-		height: 180px;
+		height: 200px;
 	}
 
 	/* Empty state */
@@ -2090,7 +2090,7 @@
 		}
 
 		.card.thread-card {
-			height: 160px;
+			height: 180px;
 		}
 
 		.scroll-hint {
@@ -2111,7 +2111,7 @@
 		}
 
 		.card.thread-card {
-			height: 200px;
+			height: 220px;
 		}
 	}
 
