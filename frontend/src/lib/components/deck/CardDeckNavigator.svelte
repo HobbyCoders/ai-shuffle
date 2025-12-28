@@ -283,30 +283,37 @@
 			hasChildren: true
 		}));
 
-		// Add "New Deck" card in edit mode
-		const addDeckCard: NavigatorCard[] = isEditMode ? [{
-			id: 'add-deck',
-			type: 'add-deck' as const,
-			title: 'New Deck',
-			subtitle: 'Create a group',
-			icon: Plus
-		}] : [];
-
-		// Sort by persisted order
+		// Sort by persisted order (excluding add-deck card)
 		const order = navigatorState.cardOrder;
-		const allCards = [...filteredCards, ...deckCards, ...addDeckCard];
+		const sortableCards = [...filteredCards, ...deckCards];
 
-		if (order.length === 0) return allCards;
+		let sortedCards: NavigatorCard[];
+		if (order.length === 0) {
+			sortedCards = sortableCards;
+		} else {
+			sortedCards = sortableCards.sort((a, b) => {
+				const aIdx = order.indexOf(a.id);
+				const bIdx = order.indexOf(b.id);
+				// Unordered items go to the end (but before add-deck)
+				if (aIdx === -1 && bIdx === -1) return 0;
+				if (aIdx === -1) return 1;
+				if (bIdx === -1) return -1;
+				return aIdx - bIdx;
+			});
+		}
 
-		return allCards.sort((a, b) => {
-			const aIdx = order.indexOf(a.id);
-			const bIdx = order.indexOf(b.id);
-			// Unordered items go to the end
-			if (aIdx === -1 && bIdx === -1) return 0;
-			if (aIdx === -1) return 1;
-			if (bIdx === -1) return -1;
-			return aIdx - bIdx;
-		});
+		// Add "New Deck" card ALWAYS at the end (only in edit mode)
+		if (isEditMode) {
+			sortedCards.push({
+				id: 'add-deck',
+				type: 'add-deck' as const,
+				title: 'New Deck',
+				subtitle: 'Create a group',
+				icon: Plus
+			});
+		}
+
+		return sortedCards;
 	});
 
 	// Build recent threads cards
@@ -539,6 +546,9 @@
 		}
 	}
 
+	// Track if we're hovering over a deck for drop-into-deck
+	let dragOverDeckId = $state<string | null>(null);
+
 	function handleDragStart(e: DragEvent, card: NavigatorCard, index: number) {
 		if (!isEditMode || card.type === 'add-deck') {
 			e.preventDefault();
@@ -554,24 +564,63 @@
 		}
 	}
 
-	function handleDragOver(e: DragEvent, index: number) {
+	function handleDragOver(e: DragEvent, index: number, card: NavigatorCard) {
 		if (!isEditMode || draggedCardId === null) return;
 		e.preventDefault();
+
+		// Check if hovering over a deck card (for drop-into-deck)
+		if (card.type === 'deck' && card.deckId && draggedCardId !== card.id) {
+			// Don't allow dropping a deck into another deck
+			const draggedCard = currentCards.find(c => c.id === draggedCardId);
+			if (draggedCard?.type !== 'deck') {
+				dragOverDeckId = card.deckId;
+				dragOverIndex = -1; // Not reordering, dropping into deck
+				return;
+			}
+		}
+
+		// Regular reorder
+		dragOverDeckId = null;
 		dragOverIndex = index;
 	}
 
 	function handleDragLeave() {
 		dragOverIndex = -1;
+		dragOverDeckId = null;
 	}
 
-	function handleDrop(e: DragEvent, targetIndex: number) {
+	function handleDrop(e: DragEvent, targetIndex: number, targetCard: NavigatorCard) {
 		e.preventDefault();
 		if (draggedCardId === null || draggedCardIndex === -1) return;
 
-		// Reorder cards
-		const cardIds = currentCards.map(c => c.id);
-		const [removed] = cardIds.splice(draggedCardIndex, 1);
-		cardIds.splice(targetIndex, 0, removed);
+		// Check if dropping onto a deck card
+		if (dragOverDeckId && targetCard.type === 'deck' && targetCard.deckId) {
+			// Add the dragged card to the deck
+			navigator.addCardToDeck(targetCard.deckId, draggedCardId);
+
+			// Reset drag state
+			draggedCardId = null;
+			draggedCardIndex = -1;
+			dragOverIndex = -1;
+			dragOverDeckId = null;
+			return;
+		}
+
+		// Don't allow dropping past the add-deck card
+		const addDeckIndex = currentCards.findIndex(c => c.type === 'add-deck');
+		if (addDeckIndex !== -1 && targetIndex >= addDeckIndex) {
+			targetIndex = addDeckIndex - 1;
+		}
+
+		// Reorder cards (exclude add-deck from the order)
+		const cardIds = currentCards.filter(c => c.type !== 'add-deck').map(c => c.id);
+		const currentIdx = cardIds.indexOf(draggedCardId);
+		if (currentIdx !== -1) {
+			cardIds.splice(currentIdx, 1);
+			// Adjust target index if needed
+			const adjustedTarget = targetIndex > currentIdx ? targetIndex - 1 : targetIndex;
+			cardIds.splice(Math.min(adjustedTarget, cardIds.length), 0, draggedCardId);
+		}
 
 		navigator.setCardOrder(cardIds);
 
@@ -579,12 +628,14 @@
 		draggedCardId = null;
 		draggedCardIndex = -1;
 		dragOverIndex = -1;
+		dragOverDeckId = null;
 	}
 
 	function handleDragEnd() {
 		draggedCardId = null;
 		draggedCardIndex = -1;
 		dragOverIndex = -1;
+		dragOverDeckId = null;
 	}
 
 	// ========================================
@@ -825,6 +876,7 @@
 							class:add-deck-card={card.type === 'add-deck'}
 							class:dragging={draggedCardId === card.id}
 							class:drag-over={dragOverIndex === index && draggedCardId !== card.id}
+							class:drop-into-deck={card.type === 'deck' && card.deckId === dragOverDeckId}
 							data-ai-active={card.isStreaming}
 							data-has-children={card.hasChildren}
 							style:animation-delay="{index * 50}ms"
@@ -837,9 +889,9 @@
 							onpointercancel={handleCardPointerUp}
 							draggable={isEditMode && card.type !== 'add-deck'}
 							ondragstart={(e) => handleDragStart(e, card, index)}
-							ondragover={(e) => handleDragOver(e, index)}
+							ondragover={(e) => handleDragOver(e, index, card)}
 							ondragleave={handleDragLeave}
-							ondrop={(e) => handleDrop(e, index)}
+							ondrop={(e) => handleDrop(e, index, card)}
 							ondragend={handleDragEnd}
 							role="option"
 							tabindex="0"
@@ -1264,6 +1316,19 @@
 
 	.card.drag-over {
 		transform: translateX(20px);
+	}
+
+	/* Visual feedback when dropping a card INTO a deck */
+	.card.drop-into-deck {
+		transform: scale(1.08);
+	}
+
+	.card.drop-into-deck .card-inner {
+		border-color: var(--deck-color, var(--ai-primary));
+		box-shadow:
+			0 0 20px color-mix(in srgb, var(--deck-color, var(--ai-primary)) 40%, transparent),
+			0 8px 32px rgba(0, 0, 0, 0.4);
+		background: color-mix(in srgb, var(--deck-color, var(--ai-primary)) 10%, var(--bg-card));
 	}
 
 	.card-inner {
