@@ -474,6 +474,9 @@
 		// Use deltaY for horizontal scrolling (more natural with trackpads/wheels)
 		const scrollAmount = e.deltaY !== 0 ? e.deltaY : e.deltaX;
 		carouselRef.scrollLeft += scrollAmount;
+
+		// Debug: log scroll info
+		console.log('[Scroll] scrollLeft:', carouselRef.scrollLeft, 'scrollWidth:', carouselRef.scrollWidth, 'clientWidth:', carouselRef.clientWidth, 'maxScroll:', carouselRef.scrollWidth - carouselRef.clientWidth);
 	}
 
 	// Update scroll progress for dots
@@ -759,10 +762,9 @@
 		align-items: center;
 		gap: var(--card-gap);
 		padding: 40px 60px;
-		overflow-x: auto;
+		overflow-x: scroll;
 		overflow-y: hidden;
-		scroll-snap-type: x mandatory;
-		scroll-behavior: smooth;
+		scroll-snap-type: x proximity; /* Less aggressive snapping */
 		scrollbar-width: none;
 		cursor: grab;
 		-webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
