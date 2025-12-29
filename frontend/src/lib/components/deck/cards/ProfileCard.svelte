@@ -153,11 +153,11 @@
 		env_vars: [] as { key: string; value: string }[]
 	});
 
-	// Common environment variable presets
+	// Common environment variable presets with valid ranges
 	const envVarPresets = [
-		{ key: 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', description: 'Max output tokens per request' },
-		{ key: 'MAX_THINKING_TOKENS', description: 'Token budget for extended thinking' },
-		{ key: 'MAX_MCP_OUTPUT_TOKENS', description: 'Max tokens in MCP tool responses' }
+		{ key: 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', placeholder: '1 - 64000' },
+		{ key: 'MAX_THINKING_TOKENS', placeholder: '1024 - 128000' },
+		{ key: 'MAX_MCP_OUTPUT_TOKENS', placeholder: '1 - 25000 (default)' }
 	];
 
 	// Tool selection mode
@@ -1381,6 +1381,7 @@
 						{#if profileForm.env_vars.length > 0}
 							<div class="env-var-list">
 								{#each profileForm.env_vars as envVar, index}
+									{@const preset = envVarPresets.find(p => p.key === envVar.key)}
 									<div class="env-var-row">
 										<input
 											type="text"
@@ -1392,7 +1393,7 @@
 											type="text"
 											bind:value={envVar.value}
 											class="card-form-input card-form-input--mono env-var-value"
-											placeholder="value"
+											placeholder={preset?.placeholder || 'value'}
 										/>
 										<button
 											type="button"
