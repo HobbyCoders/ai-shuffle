@@ -840,15 +840,14 @@
 	/* ===== INPUT WRAPPER - THE HERO (outer border container) ===== */
 	.input-wrapper {
 		position: relative;
-		background: #131315;
+		background: #0f0f10;
 		border: 1px solid rgba(255, 255, 255, 0.1);
 		border-radius: 16px 16px 0 0;
-		padding: 4px;
 		transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 	}
 
 	:global(.light) .input-wrapper {
-		background: #f8f8f9;
+		background: #ffffff;
 		border-color: rgba(0, 0, 0, 0.1);
 	}
 
@@ -874,18 +873,13 @@
 			0 0 40px -10px rgba(20, 184, 166, 0.2);
 	}
 
-	/* ===== INPUT INNER - Dark background container ===== */
+	/* ===== INPUT INNER - Content container ===== */
 	.input-inner {
 		display: flex;
 		align-items: flex-end;
 		gap: 8px;
-		background: #0d0d0e;
-		border-radius: 12px;
+		background: transparent;
 		padding: 12px 16px;
-	}
-
-	:global(.light) .input-inner {
-		background: #ffffff;
 	}
 
 	/* Textarea wrapper */
