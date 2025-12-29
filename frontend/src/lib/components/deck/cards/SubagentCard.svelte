@@ -396,7 +396,7 @@
 <input type="file" accept=".json" bind:this={importInput} onchange={handleImport} class="hidden" />
 
 {#snippet content()}
-	<div class="card-system subagent-card">
+	<div class="card-system subagent-card" class:maximized={card.maximized}>
 		{#if viewMode === 'list'}
 			<!-- LIST VIEW -->
 			<!-- Header -->
@@ -862,6 +862,25 @@
 		height: 100%;
 		background: var(--card);
 		overflow: hidden;
+	}
+
+	/* Maximized state - constrain width and center content */
+	.subagent-card.maximized {
+		--card-max-width: 900px;
+	}
+
+	.subagent-card.maximized :global(.card-tabs),
+	.subagent-card.maximized :global(.card-header),
+	.subagent-card.maximized .card-search-wrapper,
+	.subagent-card.maximized :global(.card-footer) {
+		max-width: var(--card-max-width);
+		margin-left: auto;
+		margin-right: auto;
+		width: 100%;
+	}
+
+	.subagent-card.maximized .centered-content {
+		max-width: var(--card-max-width);
 	}
 
 	/* Centered content wrapper - prevents content from stretching too wide on large screens */

@@ -122,7 +122,7 @@
 </script>
 
 {#snippet content()}
-	<div class="card-system project-card">
+	<div class="card-system project-card" class:maximized={card.maximized}>
 		<!-- Header -->
 		<div class="card-header">
 			<div class="card-header-info">
@@ -331,11 +331,29 @@
 		overflow: hidden;
 	}
 
+	/* Maximized state - constrain width and center content */
+	.project-card.maximized {
+		--card-max-width: 800px;
+	}
+
+	.project-card.maximized :global(.card-header),
+	.project-card.maximized .card-search-wrapper,
+	.project-card.maximized :global(.card-footer) {
+		max-width: var(--card-max-width);
+		margin-left: auto;
+		margin-right: auto;
+		width: 100%;
+	}
+
 	/* Centered content wrapper - prevents content from stretching too wide on large screens */
 	.centered-content {
 		width: 100%;
 		max-width: 600px;
 		margin: 0 auto;
+	}
+
+	.project-card.maximized .centered-content {
+		max-width: var(--card-max-width);
 	}
 
 	.card-search-wrapper {

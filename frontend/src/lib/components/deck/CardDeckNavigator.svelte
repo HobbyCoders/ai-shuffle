@@ -21,7 +21,7 @@
 	import {
 		MessageSquare, Terminal, Clock, Image, Box, AudioLines,
 		Settings, FolderOpen, X, Files, User, Pencil, Check,
-		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronRight
+		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronRight, Bot
 	} from 'lucide-svelte';
 	import { tabs, type Session } from '$lib/stores/tabs';
 	import { deck, type DeckCard as DeckCardType } from '$lib/stores/deck';
@@ -42,6 +42,7 @@
 		onOpenFileBrowser?: () => void;
 		onOpenProjects?: () => void;
 		onOpenProfiles?: () => void;
+		onOpenSubagents?: () => void;
 		onOpenSettings?: () => void;
 		isAdmin?: boolean;
 		isMobile?: boolean;
@@ -59,6 +60,7 @@
 		onOpenFileBrowser,
 		onOpenProjects,
 		onOpenProfiles,
+		onOpenSubagents,
 		onOpenSettings,
 		isAdmin = false,
 		isMobile = false
@@ -117,7 +119,7 @@
 	let renameDeckName = $state('');
 
 	// Card types for main deck
-	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'image-studio' | 'model-studio' | 'audio-studio' | 'file-browser' | 'projects' | 'profiles' | 'settings';
+	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'image-studio' | 'model-studio' | 'audio-studio' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings';
 
 	interface NavigatorCard {
 		id: string;
@@ -258,14 +260,24 @@
 		];
 
 		if (isAdmin) {
-			cards.push({
-				id: 'settings',
-				type: 'action',
-				action: 'settings',
-				title: 'Settings',
-				subtitle: 'Preferences & config',
-				icon: Settings
-			});
+			cards.push(
+				{
+					id: 'subagents',
+					type: 'action',
+					action: 'subagents',
+					title: 'Subagents',
+					subtitle: 'Manage AI subagents',
+					icon: Bot
+				},
+				{
+					id: 'settings',
+					type: 'action',
+					action: 'settings',
+					title: 'Settings',
+					subtitle: 'Preferences & config',
+					icon: Settings
+				}
+			);
 		}
 
 		return cards;
@@ -433,6 +445,7 @@
 			case 'file-browser': onOpenFileBrowser?.(); break;
 			case 'projects': onOpenProjects?.(); break;
 			case 'profiles': onOpenProfiles?.(); break;
+			case 'subagents': onOpenSubagents?.(); break;
 			case 'settings': onOpenSettings?.(); break;
 		}
 	}

@@ -66,7 +66,6 @@
 	import Canvas from '$lib/components/canvas/Canvas.svelte';
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
-	import CreateMenu from '$lib/components/deck/CreateMenu.svelte';
 	import CardDeckNavigator from '$lib/components/deck/CardDeckNavigator.svelte';
 
 	// ============================================
@@ -110,7 +109,6 @@
 	let showCanvas = $state(false);
 	let showSpotlight = $state(false);
 	let showAdvancedSearch = $state(false);
-	let showCreateMenu = $state(false);
 	let showCardNavigator = $state(false);
 
 	// Terminal modal state
@@ -1155,29 +1153,12 @@
 		onOpenFileBrowser={() => handleCreateCard('file-browser')}
 		onOpenProjects={() => handleCreateCard('project')}
 		onOpenProfiles={() => handleCreateCard('profile')}
+		onOpenSubagents={() => handleCreateCard('subagent')}
 		onOpenSettings={() => handleCreateCard('settings')}
 		isAdmin={$isAdmin}
 		{isMobile}
 	/>
 
-	<!-- Create Menu (legacy - kept for potential fallback) -->
-	<CreateMenu
-		open={showCreateMenu}
-		onClose={() => showCreateMenu = false}
-		onCreateChat={() => handleCreateCard('chat')}
-		onCreateTerminal={() => handleCreateCard('terminal')}
-		onOpenProfiles={() => handleCreateCard('profile')}
-		onOpenProjects={() => handleCreateCard('project')}
-		onOpenSubagents={() => handleCreateCard('subagent')}
-		onOpenSettings={() => handleCreateCard('settings')}
-		onOpenUserSettings={() => handleCreateCard('user-settings')}
-		onOpenImageStudio={() => handleCreateCard('image-studio')}
-		onOpenModelStudio={() => handleCreateCard('model-studio')}
-		onOpenAudioStudio={() => handleCreateCard('audio-studio')}
-		onOpenFileBrowser={() => handleCreateCard('file-browser')}
-		isAdmin={$isAdmin}
-		{isMobile}
-	/>
 
 	<!-- Spotlight Search (Cmd+K) -->
 	<SpotlightSearch

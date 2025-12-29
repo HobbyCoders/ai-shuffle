@@ -642,7 +642,7 @@
 </script>
 
 {#snippet content()}
-	<div class="card-system profile-card">
+	<div class="card-system profile-card" class:maximized={card.maximized}>
 		{#if viewMode === 'form'}
 			<!-- Form View with Tabs -->
 			<!-- Tab Navigation -->
@@ -1601,6 +1601,25 @@
 		height: 100%;
 		min-height: 0;
 		overflow: hidden;
+	}
+
+	/* Maximized state - constrain width and center content */
+	.profile-card.maximized {
+		--card-max-width: 900px;
+	}
+
+	.profile-card.maximized :global(.card-tabs),
+	.profile-card.maximized :global(.card-header),
+	.profile-card.maximized .card-search-wrapper,
+	.profile-card.maximized :global(.card-footer) {
+		max-width: var(--card-max-width);
+		margin-left: auto;
+		margin-right: auto;
+		width: 100%;
+	}
+
+	.profile-card.maximized .centered-content {
+		max-width: var(--card-max-width);
 	}
 
 	.profile-card-mobile {
