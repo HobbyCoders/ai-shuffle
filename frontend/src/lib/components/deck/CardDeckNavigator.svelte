@@ -106,6 +106,8 @@
 
 	// Live reorder state - tracks the current visual order during drag
 	let liveCardOrder = $state<string[]>([]);
+	// Original card positions captured at drag start (before any reordering)
+	let originalCardPositions = $state<{ id: string; left: number; width: number }[]>([]);
 
 	// Context menu state
 	let contextMenuOpen = $state(false);
@@ -641,6 +643,26 @@
 		// Initialize live card order for real-time reordering
 		liveCardOrder = currentCards.filter(c => c.type !== 'add-deck').map(c => c.id);
 
+		// Capture original card positions BEFORE any reordering happens
+		// These positions stay fixed throughout the drag operation
+		const cardElements = carouselRef?.querySelectorAll('[data-card-id]') as NodeListOf<HTMLElement>;
+		originalCardPositions = [];
+		if (cardElements) {
+			for (const el of cardElements) {
+				const cardId = el.dataset.cardId;
+				if (!cardId) continue;
+				const card = currentCards.find(c => c.id === cardId);
+				if (!card || card.type === 'add-deck') continue;
+
+				const rect = el.getBoundingClientRect();
+				originalCardPositions.push({
+					id: cardId,
+					left: rect.left,
+					width: rect.width
+				});
+			}
+		}
+
 		// Set initial position - lock Y to rail position
 		pointerDragPosition = {
 			x: e.clientX - pointerDragOffset.x,
@@ -710,45 +732,29 @@
 			y: railYPosition // Always keep Y locked to the rail
 		};
 
-		// Find which card position we're over based on X coordinate
-		// Use the center of the dragged card for comparison
-		const draggedCardWidth = 220; // var(--card-width) default
-		const dragCenterX = pointerDragPosition.x + draggedCardWidth / 2;
-		let hoveredDeckId: string | null = null;
-
-		// Get all visible card elements and their positions
-		const cardElements = carouselRef?.querySelectorAll('[data-card-id]') as NodeListOf<HTMLElement>;
-		if (!cardElements || cardElements.length === 0) {
+		// Use the ORIGINAL positions captured at drag start (not current DOM positions)
+		// This prevents feedback loops where positions shift as we reorder
+		if (originalCardPositions.length === 0) {
 			e.preventDefault();
 			return;
 		}
 
-		// Build array of card positions (excluding the dragged card)
-		const cardPositions: { id: string; centerX: number; rect: DOMRect }[] = [];
+		// Find the dragged card's original position to calculate its center
+		const draggedOriginal = originalCardPositions.find(p => p.id === draggedCardId);
+		const draggedCardWidth = draggedOriginal?.width || 220;
+		const dragCenterX = pointerDragPosition.x + draggedCardWidth / 2;
 
-		for (let i = 0; i < cardElements.length; i++) {
-			const cardEl = cardElements[i];
-			const cardId = cardEl.dataset.cardId;
-			if (!cardId || cardId === draggedCardId) continue;
+		let hoveredDeckId: string | null = null;
 
-			const card = currentCards.find(c => c.id === cardId);
-			if (!card || card.type === 'add-deck') continue;
-
-			const rect = cardEl.getBoundingClientRect();
-			cardPositions.push({
-				id: cardId,
-				centerX: rect.left + rect.width / 2,
-				rect
-			});
-		}
-
-		// Check for deck drop-into (only if dragging a non-deck card)
+		// Check for deck drop-into using original positions
 		const draggedCard = currentCards.find(c => c.id === draggedCardId);
 		if (draggedCard?.type !== 'deck') {
-			for (const pos of cardPositions) {
+			for (const pos of originalCardPositions) {
+				if (pos.id === draggedCardId) continue;
 				const card = currentCards.find(c => c.id === pos.id);
 				if (card?.type === 'deck' && card.deckId) {
-					if (dragCenterX >= pos.rect.left && dragCenterX <= pos.rect.right) {
+					const posRight = pos.left + pos.width;
+					if (dragCenterX >= pos.left && dragCenterX <= posRight) {
 						hoveredDeckId = card.deckId;
 						break;
 					}
@@ -756,43 +762,31 @@
 			}
 		}
 
-		// Calculate new position in the order
+		// Calculate new position in the order using ORIGINAL positions
 		if (!hoveredDeckId) {
-			// Find where the dragged card should be inserted based on X position
-			let targetIndex = cardPositions.length; // Default to end
+			// Get positions of other cards (excluding the dragged one) in their original order
+			const otherPositions = originalCardPositions.filter(p => p.id !== draggedCardId);
 
-			for (let i = 0; i < cardPositions.length; i++) {
-				if (dragCenterX < cardPositions[i].centerX) {
-					targetIndex = i;
+			// Find where the dragged card's center falls among the original slot positions
+			// Each "slot" is defined by the center of the original card position
+			let targetSlot = otherPositions.length; // Default to end
+
+			for (let i = 0; i < otherPositions.length; i++) {
+				const slotCenterX = otherPositions[i].left + otherPositions[i].width / 2;
+				if (dragCenterX < slotCenterX) {
+					targetSlot = i;
 					break;
 				}
 			}
 
-			// Get current position of dragged card in liveCardOrder
-			const currentDragIndex = liveCardOrder.indexOf(draggedCardId);
+			// Build the new order: insert dragged card at targetSlot position
+			const otherCardIds = otherPositions.map(p => p.id);
+			const newOrder = [...otherCardIds];
+			newOrder.splice(targetSlot, 0, draggedCardId);
 
-			// Map target visual index to liveCardOrder index
-			// The visual positions map to liveCardOrder positions (minus the dragged card)
-			const visualOrder = liveCardOrder.filter(id => id !== draggedCardId);
-
-			// Determine the actual target index in liveCardOrder
-			let newOrderIndex: number;
-			if (targetIndex >= visualOrder.length) {
-				// Insert at end
-				newOrderIndex = liveCardOrder.length - 1;
-			} else {
-				// Insert before the card at targetIndex
-				const targetCardId = visualOrder[targetIndex];
-				newOrderIndex = liveCardOrder.indexOf(targetCardId);
-			}
-
-			// Only update if position actually changed
-			if (currentDragIndex !== newOrderIndex) {
-				const newOrder = [...liveCardOrder];
-				newOrder.splice(currentDragIndex, 1);
-				// Adjust index after removal
-				const insertAt = newOrderIndex > currentDragIndex ? newOrderIndex - 1 : newOrderIndex;
-				newOrder.splice(Math.max(0, insertAt), 0, draggedCardId);
+			// Only update if order actually changed
+			const orderChanged = newOrder.some((id, i) => liveCardOrder[i] !== id);
+			if (orderChanged) {
 				liveCardOrder = newOrder;
 			}
 		}
@@ -822,6 +816,7 @@
 		dragOverDeckId = null;
 		draggedCardElement = null;
 		liveCardOrder = [];
+		originalCardPositions = [];
 
 		// Clear pending state
 		pendingDragCard = null;
@@ -849,6 +844,7 @@
 		dragOverDeckId = null;
 		draggedCardElement = null;
 		liveCardOrder = [];
+		originalCardPositions = [];
 	}
 
 	// ========================================
@@ -1057,6 +1053,7 @@
 		class="navigator"
 		class:open
 		class:edit-mode={isEditMode}
+		class:is-dragging={isPointerDragging}
 		transition:fade={{ duration: 200 }}
 	>
 		<!-- Backdrop -->
@@ -1607,8 +1604,8 @@
 		}
 	}
 
-	/* Edit mode shake animation */
-	.navigator.edit-mode .card:not(.add-deck-card) {
+	/* Edit mode shake animation - only when NOT dragging */
+	.navigator.edit-mode:not(.is-dragging) .card:not(.add-deck-card) {
 		animation: cardEnter 0.4s var(--ease-spring) forwards, cardShake 0.4s ease-in-out infinite;
 		animation-delay: calc(var(--index, 0) * 50ms), 0ms;
 	}
@@ -1634,6 +1631,12 @@
 
 	.navigator.edit-mode .card:active {
 		transform: none;
+	}
+
+	/* During drag, disable all transitions/animations so flip can work */
+	.navigator.is-dragging .card {
+		animation: none !important;
+		transition: none !important;
 	}
 
 	/* Floating drag clone - physically picked up card */
