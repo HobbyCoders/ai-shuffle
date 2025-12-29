@@ -111,6 +111,10 @@
 	// Original card positions captured at drag start (before any reordering)
 	let originalCardPositions = $state<{ id: string; left: number; width: number }[]>([]);
 
+	// Pending edit mode state - tracks uncommitted changes until user confirms
+	let pendingCardOrder = $state<string[]>([]); // The working order during edit mode
+	let originalCardOrder = $state<string[]>([]); // Order when edit mode started (for revert)
+
 	// Context menu state
 	let contextMenuOpen = $state(false);
 	let contextMenuCardId = $state<string | null>(null);
@@ -316,8 +320,11 @@
 			hasChildren: true
 		}));
 
-		// Sort by persisted order (excluding add-deck card)
-		const order = navigatorState.cardOrder;
+		// In edit mode, use pending order (uncommitted changes)
+		// Otherwise use persisted order from store
+		const order = isEditMode && pendingCardOrder.length > 0
+			? pendingCardOrder
+			: navigatorState.cardOrder;
 		const sortableCards = [...filteredCards, ...deckCards];
 
 		let sortedCards: NavigatorCard[];
@@ -543,8 +550,8 @@
 	// Reset state when closing
 	function handleClose() {
 		if (isEditMode) {
-			navigator.exitEditMode();
-			isEditMode = false;
+			// Cancel edit mode without saving - revert any pending changes
+			cancelEditMode();
 		}
 		contextMenuOpen = false;
 		showNewDeckDialog = false;
@@ -557,6 +564,8 @@
 		draggedCardId = null;
 		liveCardOrder = [];
 		dragStartCards = [];
+		pendingCardOrder = [];
+		originalCardOrder = [];
 
 		onClose();
 		setTimeout(() => {
@@ -567,18 +576,45 @@
 		}, 300);
 	}
 
-	// Toggle edit mode
+	// Enter edit mode - capture original state for potential revert
+	function enterEditMode() {
+		// Capture original order before any changes
+		originalCardOrder = currentCards.filter(c => c.type !== 'add-deck').map(c => c.id);
+		pendingCardOrder = [...originalCardOrder];
+		navigator.enterEditMode();
+		isEditMode = true;
+		contextMenuOpen = false;
+	}
+
+	// Confirm edit mode - save pending changes
+	function confirmEditMode() {
+		if (pendingCardOrder.length > 0) {
+			navigator.setCardOrder(pendingCardOrder);
+		}
+		navigator.exitEditMode();
+		isEditMode = false;
+		pendingCardOrder = [];
+		originalCardOrder = [];
+		contextMenuOpen = false;
+	}
+
+	// Cancel edit mode - revert to original order
+	function cancelEditMode() {
+		// Revert to original order (no store update needed, just discard pending)
+		navigator.exitEditMode();
+		isEditMode = false;
+		pendingCardOrder = [];
+		originalCardOrder = [];
+		contextMenuOpen = false;
+	}
+
+	// Toggle edit mode (for button click - confirms when exiting)
 	function toggleEditMode() {
 		if (isEditMode) {
-			// Save card order when exiting
-			const cardIds = currentCards.map(c => c.id);
-			navigator.setCardOrder(cardIds);
-			navigator.exitEditMode();
+			confirmEditMode();
 		} else {
-			navigator.enterEditMode();
+			enterEditMode();
 		}
-		isEditMode = !isEditMode;
-		contextMenuOpen = false;
 	}
 
 	// Handle keyboard
@@ -661,18 +697,22 @@
 	function startDragging(e: PointerEvent | { clientX: number; clientY: number }) {
 		if (!pendingDragCard || !pendingDragElement) return;
 
+		// Capture snapshots FIRST, before setting isPointerDragging
+		// This ensures displayCards has valid data when it re-evaluates
+		const cardsSnapshot = [...currentCards];
+		const orderSnapshot = currentCards.filter(c => c.type !== 'add-deck').map(c => c.id);
+
 		draggedCardId = pendingDragCard.id;
 		draggedCardIndex = pendingDragIndex;
 		draggedCardElement = pendingDragElement;
-		isPointerDragging = true;
 		didDragInEditMode = true;
 
-		// Capture a SNAPSHOT of current cards at drag start
-		// This prevents displayCards from seeing inconsistent state when store updates
-		dragStartCards = [...currentCards];
+		// Set snapshots before enabling drag mode
+		dragStartCards = cardsSnapshot;
+		liveCardOrder = orderSnapshot;
 
-		// Initialize live card order for real-time reordering
-		liveCardOrder = currentCards.filter(c => c.type !== 'add-deck').map(c => c.id);
+		// NOW enable drag mode - displayCards will have valid data
+		isPointerDragging = true;
 
 		// Capture original card positions BEFORE any reordering happens
 		// These positions stay fixed throughout the drag operation
@@ -831,15 +871,11 @@
 		if (!isPointerDragging || !draggedCardId) return;
 
 		// Capture the final order and drop target BEFORE clearing reactive state
-		// This prevents race conditions where store updates trigger derived recalculations
-		// while we still have stale liveCardOrder values
 		const finalOrder = [...liveCardOrder];
 		const dropIntoDeckId = dragOverDeckId;
 		const droppedCardId = draggedCardId;
 
-		// FIRST: Reset ALL drag state so displayCards falls back to currentCards immediately
-		// This must happen BEFORE any store updates to prevent the derived displayCards
-		// from trying to match stale liveCardOrder against updated currentCards
+		// Reset ALL drag state so displayCards falls back to pendingCardOrder
 		isPointerDragging = false;
 		draggedCardId = null;
 		draggedCardIndex = -1;
@@ -850,17 +886,21 @@
 		originalCardPositions = [];
 		dragStartCards = [];
 
-		// Clear pending state
+		// Clear pending drag state
 		pendingDragCard = null;
 		pendingDragIndex = -1;
 		pendingDragElement = null;
 
-		// THEN: Persist to store (this triggers reactive updates, but displayCards
-		// will now use currentCards directly since isPointerDragging is false)
+		// Update PENDING order (not persisted until user confirms edit mode)
+		// This allows visual reordering without committing to the store
 		if (dropIntoDeckId) {
+			// Dropping into a deck is immediate (can't be undone easily)
 			navigator.addCardToDeck(dropIntoDeckId, droppedCardId);
+			// Remove from pending order
+			pendingCardOrder = pendingCardOrder.filter(id => id !== droppedCardId);
 		} else if (finalOrder.length > 0) {
-			navigator.setCardOrder(finalOrder);
+			// Just update the pending order - don't save to store yet
+			pendingCardOrder = finalOrder;
 		}
 	}
 
@@ -1676,8 +1716,12 @@
 	}
 
 	/* During drag, disable all transitions/animations so flip can work */
+	/* CRITICAL: Must also set opacity:1 and reset transform because base .card style
+	   has opacity:0 which relies on cardEnter animation to become visible */
 	.navigator.is-dragging .card {
 		animation: none !important;
+		opacity: 1;
+		transform: none;
 	}
 
 	/* Hide the original card being dragged (it's shown as floating element) */
