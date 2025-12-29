@@ -406,20 +406,19 @@
 	});
 
 	// Display cards - reordered in real-time during drag based on liveCardOrder
+	// IMPORTANT: Keep ALL cards in the list (including dragged card) so flip animation works
+	// The dragged card is hidden via CSS, not removed from the DOM
 	const displayCards = $derived.by((): NavigatorCard[] => {
 		// If not dragging or no live order, use current cards
 		if (!isPointerDragging || liveCardOrder.length === 0) {
 			return currentCards;
 		}
 
-		// Reorder cards based on live order (excluding dragged card and add-deck)
+		// Reorder cards based on live order (keep dragged card in list for flip to work)
 		const orderedCards: NavigatorCard[] = [];
 		const addDeckCard = currentCards.find(c => c.type === 'add-deck');
 
 		for (const cardId of liveCardOrder) {
-			// Skip the dragged card - it's shown as the floating element
-			if (cardId === draggedCardId) continue;
-
 			const card = currentCards.find(c => c.id === cardId);
 			if (card) {
 				orderedCards.push(card);
@@ -1137,6 +1136,7 @@
 							class:thread-card={card.type === 'thread'}
 							class:deck-card={card.type === 'deck'}
 							class:add-deck-card={card.type === 'add-deck'}
+							class:is-being-dragged={isPointerDragging && card.id === draggedCardId}
 							class:drop-into-deck={card.type === 'deck' && card.deckId === dragOverDeckId}
 							data-ai-active={card.isStreaming}
 							data-has-children={card.hasChildren}
@@ -1636,7 +1636,12 @@
 	/* During drag, disable all transitions/animations so flip can work */
 	.navigator.is-dragging .card {
 		animation: none !important;
-		transition: none !important;
+	}
+
+	/* Hide the original card being dragged (it's shown as floating element) */
+	.card.is-being-dragged {
+		opacity: 0 !important;
+		pointer-events: none;
 	}
 
 	/* Floating drag clone - physically picked up card */
