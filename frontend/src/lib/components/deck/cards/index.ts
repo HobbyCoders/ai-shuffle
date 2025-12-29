@@ -25,3 +25,6 @@ export { default as ImageStudioCard } from './ImageStudioCard.svelte';
 export { default as ModelStudioCard } from './ModelStudioCard.svelte';
 export { default as AudioStudioCard } from './AudioStudioCard.svelte';
 export { default as FileBrowserCard } from './FileBrowserCard.svelte';
+
+// Plugin Management
+export { default as PluginManagerCard } from './PluginManagerCard.svelte';

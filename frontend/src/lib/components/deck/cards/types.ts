@@ -13,7 +13,8 @@ export type CardType =
   | 'image-studio'
   | 'model-studio'
   | 'audio-studio'
-  | 'file-browser';
+  | 'file-browser'
+  | 'plugins';
 
 export interface DeckCard {
   id: string;
@@ -45,6 +46,7 @@ export const DEFAULT_CARD_SIZES: Record<CardType, { width: number; height: numbe
   'model-studio': { width: 800, height: 600 },
   'audio-studio': { width: 700, height: 500 },
   'file-browser': { width: 600, height: 500 },
+  plugins: { width: 750, height: 650 },
 };
 
 export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }> = {
@@ -59,6 +61,7 @@ export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }>
   'model-studio': { width: 500, height: 400 },
   'audio-studio': { width: 450, height: 350 },
   'file-browser': { width: 400, height: 350 },
+  plugins: { width: 500, height: 450 },
 };
 
 /**

@@ -51,7 +51,8 @@
 		ImageStudioCard,
 		ModelStudioCard,
 		AudioStudioCard,
-		FileBrowserCard
+		FileBrowserCard,
+		PluginManagerCard
 	} from '$lib/components/deck/cards';
 	import type { CardType, DeckCard as CardsDeckCard } from '$lib/components/deck/cards/types';
 
@@ -178,6 +179,8 @@
 				return 'audio-studio';
 			case 'file-browser':
 				return 'file-browser';
+			case 'plugins':
+				return 'plugins';
 			default:
 				return 'chat';
 		}
@@ -651,6 +654,17 @@
 				title = 'Files';
 				break;
 			}
+			case 'plugins': {
+				// Singleton - only one plugins card at a time
+				const existingPlugins = $allCards.find(c => c.type === 'plugins');
+				if (existingPlugins) {
+					deck.focusCard(existingPlugins.id);
+					return;
+				}
+				deckCardType = 'plugins';
+				title = 'Plugins';
+				break;
+			}
 			default:
 				deckCardType = 'chat';
 				title = 'New Card';
@@ -889,6 +903,7 @@
 								onFocus={() => handleCardFocus(card.id)}
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
+								onOpenPlugins={() => handleCreateCard('plugins')}
 							/>
 						{:else if card.type === 'subagent'}
 							<SubagentCard
@@ -942,6 +957,16 @@
 							/>
 						{:else if card.type === 'file-browser'}
 							<FileBrowserCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
+						{:else if card.type === 'plugins'}
+							<PluginManagerCard
 								{card}
 								mobile={true}
 								onClose={() => handleCardClose(card.id)}
@@ -1050,6 +1075,7 @@
 											onResize={(w, h) => handleCardResize(card.id, w, h)}
 											onDragEnd={() => handleCardDragEnd(card.id)}
 											onResizeEnd={() => handleCardResizeEnd(card.id)}
+											onOpenPlugins={() => handleCreateCard('plugins')}
 										/>
 									{:else if card.type === 'subagent'}
 										<SubagentCard
@@ -1117,6 +1143,17 @@
 											onDragEnd={() => handleCardDragEnd(card.id)}
 											onResizeEnd={() => handleCardResizeEnd(card.id)}
 										/>
+									{:else if card.type === 'plugins'}
+										<PluginManagerCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
+										/>
 									{:else}
 										<!-- Other card types -->
 										<div class="card-placeholder">
@@ -1151,6 +1188,7 @@
 		onOpenProfiles={() => handleCreateCard('profile')}
 		onOpenSubagents={() => handleCreateCard('subagent')}
 		onOpenSettings={() => handleCreateCard('settings')}
+		onOpenPlugins={() => handleCreateCard('plugins')}
 		isAdmin={$isAdmin}
 		{isMobile}
 	/>

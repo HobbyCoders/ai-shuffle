@@ -38,7 +38,8 @@ export type DeckCardType =
 	| 'project'
 	| 'image-studio'
 	| 'model-studio'
-	| 'audio-studio';
+	| 'audio-studio'
+	| 'plugins';
 
 export type SnapZone =
 	| 'left'
@@ -324,6 +325,8 @@ function getDefaultTitle(type: DeckCardType): string {
 			return 'Subagents';
 		case 'project':
 			return 'Projects';
+		case 'plugins':
+			return 'Plugins';
 		default:
 			return 'Card';
 	}

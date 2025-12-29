@@ -13,7 +13,6 @@
 	import { groups as groupsStore } from '$lib/stores/groups';
 	import { plugins, installedPlugins, fileBasedAgents } from '$lib/stores/plugins';
 	import type { PluginInfo, FileBasedAgent } from '$lib/api/plugins';
-	import { PluginCard } from '$lib/components/plugins';
 	import './card-design-system.css';
 
 	// Types
@@ -61,6 +60,7 @@
 		onResize: (w: number, h: number) => void;
 		onDragEnd?: () => void;
 		onResizeEnd?: () => void;
+		onOpenPlugins?: () => void;
 		mobile?: boolean;
 	}
 
@@ -73,6 +73,7 @@
 		onResize,
 		onDragEnd,
 		onResizeEnd,
+		onOpenPlugins,
 		mobile = false
 	}: Props = $props();
 
@@ -164,7 +165,6 @@
 	let profileImporting = $state(false);
 
 	// Plugin management
-	let showPluginManager = $state(false);
 	let pluginAgents = $derived($fileBasedAgents);
 	let installedPluginsList = $derived($installedPlugins);
 
@@ -1093,7 +1093,7 @@
 							<button
 								type="button"
 								class="text-btn primary"
-								onclick={() => (showPluginManager = true)}
+								onclick={() => onOpenPlugins?.()}
 							>
 								Manage Plugins
 							</button>
@@ -1151,7 +1151,7 @@
 								<button
 									type="button"
 									class="card-btn-secondary small"
-									onclick={() => (showPluginManager = true)}
+									onclick={() => onOpenPlugins?.()}
 								>
 									Browse Plugins
 								</button>
@@ -1183,7 +1183,7 @@
 									<button
 										type="button"
 										class="show-more-btn"
-										onclick={() => (showPluginManager = true)}
+										onclick={() => onOpenPlugins?.()}
 									>
 										+{installedPluginsList.length - 6} more plugins
 									</button>
@@ -1193,7 +1193,7 @@
 								<button
 									type="button"
 									class="card-btn-secondary small"
-									onclick={() => (showPluginManager = true)}
+									onclick={() => onOpenPlugins?.()}
 								>
 									Open Plugin Manager
 								</button>
@@ -1573,25 +1573,6 @@
 	</BaseCard>
 {/if}
 
-<!-- Plugin Manager Modal -->
-{#if showPluginManager}
-	<div class="plugin-modal-overlay" onclick={() => (showPluginManager = false)}>
-		<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-		<div class="plugin-modal-container" onclick={(e) => e.stopPropagation()}>
-			<div class="plugin-modal-header">
-				<h2>Plugin Manager</h2>
-				<button class="close-btn" onclick={() => (showPluginManager = false)}>
-					<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-					</svg>
-				</button>
-			</div>
-			<div class="plugin-modal-content">
-				<PluginCard />
-			</div>
-		</div>
-	</div>
-{/if}
 
 <style>
 	/* Profile Card Container */
@@ -2378,79 +2359,6 @@
 	/* Required indicator */
 	.required {
 		color: var(--destructive);
-	}
-
-	/* Plugin Modal */
-	.plugin-modal-overlay {
-		position: fixed;
-		inset: 0;
-		background: rgba(0, 0, 0, 0.6);
-		backdrop-filter: blur(4px);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		z-index: 1000;
-		padding: 24px;
-	}
-
-	.plugin-modal-container {
-		width: 100%;
-		max-width: 900px;
-		max-height: 85vh;
-		background: var(--surface-0);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-xl, 18px);
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-		box-shadow: var(--shadow-lg), 0 20px 60px rgba(0, 0, 0, 0.4);
-	}
-
-	.plugin-modal-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: var(--space-4, 16px) var(--space-5, 20px);
-		border-bottom: 1px solid var(--border-subtle);
-		flex-shrink: 0;
-	}
-
-	.plugin-modal-header h2 {
-		font-size: var(--text-xl, 1.125rem);
-		font-weight: 600;
-		color: var(--text-primary);
-		margin: 0;
-	}
-
-	.close-btn {
-		width: 32px;
-		height: 32px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: transparent;
-		border: none;
-		border-radius: var(--radius-sm, 6px);
-		color: var(--text-secondary);
-		cursor: pointer;
-		transition: all var(--transition-fast, 100ms);
-	}
-
-	.close-btn:hover {
-		background: var(--surface-1);
-		color: var(--text-primary);
-	}
-
-	.close-btn svg {
-		width: 18px;
-		height: 18px;
-	}
-
-	.plugin-modal-content {
-		flex: 1;
-		overflow: hidden;
-		display: flex;
-		flex-direction: column;
 	}
 
 	/* Scrollbar styling */

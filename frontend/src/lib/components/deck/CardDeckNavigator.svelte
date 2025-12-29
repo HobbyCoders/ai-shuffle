@@ -21,7 +21,7 @@
 	import {
 		MessageSquare, Terminal, Clock, Image, Box, AudioLines,
 		Settings, FolderOpen, X, Files, User, Pencil, Check,
-		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronRight, Bot
+		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronRight, Bot, Puzzle
 	} from 'lucide-svelte';
 	import { tabs, type Session } from '$lib/stores/tabs';
 	import { deck, type DeckCard as DeckCardType } from '$lib/stores/deck';
@@ -44,6 +44,7 @@
 		onOpenProfiles?: () => void;
 		onOpenSubagents?: () => void;
 		onOpenSettings?: () => void;
+		onOpenPlugins?: () => void;
 		isAdmin?: boolean;
 		isMobile?: boolean;
 	}
@@ -62,6 +63,7 @@
 		onOpenProfiles,
 		onOpenSubagents,
 		onOpenSettings,
+		onOpenPlugins,
 		isAdmin = false,
 		isMobile = false
 	}: Props = $props();
@@ -125,7 +127,7 @@
 	let renameDeckName = $state('');
 
 	// Card types for main deck
-	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'image-studio' | 'model-studio' | 'audio-studio' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings';
+	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'image-studio' | 'model-studio' | 'audio-studio' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins';
 
 	interface NavigatorCard {
 		id: string;
@@ -262,6 +264,14 @@
 				title: 'Profiles',
 				subtitle: 'Agent configurations',
 				icon: User
+			},
+			{
+				id: 'plugins',
+				type: 'action',
+				action: 'plugins',
+				title: 'Plugins',
+				subtitle: 'Manage extensions',
+				icon: Puzzle
 			}
 		];
 
@@ -481,6 +491,7 @@
 			case 'profiles': onOpenProfiles?.(); break;
 			case 'subagents': onOpenSubagents?.(); break;
 			case 'settings': onOpenSettings?.(); break;
+			case 'plugins': onOpenPlugins?.(); break;
 		}
 	}
 
