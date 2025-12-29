@@ -711,67 +711,93 @@
 		};
 
 		// Find which card position we're over based on X coordinate
-		const dragCenterX = e.clientX;
+		// Use the center of the dragged card for comparison
+		const draggedCardWidth = 220; // var(--card-width) default
+		const dragCenterX = pointerDragPosition.x + draggedCardWidth / 2;
 		let hoveredDeckId: string | null = null;
-		let newIndex = -1;
 
-		// Get all card elements and find where we should insert
+		// Get all visible card elements and their positions
 		const cardElements = carouselRef?.querySelectorAll('[data-card-id]') as NodeListOf<HTMLElement>;
-		if (cardElements) {
-			for (let i = 0; i < cardElements.length; i++) {
-				const cardEl = cardElements[i];
-				const cardId = cardEl.dataset.cardId;
-				if (!cardId || cardId === draggedCardId) continue;
+		if (!cardElements || cardElements.length === 0) {
+			e.preventDefault();
+			return;
+		}
 
-				const rect = cardEl.getBoundingClientRect();
-				const cardCenterX = rect.left + rect.width / 2;
+		// Build array of card positions (excluding the dragged card)
+		const cardPositions: { id: string; centerX: number; rect: DOMRect }[] = [];
 
-				const card = currentCards.find(c => c.id === cardId);
-				if (!card) continue;
+		for (let i = 0; i < cardElements.length; i++) {
+			const cardEl = cardElements[i];
+			const cardId = cardEl.dataset.cardId;
+			if (!cardId || cardId === draggedCardId) continue;
 
-				// Check if it's a deck card (for drop-into)
-				if (card.type === 'deck' && card.deckId) {
-					// Check if we're hovering over this deck card
-					if (dragCenterX >= rect.left && dragCenterX <= rect.right) {
-						const draggedCard = currentCards.find(c => c.id === draggedCardId);
-						if (draggedCard?.type !== 'deck') {
-							hoveredDeckId = card.deckId;
-							break;
-						}
-					}
-				}
+			const card = currentCards.find(c => c.id === cardId);
+			if (!card || card.type === 'add-deck') continue;
 
-				// Determine insertion point based on X position
-				if (card.type !== 'add-deck' && dragCenterX < cardCenterX) {
-					const liveIndex = liveCardOrder.indexOf(cardId);
-					if (liveIndex !== -1 && newIndex === -1) {
-						newIndex = liveIndex;
+			const rect = cardEl.getBoundingClientRect();
+			cardPositions.push({
+				id: cardId,
+				centerX: rect.left + rect.width / 2,
+				rect
+			});
+		}
+
+		// Check for deck drop-into (only if dragging a non-deck card)
+		const draggedCard = currentCards.find(c => c.id === draggedCardId);
+		if (draggedCard?.type !== 'deck') {
+			for (const pos of cardPositions) {
+				const card = currentCards.find(c => c.id === pos.id);
+				if (card?.type === 'deck' && card.deckId) {
+					if (dragCenterX >= pos.rect.left && dragCenterX <= pos.rect.right) {
+						hoveredDeckId = card.deckId;
+						break;
 					}
 				}
 			}
 		}
 
-		// If we didn't find an insertion point, put at the end
-		if (newIndex === -1 && !hoveredDeckId) {
-			newIndex = liveCardOrder.length;
-		}
+		// Calculate new position in the order
+		if (!hoveredDeckId) {
+			// Find where the dragged card should be inserted based on X position
+			let targetIndex = cardPositions.length; // Default to end
 
-		// Update live card order for real-time reordering animation
-		if (!hoveredDeckId && newIndex !== -1) {
-			const currentIndex = liveCardOrder.indexOf(draggedCardId);
-			if (currentIndex !== -1 && currentIndex !== newIndex) {
-				// Create new order with the card moved to the new position
+			for (let i = 0; i < cardPositions.length; i++) {
+				if (dragCenterX < cardPositions[i].centerX) {
+					targetIndex = i;
+					break;
+				}
+			}
+
+			// Get current position of dragged card in liveCardOrder
+			const currentDragIndex = liveCardOrder.indexOf(draggedCardId);
+
+			// Map target visual index to liveCardOrder index
+			// The visual positions map to liveCardOrder positions (minus the dragged card)
+			const visualOrder = liveCardOrder.filter(id => id !== draggedCardId);
+
+			// Determine the actual target index in liveCardOrder
+			let newOrderIndex: number;
+			if (targetIndex >= visualOrder.length) {
+				// Insert at end
+				newOrderIndex = liveCardOrder.length - 1;
+			} else {
+				// Insert before the card at targetIndex
+				const targetCardId = visualOrder[targetIndex];
+				newOrderIndex = liveCardOrder.indexOf(targetCardId);
+			}
+
+			// Only update if position actually changed
+			if (currentDragIndex !== newOrderIndex) {
 				const newOrder = [...liveCardOrder];
-				newOrder.splice(currentIndex, 1);
-				// Adjust insertion index if we removed from before it
-				const insertAt = newIndex > currentIndex ? newIndex - 1 : newIndex;
-				newOrder.splice(insertAt, 0, draggedCardId);
+				newOrder.splice(currentDragIndex, 1);
+				// Adjust index after removal
+				const insertAt = newOrderIndex > currentDragIndex ? newOrderIndex - 1 : newOrderIndex;
+				newOrder.splice(Math.max(0, insertAt), 0, draggedCardId);
 				liveCardOrder = newOrder;
 			}
 		}
 
 		dragOverDeckId = hoveredDeckId;
-		dragOverIndex = newIndex;
 
 		e.preventDefault();
 	}
