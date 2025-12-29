@@ -798,12 +798,12 @@
 		gap: 0.375rem;
 		padding: 8px 12px;
 		margin-bottom: 4px;
-		background: #0d0d0e;
+		background: rgba(0, 0, 0, 0.3);
 		border-radius: 10px;
 	}
 
 	:global(.light) .uploaded-files {
-		background: #ffffff;
+		background: rgba(255, 255, 255, 0.8);
 	}
 
 	.file-chip {
@@ -834,19 +834,21 @@
 		color: var(--destructive);
 	}
 
-	/* ===== INPUT WRAPPER - THE HERO (outer frame with lighter bg) ===== */
+	/* ===== INPUT WRAPPER - THE HERO (glass outer frame) ===== */
 	.input-wrapper {
 		position: relative;
-		background: #131315;
-		border: 1px solid rgba(255, 255, 255, 0.1);
+		background: rgba(255, 255, 255, 0.03);
+		backdrop-filter: blur(20px);
+		-webkit-backdrop-filter: blur(20px);
+		border: 1px solid rgba(255, 255, 255, 0.08);
 		border-radius: 16px 16px 0 0;
 		padding: 4px;
 		transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 	}
 
 	:global(.light) .input-wrapper {
-		background: #f0f0f2;
-		border-color: rgba(0, 0, 0, 0.1);
+		background: rgba(255, 255, 255, 0.7);
+		border-color: rgba(0, 0, 0, 0.08);
 	}
 
 
@@ -866,18 +868,18 @@
 			0 0 40px -10px rgba(20, 184, 166, 0.2);
 	}
 
-	/* ===== INPUT INNER - Dark rounded bubble inside ===== */
+	/* ===== INPUT INNER - Glass rounded bubble inside ===== */
 	.input-inner {
 		display: flex;
 		align-items: flex-end;
 		gap: 8px;
-		background: #0d0d0e;
+		background: rgba(0, 0, 0, 0.3);
 		border-radius: 12px;
 		padding: 12px 16px;
 	}
 
 	:global(.light) .input-inner {
-		background: #ffffff;
+		background: rgba(255, 255, 255, 0.8);
 	}
 
 	/* Textarea wrapper */
@@ -1036,7 +1038,9 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		background: #1a1a1d;
+		background: rgba(255, 255, 255, 0.02);
+		backdrop-filter: blur(20px);
+		-webkit-backdrop-filter: blur(20px);
 		border: 1px solid rgba(255, 255, 255, 0.06);
 		border-top: none;
 		border-radius: 0 0 16px 16px;
@@ -1044,7 +1048,7 @@
 	}
 
 	:global(.light) .controls-dock {
-		background: #f0f0f2;
+		background: rgba(255, 255, 255, 0.6);
 		border-color: rgba(0, 0, 0, 0.06);
 	}
 
