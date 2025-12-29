@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { MessageSquare, Bot, Terminal } from 'lucide-svelte';
+	import { MessageSquare, Terminal, FolderOpen, User, Bot } from 'lucide-svelte';
 	import WelcomeCard from './WelcomeCard.svelte';
 
 	interface Props {
@@ -15,15 +15,7 @@
 			description: 'Start a conversation',
 			icon: MessageSquare,
 			shortcut: '⌘N',
-			rotation: -5
-		},
-		{
-			type: 'agent',
-			label: 'AGENT',
-			description: 'Deploy an AI ally',
-			icon: Bot,
-			shortcut: '⌘⇧B',
-			rotation: 0
+			rotation: -10
 		},
 		{
 			type: 'terminal',
@@ -31,7 +23,31 @@
 			description: 'Open command line',
 			icon: Terminal,
 			shortcut: '⌘T',
+			rotation: -5
+		},
+		{
+			type: 'project',
+			label: 'PROJECTS',
+			description: 'Manage workspaces',
+			icon: FolderOpen,
+			shortcut: '⌘P',
+			rotation: 0
+		},
+		{
+			type: 'profile',
+			label: 'PROFILES',
+			description: 'Configure agents',
+			icon: User,
+			shortcut: '⌘⇧P',
 			rotation: 5
+		},
+		{
+			type: 'subagent',
+			label: 'SUBAGENTS',
+			description: 'Specialized assistants',
+			icon: Bot,
+			shortcut: '⌘⇧S',
+			rotation: 10
 		}
 	];
 </script>
