@@ -798,12 +798,7 @@
 		gap: 0.375rem;
 		padding: 8px 12px;
 		margin-bottom: 4px;
-		background: rgba(0, 0, 0, 0.3);
-		border-radius: 10px;
-	}
-
-	:global(.light) .uploaded-files {
-		background: rgba(255, 255, 255, 0.8);
+		background: transparent;
 	}
 
 	.file-chip {
