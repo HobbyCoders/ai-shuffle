@@ -46,7 +46,7 @@ export const DEFAULT_CARD_SIZES: Record<CardType, { width: number; height: numbe
   'model-studio': { width: 800, height: 600 },
   'audio-studio': { width: 700, height: 500 },
   'file-browser': { width: 600, height: 500 },
-  plugins: { width: 750, height: 650 },
+  plugins: { width: 650, height: 550 },
 };
 
 export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }> = {

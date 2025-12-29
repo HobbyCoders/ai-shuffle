@@ -186,7 +186,7 @@
 	{onResizeEnd}
 >
 	{#snippet children()}
-		<div class="plugin-card" class:mobile>
+		<div class="plugin-card" class:mobile class:maximized={card.maximized}>
 			<!-- Tabs -->
 			<div class="plugin-tabs">
 				{#each tabs as tab}
@@ -446,6 +446,21 @@
 		flex-direction: column;
 		height: 100%;
 		overflow: hidden;
+	}
+
+	/* Maximized state - constrain width and center content */
+	.plugin-card.maximized {
+		--card-max-width: 850px;
+	}
+
+	.plugin-card.maximized .plugin-tabs,
+	.plugin-card.maximized .plugin-search-bar,
+	.plugin-card.maximized .plugin-content,
+	.plugin-card.maximized .plugin-footer {
+		max-width: var(--card-max-width);
+		margin-left: auto;
+		margin-right: auto;
+		width: 100%;
 	}
 
 	/* Tabs */
