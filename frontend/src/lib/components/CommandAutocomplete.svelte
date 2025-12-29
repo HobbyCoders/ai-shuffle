@@ -6,7 +6,8 @@
     display: string;
     description: string;
     argument_hint?: string;
-    type: 'custom' | 'interactive' | 'sdk_builtin';
+    type: 'custom' | 'interactive' | 'sdk_builtin' | 'plugin';
+    source?: string;
   }
 
   interface Props {
@@ -186,7 +187,11 @@
               <p class="text-sm text-foreground truncate">{command.description}</p>
             </div>
             <div class="flex-shrink-0">
-              {#if command.type === 'interactive'}
+              {#if command.type === 'plugin'}
+                <span class="px-1.5 py-0.5 text-xs bg-purple-500/20 text-purple-400 rounded">
+                  plugin
+                </span>
+              {:else if command.type === 'interactive'}
                 <span class="px-1.5 py-0.5 text-xs bg-primary/20 text-primary rounded">
                   interactive
                 </span>
