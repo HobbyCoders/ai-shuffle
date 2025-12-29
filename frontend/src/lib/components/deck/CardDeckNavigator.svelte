@@ -541,6 +541,15 @@
 		}
 		contextMenuOpen = false;
 		showNewDeckDialog = false;
+
+		// Reset drag-related state that could block clicks on next open
+		didDragInEditMode = false;
+		hasDragged = false;
+		isDragging = false;
+		isPointerDragging = false;
+		draggedCardId = null;
+		liveCardOrder = [];
+
 		onClose();
 		setTimeout(() => {
 			navStack = [{ id: 'root', name: 'AI Shuffle', type: 'root' }];
@@ -809,16 +818,16 @@
 	function handleEditPointerUp(e: PointerEvent) {
 		if (!isPointerDragging || !draggedCardId) return;
 
-		// Handle drop into deck
-		if (dragOverDeckId) {
-			navigator.addCardToDeck(dragOverDeckId, draggedCardId);
-		}
-		// Handle reorder - use the live card order that was updated during drag
-		else if (liveCardOrder.length > 0) {
-			navigator.setCardOrder(liveCardOrder);
-		}
+		// Capture the final order and drop target BEFORE clearing reactive state
+		// This prevents race conditions where store updates trigger derived recalculations
+		// while we still have stale liveCardOrder values
+		const finalOrder = [...liveCardOrder];
+		const dropIntoDeckId = dragOverDeckId;
+		const droppedCardId = draggedCardId;
 
-		// Reset drag state
+		// FIRST: Reset ALL drag state so displayCards falls back to currentCards immediately
+		// This must happen BEFORE any store updates to prevent the derived displayCards
+		// from trying to match stale liveCardOrder against updated currentCards
 		isPointerDragging = false;
 		draggedCardId = null;
 		draggedCardIndex = -1;
@@ -832,6 +841,14 @@
 		pendingDragCard = null;
 		pendingDragIndex = -1;
 		pendingDragElement = null;
+
+		// THEN: Persist to store (this triggers reactive updates, but displayCards
+		// will now use currentCards directly since isPointerDragging is false)
+		if (dropIntoDeckId) {
+			navigator.addCardToDeck(dropIntoDeckId, droppedCardId);
+		} else if (finalOrder.length > 0) {
+			navigator.setCardOrder(finalOrder);
+		}
 	}
 
 	function handleEditPointerCancel(e: PointerEvent) {
