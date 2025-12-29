@@ -899,13 +899,14 @@
 	/* Textarea */
 	.chat-textarea {
 		width: 100%;
-		min-height: 44px;
+		min-height: 24px;
 		max-height: 300px;
 		padding: 0;
 		background: transparent !important;
 		background-color: transparent !important;
 		border: none !important;
 		outline: none !important;
+		box-shadow: none !important;
 		resize: none;
 		font-family: 'Outfit', -apple-system, sans-serif;
 		font-size: 15px;
@@ -918,10 +919,22 @@
 		appearance: none;
 	}
 
+	.chat-textarea:focus {
+		outline: none !important;
+		border: none !important;
+		box-shadow: none !important;
+	}
+
 	:global(.light) .chat-textarea {
 		color: #18181b;
 		background: transparent !important;
 		background-color: transparent !important;
+	}
+
+	:global(.light) .chat-textarea:focus {
+		outline: none !important;
+		border: none !important;
+		box-shadow: none !important;
 	}
 
 	.chat-textarea::placeholder {
