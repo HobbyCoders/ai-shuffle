@@ -3119,6 +3119,8 @@ function createTabsStore() {
 		 */
 		setTabProfile(tabId: string, profileId: string) {
 			updateTab(tabId, { profile: profileId });
+			// Save tabs state (debounced) to persist the profile selection
+			saveTabsToServer(get({ subscribe }));
 		},
 
 		/**
@@ -3126,6 +3128,8 @@ function createTabsStore() {
 		 */
 		setTabProject(tabId: string, projectId: string) {
 			updateTab(tabId, { project: projectId });
+			// Save tabs state (debounced) to persist the project selection
+			saveTabsToServer(get({ subscribe }));
 		},
 
 		/**
