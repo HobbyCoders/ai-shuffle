@@ -101,7 +101,11 @@
 	let draggedCardElement = $state<HTMLElement | null>(null);
 	let didDragInEditMode = $state(false); // Track if drag occurred to prevent click
 	let dragStartPosition = $state({ x: 0, y: 0 }); // Track start position for drag threshold
+	let railYPosition = $state(0); // Y position to lock horizontal dragging
 	const DRAG_START_THRESHOLD = 8; // Pixels to move before drag starts
+
+	// Live reorder state - tracks the current visual order during drag
+	let liveCardOrder = $state<string[]>([]);
 
 	// Context menu state
 	let contextMenuOpen = $state(false);
@@ -399,6 +403,35 @@
 		}
 	});
 
+	// Display cards - reordered in real-time during drag based on liveCardOrder
+	const displayCards = $derived.by((): NavigatorCard[] => {
+		// If not dragging or no live order, use current cards
+		if (!isPointerDragging || liveCardOrder.length === 0) {
+			return currentCards;
+		}
+
+		// Reorder cards based on live order (excluding dragged card and add-deck)
+		const orderedCards: NavigatorCard[] = [];
+		const addDeckCard = currentCards.find(c => c.type === 'add-deck');
+
+		for (const cardId of liveCardOrder) {
+			// Skip the dragged card - it's shown as the floating element
+			if (cardId === draggedCardId) continue;
+
+			const card = currentCards.find(c => c.id === cardId);
+			if (card) {
+				orderedCards.push(card);
+			}
+		}
+
+		// Add the add-deck card at the end if it exists
+		if (addDeckCard) {
+			orderedCards.push(addDeckCard);
+		}
+
+		return orderedCards;
+	});
+
 	// Handle card click
 	function handleCardClick(card: NavigatorCard, e: MouseEvent) {
 		// Block click if we just finished dragging
@@ -548,23 +581,34 @@
 	let pendingDragIndex = $state<number>(-1);
 	let pendingDragElement = $state<HTMLElement | null>(null);
 
-	function handleCardPointerDown(e: PointerEvent, card: NavigatorCard, index: number) {
+	function handleDragHandlePointerDown(e: PointerEvent, card: NavigatorCard, index: number) {
 		if (!isEditMode || card.type === 'add-deck') return;
 
-		const target = e.currentTarget as HTMLElement;
+		// Stop propagation so card click doesn't fire
+		e.stopPropagation();
+		e.preventDefault();
+
+		const cardElement = (e.currentTarget as HTMLElement).closest('[data-card-id]') as HTMLElement;
+		if (!cardElement) return;
 
 		// Store the start position and card info
 		dragStartPosition = { x: e.clientX, y: e.clientY };
 		pendingDragCard = card;
 		pendingDragIndex = index;
-		pendingDragElement = target;
+		pendingDragElement = cardElement;
 
-		// Calculate offset from card top-left to pointer
-		const rect = target.getBoundingClientRect();
+		// Calculate offset from card top-left to pointer - use card element, not handle
+		const rect = cardElement.getBoundingClientRect();
 		pointerDragOffset = {
 			x: e.clientX - rect.left,
 			y: e.clientY - rect.top
 		};
+
+		// Store the carousel's Y position to lock horizontal movement
+		if (carouselRef) {
+			const carouselRect = carouselRef.getBoundingClientRect();
+			railYPosition = rect.top; // Lock to this card's Y position
+		}
 
 		// Start long press timer for mobile
 		if (isMobile) {
@@ -572,9 +616,17 @@
 				// Mobile long-press triggers drag immediately
 				startDragging(e);
 			}, LONG_PRESS_DURATION);
+		} else {
+			// On desktop, start drag immediately from handle
+			startDragging(e);
 		}
+	}
 
-		// Don't prevent default yet - allow click to work if no drag
+	// Keep the old function but make it a no-op for non-handle clicks
+	function handleCardPointerDown(e: PointerEvent, card: NavigatorCard, index: number) {
+		// Only allow drag initiation from the drag handle, not the card body
+		// This function now does nothing - drag is handled by handleDragHandlePointerDown
+		return;
 	}
 
 	function startDragging(e: PointerEvent | { clientX: number; clientY: number }) {
@@ -586,10 +638,13 @@
 		isPointerDragging = true;
 		didDragInEditMode = true;
 
-		// Set initial position
+		// Initialize live card order for real-time reordering
+		liveCardOrder = currentCards.filter(c => c.type !== 'add-deck').map(c => c.id);
+
+		// Set initial position - lock Y to rail position
 		pointerDragPosition = {
 			x: e.clientX - pointerDragOffset.x,
-			y: e.clientY - pointerDragOffset.y
+			y: railYPosition // Lock to rail Y position
 		};
 
 		// Haptic feedback on mobile
@@ -649,50 +704,74 @@
 	function handleEditPointerMove(e: PointerEvent | MouseEvent) {
 		if (!isPointerDragging || !draggedCardId) return;
 
-		// Update drag position
+		// Update drag position - LOCK Y axis to rail position
 		pointerDragPosition = {
 			x: e.clientX - pointerDragOffset.x,
-			y: e.clientY - pointerDragOffset.y
+			y: railYPosition // Always keep Y locked to the rail
 		};
 
-		// Find which card we're over using elementsFromPoint
-		const elements = document.elementsFromPoint(e.clientX, e.clientY);
-
-		let hoveredIndex = -1;
+		// Find which card position we're over based on X coordinate
+		const dragCenterX = e.clientX;
 		let hoveredDeckId: string | null = null;
+		let newIndex = -1;
 
-		// Find the first card element under the pointer (excluding the dragged one)
-		for (const el of elements) {
-			const cardEl = el.closest('[data-card-id]') as HTMLElement;
-			if (!cardEl) continue;
+		// Get all card elements and find where we should insert
+		const cardElements = carouselRef?.querySelectorAll('[data-card-id]') as NodeListOf<HTMLElement>;
+		if (cardElements) {
+			for (let i = 0; i < cardElements.length; i++) {
+				const cardEl = cardElements[i];
+				const cardId = cardEl.dataset.cardId;
+				if (!cardId || cardId === draggedCardId) continue;
 
-			const cardId = cardEl.dataset.cardId;
-			if (!cardId || cardId === draggedCardId) continue;
+				const rect = cardEl.getBoundingClientRect();
+				const cardCenterX = rect.left + rect.width / 2;
 
-			const card = currentCards.find(c => c.id === cardId);
-			if (!card) continue;
+				const card = currentCards.find(c => c.id === cardId);
+				if (!card) continue;
 
-			const idx = currentCards.findIndex(c => c.id === cardId);
+				// Check if it's a deck card (for drop-into)
+				if (card.type === 'deck' && card.deckId) {
+					// Check if we're hovering over this deck card
+					if (dragCenterX >= rect.left && dragCenterX <= rect.right) {
+						const draggedCard = currentCards.find(c => c.id === draggedCardId);
+						if (draggedCard?.type !== 'deck') {
+							hoveredDeckId = card.deckId;
+							break;
+						}
+					}
+				}
 
-			// Check if it's a deck card (for drop-into)
-			if (card.type === 'deck' && card.deckId) {
-				const draggedCard = currentCards.find(c => c.id === draggedCardId);
-				if (draggedCard?.type !== 'deck') {
-					hoveredDeckId = card.deckId;
-					hoveredIndex = -1;
-					break;
+				// Determine insertion point based on X position
+				if (card.type !== 'add-deck' && dragCenterX < cardCenterX) {
+					const liveIndex = liveCardOrder.indexOf(cardId);
+					if (liveIndex !== -1 && newIndex === -1) {
+						newIndex = liveIndex;
+					}
 				}
 			}
+		}
 
-			// Regular card - use for reordering
-			if (card.type !== 'add-deck') {
-				hoveredIndex = idx;
+		// If we didn't find an insertion point, put at the end
+		if (newIndex === -1 && !hoveredDeckId) {
+			newIndex = liveCardOrder.length;
+		}
+
+		// Update live card order for real-time reordering animation
+		if (!hoveredDeckId && newIndex !== -1) {
+			const currentIndex = liveCardOrder.indexOf(draggedCardId);
+			if (currentIndex !== -1 && currentIndex !== newIndex) {
+				// Create new order with the card moved to the new position
+				const newOrder = [...liveCardOrder];
+				newOrder.splice(currentIndex, 1);
+				// Adjust insertion index if we removed from before it
+				const insertAt = newIndex > currentIndex ? newIndex - 1 : newIndex;
+				newOrder.splice(insertAt, 0, draggedCardId);
+				liveCardOrder = newOrder;
 			}
-			break;
 		}
 
 		dragOverDeckId = hoveredDeckId;
-		dragOverIndex = hoveredIndex;
+		dragOverIndex = newIndex;
 
 		e.preventDefault();
 	}
@@ -704,26 +783,9 @@
 		if (dragOverDeckId) {
 			navigator.addCardToDeck(dragOverDeckId, draggedCardId);
 		}
-		// Handle reorder
-		else if (dragOverIndex !== -1 && dragOverIndex !== draggedCardIndex) {
-			// Don't allow dropping past the add-deck card
-			let targetIndex = dragOverIndex;
-			const addDeckIndex = currentCards.findIndex(c => c.type === 'add-deck');
-			if (addDeckIndex !== -1 && targetIndex >= addDeckIndex) {
-				targetIndex = addDeckIndex - 1;
-			}
-
-			// Reorder cards (exclude add-deck from the order)
-			const cardIds = currentCards.filter(c => c.type !== 'add-deck').map(c => c.id);
-			const currentIdx = cardIds.indexOf(draggedCardId);
-			if (currentIdx !== -1) {
-				cardIds.splice(currentIdx, 1);
-				// Adjust target index if needed
-				const adjustedTarget = targetIndex > currentIdx ? targetIndex - 1 : targetIndex;
-				cardIds.splice(Math.min(adjustedTarget, cardIds.length), 0, draggedCardId);
-
-				navigator.setCardOrder(cardIds);
-			}
+		// Handle reorder - use the live card order that was updated during drag
+		else if (liveCardOrder.length > 0) {
+			navigator.setCardOrder(liveCardOrder);
 		}
 
 		// Reset drag state
@@ -733,6 +795,7 @@
 		dragOverIndex = -1;
 		dragOverDeckId = null;
 		draggedCardElement = null;
+		liveCardOrder = [];
 
 		// Clear pending state
 		pendingDragCard = null;
@@ -759,6 +822,7 @@
 		dragOverIndex = -1;
 		dragOverDeckId = null;
 		draggedCardElement = null;
+		liveCardOrder = [];
 	}
 
 	// ========================================
@@ -1043,15 +1107,13 @@
 					in:fly={{ x: 100, duration: 300, easing: cubicOut }}
 					out:fly={{ x: -100, duration: 200, easing: cubicOut }}
 				>
-					{#each currentCards as card, index (card.id)}
+					{#each displayCards as card, index (card.id)}
 						<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
 						<article
 							class="card"
 							class:thread-card={card.type === 'thread'}
 							class:deck-card={card.type === 'deck'}
 							class:add-deck-card={card.type === 'add-deck'}
-							class:dragging={isPointerDragging && draggedCardId === card.id}
-							class:drag-over={dragOverIndex === index && draggedCardId !== card.id}
 							class:drop-into-deck={card.type === 'deck' && card.deckId === dragOverDeckId}
 							data-ai-active={card.isStreaming}
 							data-has-children={card.hasChildren}
@@ -1061,18 +1123,18 @@
 							onclick={(e) => handleCardClick(card, e)}
 							oncontextmenu={(e) => isEditMode && showContextMenu(card.id, e)}
 							onkeydown={(e) => e.key === 'Enter' && handleCardClick(card, e as unknown as MouseEvent)}
-							onpointerdown={(e) => handleCardPointerDown(e, card, index)}
-							onpointermove={handleCardPointerMove}
-							onpointerup={handleCardPointerUp}
-							onpointercancel={(e) => handleEditPointerCancel(e)}
 							role="option"
 							tabindex="0"
 							aria-selected="false"
-							animate:flip={{ duration: 200 }}
+							animate:flip={{ duration: 250, easing: cubicOut }}
 						>
 							<div class="card-inner">
 								{#if isEditMode && card.type !== 'add-deck'}
-									<div class="drag-handle">
+									<!-- svelte-ignore a11y_no_static_element_interactions -->
+									<div
+										class="drag-handle"
+										onpointerdown={(e) => handleDragHandlePointerDown(e, card, index)}
+									>
 										<GripVertical size={16} />
 									</div>
 								{/if}
@@ -1531,23 +1593,21 @@
 		75% { transform: rotate(0.5deg); }
 	}
 
-	.card:hover:not(.dragging) {
+	.card:hover {
 		transform: translateY(-6px);
 	}
 
-	.card:active:not(.dragging) {
+	.card:active {
 		transform: translateY(-4px) scale(0.98);
 	}
 
-	.card.dragging {
-		opacity: 0.3;
-		transform: scale(0.95);
-		animation: none !important;
+	/* In edit mode, don't apply hover transform - let cards stay in place */
+	.navigator.edit-mode .card:hover {
+		transform: none;
 	}
 
-	.card.drag-over {
-		transform: translateX(30px);
-		transition: transform 0.15s var(--ease-out);
+	.navigator.edit-mode .card:active {
+		transform: none;
 	}
 
 	/* Floating drag clone - physically picked up card */
@@ -1659,16 +1719,25 @@
 		position: absolute;
 		top: 8px;
 		right: 8px;
-		padding: 4px;
+		padding: 8px;
 		color: var(--text-dim);
-		opacity: 0.6;
+		opacity: 0.7;
 		cursor: grab;
 		transition: all 0.15s ease;
+		border-radius: var(--radius-sm);
+		touch-action: none; /* Prevent scroll interference on touch */
+		z-index: 5;
 	}
 
-	.card:hover .drag-handle {
+	.drag-handle:hover {
 		opacity: 1;
-		color: var(--text-secondary);
+		color: var(--ai-primary);
+		background: var(--ai-subtle);
+	}
+
+	.drag-handle:active {
+		cursor: grabbing;
+		transform: scale(0.95);
 	}
 
 	/* Card icon */
