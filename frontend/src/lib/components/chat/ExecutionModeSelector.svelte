@@ -54,7 +54,7 @@
 			lastSyncedProject = projectId;
 
 			if (result.cleaned_up.length > 0) {
-				console.log(`[WorktreeSync] Cleaned up ${result.cleaned_up.length} stale worktree records for project ${projectId}:`, result.cleaned_up);
+				// Stale worktree records cleaned up silently
 			}
 		} catch (e) {
 			// Don't block on sync errors - just log them

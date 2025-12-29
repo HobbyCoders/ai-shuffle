@@ -156,7 +156,6 @@
 
 	function handleShare() {
 		// Placeholder for future share functionality
-		console.log('Share:', generation?.id);
 	}
 
 	// Check if provider supports editing

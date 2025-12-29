@@ -660,22 +660,18 @@
 	}
 
 	function handleCardFocus(id: string) {
-		console.log('[CardFocus] Card focused:', id);
 		deck.focusCard(id);
 
 		// If this is a chat card, sync the active tab
 		// Note: deck.getCard returns the store's DeckCard type (meta at top level)
 		// which is different from CardsDeckCard (meta under data)
 		const storeCard = deck.getCard(id);
-		console.log('[CardFocus] Store card:', storeCard?.type, 'meta.tabId:', storeCard?.meta?.tabId, 'dataId:', storeCard?.dataId);
 		if (storeCard?.type === 'chat') {
 			// Get tabId from store card's meta (not data.meta)
 			const tabId = (storeCard.meta?.tabId as string) ||
 				(storeCard.dataId ? tabs.findTabBySessionId(storeCard.dataId) : null);
-			console.log('[CardFocus] Resolved tabId:', tabId);
 			if (tabId) {
 				tabs.setActiveTab(tabId);
-				console.log('[CardFocus] activeTab after set:', $activeTab?.id);
 			}
 		}
 	}
@@ -724,8 +720,8 @@
 		deck.setCardTitle(id, title);
 	}
 
-	function handleFork(cardId: string, sessionId: string, messageIndex: number, messageId: string) {
-		console.log('Fork requested:', { cardId, sessionId, messageIndex, messageId });
+	function handleFork(_cardId: string, _sessionId: string, _messageIndex: number, _messageId: string) {
+		// Fork functionality to be implemented
 	}
 
 	// ============================================

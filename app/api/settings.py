@@ -64,7 +64,7 @@ router = APIRouter(prefix="/api/v1/settings", tags=["Settings"])
 # ============================================================================
 
 @router.get("/internal/api-keys/{key_name}")
-async def get_internal_api_key(key_name: str):
+async def get_internal_api_key(key_name: str, _: str = Depends(require_admin)):
     """
     Internal endpoint for AI tools to get decrypted API keys.
 
@@ -72,6 +72,7 @@ async def get_internal_api_key(key_name: str):
     to access API keys that are encrypted in the database.
 
     Only allows specific key names to prevent arbitrary setting access.
+    Requires admin authentication to prevent unauthorized access.
     """
     allowed_keys = ["openai_api_key", "image_api_key", "gemini_api_key", "video_api_key", "meshy_api_key"]
 
@@ -87,10 +88,11 @@ async def get_internal_api_key(key_name: str):
 
 
 @router.get("/internal/image-config")
-async def get_internal_image_config():
+async def get_internal_image_config(_: str = Depends(require_admin)):
     """
     Internal endpoint for AI tools to get image generation configuration.
     Returns provider, model, and decrypted API key.
+    Requires admin authentication to prevent unauthorized access.
     """
     provider = database.get_system_setting("image_provider")
     model = database.get_system_setting("image_model")
@@ -107,10 +109,11 @@ async def get_internal_image_config():
 
 
 @router.get("/internal/video-config")
-async def get_internal_video_config():
+async def get_internal_video_config(_: str = Depends(require_admin)):
     """
     Internal endpoint for AI tools to get video generation configuration.
     Returns provider, model, and decrypted API key.
+    Requires admin authentication to prevent unauthorized access.
     """
     provider = database.get_system_setting("video_provider")
     model = database.get_system_setting("video_model")
