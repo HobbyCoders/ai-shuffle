@@ -415,6 +415,9 @@
 		}
 	});
 
+	// Snapshot of cards captured at drag start - prevents reactive updates from causing mismatches
+	let dragStartCards = $state<NavigatorCard[]>([]);
+
 	// Display cards - reordered in real-time during drag based on liveCardOrder
 	// IMPORTANT: Keep ALL cards in the list (including dragged card) so flip animation works
 	// The dragged card is hidden via CSS, not removed from the DOM
@@ -424,12 +427,16 @@
 			return currentCards;
 		}
 
+		// During drag, use the SNAPSHOT of cards from drag start, not the reactive currentCards
+		// This prevents the derived from seeing inconsistent state when the store updates
+		const cardsToUse = dragStartCards.length > 0 ? dragStartCards : currentCards;
+
 		// Reorder cards based on live order (keep dragged card in list for flip to work)
 		const orderedCards: NavigatorCard[] = [];
-		const addDeckCard = currentCards.find(c => c.type === 'add-deck');
+		const addDeckCard = cardsToUse.find(c => c.type === 'add-deck');
 
 		for (const cardId of liveCardOrder) {
-			const card = currentCards.find(c => c.id === cardId);
+			const card = cardsToUse.find(c => c.id === cardId);
 			if (card) {
 				orderedCards.push(card);
 			}
@@ -549,6 +556,7 @@
 		isPointerDragging = false;
 		draggedCardId = null;
 		liveCardOrder = [];
+		dragStartCards = [];
 
 		onClose();
 		setTimeout(() => {
@@ -658,6 +666,10 @@
 		draggedCardElement = pendingDragElement;
 		isPointerDragging = true;
 		didDragInEditMode = true;
+
+		// Capture a SNAPSHOT of current cards at drag start
+		// This prevents displayCards from seeing inconsistent state when store updates
+		dragStartCards = [...currentCards];
 
 		// Initialize live card order for real-time reordering
 		liveCardOrder = currentCards.filter(c => c.type !== 'add-deck').map(c => c.id);
@@ -836,6 +848,7 @@
 		draggedCardElement = null;
 		liveCardOrder = [];
 		originalCardPositions = [];
+		dragStartCards = [];
 
 		// Clear pending state
 		pendingDragCard = null;
@@ -872,6 +885,7 @@
 		draggedCardElement = null;
 		liveCardOrder = [];
 		originalCardPositions = [];
+		dragStartCards = [];
 	}
 
 	// ========================================
