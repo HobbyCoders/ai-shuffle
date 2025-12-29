@@ -157,7 +157,11 @@
 	const envVarPresets = [
 		{ key: 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', placeholder: '1 - 64000' },
 		{ key: 'MAX_THINKING_TOKENS', placeholder: '1024 - 128000' },
-		{ key: 'MAX_MCP_OUTPUT_TOKENS', placeholder: '1 - 25000 (default)' }
+		{ key: 'MAX_MCP_OUTPUT_TOKENS', placeholder: '1 - 25000 (default)' },
+		{ key: 'BASH_DEFAULT_TIMEOUT_MS', placeholder: 'ms (default: 120000)' },
+		{ key: 'BASH_MAX_TIMEOUT_MS', placeholder: 'ms (default: 600000)' },
+		{ key: 'MCP_TIMEOUT', placeholder: 'ms for server startup' },
+		{ key: 'MCP_TOOL_TIMEOUT', placeholder: 'ms for tool execution' }
 	];
 
 	// Tool selection mode
