@@ -154,8 +154,20 @@
 	}
 
 	// Computed values
+	// Get current profile to access env vars for auto-compaction reserve calculation
+	const currentProfile = $derived($profiles.find(p => p.id === tab.profile));
+
+	// Auto-compaction reserve: 13k base + CLAUDE_CODE_MAX_OUTPUT_TOKENS from profile env vars
+	const AUTO_COMPACTION_BASE = 13000;
+	const maxOutputTokens = $derived(
+		parseInt((currentProfile?.config as any)?.env?.CLAUDE_CODE_MAX_OUTPUT_TOKENS || '0', 10) || 0
+	);
+	const autoCompactionReserve = $derived(AUTO_COMPACTION_BASE + maxOutputTokens);
+
 	// Context usage: use real-time tracked value, or calculate from token counts for resumed sessions
-	const contextUsed = $derived(tab.contextUsed ?? (tab.totalTokensIn + tab.totalCacheCreationTokens + tab.totalCacheReadTokens));
+	// Add auto-compaction reserve to show effective context usage
+	const baseContextUsed = $derived(tab.contextUsed ?? (tab.totalTokensIn + tab.totalCacheCreationTokens + tab.totalCacheReadTokens));
+	const contextUsed = $derived(baseContextUsed + autoCompactionReserve);
 	const contextMax = 200000;
 	const contextPercent = $derived(Math.min((contextUsed / contextMax) * 100, 100));
 
