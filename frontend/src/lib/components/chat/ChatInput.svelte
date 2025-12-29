@@ -893,12 +893,13 @@
 	/* Textarea */
 	.chat-textarea {
 		width: 100%;
-		min-height: 24px;
+		min-height: 44px;
 		max-height: 300px;
 		padding: 0;
-		background: transparent;
-		border: none;
-		outline: none;
+		background: transparent !important;
+		background-color: transparent !important;
+		border: none !important;
+		outline: none !important;
 		resize: none;
 		font-family: 'Outfit', -apple-system, sans-serif;
 		font-size: 15px;
@@ -906,10 +907,15 @@
 		line-height: 1.5;
 		color: #f4f4f5;
 		field-sizing: content;
+		-webkit-appearance: none;
+		-moz-appearance: none;
+		appearance: none;
 	}
 
 	:global(.light) .chat-textarea {
 		color: #18181b;
+		background: transparent !important;
+		background-color: transparent !important;
 	}
 
 	.chat-textarea::placeholder {
