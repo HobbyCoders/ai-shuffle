@@ -9,11 +9,12 @@
 		icon: Component;
 		shortcut: string;
 		rotation: number;
+		offsetY?: number;
 		index: number;
 		onclick: () => void;
 	}
 
-	let { type, label, description, icon: Icon, shortcut, rotation, index, onclick }: Props =
+	let { type, label, description, icon: Icon, shortcut, rotation, offsetY = 0, index, onclick }: Props =
 		$props();
 
 	let cardEl: HTMLButtonElement | undefined = $state();
@@ -51,7 +52,7 @@
 	class="welcome-card"
 	class:hovered={isHovered}
 	class:animation-complete={animationComplete}
-	style="--rotation: {rotation}deg; --index: {index}"
+	style="--rotation: {rotation}deg; --offset-y: {offsetY}px; --index: {index}"
 	onmouseenter={() => (isHovered = true)}
 	onmouseleave={handleMouseLeave}
 	onmousemove={handleMouseMove}
@@ -71,6 +72,7 @@
 <style>
 	.welcome-card {
 		--rotation: 0deg;
+		--offset-y: 0px;
 		--mouse-x: 0deg;
 		--mouse-y: 0deg;
 		--index: 0;
@@ -93,6 +95,7 @@
 		cursor: pointer;
 		transform-style: preserve-3d;
 		transform:
+			translateY(var(--offset-y))
 			rotateZ(var(--rotation))
 			rotateY(var(--mouse-x))
 			rotateX(var(--mouse-y));
@@ -140,7 +143,7 @@
 	.welcome-card.animation-complete {
 		animation: none;
 		opacity: 1;
-		transform: rotateZ(var(--rotation)) rotateY(var(--mouse-x)) rotateX(var(--mouse-y));
+		transform: translateY(var(--offset-y)) rotateZ(var(--rotation)) rotateY(var(--mouse-x)) rotateX(var(--mouse-y));
 	}
 
 	.welcome-card.animation-complete:hover {
@@ -155,11 +158,11 @@
 	@keyframes dealCard {
 		from {
 			opacity: 0;
-			transform: translateX(100px) rotateZ(calc(var(--rotation) + 15deg)) scale(0.8);
+			transform: translateY(var(--offset-y)) translateX(100px) rotateZ(calc(var(--rotation) + 15deg)) scale(0.8);
 		}
 		to {
 			opacity: 1;
-			transform: rotateZ(var(--rotation)) scale(1);
+			transform: translateY(var(--offset-y)) rotateZ(var(--rotation)) scale(1);
 		}
 	}
 

@@ -15,7 +15,8 @@
 			description: 'Start a conversation',
 			icon: MessageSquare,
 			shortcut: '⌘N',
-			rotation: -10
+			rotation: -10,
+			offsetY: 24
 		},
 		{
 			type: 'terminal',
@@ -23,7 +24,8 @@
 			description: 'Open command line',
 			icon: Terminal,
 			shortcut: '⌘T',
-			rotation: -5
+			rotation: -5,
+			offsetY: 8
 		},
 		{
 			type: 'project',
@@ -31,7 +33,8 @@
 			description: 'Manage workspaces',
 			icon: FolderOpen,
 			shortcut: '⌘P',
-			rotation: 0
+			rotation: 0,
+			offsetY: 0
 		},
 		{
 			type: 'profile',
@@ -39,7 +42,8 @@
 			description: 'Configure agents',
 			icon: User,
 			shortcut: '⌘⇧P',
-			rotation: 5
+			rotation: 5,
+			offsetY: 8
 		},
 		{
 			type: 'subagent',
@@ -47,7 +51,8 @@
 			description: 'Specialized assistants',
 			icon: Bot,
 			shortcut: '⌘⇧S',
-			rotation: 10
+			rotation: 10,
+			offsetY: 24
 		}
 	];
 </script>
