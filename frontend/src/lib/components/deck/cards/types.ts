@@ -2,7 +2,18 @@
  * Card types for The Deck - Draggable window system
  */
 
-export type CardType = 'chat' | 'agent' | 'terminal' | 'settings' | 'profile' | 'subagent' | 'project' | 'user-settings';
+export type CardType =
+  | 'chat'
+  | 'terminal'
+  | 'settings'
+  | 'profile'
+  | 'subagent'
+  | 'project'
+  | 'user-settings'
+  | 'image-studio'
+  | 'model-studio'
+  | 'audio-studio'
+  | 'file-browser';
 
 export interface DeckCard {
   id: string;
@@ -24,34 +35,40 @@ export interface DeckCard {
 
 export const DEFAULT_CARD_SIZES: Record<CardType, { width: number; height: number }> = {
   chat: { width: 480, height: 640 },
-  agent: { width: 400, height: 500 },
   terminal: { width: 600, height: 400 },
   settings: { width: 700, height: 650 },
   profile: { width: 600, height: 620 },
   subagent: { width: 550, height: 580 },
   project: { width: 480, height: 520 },
   'user-settings': { width: 650, height: 550 },
+  'image-studio': { width: 800, height: 600 },
+  'model-studio': { width: 800, height: 600 },
+  'audio-studio': { width: 700, height: 500 },
+  'file-browser': { width: 600, height: 500 },
 };
 
 export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }> = {
   chat: { width: 360, height: 400 },
-  agent: { width: 320, height: 300 },
   terminal: { width: 400, height: 200 },
   settings: { width: 500, height: 400 },
   profile: { width: 450, height: 400 },
   subagent: { width: 400, height: 350 },
   project: { width: 360, height: 300 },
   'user-settings': { width: 500, height: 400 },
+  'image-studio': { width: 500, height: 400 },
+  'model-studio': { width: 500, height: 400 },
+  'audio-studio': { width: 450, height: 350 },
+  'file-browser': { width: 400, height: 350 },
 };
 
 /**
  * Workspace padding to keep cards visible and accessible
- * Left padding accounts for floating activity pill (56px wide + 16px from edge + 12px gap)
+ * Now with floating dealer button in bottom-left corner
  */
 export const WORKSPACE_PADDING = {
   top: 10,       // Small top padding
-  bottom: 10,    // Small bottom padding
-  left: 84,      // Space for floating pill bar (56px + 16px + 12px gap)
+  bottom: 90,    // Space for floating dealer button (56px + 24px + some margin)
+  left: 10,      // Small left padding (no more sidebar)
   right: 10,     // Small right padding
   minVisible: 100 // Minimum visible area of card (header must stay visible)
 };

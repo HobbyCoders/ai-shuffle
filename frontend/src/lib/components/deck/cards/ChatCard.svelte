@@ -4,11 +4,14 @@
 	 *
 	 * Integrates all extracted chat components for full feature parity
 	 * with the main chat interface.
+	 *
+	 * Animation: When transitioning from empty state (centered island) to active chat
+	 * (messages + bottom island), we animate the island sliding down and messages fading in.
 	 */
 	import BaseCard from './BaseCard.svelte';
 	import type { DeckCard } from './types';
 	import { tabs, allTabs } from '$lib/stores/tabs';
-	import { MessageArea, ChatInput } from '$lib/components/chat';
+	import { MessageArea, ChatInput, ExecutionModeSelector } from '$lib/components/chat';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import ConnectionStatus from '$lib/components/ConnectionStatus.svelte';
@@ -24,9 +27,6 @@
 		onDragEnd?: () => void;
 		onResizeEnd?: () => void;
 		onFork?: (sessionId: string, messageIndex: number, messageId: string) => void;
-		onOpenProfileCard?: (editId?: string) => void;
-		onOpenProjectCard?: (editId?: string) => void;
-		onOpenSettings?: () => void;
 		mobile?: boolean;
 	}
 
@@ -41,14 +41,32 @@
 		onDragEnd,
 		onResizeEnd,
 		onFork,
-		onOpenProfileCard,
-		onOpenProjectCard,
-		onOpenSettings,
 		mobile = false
 	}: Props = $props();
 
 	// Get the tab data from the tabs store
 	const tab = $derived($allTabs.find((t) => t.id === tabId));
+
+	// Check if this is an empty state (no messages yet)
+	const isEmptyState = $derived(tab ? tab.messages.length === 0 : true);
+
+	// Animation: Track transition from empty → active state
+	let transitioningFromEmpty = $state(false);
+	let previousIsEmpty = $state(true);
+
+	$effect(() => {
+		// Detect when we transition from empty state to having messages
+		if (previousIsEmpty && !isEmptyState) {
+			transitioningFromEmpty = true;
+			// Reset after animation completes (400ms animation + 50ms buffer)
+			const timer = setTimeout(() => {
+				transitioningFromEmpty = false;
+			}, 450);
+			// Cleanup on unmount
+			return () => clearTimeout(timer);
+		}
+		previousIsEmpty = isEmptyState;
+	});
 
 	// Handle permission response
 	function handlePermissionResponse(
@@ -86,53 +104,29 @@
 {#if mobile}
 	<!-- Mobile: Full-screen card with no BaseCard wrapper or ChatHeader -->
 	<!-- MobileWorkspace provides the header with title and close button -->
-	<div class="chat-card-content mobile">
+	<div class="chat-card-content mobile" class:transitioning-from-empty={transitioningFromEmpty}>
 		{#if tab}
-			<!-- Messages fill the space -->
-			<MessageArea {tab} onFork={handleFork} />
-
-			<!-- Permission Queue -->
-			{#if tab.pendingPermissions && tab.pendingPermissions.length > 0}
-				<div class="border-t border-warning/30 bg-warning/5 p-3">
-					<div class="max-w-full">
-						<PermissionQueue
-							requests={tab.pendingPermissions}
-							on:respond={handlePermissionResponse}
-						/>
+			{#if isEmptyState}
+				<!-- Empty state: Centered layout with mode selector -->
+				<div class="empty-state">
+					<!-- Error display for empty state (e.g., worktree creation failures) -->
+					{#if tab.error}
+						<div class="error-banner">
+							<span>{tab.error}</span>
+							<button onclick={() => tabs.clearTabError(tab.id)}>&times;</button>
+						</div>
+					{/if}
+					<div class="empty-state-content">
+						<ExecutionModeSelector {tab} />
+						<ChatInput {tab} />
 					</div>
 				</div>
-			{/if}
-
-			<!-- User Question Queue -->
-			{#if tab.pendingQuestions && tab.pendingQuestions.length > 0}
-				<div class="border-t border-info/30 bg-info/5 p-3">
-					<div class="max-w-full">
-						{#each tab.pendingQuestions as question (question.request_id)}
-							<UserQuestion
-								data={question}
-								on:respond={handleQuestionResponse}
-							/>
-						{/each}
-					</div>
+			{:else}
+				<!-- Normal chat view -->
+				<!-- Messages fill the space -->
+				<div class="message-area-wrapper">
+					<MessageArea {tab} onFork={handleFork} />
 				</div>
-			{/if}
-
-			<!-- Input at the bottom -->
-			<ChatInput {tab} compact {onOpenProfileCard} {onOpenProjectCard} {onOpenSettings} />
-		{:else}
-			<div class="chat-loading">
-				<div class="spinner"></div>
-				<p>Loading chat...</p>
-			</div>
-		{/if}
-	</div>
-{:else}
-	<!-- Desktop: Full BaseCard with all features -->
-	<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
-		<div class="chat-card-content">
-			{#if tab}
-				<!-- Main message area -->
-				<MessageArea {tab} onFork={handleFork} />
 
 				<!-- Permission Queue -->
 				{#if tab.pendingPermissions && tab.pendingPermissions.length > 0}
@@ -160,8 +154,76 @@
 					</div>
 				{/if}
 
-				<!-- Input area -->
-				<ChatInput {tab} compact {onOpenProfileCard} {onOpenProjectCard} {onOpenSettings} />
+				<!-- Input at the bottom -->
+				<div class="input-wrapper">
+					<ChatInput {tab} compact />
+				</div>
+			{/if}
+		{:else}
+			<div class="chat-loading">
+				<div class="spinner"></div>
+				<p>Loading chat...</p>
+			</div>
+		{/if}
+	</div>
+{:else}
+	<!-- Desktop: Full BaseCard with all features -->
+	<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
+		<div class="chat-card-content" class:transitioning-from-empty={transitioningFromEmpty}>
+			{#if tab}
+				{#if isEmptyState}
+					<!-- Empty state: Centered layout with mode selector -->
+					<div class="empty-state">
+						<!-- Error display for empty state (e.g., worktree creation failures) -->
+						{#if tab.error}
+							<div class="error-banner">
+								<span>{tab.error}</span>
+								<button onclick={() => tabs.clearTabError(tab.id)}>&times;</button>
+							</div>
+						{/if}
+						<div class="empty-state-content">
+							<ExecutionModeSelector {tab} />
+							<ChatInput {tab} />
+						</div>
+					</div>
+				{:else}
+					<!-- Normal chat view -->
+					<!-- Main message area -->
+					<div class="message-area-wrapper">
+						<MessageArea {tab} onFork={handleFork} />
+					</div>
+
+					<!-- Permission Queue -->
+					{#if tab.pendingPermissions && tab.pendingPermissions.length > 0}
+						<div class="border-t border-warning/30 bg-warning/5 p-3">
+							<div class="max-w-full">
+								<PermissionQueue
+									requests={tab.pendingPermissions}
+									on:respond={handlePermissionResponse}
+								/>
+							</div>
+						</div>
+					{/if}
+
+					<!-- User Question Queue -->
+					{#if tab.pendingQuestions && tab.pendingQuestions.length > 0}
+						<div class="border-t border-info/30 bg-info/5 p-3">
+							<div class="max-w-full">
+								{#each tab.pendingQuestions as question (question.request_id)}
+									<UserQuestion
+										data={question}
+										on:respond={handleQuestionResponse}
+									/>
+								{/each}
+							</div>
+						</div>
+					{/if}
+
+					<!-- Input area -->
+					<div class="input-wrapper">
+						<ChatInput {tab} compact />
+					</div>
+				{/if}
 			{:else}
 				<div class="chat-loading">
 					<div class="spinner"></div>
@@ -191,6 +253,119 @@
 
 	.chat-card-content.mobile {
 		height: 100%;
+	}
+
+	/* ========================================
+	   TRANSITION ANIMATION: Empty → Active
+	   ======================================== */
+
+	/* Keyframes for the message area reveal */
+	@keyframes messageAreaReveal {
+		from {
+			opacity: 0;
+			transform: translateY(-16px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
+	}
+
+	/* Keyframes for input sliding down into position */
+	@keyframes inputSlideDown {
+		from {
+			opacity: 0.7;
+			transform: translateY(-30vh);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
+	}
+
+	/* Wrapper for message area - needed for animation */
+	.message-area-wrapper {
+		flex: 1;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+	}
+
+	/* Wrapper for input - needed for animation */
+	.input-wrapper {
+		flex-shrink: 0;
+	}
+
+	/* Apply animations during transition */
+	.transitioning-from-empty .message-area-wrapper {
+		animation: messageAreaReveal 350ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+	}
+
+	.transitioning-from-empty .input-wrapper {
+		animation: inputSlideDown 400ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+	}
+
+	/* Respect reduced motion preference */
+	@media (prefers-reduced-motion: reduce) {
+		.transitioning-from-empty .message-area-wrapper,
+		.transitioning-from-empty .input-wrapper {
+			animation: none;
+		}
+	}
+
+	/* ======================================== */
+
+	/* Empty state - centered layout */
+	.empty-state {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		padding: 1rem;
+		position: relative;
+	}
+
+	.empty-state-content {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+		width: 100%;
+		max-width: 600px;
+	}
+
+	/* Error banner for empty state - positioned at top */
+	.error-banner {
+		position: absolute;
+		top: 1rem;
+		left: 1rem;
+		right: 1rem;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 1rem;
+		padding: 0.75rem 1rem;
+		background: hsl(var(--destructive) / 0.1);
+		border: 1px solid hsl(var(--destructive) / 0.3);
+		border-radius: 0.5rem;
+		color: hsl(var(--destructive));
+		font-size: 0.875rem;
+	}
+
+	.error-banner button {
+		flex-shrink: 0;
+		background: none;
+		border: none;
+		color: hsl(var(--destructive));
+		font-size: 1.25rem;
+		cursor: pointer;
+		padding: 0;
+		line-height: 1;
+		opacity: 0.7;
+	}
+
+	.error-banner button:hover {
+		opacity: 1;
 	}
 
 	.chat-loading {

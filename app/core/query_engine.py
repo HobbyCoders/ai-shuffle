@@ -399,10 +399,11 @@ def _get_os_version() -> str:
 def _get_available_providers() -> Dict[str, Any]:
     """
     Get all available AI providers based on configured API keys.
-    Returns a dict with image_providers and video_providers that have valid keys.
+    Returns a dict with image_providers, video_providers, and model3d_providers that have valid keys.
     """
     gemini_key = _get_decrypted_api_key("image_api_key")
     openai_key = _get_decrypted_api_key("openai_api_key")
+    meshy_key = _get_decrypted_api_key("meshy_api_key")
 
     # Image providers with their capabilities
     image_providers = {}
@@ -446,11 +447,24 @@ def _get_available_providers() -> Dict[str, Any]:
             "durations": "4, 8, or 12 seconds"
         }
 
+    # 3D Model providers with their capabilities
+    model3d_providers = {}
+    if meshy_key:
+        model3d_providers["meshy"] = {
+            "name": "Meshy AI",
+            "models": ["meshy-6", "meshy-5", "meshy-4"],
+            "capabilities": ["text-to-3d", "image-to-3d", "retexture", "rigging", "animation"],
+            "best_for": "3D model generation, texturing, rigging, animation",
+            "credits": "5-20 per generation"
+        }
+
     return {
         "image_providers": image_providers,
         "video_providers": video_providers,
+        "model3d_providers": model3d_providers,
         "has_gemini": bool(gemini_key),
-        "has_openai": bool(openai_key)
+        "has_openai": bool(openai_key),
+        "has_meshy": bool(meshy_key)
     }
 
 
@@ -477,17 +491,18 @@ def _build_ai_tools_section(ai_tools_config: Optional[Dict[str, Any]] = None, pr
     # Check if any AI tools are enabled
     any_image_tools = ai_tools_config.get("image_generation", False) or ai_tools_config.get("image_editing", False) or ai_tools_config.get("image_reference", False)
     any_video_tools = ai_tools_config.get("video_generation", False) or ai_tools_config.get("image_to_video", False) or ai_tools_config.get("video_extend", False) or ai_tools_config.get("video_bridge", False) or ai_tools_config.get("video_with_audio", False) or ai_tools_config.get("video_understanding", False)
+    any_3d_tools = ai_tools_config.get("text_to_3d", False) or ai_tools_config.get("image_to_3d", False) or ai_tools_config.get("retexture_3d", False) or ai_tools_config.get("rig_3d", False) or ai_tools_config.get("animate_3d", False)
 
-    if not any_image_tools and not any_video_tools:
+    if not any_image_tools and not any_video_tools and not any_3d_tools:
         return ""
 
-    if not providers["image_providers"] and not providers["video_providers"]:
+    if not providers["image_providers"] and not providers["video_providers"] and not providers["model3d_providers"]:
         return ""
 
     tools_section = f"{prefix}<ai-tools>\n"
     tools_section += """## AI Content Generation Tools
 
-You have specialized tools for generating and analyzing images and videos. These tools use AI providers (Google, OpenAI) to create content.
+You have specialized tools for generating and analyzing images, videos, and 3D models. These tools use AI providers (Google, OpenAI, Meshy) to create content.
 
 ---
 ## ⚠️ MANDATORY: Tool Selection Rules
@@ -502,12 +517,18 @@ You have specialized tools for generating and analyzing images and videos. These
 | "Make a video of..." / "Generate a video showing..." | `generateVideo` | ❌ WebSearch |
 | "Animate this image" / "Turn this image into video" | `imageToVideo` | ❌ generateVideo |
 | "Continue this video" / "Extend the video" | `extendVideo` | ❌ generateVideo |
+| "Create a 3D model of..." / "Generate 3D..." | `textTo3D` | ❌ image generation |
+| "Turn this image into 3D" / "Make 3D from image" | `imageTo3D` | ❌ textTo3D |
+| "Retexture this model" / "Change texture" | `retexture3D` | ❌ textTo3D |
+| "Rig this model" / "Add skeleton" | `rig3D` | ❌ animate3D |
+| "Animate this model" / "Make it move" | `animate3D` | ❌ rig3D alone |
 
 **Key Decision Rules:**
 1. **Video files (.mp4, .mov, .webm)** → ALWAYS use `analyzeVideo` for understanding content
 2. **Image files (.png, .jpg, .webp)** → Use `Read` tool (it supports images natively) OR use as input to other tools
-3. **"Create/Generate/Make" requests** → Use generation tools, not search tools
-4. **"Analyze/Describe/What's in" requests** → Use analysis tools
+3. **3D model files (.glb, .fbx, .obj)** → Use 3D tools for retexturing, rigging, or animation
+4. **"Create/Generate/Make" requests** → Use generation tools, not search tools
+5. **"Analyze/Describe/What's in" requests** → Use analysis tools
 
 ---
 ## 🔧 Technical Notes
@@ -771,6 +792,171 @@ console.log(JSON.stringify(result));
 
 """
 
+    # =========================================================================
+    # 3D MODEL TOOLS SECTION
+    # =========================================================================
+    if any_3d_tools and providers["model3d_providers"]:
+        tools_section += """---
+## 🧊 3D Model Tools
+
+"""
+        # Build provider info
+        tools_section += """### Available 3D Providers
+
+| Provider | ID | Capabilities | Best For |
+|----------|-----|--------------|----------|
+"""
+        for pid, pinfo in providers["model3d_providers"].items():
+            caps = ", ".join(pinfo["capabilities"][:3])  # First 3 capabilities
+            tools_section += f"| {pinfo['name']} | `{pid}` | {caps} | {pinfo['best_for']} |\n"
+
+        tools_section += """
+### Important Notes
+
+- **Async Processing:** 3D generation takes 1-5 minutes. Tasks return immediately with a `task_id`.
+- **Polling Required:** Use `getTask3D` to check task status and get download URLs.
+- **Credits:** Each operation costs 5-20 Meshy credits depending on complexity.
+- **Output Formats:** GLB (default), FBX, OBJ, USDZ available.
+
+"""
+        # Text to 3D
+        if ai_tools_config.get("text_to_3d", False):
+            tool_path = f"{tools_dir}/dist/model3d-generation/textTo3D.js"
+            tools_section += f"""### Text to 3D
+
+**🎯 USE WHEN:** User says "create 3D model", "generate 3D", "make a 3D object" FROM TEXT DESCRIPTION
+**❌ DO NOT USE:** For converting images to 3D (use imageTo3D)
+
+⏱️ Takes 2-5 minutes. Returns task_id for polling.
+
+```typescript
+import {{ textTo3D }} from '{tool_path}';
+
+const result = await textTo3D({{
+  prompt: 'A medieval sword with ornate handle',
+  art_style: 'realistic',  // or 'cartoon', 'low-poly', 'sculpture'
+  topology: 'quad',  // or 'triangle'
+}});
+console.log(JSON.stringify(result));
+```
+
+**Response fields:** `task_id`, `status`, `model_urls` (when complete), `thumbnail_url`, `video_url`
+
+"""
+
+        # Image to 3D
+        if ai_tools_config.get("image_to_3d", False):
+            tool_path = f"{tools_dir}/dist/model3d-generation/imageTo3D.js"
+            tools_section += f"""### Image to 3D
+
+**🎯 USE WHEN:** User has an existing IMAGE and wants to convert it to a 3D model
+**❌ DO NOT USE:** For generating 3D from text only (use textTo3D)
+
+⏱️ Takes 2-5 minutes. Returns task_id for polling.
+
+```typescript
+import {{ imageTo3D }} from '{tool_path}';
+
+const result = await imageTo3D({{
+  image_path: '/path/to/reference.png',
+  topology: 'quad',  // or 'triangle'
+}});
+console.log(JSON.stringify(result));
+```
+
+**Response fields:** `task_id`, `status`, `model_urls` (when complete), `thumbnail_url`
+
+"""
+
+        # Retexture 3D
+        if ai_tools_config.get("retexture_3d", False):
+            tool_path = f"{tools_dir}/dist/model3d-generation/retexture3D.js"
+            tools_section += f"""### Retexture 3D
+
+**🎯 USE WHEN:** User has an existing 3D model and wants to apply new AI-generated textures
+**❌ DO NOT USE:** For creating new 3D models (use textTo3D or imageTo3D)
+
+```typescript
+import {{ retexture3D }} from '{tool_path}';
+
+const result = await retexture3D({{
+  model_path: '/path/to/model.glb',  // or URL
+  prompt: 'Worn leather texture with scratches',
+  art_style: 'realistic',
+}});
+console.log(JSON.stringify(result));
+```
+
+**Response fields:** `task_id`, `status`, `model_urls` (when complete)
+
+"""
+
+        # Rig 3D
+        if ai_tools_config.get("rig_3d", False):
+            tool_path = f"{tools_dir}/dist/model3d-generation/rig3D.js"
+            tools_section += f"""### Rig 3D (Auto-Rigging)
+
+**🎯 USE WHEN:** User wants to add animation skeleton to a humanoid 3D model
+**❌ DO NOT USE:** For non-humanoid models (rigging only works for humanoid shapes)
+
+⚠️ Only works with humanoid models. Model must have proper proportions.
+
+```typescript
+import {{ rig3D }} from '{tool_path}';
+
+const result = await rig3D({{
+  model_path: '/path/to/humanoid.glb',  // or URL to a Meshy-generated model
+}});
+console.log(JSON.stringify(result));
+```
+
+**Response fields:** `task_id`, `status`, `model_urls` (rigged model with skeleton)
+
+"""
+
+        # Animate 3D
+        if ai_tools_config.get("animate_3d", False):
+            tool_path = f"{tools_dir}/dist/model3d-generation/animate3D.js"
+            tools_section += f"""### Animate 3D
+
+**🎯 USE WHEN:** User wants to apply preset animations to a rigged 3D model
+**❌ DO NOT USE:** For unrigged models (must rig first with rig3D)
+
+⚠️ Model must be rigged first. Use rig3D before animate3D.
+
+```typescript
+import {{ animate3D }} from '{tool_path}';
+
+const result = await animate3D({{
+  model_path: '/path/to/rigged_model.glb',
+  animation: 'walk',  // or 'run', 'jump', 'idle', 'wave', etc.
+}});
+console.log(JSON.stringify(result));
+```
+
+**Response fields:** `task_id`, `status`, `model_urls` (animated model), `video_url` (preview)
+
+"""
+
+        # Get Task (always include when any 3D tool is enabled)
+        tool_path = f"{tools_dir}/dist/model3d-generation/getTask3D.js"
+        tools_section += f"""### Check Task Status
+
+**🎯 USE WHEN:** Need to check status of a 3D generation task or get download URLs
+
+```typescript
+import {{ getTask3D }} from '{tool_path}';
+
+const result = await getTask3D({{
+  task_id: 'previous_result.task_id'
+}});
+console.log(JSON.stringify(result));
+```
+
+**Response fields:** `status` (PENDING, IN_PROGRESS, SUCCEEDED, FAILED), `model_urls`, `thumbnail_url`, `video_url`
+
+"""
+
     tools_section += "</ai-tools>"
 
     return tools_section
@@ -829,6 +1015,7 @@ def _resolve_api_credential(
     admin_setting_map = {
         "openai_api_key": "openai_api_key",
         "gemini_api_key": "image_api_key",
+        "meshy_api_key": "meshy_api_key",
         "github_pat": None  # No admin fallback for GitHub
     }
 
@@ -988,8 +1175,9 @@ def _build_env_with_ai_tools(
     # Check if any AI tools are enabled
     any_image_tools = ai_tools_config.get("image_generation", False) or ai_tools_config.get("image_editing", False) or ai_tools_config.get("image_reference", False)
     any_video_tools = ai_tools_config.get("video_generation", False) or ai_tools_config.get("image_to_video", False) or ai_tools_config.get("video_extend", False) or ai_tools_config.get("video_bridge", False) or ai_tools_config.get("video_with_audio", False) or ai_tools_config.get("video_understanding", False)
+    any_3d_tools = ai_tools_config.get("text_to_3d", False) or ai_tools_config.get("image_to_3d", False) or ai_tools_config.get("retexture_3d", False) or ai_tools_config.get("rig_3d", False) or ai_tools_config.get("animate_3d", False)
 
-    if not any_image_tools and not any_video_tools:
+    if not any_image_tools and not any_video_tools and not any_3d_tools:
         return env
 
     # Resolve API keys based on user/policy
@@ -998,11 +1186,13 @@ def _build_env_with_ai_tools(
     if api_user_id:
         gemini_api_key = _resolve_api_credential("gemini_api_key", api_user_id)
         openai_api_key = _resolve_api_credential("openai_api_key", api_user_id)
+        meshy_api_key = _resolve_api_credential("meshy_api_key", api_user_id)
         logger.debug(f"Resolved credentials for API user {api_user_id}")
     else:
         # Admin/local session - use admin keys directly
         gemini_api_key = _get_decrypted_api_key("image_api_key")
         openai_api_key = _get_decrypted_api_key("openai_api_key")
+        meshy_api_key = _get_decrypted_api_key("meshy_api_key")
 
     # Inject ALL available API keys so Claude can dynamically choose providers
     # This is the key change - instead of only injecting the default provider's key,
@@ -1017,6 +1207,11 @@ def _build_env_with_ai_tools(
     if openai_api_key:
         env["OPENAI_API_KEY"] = openai_api_key
         logger.debug("Injected OPENAI_API_KEY for OpenAI tools (GPT Image, Sora)")
+
+    if meshy_api_key:
+        env["MESHY_API_KEY"] = meshy_api_key
+        env["MODEL3D_API_KEY"] = meshy_api_key  # Alternative name
+        logger.debug("Injected MESHY_API_KEY for 3D model tools (Meshy)")
 
     # Set default provider/model from settings (Claude can override these per-request)
     if any_image_tools:
@@ -1045,10 +1240,27 @@ def _build_env_with_ai_tools(
             env["VEO_MODEL"] = video_model  # Legacy compatibility
             logger.debug(f"Set default VIDEO_MODEL={video_model}")
 
+    if any_3d_tools:
+        model3d_provider = database.get_system_setting("model3d_provider")
+        model3d_model = database.get_system_setting("model3d_model")
+
+        if model3d_provider:
+            env["MODEL3D_PROVIDER"] = model3d_provider
+            logger.debug(f"Set default MODEL3D_PROVIDER={model3d_provider}")
+
+        if model3d_model:
+            env["MODEL3D_MODEL"] = model3d_model
+            logger.debug(f"Set default MODEL3D_MODEL={model3d_model}")
+
     return env
 
 
-def generate_environment_details(working_dir: str, ai_tools_config: Optional[Dict[str, Any]] = None) -> str:
+def generate_environment_details(
+    working_dir: str,
+    ai_tools_config: Optional[Dict[str, Any]] = None,
+    execution_mode: str = "local",
+    worktree_info: Optional[Dict[str, str]] = None
+) -> str:
     """
     Generate environment details block for custom system prompts.
     Similar to Claude Code's dynamic environment injection.
@@ -1056,6 +1268,8 @@ def generate_environment_details(working_dir: str, ai_tools_config: Optional[Dic
     Args:
         working_dir: The working directory path
         ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
+        execution_mode: Either "local" or "worktree"
+        worktree_info: Dict with branch and base_branch info when in worktree mode
     """
     is_git = _is_git_repo(working_dir)
     os_version = _get_os_version()
@@ -1064,13 +1278,20 @@ def generate_environment_details(working_dir: str, ai_tools_config: Optional[Dic
     # Get AI tools section using helper function
     tools_section = _build_ai_tools_section(ai_tools_config)
 
+    # Build execution mode lines
+    execution_lines = f"\nExecution mode: {execution_mode}"
+    if execution_mode == "worktree" and worktree_info:
+        branch = worktree_info.get("branch", "unknown")
+        base_branch = worktree_info.get("base_branch", "main")
+        execution_lines += f"\nCurrent branch: {branch}\nBase branch: {base_branch}"
+
     return f"""Here is useful information about the environment you are running in:
 <env>
 Working directory: {working_dir}
 Is directory a git repo: {"Yes" if is_git else "No"}
 Platform: {sys.platform}
 OS Version: {os_version}
-Today's date: {today}
+Today's date: {today}{execution_lines}
 </env>{tools_section}"""
 
 
@@ -1081,7 +1302,8 @@ def build_options_from_profile(
     resume_session_id: Optional[str] = None,
     can_use_tool: Optional[callable] = None,
     hooks: Optional[Dict[str, list]] = None,
-    api_user_id: Optional[str] = None
+    api_user_id: Optional[str] = None,
+    session_id: Optional[str] = None
 ) -> tuple[ClaudeAgentOptions, Optional[Dict[str, AgentDefinition]]]:
     """
     Convert a profile to ClaudeAgentOptions with all available options.
@@ -1095,10 +1317,11 @@ def build_options_from_profile(
         profile: Profile configuration dict
         project: Optional project configuration
         overrides: Optional override settings
-        resume_session_id: Optional session ID to resume
+        resume_session_id: Optional SDK session ID to resume (from Claude SDK)
         can_use_tool: Optional permission callback
         hooks: Optional hooks configuration
         api_user_id: Optional API user ID for user-specific credential resolution
+        session_id: Optional our session ID (for worktree lookup)
 
     Note: On Windows local mode, --agents CLI flag has a bug where agents are not discovered.
     Callers should use write_agents_to_filesystem() on Windows only. On Docker/Linux, agents
@@ -1107,20 +1330,33 @@ def build_options_from_profile(
     config = profile["config"]
     overrides = overrides or {}
 
-    # Determine working directory first (needed for env details injection)
+    # Determine working directory and execution mode (needed for env details injection)
     # Priority order:
     # 1. Override cwd (explicit worktree path from agent engine)
     # 2. Session worktree (for resumed sessions)
     # 3. Project path
     # 4. Profile config cwd
     # 5. Default workspace
+    execution_mode = "local"
+    worktree_info = None
+
     if overrides.get("cwd"):
         # Override takes highest priority - used by agent engine for worktrees
         working_dir = overrides.get("cwd")
-    elif resume_session_id:
-        worktree = database.get_worktree_by_session(resume_session_id)
+        # Check if override includes worktree info
+        if overrides.get("worktree_info"):
+            execution_mode = "worktree"
+            worktree_info = overrides.get("worktree_info")
+    elif session_id:
+        # Check if this session has an associated worktree
+        worktree = database.get_worktree_by_session(session_id)
         if worktree and worktree.get("status") == "active":
             working_dir = str(settings.workspace_dir / worktree["worktree_path"])
+            execution_mode = "worktree"
+            worktree_info = {
+                "branch": worktree.get("branch_name", "unknown"),
+                "base_branch": worktree.get("base_branch", "main")
+            }
         elif project:
             working_dir = str(settings.workspace_dir / project["path"])
         else:
@@ -1162,7 +1398,12 @@ def build_options_from_profile(
 
             # Add environment details if enabled (includes AI tools based on ai_tools_config)
             if inject_env:
-                prompt_parts.append(generate_environment_details(working_dir, ai_tools_config))
+                prompt_parts.append(generate_environment_details(
+                    working_dir,
+                    ai_tools_config,
+                    execution_mode=execution_mode,
+                    worktree_info=worktree_info
+                ))
             else:
                 # If env details not enabled, still add AI tools section if any are enabled
                 tools_section = _build_ai_tools_section(ai_tools_config, prefix="")
@@ -1393,7 +1634,8 @@ async def execute_query(
         project=project,
         overrides=overrides,
         resume_session_id=resume_id,
-        api_user_id=api_user_id
+        api_user_id=api_user_id,
+        session_id=session_id
     )
 
     # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
@@ -1610,7 +1852,8 @@ async def stream_query(
         project=project,
         overrides=overrides,
         resume_session_id=resume_id,
-        api_user_id=api_user_id
+        api_user_id=api_user_id,
+        session_id=session_id
     )
 
     # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
@@ -1984,7 +2227,8 @@ async def _run_background_query(
         project=project,
         overrides=overrides,
         resume_session_id=resume_id,
-        api_user_id=api_user_id
+        api_user_id=api_user_id,
+        session_id=session_id
     )
 
     # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
@@ -2591,7 +2835,8 @@ async def stream_to_websocket(
         resume_session_id=resume_id,
         can_use_tool=can_use_tool_callback,
         hooks=hooks_config,
-        api_user_id=api_user_id
+        api_user_id=api_user_id,
+        session_id=session_id
     )
 
     # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)

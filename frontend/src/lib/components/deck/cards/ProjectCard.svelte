@@ -13,7 +13,8 @@
 	import type { DeckCard } from './types';
 	import { tabs, projects } from '$lib/stores/tabs';
 	import { groups } from '$lib/stores/groups';
-	import { Search, Plus, Trash2, FolderOpen, X } from 'lucide-svelte';
+	import { Search, Plus, Trash2, FolderOpen, X, Download } from 'lucide-svelte';
+	import './card-design-system.css';
 
 	interface Props {
 		card: DeckCard;
@@ -120,40 +121,42 @@
 	}
 </script>
 
-{#if mobile}
-	<!-- Mobile: No BaseCard wrapper, just the content -->
-	<div class="project-card-content mobile flex flex-col h-full">
+{#snippet content()}
+	<div class="card-system project-card" class:maximized={card.maximized}>
 		<!-- Header -->
-		<div class="px-4 py-3 border-b border-border bg-gradient-to-r from-primary/5 to-transparent">
-			<div class="flex items-center justify-between">
-				<div>
-					<h2 class="text-lg font-semibold text-foreground">Projects</h2>
-					<p class="text-xs text-muted-foreground">
-						{$projects.length} project{$projects.length !== 1 ? 's' : ''}
-					</p>
-				</div>
+		<div class="card-header">
+			<div class="card-header-info">
+				{#if mobile}
+					<span class="card-header-title">Projects</span>
+				{/if}
+				<span class="card-header-subtitle">
+					{$projects.length} project{$projects.length !== 1 ? 's' : ''} configured
+				</span>
 			</div>
+		</div>
 
-			<!-- Search bar (show if > 3 projects) -->
-			{#if $projects.length > 3}
-				<div class="mt-3 relative">
-					<Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+		<!-- Search (show if > 3 projects) -->
+		{#if $projects.length > 3}
+			<div class="card-search-wrapper">
+				<div class="card-search-container">
+					<Search class="card-search-icon" />
 					<input
 						type="text"
 						bind:value={searchQuery}
 						placeholder="Search projects..."
-						class="w-full pl-10 pr-4 py-2 bg-background border border-border rounded-xl text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+						class="card-search-input"
 					/>
 				</div>
-			{/if}
-		</div>
+			</div>
+		{/if}
 
 		<!-- Content -->
-		<div class="flex-1 overflow-y-auto p-4">
+		<div class="card-content">
+			<div class="centered-content">
 			{#if error}
-				<div class="mb-4 p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-500 text-sm flex items-center gap-2">
+				<div class="card-error-banner">
 					<span class="flex-1">{error}</span>
-					<button onclick={() => (error = null)} class="hover:text-red-400">
+					<button onclick={() => (error = null)}>
 						<X class="w-4 h-4" />
 					</button>
 				</div>
@@ -161,28 +164,25 @@
 
 			<!-- Delete confirmation banner -->
 			{#if deletingId}
-				<div class="mb-4 p-4 bg-red-500/10 border border-red-500/20 rounded-xl">
-					<p class="text-sm text-foreground mb-3">
+				<div class="card-delete-banner">
+					<p>
 						Delete <strong>{$projects.find(p => p.id === deletingId)?.name}</strong>? This cannot be undone.
 					</p>
-					<div class="flex gap-2">
+					<div class="button-group">
 						<button
 							onclick={() => (deletingId = null)}
 							disabled={deleteLoading}
-							class="flex-1 px-3 py-2 bg-muted text-foreground rounded-lg hover:bg-accent transition-colors text-sm"
+							class="card-btn-secondary flex-1"
 						>
 							Cancel
 						</button>
 						<button
 							onclick={handleDeleteProject}
 							disabled={deleteLoading}
-							class="flex-1 px-3 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors text-sm flex items-center justify-center gap-2"
+							class="card-btn-destructive flex-1"
 						>
 							{#if deleteLoading}
-								<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-									<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-									<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-								</svg>
+								<div class="card-spinner card-spinner--small"></div>
 							{/if}
 							Delete
 						</button>
@@ -192,101 +192,99 @@
 
 			<!-- Project list -->
 			{#if filteredProjects().length === 0}
-				<div class="text-center py-8">
+				<div class="card-empty-state">
 					{#if searchQuery}
-						<Search class="w-12 h-12 mx-auto text-muted-foreground/50 mb-3" />
-						<p class="text-sm text-muted-foreground">No projects match "{searchQuery}"</p>
-						<button onclick={() => (searchQuery = '')} class="mt-2 text-xs text-primary hover:underline">
+						<Search class="card-empty-icon" />
+						<p class="card-empty-title">No projects match "{searchQuery}"</p>
+						<button onclick={() => (searchQuery = '')} class="card-empty-action">
 							Clear search
 						</button>
 					{:else}
-						<FolderOpen class="w-12 h-12 mx-auto text-muted-foreground/50 mb-3" />
-						<p class="text-sm text-muted-foreground mb-2">No projects configured yet</p>
-						<p class="text-xs text-muted-foreground/70 max-w-xs mx-auto">
+						<FolderOpen class="card-empty-icon" />
+						<p class="card-empty-title">No projects configured yet</p>
+						<p class="card-empty-description">
 							Projects organize your work into separate workspaces with their own settings.
 						</p>
 					{/if}
 				</div>
 			{:else}
-				<div class="space-y-2">
-					{#each filteredProjects() as project (project.id)}
-						<div class="p-3 bg-background hover:bg-accent border border-border rounded-xl transition-all group">
-							<div class="flex items-start gap-3">
-								<div class="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
-									<FolderOpen class="w-4 h-4 text-primary" />
-								</div>
-								<div class="flex-1 min-w-0">
-									<div class="flex items-center gap-2 flex-wrap">
-										<span class="font-medium text-foreground text-sm">{project.name}</span>
-										{#if $groups.projects.assignments[project.id]}
-											<span class="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">
-												{$groups.projects.assignments[project.id]}
-											</span>
-										{/if}
-									</div>
-									<p class="text-xs text-muted-foreground font-mono mt-0.5 truncate">/workspace/{project.path}/</p>
-								</div>
-								<button
-									onclick={() => (deletingId = project.id)}
-									class="p-2 text-muted-foreground hover:text-red-500 rounded-lg hover:bg-red-500/10 transition-colors opacity-0 group-hover:opacity-100"
-									title="Delete project"
-								>
-									<Trash2 class="w-4 h-4" />
-								</button>
-							</div>
+				{#each filteredProjects() as project (project.id)}
+					<div class="card-list-item">
+						<div class="card-item-icon">
+							<FolderOpen />
 						</div>
-					{/each}
-				</div>
+						<div class="card-item-content">
+							<div class="card-item-header">
+								<span class="card-item-name">{project.name}</span>
+								{#if $groups.projects.assignments[project.id]}
+									<span class="card-badge card-badge--primary">
+										{$groups.projects.assignments[project.id]}
+									</span>
+								{/if}
+							</div>
+							<span class="card-item-id">/workspace/{project.path}/</span>
+						</div>
+						<div class="card-item-actions">
+							<button
+								onclick={() => (deletingId = project.id)}
+								class="card-action-btn card-action-btn--destructive"
+								title="Delete project"
+							>
+								<Trash2 />
+							</button>
+						</div>
+					</div>
+				{/each}
 			{/if}
+			</div>
 		</div>
 
 		<!-- Footer -->
-		<div class="px-4 py-4 border-t border-border bg-muted/30">
+		<div class="card-footer">
 			{#if showCreateForm}
-				<div class="space-y-3">
-					<div>
-						<label class="block text-xs text-muted-foreground mb-1">ID</label>
-						<input
-							bind:value={newProjectId}
-							class="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-							placeholder="my-project"
-						/>
+				<div class="create-form">
+					<div class="form-row">
+						<div class="form-field">
+							<label class="card-form-label">ID</label>
+							<input
+								bind:value={newProjectId}
+								class="card-form-input card-form-input--mono"
+								placeholder="my-project"
+							/>
+						</div>
+						<div class="form-field">
+							<label class="card-form-label">Name</label>
+							<input
+								bind:value={newProjectName}
+								class="card-form-input"
+								placeholder="My Project"
+							/>
+						</div>
 					</div>
-					<div>
-						<label class="block text-xs text-muted-foreground mb-1">Name</label>
-						<input
-							bind:value={newProjectName}
-							class="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-							placeholder="My Project"
-						/>
-					</div>
-					<div>
-						<label class="block text-xs text-muted-foreground mb-1">Description</label>
+					<div class="form-field">
+						<label class="card-form-label">Description</label>
 						<textarea
 							bind:value={newProjectDescription}
-							class="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground resize-none focus:outline-none focus:ring-2 focus:ring-primary/50"
+							class="card-form-input card-form-textarea"
 							rows="2"
-							placeholder="Optional"
+							placeholder="Optional description..."
 						></textarea>
 					</div>
-					<div class="flex gap-2">
+					<div class="form-actions">
 						<button
 							onclick={cancelCreate}
 							disabled={creating}
-							class="flex-1 px-4 py-2.5 bg-muted text-foreground rounded-xl hover:bg-accent transition-colors"
+							class="card-btn-secondary"
 						>
 							Cancel
 						</button>
 						<button
 							onclick={handleCreateProject}
 							disabled={creating || !newProjectId.trim() || !newProjectName.trim()}
-							class="flex-1 px-4 py-2.5 bg-primary text-primary-foreground rounded-xl hover:bg-primary/90 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+							class="card-btn-primary"
 						>
 							{#if creating}
-								<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-									<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-									<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-								</svg>
+								<div class="card-spinner card-spinner--small"></div>
 							{/if}
 							Create
 						</button>
@@ -295,14 +293,19 @@
 			{:else}
 				<button
 					onclick={() => (showCreateForm = true)}
-					class="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground rounded-xl hover:bg-primary/90 transition-colors font-medium"
+					class="card-btn-primary"
 				>
-					<Plus class="w-4 h-4" />
+					<Plus />
 					New Project
 				</button>
 			{/if}
 		</div>
 	</div>
+{/snippet}
+
+{#if mobile}
+	<!-- Mobile: No BaseCard wrapper, just the content -->
+	{@render content()}
 {:else}
 	<!-- Desktop: Wrap in BaseCard -->
 	<BaseCard
@@ -315,376 +318,94 @@
 		{onDragEnd}
 		{onResizeEnd}
 	>
-		<div class="project-card-content flex flex-col h-full">
-			<!-- Header -->
-			<div class="px-4 py-3 border-b border-border bg-gradient-to-r from-primary/5 to-transparent">
-				<div class="flex items-center justify-between">
-					<div>
-						<p class="text-xs text-muted-foreground">
-							{$projects.length} project{$projects.length !== 1 ? 's' : ''} configured
-						</p>
-					</div>
-				</div>
-
-				<!-- Search bar (show if > 3 projects) -->
-				{#if $projects.length > 3}
-					<div class="mt-3 relative">
-						<Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-						<input
-							type="text"
-							bind:value={searchQuery}
-							placeholder="Search projects..."
-							class="w-full pl-10 pr-4 py-2 bg-background border border-border rounded-xl text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-						/>
-					</div>
-				{/if}
-			</div>
-
-			<!-- Content -->
-			<div class="flex-1 overflow-y-auto p-4">
-				{#if error}
-					<div class="mb-4 p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-500 text-sm flex items-center gap-2">
-						<span class="flex-1">{error}</span>
-						<button onclick={() => (error = null)} class="hover:text-red-400">
-							<X class="w-4 h-4" />
-						</button>
-					</div>
-				{/if}
-
-				<!-- Delete confirmation banner -->
-				{#if deletingId}
-					<div class="mb-4 p-4 bg-red-500/10 border border-red-500/20 rounded-xl">
-						<p class="text-sm text-foreground mb-3">
-							Delete <strong>{$projects.find(p => p.id === deletingId)?.name}</strong>? This cannot be undone.
-						</p>
-						<div class="flex gap-2">
-							<button
-								onclick={() => (deletingId = null)}
-								disabled={deleteLoading}
-								class="flex-1 px-3 py-2 bg-muted text-foreground rounded-lg hover:bg-accent transition-colors text-sm"
-							>
-								Cancel
-							</button>
-							<button
-								onclick={handleDeleteProject}
-								disabled={deleteLoading}
-								class="flex-1 px-3 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors text-sm flex items-center justify-center gap-2"
-							>
-								{#if deleteLoading}
-									<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-										<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-										<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-									</svg>
-								{/if}
-								Delete
-							</button>
-						</div>
-					</div>
-				{/if}
-
-				<!-- Project list -->
-				{#if filteredProjects().length === 0}
-					<div class="text-center py-8">
-						{#if searchQuery}
-							<Search class="w-12 h-12 mx-auto text-muted-foreground/50 mb-3" />
-							<p class="text-sm text-muted-foreground">No projects match "{searchQuery}"</p>
-							<button onclick={() => (searchQuery = '')} class="mt-2 text-xs text-primary hover:underline">
-								Clear search
-							</button>
-						{:else}
-							<FolderOpen class="w-12 h-12 mx-auto text-muted-foreground/50 mb-3" />
-							<p class="text-sm text-muted-foreground mb-2">No projects configured yet</p>
-							<p class="text-xs text-muted-foreground/70 max-w-xs mx-auto">
-								Projects organize your work into separate workspaces with their own settings.
-							</p>
-						{/if}
-					</div>
-				{:else}
-					<div class="space-y-2">
-						{#each filteredProjects() as project (project.id)}
-							<div class="p-3 bg-background hover:bg-accent border border-border rounded-xl transition-all group">
-								<div class="flex items-start gap-3">
-									<div class="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
-										<FolderOpen class="w-4 h-4 text-primary" />
-									</div>
-									<div class="flex-1 min-w-0">
-										<div class="flex items-center gap-2 flex-wrap">
-											<span class="font-medium text-foreground text-sm">{project.name}</span>
-											{#if $groups.projects.assignments[project.id]}
-												<span class="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">
-													{$groups.projects.assignments[project.id]}
-												</span>
-											{/if}
-										</div>
-										<p class="text-xs text-muted-foreground font-mono mt-0.5 truncate">/workspace/{project.path}/</p>
-									</div>
-									<button
-										onclick={() => (deletingId = project.id)}
-										class="p-2 text-muted-foreground hover:text-red-500 rounded-lg hover:bg-red-500/10 transition-colors opacity-0 group-hover:opacity-100"
-										title="Delete project"
-									>
-										<Trash2 class="w-4 h-4" />
-									</button>
-								</div>
-							</div>
-						{/each}
-					</div>
-				{/if}
-			</div>
-
-			<!-- Footer -->
-			<div class="px-4 py-4 border-t border-border bg-muted/30">
-				{#if showCreateForm}
-					<div class="space-y-3">
-						<div>
-							<label class="block text-xs text-muted-foreground mb-1">ID</label>
-							<input
-								bind:value={newProjectId}
-								class="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-								placeholder="my-project"
-							/>
-						</div>
-						<div>
-							<label class="block text-xs text-muted-foreground mb-1">Name</label>
-							<input
-								bind:value={newProjectName}
-								class="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-								placeholder="My Project"
-							/>
-						</div>
-						<div>
-							<label class="block text-xs text-muted-foreground mb-1">Description</label>
-							<textarea
-								bind:value={newProjectDescription}
-								class="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground resize-none focus:outline-none focus:ring-2 focus:ring-primary/50"
-								rows="2"
-								placeholder="Optional"
-							></textarea>
-						</div>
-						<div class="flex gap-2">
-							<button
-								onclick={cancelCreate}
-								disabled={creating}
-								class="flex-1 px-4 py-2.5 bg-muted text-foreground rounded-xl hover:bg-accent transition-colors"
-							>
-								Cancel
-							</button>
-							<button
-								onclick={handleCreateProject}
-								disabled={creating || !newProjectId.trim() || !newProjectName.trim()}
-								class="flex-1 px-4 py-2.5 bg-primary text-primary-foreground rounded-xl hover:bg-primary/90 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
-							>
-								{#if creating}
-									<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-										<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-										<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-									</svg>
-								{/if}
-								Create
-							</button>
-						</div>
-					</div>
-				{:else}
-					<button
-						onclick={() => (showCreateForm = true)}
-						class="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground rounded-xl hover:bg-primary/90 transition-colors font-medium"
-					>
-						<Plus class="w-4 h-4" />
-						New Project
-					</button>
-				{/if}
-			</div>
-		</div>
+		{@render content()}
 	</BaseCard>
 {/if}
 
 <style>
-	.project-card-content {
-		background: hsl(var(--card));
-		color: hsl(var(--card-foreground));
+	.project-card {
+		display: flex;
+		flex-direction: column;
+		height: 100%;
+		background: var(--card);
+		overflow: hidden;
 	}
 
-	.project-card-content.mobile {
-		border-radius: 0;
+	/* Maximized state - constrain width and center content */
+	.project-card.maximized {
+		--card-max-width: 800px;
 	}
 
-	/* Header gradient with better visibility */
-	:global(.project-card-content .px-4.py-3.border-b) {
-		background: linear-gradient(135deg, hsl(var(--primary) / 0.08) 0%, hsl(var(--card)) 100%);
+	.project-card.maximized :global(.card-header),
+	.project-card.maximized .card-search-wrapper,
+	.project-card.maximized :global(.card-footer) {
+		max-width: var(--card-max-width);
+		margin-left: auto;
+		margin-right: auto;
+		width: 100%;
 	}
 
-	/* Search input styling for better contrast */
-	:global(.project-card-content input[type="text"]) {
-		background: hsl(var(--muted));
-		border: 1px solid hsl(var(--border));
-		color: hsl(var(--foreground));
-		box-shadow: var(--shadow-s);
-		transition: all 0.2s ease;
+	/* Centered content wrapper - prevents content from stretching too wide on large screens */
+	.centered-content {
+		width: 100%;
+		max-width: 600px;
+		margin: 0 auto;
 	}
 
-	:global(.project-card-content input[type="text"]:focus) {
-		border-color: hsl(var(--primary));
-		box-shadow: var(--shadow-s), 0 0 0 2px hsl(var(--primary) / 0.15);
+	.project-card.maximized .centered-content {
+		max-width: var(--card-max-width);
 	}
 
-	:global(.project-card-content input[type="text"]::placeholder) {
-		color: hsl(var(--muted-foreground));
+	.card-search-wrapper {
+		padding: 0 var(--space-4) var(--space-3);
+		border-bottom: 1px solid var(--border-subtle);
+		background: linear-gradient(180deg, transparent 0%, color-mix(in oklch, var(--muted) 20%, transparent) 100%);
 	}
 
-	/* Textarea styling */
-	:global(.project-card-content textarea) {
-		background: hsl(var(--muted));
-		border: 1px solid hsl(var(--border));
-		color: hsl(var(--foreground));
-		box-shadow: var(--shadow-s);
-		transition: all 0.2s ease;
+	/* Create form styles */
+	.create-form {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-3);
+		width: 100%;
 	}
 
-	:global(.project-card-content textarea:focus) {
-		border-color: hsl(var(--primary));
-		box-shadow: var(--shadow-s), 0 0 0 2px hsl(var(--primary) / 0.15);
+	.form-row {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: var(--space-3);
 	}
 
-	/* Project list items with shadow and better hover */
-	:global(.project-card-content .space-y-2 > div) {
-		box-shadow: var(--shadow-s);
-		transition: all 0.2s ease;
+	.form-field {
+		display: flex;
+		flex-direction: column;
 	}
 
-	:global(.project-card-content .space-y-2 > div:hover) {
-		box-shadow: var(--shadow-m);
-		transform: translateY(-1px);
-		border-color: hsl(var(--primary) / 0.4);
+	.form-actions {
+		display: flex;
+		gap: var(--space-2);
+		margin-top: var(--space-2);
 	}
 
-	/* Icon container with proper depth */
-	:global(.project-card-content .w-9.h-9.rounded-lg) {
-		box-shadow: var(--shadow-s);
-		background: linear-gradient(135deg, hsl(var(--primary) / 0.15) 0%, hsl(var(--primary) / 0.08) 100%);
+	.form-actions .card-btn-secondary,
+	.form-actions .card-btn-primary {
+		flex: 1;
 	}
 
-	/* Project name styling */
-	:global(.project-card-content .font-medium.text-foreground) {
-		color: hsl(var(--foreground));
-		font-weight: 600;
+	/* Ensure footer adapts when form is showing */
+	.project-card :global(.card-footer) {
+		flex-direction: column;
 	}
 
-	/* Path styling - monospace with subtle background */
-	:global(.project-card-content .font-mono) {
-		color: hsl(var(--muted-foreground));
-		background: hsl(var(--muted) / 0.5);
-		padding: 0.125rem 0.375rem;
-		border-radius: 0.25rem;
+	/* Text utilities */
+	.flex-1 {
+		flex: 1;
 	}
 
-	/* Delete button with better hover feedback */
-	:global(.project-card-content button[title="Delete project"]) {
-		transition: all 0.2s ease;
-	}
-
-	:global(.project-card-content button[title="Delete project"]:hover) {
-		transform: scale(1.05);
-	}
-
-	/* Group badge styling */
-	:global(.project-card-content .text-\[10px\].px-1\.5) {
-		box-shadow: var(--shadow-s);
-		font-weight: 500;
-	}
-
-	/* Footer with proper depth */
-	:global(.project-card-content .border-t.border-border) {
-		background: linear-gradient(180deg, hsl(var(--muted) / 0.4) 0%, hsl(var(--muted) / 0.2) 100%);
-	}
-
-	/* Form labels */
-	:global(.project-card-content label.block) {
-		color: hsl(var(--muted-foreground));
-		font-weight: 500;
-		letter-spacing: 0.01em;
-	}
-
-	/* Primary button with gradient and shadow */
-	:global(.project-card-content .bg-primary) {
-		background: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(var(--primary) / 0.85) 100%);
-		box-shadow: var(--shadow-s);
-		transition: all 0.2s ease;
-	}
-
-	:global(.project-card-content .bg-primary:hover) {
-		box-shadow: var(--shadow-m);
-		filter: brightness(1.05);
-	}
-
-	/* Cancel/secondary button */
-	:global(.project-card-content .bg-muted.text-foreground) {
-		background: hsl(var(--muted));
-		border: 1px solid hsl(var(--border));
-		box-shadow: var(--shadow-s);
-		transition: all 0.2s ease;
-	}
-
-	:global(.project-card-content .bg-muted.text-foreground:hover) {
-		background: hsl(var(--accent));
-		box-shadow: var(--shadow-m);
-	}
-
-	/* Error banner */
-	:global(.project-card-content .bg-red-500\/10) {
-		box-shadow: var(--shadow-s);
-		backdrop-filter: blur(4px);
-	}
-
-	/* Delete button in delete confirmation */
-	:global(.project-card-content .bg-red-500) {
-		box-shadow: var(--shadow-s);
-		transition: all 0.2s ease;
-	}
-
-	:global(.project-card-content .bg-red-500:hover) {
-		box-shadow: var(--shadow-m);
-	}
-
-	/* Empty state styling */
-	:global(.project-card-content .text-center.py-8 svg) {
-		opacity: 0.4;
-	}
-
-	:global(.project-card-content .text-center.py-8 p) {
-		color: hsl(var(--muted-foreground));
-	}
-
-	/* New Project button dashed border style */
-	:global(.project-card-content button.w-full.flex) {
-		background: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(var(--primary) / 0.85) 100%);
-		box-shadow: var(--shadow-s);
-	}
-
-	:global(.project-card-content button.w-full.flex:hover) {
-		box-shadow: var(--shadow-m);
-		transform: translateY(-1px);
-	}
-
-	/* Scrollbar styling */
-	:global(.project-card-content .overflow-y-auto) {
-		scrollbar-width: thin;
-		scrollbar-color: hsl(var(--border)) transparent;
-	}
-
-	:global(.project-card-content .overflow-y-auto::-webkit-scrollbar) {
-		width: 6px;
-	}
-
-	:global(.project-card-content .overflow-y-auto::-webkit-scrollbar-track) {
-		background: transparent;
-	}
-
-	:global(.project-card-content .overflow-y-auto::-webkit-scrollbar-thumb) {
-		background-color: hsl(var(--border));
-		border-radius: 3px;
-	}
-
-	:global(.project-card-content .overflow-y-auto::-webkit-scrollbar-thumb:hover) {
-		background-color: hsl(var(--muted-foreground));
+	/* Responsive adjustments */
+	@media (max-width: 400px) {
+		.form-row {
+			grid-template-columns: 1fr;
+		}
 	}
 </style>

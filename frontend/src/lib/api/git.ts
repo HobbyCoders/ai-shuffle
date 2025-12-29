@@ -264,3 +264,26 @@ export async function linkWorktreeSession(
 export async function unlinkWorktreeSession(projectId: string, worktreeId: string): Promise<Worktree> {
     return api.patch<Worktree>(`${BASE}/${projectId}/git/worktrees/${worktreeId}`, { session_id: null });
 }
+
+// ============================================================================
+// Worktree Sync API
+// ============================================================================
+
+export interface WorktreeSyncResult {
+    is_git_repo: boolean;
+    active_worktrees: number;
+    cleaned_up: Array<{
+        id: string;
+        branch_name: string;
+        reason: string;
+    }>;
+}
+
+/**
+ * Sync worktree database records with actual state on disk.
+ * Cleans up stale records where worktrees were deleted outside the app.
+ * Should be called when loading a chat card for a project.
+ */
+export async function syncWorktrees(projectId: string): Promise<WorktreeSyncResult> {
+    return api.post<WorktreeSyncResult>(`${BASE}/${projectId}/sync-worktrees`);
+}

@@ -1,3 +1,6 @@
+/* Playfair Display for welcome page display text */
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -10,6 +13,35 @@
 	.dark {
 		/* Background colors */
 		--background: oklch(0.14 0.008 260);
+
+		/* AI Shuffle Palette - Welcome Page */
+		--accent-cyan: oklch(0.75 0.15 195);
+		--accent-cyan-dim: oklch(0.60 0.12 195);
+		--accent-cyan-bright: oklch(0.85 0.18 195);
+		--accent-glow: oklch(0.75 0.15 195 / 0.3);
+		--accent-glow-strong: oklch(0.75 0.15 195 / 0.5);
+		--card-surface-welcome: oklch(0.17 0.01 260);
+		--card-bg-welcome: oklch(0.14 0.008 260);
+
+		/* Legacy aliases for compatibility */
+		--gold: var(--accent-cyan);
+		--gold-dim: var(--accent-cyan-dim);
+		--gold-bright: var(--accent-cyan-bright);
+		--gold-glow: var(--accent-glow);
+		--gold-glow-strong: var(--accent-glow-strong);
+
+		/* Dealer Button */
+		--dealer-white: #f8f6f0;
+		--dealer-cream: #e8e4d9;
+		--dealer-shadow: #d4d0c5;
+		--dealer-text: #1a1a1a;
+
+		/* Menu Card */
+		--menu-card-bg: oklch(0.14 0.015 260);
+		--menu-card-border: oklch(0.25 0.01 260);
+
+		/* Display font */
+		--font-display: 'Playfair Display', Georgia, serif;
 		--foreground: oklch(0.95 0.01 260);
 
 		/* Elevated surfaces */
@@ -58,10 +90,21 @@
 		/* Scrollbar colors */
 		--scrollbar-thumb: oklch(0.35 0.01 260);
 		--scrollbar-thumb-hover: oklch(0.45 0.01 260);
+		--scrollbar-track: transparent;
 
 		/* Glass effects */
 		--glass-bg: oklch(0.18 0.01 260 / 0.8);
 		--glass-border: oklch(0.4 0.01 260 / 0.15);
+		--glass-blur: 12px;
+
+		/* Border variations */
+		--border-subtle: oklch(0.28 0.01 260 / 0.1);
+		--border-medium: oklch(0.28 0.01 260 / 0.2);
+
+		/* Primary variations */
+		--primary-10: oklch(0.72 0.14 180 / 0.1);
+		--primary-20: oklch(0.72 0.14 180 / 0.2);
+		--primary-30: oklch(0.72 0.14 180 / 0.3);
 
 		/* Floating panel */
 		--panel-bg: oklch(0.16 0.012 260 / 0.85);
@@ -87,6 +130,22 @@
 		/* Background colors */
 		--background: oklch(0.98 0.005 260);
 		--foreground: oklch(0.15 0.01 260);
+
+		/* AI Shuffle Palette - Light theme variant */
+		--accent-cyan: oklch(0.55 0.16 195);
+		--accent-cyan-dim: oklch(0.45 0.14 195);
+		--accent-cyan-bright: oklch(0.65 0.18 195);
+		--accent-glow: oklch(0.55 0.16 195 / 0.25);
+		--accent-glow-strong: oklch(0.55 0.16 195 / 0.4);
+		--card-surface-welcome: oklch(0.98 0.005 260);
+		--card-bg-welcome: oklch(0.96 0.003 260);
+
+		/* Legacy aliases for compatibility */
+		--gold: var(--accent-cyan);
+		--gold-dim: var(--accent-cyan-dim);
+		--gold-bright: var(--accent-cyan-bright);
+		--gold-glow: var(--accent-glow);
+		--gold-glow-strong: var(--accent-glow-strong);
 
 		/* Elevated surfaces */
 		--card: oklch(1 0 0);
@@ -797,6 +856,22 @@ button, a, .clickable {
 
 .theme-toggle-icon.rotating {
 	transform: rotate(180deg);
+}
+
+/* Custom scrollbar styling */
+.custom-scrollbar::-webkit-scrollbar {
+	width: 8px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+	background: var(--scrollbar-track);
+	border-radius: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+	background: var(--scrollbar-thumb);
+	border-radius: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+	background: var(--primary-30);
 }
 
 /* Floating Island Input Container */

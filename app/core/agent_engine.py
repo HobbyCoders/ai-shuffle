@@ -304,17 +304,27 @@ class AgentExecutionEngine:
             # Build SDK options
             # Use worktree path if we created one, otherwise project path
             working_dir = state.worktree_path
+            worktree_info = None
             if not working_dir and project:
                 working_dir = str(settings.workspace_dir / project["path"])
             elif not working_dir:
                 working_dir = str(settings.workspace_dir)
 
+            # If we have a worktree, build worktree_info for environment injection
+            if state.worktree_path and state.branch_name:
+                base_branch = agent_run.get("base_branch", "main")
+                worktree_info = {
+                    "branch": state.branch_name,
+                    "base_branch": base_branch
+                }
+
             # Build options from profile with worktree path override
             # The cwd override takes highest priority in build_options_from_profile
+            # worktree_info triggers "worktree" execution mode in environment details
             options, agents_dict = build_options_from_profile(
                 profile=profile,
                 project=project,
-                overrides={"cwd": working_dir}
+                overrides={"cwd": working_dir, "worktree_info": worktree_info}
             )
 
             # Write agents to filesystem if needed (Windows workaround)

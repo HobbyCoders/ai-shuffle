@@ -12,7 +12,7 @@ import logging
 import subprocess
 import os
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -424,7 +424,7 @@ class GitService:
         branch: str,
         new_branch: bool = False,
         base_branch: Optional[str] = None
-    ) -> bool:
+    ) -> Tuple[bool, Optional[str]]:
         """
         Add a new worktree.
 
@@ -436,7 +436,7 @@ class GitService:
             base_branch: Base branch for new branch (only if new_branch=True)
 
         Returns:
-            True if successful, False otherwise
+            Tuple of (success: bool, error_message: Optional[str])
         """
         try:
             args = ["worktree", "add"]
@@ -451,13 +451,14 @@ class GitService:
             result = self._run_git(main_dir, args, timeout=30)
             if result.returncode == 0:
                 logger.info(f"Added worktree at {path} for branch {branch}")
-                return True
+                return True, None
 
-            logger.warning(f"Failed to add worktree: {result.stderr}")
-            return False
+            error_msg = result.stderr.strip() if result.stderr else "Unknown git error"
+            logger.warning(f"Failed to add worktree: {error_msg}")
+            return False, error_msg
         except Exception as e:
             logger.error(f"Error adding worktree: {e}")
-            return False
+            return False, str(e)
 
     def remove_worktree(
         self,
