@@ -1433,7 +1433,7 @@ function createTabsStore() {
 
 				// Update tab title based on first message
 				if (finalMessages.length > 0 && finalMessages[0].role === 'user') {
-					const title = finalMessages[0].content.substring(0, 30) + (finalMessages[0].content.length > 30 ? '...' : '');
+					const title = finalMessages[0].content.substring(0, 100) + (finalMessages[0].content.length > 100 ? '...' : '');
 					updateTab(tabId, { title });
 				}
 
@@ -1893,7 +1893,7 @@ function createTabsStore() {
 						if (title === 'New Chat' && messages.length > 0) {
 							const firstUserMsg = messages.find(m => m.role === 'user');
 							if (firstUserMsg) {
-								title = firstUserMsg.content.substring(0, 30) + (firstUserMsg.content.length > 30 ? '...' : '');
+								title = firstUserMsg.content.substring(0, 100) + (firstUserMsg.content.length > 100 ? '...' : '');
 							}
 						}
 
@@ -2836,7 +2836,7 @@ function createTabsStore() {
 						}],
 						isStreaming: true,
 						error: null,
-						title: t.title === 'New Chat' ? prompt.substring(0, 30) + (prompt.length > 30 ? '...' : '') : t.title
+						title: t.title === 'New Chat' ? prompt.substring(0, 100) + (prompt.length > 100 ? '...' : '') : t.title
 					};
 				})
 			}));
@@ -3085,7 +3085,7 @@ function createTabsStore() {
 				let title = 'Chat';
 				const firstUserMsg = messages.find(m => m.role === 'user');
 				if (firstUserMsg) {
-					title = firstUserMsg.content.substring(0, 30) + (firstUserMsg.content.length > 30 ? '...' : '');
+					title = firstUserMsg.content.substring(0, 100) + (firstUserMsg.content.length > 100 ? '...' : '');
 				}
 
 				// Load token totals from session history - single source of truth

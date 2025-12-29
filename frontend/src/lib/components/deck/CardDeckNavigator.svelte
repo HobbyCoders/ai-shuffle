@@ -21,11 +21,14 @@
 	import {
 		MessageSquare, Terminal, Clock, Image, Box, AudioLines,
 		Settings, FolderOpen, X, Files, User, Pencil, Check,
-		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronRight, Bot, Puzzle
+		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronRight, Bot, Puzzle,
+		List, GitBranch
 	} from 'lucide-svelte';
 	import { tabs, type Session } from '$lib/stores/tabs';
 	import { deck, type DeckCard as DeckCardType } from '$lib/stores/deck';
-	import { navigator, type CustomDeck, DECK_COLORS } from '$lib/stores/navigator';
+	import { navigator, type CustomDeck, DECK_COLORS, type RecentSessionsViewMode } from '$lib/stores/navigator';
+	import RecentSessionsList from './RecentSessionsList.svelte';
+	import RecentSessionsTimeline from './RecentSessionsTimeline.svelte';
 	import { fly, fade, scale } from 'svelte/transition';
 	import { cubicOut } from 'svelte/easing';
 	import { flip } from 'svelte/animate';
@@ -153,6 +156,7 @@
 	// Get navigator state
 	const navigatorState = $derived($navigator);
 	const userDecks = $derived(navigatorState.decks);
+	const recentViewMode = $derived(navigatorState.recentSessionsView);
 
 	// Get sessions from tabs store
 	const sessions = $derived($tabs.sessions);
@@ -1159,6 +1163,30 @@
 			</nav>
 
 			<div class="nav-actions">
+				<!-- View Switcher for Recent Sessions -->
+				{#if currentView === 'recent'}
+					<div class="view-switcher">
+						<button
+							class="view-switch-btn"
+							class:active={recentViewMode === 'list'}
+							onclick={() => navigator.setRecentSessionsView('list')}
+							aria-label="List view"
+							title="List view"
+						>
+							<List size={16} strokeWidth={2} />
+						</button>
+						<button
+							class="view-switch-btn"
+							class:active={recentViewMode === 'timeline'}
+							onclick={() => navigator.setRecentSessionsView('timeline')}
+							aria-label="Timeline view"
+							title="Timeline view"
+						>
+							<GitBranch size={16} strokeWidth={2} />
+						</button>
+					</div>
+				{/if}
+
 				<!-- Edit Mode Toggle -->
 				{#if currentView === 'main' || currentView === 'deck'}
 					<button
@@ -1189,122 +1217,150 @@
 			</div>
 		{/if}
 
-		<!-- Card carousel -->
+		<!-- Card carousel / Recent views -->
 		<div class="carousel-stage">
-			{#key `${currentView}-${currentDeckId}`}
-				<div
-					class="carousel"
-					class:dragging={isDragging}
-					class:edit-mode={isEditMode}
-					bind:this={carouselRef}
-					onmousedown={handleMouseDown}
-					onmousemove={handleMouseMove}
-					onmouseup={handleMouseUp}
-					onmouseleave={handleMouseLeave}
-					ontouchstart={handleTouchStart}
-					ontouchmove={handleTouchMove}
-					ontouchend={handleTouchEnd}
-					onwheel={handleWheel}
-					onscroll={handleScroll}
-					role="listbox"
-					aria-label="Card navigator"
-					in:fly={{ x: 100, duration: 300, easing: cubicOut }}
-					out:fly={{ x: -100, duration: 200, easing: cubicOut }}
-				>
-					{#each displayCards as card, index (card.id)}
-						<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
-						<article
-							class="card"
-							class:thread-card={card.type === 'thread'}
-							class:deck-card={card.type === 'deck'}
-							class:add-deck-card={card.type === 'add-deck'}
-							class:is-being-dragged={isPointerDragging && card.id === draggedCardId}
-							class:drop-into-deck={card.type === 'deck' && card.deckId === dragOverDeckId}
-							data-ai-active={card.isStreaming}
-							data-has-children={card.hasChildren}
-							data-card-id={card.id}
-							style:animation-delay="{index * 50}ms"
-							style:--deck-color={card.iconColor}
-							onclick={(e) => handleCardClick(card, e)}
-							oncontextmenu={(e) => isEditMode && showContextMenu(card.id, e)}
-							onkeydown={(e) => e.key === 'Enter' && handleCardClick(card, e as unknown as MouseEvent)}
-							role="option"
-							tabindex="0"
-							aria-selected="false"
-							animate:flip={{ duration: 250, easing: cubicOut }}
-						>
-							<div class="card-inner">
-								{#if isEditMode && card.type !== 'add-deck'}
-									<!-- svelte-ignore a11y_no_static_element_interactions -->
-									<div
-										class="drag-handle"
-										onpointerdown={(e) => handleDragHandlePointerDown(e, card, index)}
-									>
-										<GripVertical size={16} />
+			{#if currentView === 'recent'}
+				<!-- Recent Sessions: List or Timeline View -->
+				{#key recentViewMode}
+					<div
+						class="recent-view-container"
+						in:fly={{ x: 50, duration: 250, easing: cubicOut }}
+						out:fly={{ x: -50, duration: 200, easing: cubicOut }}
+					>
+						{#if recentViewMode === 'list'}
+							<RecentSessionsList
+								sessions={sessions.slice(0, 30)}
+								onOpenThread={(sessionId) => { onOpenThread(sessionId); onClose(); }}
+								{isSessionStreaming}
+								{formatRelativeTime}
+							/>
+						{:else}
+							<RecentSessionsTimeline
+								sessions={sessions.slice(0, 30)}
+								onOpenThread={(sessionId) => { onOpenThread(sessionId); onClose(); }}
+								{isSessionStreaming}
+								{formatRelativeTime}
+							/>
+						{/if}
+					</div>
+				{/key}
+			{:else}
+				<!-- Default Card Carousel -->
+				{#key `${currentView}-${currentDeckId}`}
+					<div
+						class="carousel"
+						class:dragging={isDragging}
+						class:edit-mode={isEditMode}
+						bind:this={carouselRef}
+						onmousedown={handleMouseDown}
+						onmousemove={handleMouseMove}
+						onmouseup={handleMouseUp}
+						onmouseleave={handleMouseLeave}
+						ontouchstart={handleTouchStart}
+						ontouchmove={handleTouchMove}
+						ontouchend={handleTouchEnd}
+						onwheel={handleWheel}
+						onscroll={handleScroll}
+						role="listbox"
+						aria-label="Card navigator"
+						in:fly={{ x: 100, duration: 300, easing: cubicOut }}
+						out:fly={{ x: -100, duration: 200, easing: cubicOut }}
+					>
+						{#each displayCards as card, index (card.id)}
+							<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+							<article
+								class="card"
+								class:thread-card={card.type === 'thread'}
+								class:deck-card={card.type === 'deck'}
+								class:add-deck-card={card.type === 'add-deck'}
+								class:is-being-dragged={isPointerDragging && card.id === draggedCardId}
+								class:drop-into-deck={card.type === 'deck' && card.deckId === dragOverDeckId}
+								data-ai-active={card.isStreaming}
+								data-has-children={card.hasChildren}
+								data-card-id={card.id}
+								style:animation-delay="{index * 50}ms"
+								style:--deck-color={card.iconColor}
+								onclick={(e) => handleCardClick(card, e)}
+								oncontextmenu={(e) => isEditMode && showContextMenu(card.id, e)}
+								onkeydown={(e) => e.key === 'Enter' && handleCardClick(card, e as unknown as MouseEvent)}
+								role="option"
+								tabindex="0"
+								aria-selected="false"
+								animate:flip={{ duration: 250, easing: cubicOut }}
+							>
+								<div class="card-inner">
+									{#if isEditMode && card.type !== 'add-deck'}
+										<!-- svelte-ignore a11y_no_static_element_interactions -->
+										<div
+											class="drag-handle"
+											onpointerdown={(e) => handleDragHandlePointerDown(e, card, index)}
+										>
+											<GripVertical size={16} />
+										</div>
+									{/if}
+
+									{#if card.isStreaming}
+										<div class="card-status">Streaming</div>
+									{/if}
+
+									<div class="card-icon" style:--icon-color={card.iconColor}>
+										<card.icon size={20} strokeWidth={1.75} />
 									</div>
-								{/if}
 
-								{#if card.isStreaming}
-									<div class="card-status">Streaming</div>
-								{/if}
+									<h3 class="card-title">{card.title}</h3>
 
-								<div class="card-icon" style:--icon-color={card.iconColor}>
-									<card.icon size={20} strokeWidth={1.75} />
+									{#if card.type === 'thread'}
+										<div class="card-meta">
+											{#if card.lastActive}
+												<span class="card-meta-item">
+													<Clock size={12} />
+													{card.lastActive}
+												</span>
+											{/if}
+											{#if card.messageCount}
+												<span class="card-meta-item">
+													<MessageSquare size={12} />
+													{card.messageCount}
+												</span>
+											{/if}
+										</div>
+									{:else if card.subtitle}
+										<p class="card-subtitle">{card.subtitle}</p>
+									{/if}
+
+									{#if card.hasChildren}
+										<div class="card-chevron">
+											<ChevronRight size={16} />
+										</div>
+									{/if}
 								</div>
+							</article>
+						{/each}
 
-								<h3 class="card-title">{card.title}</h3>
-
-								{#if card.type === 'thread'}
-									<div class="card-meta">
-										{#if card.lastActive}
-											<span class="card-meta-item">
-												<Clock size={12} />
-												{card.lastActive}
-											</span>
-										{/if}
-										{#if card.messageCount}
-											<span class="card-meta-item">
-												<MessageSquare size={12} />
-												{card.messageCount}
-											</span>
-										{/if}
-									</div>
-								{:else if card.subtitle}
-									<p class="card-subtitle">{card.subtitle}</p>
-								{/if}
-
-								{#if card.hasChildren}
-									<div class="card-chevron">
-										<ChevronRight size={16} />
-									</div>
+						{#if currentCards.length === 0}
+							<div class="empty-state">
+								{#if currentView === 'deck'}
+									<p>This deck is empty</p>
+									<p class="empty-hint">Add cards from the main view</p>
+								{:else}
+									<p>No items to show</p>
 								{/if}
 							</div>
-						</article>
-					{/each}
-
-					{#if currentCards.length === 0}
-						<div class="empty-state">
-							{#if currentView === 'deck'}
-								<p>This deck is empty</p>
-								<p class="empty-hint">Add cards from the main view</p>
-							{:else}
-								<p>No items to show</p>
-							{/if}
-						</div>
-					{/if}
-				</div>
-			{/key}
-
-			<!-- Scroll hint with dots -->
-			{#if currentCards.length > 3 && !isEditMode}
-				<div class="scroll-hint">
-					<span class="scroll-hint-text">{isMobile ? 'Swipe' : 'Scroll'} to browse</span>
-					<div class="scroll-dots">
-						{#each Array(dotCount) as _, i}
-							<span class="scroll-dot" class:active={i === activeDot}></span>
-						{/each}
+						{/if}
 					</div>
-				</div>
+				{/key}
+
+				<!-- Scroll hint with dots (only for card carousel) -->
+				{#if currentCards.length > 3 && !isEditMode}
+					<div class="scroll-hint">
+						<span class="scroll-hint-text">{isMobile ? 'Swipe' : 'Scroll'} to browse</span>
+						<div class="scroll-dots">
+							{#each Array(dotCount) as _, i}
+								<span class="scroll-dot" class:active={i === activeDot}></span>
+							{/each}
+						</div>
+					</div>
+				{/if}
 			{/if}
 		</div>
 
@@ -1580,6 +1636,55 @@
 		background: var(--bg-card);
 		border-color: var(--border-strong);
 		color: var(--text-primary);
+	}
+
+	/* ========================================
+	   VIEW SWITCHER
+	   ======================================== */
+	.view-switcher {
+		display: flex;
+		align-items: center;
+		background: var(--bg-elevated);
+		border: 1px solid var(--border-default);
+		border-radius: 8px;
+		padding: 3px;
+		gap: 2px;
+	}
+
+	.view-switch-btn {
+		width: 32px;
+		height: 32px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: transparent;
+		border: none;
+		border-radius: 6px;
+		color: var(--text-muted);
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.view-switch-btn:hover {
+		color: var(--text-primary);
+		background: var(--border-subtle);
+	}
+
+	.view-switch-btn.active {
+		background: var(--ai-subtle);
+		color: var(--ai-primary);
+	}
+
+	/* ========================================
+	   RECENT VIEW CONTAINER
+	   ======================================== */
+	.recent-view-container {
+		position: absolute;
+		inset: 0;
+		display: flex;
+		align-items: flex-start;
+		justify-content: center;
+		overflow: hidden;
 	}
 
 	/* ========================================
