@@ -186,12 +186,21 @@ def cleanup_agents_directory(agents_dir: Path, agent_ids: list) -> None:
                 logger.warning(f"Failed to remove subagent file {agent_file}: {e}")
 
 
-def _build_plugins_list(enabled_plugins: Optional[list]) -> Optional[list]:
+def _build_plugins_list(
+    enabled_plugins: Optional[list],
+    setting_sources: Optional[list] = None
+) -> Optional[list]:
     """
     Build the plugins list for ClaudeAgentOptions from profile's enabled_plugins.
 
     According to the Claude Agent SDK documentation, plugins are specified as:
     [{"type": "local", "path": "./my-plugin"}, ...]
+
+    IMPORTANT: When setting_sources includes "user" or "project", Claude Code CLI
+    automatically loads plugins from ~/.claude/settings.json (enabledPlugins).
+    To avoid duplication, we only return explicit plugins here when:
+    1. setting_sources doesn't include "user" or "project", OR
+    2. enabled_plugins contains paths (not plugin IDs) that wouldn't be auto-loaded
 
     Supports two formats for enabled_plugins entries:
     1. Plugin IDs: "plugin-name@marketplace" - resolved via installed_plugins.json
@@ -199,12 +208,38 @@ def _build_plugins_list(enabled_plugins: Optional[list]) -> Optional[list]:
 
     Args:
         enabled_plugins: List of plugin IDs or paths from profile config
+        setting_sources: List of setting sources (e.g., ["user", "project"])
 
     Returns:
-        List of plugin dicts for SDK, or None if no plugins enabled
+        List of plugin dicts for SDK, or None if no plugins enabled/needed
     """
     if not enabled_plugins:
         return None
+
+    # Check if Claude Code will auto-load plugins from settings
+    # When "user" or "project" is in setting_sources, Claude reads settings.json
+    # which contains enabledPlugins - those plugins are loaded automatically
+    auto_loads_from_settings = setting_sources and (
+        "user" in setting_sources or "project" in setting_sources
+    )
+
+    if auto_loads_from_settings:
+        # Filter to only include direct path entries (not plugin IDs)
+        # Plugin IDs (name@marketplace) are already in settings.json and will be auto-loaded
+        # Direct paths won't be auto-loaded, so we need to pass them explicitly
+        direct_path_plugins = [
+            p for p in enabled_plugins
+            if p and (p.startswith("/") or p.startswith(".") or "@" not in p)
+        ]
+
+        if not direct_path_plugins:
+            # All plugins are IDs that will be auto-loaded from settings
+            logger.info("Skipping explicit plugins list - Claude Code will auto-load from settings.json")
+            return None
+
+        # Only process direct paths
+        enabled_plugins = direct_path_plugins
+        logger.info(f"Setting sources includes user/project - only passing {len(direct_path_plugins)} direct path plugin(s)")
 
     # Try to load installed plugins registry to resolve plugin IDs
     # Import here to avoid circular imports
@@ -1527,7 +1562,11 @@ def build_options_from_profile(
 
         # Plugins - load from enabled_plugins in profile config
         # Each plugin path is resolved relative to workspace_dir if relative
-        plugins=_build_plugins_list(config.get("enabled_plugins")),
+        # Pass setting_sources to avoid duplicating plugins that Claude Code auto-loads
+        plugins=_build_plugins_list(
+            config.get("enabled_plugins"),
+            config.get("setting_sources")
+        ),
 
         # Beta features - e.g., 1M context window
         betas=betas_to_use,
