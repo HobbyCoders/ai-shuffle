@@ -838,6 +838,7 @@
 	<!-- Main Deck Layout -->
 	<DeckLayout
 		onLogoClick={() => showCardNavigator = !showCardNavigator}
+		hasOpenCards={workspaceCards.length > 0}
 	>
 		{#if isMobile}
 				<!-- Mobile Workspace -->
@@ -847,6 +848,7 @@
 					onCardChange={(index) => deck.setMobileActiveCardIndex(index)}
 					onCloseCard={handleCardClose}
 					onCreateCard={handleCreateCard}
+					onOpenNavigator={() => showCardNavigator = true}
 				>
 					{#snippet children(card)}
 						{@const tabId = getTabIdForCard(card)}

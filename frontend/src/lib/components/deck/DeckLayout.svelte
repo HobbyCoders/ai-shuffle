@@ -14,13 +14,18 @@
 
 	interface Props {
 		onLogoClick?: () => void;
+		hasOpenCards?: boolean;
 		children?: import('svelte').Snippet;
 	}
 
 	let {
 		onLogoClick,
+		hasOpenCards = false,
 		children
 	}: Props = $props();
+
+	// On mobile, hide dealer button when cards are open (user can access via header)
+	const showDealerButton = $derived(!isMobile || !hasOpenCards);
 
 	// Track mobile state
 	let isMobile = $state(false);
@@ -47,18 +52,20 @@
 			</div>
 		{/if}
 
-		<!-- Floating Dealer Button -->
-		<button
-			class="dealer-button"
-			class:mobile={isMobile}
-			onclick={() => onLogoClick?.()}
-			title="AI Shuffle"
-		>
-			<Plus size={24} strokeWidth={2} class="dealer-icon" />
-			{#if !isMobile}
-				<span class="tooltip">AI Shuffle</span>
-			{/if}
-		</button>
+		<!-- Floating Dealer Button - hidden on mobile when cards are open -->
+		{#if showDealerButton}
+			<button
+				class="dealer-button"
+				class:mobile={isMobile}
+				onclick={() => onLogoClick?.()}
+				title="AI Shuffle"
+			>
+				<Plus size={24} strokeWidth={2} class="dealer-icon" />
+				{#if !isMobile}
+					<span class="tooltip">AI Shuffle</span>
+				{/if}
+			</button>
+		{/if}
 	</main>
 </div>
 
