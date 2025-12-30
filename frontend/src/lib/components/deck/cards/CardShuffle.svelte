@@ -285,7 +285,7 @@
 		display: flex;
 		flex-direction: column;
 		align-items: center;
-		padding-top: 8px;
+		padding-top: 4px;
 		animation: fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 	}
 
