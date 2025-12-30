@@ -116,15 +116,45 @@ if "%1"=="--setup" (
 
 :start
 echo [INFO] Starting AI Hub...
-echo [INFO] Server will be available at http://127.0.0.1:8000
 echo [INFO] Press Ctrl+C to stop
 echo.
 
 REM Set environment variables for local mode
 set LOCAL_MODE=true
-set HOST=127.0.0.1
+set HOST=0.0.0.0
 set PORT=8000
 set COOKIE_SECURE=false
+
+REM Get LAN IP (the one with a default gateway, not virtual adapters)
+set "LOCAL_IP="
+for /f "tokens=2 delims=:" %%a in ('netsh interface ip show addresses "Ethernet" ^| findstr /c:"IP Address"') do (
+    for /f "tokens=1" %%b in ("%%a") do (
+        set "LOCAL_IP=%%b"
+        set "LOCAL_IP=!LOCAL_IP: =!"
+    )
+)
+REM Fallback to Wi-Fi if Ethernet not found
+if not defined LOCAL_IP (
+    for /f "tokens=2 delims=:" %%a in ('netsh interface ip show addresses "Wi-Fi" ^| findstr /c:"IP Address"') do (
+        for /f "tokens=1" %%b in ("%%a") do (
+            set "LOCAL_IP=%%b"
+            set "LOCAL_IP=!LOCAL_IP: =!"
+        )
+    )
+)
+
+REM Build CORS origins including LAN IP
+if defined LOCAL_IP (
+    set "CORS_ORIGINS=http://localhost:8000,http://127.0.0.1:8000,http://!LOCAL_IP!:8000"
+    echo [INFO] Server available at:
+    echo        - http://localhost:8000
+    echo        - http://!LOCAL_IP!:8000 ^(LAN^)
+) else (
+    set "CORS_ORIGINS=http://localhost:8000,http://127.0.0.1:8000"
+    echo [INFO] Server will be available at http://localhost:8000
+    echo [WARN] Could not detect LAN IP - phone access may not work
+)
+echo.
 
 REM Start the server
 call venv\Scripts\activate.bat
