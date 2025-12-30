@@ -111,6 +111,8 @@ export interface LoginResponse {
 	is_admin: boolean;
 	requires_2fa?: boolean;
 	pending_2fa_token?: string;
+	// FastAPI returns errors in 'detail' field
+	detail?: string;
 }
 
 export interface AuditLogEntry {

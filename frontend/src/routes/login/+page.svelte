@@ -52,7 +52,8 @@
 		}
 
 		// Admin login failed - if "Invalid credentials", try API user login
-		if (data.message === 'Invalid credentials') {
+		// Note: FastAPI returns errors in 'detail' field, not 'message'
+		if (data.detail === 'Invalid credentials') {
 			try {
 				// This sets error in auth store on failure
 				await auth.loginApiUser(username, password);
@@ -62,7 +63,7 @@
 			}
 		} else {
 			// Some other admin login error (rate limit, 2FA issue, etc)
-			auth.setError(data.message || 'Login failed');
+			auth.setError(data.detail || data.message || 'Login failed');
 		}
 	}
 
