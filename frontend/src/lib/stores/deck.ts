@@ -129,6 +129,7 @@ interface PersistedDeckState {
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let serverSyncTimer: ReturnType<typeof setTimeout> | null = null;
 let isLoadingFromServer = false;
+let hasSyncedFromServer = false; // Prevents writing to server before initial sync completes
 let lastServerSync = 0;
 
 function parsePersistedState(parsed: PersistedDeckState): Partial<DeckState> {
@@ -198,6 +199,13 @@ function saveToStorage(state: DeckState) {
  */
 async function saveToServer(state: DeckState) {
 	if (typeof window === 'undefined' || isLoadingFromServer) return;
+
+	// Don't write to server until we've completed initial sync
+	// This prevents empty local state from overwriting server data on first load
+	if (!hasSyncedFromServer) {
+		console.log('[Deck] Skipping server save - initial sync not complete');
+		return;
+	}
 
 	if (serverSyncTimer) {
 		clearTimeout(serverSyncTimer);
@@ -376,31 +384,63 @@ function createDeckStore() {
 
 		/**
 		 * Sync state from server (call on page load/focus)
+		 *
+		 * Merge strategy:
+		 * 1. If local is empty (no cards), always use server state
+		 * 2. If server is empty but local has data, keep local
+		 * 3. If both have data, merge: server cards + local-only cards
 		 */
 		async syncFromServer(): Promise<void> {
 			const serverState = await loadFromServer();
-			if (serverState) {
-				update((state) => {
-					const merged = mergeStates(
-						{ ...state },
-						serverState
-					);
-					if (merged) {
-						const newState = {
+
+			update((state) => {
+				const localCards = state.cards || [];
+				const serverCards = serverState?.cards || [];
+				const localIsEmpty = localCards.length === 0;
+				const serverIsEmpty = serverCards.length === 0;
+
+				let newState: DeckState;
+
+				if (serverState && !serverIsEmpty) {
+					if (localIsEmpty) {
+						// Local is empty, use server state entirely
+						console.log('[Deck] Local empty, using server state');
+						newState = {
 							...state,
-							...merged,
+							...serverState,
 							// Recalculate nextZIndex
-							nextZIndex: merged.cards
-								? Math.max(...merged.cards.map((c) => c.zIndex), state.nextZIndex) + 1
-								: state.nextZIndex
-						};
-						// Save merged state back to localStorage
-						saveToStorage(newState);
-						return newState;
+							nextZIndex: Math.max(...serverCards.map((c) => c.zIndex), state.nextZIndex) + 1
+						} as DeckState;
+					} else {
+						// Both have data - merge them
+						const merged = mergeStates({ ...state }, serverState);
+						if (merged) {
+							console.log('[Deck] Merging local and server state');
+							newState = {
+								...state,
+								...merged,
+								nextZIndex: merged.cards
+									? Math.max(...merged.cards.map((c) => c.zIndex), state.nextZIndex) + 1
+									: state.nextZIndex
+							};
+						} else {
+							newState = state;
+						}
 					}
-					return state;
-				});
-			}
+				} else {
+					// No server state or server is empty - keep local
+					console.log('[Deck] No server state, keeping local');
+					newState = state;
+				}
+
+				// Save merged state to localStorage
+				saveToStorage(newState);
+				return newState;
+			});
+
+			// Mark sync as complete - now server writes are allowed
+			hasSyncedFromServer = true;
+			console.log('[Deck] Initial sync complete, server writes enabled');
 		},
 
 		/**

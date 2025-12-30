@@ -95,6 +95,7 @@
 	const MOBILE_CARD_WIDTH_PERCENT = 0.75; // Card is 75% of viewport
 	const MOBILE_CARD_GAP = 16; // Gap between cards in pixels
 	const MOBILE_SCROLL_DEBOUNCE_MS = 100; // Debounce delay to let scroll-snap settle
+	const MOBILE_FAST_SCROLL_THRESHOLD = 6; // Above this many cards, allow momentum scrolling
 	let mobileCarouselRef = $state<HTMLDivElement | null>(null);
 	let mobileCurrentIndex = $state(0);
 	let mobileScrollDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -468,6 +469,11 @@
 
 		return orderedCards;
 	});
+
+	// Mobile card count (excluding add-deck when not in edit mode) for dynamic scroll behavior
+	const mobileCardCount = $derived(
+		displayCards.filter(c => c.type !== 'add-deck' || isEditMode).length
+	);
 
 	// Handle card click
 	function handleCardClick(card: NavigatorCard, e: MouseEvent) {
@@ -1176,7 +1182,7 @@
 			// Find which card is closest to the center of the viewport
 			const carouselRect = mobileCarouselRef.getBoundingClientRect();
 			const carouselCenter = carouselRect.left + carouselRect.width / 2;
-			const cardElements = mobileCarouselRef.querySelectorAll('.mobile-nav-card');
+			const cardElements = mobileCarouselRef.querySelectorAll('.mobile-card');
 
 			let closestIndex = 0;
 			let closestDistance = Infinity;
@@ -1339,6 +1345,7 @@
 							class="mobile-carousel"
 							class:edit-mode={isEditMode}
 							class:is-dragging={isPointerDragging}
+							class:many-cards={mobileCardCount > MOBILE_FAST_SCROLL_THRESHOLD}
 							bind:this={mobileCarouselRef}
 							onscroll={handleMobileScroll}
 							role="region"
@@ -2740,7 +2747,13 @@
 
 		cursor: pointer;
 		scroll-snap-align: center;
+		scroll-snap-stop: always; /* Prevent momentum from skipping cards (disabled with many cards) */
 		transition: all 0.3s var(--ease-out);
+
+		/* When carousel has many cards, allow momentum scrolling for faster navigation */
+		.many-cards & {
+			scroll-snap-stop: normal;
+		}
 		-webkit-tap-highlight-color: transparent;
 
 		box-shadow:
