@@ -164,6 +164,15 @@
 	role="group"
 	aria-label="Card layout mode selector"
 >
+	<!-- Visible indicator hint - shows users where to hover -->
+	<div class="hover-indicator" aria-hidden="true">
+		<div class="indicator-pill">
+			<div class="indicator-dot"></div>
+			<div class="indicator-dot"></div>
+			<div class="indicator-dot"></div>
+		</div>
+	</div>
+
 	<!-- Invisible trigger zone at top of workspace - always present to detect mouse -->
 	<div
 		class="trigger-zone"
@@ -270,14 +279,16 @@
 		pointer-events: none;
 	}
 
-	/* Invisible trigger zone - wide area at top to detect mouse */
+	/* Invisible trigger zone - narrower area at top to detect mouse
+	   Narrowed to 160px to avoid overlap with card close buttons.
+	   Cards now have 48px top padding buffer for this trigger zone. */
 	.trigger-zone {
 		position: absolute;
-		top: 0;
+		top: 12px;
 		left: 50%;
 		transform: translateX(-50%);
-		width: 300px;
-		height: 40px;
+		width: 160px;
+		height: 32px;
 		pointer-events: auto;
 	}
 
@@ -580,6 +591,63 @@
 		to {
 			transform: scale(1);
 			opacity: 1;
+		}
+	}
+
+	/* Hover indicator - subtle hint at top showing where to hover */
+	.hover-indicator {
+		position: absolute;
+		top: 8px;
+		left: 50%;
+		transform: translateX(-50%);
+		pointer-events: none;
+		z-index: 1;
+	}
+
+	.indicator-pill {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 4px;
+		padding: 6px 12px;
+		background: rgba(255, 255, 255, 0.04);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		border-radius: 12px;
+		opacity: 0.5;
+		transition: opacity 0.3s ease;
+	}
+
+	.card-shuffle-container:hover .indicator-pill {
+		opacity: 0;
+	}
+
+	.indicator-dot {
+		width: 4px;
+		height: 4px;
+		border-radius: 50%;
+		background: var(--muted-foreground);
+		opacity: 0.6;
+	}
+
+	/* Subtle pulse animation for the middle dot */
+	.indicator-dot:nth-child(2) {
+		animation: dotPulse 2s ease-in-out infinite;
+	}
+
+	@keyframes dotPulse {
+		0%, 100% {
+			opacity: 0.6;
+			transform: scale(1);
+		}
+		50% {
+			opacity: 1;
+			transform: scale(1.3);
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.indicator-dot:nth-child(2) {
+			animation: none;
 		}
 	}
 </style>

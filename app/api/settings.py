@@ -1586,6 +1586,8 @@ class CleanupConfigResponse(BaseModel):
     cleanup_videos_max_age_days: int
     cleanup_shared_files_enabled: bool
     cleanup_shared_files_max_age_days: int
+    cleanup_uploads_enabled: bool
+    cleanup_uploads_max_age_days: int
     cleanup_project_ids: list[str]
     # Sleep mode
     sleep_mode_enabled: bool
@@ -1605,6 +1607,8 @@ class CleanupConfigUpdateRequest(BaseModel):
     cleanup_videos_max_age_days: Optional[int] = None
     cleanup_shared_files_enabled: Optional[bool] = None
     cleanup_shared_files_max_age_days: Optional[int] = None
+    cleanup_uploads_enabled: Optional[bool] = None
+    cleanup_uploads_max_age_days: Optional[int] = None
     cleanup_project_ids: Optional[list[str]] = None
     sleep_mode_enabled: Optional[bool] = None
     sleep_timeout_minutes: Optional[int] = None
@@ -1625,6 +1629,7 @@ class FileCleanupPreviewResponse(BaseModel):
     images: list[dict]
     videos: list[dict]
     shared_files: list[dict]
+    uploads: list[dict]
     total_count: int
     total_bytes: int
     total_bytes_formatted: str
@@ -1636,6 +1641,7 @@ class CleanupRunResponse(BaseModel):
     images_deleted: int
     videos_deleted: int
     shared_files_deleted: int
+    uploads_deleted: int
     bytes_freed: int
     bytes_freed_formatted: str
 
@@ -1666,6 +1672,8 @@ async def get_cleanup_config(token: str = Depends(require_auth)):
         cleanup_videos_max_age_days=config.get("cleanup_videos_max_age_days", 7),
         cleanup_shared_files_enabled=config.get("cleanup_shared_files_enabled", False),
         cleanup_shared_files_max_age_days=config.get("cleanup_shared_files_max_age_days", 7),
+        cleanup_uploads_enabled=config.get("cleanup_uploads_enabled", False),
+        cleanup_uploads_max_age_days=config.get("cleanup_uploads_max_age_days", 7),
         cleanup_project_ids=config.get("cleanup_project_ids", []),
         sleep_mode_enabled=config.get("sleep_mode_enabled", True),
         sleep_timeout_minutes=config.get("sleep_timeout_minutes", 10),
@@ -1727,6 +1735,7 @@ async def preview_file_cleanup(token: str = Depends(require_auth)):
         images=preview.images,
         videos=preview.videos,
         shared_files=preview.shared_files,
+        uploads=preview.uploads,
         total_count=preview.total_count,
         total_bytes=preview.total_bytes,
         total_bytes_formatted=format_bytes(preview.total_bytes),
@@ -1746,6 +1755,7 @@ async def run_file_cleanup_now(token: str = Depends(require_admin)):
         images_deleted=stats.images_deleted,
         videos_deleted=stats.videos_deleted,
         shared_files_deleted=stats.shared_files_deleted,
+        uploads_deleted=stats.uploads_deleted,
         bytes_freed=stats.bytes_freed,
         bytes_freed_formatted=format_bytes(stats.bytes_freed),
     )

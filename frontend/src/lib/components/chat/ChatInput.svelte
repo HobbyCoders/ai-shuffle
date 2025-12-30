@@ -11,6 +11,7 @@
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
+	import { AUTO_COMPACTION_BASE, CONTEXT_MAX } from '$lib/constants/chat';
 
 	interface Command {
 		name: string;
@@ -39,10 +40,20 @@
 		return count.toString();
 	}
 
+	// Get current profile to access env vars for auto-compaction reserve calculation
+	const currentProfile = $derived($profiles.find(p => p.id === tab.profile));
+
+	// Auto-compaction reserve: 13k base + CLAUDE_CODE_MAX_OUTPUT_TOKENS from profile env vars
+	const maxOutputTokens = $derived(
+		parseInt((currentProfile?.config as any)?.env?.CLAUDE_CODE_MAX_OUTPUT_TOKENS || '0', 10) || 0
+	);
+	const autoCompactionReserve = $derived(AUTO_COMPACTION_BASE + maxOutputTokens);
+
 	// Context usage: use real-time tracked value, or calculate from token counts for resumed sessions
-	const contextUsed = $derived(tab.contextUsed ?? (tab.totalTokensIn + tab.totalCacheCreationTokens + tab.totalCacheReadTokens));
-	const contextMax = 200000;
-	const contextPercent = $derived(Math.min((contextUsed / contextMax) * 100, 100));
+	// Add auto-compaction reserve to show effective context usage
+	const baseContextUsed = $derived(tab.contextUsed ?? (tab.totalTokensIn + tab.totalCacheCreationTokens + tab.totalCacheReadTokens));
+	const contextUsed = $derived(baseContextUsed + autoCompactionReserve);
+	const contextPercent = $derived(Math.min((contextUsed / CONTEXT_MAX) * 100, 100));
 
 
 	// Input state - use tab.draft for persistence across card switches
@@ -477,141 +488,116 @@
 		<form onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}>
 			<!-- Main Island -->
 			<div class="chat-island" bind:this={islandRef}>
-				<!-- Uploaded Files (if any) -->
-				{#if uploadedFiles.length > 0}
-					<div class="uploaded-files">
-						{#each uploadedFiles as file, index}
-							<div class="file-chip">
-								<svg class="w-3 h-3 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-								</svg>
-								<span class="file-name" title={file.path}>{file.filename}</span>
-								<button
-									type="button"
-									onclick={() => removeUploadedFile(index)}
-									class="file-remove"
-									aria-label="Remove file"
-								>
-									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+				<!-- Input Wrapper - The Hero (outer container with border) -->
+				<div class="input-wrapper">
+					<!-- Uploaded Files (if any) - inside wrapper so focus glow includes them -->
+					{#if uploadedFiles.length > 0}
+						<div class="uploaded-files">
+							{#each uploadedFiles as file, index}
+								<div class="file-chip">
+									<svg class="w-3 h-3 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
 									</svg>
-								</button>
-							</div>
-						{/each}
-					</div>
-				{/if}
+									<span class="file-name" title={file.path}>{file.filename}</span>
+									<button
+										type="button"
+										onclick={() => removeUploadedFile(index)}
+										class="file-remove"
+										aria-label="Remove file"
+									>
+										<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+										</svg>
+									</button>
+								</div>
+							{/each}
+						</div>
+					{/if}
+					<!-- Input Inner - Dark background container -->
+					<div class="input-inner">
+						<!-- Textarea with autocomplete -->
+						<div class="textarea-wrapper">
+							<CommandAutocomplete
+								bind:this={commandAutocompleteRef}
+								inputValue={inputValue}
+								projectId={tab.project}
+								visible={showCommandAutocomplete}
+								onSelect={handleCommandSelect}
+								onClose={() => showCommandAutocomplete = false}
+							/>
 
-				<!-- Input Row -->
-				<div class="input-row">
-					<!-- Textarea with autocomplete -->
-					<div class="textarea-wrapper">
-						<CommandAutocomplete
-							bind:this={commandAutocompleteRef}
-							inputValue={inputValue}
-							projectId={tab.project}
-							visible={showCommandAutocomplete}
-							onSelect={handleCommandSelect}
-							onClose={() => showCommandAutocomplete = false}
-						/>
+							<FileAutocomplete
+								bind:this={fileAutocompleteRef}
+								inputValue={inputValue}
+								projectId={tab.project}
+								visible={showFileAutocomplete}
+								onSelect={handleFileSelect}
+								onClose={() => showFileAutocomplete = false}
+							/>
 
-						<FileAutocomplete
-							bind:this={fileAutocompleteRef}
-							inputValue={inputValue}
-							projectId={tab.project}
-							visible={showFileAutocomplete}
-							onSelect={handleFileSelect}
-							onClose={() => showFileAutocomplete = false}
-						/>
+							<textarea
+								bind:this={textareaRef}
+								bind:value={inputValue}
+								oninput={handleInputChange}
+								onkeydown={handleKeyDown}
+								placeholder="Message Claude..."
+								class="chat-textarea"
+								rows="1"
+								disabled={!$claudeAuthenticated}
+							></textarea>
+						</div>
 
-						<textarea
-							bind:this={textareaRef}
-							bind:value={inputValue}
-							oninput={handleInputChange}
-							onkeydown={handleKeyDown}
-							placeholder="Message Claude..."
-							class="chat-textarea"
-							rows="1"
-							disabled={!$claudeAuthenticated}
-						></textarea>
-					</div>
-
-					<!-- Right side action buttons -->
-					<div class="action-buttons">
-						<button
-							type="button"
-							onclick={triggerFileUpload}
-							disabled={tab.isStreaming || !$claudeAuthenticated || isUploading}
-							class="action-btn"
-							title={isUploading ? 'Uploading...' : tab.project ? 'Attach file' : 'Select a project to attach files'}
-						>
-							{#if isUploading}
-								<svg class="w-[18px] h-[18px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-									<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-								</svg>
-							{:else}
-								<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-								</svg>
-							{/if}
-						</button>
-
-						<button
-							type="button"
-							onclick={toggleRecording}
-							disabled={!$claudeAuthenticated || isUploading || isTranscribing}
-							class="action-btn {isRecording ? 'recording' : ''} {isTranscribing ? 'transcribing' : ''}"
-							title={isRecording ? 'Stop recording' : isTranscribing ? 'Transcribing...' : 'Voice input'}
-						>
-							{#if isTranscribing}
-								<svg class="w-[18px] h-[18px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
-								</svg>
-							{:else}
-								<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-								</svg>
-							{/if}
-						</button>
-
-						{#if tab.isStreaming}
-							{#if inputValue.trim()}
-								<button type="submit" class="send-btn" title="Send message (interrupts current response)">
-									<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" />
-									</svg>
-								</button>
+						<!-- Send button only -->
+						<div class="send-button-wrapper">
+							{#if tab.isStreaming}
+								{#if inputValue.trim()}
+									<button type="submit" class="send-btn" title="Send message (interrupts current response)">
+										<svg class="w-[14px] h-[14px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
+										</svg>
+									</button>
+								{:else}
+									<button
+										type="button"
+										onclick={() => tabs.stopGeneration(tab.id)}
+										class="stop-btn"
+										title="Stop generating"
+									>
+										<svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+											<rect x="6" y="6" width="12" height="12" rx="2" />
+										</svg>
+									</button>
+								{/if}
 							{:else}
 								<button
-									type="button"
-									onclick={() => tabs.stopGeneration(tab.id)}
-									class="stop-btn"
-									title="Stop generating"
+									type="submit"
+									class="send-btn"
+									disabled={!inputValue.trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing}
+									title={isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : "Send message"}
 								>
-									<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-										<rect x="6" y="6" width="12" height="12" rx="2" />
+									<svg class="w-[14px] h-[14px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
 									</svg>
 								</button>
 							{/if}
-						{:else}
-							<button
-								type="submit"
-								class="send-btn"
-								disabled={!inputValue.trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing}
-								title={isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : "Send message"}
-							>
-								<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" />
-								</svg>
-							</button>
-						{/if}
+						</div>
 					</div>
 				</div>
 
-				<!-- Context Bar - clickable profile/project selectors -->
-				<div class="context-bar">
-					<!-- Left: Clickable Profile & Project selectors -->
-					<div class="context-selectors">
+				<!-- Controls Dock - Three column layout -->
+				<div class="controls-dock">
+					<!-- Left: Usage Indicator -->
+					<div class="controls-left">
+						<div class="usage-indicator {contextColor}" title="{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)} tokens">
+							<div class="usage-bar">
+								<div class="usage-fill" style="width: {Math.min(contextPercent, 100)}%"></div>
+							</div>
+							<span class="usage-text">{Math.round(contextPercent)}%</span>
+						</div>
+					</div>
+
+					<!-- Center: Profile & Project selectors -->
+					<div class="controls-center">
 						<!-- Profile Selector -->
 						<div class="selector-wrapper" bind:this={profileDropdownRef}>
 							<button
@@ -620,10 +606,12 @@
 								onclick={handleProfileClick}
 								title="Change profile"
 							>
-								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-								</svg>
-								<span>{selectedProfileName}</span>
+								<div class="selector-icon">
+									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+									</svg>
+								</div>
+								<span class="selector-text">{selectedProfileName}</span>
 								<svg class="w-3 h-3 opacity-50 chevron" class:open={showProfileDropdown} fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 								</svg>
@@ -657,8 +645,6 @@
 							{/if}
 						</div>
 
-						<span class="context-separator">•</span>
-
 						<!-- Project Selector -->
 						<div class="selector-wrapper" bind:this={projectDropdownRef}>
 							<button
@@ -667,10 +653,12 @@
 								onclick={handleProjectClick}
 								title="Change project"
 							>
-								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-								</svg>
-								<span>{selectedProjectName}</span>
+								<div class="selector-icon">
+									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+									</svg>
+								</div>
+								<span class="selector-text">{selectedProjectName}</span>
 								<svg class="w-3 h-3 opacity-50 chevron" class:open={showProjectDropdown} fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 								</svg>
@@ -705,11 +693,44 @@
 						</div>
 					</div>
 
-					<!-- Right: Context % -->
-					<div class="context-right">
-						<span class="context-percent {contextColor}" title="{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)} tokens">
-							{Math.round(contextPercent)}%
-						</span>
+					<!-- Right: Attach & Mic buttons -->
+					<div class="controls-right">
+						<button
+							type="button"
+							onclick={triggerFileUpload}
+							disabled={tab.isStreaming || !$claudeAuthenticated || isUploading}
+							class="dock-action-btn"
+							title={isUploading ? 'Uploading...' : tab.project ? 'Attach file' : 'Select a project to attach files'}
+						>
+							{#if isUploading}
+								<svg class="w-[18px] h-[18px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+									<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+								</svg>
+							{:else}
+								<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+								</svg>
+							{/if}
+						</button>
+
+						<button
+							type="button"
+							onclick={toggleRecording}
+							disabled={!$claudeAuthenticated || isUploading || isTranscribing}
+							class="dock-action-btn {isRecording ? 'recording' : ''} {isTranscribing ? 'transcribing' : ''}"
+							title={isRecording ? 'Stop recording' : isTranscribing ? 'Transcribing...' : 'Voice input'}
+						>
+							{#if isTranscribing}
+								<svg class="w-[18px] h-[18px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
+								</svg>
+							{:else}
+								<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+								</svg>
+							{/if}
+						</button>
 					</div>
 				</div>
 			</div>
@@ -721,7 +742,7 @@
 	/* Wrapper - provides safe spacing */
 	.chat-input-wrapper {
 		padding: 0.5rem 0.75rem 0.75rem;
-		flex-shrink: 0; /* Prevents input from shrinking - stays fixed at bottom */
+		flex-shrink: 0;
 	}
 
 	@media (min-width: 640px) {
@@ -762,42 +783,21 @@
 		opacity: 1;
 	}
 
-	/* Main Island */
+	/* Main Island - Two tier structure */
 	.chat-island {
 		display: flex;
 		flex-direction: column;
-		background: color-mix(in srgb, var(--card) 95%, transparent);
-		backdrop-filter: blur(20px);
-		-webkit-backdrop-filter: blur(20px);
-		border: 1px solid var(--border);
-		border-radius: 1.25rem;
-		box-shadow: 0 2px 12px -2px rgba(0, 0, 0, 0.08);
 		overflow: visible;
-		transition: border-color 0.2s, box-shadow 0.2s;
 	}
 
-	.chat-island:focus-within {
-		border-color: color-mix(in srgb, var(--primary) 50%, var(--border));
-		box-shadow: 0 2px 16px -2px rgba(0, 0, 0, 0.1), 0 0 0 3px color-mix(in srgb, var(--primary) 10%, transparent);
-	}
-
-	:global(.dark) .chat-island {
-		background: color-mix(in srgb, oklch(0.16 0.01 260) 95%, transparent);
-		border-color: oklch(0.28 0.01 260);
-	}
-
-	:global(.light) .chat-island {
-		background: white;
-		border-color: oklch(0.88 0.005 260);
-		box-shadow: 0 2px 12px -2px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
-	}
-
-	/* Uploaded files section */
+	/* Uploaded files section - now inside input-wrapper */
 	.uploaded-files {
 		display: flex;
 		flex-wrap: wrap;
 		gap: 0.375rem;
-		padding: 0.5rem 0.75rem 0;
+		padding: 8px 12px;
+		margin-bottom: 4px;
+		background: transparent;
 	}
 
 	.file-chip {
@@ -805,7 +805,7 @@
 		align-items: center;
 		gap: 0.375rem;
 		padding: 0.25rem 0.5rem;
-		background: color-mix(in srgb, var(--accent) 60%, transparent);
+		background: rgba(45, 212, 191, 0.15);
 		border-radius: 0.5rem;
 		font-size: 0.75rem;
 	}
@@ -828,18 +828,52 @@
 		color: var(--destructive);
 	}
 
-	/* Input row */
-	.input-row {
-		display: flex;
-		align-items: flex-end;
-		gap: 0.5rem;
-		padding: 0.5rem;
+	/* ===== INPUT WRAPPER - THE HERO (glass outer frame) ===== */
+	.input-wrapper {
+		position: relative;
+		background: rgba(255, 255, 255, 0.03);
+		backdrop-filter: blur(20px);
+		-webkit-backdrop-filter: blur(20px);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		border-radius: 16px 16px 0 0;
+		padding: 4px;
+		transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 	}
 
-	@media (min-width: 640px) {
-		.input-row {
-			padding: 0.625rem 0.75rem;
-		}
+	:global(.light) .input-wrapper {
+		background: rgba(255, 255, 255, 0.7);
+		border-color: rgba(0, 0, 0, 0.08);
+	}
+
+
+	/* Focus glow effect */
+	.input-wrapper:focus-within {
+		border-color: rgba(45, 212, 191, 0.5);
+		box-shadow:
+			0 0 0 1px rgba(45, 212, 191, 0.5),
+			0 0 40px -10px rgba(45, 212, 191, 0.15),
+			inset 0 1px 0 rgba(255, 255, 255, 0.05);
+	}
+
+	:global(.light) .input-wrapper:focus-within {
+		border-color: rgba(20, 184, 166, 0.5);
+		box-shadow:
+			0 0 0 1px rgba(20, 184, 166, 0.4),
+			0 0 40px -10px rgba(20, 184, 166, 0.2);
+	}
+
+	/* ===== INPUT INNER - Glass rounded bubble inside ===== */
+	.input-inner {
+		display: flex;
+		align-items: flex-end;
+		gap: 8px;
+		background: rgba(0, 0, 0, 0.3);
+		border-radius: 12px;
+		padding: 12px 16px;
+	}
+
+	:global(.light) .input-inner {
+		background: rgba(255, 255, 255, 0.8);
 	}
 
 	/* Textarea wrapper */
@@ -848,70 +882,399 @@
 		min-width: 0;
 		position: relative;
 		background: transparent;
-		border-radius: 1rem;
-		transition: background-color 0.15s;
 	}
 
 	/* Textarea */
 	.chat-textarea {
 		width: 100%;
-		min-height: 42px;
-		max-height: 180px;
-		padding: 0.625rem 0.875rem;
-		background: transparent;
-		border: none;
-		outline: none;
+		min-height: 24px;
+		max-height: 300px;
+		padding: 0;
+		background: transparent !important;
+		background-color: transparent !important;
+		border: none !important;
+		outline: none !important;
+		box-shadow: none !important;
 		resize: none;
-		font-size: 0.9375rem;
+		font-family: 'Outfit', -apple-system, sans-serif;
+		font-size: 15px;
+		font-weight: 400;
 		line-height: 1.5;
-		color: var(--foreground);
+		color: #f4f4f5;
 		field-sizing: content;
+		-webkit-appearance: none;
+		-moz-appearance: none;
+		appearance: none;
+	}
+
+	.chat-textarea:focus {
+		outline: none !important;
+		border: none !important;
+		box-shadow: none !important;
+	}
+
+	:global(.light) .chat-textarea {
+		color: #18181b;
+		background: transparent !important;
+		background-color: transparent !important;
+	}
+
+	:global(.light) .chat-textarea:focus {
+		outline: none !important;
+		border: none !important;
+		box-shadow: none !important;
 	}
 
 	.chat-textarea::placeholder {
-		color: var(--muted-foreground);
-		opacity: 0.6;
+		color: rgba(255, 255, 255, 0.3);
+		font-weight: 300;
 	}
 
-	/* Action buttons */
-	.action-buttons {
+	:global(.light) .chat-textarea::placeholder {
+		color: rgba(0, 0, 0, 0.35);
+	}
+
+	.chat-textarea:focus::placeholder {
+		color: rgba(255, 255, 255, 0.5);
+	}
+
+	:global(.light) .chat-textarea:focus::placeholder {
+		color: rgba(0, 0, 0, 0.5);
+	}
+
+	/* Send button wrapper */
+	.send-button-wrapper {
 		display: flex;
 		align-items: center;
-		gap: 0.25rem;
 		flex-shrink: 0;
-		padding-bottom: 0.125rem;
 	}
 
-	.action-btn {
+	/* ===== SEND BUTTON - COMPACT ===== */
+	.send-btn {
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 36px;
-		height: 36px;
-		border-radius: 0.75rem;
-		color: var(--muted-foreground);
-		transition: background-color 0.15s, color 0.15s;
+		width: 32px;
+		height: 32px;
+		background: linear-gradient(135deg, #2dd4bf, #14b8a6);
+		border: none;
+		border-radius: 8px;
+		cursor: pointer;
+		transition: all 0.2s ease;
+		flex-shrink: 0;
+		position: relative;
+		overflow: hidden;
 	}
 
-	.action-btn:hover:not(:disabled) {
-		background: var(--accent);
-		color: var(--foreground);
+	.send-btn::before {
+		content: '';
+		position: absolute;
+		inset: 0;
+		background: linear-gradient(135deg, rgba(255,255,255,0.2), transparent);
+		opacity: 0;
+		transition: opacity 0.2s ease;
 	}
 
-	.action-btn:disabled {
+	.send-btn:hover:not(:disabled) {
+		transform: translateY(-1px);
+		box-shadow: 0 4px 20px rgba(45, 212, 191, 0.15);
+	}
+
+	.send-btn:hover:not(:disabled)::before {
+		opacity: 1;
+	}
+
+	.send-btn:active:not(:disabled) {
+		transform: translateY(0) scale(0.96);
+	}
+
+	.send-btn svg {
+		color: #0a0a0b;
+		position: relative;
+		z-index: 1;
+	}
+
+	.send-btn:disabled {
+		background: #1a1a1d;
+		cursor: not-allowed;
+	}
+
+	:global(.light) .send-btn:disabled {
+		background: #e4e4e7;
+	}
+
+	.send-btn:disabled svg {
+		color: rgba(255, 255, 255, 0.3);
+	}
+
+	:global(.light) .send-btn:disabled svg {
+		color: rgba(0, 0, 0, 0.3);
+	}
+
+	.stop-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 32px;
+		height: 32px;
+		background: rgba(239, 68, 68, 0.15);
+		color: #ef4444;
+		border-radius: 8px;
+		transition: background-color 0.15s;
+	}
+
+	.stop-btn:hover {
+		background: rgba(239, 68, 68, 0.25);
+	}
+
+	/* ===== CONTROLS DOCK ===== */
+	.controls-dock {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		background: rgba(255, 255, 255, 0.02);
+		backdrop-filter: blur(20px);
+		-webkit-backdrop-filter: blur(20px);
+		border: 1px solid rgba(255, 255, 255, 0.06);
+		border-top: none;
+		border-radius: 0 0 16px 16px;
+		padding: 8px 12px;
+	}
+
+	:global(.light) .controls-dock {
+		background: rgba(255, 255, 255, 0.6);
+		border-color: rgba(0, 0, 0, 0.06);
+	}
+
+	.controls-left {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex: 1;
+	}
+
+	.controls-center {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		justify-content: center;
+		flex: 2;
+	}
+
+	.controls-right {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		justify-content: flex-end;
+		flex: 1;
+	}
+
+	/* ===== USAGE INDICATOR ===== */
+	.usage-indicator {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 4px 8px;
+		border-radius: 6px;
+		background: rgba(34, 197, 94, 0.08);
+		border: 1px solid rgba(34, 197, 94, 0.15);
+	}
+
+	.usage-indicator.text-amber-500 {
+		background: rgba(245, 158, 11, 0.08);
+		border-color: rgba(245, 158, 11, 0.15);
+	}
+
+	.usage-indicator.text-red-500 {
+		background: rgba(239, 68, 68, 0.08);
+		border-color: rgba(239, 68, 68, 0.15);
+	}
+
+	.usage-bar {
+		width: 40px;
+		height: 4px;
+		background: #131315;
+		border-radius: 2px;
+		overflow: hidden;
+	}
+
+	:global(.light) .usage-bar {
+		background: #e4e4e7;
+	}
+
+	.usage-fill {
+		height: 100%;
+		background: linear-gradient(90deg, #22c55e, #4ade80);
+		border-radius: 2px;
+		transition: width 0.3s ease;
+	}
+
+	.usage-indicator.text-amber-500 .usage-fill {
+		background: linear-gradient(90deg, #f59e0b, #fbbf24);
+	}
+
+	.usage-indicator.text-red-500 .usage-fill {
+		background: linear-gradient(90deg, #ef4444, #f87171);
+	}
+
+	.usage-text {
+		font-family: ui-monospace, 'Monaco', 'Menlo', monospace;
+		font-size: 11px;
+		font-weight: 500;
+		color: #22c55e;
+		letter-spacing: 0.02em;
+	}
+
+	.usage-indicator.text-amber-500 .usage-text {
+		color: #f59e0b;
+	}
+
+	.usage-indicator.text-red-500 .usage-text {
+		color: #ef4444;
+	}
+
+	/* ===== SELECTORS (Agent/Project) ===== */
+	.selector-wrapper {
+		position: relative;
+	}
+
+	.context-selector-btn {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 4px 10px 4px 8px;
+		background: transparent;
+		border: 1px solid transparent;
+		border-radius: 6px;
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.context-selector-btn:hover {
+		background: rgba(255, 255, 255, 0.03);
+		border-color: rgba(255, 255, 255, 0.06);
+	}
+
+	:global(.light) .context-selector-btn:hover {
+		background: rgba(0, 0, 0, 0.03);
+		border-color: rgba(0, 0, 0, 0.08);
+	}
+
+	.context-selector-btn.unset {
+		color: #f59e0b;
+	}
+
+	.context-selector-btn.unset:hover {
+		background: rgba(245, 158, 11, 0.1);
+		border-color: rgba(245, 158, 11, 0.2);
+	}
+
+	.selector-icon {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 20px;
+		height: 20px;
+		border-radius: 5px;
+		background: #131315;
+		border: 1px solid rgba(255, 255, 255, 0.06);
+	}
+
+	:global(.light) .selector-icon {
+		background: #e4e4e7;
+		border-color: rgba(0, 0, 0, 0.08);
+	}
+
+	.selector-icon svg {
+		color: rgba(255, 255, 255, 0.5);
+	}
+
+	:global(.light) .selector-icon svg {
+		color: rgba(0, 0, 0, 0.5);
+	}
+
+	.selector-text {
+		font-size: 12px;
+		font-weight: 500;
+		color: rgba(255, 255, 255, 0.5);
+		letter-spacing: 0.01em;
+		max-width: 80px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	:global(.light) .selector-text {
+		color: rgba(0, 0, 0, 0.5);
+	}
+
+	@media (min-width: 640px) {
+		.selector-text {
+			max-width: 120px;
+		}
+	}
+
+	/* Chevron */
+	.chevron {
+		color: rgba(255, 255, 255, 0.3);
+		transition: transform 0.2s ease;
+	}
+
+	:global(.light) .chevron {
+		color: rgba(0, 0, 0, 0.3);
+	}
+
+	.chevron.open {
+		transform: rotate(180deg);
+	}
+
+	/* ===== ACTION BUTTONS ===== */
+	.dock-action-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 32px;
+		height: 32px;
+		background: transparent;
+		border: none;
+		border-radius: 8px;
+		cursor: pointer;
+		color: rgba(255, 255, 255, 0.3);
+		transition: all 0.15s ease;
+	}
+
+	:global(.light) .dock-action-btn {
+		color: rgba(0, 0, 0, 0.35);
+	}
+
+	.dock-action-btn:hover:not(:disabled) {
+		background: rgba(255, 255, 255, 0.05);
+		color: rgba(255, 255, 255, 0.5);
+	}
+
+	:global(.light) .dock-action-btn:hover:not(:disabled) {
+		background: rgba(0, 0, 0, 0.05);
+		color: rgba(0, 0, 0, 0.6);
+	}
+
+	.dock-action-btn:active:not(:disabled) {
+		transform: scale(0.94);
+	}
+
+	.dock-action-btn:disabled {
 		opacity: 0.3;
 		cursor: not-allowed;
 	}
 
-	.action-btn.recording {
-		background: color-mix(in srgb, var(--destructive) 20%, transparent);
-		color: var(--destructive);
+	.dock-action-btn.recording {
+		background: rgba(239, 68, 68, 0.15);
+		color: #ef4444;
 		animation: pulse 1.5s ease-in-out infinite;
 	}
 
-	.action-btn.transcribing {
-		background: color-mix(in srgb, var(--primary) 15%, transparent);
-		color: var(--primary);
+	.dock-action-btn.transcribing {
+		background: rgba(45, 212, 191, 0.15);
+		color: #2dd4bf;
 	}
 
 	@keyframes pulse {
@@ -919,197 +1282,83 @@
 		50% { opacity: 0.6; }
 	}
 
-	.send-btn {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 36px;
-		height: 36px;
-		background: var(--primary);
-		color: var(--primary-foreground);
-		border-radius: 0.75rem;
-		transition: background-color 0.15s, opacity 0.15s;
-	}
-
-	.send-btn:hover:not(:disabled) {
-		background: color-mix(in srgb, var(--primary) 90%, black);
-	}
-
-	.send-btn:disabled {
-		opacity: 0.3;
-		cursor: not-allowed;
-	}
-
-	.stop-btn {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 36px;
-		height: 36px;
-		background: color-mix(in srgb, var(--destructive) 15%, transparent);
-		color: var(--destructive);
-		border-radius: 0.75rem;
-		transition: background-color 0.15s;
-	}
-
-	.stop-btn:hover {
-		background: color-mix(in srgb, var(--destructive) 25%, transparent);
-	}
-
-	/* Simplified Context Bar */
-	.context-bar {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 0.5rem;
-		padding: 0.375rem 0.625rem;
-		border-top: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
-	}
-
-	@media (min-width: 640px) {
-		.context-bar {
-			padding: 0.5rem 0.75rem;
-		}
-	}
-
-	.context-selectors {
-		display: flex;
-		align-items: center;
-		gap: 0.375rem;
-		flex-wrap: wrap;
-	}
-
-	.context-selector-btn {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.375rem;
-		padding: 0.25rem 0.5rem;
-		font-size: 0.75rem;
-		font-weight: 500;
-		color: var(--muted-foreground);
-		border-radius: 0.5rem;
-		background: transparent;
-		border: none;
-		cursor: pointer;
-		transition: background-color 0.15s, color 0.15s;
-	}
-
-	.context-selector-btn:hover {
-		background: var(--accent);
-		color: var(--foreground);
-	}
-
-	.context-selector-btn.unset {
-		color: var(--warning);
-	}
-
-	.context-selector-btn.unset:hover {
-		background: color-mix(in srgb, var(--warning) 15%, transparent);
-		color: var(--warning);
-	}
-
-	.context-selector-btn span {
-		max-width: 100px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	@media (min-width: 640px) {
-		.context-selector-btn span {
-			max-width: 140px;
-		}
-	}
-
-	.context-separator {
-		color: var(--muted-foreground);
-		opacity: 0.4;
-		font-size: 0.75rem;
-	}
-
-	.context-right {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-	}
-
-	.context-percent {
-		font-size: 0.6875rem;
-		font-weight: 600;
-	}
-
-	/* Selector wrapper for dropdown positioning */
-	.selector-wrapper {
-		position: relative;
-	}
-
-	/* Chevron rotation animation */
-	.chevron {
-		transition: transform 0.2s ease;
-	}
-
-	.chevron.open {
-		transform: rotate(180deg);
-	}
-
-	/* Dropdown menu */
+	/* ===== DROPDOWN MENU ===== */
 	.selector-dropdown {
 		position: absolute;
 		bottom: calc(100% + 4px);
-		left: 0;
+		left: 50%;
+		transform: translateX(-50%);
 		min-width: 180px;
 		max-width: 280px;
 		max-height: 240px;
 		overflow-y: auto;
-		background: var(--popover);
-		border: 1px solid var(--border);
-		border-radius: 0.75rem;
-		box-shadow: 0 4px 16px -2px rgba(0, 0, 0, 0.15), 0 2px 8px -2px rgba(0, 0, 0, 0.1);
+		background: #1a1a1d;
+		border: 1px solid rgba(255, 255, 255, 0.1);
+		border-radius: 12px;
+		box-shadow: 0 4px 16px -2px rgba(0, 0, 0, 0.25), 0 2px 8px -2px rgba(0, 0, 0, 0.15);
 		z-index: 50;
-		padding: 0.375rem;
+		padding: 6px;
 		animation: dropdown-fade-in 0.15s ease;
+	}
+
+	:global(.light) .selector-dropdown {
+		background: #ffffff;
+		border-color: rgba(0, 0, 0, 0.1);
+		box-shadow: 0 4px 16px -2px rgba(0, 0, 0, 0.1), 0 2px 8px -2px rgba(0, 0, 0, 0.08);
 	}
 
 	@keyframes dropdown-fade-in {
 		from {
 			opacity: 0;
-			transform: translateY(4px);
+			transform: translateX(-50%) translateY(4px);
 		}
 		to {
 			opacity: 1;
-			transform: translateY(0);
+			transform: translateX(-50%) translateY(0);
 		}
 	}
 
 	.dropdown-empty {
-		padding: 0.75rem 1rem;
-		font-size: 0.8125rem;
-		color: var(--muted-foreground);
+		padding: 12px 16px;
+		font-size: 13px;
+		color: rgba(255, 255, 255, 0.5);
 		text-align: center;
+	}
+
+	:global(.light) .dropdown-empty {
+		color: rgba(0, 0, 0, 0.5);
 	}
 
 	.dropdown-item {
 		display: flex;
 		align-items: center;
-		gap: 0.5rem;
+		gap: 8px;
 		width: 100%;
-		padding: 0.5rem 0.75rem;
-		font-size: 0.8125rem;
-		color: var(--foreground);
+		padding: 8px 12px;
+		font-size: 13px;
+		color: #f4f4f5;
 		background: transparent;
 		border: none;
-		border-radius: 0.5rem;
+		border-radius: 8px;
 		cursor: pointer;
 		transition: background-color 0.15s;
 		text-align: left;
 	}
 
+	:global(.light) .dropdown-item {
+		color: #18181b;
+	}
+
 	.dropdown-item:hover {
-		background: var(--accent);
+		background: rgba(255, 255, 255, 0.05);
+	}
+
+	:global(.light) .dropdown-item:hover {
+		background: rgba(0, 0, 0, 0.05);
 	}
 
 	.dropdown-item.selected {
-		background: color-mix(in srgb, var(--primary) 12%, transparent);
+		background: rgba(45, 212, 191, 0.12);
 	}
 
 	.dropdown-item span {
@@ -1129,11 +1378,30 @@
 	}
 
 	.selector-dropdown::-webkit-scrollbar-thumb {
-		background: var(--border);
+		background: rgba(255, 255, 255, 0.1);
 		border-radius: 3px;
 	}
 
+	:global(.light) .selector-dropdown::-webkit-scrollbar-thumb {
+		background: rgba(0, 0, 0, 0.15);
+	}
+
 	.selector-dropdown::-webkit-scrollbar-thumb:hover {
-		background: var(--muted-foreground);
+		background: rgba(255, 255, 255, 0.2);
+	}
+
+	:global(.light) .selector-dropdown::-webkit-scrollbar-thumb:hover {
+		background: rgba(0, 0, 0, 0.25);
+	}
+
+	/* Responsive: hide selector text on mobile */
+	@media (max-width: 500px) {
+		.selector-text {
+			display: none;
+		}
+
+		.context-selector-btn {
+			padding: 4px;
+		}
 	}
 </style>

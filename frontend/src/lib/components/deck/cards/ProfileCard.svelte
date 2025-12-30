@@ -149,8 +149,20 @@
 		cwd: '',
 		add_dirs: '',
 		user: '',
-		max_buffer_size: null as number | null
+		max_buffer_size: null as number | null,
+		env_vars: [] as { key: string; value: string }[]
 	});
+
+	// Common environment variable presets with valid ranges
+	const envVarPresets = [
+		{ key: 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', placeholder: '1 - 64000' },
+		{ key: 'MAX_THINKING_TOKENS', placeholder: '1024 - 128000' },
+		{ key: 'MAX_MCP_OUTPUT_TOKENS', placeholder: '1 - 25000 (default)' },
+		{ key: 'BASH_DEFAULT_TIMEOUT_MS', placeholder: 'ms (default: 120000)' },
+		{ key: 'BASH_MAX_TIMEOUT_MS', placeholder: 'ms (default: 600000)' },
+		{ key: 'MCP_TIMEOUT', placeholder: 'ms for server startup' },
+		{ key: 'MCP_TOOL_TIMEOUT', placeholder: 'ms for tool execution' }
+	];
 
 	// Tool selection mode
 	let toolSelectionMode = $state<'all' | 'allow' | 'disallow'>('all');
@@ -251,7 +263,8 @@
 			cwd: '',
 			add_dirs: '',
 			user: '',
-			max_buffer_size: null
+			max_buffer_size: null,
+			env_vars: []
 		};
 		toolSelectionMode = 'all';
 		aiToolSelectionMode = 'custom';
@@ -329,7 +342,8 @@
 			cwd: (config as any).cwd || '',
 			add_dirs: ((config as any).add_dirs || []).join(', '),
 			user: (config as any).user || '',
-			max_buffer_size: (config as any).max_buffer_size || null
+			max_buffer_size: (config as any).max_buffer_size || null,
+			env_vars: Object.entries((config as any).env || {}).map(([key, value]) => ({ key, value: value as string }))
 		};
 
 		viewMode = 'form';
@@ -518,6 +532,15 @@
 		}
 		if (profileForm.user.trim()) config.user = profileForm.user;
 		if (profileForm.max_buffer_size) config.max_buffer_size = profileForm.max_buffer_size;
+
+		// Environment variables - convert array to dict
+		const validEnvVars = profileForm.env_vars.filter(v => v.key.trim());
+		if (validEnvVars.length > 0) {
+			config.env = validEnvVars.reduce((acc, { key, value }) => {
+				acc[key.trim()] = value;
+				return acc;
+			}, {} as Record<string, string>);
+		}
 
 		// AI tools
 		const effectiveAITools =
@@ -1327,6 +1350,73 @@
 								placeholder="Default"
 							/>
 						</div>
+					</div>
+
+					<div class="card-form-section">
+						<h3 class="card-form-title">Environment Variables</h3>
+						<p class="card-form-description">Set environment variables for Claude Code sessions using this profile.</p>
+
+						<!-- Add Variable Dropdown -->
+						<div class="env-var-add">
+							<select
+								class="card-form-input"
+								onchange={(e) => {
+									const target = e.target as HTMLSelectElement;
+									const key = target.value;
+									if (key === '__custom__') {
+										profileForm.env_vars = [...profileForm.env_vars, { key: '', value: '' }];
+									} else if (key && !profileForm.env_vars.some(v => v.key === key)) {
+										profileForm.env_vars = [...profileForm.env_vars, { key, value: '' }];
+									}
+									target.value = '';
+								}}
+							>
+								<option value="">+ Add variable...</option>
+								{#each envVarPresets as preset}
+									{#if !profileForm.env_vars.some(v => v.key === preset.key)}
+										<option value={preset.key}>{preset.key}</option>
+									{/if}
+								{/each}
+								<option value="__custom__">Custom variable...</option>
+							</select>
+						</div>
+
+						<!-- Environment Variable Rows -->
+						{#if profileForm.env_vars.length > 0}
+							<div class="env-var-list">
+								{#each profileForm.env_vars as envVar, index}
+									{@const preset = envVarPresets.find(p => p.key === envVar.key)}
+									<div class="env-var-row">
+										<input
+											type="text"
+											bind:value={envVar.key}
+											class="card-form-input card-form-input--mono env-var-key"
+											placeholder="VARIABLE_NAME"
+										/>
+										<input
+											type="text"
+											bind:value={envVar.value}
+											class="card-form-input card-form-input--mono env-var-value"
+											placeholder={preset?.placeholder || 'value'}
+										/>
+										<button
+											type="button"
+											class="env-var-remove"
+											title="Remove variable"
+											onclick={() => {
+												profileForm.env_vars = profileForm.env_vars.filter((_, i) => i !== index);
+											}}
+										>
+											<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+											</svg>
+										</button>
+									</div>
+								{/each}
+							</div>
+						{:else}
+							<p class="env-var-empty">No environment variables configured.</p>
+						{/if}
 					</div>
 				{/if}
 				</div>

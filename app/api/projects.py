@@ -264,7 +264,8 @@ async def upload_file(
     if path:
         target_dir = validate_project_path(f"{project['path']}/{path}")
     else:
-        target_dir = validate_project_path(project['path'])
+        # Default to uploads subdirectory to keep project root clean
+        target_dir = validate_project_path(f"{project['path']}/uploads")
 
     # Ensure directory exists
     target_dir.mkdir(parents=True, exist_ok=True)

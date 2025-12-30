@@ -19,6 +19,7 @@
 	import { isAdmin, apiUser } from '$lib/stores/auth';
 	import { groups, organizeByGroups } from '$lib/stores/groups';
 	import DropdownContextMenu from './DropdownContextMenu.svelte';
+	import { AUTO_COMPACTION_BASE, CONTEXT_MAX } from '$lib/constants/chat';
 
 	interface Props {
 		tab: ChatTab;
@@ -154,10 +155,20 @@
 	}
 
 	// Computed values
+	// Get current profile to access env vars for auto-compaction reserve calculation
+	const currentProfile = $derived($profiles.find(p => p.id === tab.profile));
+
+	// Auto-compaction reserve: 13k base + CLAUDE_CODE_MAX_OUTPUT_TOKENS from profile env vars
+	const maxOutputTokens = $derived(
+		parseInt((currentProfile?.config as any)?.env?.CLAUDE_CODE_MAX_OUTPUT_TOKENS || '0', 10) || 0
+	);
+	const autoCompactionReserve = $derived(AUTO_COMPACTION_BASE + maxOutputTokens);
+
 	// Context usage: use real-time tracked value, or calculate from token counts for resumed sessions
-	const contextUsed = $derived(tab.contextUsed ?? (tab.totalTokensIn + tab.totalCacheCreationTokens + tab.totalCacheReadTokens));
-	const contextMax = 200000;
-	const contextPercent = $derived(Math.min((contextUsed / contextMax) * 100, 100));
+	// Add auto-compaction reserve to show effective context usage
+	const baseContextUsed = $derived(tab.contextUsed ?? (tab.totalTokensIn + tab.totalCacheCreationTokens + tab.totalCacheReadTokens));
+	const contextUsed = $derived(baseContextUsed + autoCompactionReserve);
+	const contextPercent = $derived(Math.min((contextUsed / CONTEXT_MAX) * 100, 100));
 
 	const headerProfilesOrganized = $derived(organizeByGroups($profiles, 'profiles', $groups));
 	const hasProfileGroups = $derived(headerProfilesOrganized.groupOrder.length > 0);
@@ -171,7 +182,7 @@
 	<div class="relative group">
 		<button
 			class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
-			title="Context usage: {formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}"
+			title="Context usage: {formatTokenCount(contextUsed)} / {formatTokenCount(CONTEXT_MAX)}"
 		>
 			<!-- Circular progress indicator -->
 			<svg class="w-4 h-4 -rotate-90" viewBox="0 0 20 20">
@@ -193,7 +204,7 @@
 				<!-- Context header -->
 				<div class="flex items-center justify-between text-xs pb-1 border-b border-border">
 					<span class="text-muted-foreground">Context</span>
-					<span class="text-foreground font-medium">{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}</span>
+					<span class="text-foreground font-medium">{formatTokenCount(contextUsed)} / {formatTokenCount(CONTEXT_MAX)}</span>
 				</div>
 				<div class="flex items-center justify-between text-xs">
 					<span class="flex items-center gap-1.5 text-muted-foreground">

@@ -294,10 +294,6 @@ REST_API_COMMANDS = {
 # SDK built-in commands that are shown in the popup autocomplete
 # These are passed directly to the SDK and handled internally
 SDK_BUILTIN_COMMANDS = {
-    "context": {
-        "description": "View current context including system prompt and files",
-        "type": "sdk_builtin"
-    },
     "compact": {
         "description": "Compact conversation history to free up context space",
         "type": "sdk_builtin"
@@ -341,6 +337,64 @@ def get_sdk_builtin_command_info(command_name: str) -> Optional[Dict[str, Any]]:
     return SDK_BUILTIN_COMMANDS.get(name)
 
 
+def discover_plugin_commands() -> List[Dict[str, Any]]:
+    """
+    Discover commands from enabled plugins.
+
+    Returns list of command info dicts for plugin commands.
+    Commands are namespaced as plugin-name:command-name.
+    """
+    # Import here to avoid circular imports
+    from app.core.plugin_service import get_plugin_service
+
+    commands = []
+
+    try:
+        plugin_service = get_plugin_service()
+        installed = plugin_service.get_installed_plugins()
+        enabled_states = plugin_service.get_enabled_plugins()
+
+        for plugin in installed:
+            # Skip disabled plugins
+            if not enabled_states.get(plugin.id, False):
+                continue
+
+            # Skip plugins without commands
+            if not plugin.has_commands:
+                continue
+
+            # Get plugin details for command list
+            details = plugin_service.get_plugin_details(plugin.id)
+            if not details:
+                continue
+
+            install_path = Path(details.install_path)
+            commands_dir = install_path / "commands"
+
+            if not commands_dir.exists():
+                continue
+
+            # Scan command files in the plugin's commands directory
+            for cmd_file in commands_dir.glob("**/*.md"):
+                cmd = parse_command_file(cmd_file, source="plugin", namespace=plugin.name)
+                if cmd:
+                    # Namespace the command as plugin-name:command-name
+                    namespaced_name = f"{plugin.name}:{cmd.name}"
+                    commands.append({
+                        "name": namespaced_name,
+                        "display": f"/{namespaced_name}",
+                        "description": cmd.description,
+                        "argument_hint": cmd.argument_hint,
+                        "type": "plugin",
+                        "source": plugin.id
+                    })
+
+    except Exception as e:
+        logger.error(f"Failed to discover plugin commands: {e}")
+
+    return commands
+
+
 def get_all_commands(working_dir: str) -> List[Dict[str, Any]]:
     """
     Get all available commands for the popup autocomplete.
@@ -360,7 +414,7 @@ def get_all_commands(working_dir: str) -> List[Dict[str, Any]]:
             "type": "custom"
         })
 
-    # Add SDK built-in commands (like /context)
+    # Add SDK built-in commands (like /compact)
     for name, info in SDK_BUILTIN_COMMANDS.items():
         commands.append({
             "name": name,
@@ -369,6 +423,9 @@ def get_all_commands(working_dir: str) -> List[Dict[str, Any]]:
             "argument_hint": None,
             "type": "sdk_builtin"
         })
+
+    # Add plugin commands from enabled plugins
+    commands.extend(discover_plugin_commands())
 
     # Note: INTERACTIVE_COMMANDS (/resume) and REST_API_COMMANDS (/rewind)
     # are intentionally excluded from the popup as they are handled separately
