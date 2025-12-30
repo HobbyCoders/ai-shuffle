@@ -24,8 +24,7 @@
 	// Carousel layout constants - single source of truth
 	const CARD_WIDTH_PERCENT = 0.75; // Card is 75% of viewport
 	const CARD_GAP = 16; // Gap between cards in pixels
-	const SWIPE_THRESHOLD = 50; // Minimum swipe distance to change cards
-	const SCROLL_DEBOUNCE_MS = 50; // Debounce delay for scroll handler
+	const SCROLL_DEBOUNCE_MS = 100; // Debounce delay to let scroll-snap settle
 
 	// Card definitions - same as WelcomeCards.svelte with proper typing
 	const cards: Array<{
@@ -66,16 +65,10 @@
 		}
 	];
 
-	// Carousel state
+	// Carousel state - relies entirely on CSS scroll-snap for smooth swiping
 	let currentIndex = $state(0);
 	let carouselEl: HTMLDivElement | undefined = $state();
-	let touchStartX = $state(0);
-	let touchDeltaX = $state(0);
-	let isDragging = $state(false);
-	let isAnimating = $state(false);
 	let scrollDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-
-	const ANIMATION_DURATION = 300; // Match scroll behavior duration
 
 	// Helper to calculate card dimensions
 	function getCardMetrics() {
@@ -86,77 +79,29 @@
 		};
 	}
 
-	// Navigate to specific card
+	// Navigate to specific card (for dot indicator clicks)
 	function goToCard(index: number) {
-		if (isAnimating) return;
 		const clampedIndex = Math.max(0, Math.min(index, cards.length - 1));
-		if (clampedIndex === currentIndex) return;
+		if (clampedIndex === currentIndex || !carouselEl) return;
 
-		isAnimating = true;
 		currentIndex = clampedIndex;
-		scrollToCard(currentIndex);
-		setTimeout(() => {
-			isAnimating = false;
-		}, ANIMATION_DURATION);
-	}
-
-	function scrollToCard(index: number) {
-		if (!carouselEl) return;
 		const { cardWidth, gap } = getCardMetrics();
 		const offset = index * (cardWidth + gap);
 		carouselEl.scrollTo({ left: offset, behavior: 'smooth' });
 	}
 
-	// Touch handlers
-	function handleTouchStart(e: TouchEvent) {
-		if (isAnimating) return;
-		touchStartX = e.touches[0].clientX;
-		touchDeltaX = 0;
-		isDragging = true;
-	}
-
-	function handleTouchMove(e: TouchEvent) {
-		if (!isDragging) return;
-		touchDeltaX = e.touches[0].clientX - touchStartX;
-	}
-
-	function handleTouchEnd() {
-		if (!isDragging) return;
-		isDragging = false;
-
-		let newIndex = currentIndex;
-		if (touchDeltaX < -SWIPE_THRESHOLD && currentIndex < cards.length - 1) {
-			newIndex = currentIndex + 1;
-		} else if (touchDeltaX > SWIPE_THRESHOLD && currentIndex > 0) {
-			newIndex = currentIndex - 1;
-		}
-
-		if (newIndex !== currentIndex) {
-			isAnimating = true;
-			currentIndex = newIndex;
-			scrollToCard(currentIndex);
-			setTimeout(() => {
-				isAnimating = false;
-			}, ANIMATION_DURATION);
-		} else {
-			// Snap back to current card
-			scrollToCard(currentIndex);
-		}
-		touchDeltaX = 0;
-	}
-
-	// Handle scroll snap detection (debounced to prevent excessive updates)
+	// Handle scroll snap detection (debounced) - CSS scroll-snap handles the actual snapping
 	function handleScroll() {
-		if (!carouselEl || isDragging || isAnimating) return;
+		if (!carouselEl) return;
 
 		// Clear any pending debounce timer
 		if (scrollDebounceTimer) {
 			clearTimeout(scrollDebounceTimer);
 		}
 
-		// Debounce the index update
+		// Debounce the index update to let scroll-snap settle
 		scrollDebounceTimer = setTimeout(() => {
-			if (!carouselEl || isAnimating) return;
+			if (!carouselEl) return;
 			const { cardWidth, gap } = getCardMetrics();
 			const scrollPos = carouselEl.scrollLeft;
 			const newIndex = Math.round(scrollPos / (cardWidth + gap));
@@ -179,15 +124,13 @@
 		<p class="welcome-tagline">Your AI workspace awaits</p>
 
 		<!-- Horizontal Carousel with ARIA support -->
+		<!-- Uses CSS scroll-snap for smooth native swiping behavior -->
 		<div
 			bind:this={carouselEl}
 			class="carousel"
 			role="region"
 			aria-label="Welcome cards carousel"
 			aria-roledescription="carousel"
-			ontouchstart={handleTouchStart}
-			ontouchmove={handleTouchMove}
-			ontouchend={handleTouchEnd}
 			onscroll={handleScroll}
 		>
 			{#each cards as card, i}

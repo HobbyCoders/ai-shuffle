@@ -44,8 +44,8 @@
 	let swipeDirection = $state<'horizontal' | 'vertical' | null>(null);
 	let isAnimating = $state(false);
 
-	const SWIPE_THRESHOLD = 50;
-	const VELOCITY_THRESHOLD = 0.3;
+	const SWIPE_THRESHOLD = 80; // Minimum distance to trigger swipe
+	const VELOCITY_THRESHOLD = 0.5; // Require more intentional swipes (px/ms)
 	const DIRECTION_LOCK_THRESHOLD = 10;
 	const ANIMATION_DURATION = 300; // Match CSS transition duration
 
