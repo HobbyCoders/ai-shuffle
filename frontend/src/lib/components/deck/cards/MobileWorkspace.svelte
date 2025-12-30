@@ -181,24 +181,6 @@
 		swipeDirection = null;
 	}
 
-	// Navigate to specific card via dot indicator
-	function navigateToCard(index: number) {
-		if (isAnimating) return;
-		if (index !== activeCardIndex && index >= 0 && index < cards.length) {
-			// Blur any focused element before switching to prevent focus jumping issues
-			if (document.activeElement instanceof HTMLElement) {
-				document.activeElement.blur();
-			}
-
-			// Lock animation to prevent rapid tapping
-			isAnimating = true;
-			onCardChange(index);
-			setTimeout(() => {
-				isAnimating = false;
-			}, ANIMATION_DURATION);
-		}
-	}
-
 	// Close current card
 	function handleClose() {
 		if (activeCard) {
@@ -298,22 +280,6 @@
 				{/if}
 			</div>
 		</div>
-
-		<!-- Dot Indicators -->
-		{#if cards.length > 1}
-			<div class="dot-indicators">
-				{#each cards as card, index}
-					<button
-						class="dot"
-						class:active={index === activeCardIndex}
-						onclick={() => navigateToCard(index)}
-						aria-label="Go to card {index + 1}"
-					>
-						<span class="dot-inner"></span>
-					</button>
-				{/each}
-			</div>
-		{/if}
 	{/if}
 </div>
 
@@ -505,60 +471,6 @@
 
 	.card-wrapper.swiping {
 		transition: none;
-	}
-
-	/* Dot Indicators - improved touch targets */
-	.dot-indicators {
-		display: flex;
-		justify-content: center;
-		gap: 4px;
-		padding: 8px 16px;
-		padding-bottom: max(12px, env(safe-area-inset-bottom, 12px));
-		background: hsl(var(--card));
-		border-top: 1px solid hsl(var(--border) / 0.6);
-	}
-
-	.dot {
-		/* Apple HIG: 44x44px touch target */
-		width: 44px;
-		height: 44px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: transparent;
-		border: none;
-		padding: 0;
-		cursor: pointer;
-		-webkit-tap-highlight-color: transparent;
-		transition: transform 0.15s ease;
-	}
-
-	.dot:active {
-		transform: scale(0.9);
-	}
-
-	.dot-inner {
-		width: 8px;
-		height: 8px;
-		border-radius: 50%;
-		background: hsl(var(--muted-foreground) / 0.3);
-		transition: all 0.2s ease;
-	}
-
-	.dot.active .dot-inner {
-		width: 10px;
-		height: 10px;
-		background: hsl(var(--primary));
-		/* Subtle glow for active state */
-		box-shadow: 0 0 6px hsl(var(--primary) / 0.4);
-	}
-
-	.dot:hover .dot-inner {
-		background: hsl(var(--muted-foreground) / 0.5);
-	}
-
-	.dot.active:hover .dot-inner {
-		background: hsl(var(--primary));
 	}
 
 	/* Empty state now uses MobileWelcome component */
