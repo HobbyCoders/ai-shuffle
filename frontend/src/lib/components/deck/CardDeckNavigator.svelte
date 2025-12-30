@@ -570,10 +570,12 @@
 
 	// Reset state when closing
 	function handleClose() {
+		// In edit mode, close button just exits edit mode without closing the navigator
 		if (isEditMode) {
-			// Cancel edit mode without saving - revert any pending changes
 			cancelEditMode();
+			return;
 		}
+
 		contextMenuOpen = false;
 		showNewDeckDialog = false;
 
