@@ -22,7 +22,8 @@
 		Maximize2,
 		ChevronDown,
 		ChevronLeft,
-		ChevronRight
+		ChevronRight,
+		ChevronsDown
 	} from 'lucide-svelte';
 	import type { LayoutMode } from '$lib/stores/deck';
 
@@ -164,7 +165,7 @@
 	role="group"
 	aria-label="Card layout mode selector"
 >
-	<!-- Three-dot indicator - this IS the hover target now -->
+	<!-- Bouncing arrow indicator - hover target for layout options -->
 	<div
 		class="hover-indicator"
 		onmouseenter={handleTriggerZoneEnter}
@@ -174,9 +175,7 @@
 		aria-label="Card layout options"
 	>
 		<div class="indicator-pill">
-			<div class="indicator-dot"></div>
-			<div class="indicator-dot"></div>
-			<div class="indicator-dot"></div>
+			<ChevronsDown size={16} strokeWidth={2} class="indicator-arrow" />
 		</div>
 	</div>
 
@@ -597,8 +596,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		gap: 4px;
-		padding: 6px 12px;
+		padding: 4px 10px;
 		background: rgba(255, 255, 255, 0.04);
 		border: 1px solid rgba(255, 255, 255, 0.08);
 		border-radius: 12px;
@@ -618,32 +616,26 @@
 		border-color: rgba(255, 255, 255, 0.15);
 	}
 
-	.indicator-dot {
-		width: 4px;
-		height: 4px;
-		border-radius: 50%;
-		background: var(--muted-foreground);
-		opacity: 0.6;
+	/* Bouncing arrow indicator */
+	.indicator-pill :global(.indicator-arrow) {
+		color: var(--muted-foreground);
+		opacity: 0.7;
+		animation: bounce 2s ease-in-out infinite;
 	}
 
-	/* Subtle pulse animation for the middle dot */
-	.indicator-dot:nth-child(2) {
-		animation: dotPulse 2s ease-in-out infinite;
-	}
-
-	@keyframes dotPulse {
+	@keyframes bounce {
 		0%, 100% {
-			opacity: 0.6;
-			transform: scale(1);
+			transform: translateY(0);
+			opacity: 0.7;
 		}
 		50% {
+			transform: translateY(3px);
 			opacity: 1;
-			transform: scale(1.3);
 		}
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.indicator-dot:nth-child(2) {
+		.indicator-pill :global(.indicator-arrow) {
 			animation: none;
 		}
 	}
