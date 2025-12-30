@@ -162,34 +162,6 @@
 				</div>
 			{/if}
 
-			<!-- Delete confirmation banner -->
-			{#if deletingId}
-				<div class="card-delete-banner">
-					<p>
-						Delete <strong>{$projects.find(p => p.id === deletingId)?.name}</strong>? This cannot be undone.
-					</p>
-					<div class="button-group">
-						<button
-							onclick={() => (deletingId = null)}
-							disabled={deleteLoading}
-							class="card-btn-secondary flex-1"
-						>
-							Cancel
-						</button>
-						<button
-							onclick={handleDeleteProject}
-							disabled={deleteLoading}
-							class="card-btn-destructive flex-1"
-						>
-							{#if deleteLoading}
-								<div class="card-spinner card-spinner--small"></div>
-							{/if}
-							Delete
-						</button>
-					</div>
-				</div>
-			{/if}
-
 			<!-- Project list -->
 			{#if filteredProjects().length === 0}
 				<div class="card-empty-state">
@@ -209,31 +181,64 @@
 				</div>
 			{:else}
 				{#each filteredProjects() as project (project.id)}
-					<div class="card-list-item">
-						<div class="card-item-icon">
-							<FolderOpen />
-						</div>
-						<div class="card-item-content">
-							<div class="card-item-header">
-								<span class="card-item-name">{project.name}</span>
-								{#if $groups.projects.assignments[project.id]}
-									<span class="card-badge card-badge--primary">
-										{$groups.projects.assignments[project.id]}
-									</span>
-								{/if}
-							</div>
-							<span class="card-item-id">/workspace/{project.path}/</span>
-						</div>
-						<div class="card-item-actions">
-							<button
-								onclick={() => (deletingId = project.id)}
-								class="card-action-btn card-action-btn--destructive"
-								title="Delete project"
-							>
+					{#if deletingId === project.id}
+						<!-- Inline delete confirmation -->
+						<div class="card-list-item card-list-item--deleting">
+							<div class="card-item-icon card-item-icon--destructive">
 								<Trash2 />
-							</button>
+							</div>
+							<div class="card-item-content">
+								<p class="delete-confirm-text">
+									Delete <strong>{project.name}</strong>? This cannot be undone.
+								</p>
+								<div class="delete-confirm-actions">
+									<button
+										onclick={() => (deletingId = null)}
+										disabled={deleteLoading}
+										class="card-btn-secondary"
+									>
+										Cancel
+									</button>
+									<button
+										onclick={handleDeleteProject}
+										disabled={deleteLoading}
+										class="card-btn-destructive"
+									>
+										{#if deleteLoading}
+											<div class="card-spinner card-spinner--small"></div>
+										{/if}
+										Delete
+									</button>
+								</div>
+							</div>
 						</div>
-					</div>
+					{:else}
+						<div class="card-list-item">
+							<div class="card-item-icon">
+								<FolderOpen />
+							</div>
+							<div class="card-item-content">
+								<div class="card-item-header">
+									<span class="card-item-name">{project.name}</span>
+									{#if $groups.projects.assignments[project.id]}
+										<span class="card-badge card-badge--primary">
+											{$groups.projects.assignments[project.id]}
+										</span>
+									{/if}
+								</div>
+								<span class="card-item-id">/workspace/{project.path}/</span>
+							</div>
+							<div class="card-item-actions">
+								<button
+									onclick={() => (deletingId = project.id)}
+									class="card-action-btn card-action-btn--destructive"
+									title="Delete project"
+								>
+									<Trash2 />
+								</button>
+							</div>
+						</div>
+					{/if}
 				{/each}
 			{/if}
 			</div>
@@ -350,6 +355,9 @@
 		width: 100%;
 		max-width: 600px;
 		margin: 0 auto;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-4, 16px);
 	}
 
 	.project-card.maximized .centered-content {

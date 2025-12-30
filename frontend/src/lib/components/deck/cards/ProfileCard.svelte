@@ -125,6 +125,10 @@
 	let activeTab = $state('general');
 	let searchQuery = $state('');
 
+	// Delete confirmation state
+	let deletingId = $state<string | null>(null);
+	let deleteLoading = $state(false);
+
 	// Profile form state
 	let profileForm = $state({
 		id: '',
@@ -641,9 +645,16 @@
 		}
 	}
 
-	async function deleteProfile(profileId: string) {
-		if (confirm('Delete this profile?')) {
-			await tabsStore.deleteProfile(profileId);
+	async function confirmDeleteProfile() {
+		if (!deletingId) return;
+		deleteLoading = true;
+		try {
+			await tabsStore.deleteProfile(deletingId);
+			deletingId = null;
+		} catch (err: any) {
+			console.error('Failed to delete profile:', err);
+		} finally {
+			deleteLoading = false;
 		}
 	}
 
@@ -1498,117 +1509,157 @@
 					</div>
 				{:else}
 					{#each filteredProfiles as profile}
-						<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-						<div
-							class="card-list-item"
-							onclick={() => !profile.is_builtin && openEditForm(profile)}
-						>
-							<div class="card-item-icon">
-								<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path
-										stroke-linecap="round"
-										stroke-linejoin="round"
-										stroke-width="2"
-										d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"
-									/>
-								</svg>
-							</div>
-							<div class="card-item-content">
-								<div class="card-item-header">
-									<span class="card-item-name">{profile.name}</span>
-									{#if profile.is_builtin}
-										<span class="card-badge card-badge--muted">Built-in</span>
-									{/if}
-									{#if groups?.profiles?.assignments?.[profile.id]}
-										<span class="card-badge card-badge--primary"
-											>{groups.profiles.assignments[profile.id]}</span
-										>
-									{/if}
-								</div>
-								<p class="card-item-description">{profile.description || profile.id}</p>
-							</div>
-							<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-							<div class="card-item-actions" onclick={(e) => e.stopPropagation()}>
-								<!-- Group dropdown -->
-								<div class="dropdown-container">
-									<button class="card-action-btn" title="Assign to group">
-										<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path
-												stroke-linecap="round"
-												stroke-linejoin="round"
-												stroke-width="2"
-												d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"
-											/>
-										</svg>
-									</button>
-									<div class="dropdown-menu">
-										{#each groups?.profiles?.groups || [] as group}
-											<button
-												class="dropdown-item"
-												onclick={() => assignToGroup(profile.id, group.name)}
-											>
-												{#if groups?.profiles?.assignments?.[profile.id] === group.name}
-													<svg class="check-icon small" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-													</svg>
-												{:else}
-													<span class="spacer"></span>
-												{/if}
-												{group.name}
-											</button>
-										{/each}
-										{#if groups?.profiles?.assignments?.[profile.id]}
-											<button
-												class="dropdown-item muted"
-												onclick={() => removeFromGroup(profile.id)}
-											>
-												<span class="spacer"></span>
-												Remove
-											</button>
-										{/if}
-										<div class="dropdown-divider"></div>
-										<button
-											class="dropdown-item muted"
-											onclick={() => createGroup(profile.id)}
-										>
-											<span class="spacer"></span>
-											+ New group
-										</button>
-									</div>
-								</div>
-
-								<button
-									class="card-action-btn"
-									title="Export"
-									onclick={() => handleExportProfile(profile.id)}
-								>
+						{#if deletingId === profile.id}
+							<!-- Inline delete confirmation -->
+							<div class="card-list-item card-list-item--deleting">
+								<div class="card-item-icon card-item-icon--destructive">
 									<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<path
 											stroke-linecap="round"
 											stroke-linejoin="round"
 											stroke-width="2"
-											d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
+											d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
 										/>
 									</svg>
-								</button>
-								{#if !profile.is_builtin}
+								</div>
+								<div class="card-item-content">
+									<p class="delete-confirm-text">
+										Delete <strong>{profile.name}</strong>? This cannot be undone.
+									</p>
+									<div class="delete-confirm-actions">
+										<button
+											onclick={() => (deletingId = null)}
+											disabled={deleteLoading}
+											class="card-btn-secondary"
+										>
+											Cancel
+										</button>
+										<button
+											onclick={confirmDeleteProfile}
+											disabled={deleteLoading}
+											class="card-btn-destructive"
+										>
+											{#if deleteLoading}
+												<div class="card-spinner card-spinner--small"></div>
+											{/if}
+											Delete
+										</button>
+									</div>
+								</div>
+							</div>
+						{:else}
+							<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+							<div
+								class="card-list-item"
+								onclick={() => !profile.is_builtin && openEditForm(profile)}
+							>
+								<div class="card-item-icon">
+									<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path
+											stroke-linecap="round"
+											stroke-linejoin="round"
+											stroke-width="2"
+											d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"
+										/>
+									</svg>
+								</div>
+								<div class="card-item-content">
+									<div class="card-item-header">
+										<span class="card-item-name">{profile.name}</span>
+										{#if profile.is_builtin}
+											<span class="card-badge card-badge--muted">Built-in</span>
+										{/if}
+										{#if groups?.profiles?.assignments?.[profile.id]}
+											<span class="card-badge card-badge--primary"
+												>{groups.profiles.assignments[profile.id]}</span
+											>
+										{/if}
+									</div>
+									<p class="card-item-description">{profile.description || profile.id}</p>
+								</div>
+								<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+								<div class="card-item-actions" onclick={(e) => e.stopPropagation()}>
+									<!-- Group dropdown -->
+									<div class="dropdown-container">
+										<button class="card-action-btn" title="Assign to group">
+											<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path
+													stroke-linecap="round"
+													stroke-linejoin="round"
+													stroke-width="2"
+													d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"
+												/>
+											</svg>
+										</button>
+										<div class="dropdown-menu">
+											{#each groups?.profiles?.groups || [] as group}
+												<button
+													class="dropdown-item"
+													onclick={() => assignToGroup(profile.id, group.name)}
+												>
+													{#if groups?.profiles?.assignments?.[profile.id] === group.name}
+														<svg class="check-icon small" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+														</svg>
+													{:else}
+														<span class="spacer"></span>
+													{/if}
+													{group.name}
+												</button>
+											{/each}
+											{#if groups?.profiles?.assignments?.[profile.id]}
+												<button
+													class="dropdown-item muted"
+													onclick={() => removeFromGroup(profile.id)}
+												>
+													<span class="spacer"></span>
+													Remove
+												</button>
+											{/if}
+											<div class="dropdown-divider"></div>
+											<button
+												class="dropdown-item muted"
+												onclick={() => createGroup(profile.id)}
+											>
+												<span class="spacer"></span>
+												+ New group
+											</button>
+										</div>
+									</div>
+
 									<button
-										class="card-action-btn card-action-btn--destructive"
-										title="Delete"
-										onclick={() => deleteProfile(profile.id)}
+										class="card-action-btn"
+										title="Export"
+										onclick={() => handleExportProfile(profile.id)}
 									>
 										<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
 											<path
 												stroke-linecap="round"
 												stroke-linejoin="round"
 												stroke-width="2"
-												d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+												d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
 											/>
 										</svg>
 									</button>
-								{/if}
+									{#if !profile.is_builtin}
+										<button
+											class="card-action-btn card-action-btn--destructive"
+											title="Delete"
+											onclick={() => (deletingId = profile.id)}
+										>
+											<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path
+													stroke-linecap="round"
+													stroke-linejoin="round"
+													stroke-width="2"
+													d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+												/>
+											</svg>
+										</button>
+									{/if}
+								</div>
 							</div>
-						</div>
+						{/if}
 					{/each}
 				{/if}
 				</div>
@@ -1708,6 +1759,9 @@
 		width: 100%;
 		max-width: 900px;
 		margin: 0 auto;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-4, 16px);
 	}
 
 	/* Search Wrapper - for padding around search */
