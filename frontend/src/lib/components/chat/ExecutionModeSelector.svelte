@@ -3,12 +3,13 @@
 	 * ExecutionModeSelector - Mode selector for empty chat state
 	 *
 	 * Allows user to choose between Local mode (work on current branch)
-	 * or Work Tree mode (create new worktree or use existing one).
+	 * or Worktree mode (create new worktree or use existing one).
+	 * Worktree option is only shown for git repositories.
 	 *
 	 * Only shown in empty state - disappears once chat starts.
 	 */
 	import { tabs, type ChatTab, type ExecutionMode } from '$lib/stores/tabs';
-	import { getBranches, getWorktrees, syncWorktrees, type Branch, type Worktree } from '$lib/api/git';
+	import { getBranches, getWorktrees, syncWorktrees, getGitStatus, type Branch, type Worktree } from '$lib/api/git';
 	import { onMount } from 'svelte';
 
 	interface Props {
@@ -31,6 +32,20 @@
 	let lastLoadedProject = $state<string | null>(null);
 	let lastSyncedProject = $state<string | null>(null);
 	let lastLoadedWorktreesProject = $state<string | null>(null);
+	let isGitRepo = $state<boolean | null>(null);
+	let lastCheckedGitProject = $state<string | null>(null);
+
+	// Check if project is a git repo when project changes
+	$effect(() => {
+		const project = tab.project;
+
+		if (project && project !== lastCheckedGitProject) {
+			checkIfGitRepo(project);
+		} else if (!project) {
+			isGitRepo = null;
+			lastCheckedGitProject = null;
+		}
+	});
 
 	// Sync worktrees when project changes (clean up stale database records)
 	$effect(() => {
@@ -66,6 +81,23 @@
 			loadWorktrees(project);
 		}
 	});
+
+	async function checkIfGitRepo(projectId: string) {
+		try {
+			const status = await getGitStatus(projectId);
+			isGitRepo = status.is_git_repo;
+			lastCheckedGitProject = projectId;
+
+			// If the project is not a git repo and worktree mode is selected, switch to local
+			if (!status.is_git_repo && tab.executionMode === 'worktree') {
+				setExecutionMode('local');
+			}
+		} catch (e) {
+			console.warn('[GitCheck] Failed to check git status:', e);
+			isGitRepo = false;
+			lastCheckedGitProject = projectId;
+		}
+	}
 
 	async function syncProjectWorktrees(projectId: string) {
 		try {
@@ -195,6 +227,7 @@
 			type="button"
 			class="segment-btn"
 			class:active={tab.executionMode === 'local'}
+			class:full-width={!isGitRepo}
 			onclick={() => setExecutionMode('local')}
 		>
 			<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -202,17 +235,19 @@
 			</svg>
 			<span>Local</span>
 		</button>
-		<button
-			type="button"
-			class="segment-btn"
-			class:active={tab.executionMode === 'worktree'}
-			onclick={() => setExecutionMode('worktree')}
-		>
-			<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
-			</svg>
-			<span>Work Tree</span>
-		</button>
+		{#if isGitRepo}
+			<button
+				type="button"
+				class="segment-btn"
+				class:active={tab.executionMode === 'worktree'}
+				onclick={() => setExecutionMode('worktree')}
+			>
+				<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+				</svg>
+				<span>Worktree</span>
+			</button>
+		{/if}
 	</div>
 
 	<!-- Work Tree Options -->
@@ -397,7 +432,7 @@
 
 			{#if !tab.project}
 				<div class="warning-text">
-					Select a project to use Work Tree mode
+					Select a project to use Worktree mode
 				</div>
 			{/if}
 		</div>
@@ -450,7 +485,12 @@
 		background: color-mix(in srgb, var(--card) 100%, transparent);
 	}
 
-	/* Work Tree Options */
+	.segment-btn.full-width {
+		flex: none;
+		width: 100%;
+	}
+
+	/* Worktree Options */
 	.worktree-options {
 		display: flex;
 		flex-direction: column;
