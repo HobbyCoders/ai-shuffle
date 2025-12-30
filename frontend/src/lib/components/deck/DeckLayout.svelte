@@ -170,14 +170,14 @@
 						onmouseenter={handleMenuEnter}
 						onmouseleave={handleMenuLeave}
 					>
-						<!-- AI Shuffle Button -->
+						<!-- New Card Button -->
 						<button
 							class="menu-button"
 							onclick={handleDealerClick}
-							title="AI Shuffle"
+							title="New Card"
 						>
 							<Plus size={18} strokeWidth={2} class="menu-icon" />
-							<span class="menu-label">AI Shuffle</span>
+							<span class="menu-label">New Card</span>
 						</button>
 
 						<!-- Card Layout Button -->
