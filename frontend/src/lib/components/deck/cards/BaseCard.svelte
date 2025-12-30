@@ -528,6 +528,13 @@
 		user-select: none;
 		flex-shrink: 0;
 		position: relative;
+		/* Clip to match parent's top rounded corners */
+		border-radius: 12px 12px 0 0;
+		overflow: hidden;
+	}
+
+	.base-card.maximized .card-header {
+		border-radius: 0;
 	}
 
 	/* Subtle top highlight for depth */
