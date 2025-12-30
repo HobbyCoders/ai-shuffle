@@ -10,28 +10,32 @@
 	 * - Full accessibility support with ARIA attributes
 	 */
 
-	import { MessageSquare, History, FolderOpen, User, Bot } from 'lucide-svelte';
+	import { MessageSquare, History, FolderOpen, User, Bot, Key, Files } from 'lucide-svelte';
 	import WelcomeTitle from './WelcomeTitle.svelte';
 	import SpotlightEffect from './SpotlightEffect.svelte';
 
 	interface Props {
 		onCreateCard: (type: string) => void;
+		isApiUser?: boolean;
 	}
 
-	let { onCreateCard }: Props = $props();
+	let { onCreateCard, isApiUser = false }: Props = $props();
 
 	// Carousel layout constants - single source of truth
 	const CARD_WIDTH_PERCENT = 0.75; // Card is 75% of viewport
 	const CARD_GAP = 16; // Gap between cards in pixels
 	const SCROLL_DEBOUNCE_MS = 100; // Debounce delay to let scroll-snap settle
 
-	// Card definitions - same as WelcomeCards.svelte with proper typing
-	const cards: Array<{
+	// Card type definition
+	type CardDef = {
 		type: string;
 		label: string;
 		description: string;
 		icon: typeof MessageSquare;
-	}> = [
+	};
+
+	// Admin card definitions
+	const adminCards: CardDef[] = [
 		{
 			type: 'chat',
 			label: 'CHAT',
@@ -63,6 +67,37 @@
 			icon: Bot,
 		}
 	];
+
+	// API user card definitions (limited set)
+	const apiUserCards: CardDef[] = [
+		{
+			type: 'chat',
+			label: 'CHAT',
+			description: 'Start a conversation',
+			icon: MessageSquare,
+		},
+		{
+			type: 'recent-sessions',
+			label: 'RECENT',
+			description: 'Recent conversations',
+			icon: History,
+		},
+		{
+			type: 'file-browser',
+			label: 'FILES',
+			description: 'Browse project files',
+			icon: Files,
+		},
+		{
+			type: 'user-settings',
+			label: 'SETTINGS',
+			description: 'API keys & profile',
+			icon: Key,
+		}
+	];
+
+	// Select cards based on user type
+	const cards = $derived(isApiUser ? apiUserCards : adminCards);
 
 	// Carousel state - relies entirely on CSS scroll-snap for smooth swiping
 	let currentIndex = $state(0);

@@ -10,7 +10,8 @@
 	 */
 	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { isAuthenticated, isAdmin } from '$lib/stores/auth';
+	import { isAuthenticated, isAdmin, apiUser } from '$lib/stores/auth';
+	import { credentials } from '$lib/stores/credentials';
 	import {
 		tabs,
 		allTabs,
@@ -280,6 +281,11 @@
 		if ($isAdmin) {
 			tabs.loadApiUsers();
 			tabs.loadAdminSessions();
+		}
+
+		// Load credentials for API users (needed for feature gating)
+		if ($apiUser) {
+			credentials.load();
 		}
 
 		// Sync deck state from server for cross-device sync
@@ -935,6 +941,7 @@
 					onCloseCard={handleCardClose}
 					onCreateCard={handleCreateCard}
 					onOpenNavigator={() => showCardNavigator = true}
+					isApiUser={!!$apiUser}
 				>
 					{#snippet children(card)}
 						{@const tabId = getTabIdForCard(card)}
@@ -1083,6 +1090,7 @@
 					onLayoutModeChange={handleLayoutModeChange}
 					onFocusNavigate={handleFocusNavigate}
 					focusedCardId={$focusedCardId}
+					isApiUser={!!$apiUser}
 				>
 					{#snippet children()}
 						<!-- Don't sort cards - z-index CSS handles visual stacking order -->
@@ -1323,7 +1331,9 @@
 		onOpenSubagents={() => handleCreateCard('subagent')}
 		onOpenSettings={() => handleCreateCard('settings')}
 		onOpenPlugins={() => handleCreateCard('plugins')}
+		onOpenUserSettings={() => handleCreateCard('user-settings')}
 		isAdmin={$isAdmin}
+		isApiUser={!!$apiUser}
 		{isMobile}
 		initialView={cardNavigatorInitialView}
 	/>

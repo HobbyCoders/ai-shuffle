@@ -5,9 +5,10 @@
 
 	interface Props {
 		onCreateCard: (type: string) => void;
+		isApiUser?: boolean;
 	}
 
-	let { onCreateCard }: Props = $props();
+	let { onCreateCard, isApiUser = false }: Props = $props();
 </script>
 
 <div class="welcome-hero">
@@ -21,7 +22,7 @@
 
 		<p class="welcome-tagline">Your AI workspace awaits</p>
 
-		<WelcomeCards {onCreateCard} />
+		<WelcomeCards {onCreateCard} {isApiUser} />
 	</div>
 </div>
 

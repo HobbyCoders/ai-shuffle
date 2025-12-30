@@ -8,6 +8,7 @@
 	import { tick, onDestroy, onMount } from 'svelte';
 	import { tabs, profiles, projects, type ChatTab } from '$lib/stores/tabs';
 	import { claudeAuthenticated, apiUser } from '$lib/stores/auth';
+	import { canUseOpenAI, credentialsLoaded } from '$lib/stores/credentials';
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
@@ -117,6 +118,15 @@
 	let mediaRecorder = $state<MediaRecorder | null>(null);
 	let audioChunks = $state<Blob[]>([]);
 	let recordingError = $state('');
+
+	// Check if recording is available based on OpenAI key policy
+	// For API users, they must have OpenAI key configured (either their own or admin-provided)
+	// For admins, we assume OpenAI is available (they control the keys)
+	const canRecord = $derived(
+		!$apiUser || // Admins can always record
+		!$credentialsLoaded || // Before credentials load, allow (will fail gracefully if no key)
+		$canUseOpenAI // API users need OpenAI key
+	);
 
 	// Autocomplete state
 	let showCommandAutocomplete = $state(false);
@@ -717,9 +727,9 @@
 						<button
 							type="button"
 							onclick={toggleRecording}
-							disabled={!$claudeAuthenticated || isUploading || isTranscribing}
+							disabled={!$claudeAuthenticated || isUploading || isTranscribing || !canRecord}
 							class="dock-action-btn {isRecording ? 'recording' : ''} {isTranscribing ? 'transcribing' : ''}"
-							title={isRecording ? 'Stop recording' : isTranscribing ? 'Transcribing...' : 'Voice input'}
+							title={!canRecord ? 'Configure OpenAI API key in Settings to use voice input' : isRecording ? 'Stop recording' : isTranscribing ? 'Transcribing...' : 'Voice input'}
 						>
 							{#if isTranscribing}
 								<svg class="w-[18px] h-[18px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">

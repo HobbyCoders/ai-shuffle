@@ -1,14 +1,16 @@
 <script lang="ts">
-	import { MessageSquare, History, FolderOpen, User, Bot } from 'lucide-svelte';
+	import { MessageSquare, History, FolderOpen, User, Bot, Key, Files } from 'lucide-svelte';
 	import WelcomeCard from './WelcomeCard.svelte';
 
 	interface Props {
 		onCreateCard: (type: string) => void;
+		isApiUser?: boolean;
 	}
 
-	let { onCreateCard }: Props = $props();
+	let { onCreateCard, isApiUser = false }: Props = $props();
 
-	const cards = [
+	// Cards available to admin users
+	const adminCards = [
 		{
 			type: 'chat',
 			label: 'CHAT',
@@ -55,6 +57,48 @@
 			offsetY: 24
 		}
 	];
+
+	// Cards available to API users (limited set)
+	const apiUserCards = [
+		{
+			type: 'chat',
+			label: 'CHAT',
+			description: 'Start a conversation',
+			icon: MessageSquare,
+			shortcut: '⌘N',
+			rotation: -8,
+			offsetY: 16
+		},
+		{
+			type: 'recent-sessions',
+			label: 'RECENT',
+			description: 'Recent conversations',
+			icon: History,
+			shortcut: '⌘R',
+			rotation: 0,
+			offsetY: 0
+		},
+		{
+			type: 'file-browser',
+			label: 'FILES',
+			description: 'Browse project files',
+			icon: Files,
+			shortcut: '⌘F',
+			rotation: 0,
+			offsetY: 0
+		},
+		{
+			type: 'user-settings',
+			label: 'SETTINGS',
+			description: 'API keys & profile',
+			icon: Key,
+			shortcut: '⌘,',
+			rotation: 8,
+			offsetY: 16
+		}
+	];
+
+	const cards = $derived(isApiUser ? apiUserCards : adminCards);
 </script>
 
 <div class="cards-container">

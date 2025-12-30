@@ -21,6 +21,7 @@
 		onCloseCard: (id: string) => void;
 		onCreateCard: (type: CardType) => void;
 		onOpenNavigator?: () => void;
+		isApiUser?: boolean;
 		children?: Snippet<[DeckCard]>;
 	}
 
@@ -31,6 +32,7 @@
 		onCloseCard,
 		onCreateCard,
 		onOpenNavigator,
+		isApiUser = false,
 		children
 	}: Props = $props();
 
@@ -192,7 +194,7 @@
 <div class="mobile-workspace">
 	{#if cards.length === 0}
 		<!-- Mobile Welcome Screen with Carousel -->
-		<MobileWelcome {onCreateCard} />
+		<MobileWelcome {onCreateCard} {isApiUser} />
 	{:else}
 		<!-- Mobile Header -->
 		<header class="mobile-header">
