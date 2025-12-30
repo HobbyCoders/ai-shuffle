@@ -98,6 +98,9 @@ export interface DeckState {
 	isMobile: boolean;
 	mobileActiveCardIndex: number;
 	layoutMode: LayoutMode;
+	// Shuffle animation state for stack layout
+	isShuffling: boolean;
+	shufflingCards: { outgoingId: string | null; incomingId: string | null };
 }
 
 // ============================================================================
@@ -358,7 +361,9 @@ function createDeckStore() {
 		gridSnapEnabled: persisted?.gridSnapEnabled ?? false,
 		isMobile: false,
 		mobileActiveCardIndex: 0,
-		layoutMode: persisted?.layoutMode || 'freeflow'
+		layoutMode: persisted?.layoutMode || 'freeflow',
+		isShuffling: false,
+		shufflingCards: { outgoingId: null, incomingId: null }
 	};
 
 	const { subscribe, set, update } = writable<DeckState>(initialState);
@@ -1209,7 +1214,9 @@ function createDeckStore() {
 				gridSnapEnabled: false,
 				isMobile: false,
 				mobileActiveCardIndex: 0,
-				layoutMode: 'freeflow'
+				layoutMode: 'freeflow',
+				isShuffling: false,
+				shufflingCards: { outgoingId: null, incomingId: null }
 			};
 			set(freshState);
 			saveToStorage(freshState);
@@ -1364,7 +1371,7 @@ function createDeckStore() {
 		},
 
 		/**
-		 * Stack layout: Left-side deck of card thumbnails + one main focused card
+		 * Stack layout: Left-side deck of compact card previews + one main focused card
 		 * Like a hand of cards fanned down on the left, with one card "in play" on the right
 		 */
 		applyStackLayout(cards: DeckCard[], boundsW: number, boundsH: number, paddingX: number, paddingY: number, paddingTop: number, focusedCardId?: string | null): DeckCard[] {
@@ -1373,7 +1380,8 @@ function createDeckStore() {
 			// Stack panel width for the card deck on the left
 			const stackPanelWidth = 260;
 			const stackPadding = 12;
-			const cardOverlap = 64; // How much each card overlaps the one above
+			const cardOverlap = 100; // Increased from 64 for better visibility with compact previews
+			const compactCardHeight = 90; // Fixed height for stacked preview cards
 
 			// Main card dimensions (takes up rest of workspace)
 			const mainCardX = stackPanelWidth + stackPadding;
@@ -1391,9 +1399,8 @@ function createDeckStore() {
 
 			let nextZ = Math.max(...cards.map(c => c.zIndex), 0) + 1;
 
-			// Stack cards (non-focused) - sort by creation time for consistent ordering
-			const stackCards = cards.filter(c => c.id !== focusedCard?.id)
-				.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+			// Stack cards (non-focused) - sort by array order to respect reordering
+			const stackCards = cards.filter(c => c.id !== focusedCard?.id);
 
 			return cards.map((card) => {
 				const isMainCard = card.id === focusedCard?.id;
@@ -1411,15 +1418,14 @@ function createDeckStore() {
 						savedSize: card.savedSize || { ...card.size }
 					};
 				} else {
-					// Stack cards: positioned in a fanned deck on the left
+					// Stack cards: compact preview cards fanned on the left
 					const stackIndex = stackCards.findIndex(c => c.id === card.id);
 					const yOffset = paddingTop + stackIndex * cardOverlap;
-					const cardHeight = Math.min(280, (boundsH - paddingTop - paddingY - (stackCards.length - 1) * cardOverlap));
 
 					return {
 						...card,
 						position: { x: stackPadding, y: yOffset },
-						size: { width: stackPanelWidth - stackPadding * 2, height: cardHeight },
+						size: { width: stackPanelWidth - stackPadding * 2, height: compactCardHeight },
 						zIndex: nextZ + stackIndex,
 						maximized: false,
 						snappedTo: null as SnapZone,
@@ -1470,7 +1476,7 @@ function createDeckStore() {
 		 */
 		getGridMetrics(): { cols: number; rows: number; cellWidth: number; cellHeight: number; paddingX: number; paddingY: number; paddingTop: number } | null {
 			const state = get({ subscribe });
-			if (state.layoutMode !== 'sidebyside' && state.layoutMode !== 'tile') {
+			if (state.layoutMode !== 'sidebyside' && state.layoutMode !== 'tile' && state.layoutMode !== 'stack') {
 				return null;
 			}
 
@@ -1487,13 +1493,33 @@ function createDeckStore() {
 				const cellWidth = (boundsW - (cols + 1) * paddingX) / cols;
 				const cellHeight = boundsH - paddingTop - paddingY;
 				return { cols, rows: 1, cellWidth, cellHeight, paddingX, paddingY, paddingTop };
-			} else {
-				// tile
+			} else if (state.layoutMode === 'tile') {
 				const cols = Math.ceil(Math.sqrt(count));
 				const rows = Math.ceil(count / cols);
 				const cellWidth = (boundsW - (cols + 1) * paddingX) / cols;
 				const cellHeight = (boundsH - paddingTop - rows * paddingY) / rows;
 				return { cols, rows, cellWidth, cellHeight, paddingX, paddingY, paddingTop };
+			} else {
+				// stack - vertical arrangement of non-focused cards
+				const stackPanelWidth = 260;
+				const stackPadding = 12;
+				const cardOverlap = 100;
+				const compactCardHeight = 90;
+
+				// Only count non-focused cards for stack metrics
+				const stackCardCount = state.focusedCardId
+					? state.cards.filter(c => c.id !== state.focusedCardId).length
+					: Math.max(0, state.cards.length - 1);
+
+				return {
+					cols: 1,
+					rows: stackCardCount,
+					cellWidth: stackPanelWidth - stackPadding * 2,
+					cellHeight: compactCardHeight,
+					paddingX: stackPadding,
+					paddingY: cardOverlap,
+					paddingTop: paddingTop
+				};
 			}
 		},
 
@@ -1517,7 +1543,7 @@ function createDeckStore() {
 				// For side-by-side, only X matters - find nearest column
 				const col = Math.round((centerX - paddingX - cellWidth / 2) / (cellWidth + paddingX));
 				return Math.max(0, Math.min(col, count - 1));
-			} else {
+			} else if (state.layoutMode === 'tile') {
 				// For tile, calculate row and column
 				const col = Math.round((centerX - paddingX - cellWidth / 2) / (cellWidth + paddingX));
 				const row = Math.round((centerY - paddingTop - cellHeight / 2) / (cellHeight + metrics.paddingY));
@@ -1525,21 +1551,69 @@ function createDeckStore() {
 				const clampedRow = Math.max(0, Math.min(row, rows - 1));
 				const index = clampedRow * cols + clampedCol;
 				return Math.max(0, Math.min(index, count - 1));
+			} else {
+				// For stack, only Y matters - vertical arrangement
+				const cardOverlap = 100;
+				const slotIndex = Math.round((y - paddingTop) / cardOverlap);
+
+				// Stack only contains non-focused cards
+				const stackCardCount = state.focusedCardId
+					? state.cards.filter(c => c.id !== state.focusedCardId).length
+					: Math.max(0, count - 1);
+
+				return Math.max(0, Math.min(slotIndex, stackCardCount - 1));
 			}
 		},
 
 		/**
 		 * Reorder a card to a new position in the array
-		 * Used during drag reordering in managed layouts (sidebyside, tile)
+		 * Used during drag reordering in managed layouts (sidebyside, tile, stack)
 		 * Reapplies layout after reordering to update card positions
 		 */
 		reorderCard(cardId: string, targetIndex: number): void {
 			update((state) => {
 				// Only allow reordering in managed grid layouts
-				if (state.layoutMode !== 'sidebyside' && state.layoutMode !== 'tile') {
+				if (state.layoutMode !== 'sidebyside' && state.layoutMode !== 'tile' && state.layoutMode !== 'stack') {
 					return state;
 				}
 
+				// In stack mode, don't allow reordering the focused (main) card
+				if (state.layoutMode === 'stack' && cardId === state.focusedCardId) {
+					return state;
+				}
+
+				// For stack layout, we need to work with non-focused cards only
+				if (state.layoutMode === 'stack') {
+					const stackCards = state.cards.filter(c => c.id !== state.focusedCardId);
+					const currentStackIndex = stackCards.findIndex(c => c.id === cardId);
+
+					if (currentStackIndex === -1 || currentStackIndex === targetIndex) {
+						return state;
+					}
+
+					// Clamp target index to valid range of stack cards
+					const clampedTarget = Math.max(0, Math.min(targetIndex, stackCards.length - 1));
+					if (currentStackIndex === clampedTarget) {
+						return state;
+					}
+
+					// Build new cards array with reordered stack cards
+					const newStackCards = [...stackCards];
+					const [movedCard] = newStackCards.splice(currentStackIndex, 1);
+					newStackCards.splice(clampedTarget, 0, movedCard);
+
+					// Rebuild full cards array: focused card + reordered stack cards
+					const focusedCard = state.cards.find(c => c.id === state.focusedCardId);
+					const newCards = focusedCard ? [focusedCard, ...newStackCards] : newStackCards;
+
+					// Apply layout to update positions
+					let newState: DeckState = { ...state, cards: newCards };
+					newState = this.applyLayout(newState, state.layoutMode);
+
+					return newState;
+				}
+
+				// Standard reorder for sidebyside/tile
 				const currentIndex = state.cards.findIndex(c => c.id === cardId);
 				if (currentIndex === -1 || currentIndex === targetIndex) {
 					return state;
@@ -1573,6 +1647,34 @@ function createDeckStore() {
 			const state = get({ subscribe });
 			saveToStorage(state);
 			saveToServer(state);
+		},
+
+		// ========================================================================
+		// Shuffle Animation (for stack layout)
+		// ========================================================================
+
+		/**
+		 * Start shuffle animation when swapping main card with a stacked card
+		 * @param outgoingId The current main card that will move to the stack
+		 * @param incomingId The stacked card that will become the main card
+		 */
+		startShuffle(outgoingId: string | null, incomingId: string): void {
+			update((state) => ({
+				...state,
+				isShuffling: true,
+				shufflingCards: { outgoingId, incomingId }
+			}));
+		},
+
+		/**
+		 * End shuffle animation (call after animation completes)
+		 */
+		endShuffle(): void {
+			update((state) => ({
+				...state,
+				isShuffling: false,
+				shufflingCards: { outgoingId: null, incomingId: null }
+			}));
 		},
 
 		/**
@@ -1670,6 +1772,10 @@ export const gridSnapEnabled = derived(deck, ($deck) => $deck.gridSnapEnabled);
 
 // Layout mode
 export const layoutMode = derived(deck, ($deck) => $deck.layoutMode);
+
+// Shuffle animation state (for stack layout)
+export const isShuffling = derived(deck, ($deck) => $deck.isShuffling);
+export const shufflingCards = derived(deck, ($deck) => $deck.shufflingCards);
 
 // Check if a specific card is focused
 export const isCardFocused = (cardId: string) =>
