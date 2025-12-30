@@ -112,6 +112,11 @@
 	let showAdvancedSearch = $state(false);
 	let showCardNavigator = $state(false);
 
+	// Reorder drag state (for sidebyside/tile layouts)
+	let reorderDragCardId: string | null = $state(null);
+	let reorderDragPosition: { x: number; y: number } | null = $state(null);
+	let isReorderTransitioning = $state(false);
+
 	// Terminal modal state
 	let terminalCommand = $state('/resume');
 	let terminalSessionId = $state('');
@@ -699,7 +704,22 @@
 
 		const { width, height } = card.size;
 
-		// Apply bounds clamping to prevent cards from going off-screen
+		// In managed grid layouts (sidebyside/tile), use reorder behavior
+		if ($layoutMode === 'sidebyside' || $layoutMode === 'tile') {
+			// Track drag position for the floating overlay
+			reorderDragCardId = id;
+			reorderDragPosition = { x, y };
+
+			// Enable transitions for other cards to animate
+			isReorderTransitioning = true;
+
+			// Calculate target slot and reorder if needed
+			const targetIndex = deck.calculateSlotIndex(x, y);
+			deck.reorderCard(id, targetIndex);
+			return;
+		}
+
+		// Freeflow mode: Apply bounds clamping to prevent cards from going off-screen
 		const clampedPos = workspaceRef.clampToBounds(x, y, width, height);
 
 		// Update the card position
@@ -711,7 +731,18 @@
 	}
 
 	function handleCardDragEnd(_id: string) {
-		// No-op: snapping has been removed
+		// In managed layouts, commit the reorder and clear drag state
+		if ($layoutMode === 'sidebyside' || $layoutMode === 'tile') {
+			deck.commitReorder();
+			reorderDragCardId = null;
+			reorderDragPosition = null;
+
+			// Keep transitions briefly for snap animation, then disable
+			setTimeout(() => {
+				isReorderTransitioning = false;
+			}, 250);
+			return;
+		}
 	}
 
 	function handleCardResizeEnd(_id: string) {
@@ -1008,6 +1039,8 @@
 							<div
 									class="card-wrapper"
 									class:maximized={card.maximized}
+									class:reorder-transitioning={isReorderTransitioning}
+									class:is-reorder-dragging={reorderDragCardId === card.id}
 									style:position="absolute"
 									style:left={card.maximized ? '0' : `${card.x}px`}
 									style:top={card.maximized ? '0' : `${card.y}px`}
@@ -1168,6 +1201,28 @@
 									{/if}
 								</div>
 						{/each}
+
+						<!-- Floating overlay for dragged card during reorder -->
+						{#if reorderDragCardId && reorderDragPosition}
+							{@const draggedCard = workspaceCards.find(c => c.id === reorderDragCardId)}
+							{#if draggedCard}
+								<div
+									class="reorder-drag-overlay"
+									style:left="{reorderDragPosition.x}px"
+									style:top="{reorderDragPosition.y}px"
+									style:width="{draggedCard.width}px"
+									style:height="{draggedCard.height}px"
+								>
+									<!-- Simplified preview of the card -->
+									<div class="h-full w-full flex flex-col rounded-xl overflow-hidden border border-primary/30 bg-card/95 backdrop-blur-md">
+										<div class="h-11 flex items-center gap-2 px-3 bg-secondary/80 border-b border-border">
+											<span class="text-sm font-medium text-foreground truncate">{draggedCard.title}</span>
+										</div>
+										<div class="flex-1 bg-card/50"></div>
+									</div>
+								</div>
+							{/if}
+						{/if}
 					{/snippet}
 				</Workspace>
 		{/if}
@@ -1315,6 +1370,31 @@
 		inset: 0 !important;
 		width: 100% !important;
 		height: 100% !important;
+	}
+
+	/* Smooth transitions during reorder drag for non-dragged cards */
+	.card-wrapper.reorder-transitioning:not(.is-reorder-dragging) {
+		transition: left 200ms cubic-bezier(0.4, 0, 0.2, 1),
+					top 200ms cubic-bezier(0.4, 0, 0.2, 1);
+	}
+
+	/* Hide the original card during reorder drag - the overlay shows it */
+	.card-wrapper.is-reorder-dragging {
+		opacity: 0;
+		pointer-events: none;
+	}
+
+	/* Floating drag overlay for reorder */
+	.reorder-drag-overlay {
+		position: absolute;
+		pointer-events: none;
+		z-index: 10000;
+		opacity: 0.9;
+		transform: scale(1.02);
+		box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3),
+					0 0 0 2px hsl(var(--primary) / 0.5);
+		border-radius: 12px;
+		overflow: hidden;
 	}
 
 	.card-loading,

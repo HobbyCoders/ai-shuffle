@@ -1460,6 +1460,121 @@ function createDeckStore() {
 			});
 		},
 
+		// ========================================================================
+		// Card Reordering (for managed layouts)
+		// ========================================================================
+
+		/**
+		 * Get grid metrics for current layout mode
+		 * Used for calculating slot positions during drag reordering
+		 */
+		getGridMetrics(): { cols: number; rows: number; cellWidth: number; cellHeight: number; paddingX: number; paddingY: number; paddingTop: number } | null {
+			const state = get({ subscribe });
+			if (state.layoutMode !== 'sidebyside' && state.layoutMode !== 'tile') {
+				return null;
+			}
+
+			const { width: boundsW, height: boundsH } = state.workspaceBounds;
+			const paddingX = 8;
+			const paddingY = 8;
+			const paddingTop = 8;
+			const count = state.cards.length;
+
+			if (count === 0) return null;
+
+			if (state.layoutMode === 'sidebyside') {
+				const cols = Math.min(count, 4);
+				const cellWidth = (boundsW - (cols + 1) * paddingX) / cols;
+				const cellHeight = boundsH - paddingTop - paddingY;
+				return { cols, rows: 1, cellWidth, cellHeight, paddingX, paddingY, paddingTop };
+			} else {
+				// tile
+				const cols = Math.ceil(Math.sqrt(count));
+				const rows = Math.ceil(count / cols);
+				const cellWidth = (boundsW - (cols + 1) * paddingX) / cols;
+				const cellHeight = (boundsH - paddingTop - rows * paddingY) / rows;
+				return { cols, rows, cellWidth, cellHeight, paddingX, paddingY, paddingTop };
+			}
+		},
+
+		/**
+		 * Calculate which slot index a position (x, y) maps to in the current grid layout
+		 * Returns clamped index within valid range [0, cardCount-1]
+		 */
+		calculateSlotIndex(x: number, y: number): number {
+			const state = get({ subscribe });
+			const metrics = this.getGridMetrics();
+			if (!metrics) return 0;
+
+			const { cols, rows, cellWidth, cellHeight, paddingX, paddingTop } = metrics;
+			const count = state.cards.length;
+
+			// Calculate center of dragged position
+			const centerX = x + cellWidth / 2;
+			const centerY = y + cellHeight / 2;
+
+			if (state.layoutMode === 'sidebyside') {
+				// For side-by-side, only X matters - find nearest column
+				const col = Math.round((centerX - paddingX - cellWidth / 2) / (cellWidth + paddingX));
+				return Math.max(0, Math.min(col, count - 1));
+			} else {
+				// For tile, calculate row and column
+				const col = Math.round((centerX - paddingX - cellWidth / 2) / (cellWidth + paddingX));
+				const row = Math.round((centerY - paddingTop - cellHeight / 2) / (cellHeight + metrics.paddingY));
+				const clampedCol = Math.max(0, Math.min(col, cols - 1));
+				const clampedRow = Math.max(0, Math.min(row, rows - 1));
+				const index = clampedRow * cols + clampedCol;
+				return Math.max(0, Math.min(index, count - 1));
+			}
+		},
+
+		/**
+		 * Reorder a card to a new position in the array
+		 * Used during drag reordering in managed layouts (sidebyside, tile)
+		 * Reapplies layout after reordering to update card positions
+		 */
+		reorderCard(cardId: string, targetIndex: number): void {
+			update((state) => {
+				// Only allow reordering in managed grid layouts
+				if (state.layoutMode !== 'sidebyside' && state.layoutMode !== 'tile') {
+					return state;
+				}
+
+				const currentIndex = state.cards.findIndex(c => c.id === cardId);
+				if (currentIndex === -1 || currentIndex === targetIndex) {
+					return state;
+				}
+
+				// Clamp target index to valid range
+				const clampedTarget = Math.max(0, Math.min(targetIndex, state.cards.length - 1));
+				if (currentIndex === clampedTarget) {
+					return state;
+				}
+
+				// Reorder the cards array
+				const newCards = [...state.cards];
+				const [card] = newCards.splice(currentIndex, 1);
+				newCards.splice(clampedTarget, 0, card);
+
+				// Apply layout to update positions
+				let newState: DeckState = { ...state, cards: newCards };
+				newState = this.applyLayout(newState, state.layoutMode);
+
+				// Don't persist during drag - only save on drag end
+				// This prevents excessive writes during rapid reordering
+				return newState;
+			});
+		},
+
+		/**
+		 * Commit card reorder to storage (call on drag end)
+		 */
+		commitReorder(): void {
+			const state = get({ subscribe });
+			saveToStorage(state);
+			saveToServer(state);
+		},
+
 		/**
 		 * Reapply current layout (useful when cards are added/removed or window resized)
 		 */
