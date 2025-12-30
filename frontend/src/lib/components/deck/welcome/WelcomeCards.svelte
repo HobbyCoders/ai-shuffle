@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { MessageSquare, Terminal, FolderOpen, User, Bot } from 'lucide-svelte';
+	import { MessageSquare, History, FolderOpen, User, Bot } from 'lucide-svelte';
 	import WelcomeCard from './WelcomeCard.svelte';
 
 	interface Props {
@@ -19,11 +19,11 @@
 			offsetY: 24
 		},
 		{
-			type: 'terminal',
-			label: 'TERMINAL',
-			description: 'Open command line',
-			icon: Terminal,
-			shortcut: '⌘T',
+			type: 'recent-sessions',
+			label: 'RECENT',
+			description: 'Recent conversations',
+			icon: History,
+			shortcut: '⌘R',
 			rotation: -5,
 			offsetY: 8
 		},

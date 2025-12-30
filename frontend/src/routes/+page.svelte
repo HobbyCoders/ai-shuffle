@@ -114,6 +114,7 @@
 	let showSpotlight = $state(false);
 	let showAdvancedSearch = $state(false);
 	let showCardNavigator = $state(false);
+	let cardNavigatorInitialView = $state<'main' | 'recent'>('main');
 
 	// Reorder drag state (for sidebyside/tile layouts)
 	let reorderDragCardId: string | null = $state(null);
@@ -595,6 +596,11 @@
 				deckCardType = 'terminal';
 				title = 'Terminal';
 				break;
+			case 'recent-sessions':
+				// Open the card navigator directly to the recent sessions view
+				cardNavigatorInitialView = 'recent';
+				showCardNavigator = true;
+				return; // Don't create a card
 			case 'settings': {
 				// Singleton - check if already open
 				const existingSettings = $allCards.find(c => c.type === 'settings');
@@ -1301,7 +1307,10 @@
 	<!-- Card Deck Navigator (AI Shuffle themed) -->
 	<CardDeckNavigator
 		open={showCardNavigator}
-		onClose={() => showCardNavigator = false}
+		onClose={() => {
+			showCardNavigator = false;
+			cardNavigatorInitialView = 'main'; // Reset for next open
+		}}
 		onCreateChat={() => handleCreateCard('chat')}
 		onCreateTerminal={() => handleCreateCard('terminal')}
 		onOpenThread={handleNavigatorOpenThread}
@@ -1316,6 +1325,7 @@
 		onOpenPlugins={() => handleCreateCard('plugins')}
 		isAdmin={$isAdmin}
 		{isMobile}
+		initialView={cardNavigatorInitialView}
 	/>
 
 

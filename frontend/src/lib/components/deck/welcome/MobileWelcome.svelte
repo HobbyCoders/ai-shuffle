@@ -10,13 +10,12 @@
 	 * - Full accessibility support with ARIA attributes
 	 */
 
-	import { MessageSquare, Terminal, FolderOpen, User, Bot } from 'lucide-svelte';
+	import { MessageSquare, History, FolderOpen, User, Bot } from 'lucide-svelte';
 	import WelcomeTitle from './WelcomeTitle.svelte';
 	import SpotlightEffect from './SpotlightEffect.svelte';
-	import type { CardType } from '../cards/types';
 
 	interface Props {
-		onCreateCard: (type: CardType) => void;
+		onCreateCard: (type: string) => void;
 	}
 
 	let { onCreateCard }: Props = $props();
@@ -28,7 +27,7 @@
 
 	// Card definitions - same as WelcomeCards.svelte with proper typing
 	const cards: Array<{
-		type: CardType;
+		type: string;
 		label: string;
 		description: string;
 		icon: typeof MessageSquare;
@@ -40,10 +39,10 @@
 			icon: MessageSquare,
 		},
 		{
-			type: 'terminal',
-			label: 'TERMINAL',
-			description: 'Open command line',
-			icon: Terminal,
+			type: 'recent-sessions',
+			label: 'RECENT',
+			description: 'Recent conversations',
+			icon: History,
 		},
 		{
 			type: 'project',

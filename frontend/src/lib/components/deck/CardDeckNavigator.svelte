@@ -50,6 +50,7 @@
 		onOpenPlugins?: () => void;
 		isAdmin?: boolean;
 		isMobile?: boolean;
+		initialView?: 'main' | 'recent';
 	}
 
 	let {
@@ -68,7 +69,8 @@
 		onOpenSettings,
 		onOpenPlugins,
 		isAdmin = false,
-		isMobile = false
+		isMobile = false,
+		initialView = 'main'
 	}: Props = $props();
 
 	// Navigation stack for breadcrumb
@@ -169,6 +171,17 @@
 
 	// Get sessions from tabs store
 	const sessions = $derived($tabs.sessions);
+
+	// Navigate to initial view when opened
+	$effect(() => {
+		if (open && initialView === 'recent') {
+			currentView = 'recent';
+			navStack = [
+				{ id: 'root', name: 'AI Shuffle', type: 'root' },
+				{ id: 'recent', name: 'Recent', type: 'category' }
+			];
+		}
+	});
 
 	// Get active streaming cards
 	const activeCards = $derived($deck.cards.filter(c => c.type === 'chat'));
