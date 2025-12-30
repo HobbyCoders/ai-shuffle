@@ -1,5 +1,0 @@
-{
-  "name": "demo-plugin",
-  "version": "1.0.0",
-  "description": "A demo plugin showing how to extend Claude with custom commands and agents"
-}
