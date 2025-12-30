@@ -2,11 +2,13 @@
 	/**
 	 * CardShuffle - Focus mode navigation for card arrangement
 	 *
-	 * Only shows when in Focus mode with multiple cards.
+	 * Only shows when in Focus mode with multiple cards on desktop.
+	 * Hidden on mobile (<640px).
 	 * Displays page navigation controls (prev/next, current/total).
 	 * Layout mode selection has been moved to DeckLayout menu.
 	 */
 
+	import { onMount } from 'svelte';
 	import { ChevronLeft, ChevronRight } from 'lucide-svelte';
 	import type { LayoutMode } from '$lib/stores/deck';
 
@@ -27,8 +29,21 @@
 		onFocusNavigate
 	}: Props = $props();
 
-	// Only show when in focus mode with multiple cards
-	const showFocusNav = $derived(currentMode === 'focus' && focusModeTotal > 1);
+	// Track mobile state
+	let isMobile = $state(false);
+
+	function checkMobile() {
+		isMobile = window.innerWidth < 640;
+	}
+
+	onMount(() => {
+		checkMobile();
+		window.addEventListener('resize', checkMobile);
+		return () => window.removeEventListener('resize', checkMobile);
+	});
+
+	// Only show when in focus mode with multiple cards AND not on mobile
+	const showFocusNav = $derived(currentMode === 'focus' && focusModeTotal > 1 && !isMobile);
 
 	// Handle focus navigation button click
 	function handleFocusNavClick(e: MouseEvent, direction: 'prev' | 'next') {
