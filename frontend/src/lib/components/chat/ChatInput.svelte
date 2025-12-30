@@ -1394,14 +1394,46 @@
 		background: rgba(0, 0, 0, 0.25);
 	}
 
-	/* Responsive: hide selector text on mobile */
-	@media (max-width: 500px) {
-		.selector-text {
+	/* Responsive: mobile layout adjustments */
+	@media (max-width: 639px) {
+		/* Hide the usage bar on mobile, only show percentage */
+		.usage-bar {
 			display: none;
 		}
 
+		/* Make usage indicator more compact */
+		.usage-indicator {
+			padding: 4px 6px;
+			gap: 0;
+		}
+
+		/* Show selector text on mobile (profile/project names) */
+		.selector-text {
+			display: block;
+			max-width: 60px;
+			font-size: 11px;
+		}
+
+		/* Make selectors more compact */
 		.context-selector-btn {
-			padding: 4px;
+			padding: 4px 6px 4px 4px;
+			gap: 4px;
+		}
+
+		/* Smaller selector icon */
+		.selector-icon {
+			width: 18px;
+			height: 18px;
+		}
+
+		/* Hide chevron on mobile to save space */
+		.context-selector-btn .chevron {
+			display: none;
+		}
+
+		/* Reduce center gap */
+		.controls-center {
+			gap: 2px;
 		}
 	}
 </style>
