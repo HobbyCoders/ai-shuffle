@@ -271,14 +271,14 @@
 	}
 
 	/* Invisible trigger zone - narrower area at top to detect mouse
-	   Reduced width (200px) and added vertical offset (12px) to avoid
-	   overlap with card close/maximize buttons in side-by-side layout */
+	   Narrowed to 160px to avoid overlap with card close buttons.
+	   Cards now have 48px top padding buffer for this trigger zone. */
 	.trigger-zone {
 		position: absolute;
 		top: 12px;
 		left: 50%;
 		transform: translateX(-50%);
-		width: 200px;
+		width: 160px;
 		height: 32px;
 		pointer-events: auto;
 	}

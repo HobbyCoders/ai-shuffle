@@ -1227,29 +1227,32 @@ function createDeckStore() {
 			if (state.cards.length === 0) return state;
 
 			const { width: boundsW, height: boundsH } = state.workspaceBounds;
-			const padding = 8; // Padding between cards
+			// Asymmetric padding: extra top space for CardShuffle trigger zone
+			const paddingX = 8;    // Left/right padding between cards
+			const paddingY = 8;    // Bottom padding
+			const paddingTop = 48; // Top padding - buffer for CardShuffle dropdown trigger
 
 			let updatedCards: DeckCard[];
 
 			switch (mode) {
 				case 'sidebyside':
 					// Cards arranged side-by-side in vertical columns
-					updatedCards = this.applySideBySideLayout(state.cards, boundsW, boundsH, padding);
+					updatedCards = this.applySideBySideLayout(state.cards, boundsW, boundsH, paddingX, paddingY, paddingTop);
 					break;
 
 				case 'tile':
 					// Cards tiled in a grid pattern
-					updatedCards = this.applyTileLayout(state.cards, boundsW, boundsH, padding);
+					updatedCards = this.applyTileLayout(state.cards, boundsW, boundsH, paddingX, paddingY, paddingTop);
 					break;
 
 				case 'stack':
 					// Cards in left-side deck with main focused card
-					updatedCards = this.applyStackLayout(state.cards, boundsW, boundsH, state.focusedCardId);
+					updatedCards = this.applyStackLayout(state.cards, boundsW, boundsH, paddingX, paddingY, paddingTop, state.focusedCardId);
 					break;
 
 				case 'focus':
 					// One main card takes most space, others in sidebar
-					updatedCards = this.applyFocusLayout(state.cards, boundsW, boundsH, padding, state.focusedCardId);
+					updatedCards = this.applyFocusLayout(state.cards, boundsW, boundsH, paddingX, state.focusedCardId);
 					break;
 
 				default:
@@ -1263,21 +1266,21 @@ function createDeckStore() {
 		/**
 		 * Side-by-side layout: Cards arranged in equal-width vertical columns
 		 */
-		applySideBySideLayout(cards: DeckCard[], boundsW: number, boundsH: number, padding: number): DeckCard[] {
+		applySideBySideLayout(cards: DeckCard[], boundsW: number, boundsH: number, paddingX: number, paddingY: number, paddingTop: number): DeckCard[] {
 			const count = cards.length;
 			if (count === 0) return cards;
 
 			// Calculate column width - max 4 columns, then start scrolling
 			const maxCols = Math.min(count, 4);
-			const cardWidth = (boundsW - (maxCols + 1) * padding) / maxCols;
-			const cardHeight = boundsH - padding * 2;
+			const cardWidth = (boundsW - (maxCols + 1) * paddingX) / maxCols;
+			const cardHeight = boundsH - paddingTop - paddingY;
 
 			return cards.map((card, index) => {
-				const x = padding + index * (cardWidth + padding);
+				const x = paddingX + index * (cardWidth + paddingX);
 
 				return {
 					...card,
-					position: { x, y: padding },
+					position: { x, y: paddingTop },
 					size: { width: cardWidth, height: cardHeight },
 					maximized: false,
 					snappedTo: null as SnapZone,
@@ -1290,7 +1293,7 @@ function createDeckStore() {
 		/**
 		 * Tile layout: Cards tiled in a grid pattern with equal sizes
 		 */
-		applyTileLayout(cards: DeckCard[], boundsW: number, boundsH: number, padding: number): DeckCard[] {
+		applyTileLayout(cards: DeckCard[], boundsW: number, boundsH: number, paddingX: number, paddingY: number, paddingTop: number): DeckCard[] {
 			const count = cards.length;
 			if (count === 0) return cards;
 
@@ -1298,8 +1301,8 @@ function createDeckStore() {
 			const cols = Math.ceil(Math.sqrt(count));
 			const rows = Math.ceil(count / cols);
 
-			const cardWidth = (boundsW - (cols + 1) * padding) / cols;
-			const cardHeight = (boundsH - (rows + 1) * padding) / rows;
+			const cardWidth = (boundsW - (cols + 1) * paddingX) / cols;
+			const cardHeight = (boundsH - paddingTop - (rows) * paddingY) / rows;
 
 			return cards.map((card, idx) => {
 				const col = idx % cols;
@@ -1308,8 +1311,8 @@ function createDeckStore() {
 				return {
 					...card,
 					position: {
-						x: padding + col * (cardWidth + padding),
-						y: padding + row * (cardHeight + padding)
+						x: paddingX + col * (cardWidth + paddingX),
+						y: paddingTop + row * (cardHeight + paddingY)
 					},
 					size: { width: cardWidth, height: cardHeight },
 					maximized: false,
@@ -1324,7 +1327,7 @@ function createDeckStore() {
 		 * Stack layout: Left-side deck of card thumbnails + one main focused card
 		 * Like a hand of cards fanned down on the left, with one card "in play" on the right
 		 */
-		applyStackLayout(cards: DeckCard[], boundsW: number, boundsH: number, focusedCardId?: string | null): DeckCard[] {
+		applyStackLayout(cards: DeckCard[], boundsW: number, boundsH: number, paddingX: number, paddingY: number, paddingTop: number, focusedCardId?: string | null): DeckCard[] {
 			if (cards.length === 0) return cards;
 
 			// Stack panel width for the card deck on the left
@@ -1334,8 +1337,8 @@ function createDeckStore() {
 
 			// Main card dimensions (takes up rest of workspace)
 			const mainCardX = stackPanelWidth + stackPadding;
-			const mainCardWidth = boundsW - mainCardX - stackPadding;
-			const mainCardHeight = boundsH - stackPadding * 2;
+			const mainCardWidth = boundsW - mainCardX - paddingX;
+			const mainCardHeight = boundsH - paddingTop - paddingY;
 
 			// Find the focused card - use the highest z-index card or the last one
 			let focusedCard = focusedCardId
@@ -1359,7 +1362,7 @@ function createDeckStore() {
 					// Main card: positioned on the right, nearly full screen
 					return {
 						...card,
-						position: { x: mainCardX, y: stackPadding },
+						position: { x: mainCardX, y: paddingTop },
 						size: { width: mainCardWidth, height: mainCardHeight },
 						zIndex: nextZ + cards.length + 1,
 						maximized: false,
@@ -1370,8 +1373,8 @@ function createDeckStore() {
 				} else {
 					// Stack cards: positioned in a fanned deck on the left
 					const stackIndex = stackCards.findIndex(c => c.id === card.id);
-					const yOffset = stackPadding + stackIndex * cardOverlap;
-					const cardHeight = Math.min(280, (boundsH - stackPadding * 2 - (stackCards.length - 1) * cardOverlap));
+					const yOffset = paddingTop + stackIndex * cardOverlap;
+					const cardHeight = Math.min(280, (boundsH - paddingTop - paddingY - (stackCards.length - 1) * cardOverlap));
 
 					return {
 						...card,
@@ -1392,7 +1395,7 @@ function createDeckStore() {
 		 * Only the focused card is visible (has highest z-index)
 		 * Navigation buttons switch which card is on top
 		 */
-		applyFocusLayout(cards: DeckCard[], boundsW: number, boundsH: number, padding: number, focusedCardId: string | null): DeckCard[] {
+		applyFocusLayout(cards: DeckCard[], _boundsW: number, _boundsH: number, _padding: number, focusedCardId: string | null): DeckCard[] {
 			if (cards.length === 0) return cards;
 
 			// Find the focused card, or use the first card
