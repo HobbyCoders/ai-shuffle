@@ -51,11 +51,15 @@
 	// Drag state
 	let isDragging = $state(false);
 	let dragStart = $state({ x: 0, y: 0, cardX: 0, cardY: 0 });
+	let dragCaptureElement: HTMLElement | null = $state(null);
+	let dragPointerId: number | null = $state(null);
 
 	// Resize state
 	let isResizing = $state(false);
 	let resizeEdge = $state<string | null>(null);
 	let resizeStart = $state({ x: 0, y: 0, width: 0, height: 0, cardX: 0, cardY: 0 });
+	let resizeCaptureElement: HTMLElement | null = $state(null);
+	let resizePointerId: number | null = $state(null);
 
 	// Icon mapping
 	const cardIcons: Record<CardType, typeof MessageSquare> = {
@@ -127,8 +131,12 @@
 			cardY: card.y,
 		};
 
+		// Store the element and pointer ID for reliable release
+		dragCaptureElement = target;
+		dragPointerId = e.pointerId;
+
 		onFocus();
-		(e.target as HTMLElement).setPointerCapture(e.pointerId);
+		target.setPointerCapture(e.pointerId);
 	}
 
 	function handlePointerMove(e: PointerEvent) {
@@ -141,10 +149,31 @@
 
 	function handlePointerUp(e: PointerEvent) {
 		if (isDragging) {
-			isDragging = false;
-			(e.target as HTMLElement).releasePointerCapture(e.pointerId);
+			clearDragState();
 			onDragEnd?.();
 		}
+	}
+
+	function handlePointerCancel(e: PointerEvent) {
+		// Browser cancelled the gesture (e.g., system dialog, touch cancel)
+		if (isDragging) {
+			clearDragState();
+			onDragEnd?.();
+		}
+	}
+
+	function clearDragState() {
+		isDragging = false;
+		// Release pointer capture on the SAME element that captured it
+		if (dragCaptureElement && dragPointerId !== null) {
+			try {
+				dragCaptureElement.releasePointerCapture(dragPointerId);
+			} catch {
+				// Ignore - capture may have already been released
+			}
+		}
+		dragCaptureElement = null;
+		dragPointerId = null;
 	}
 
 	// Resize handling
@@ -152,6 +181,8 @@
 		if (card.maximized) return;
 
 		e.stopPropagation();
+		const target = e.target as HTMLElement;
+
 		isResizing = true;
 		resizeEdge = edge;
 		resizeStart = {
@@ -163,8 +194,12 @@
 			cardY: card.y,
 		};
 
+		// Store the element and pointer ID for reliable release
+		resizeCaptureElement = target;
+		resizePointerId = e.pointerId;
+
 		onFocus();
-		(e.target as HTMLElement).setPointerCapture(e.pointerId);
+		target.setPointerCapture(e.pointerId);
 	}
 
 	function handleResizeMove(e: PointerEvent) {
@@ -204,11 +239,32 @@
 
 	function handleResizeEnd(e: PointerEvent) {
 		if (isResizing) {
-			isResizing = false;
-			resizeEdge = null;
-			(e.target as HTMLElement).releasePointerCapture(e.pointerId);
+			clearResizeState();
 			onResizeEnd?.();
 		}
+	}
+
+	function handleResizeCancel(e: PointerEvent) {
+		// Browser cancelled the gesture
+		if (isResizing) {
+			clearResizeState();
+			onResizeEnd?.();
+		}
+	}
+
+	function clearResizeState() {
+		isResizing = false;
+		resizeEdge = null;
+		// Release pointer capture on the SAME element that captured it
+		if (resizeCaptureElement && resizePointerId !== null) {
+			try {
+				resizeCaptureElement.releasePointerCapture(resizePointerId);
+			} catch {
+				// Ignore - capture may have already been released
+			}
+		}
+		resizeCaptureElement = null;
+		resizePointerId = null;
 	}
 
 	// Double-click header to maximize/restore (disabled in managed layouts)
@@ -241,6 +297,7 @@
 		onpointerdown={handlePointerDown}
 		onpointermove={handlePointerMove}
 		onpointerup={handlePointerUp}
+		onpointercancel={handlePointerCancel}
 		ondblclick={handleHeaderDoubleClick}
 	>
 		<div class="header-left">
@@ -309,48 +366,56 @@
 			onpointerdown={(e) => handleResizeStart(e, 'n')}
 			onpointermove={handleResizeMove}
 			onpointerup={handleResizeEnd}
+			onpointercancel={handleResizeCancel}
 		></div>
 		<div
 			class="resize-handle s"
 			onpointerdown={(e) => handleResizeStart(e, 's')}
 			onpointermove={handleResizeMove}
 			onpointerup={handleResizeEnd}
+			onpointercancel={handleResizeCancel}
 		></div>
 		<div
 			class="resize-handle e"
 			onpointerdown={(e) => handleResizeStart(e, 'e')}
 			onpointermove={handleResizeMove}
 			onpointerup={handleResizeEnd}
+			onpointercancel={handleResizeCancel}
 		></div>
 		<div
 			class="resize-handle w"
 			onpointerdown={(e) => handleResizeStart(e, 'w')}
 			onpointermove={handleResizeMove}
 			onpointerup={handleResizeEnd}
+			onpointercancel={handleResizeCancel}
 		></div>
 		<div
 			class="resize-handle ne"
 			onpointerdown={(e) => handleResizeStart(e, 'ne')}
 			onpointermove={handleResizeMove}
 			onpointerup={handleResizeEnd}
+			onpointercancel={handleResizeCancel}
 		></div>
 		<div
 			class="resize-handle nw"
 			onpointerdown={(e) => handleResizeStart(e, 'nw')}
 			onpointermove={handleResizeMove}
 			onpointerup={handleResizeEnd}
+			onpointercancel={handleResizeCancel}
 		></div>
 		<div
 			class="resize-handle se"
 			onpointerdown={(e) => handleResizeStart(e, 'se')}
 			onpointermove={handleResizeMove}
 			onpointerup={handleResizeEnd}
+			onpointercancel={handleResizeCancel}
 		></div>
 		<div
 			class="resize-handle sw"
 			onpointerdown={(e) => handleResizeStart(e, 'sw')}
 			onpointermove={handleResizeMove}
 			onpointerup={handleResizeEnd}
+			onpointercancel={handleResizeCancel}
 		></div>
 	{/if}
 </div>
