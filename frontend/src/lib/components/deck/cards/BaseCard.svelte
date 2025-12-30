@@ -123,6 +123,44 @@
 		// Only start drag from header area, not buttons
 		if (target.closest('.window-controls') || target.closest('button')) return;
 
+		// In managed layouts, we use a simpler approach:
+		// - Don't capture the pointer (let events bubble naturally)
+		// - Track drag state for visual feedback only
+		// - Use window-level events for actual position tracking
+		if (isManagedLayout) {
+			isDragging = true;
+			dragStart = {
+				x: e.clientX,
+				y: e.clientY,
+				cardX: card.x,
+				cardY: card.y,
+			};
+			onFocus();
+
+			// Use window-level events instead of pointer capture
+			// This avoids issues with capture + reactive state updates
+			const handleWindowMove = (moveEvent: PointerEvent) => {
+				if (!isDragging) return;
+				const dx = moveEvent.clientX - dragStart.x;
+				const dy = moveEvent.clientY - dragStart.y;
+				onMove(dragStart.cardX + dx, dragStart.cardY + dy);
+			};
+
+			const handleWindowUp = () => {
+				isDragging = false;
+				window.removeEventListener('pointermove', handleWindowMove);
+				window.removeEventListener('pointerup', handleWindowUp);
+				window.removeEventListener('pointercancel', handleWindowUp);
+				onDragEnd?.();
+			};
+
+			window.addEventListener('pointermove', handleWindowMove);
+			window.addEventListener('pointerup', handleWindowUp);
+			window.addEventListener('pointercancel', handleWindowUp);
+			return;
+		}
+
+		// Freeflow mode: use pointer capture for precise tracking
 		isDragging = true;
 		dragStart = {
 			x: e.clientX,
@@ -140,7 +178,8 @@
 	}
 
 	function handlePointerMove(e: PointerEvent) {
-		if (!isDragging) return;
+		// Only used in freeflow mode (managed layouts use window events)
+		if (!isDragging || isManagedLayout) return;
 
 		const dx = e.clientX - dragStart.x;
 		const dy = e.clientY - dragStart.y;
@@ -148,15 +187,16 @@
 	}
 
 	function handlePointerUp(e: PointerEvent) {
-		if (isDragging) {
+		// Only used in freeflow mode (managed layouts use window events)
+		if (isDragging && !isManagedLayout) {
 			clearDragState();
 			onDragEnd?.();
 		}
 	}
 
 	function handlePointerCancel(e: PointerEvent) {
-		// Browser cancelled the gesture (e.g., system dialog, touch cancel)
-		if (isDragging) {
+		// Only used in freeflow mode (managed layouts use window events)
+		if (isDragging && !isManagedLayout) {
 			clearDragState();
 			onDragEnd?.();
 		}
