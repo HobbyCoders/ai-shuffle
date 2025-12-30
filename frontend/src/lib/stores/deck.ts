@@ -1270,7 +1270,7 @@ function createDeckStore() {
 			// Asymmetric padding: minimal top space for CardShuffle trigger zone
 			const paddingX = 8;    // Left/right padding between cards
 			const paddingY = 8;    // Bottom padding
-			const paddingTop = 24; // Top padding - compact buffer for CardShuffle dropdown trigger
+			const paddingTop = 28; // Top padding - buffer for CardShuffle dropdown trigger
 
 			let updatedCards: DeckCard[];
 

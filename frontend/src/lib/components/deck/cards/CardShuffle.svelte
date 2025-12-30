@@ -585,7 +585,7 @@
 	/* Hover indicator - the actual hover target for showing layout dropdown */
 	.hover-indicator {
 		position: absolute;
-		top: 4px;
+		top: 6px;
 		left: 50%;
 		transform: translateX(-50%);
 		pointer-events: auto;
@@ -598,7 +598,7 @@
 		align-items: center;
 		justify-content: center;
 		gap: 4px;
-		padding: 8px 12px;
+		padding: 6px 12px;
 		background: rgba(255, 255, 255, 0.04);
 		border: 1px solid rgba(255, 255, 255, 0.08);
 		border-radius: 12px;
