@@ -91,16 +91,12 @@
 	let scrollProgress = $state(0);
 	const DRAG_THRESHOLD = 5;
 
-	// Mobile carousel state (MobileWelcome-style)
+	// Mobile carousel state - relies on CSS scroll-snap for smooth swiping
 	const MOBILE_CARD_WIDTH_PERCENT = 0.75; // Card is 75% of viewport
 	const MOBILE_CARD_GAP = 16; // Gap between cards in pixels
-	const MOBILE_SWIPE_THRESHOLD = 50; // Minimum swipe distance to change cards
-	const MOBILE_SCROLL_DEBOUNCE_MS = 50; // Debounce delay for scroll handler
+	const MOBILE_SCROLL_DEBOUNCE_MS = 100; // Debounce delay to let scroll-snap settle
 	let mobileCarouselRef = $state<HTMLDivElement | null>(null);
 	let mobileCurrentIndex = $state(0);
-	let mobileTouchStartX = $state(0);
-	let mobileTouchDeltaX = $state(0);
-	let mobileIsSwiping = $state(false);
 	let mobileScrollDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 	// Edit mode state
@@ -1162,47 +1158,9 @@
 		mobileCarouselRef.scrollTo({ left: offset, behavior: 'smooth' });
 	}
 
-	// Mobile touch handlers for swiping (not edit mode drag)
-	function handleMobileTouchStart(e: TouchEvent) {
-		// Don't interfere with edit mode drag
-		if (isEditMode && isPointerDragging) return;
-
-		mobileTouchStartX = e.touches[0].clientX;
-		mobileTouchDeltaX = 0;
-		mobileIsSwiping = true;
-	}
-
-	function handleMobileTouchMove(e: TouchEvent) {
-		if (!mobileIsSwiping) return;
-		// Don't interfere with edit mode drag
-		if (isEditMode && isPointerDragging) return;
-
-		mobileTouchDeltaX = e.touches[0].clientX - mobileTouchStartX;
-	}
-
-	function handleMobileTouchEnd() {
-		if (!mobileIsSwiping) return;
-		mobileIsSwiping = false;
-
-		// Don't process swipe if we were dragging in edit mode
-		if (isEditMode && didDragInEditMode) return;
-
-		const cards = displayCards.filter(c => c.type !== 'add-deck' || isEditMode);
-
-		if (mobileTouchDeltaX < -MOBILE_SWIPE_THRESHOLD && mobileCurrentIndex < cards.length - 1) {
-			goToMobileCard(mobileCurrentIndex + 1);
-		} else if (mobileTouchDeltaX > MOBILE_SWIPE_THRESHOLD && mobileCurrentIndex > 0) {
-			goToMobileCard(mobileCurrentIndex - 1);
-		} else {
-			// Snap back to current card
-			scrollToMobileCard(mobileCurrentIndex);
-		}
-		mobileTouchDeltaX = 0;
-	}
-
-	// Handle mobile scroll snap detection (debounced)
+	// Handle mobile scroll snap detection (debounced) - CSS scroll-snap handles actual swiping
 	function handleMobileScroll() {
-		if (!mobileCarouselRef || mobileIsSwiping) return;
+		if (!mobileCarouselRef) return;
 		// Don't update during edit mode drag
 		if (isEditMode && isPointerDragging) return;
 
@@ -1211,15 +1169,31 @@
 			clearTimeout(mobileScrollDebounceTimer);
 		}
 
-		// Debounce the index update
+		// Debounce the index update to let scroll-snap settle
 		mobileScrollDebounceTimer = setTimeout(() => {
 			if (!mobileCarouselRef) return;
-			const { cardWidth, gap } = getMobileCardMetrics();
-			const scrollPos = mobileCarouselRef.scrollLeft;
-			const newIndex = Math.round(scrollPos / (cardWidth + gap));
-			const cards = displayCards.filter(c => c.type !== 'add-deck' || isEditMode);
-			if (newIndex !== mobileCurrentIndex && newIndex >= 0 && newIndex < cards.length) {
-				mobileCurrentIndex = newIndex;
+
+			// Find which card is closest to the center of the viewport
+			const carouselRect = mobileCarouselRef.getBoundingClientRect();
+			const carouselCenter = carouselRect.left + carouselRect.width / 2;
+			const cardElements = mobileCarouselRef.querySelectorAll('.mobile-nav-card');
+
+			let closestIndex = 0;
+			let closestDistance = Infinity;
+
+			cardElements.forEach((card, index) => {
+				const cardRect = card.getBoundingClientRect();
+				const cardCenter = cardRect.left + cardRect.width / 2;
+				const distance = Math.abs(carouselCenter - cardCenter);
+
+				if (distance < closestDistance) {
+					closestDistance = distance;
+					closestIndex = index;
+				}
+			});
+
+			if (closestIndex !== mobileCurrentIndex) {
+				mobileCurrentIndex = closestIndex;
 			}
 		}, MOBILE_SCROLL_DEBOUNCE_MS);
 	}
@@ -1360,14 +1334,12 @@
 				<!-- Mobile Card Carousel (MobileWelcome-style) -->
 				{#key `mobile-${currentView}-${currentDeckId}`}
 					<div class="mobile-carousel-container">
+						<!-- Uses CSS scroll-snap for smooth native swiping behavior -->
 						<div
 							class="mobile-carousel"
 							class:edit-mode={isEditMode}
 							class:is-dragging={isPointerDragging}
 							bind:this={mobileCarouselRef}
-							ontouchstart={handleMobileTouchStart}
-							ontouchmove={handleMobileTouchMove}
-							ontouchend={handleMobileTouchEnd}
 							onscroll={handleMobileScroll}
 							role="region"
 							aria-label="Card navigator carousel"

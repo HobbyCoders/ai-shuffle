@@ -102,11 +102,28 @@
 		// Debounce the index update to let scroll-snap settle
 		scrollDebounceTimer = setTimeout(() => {
 			if (!carouselEl) return;
-			const { cardWidth, gap } = getCardMetrics();
-			const scrollPos = carouselEl.scrollLeft;
-			const newIndex = Math.round(scrollPos / (cardWidth + gap));
-			if (newIndex !== currentIndex && newIndex >= 0 && newIndex < cards.length) {
-				currentIndex = newIndex;
+
+			// Find which card is closest to the center of the viewport
+			const carouselRect = carouselEl.getBoundingClientRect();
+			const carouselCenter = carouselRect.left + carouselRect.width / 2;
+			const cardElements = carouselEl.querySelectorAll('.carousel-card');
+
+			let closestIndex = 0;
+			let closestDistance = Infinity;
+
+			cardElements.forEach((card, index) => {
+				const cardRect = card.getBoundingClientRect();
+				const cardCenter = cardRect.left + cardRect.width / 2;
+				const distance = Math.abs(carouselCenter - cardCenter);
+
+				if (distance < closestDistance) {
+					closestDistance = distance;
+					closestIndex = index;
+				}
+			});
+
+			if (closestIndex !== currentIndex) {
+				currentIndex = closestIndex;
 			}
 		}, SCROLL_DEBOUNCE_MS);
 	}
