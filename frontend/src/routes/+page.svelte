@@ -839,6 +839,8 @@
 	<DeckLayout
 		onLogoClick={() => showCardNavigator = !showCardNavigator}
 		hasOpenCards={workspaceCards.length > 0}
+		layoutMode={$layoutMode}
+		onLayoutModeChange={handleLayoutModeChange}
 	>
 		{#if isMobile}
 				<!-- Mobile Workspace -->

@@ -4,25 +4,51 @@
 	 *
 	 * Provides a clean full-screen workspace with:
 	 * - Floating dealer button for card navigation (opens CardDeckNavigator)
+	 * - Card layout mode selector
 	 * - All navigation via the card deck navigator overlay
 	 *
 	 * On mobile (<640px), dealer button moves to bottom center.
 	 */
 
 	import { onMount } from 'svelte';
-	import { Plus, ChevronsDown } from 'lucide-svelte';
+	import {
+		Plus,
+		ChevronsDown,
+		ChevronDown,
+		Move,
+		Columns,
+		LayoutGrid,
+		Layers,
+		Maximize2
+	} from 'lucide-svelte';
+	import type { LayoutMode } from '$lib/stores/deck';
 
 	interface Props {
 		onLogoClick?: () => void;
 		hasOpenCards?: boolean;
+		layoutMode?: LayoutMode;
+		onLayoutModeChange?: (mode: LayoutMode) => void;
 		children?: import('svelte').Snippet;
 	}
 
 	let {
 		onLogoClick,
 		hasOpenCards = false,
+		layoutMode = 'freeflow',
+		onLayoutModeChange,
 		children
 	}: Props = $props();
+
+	// Layout mode options
+	const layoutModes: { mode: LayoutMode; label: string; icon: typeof Move }[] = [
+		{ mode: 'freeflow', label: 'Free Flow', icon: Move },
+		{ mode: 'sidebyside', label: 'Side by Side', icon: Columns },
+		{ mode: 'tile', label: 'Tile', icon: LayoutGrid },
+		{ mode: 'stack', label: 'Stack', icon: Layers },
+		{ mode: 'focus', label: 'Focus', icon: Maximize2 }
+	];
+
+	const currentModeInfo = $derived(layoutModes.find((m) => m.mode === layoutMode) || layoutModes[0]);
 
 	// On mobile, hide dealer button when cards are open (user can access via header)
 	const showDealerButton = $derived(!isMobile || !hasOpenCards);
@@ -30,44 +56,75 @@
 	// Track mobile state
 	let isMobile = $state(false);
 
-	// Hover state for dealer button reveal
-	let isDealerVisible = $state(false);
-	let dealerTimeout: ReturnType<typeof setTimeout> | null = null;
+	// Hover state for menu reveal
+	let isMenuVisible = $state(false);
+	let menuTimeout: ReturnType<typeof setTimeout> | null = null;
+
+	// Layout panel expanded state
+	let isLayoutPanelOpen = $state(false);
 
 	function checkMobile() {
 		isMobile = window.innerWidth < 640;
 	}
 
-	function handleDealerIndicatorEnter() {
-		if (dealerTimeout) clearTimeout(dealerTimeout);
-		isDealerVisible = true;
+	function handleIndicatorEnter() {
+		if (menuTimeout) clearTimeout(menuTimeout);
+		isMenuVisible = true;
 	}
 
-	function handleDealerIndicatorLeave() {
-		if (dealerTimeout) clearTimeout(dealerTimeout);
-		dealerTimeout = setTimeout(() => {
-			isDealerVisible = false;
-		}, 300);
+	function handleIndicatorLeave() {
+		if (menuTimeout) clearTimeout(menuTimeout);
+		// Don't hide if layout panel is open
+		if (!isLayoutPanelOpen) {
+			menuTimeout = setTimeout(() => {
+				isMenuVisible = false;
+			}, 300);
+		}
 	}
 
-	function handleDealerButtonEnter() {
-		if (dealerTimeout) clearTimeout(dealerTimeout);
-		isDealerVisible = true;
+	function handleMenuEnter() {
+		if (menuTimeout) clearTimeout(menuTimeout);
+		isMenuVisible = true;
 	}
 
-	function handleDealerButtonLeave() {
-		if (dealerTimeout) clearTimeout(dealerTimeout);
-		dealerTimeout = setTimeout(() => {
-			isDealerVisible = false;
-		}, 300);
+	function handleMenuLeave() {
+		if (menuTimeout) clearTimeout(menuTimeout);
+		// Don't hide if layout panel is open
+		if (!isLayoutPanelOpen) {
+			menuTimeout = setTimeout(() => {
+				isMenuVisible = false;
+				isLayoutPanelOpen = false;
+			}, 300);
+		}
 	}
 
 	function handleDealerClick() {
 		onLogoClick?.();
-		// Hide after click
+		// Hide menu after click
 		setTimeout(() => {
-			isDealerVisible = false;
+			isMenuVisible = false;
+			isLayoutPanelOpen = false;
 		}, 200);
+	}
+
+	function handleLayoutButtonClick() {
+		isLayoutPanelOpen = !isLayoutPanelOpen;
+	}
+
+	function handleLayoutModeSelect(mode: LayoutMode) {
+		onLayoutModeChange?.(mode);
+		// Close panel after selection
+		setTimeout(() => {
+			isLayoutPanelOpen = false;
+			isMenuVisible = false;
+		}, 200);
+	}
+
+	function handleKeyDown(e: KeyboardEvent) {
+		if (e.key === 'Escape' && (isMenuVisible || isLayoutPanelOpen)) {
+			isMenuVisible = false;
+			isLayoutPanelOpen = false;
+		}
 	}
 
 	onMount(() => {
@@ -76,6 +133,8 @@
 		return () => window.removeEventListener('resize', checkMobile);
 	});
 </script>
+
+<svelte:window on:keydown={handleKeyDown} />
 
 <div class="deck-layout" class:mobile={isMobile}>
 	<!-- Main content area - full width -->
@@ -88,34 +147,81 @@
 			</div>
 		{/if}
 
-		<!-- AI Shuffle Button - Top left, hidden by default with hover indicator -->
+		<!-- Menu Container - Top left, hidden by default with hover indicator -->
 		{#if showDealerButton && !isMobile}
-			<div class="dealer-container">
+			<div class="menu-container">
 				<!-- Hover indicator - bouncing arrow -->
 				<div
-					class="dealer-indicator"
-					class:hidden={isDealerVisible}
-					onmouseenter={handleDealerIndicatorEnter}
-					onmouseleave={handleDealerIndicatorLeave}
+					class="menu-indicator"
+					class:hidden={isMenuVisible}
+					onmouseenter={handleIndicatorEnter}
+					onmouseleave={handleIndicatorLeave}
 					role="button"
 					tabindex="0"
-					aria-label="AI Shuffle"
+					aria-label="Menu"
 				>
 					<ChevronsDown size={16} strokeWidth={2} class="indicator-arrow" />
 				</div>
 
-				<!-- Actual button - revealed on hover -->
-				{#if isDealerVisible}
-					<button
-						class="dealer-button"
-						onmouseenter={handleDealerButtonEnter}
-						onmouseleave={handleDealerButtonLeave}
-						onclick={handleDealerClick}
-						title="AI Shuffle"
+				<!-- Menu buttons - revealed on hover -->
+				{#if isMenuVisible}
+					<div
+						class="menu-buttons"
+						onmouseenter={handleMenuEnter}
+						onmouseleave={handleMenuLeave}
 					>
-						<Plus size={20} strokeWidth={2} class="dealer-icon" />
-						<span class="dealer-label">AI Shuffle</span>
-					</button>
+						<!-- AI Shuffle Button -->
+						<button
+							class="menu-button"
+							onclick={handleDealerClick}
+							title="AI Shuffle"
+						>
+							<Plus size={18} strokeWidth={2} class="menu-icon" />
+							<span class="menu-label">AI Shuffle</span>
+						</button>
+
+						<!-- Card Layout Button -->
+						{#if hasOpenCards}
+							<button
+								class="menu-button"
+								class:expanded={isLayoutPanelOpen}
+								onclick={handleLayoutButtonClick}
+								title="Card Layout"
+							>
+								<svelte:component this={currentModeInfo.icon} size={18} strokeWidth={2} class="menu-icon" />
+								<span class="menu-label">{currentModeInfo.label}</span>
+								<ChevronDown
+									size={14}
+									strokeWidth={2}
+									class="chevron-icon {isLayoutPanelOpen ? 'rotated' : ''}"
+								/>
+							</button>
+						{/if}
+
+						<!-- Layout Mode Panel -->
+						{#if isLayoutPanelOpen && hasOpenCards}
+							<div class="layout-panel" role="menu">
+								{#each layoutModes as { mode, label, icon: Icon }}
+									<button
+										class="layout-option"
+										class:active={layoutMode === mode}
+										onclick={() => handleLayoutModeSelect(mode)}
+										role="menuitem"
+									>
+										<Icon size={16} strokeWidth={1.5} />
+										<span>{label}</span>
+										{#if layoutMode === mode}
+											<div class="check-mark">
+												<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+													<path d="M20 6L9 17l-5-5" />
+												</svg>
+											</div>
+										{/if}
+									</button>
+								{/each}
+							</div>
+						{/if}
+					</div>
 				{/if}
 			</div>
 		{/if}
@@ -163,10 +269,10 @@
 	}
 
 	/* ===================================
-	   DEALER CONTAINER - Top left hover reveal
+	   MENU CONTAINER - Top left hover reveal
 	   =================================== */
 
-	.dealer-container {
+	.menu-container {
 		position: absolute;
 		top: 6px;
 		left: 16px;
@@ -177,7 +283,7 @@
 	}
 
 	/* Hover indicator - bouncing arrow */
-	.dealer-indicator {
+	.menu-indicator {
 		padding: 6px 10px;
 		background: rgba(255, 255, 255, 0.04);
 		border: 1px solid rgba(255, 255, 255, 0.08);
@@ -187,18 +293,18 @@
 		transition: opacity 0.3s ease;
 	}
 
-	.dealer-indicator:hover {
+	.menu-indicator:hover {
 		opacity: 0.8;
 		background: rgba(255, 255, 255, 0.08);
 		border-color: rgba(255, 255, 255, 0.15);
 	}
 
-	.dealer-indicator.hidden {
+	.menu-indicator.hidden {
 		opacity: 0;
 		pointer-events: none;
 	}
 
-	.dealer-indicator :global(.indicator-arrow) {
+	.menu-indicator :global(.indicator-arrow) {
 		color: var(--muted-foreground);
 		opacity: 0.7;
 		animation: bounce 2s ease-in-out infinite;
@@ -215,32 +321,13 @@
 		}
 	}
 
-	/* Dealer button - revealed on hover */
-	.dealer-button {
-		--btn-bg: var(--glass-bg, rgba(255, 255, 255, 0.05));
-		--btn-border: var(--glass-border, rgba(255, 255, 255, 0.1));
-		--btn-border-hover: #22d3ee;
-		--btn-text: var(--muted-foreground);
-		--btn-text-hover: #22d3ee;
-		--btn-glow: rgba(34, 211, 238, 0.25);
-
+	/* Menu buttons container */
+	.menu-buttons {
 		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 8px 16px;
-		background: var(--btn-bg);
-		backdrop-filter: blur(16px);
-		-webkit-backdrop-filter: blur(16px);
-		border: 1px solid var(--btn-border);
-		border-radius: 24px;
-		cursor: pointer;
-		color: var(--foreground);
-		font-size: 0.8125rem;
-		font-weight: 500;
-		box-shadow: var(--shadow-m, 0 4px 12px rgba(0, 0, 0, 0.3));
-		transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-		animation: fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+		flex-direction: column;
+		gap: 6px;
 		margin-top: 4px;
+		animation: fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 	}
 
 	@keyframes fadeIn {
@@ -254,36 +341,156 @@
 		}
 	}
 
-	.dealer-button:hover {
+	/* Individual menu button */
+	.menu-button {
+		--btn-bg: var(--glass-bg, rgba(255, 255, 255, 0.05));
+		--btn-border: var(--glass-border, rgba(255, 255, 255, 0.1));
+		--btn-border-hover: #22d3ee;
+		--btn-text: var(--muted-foreground);
+		--btn-text-hover: #22d3ee;
+		--btn-glow: rgba(34, 211, 238, 0.25);
+
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 8px 14px;
+		background: var(--btn-bg);
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
+		border: 1px solid var(--btn-border);
+		border-radius: 20px;
+		cursor: pointer;
+		color: var(--foreground);
+		font-size: 0.8125rem;
+		font-weight: 500;
+		box-shadow: var(--shadow-m, 0 4px 12px rgba(0, 0, 0, 0.3));
+		transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+		white-space: nowrap;
+	}
+
+	.menu-button:hover {
 		background: var(--card, rgba(255, 255, 255, 0.08));
 		border-color: var(--btn-border-hover);
 		box-shadow:
 			var(--shadow-l, 0 8px 24px rgba(0, 0, 0, 0.4)),
 			0 0 20px var(--btn-glow);
-		transform: translateY(-1px);
+		transform: translateX(2px);
 	}
 
-	.dealer-button:active {
-		transform: scale(0.96);
+	.menu-button.expanded {
+		background: var(--card, rgba(255, 255, 255, 0.08));
+		border-color: var(--primary, #22d3ee);
 	}
 
-	.dealer-button :global(.dealer-icon) {
+	.menu-button:active {
+		transform: scale(0.98);
+	}
+
+	.menu-button :global(.menu-icon) {
 		color: var(--btn-text);
 		transition: all 0.2s ease;
+		flex-shrink: 0;
 	}
 
-	.dealer-button:hover :global(.dealer-icon) {
+	.menu-button:hover :global(.menu-icon) {
 		color: var(--btn-text-hover);
-		transform: rotate(90deg);
 	}
 
-	.dealer-label {
+	.menu-label {
 		color: var(--foreground);
 		transition: color 0.2s ease;
 	}
 
-	.dealer-button:hover .dealer-label {
+	.menu-button:hover .menu-label {
 		color: var(--btn-text-hover);
+	}
+
+	.menu-button :global(.chevron-icon) {
+		color: var(--muted-foreground);
+		margin-left: auto;
+		transition: transform 0.2s ease;
+	}
+
+	.menu-button :global(.chevron-icon.rotated) {
+		transform: rotate(180deg);
+	}
+
+	/* ===================================
+	   LAYOUT PANEL - Dropdown for layout modes
+	   =================================== */
+
+	.layout-panel {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		padding: 6px;
+		background: var(--popover, rgba(20, 20, 25, 0.95));
+		backdrop-filter: blur(20px);
+		-webkit-backdrop-filter: blur(20px);
+		border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+		border-radius: 12px;
+		box-shadow: var(--shadow-l, 0 8px 32px rgba(0, 0, 0, 0.4));
+		min-width: 160px;
+		animation: slideDown 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+	}
+
+	@keyframes slideDown {
+		from {
+			opacity: 0;
+			transform: translateY(-8px) scale(0.96);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0) scale(1);
+		}
+	}
+
+	.layout-option {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 8px 10px;
+		background: transparent;
+		border: none;
+		border-radius: 8px;
+		color: var(--foreground);
+		font-size: 0.8125rem;
+		cursor: pointer;
+		transition: all 0.15s ease;
+		text-align: left;
+	}
+
+	.layout-option:hover {
+		background: var(--accent, rgba(255, 255, 255, 0.08));
+	}
+
+	.layout-option.active {
+		background: color-mix(in oklch, var(--primary, #22d3ee) 15%, transparent);
+		color: var(--primary, #22d3ee);
+	}
+
+	.layout-option :global(svg) {
+		flex-shrink: 0;
+		opacity: 0.7;
+	}
+
+	.layout-option.active :global(svg) {
+		opacity: 1;
+	}
+
+	.layout-option span {
+		flex: 1;
+	}
+
+	.check-mark {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 18px;
+		height: 18px;
+		background: var(--primary, #22d3ee);
+		border-radius: 50%;
+		color: var(--primary-foreground, #000);
 	}
 
 	/* ===================================
@@ -333,10 +540,11 @@
 
 	/* Reduced motion */
 	@media (prefers-reduced-motion: reduce) {
-		.dealer-indicator :global(.indicator-arrow) {
+		.menu-indicator :global(.indicator-arrow) {
 			animation: none;
 		}
-		.dealer-button {
+		.menu-buttons,
+		.layout-panel {
 			animation: none;
 		}
 	}
