@@ -673,12 +673,17 @@
 	.card-content {
 		flex: 1;
 		min-height: 0; /* Critical: allows flex child to shrink and enables internal scrolling */
-		overflow: visible;
+		overflow: hidden;
 		display: flex;
 		flex-direction: column;
 		background: var(--card);
-		/* Allow fixed-position children (dropdowns, modals) to escape */
 		position: relative;
+		/* Clip content to match parent's bottom rounded corners */
+		border-radius: 0 0 12px 12px;
+	}
+
+	.base-card.maximized .card-content {
+		border-radius: 0;
 	}
 
 	/* Resize Handles */
