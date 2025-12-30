@@ -348,6 +348,88 @@ async function loadSelectionFromBackend(): Promise<{ selectedProfile: string; se
 	return null;
 }
 
+// Debounce timer for selection sync
+let selectionSyncTimeout: ReturnType<typeof setTimeout> | null = null;
+let pendingSelection: { profile: string; project: string } | null = null;
+const SELECTION_SYNC_DEBOUNCE_MS = 500;
+
+/**
+ * Immediately flush any pending selection save to backend (sync, for beforeunload)
+ */
+function flushPendingSelectionSave() {
+	if (!pendingSelection) return;
+
+	// Cancel the debounce timer
+	if (selectionSyncTimeout) {
+		clearTimeout(selectionSyncTimeout);
+		selectionSyncTimeout = null;
+	}
+
+	// Use sendBeacon for reliable delivery during page unload
+	const data = JSON.stringify({
+		key: 'selection',
+		value: { selectedProfile: pendingSelection.profile, selectedProject: pendingSelection.project }
+	});
+	navigator.sendBeacon('/api/v1/preferences/selection', new Blob([data], { type: 'application/json' }));
+
+	pendingSelection = null;
+}
+
+// Register beforeunload handler to flush pending saves when browser closes
+if (typeof window !== 'undefined') {
+	window.addEventListener('beforeunload', flushPendingSelectionSave);
+	document.addEventListener('visibilitychange', () => {
+		if (document.visibilityState === 'hidden') {
+			flushPendingSelectionSave();
+		}
+	});
+}
+
+/**
+ * Save selection to backend (debounced) for cross-device persistence
+ */
+async function saveSelectionToBackend(profile: string, project: string) {
+	// Update localStorage immediately
+	if (typeof window !== 'undefined') {
+		if (profile) {
+			localStorage.setItem('aihub_selectedProfile', profile);
+		}
+		if (project) {
+			localStorage.setItem('aihub_selectedProject', project);
+		}
+	}
+
+	// Store pending selection for flush on unload
+	pendingSelection = { profile, project };
+
+	// Clear existing timer
+	if (selectionSyncTimeout) {
+		clearTimeout(selectionSyncTimeout);
+	}
+
+	// Debounce the sync to avoid excessive API calls
+	selectionSyncTimeout = setTimeout(async () => {
+		if (!pendingSelection) return;
+
+		try {
+			await fetch('/api/v1/preferences/selection', {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				credentials: 'include',
+				body: JSON.stringify({
+					key: 'selection',
+					value: { selectedProfile: pendingSelection.profile, selectedProject: pendingSelection.project }
+				})
+			});
+		} catch (e) {
+			console.error('[Tabs] Failed to sync selection to backend:', e);
+		}
+
+		pendingSelection = null;
+		selectionSyncTimeout = null;
+	}, SELECTION_SYNC_DEBOUNCE_MS);
+}
+
 function generateTabId(): string {
 	return `tab-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 }
@@ -3314,6 +3396,11 @@ function createTabsStore() {
 			updateTab(tabId, { profile: profileId });
 			// Save tabs state (debounced) to persist the profile selection
 			saveTabsToServer(get({ subscribe }));
+			// Also save as default selection for new tabs (cross-device persistence)
+			const tab = getTab(tabId);
+			if (tab) {
+				saveSelectionToBackend(profileId, tab.project);
+			}
 		},
 
 		/**
@@ -3323,6 +3410,11 @@ function createTabsStore() {
 			updateTab(tabId, { project: projectId });
 			// Save tabs state (debounced) to persist the project selection
 			saveTabsToServer(get({ subscribe }));
+			// Also save as default selection for new tabs (cross-device persistence)
+			const tab = getTab(tabId);
+			if (tab) {
+				saveSelectionToBackend(tab.profile, projectId);
+			}
 		},
 
 		/**
