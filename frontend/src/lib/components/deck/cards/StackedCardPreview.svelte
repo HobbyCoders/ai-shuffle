@@ -141,20 +141,44 @@
 
 	// Drag state
 	let dragStartPos = $state({ x: 0, y: 0 });
+	let isPointerDown = $state(false);
 
 	function handlePointerDown(e: PointerEvent) {
 		// Don't start drag on button clicks
 		if ((e.target as HTMLElement).closest('button')) return;
 
+		isPointerDown = true;
 		dragStartPos = { x: e.clientX, y: e.clientY };
-		onDragStart?.(e);
+
+		// Capture pointer to receive events even if pointer leaves element
+		(e.target as HTMLElement).setPointerCapture(e.pointerId);
 	}
 
 	function handlePointerMove(e: PointerEvent) {
-		onDragMove?.(e);
+		// Only process move if we started a drag (pointer is down)
+		if (!isPointerDown) return;
+
+		// Check if we've moved enough to consider this a drag (not just a click)
+		const dx = Math.abs(e.clientX - dragStartPos.x);
+		const dy = Math.abs(e.clientY - dragStartPos.y);
+
+		if (dx > 5 || dy > 5) {
+			// This is a real drag - notify parent
+			if (!isDragging) {
+				onDragStart?.(e);
+			}
+			onDragMove?.(e);
+		}
 	}
 
 	function handlePointerUp(e: PointerEvent) {
+		if (!isPointerDown) return;
+
+		isPointerDown = false;
+
+		// Release pointer capture
+		(e.target as HTMLElement).releasePointerCapture(e.pointerId);
+
 		// Check if this was a click (minimal movement) or a drag
 		const dx = Math.abs(e.clientX - dragStartPos.x);
 		const dy = Math.abs(e.clientY - dragStartPos.y);
@@ -164,6 +188,12 @@
 			onClick();
 		}
 
+		onDragEnd?.();
+	}
+
+	function handlePointerCancel(e: PointerEvent) {
+		isPointerDown = false;
+		(e.target as HTMLElement).releasePointerCapture(e.pointerId);
 		onDragEnd?.();
 	}
 
@@ -183,6 +213,7 @@
 	onpointerdown={handlePointerDown}
 	onpointermove={handlePointerMove}
 	onpointerup={handlePointerUp}
+	onpointercancel={handlePointerCancel}
 	onclick={handleClick}
 	role="button"
 	tabindex="0"
@@ -237,7 +268,7 @@
 	}
 
 	.stacked-card-preview:hover:not(.dragging) {
-		transform: translateX(6px);
+		/* No transform - position is controlled by parent wrapper */
 		box-shadow:
 			var(--shadow-m),
 			0 4px 16px color-mix(in oklch, var(--primary) 15%, transparent);
@@ -246,7 +277,8 @@
 	}
 
 	.stacked-card-preview:active:not(.dragging) {
-		transform: translateX(4px) scale(0.98);
+		/* Subtle scale only, no translate - position controlled by parent */
+		transform: scale(0.98);
 	}
 
 	.stacked-card-preview.dragging {

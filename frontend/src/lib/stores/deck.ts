@@ -1292,10 +1292,18 @@ function createDeckStore() {
 					updatedCards = this.applyTileLayout(state.cards, boundsW, boundsH, paddingX, paddingY, paddingTop);
 					break;
 
-				case 'stack':
+				case 'stack': {
 					// Cards in left-side deck with main focused card
-					updatedCards = this.applyStackLayout(state.cards, boundsW, boundsH, paddingX, paddingY, paddingTop, state.focusedCardId);
-					break;
+					// Ensure focusedCardId is set - default to highest z-index card if not
+					let focusedId = state.focusedCardId;
+					if (!focusedId || !state.cards.find(c => c.id === focusedId)) {
+						const highestZCard = state.cards.reduce((a, b) => a.zIndex > b.zIndex ? a : b);
+						focusedId = highestZCard.id;
+						state = { ...state, focusedCardId: focusedId };
+					}
+					updatedCards = this.applyStackLayout(state.cards, boundsW, boundsH, paddingX, paddingY, paddingTop, focusedId);
+					return { ...state, cards: updatedCards, focusedCardId: focusedId };
+				}
 
 				case 'focus':
 					// One main card takes most space, others in sidebar
