@@ -541,6 +541,7 @@ async def chat_websocket(
                         profile_id = data.get("profile", "claude-code")
                         project_id = data.get("project")
                         overrides = data.get("overrides")  # Optional: {model, permission_mode}
+                        worktree_id = data.get("worktree_id")  # Optional: link session to existing worktree
 
                         if not prompt:
                             await send_json({"type": "error", "message": "Empty prompt"})
@@ -548,18 +549,20 @@ async def chat_websocket(
 
                         # Create or get session
                         if not session_id:
-                            # Create new session
+                            # Create new session, optionally linked to a worktree
                             session_id = str(uuid.uuid4())
                             database.create_session(
                                 session_id=session_id,
                                 profile_id=profile_id,
                                 project_id=project_id,
-                                api_user_id=api_user_id
+                                api_user_id=api_user_id,
+                                worktree_id=worktree_id  # Link to worktree if provided
                             )
                             # Immediately notify frontend of new session_id so it persists on refresh
                             await send_json({
                                 "type": "session_created",
-                                "session_id": session_id
+                                "session_id": session_id,
+                                "worktree_id": worktree_id  # Include worktree_id in response
                             })
 
                         # Register device with session if switching sessions

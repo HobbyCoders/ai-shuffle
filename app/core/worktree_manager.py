@@ -1,10 +1,15 @@
 """
 Worktree Manager
 
-Manages worktree lifecycle and links them to chat sessions.
+Manages worktree lifecycle independently from chat sessions.
 
-Worktrees allow parallel development on different branches
-while sharing the same git repository.
+Worktrees are persistent resources that can be used by multiple sessions
+over time. The relationship is tracked via sessions.worktree_id.
+
+Key design principles:
+- Worktrees are independent of sessions (can exist without a session)
+- Multiple sessions can use the same worktree (sequentially, not concurrently)
+- Worktree validity is determined by checking if the folder exists on disk
 
 Path pattern: {workspace_dir}/.worktrees/{project_id}/{branch_sanitized}
 """
@@ -28,10 +33,16 @@ class WorktreeError(Exception):
 
 class WorktreeManager:
     """
-    Manages worktree lifecycle and links them to chat sessions.
+    Manages worktree lifecycle independently from chat sessions.
 
-    Worktrees allow parallel development on different branches
-    while sharing the same git repository.
+    Worktrees are persistent resources that can be used by multiple sessions
+    over time. Sessions track their worktree via the sessions.worktree_id field.
+
+    Key operations:
+    - create_worktree(): Creates a standalone worktree (no session)
+    - create_worktree_session(): Creates worktree + session together (legacy support)
+    - get_available_worktrees(): Gets worktrees available for new sessions
+    - is_worktree_valid(): Checks if worktree folder exists on disk
 
     Path pattern: {workspace_dir}/.worktrees/{project_id}/{branch_sanitized}
     """
@@ -157,6 +168,173 @@ class WorktreeManager:
             "is_git_repo": True
         }
 
+    def is_worktree_valid(self, worktree: Dict) -> bool:
+        """Check if a worktree folder exists on disk"""
+        if not worktree:
+            return False
+        worktree_path = settings.workspace_dir / worktree["worktree_path"]
+        return worktree_path.exists()
+
+    def create_worktree(
+        self,
+        project_id: str,
+        branch_name: str,
+        create_new_branch: bool = False,
+        base_branch: Optional[str] = None
+    ) -> Dict:
+        """
+        Create a standalone worktree without an associated session.
+
+        This is the primary method for creating worktrees. Sessions can later
+        be linked to this worktree via sessions.worktree_id.
+
+        Args:
+            project_id: The project containing the main repo
+            branch_name: Branch to checkout in worktree
+            create_new_branch: If True, create new branch from base_branch
+            base_branch: Base branch for new branch (defaults to current HEAD)
+
+        Returns:
+            worktree_dict with id, branch_name, worktree_path, etc.
+
+        Raises:
+            WorktreeError: With descriptive message on failure
+        """
+        # Get project
+        project = database.get_project(project_id)
+        if not project:
+            logger.error(f"Project not found: {project_id}")
+            raise WorktreeError(f"Project not found: {project_id}")
+
+        # Ensure repository record exists
+        repo = self._ensure_repository_record(project_id, project["path"])
+        if not repo:
+            logger.error(f"Project {project_id} is not a git repository")
+            raise WorktreeError("This project is not a git repository. Initialize git first.")
+
+        main_dir = str(settings.workspace_dir / project["path"])
+
+        # Check if branch already has a worktree (and clean up stale records)
+        existing_worktrees = database.get_active_worktrees_for_repository(repo["id"])
+        for wt in existing_worktrees:
+            if wt["branch_name"] == branch_name:
+                worktree_full_path = settings.workspace_dir / wt["worktree_path"]
+                if not worktree_full_path.exists():
+                    # Stale record - clean it up
+                    logger.info(f"Cleaning up stale worktree record for branch '{branch_name}'")
+                    database.update_worktree(wt["id"], status="deleted")
+                    continue
+                # Valid existing worktree - return it instead of creating new
+                logger.info(f"Branch '{branch_name}' already has an active worktree, returning existing")
+                return wt
+
+        # Verify the branch exists if not creating a new one
+        if not create_new_branch:
+            branches = self.git_service.list_branches(main_dir, include_remote=False)
+            local_branch_names = [b["name"] for b in branches if not b["is_remote"]]
+            if branch_name not in local_branch_names:
+                remote_branches = self.git_service.list_branches(main_dir, include_remote=True)
+                remote_name = f"origin/{branch_name}"
+                if not any(b["name"] == remote_name for b in remote_branches):
+                    logger.error(f"Branch {branch_name} does not exist")
+                    raise WorktreeError(f"Branch '{branch_name}' does not exist.")
+
+        # Check if branch name already exists when creating new branch
+        if create_new_branch:
+            branches = self.git_service.list_branches(main_dir, include_remote=False)
+            local_branch_names = [b["name"] for b in branches if not b["is_remote"]]
+            if branch_name in local_branch_names:
+                logger.error(f"Branch {branch_name} already exists")
+                raise WorktreeError(f"Branch '{branch_name}' already exists. Use existing branch mode.")
+
+        # Calculate worktree path
+        worktree_path = self._get_worktree_path(project_id, branch_name)
+        relative_worktree_path = self._get_relative_worktree_path(project_id, branch_name)
+
+        # Check if path already exists
+        if worktree_path.exists():
+            logger.error(f"Worktree path already exists: {worktree_path}")
+            raise WorktreeError(f"Worktree directory already exists at '{worktree_path}'.")
+
+        # Ensure base directory exists
+        worktree_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Create git worktree
+        success, error_msg = self.git_service.add_worktree(
+            main_dir=main_dir,
+            path=str(worktree_path),
+            branch=branch_name,
+            new_branch=create_new_branch,
+            base_branch=base_branch
+        )
+
+        if not success:
+            logger.error(f"Failed to create git worktree: {error_msg}")
+            raise WorktreeError(f"Git failed to create worktree: {error_msg or 'Unknown error'}")
+
+        # Create worktree record (no session_id - standalone worktree)
+        worktree_id = f"wt-{uuid.uuid4().hex[:12]}"
+        try:
+            worktree = database.create_worktree(
+                worktree_id=worktree_id,
+                repository_id=repo["id"],
+                branch_name=branch_name,
+                worktree_path=relative_worktree_path,
+                session_id=None,  # No session - standalone worktree
+                base_branch=base_branch,
+                status="active"
+            )
+        except Exception as e:
+            logger.error(f"Failed to create worktree record: {e}")
+            self.git_service.remove_worktree(main_dir, str(worktree_path), force=True)
+            raise WorktreeError(f"Failed to create worktree record: {str(e)}")
+
+        logger.info(f"Created standalone worktree {worktree_id} at {worktree_path} for branch {branch_name}")
+        return worktree
+
+    def get_available_worktrees(self, project_id: str) -> List[Dict]:
+        """
+        Get all valid worktrees for a project that can be used for new sessions.
+
+        Returns worktrees with their current state:
+        - exists: Whether the folder exists on disk
+        - sessions: List of sessions that have used this worktree
+        - active_session: Currently active session (if any)
+
+        Args:
+            project_id: The project ID
+
+        Returns:
+            List of worktree dicts with enriched info
+        """
+        repo = database.get_git_repository_by_project(project_id)
+        if not repo:
+            return []
+
+        worktrees = database.get_active_worktrees_for_repository(repo["id"])
+        result = []
+
+        for wt in worktrees:
+            worktree_path = settings.workspace_dir / wt["worktree_path"]
+            wt["exists"] = worktree_path.exists()
+
+            if not wt["exists"]:
+                # Mark as deleted but don't remove - let sync handle it
+                continue
+
+            # Get all sessions for this worktree
+            sessions = database.get_sessions_for_worktree(wt["id"])
+            wt["sessions"] = sessions
+            wt["session_count"] = len(sessions)
+
+            # Find active session (if any)
+            active_sessions = [s for s in sessions if s.get("status") == "active"]
+            wt["active_session"] = active_sessions[0] if active_sessions else None
+
+            result.append(wt)
+
+        return result
+
     def create_worktree_session(
         self,
         project_id: str,
@@ -272,7 +450,24 @@ class WorktreeManager:
                     self.git_service.remove_worktree(main_dir, str(worktree_path), force=True)
                     raise WorktreeError("No profiles available. Please create a profile first.")
 
-        # Create session
+        # Create worktree record FIRST (worktrees are independent of sessions)
+        worktree_id = f"wt-{uuid.uuid4().hex[:12]}"
+        try:
+            worktree = database.create_worktree(
+                worktree_id=worktree_id,
+                repository_id=repo["id"],
+                branch_name=branch_name,
+                worktree_path=relative_worktree_path,
+                session_id=None,  # New model: no session_id on worktree
+                base_branch=base_branch,
+                status="active"
+            )
+        except Exception as e:
+            logger.error(f"Failed to create worktree record: {e}")
+            self.git_service.remove_worktree(main_dir, str(worktree_path), force=True)
+            raise WorktreeError(f"Failed to create worktree record: {str(e)}")
+
+        # Create session with worktree_id (new relationship model)
         session_id = f"ses-{uuid.uuid4().hex[:12]}"
         session_title = f"Branch: {branch_name}"
 
@@ -281,34 +476,17 @@ class WorktreeManager:
                 session_id=session_id,
                 profile_id=profile_id,
                 project_id=project_id,
-                title=session_title
+                title=session_title,
+                worktree_id=worktree_id  # Link session to worktree via new model
             )
         except Exception as e:
             logger.error(f"Failed to create session: {e}")
             # Clean up the created worktree
             self.git_service.remove_worktree(main_dir, str(worktree_path), force=True)
+            database.delete_worktree(worktree_id)
             raise WorktreeError(f"Failed to create chat session: {str(e)}")
 
-        # Create worktree record
-        worktree_id = f"wt-{uuid.uuid4().hex[:12]}"
-        try:
-            worktree = database.create_worktree(
-                worktree_id=worktree_id,
-                repository_id=repo["id"],
-                branch_name=branch_name,
-                worktree_path=relative_worktree_path,
-                session_id=session_id,
-                base_branch=base_branch,
-                status="active"
-            )
-        except Exception as e:
-            logger.error(f"Failed to create worktree record: {e}")
-            # Clean up the created worktree and session
-            self.git_service.remove_worktree(main_dir, str(worktree_path), force=True)
-            database.delete_session(session_id)
-            raise WorktreeError(f"Failed to create worktree record: {str(e)}")
-
-        logger.info(f"Created worktree {worktree_id} at {worktree_path} for branch {branch_name}")
+        logger.info(f"Created worktree {worktree_id} at {worktree_path} for branch {branch_name} with session {session_id}")
         return worktree, session
 
     def get_worktree_by_session(self, session_id: str) -> Optional[Dict]:
@@ -316,52 +494,106 @@ class WorktreeManager:
         return database.get_worktree_by_session(session_id)
 
     def get_worktrees_for_project(self, project_id: str) -> List[Dict]:
-        """Get all worktrees for a project"""
-        # Get repository for this project
+        """Get all worktrees for a project with session info.
+
+        Uses the new sessions.worktree_id relationship model.
+        Returns worktrees enriched with:
+        - exists: whether worktree folder exists on disk
+        - sessions: list of all sessions for this worktree
+        - session_count: total number of sessions
+        - active_session: currently active session (if any)
+        """
         repo = database.get_git_repository_by_project(project_id)
         if not repo:
             return []
 
         worktrees = database.get_worktrees_for_repository(repo["id"])
 
-        # Enrich with session info
         for wt in worktrees:
-            if wt.get("session_id"):
+            # Check if worktree folder exists
+            worktree_path = settings.workspace_dir / wt["worktree_path"]
+            wt["exists"] = worktree_path.exists()
+
+            # Get all sessions that have used this worktree (new model)
+            sessions = database.get_sessions_for_worktree(wt["id"])
+            wt["sessions"] = [{
+                "id": s["id"],
+                "title": s["title"],
+                "status": s["status"],
+                "updated_at": s["updated_at"]
+            } for s in sessions]
+            wt["session_count"] = len(sessions)
+
+            # Find active session
+            active_sessions = [s for s in sessions if s.get("status") == "active"]
+            wt["active_session"] = {
+                "id": active_sessions[0]["id"],
+                "title": active_sessions[0]["title"],
+                "status": active_sessions[0]["status"],
+                "updated_at": active_sessions[0]["updated_at"]
+            } if active_sessions else None
+
+            # Legacy support: also check deprecated worktrees.session_id
+            if not wt["sessions"] and wt.get("session_id"):
                 session = database.get_session(wt["session_id"])
                 if session:
-                    wt["session"] = {
+                    wt["sessions"] = [{
                         "id": session["id"],
                         "title": session["title"],
                         "status": session["status"],
                         "updated_at": session["updated_at"]
-                    }
+                    }]
+                    wt["session_count"] = 1
+                    if session.get("status") == "active":
+                        wt["active_session"] = wt["sessions"][0]
 
         return worktrees
 
     def get_worktree_details(self, worktree_id: str) -> Optional[Dict]:
-        """Get detailed worktree information"""
+        """Get detailed worktree information with session history."""
         worktree = database.get_worktree(worktree_id)
         if not worktree:
             return None
 
-        # Get associated session
-        if worktree.get("session_id"):
+        # Check if worktree folder exists
+        worktree_abs_path = str(settings.workspace_dir / worktree["worktree_path"])
+        worktree["exists"] = Path(worktree_abs_path).exists()
+
+        if worktree["exists"]:
+            worktree["git_status"] = self.git_service.get_status(worktree_abs_path)
+
+        # Get all sessions for this worktree (new model)
+        sessions = database.get_sessions_for_worktree(worktree_id)
+        worktree["sessions"] = [{
+            "id": s["id"],
+            "title": s["title"],
+            "status": s["status"],
+            "updated_at": s["updated_at"]
+        } for s in sessions]
+        worktree["session_count"] = len(sessions)
+
+        # Find active session
+        active_sessions = [s for s in sessions if s.get("status") == "active"]
+        worktree["active_session"] = {
+            "id": active_sessions[0]["id"],
+            "title": active_sessions[0]["title"],
+            "status": active_sessions[0]["status"],
+            "updated_at": active_sessions[0]["updated_at"]
+        } if active_sessions else None
+
+        # Legacy support: check deprecated worktrees.session_id
+        if not worktree["sessions"] and worktree.get("session_id"):
             session = database.get_session(worktree["session_id"])
             if session:
-                worktree["session"] = {
+                worktree["sessions"] = [{
                     "id": session["id"],
                     "title": session["title"],
                     "status": session["status"],
                     "updated_at": session["updated_at"]
-                }
-
-        # Get git status for the worktree
-        worktree_abs_path = str(settings.workspace_dir / worktree["worktree_path"])
-        if Path(worktree_abs_path).exists():
-            worktree["git_status"] = self.git_service.get_status(worktree_abs_path)
-            worktree["exists"] = True
-        else:
-            worktree["exists"] = False
+                }]
+                worktree["session_count"] = 1
+                if session.get("status") == "active":
+                    worktree["active_session"] = worktree["sessions"][0]
 
         return worktree
 

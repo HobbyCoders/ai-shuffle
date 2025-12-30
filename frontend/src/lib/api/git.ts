@@ -120,6 +120,9 @@ export interface Worktree {
     base_branch: string | null;
     status: string;
     created_at: string;
+    // New fields from worktree-session decoupling
+    exists?: boolean;  // Whether worktree folder exists on disk
+    session_count?: number;  // Number of sessions that have used this worktree
 }
 
 export interface CreateWorktreeRequest {
