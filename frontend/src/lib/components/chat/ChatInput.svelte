@@ -588,7 +588,7 @@
 				<div class="controls-dock">
 					<!-- Left: Usage Indicator -->
 					<div class="controls-left">
-						<div class="usage-indicator {contextColor}" title="{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)} tokens">
+						<div class="usage-indicator {contextColor}" title="{formatTokenCount(contextUsed)} / {formatTokenCount(CONTEXT_MAX)} tokens">
 							<div class="usage-bar">
 								<div class="usage-fill" style="width: {Math.min(contextPercent, 100)}%"></div>
 							</div>
