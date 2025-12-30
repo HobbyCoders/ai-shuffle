@@ -2696,6 +2696,66 @@ def get_streaming_sessions() -> list:
     ]
 
 
+def get_active_sessions_info() -> list:
+    """Get detailed info about active sessions for the UI.
+
+    Returns list of dicts with session details including:
+    - session_id: The session ID
+    - is_connected: Whether the SDK client is connected
+    - is_streaming: Whether the session is actively streaming
+    - last_activity: When the session was last active
+    - sdk_session_id: The Claude SDK session ID (if available)
+    """
+    result = []
+    for session_id, state in _active_sessions.items():
+        # Get session details from database
+        session_data = database.get_session(session_id)
+        result.append({
+            "session_id": session_id,
+            "is_connected": state.is_connected,
+            "is_streaming": state.is_streaming,
+            "last_activity": state.last_activity.isoformat() if state.last_activity else None,
+            "sdk_session_id": state.sdk_session_id,
+            "title": session_data.get("title") if session_data else None,
+            "project_id": session_data.get("project_id") if session_data else None,
+            "worktree_id": session_data.get("worktree_id") if session_data else None,
+        })
+    return result
+
+
+async def close_active_session(session_id: str) -> bool:
+    """Close an active session, disconnecting the SDK client.
+
+    This releases any file handles the Claude CLI process has on the working directory.
+
+    Returns True if session was closed, False if session wasn't found.
+    """
+    state = _active_sessions.get(session_id)
+    if not state:
+        logger.warning(f"No active session found for {session_id}")
+        return False
+
+    logger.info(f"Closing active session {session_id}")
+
+    # Disconnect the SDK client
+    if state.client:
+        try:
+            await state.client.disconnect()
+            logger.info(f"Disconnected SDK client for session {session_id}")
+        except Exception as e:
+            logger.warning(f"Error disconnecting SDK client for {session_id}: {e}")
+
+    # Clean up agent files
+    if state.agents_dir and state.written_agent_ids:
+        cleanup_agents_directory(state.agents_dir, state.written_agent_ids)
+
+    # Remove from active sessions
+    del _active_sessions[session_id]
+    logger.info(f"Removed session {session_id} from active sessions")
+
+    return True
+
+
 async def stream_to_websocket(
     prompt: str,
     session_id: str,

@@ -272,7 +272,25 @@ class WorktreeManager:
                     self.git_service.remove_worktree(main_dir, str(worktree_path), force=True)
                     raise WorktreeError("No profiles available. Please create a profile first.")
 
-        # Create session
+        # Create worktree record first (we need the worktree_id for the session)
+        worktree_id = f"wt-{uuid.uuid4().hex[:12]}"
+        try:
+            worktree = database.create_worktree(
+                worktree_id=worktree_id,
+                repository_id=repo["id"],
+                branch_name=branch_name,
+                worktree_path=relative_worktree_path,
+                session_id=None,  # No longer linking via worktree.session_id
+                base_branch=base_branch,
+                status="active"
+            )
+        except Exception as e:
+            logger.error(f"Failed to create worktree record: {e}")
+            # Clean up the created git worktree
+            self.git_service.remove_worktree(main_dir, str(worktree_path), force=True)
+            raise WorktreeError(f"Failed to create worktree record: {str(e)}")
+
+        # Create session with worktree_id (new model: session points to worktree)
         session_id = f"ses-{uuid.uuid4().hex[:12]}"
         session_title = f"Branch: {branch_name}"
 
@@ -281,32 +299,15 @@ class WorktreeManager:
                 session_id=session_id,
                 profile_id=profile_id,
                 project_id=project_id,
-                title=session_title
+                title=session_title,
+                worktree_id=worktree_id  # Link session to worktree
             )
         except Exception as e:
             logger.error(f"Failed to create session: {e}")
-            # Clean up the created worktree
+            # Clean up the created worktree record and git worktree
+            database.delete_worktree(worktree_id)
             self.git_service.remove_worktree(main_dir, str(worktree_path), force=True)
             raise WorktreeError(f"Failed to create chat session: {str(e)}")
-
-        # Create worktree record
-        worktree_id = f"wt-{uuid.uuid4().hex[:12]}"
-        try:
-            worktree = database.create_worktree(
-                worktree_id=worktree_id,
-                repository_id=repo["id"],
-                branch_name=branch_name,
-                worktree_path=relative_worktree_path,
-                session_id=session_id,
-                base_branch=base_branch,
-                status="active"
-            )
-        except Exception as e:
-            logger.error(f"Failed to create worktree record: {e}")
-            # Clean up the created worktree and session
-            self.git_service.remove_worktree(main_dir, str(worktree_path), force=True)
-            database.delete_session(session_id)
-            raise WorktreeError(f"Failed to create worktree record: {str(e)}")
 
         logger.info(f"Created worktree {worktree_id} at {worktree_path} for branch {branch_name}")
         return worktree, session

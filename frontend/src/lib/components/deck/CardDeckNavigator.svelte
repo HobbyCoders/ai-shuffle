@@ -22,7 +22,7 @@
 		MessageSquare, Terminal, Clock, Image, Box, AudioLines,
 		Settings, FolderOpen, X, Files, User, Pencil, Check,
 		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronRight, Bot, Puzzle,
-		List, GitBranch
+		List, GitBranch, Activity
 	} from 'lucide-svelte';
 	import { tabs, type Session } from '$lib/stores/tabs';
 	import { deck, type DeckCard as DeckCardType } from '$lib/stores/deck';
@@ -48,6 +48,7 @@
 		onOpenSubagents?: () => void;
 		onOpenSettings?: () => void;
 		onOpenPlugins?: () => void;
+		onOpenActiveSessions?: () => void;
 		isAdmin?: boolean;
 		isMobile?: boolean;
 	}
@@ -67,6 +68,7 @@
 		onOpenSubagents,
 		onOpenSettings,
 		onOpenPlugins,
+		onOpenActiveSessions,
 		isAdmin = false,
 		isMobile = false
 	}: Props = $props();
@@ -294,6 +296,14 @@
 					icon: Bot
 				},
 				{
+					id: 'active-sessions',
+					type: 'action',
+					action: 'active-sessions',
+					title: 'Active Sessions',
+					subtitle: 'Manage running processes',
+					icon: Activity
+				},
+				{
 					id: 'settings',
 					type: 'action',
 					action: 'settings',
@@ -510,6 +520,7 @@
 			case 'subagents': onOpenSubagents?.(); break;
 			case 'settings': onOpenSettings?.(); break;
 			case 'plugins': onOpenPlugins?.(); break;
+			case 'active-sessions': onOpenActiveSessions?.(); break;
 		}
 	}
 

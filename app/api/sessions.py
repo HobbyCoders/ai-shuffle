@@ -1310,3 +1310,76 @@ async def create_session_with_worktree(
         worktree_path=worktree["worktree_path"],
         status="active"
     )
+
+
+# ============================================================================
+# Active Sessions Management (running SDK clients)
+# ============================================================================
+
+class ActiveSessionInfo(BaseModel):
+    """Info about an active session with a running SDK client"""
+    session_id: str
+    is_connected: bool
+    is_streaming: bool
+    last_activity: Optional[str]
+    sdk_session_id: Optional[str]
+    title: Optional[str]
+    project_id: Optional[str]
+    worktree_id: Optional[str]
+
+
+class CloseSessionResponse(BaseModel):
+    """Response for closing an active session"""
+    success: bool
+    message: str
+
+
+@router.get("/active", response_model=List[ActiveSessionInfo])
+async def list_active_sessions(
+    request: Request,
+    token: str = Depends(require_auth)
+):
+    """
+    List all active sessions with running SDK clients.
+
+    Active sessions have a connected Claude CLI process that may be holding
+    file handles on their working directory. This is useful for:
+    - Seeing which sessions are currently in use
+    - Identifying sessions that need to be closed before deleting worktrees
+    - Monitoring system resource usage
+    """
+    from app.core.query_engine import get_active_sessions_info
+
+    active = get_active_sessions_info()
+    return [ActiveSessionInfo(**info) for info in active]
+
+
+@router.post("/active/{session_id}/close", response_model=CloseSessionResponse)
+async def close_active_session(
+    request: Request,
+    session_id: str,
+    token: str = Depends(require_auth)
+):
+    """
+    Close an active session, disconnecting its SDK client.
+
+    This releases any file handles the Claude CLI process has on the working
+    directory, allowing the directory (e.g., a worktree) to be deleted.
+
+    The session data (messages, history) is preserved - only the running
+    process is terminated. The session can be resumed later.
+    """
+    from app.core.query_engine import close_active_session as close_session
+
+    success = await close_session(session_id)
+
+    if success:
+        return CloseSessionResponse(
+            success=True,
+            message=f"Session {session_id} closed successfully"
+        )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {session_id} is not currently active"
+        )
