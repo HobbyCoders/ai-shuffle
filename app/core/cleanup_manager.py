@@ -37,6 +37,8 @@ DEFAULT_CONFIG = {
     "cleanup_videos_max_age_days": 7,
     "cleanup_shared_files_enabled": False,
     "cleanup_shared_files_max_age_days": 7,
+    "cleanup_uploads_enabled": False,
+    "cleanup_uploads_max_age_days": 7,
     "cleanup_project_ids": [],  # List of project IDs, empty = all projects
 
     # Sleep mode
@@ -55,6 +57,7 @@ class CleanupStats:
     images_deleted: int = 0
     videos_deleted: int = 0
     shared_files_deleted: int = 0
+    uploads_deleted: int = 0
     bytes_freed: int = 0
 
 
@@ -64,6 +67,7 @@ class FileCleanupPreview:
     images: List[Dict[str, Any]] = field(default_factory=list)
     videos: List[Dict[str, Any]] = field(default_factory=list)
     shared_files: List[Dict[str, Any]] = field(default_factory=list)
+    uploads: List[Dict[str, Any]] = field(default_factory=list)
     total_count: int = 0
     total_bytes: int = 0
 
@@ -189,7 +193,8 @@ class CleanupManager:
         return {
             "images": project_path / "generated-images",
             "videos": project_path / "generated-videos",
-            "shared_files": project_path / "shared-files"
+            "shared_files": project_path / "shared-files",
+            "uploads": project_path / "uploads"
         }
 
     def _scan_old_files(self, folder: Path, max_age_days: int) -> List[Dict[str, Any]]:
@@ -198,19 +203,22 @@ class CleanupManager:
         if not folder.exists():
             return old_files
 
-        cutoff = datetime.utcnow() - timedelta(days=max_age_days)
+        # Use local time consistently for both cutoff and file mtime
+        now = datetime.now()
+        cutoff = now - timedelta(days=max_age_days)
 
         try:
             for file_path in folder.iterdir():
                 if file_path.is_file():
                     mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
                     if mtime < cutoff:
+                        age_days = (now - mtime).days
                         old_files.append({
                             "path": str(file_path),
                             "name": file_path.name,
                             "size": file_path.stat().st_size,
                             "modified": mtime.isoformat(),
-                            "age_days": (datetime.utcnow() - mtime).days
+                            "age_days": age_days
                         })
         except Exception as e:
             logger.error(f"Error scanning folder {folder}: {e}")
@@ -224,7 +232,8 @@ class CleanupManager:
         projects = self.get_projects_to_clean()
 
         for project in projects:
-            project_path = Path(project["path"])
+            # Project paths are relative to workspace - join with workspace dir
+            project_path = settings.effective_workspace_dir / project["path"]
             folders = self._get_generated_folders(project_path)
 
             # Images
@@ -251,6 +260,14 @@ class CleanupManager:
                     f["project"] = project["name"]
                 preview.shared_files.extend(files)
 
+            # Uploads
+            if self.get_config("cleanup_uploads_enabled"):
+                max_age = self.get_config("cleanup_uploads_max_age_days")
+                files = self._scan_old_files(folders["uploads"], max_age)
+                for f in files:
+                    f["project"] = project["name"]
+                preview.uploads.extend(files)
+
         # Also check workspace root folders
         workspace = settings.effective_workspace_dir
         root_folders = self._get_generated_folders(workspace)
@@ -276,12 +293,20 @@ class CleanupManager:
                 f["project"] = "(workspace root)"
             preview.shared_files.extend(files)
 
+        if self.get_config("cleanup_uploads_enabled"):
+            max_age = self.get_config("cleanup_uploads_max_age_days")
+            files = self._scan_old_files(root_folders["uploads"], max_age)
+            for f in files:
+                f["project"] = "(workspace root)"
+            preview.uploads.extend(files)
+
         # Calculate totals
-        preview.total_count = len(preview.images) + len(preview.videos) + len(preview.shared_files)
+        preview.total_count = len(preview.images) + len(preview.videos) + len(preview.shared_files) + len(preview.uploads)
         preview.total_bytes = (
             sum(f["size"] for f in preview.images) +
             sum(f["size"] for f in preview.videos) +
-            sum(f["size"] for f in preview.shared_files)
+            sum(f["size"] for f in preview.shared_files) +
+            sum(f["size"] for f in preview.uploads)
         )
 
         return preview
@@ -328,11 +353,17 @@ class CleanupManager:
             stats.shared_files_deleted = count
             stats.bytes_freed += bytes_freed
 
-        if stats.images_deleted or stats.videos_deleted or stats.shared_files_deleted:
+        # Delete uploads
+        if preview.uploads:
+            count, bytes_freed = self._delete_files(preview.uploads)
+            stats.uploads_deleted = count
+            stats.bytes_freed += bytes_freed
+
+        if stats.images_deleted or stats.videos_deleted or stats.shared_files_deleted or stats.uploads_deleted:
             logger.info(
                 f"File cleanup: deleted {stats.images_deleted} images, "
-                f"{stats.videos_deleted} videos, {stats.shared_files_deleted} shared files "
-                f"({stats.bytes_freed / 1024 / 1024:.2f} MB freed)"
+                f"{stats.videos_deleted} videos, {stats.shared_files_deleted} shared files, "
+                f"{stats.uploads_deleted} uploads ({stats.bytes_freed / 1024 / 1024:.2f} MB freed)"
             )
 
         return stats
@@ -385,6 +416,7 @@ class CleanupManager:
         stats.images_deleted = file_stats.images_deleted
         stats.videos_deleted = file_stats.videos_deleted
         stats.shared_files_deleted = file_stats.shared_files_deleted
+        stats.uploads_deleted = file_stats.uploads_deleted
         stats.bytes_freed = file_stats.bytes_freed
 
         logger.debug("Cleanup cycle completed")
