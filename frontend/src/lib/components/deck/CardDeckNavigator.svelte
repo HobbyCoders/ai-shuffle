@@ -48,7 +48,6 @@
 		onOpenSubagents?: () => void;
 		onOpenSettings?: () => void;
 		onOpenPlugins?: () => void;
-		onOpenActiveSessions?: () => void;
 		isAdmin?: boolean;
 		isMobile?: boolean;
 	}
@@ -68,7 +67,6 @@
 		onOpenSubagents,
 		onOpenSettings,
 		onOpenPlugins,
-		onOpenActiveSessions,
 		isAdmin = false,
 		isMobile = false
 	}: Props = $props();
@@ -136,7 +134,7 @@
 	let renameDeckName = $state('');
 
 	// Card types for main deck
-	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'image-studio' | 'model-studio' | 'audio-studio' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins' | 'active-sessions';
+	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'image-studio' | 'model-studio' | 'audio-studio' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins';
 
 	interface NavigatorCard {
 		id: string;
@@ -302,14 +300,6 @@
 					title: 'Settings',
 					subtitle: 'Preferences & config',
 					icon: Settings
-				},
-				{
-					id: 'active-sessions',
-					type: 'action',
-					action: 'active-sessions',
-					title: 'Active Sessions',
-					subtitle: 'Manage running processes',
-					icon: Activity
 				}
 			);
 		}
@@ -520,7 +510,6 @@
 			case 'subagents': onOpenSubagents?.(); break;
 			case 'settings': onOpenSettings?.(); break;
 			case 'plugins': onOpenPlugins?.(); break;
-			case 'active-sessions': onOpenActiveSessions?.(); break;
 		}
 	}
 
