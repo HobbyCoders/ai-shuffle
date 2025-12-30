@@ -255,6 +255,13 @@ def _create_schema(cursor: sqlite3.Cursor):
     except sqlite3.OperationalError:
         pass  # Column already exists
 
+    # Add worktree_id to sessions (migration for existing DBs)
+    # This allows sessions to reference their worktree (many sessions can share one worktree)
+    try:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN worktree_id TEXT REFERENCES worktrees(id) ON DELETE SET NULL")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
     # Login attempts tracking for brute force protection
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS login_attempts (
@@ -500,6 +507,7 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags(session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_tag ON session_tags(tag_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_worktree ON sessions(worktree_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_webhooks_active ON webhooks(is_active)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_documents_project ON knowledge_documents(project_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_document ON knowledge_chunks(document_id)")
@@ -4161,11 +4169,58 @@ def get_worktree(worktree_id: str) -> Optional[Dict[str, Any]]:
 
 
 def get_worktree_by_session(session_id: str) -> Optional[Dict[str, Any]]:
-    """Get a worktree by session ID"""
+    """Get a worktree by session ID.
+    
+    Uses the new model where sessions.worktree_id points to the worktree.
+    Falls back to legacy worktrees.session_id for backwards compatibility.
+    """
     with get_db() as conn:
         cursor = conn.cursor()
+        # New model: session has worktree_id
+        cursor.execute("""
+            SELECT w.* FROM worktrees w
+            JOIN sessions s ON s.worktree_id = w.id
+            WHERE s.id = ?
+        """, (session_id,))
+        result = row_to_dict(cursor.fetchone())
+        if result:
+            return result
+        
+        # Fallback: legacy model where worktree has session_id
         cursor.execute("SELECT * FROM worktrees WHERE session_id = ?", (session_id,))
         return row_to_dict(cursor.fetchone())
+
+
+def get_sessions_for_worktree(worktree_id: str) -> List[Dict[str, Any]]:
+    """Get all sessions associated with a worktree."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM sessions WHERE worktree_id = ? ORDER BY updated_at DESC",
+            (worktree_id,)
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def link_session_to_worktree(session_id: str, worktree_id: str) -> bool:
+    """Link a session to a worktree by setting sessions.worktree_id.
+    
+    This is the safe way to associate a session with a worktree - 
+    using UPDATE after session creation rather than modifying INSERT.
+    
+    Returns True if successful, False if session not found.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "UPDATE sessions SET worktree_id = ? WHERE id = ?",
+                (worktree_id, session_id)
+            )
+            return cursor.rowcount > 0
+        except Exception:
+            # Column might not exist in old databases - fail gracefully
+            return False
 
 
 def get_worktrees_for_repository(repository_id: str) -> List[Dict[str, Any]]:
