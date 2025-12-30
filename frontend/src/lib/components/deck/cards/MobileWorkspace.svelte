@@ -455,6 +455,7 @@
 	/* Card Container */
 	.card-container {
 		flex: 1;
+		min-height: 0; /* Critical: allows flex child to shrink below content size */
 		overflow: hidden;
 		position: relative;
 		/* Allow normal touch behavior for inputs - swipe is controlled by JS */
@@ -495,6 +496,9 @@
 
 	.card-wrapper {
 		height: 100%;
+		min-height: 0; /* Allow shrinking in flex context */
+		display: flex;
+		flex-direction: column;
 		transition: transform 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94),
 					opacity 0.15s ease;
 	}
