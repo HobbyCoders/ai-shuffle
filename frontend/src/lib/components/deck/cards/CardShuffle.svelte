@@ -270,14 +270,16 @@
 		pointer-events: none;
 	}
 
-	/* Invisible trigger zone - wide area at top to detect mouse */
+	/* Invisible trigger zone - narrower area at top to detect mouse
+	   Reduced width (200px) and added vertical offset (12px) to avoid
+	   overlap with card close/maximize buttons in side-by-side layout */
 	.trigger-zone {
 		position: absolute;
-		top: 0;
+		top: 12px;
 		left: 50%;
 		transform: translateX(-50%);
-		width: 300px;
-		height: 40px;
+		width: 200px;
+		height: 32px;
 		pointer-events: auto;
 	}
 

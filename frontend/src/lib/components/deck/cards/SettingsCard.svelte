@@ -1221,38 +1221,40 @@
 {:else}
 	<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
 		<div class="settings-card-content">
-			<!-- Sidebar -->
-			<nav class="settings-sidebar">
-				{#each categories as cat}
-					<div class="sidebar-category">
-						<button
-							onclick={() => selectCategory(cat.id)}
-							class="category-header {activeCategory === cat.id ? 'active' : ''}"
-						>
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d={cat.icon} />
-							</svg>
-							<span>{cat.label}</span>
-						</button>
-						{#if activeCategory === cat.id}
-							<div class="sidebar-sections">
-								{#each cat.sections as section}
-									<button
-										onclick={() => selectSection(section.id)}
-										class="section-btn {activeSection === section.id ? 'active' : ''}"
-									>
-										{section.label}
-									</button>
-								{/each}
-							</div>
-						{/if}
-					</div>
-				{/each}
-			</nav>
+			<div class="settings-inner">
+				<!-- Sidebar -->
+				<nav class="settings-sidebar">
+					{#each categories as cat}
+						<div class="sidebar-category">
+							<button
+								onclick={() => selectCategory(cat.id)}
+								class="category-header {activeCategory === cat.id ? 'active' : ''}"
+							>
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d={cat.icon} />
+								</svg>
+								<span>{cat.label}</span>
+							</button>
+							{#if activeCategory === cat.id}
+								<div class="sidebar-sections">
+									{#each cat.sections as section}
+										<button
+											onclick={() => selectSection(section.id)}
+											class="section-btn {activeSection === section.id ? 'active' : ''}"
+										>
+											{section.label}
+										</button>
+									{/each}
+								</div>
+							{/if}
+						</div>
+					{/each}
+				</nav>
 
-			<!-- Content -->
-			<div class="settings-content">
-				{@render settingsContent()}
+				<!-- Content -->
+				<div class="settings-content">
+					{@render settingsContent()}
+				</div>
 			</div>
 		</div>
 	</BaseCard>
@@ -2348,6 +2350,9 @@
 		--radius-xl: 18px;
 		--radius-full: 9999px;
 
+		/* Max width for centered layout */
+		--settings-max-width: 1000px;
+
 		/* Surface colors */
 		--surface-0: var(--card, oklch(0.18 0.008 260));
 		--surface-1: color-mix(in oklch, var(--muted, oklch(0.22 0.01 260)) 60%, transparent);
@@ -2388,11 +2393,22 @@
 		--transition-spring: 300ms cubic-bezier(0.34, 1.56, 0.64, 1);
 
 		display: flex;
+		justify-content: center;
 		height: 100%;
 		overflow: hidden;
 		background: var(--surface-0);
 		position: relative;
 		font-family: var(--font-display);
+	}
+
+	/* Inner container - holds sidebar + content, centered and clamped */
+	.settings-inner {
+		display: flex;
+		width: 100%;
+		max-width: var(--settings-max-width);
+		height: 100%;
+		gap: var(--space-4);
+		padding: var(--space-4);
 	}
 
 	/* Glass edge highlight at top */
@@ -2427,39 +2443,42 @@
 	}
 
 	/* ═══════════════════════════════════════════════════════════════════════════════
-	   SIDEBAR
+	   SIDEBAR - Floating Pill Design
 	   ═══════════════════════════════════════════════════════════════════════════════ */
 
 	.settings-sidebar {
 		width: 180px;
 		flex-shrink: 0;
-		background: linear-gradient(
-			180deg,
-			color-mix(in oklch, var(--muted, oklch(0.22 0.01 260)) 40%, transparent) 0%,
-			color-mix(in oklch, var(--muted, oklch(0.22 0.01 260)) 20%, transparent) 100%
-		);
-		border-right: 1px solid var(--border-subtle);
+		background: var(--surface-1);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-lg);
 		overflow-y: auto;
-		padding: var(--space-3) var(--space-2);
+		overflow-x: hidden;
+		padding: var(--space-3);
 		position: relative;
+		box-shadow: var(--shadow-sm);
+		/* Frosted glass effect */
+		backdrop-filter: blur(12px);
+		-webkit-backdrop-filter: blur(12px);
 	}
 
-	/* Subtle glow line on right edge */
-	.settings-sidebar::after {
+	/* Subtle inner glow at top */
+	.settings-sidebar::before {
 		content: '';
 		position: absolute;
 		top: 0;
+		left: 0;
 		right: 0;
-		width: 1px;
-		height: 100%;
+		height: 1px;
 		background: linear-gradient(
-			180deg,
+			90deg,
 			transparent 0%,
-			color-mix(in oklch, var(--accent-primary) 20%, transparent) 30%,
-			color-mix(in oklch, var(--accent-primary) 30%, transparent) 50%,
-			color-mix(in oklch, var(--accent-primary) 20%, transparent) 70%,
+			color-mix(in oklch, var(--foreground) 10%, transparent) 30%,
+			color-mix(in oklch, var(--foreground) 15%, transparent) 50%,
+			color-mix(in oklch, var(--foreground) 10%, transparent) 70%,
 			transparent 100%
 		);
+		border-radius: var(--radius-lg) var(--radius-lg) 0 0;
 	}
 
 	.sidebar-category {
@@ -2547,7 +2566,7 @@
 	}
 
 	/* ═══════════════════════════════════════════════════════════════════════════════
-	   CONTENT AREA
+	   CONTENT AREA - Floating Panel Design
 	   ═══════════════════════════════════════════════════════════════════════════════ */
 
 	.settings-content {
@@ -2556,6 +2575,34 @@
 		padding: var(--space-5) var(--space-6);
 		scrollbar-width: thin;
 		scrollbar-color: var(--border-default) transparent;
+		/* Match floating sidebar style */
+		background: var(--surface-1);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-lg);
+		box-shadow: var(--shadow-sm);
+		backdrop-filter: blur(12px);
+		-webkit-backdrop-filter: blur(12px);
+		position: relative;
+	}
+
+	/* Subtle inner glow at top */
+	.settings-content::before {
+		content: '';
+		position: absolute;
+		top: 0;
+		left: 0;
+		right: 0;
+		height: 1px;
+		background: linear-gradient(
+			90deg,
+			transparent 0%,
+			color-mix(in oklch, var(--foreground) 10%, transparent) 30%,
+			color-mix(in oklch, var(--foreground) 15%, transparent) 50%,
+			color-mix(in oklch, var(--foreground) 10%, transparent) 70%,
+			transparent 100%
+		);
+		border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+		z-index: 1;
 	}
 
 	.settings-content::-webkit-scrollbar {
@@ -2576,7 +2623,8 @@
 	}
 
 	.section-content {
-		max-width: 640px;
+		width: 100%;
+		max-width: 720px;
 	}
 
 	/* Section header */
