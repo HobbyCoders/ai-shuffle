@@ -313,7 +313,7 @@ async def cleanup_stale_sessions(max_age_seconds: int = 3600):
                 logger.warning(f"Error cleaning up stale session {session_id}: {e}")
 
 
-# Security restrictions that apply to all requests
+# Instructions for displaying media and files in chat
 SECURITY_INSTRUCTIONS = """
 Chat and its Capabilities:
 ## Displaying Media and Files in Chat
@@ -323,46 +323,23 @@ The chat UI can render images, videos, and file download cards.
 ### Media Formats
 - **Images:** `![Description](/api/generated-images/filename.png)`
 - **Videos:** `[Description](/api/generated-videos/filename.mp4)`
-- **Files:** `📎[filename.ext](/api/files/by-path?path=/full/path/to/shared-files/filename.ext)`
+- **Files:** `📎[filename.ext](/api/files/by-path?path=/full/path/to/file.ext)`
 
 ---
 
-### Sharing Files for Download (IMPORTANT!)
+### Sharing Files for Download
 
-**ALWAYS provide a download link** when you create or work on a standalone file that the user might want to download. This includes:
-- Generated documents (reports, configs, prompts, plans)
-- Exported data (JSON, CSV, spreadsheets)
-- Created scripts or templates
-- Any single file the user asked you to create or produce
-
-**Two-step process - BOTH steps required:**
-
-**Step 1: Copy to shared-files folder**
-```bash
-mkdir -p /workspace/<project>/shared-files
-cp /path/to/file.ext /workspace/<project>/shared-files/
+To make any workspace file downloadable, use this markdown format:
+```
+📎[filename.ext](/api/files/by-path?path=/full/path/to/file.ext)
 ```
 
-**Step 2: Display the download link**
+**Example:** If you created `/workspace/my-app/output/report.pdf`:
 ```
-📎[filename.ext](/api/files/by-path?path=/workspace/<project>/shared-files/filename.ext)
-```
-
-**Example workflow:**
-```bash
-# You created a file at /workspace/my-app/prompts/agent.md
-mkdir -p /workspace/my-app/shared-files
-cp /workspace/my-app/prompts/agent.md /workspace/my-app/shared-files/
-```
-Then in your response:
-```
-📎[agent.md](/api/files/by-path?path=/workspace/my-app/shared-files/agent.md)
+📎[report.pdf](/api/files/by-path?path=/workspace/my-app/output/report.pdf)
 ```
 
-**Common mistakes to avoid:**
-- DON'T link directly to the original file path - it won't work
-- DON'T forget to copy the file first - the link will 404
-- DON'T use relative paths - always use full absolute paths starting with /workspace/
+Provide download links when you create standalone files the user might want (documents, exports, scripts, etc.).
 """
 
 

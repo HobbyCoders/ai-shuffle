@@ -3,7 +3,7 @@ Cleanup Manager - Centralized background cleanup and sleep mode management
 
 Handles:
 - Configurable cleanup schedules for sessions, connections, and database records
-- Generated file cleanup (images, videos, shared files) per project
+- Generated file cleanup (images, videos, uploads) per project
 - Sleep mode to reduce resource usage when idle
 """
 
@@ -35,8 +35,6 @@ DEFAULT_CONFIG = {
     "cleanup_images_max_age_days": 7,
     "cleanup_videos_enabled": False,
     "cleanup_videos_max_age_days": 7,
-    "cleanup_shared_files_enabled": False,
-    "cleanup_shared_files_max_age_days": 7,
     "cleanup_uploads_enabled": False,
     "cleanup_uploads_max_age_days": 7,
     "cleanup_project_ids": [],  # List of project IDs, empty = all projects
@@ -56,7 +54,6 @@ class CleanupStats:
     sync_logs_cleaned: int = 0
     images_deleted: int = 0
     videos_deleted: int = 0
-    shared_files_deleted: int = 0
     uploads_deleted: int = 0
     bytes_freed: int = 0
 
@@ -66,7 +63,6 @@ class FileCleanupPreview:
     """Preview of files that would be deleted"""
     images: List[Dict[str, Any]] = field(default_factory=list)
     videos: List[Dict[str, Any]] = field(default_factory=list)
-    shared_files: List[Dict[str, Any]] = field(default_factory=list)
     uploads: List[Dict[str, Any]] = field(default_factory=list)
     total_count: int = 0
     total_bytes: int = 0
@@ -193,7 +189,6 @@ class CleanupManager:
         return {
             "images": project_path / "generated-images",
             "videos": project_path / "generated-videos",
-            "shared_files": project_path / "shared-files",
             "uploads": project_path / "uploads"
         }
 
@@ -252,14 +247,6 @@ class CleanupManager:
                     f["project"] = project["name"]
                 preview.videos.extend(files)
 
-            # Shared files
-            if self.get_config("cleanup_shared_files_enabled"):
-                max_age = self.get_config("cleanup_shared_files_max_age_days")
-                files = self._scan_old_files(folders["shared_files"], max_age)
-                for f in files:
-                    f["project"] = project["name"]
-                preview.shared_files.extend(files)
-
             # Uploads
             if self.get_config("cleanup_uploads_enabled"):
                 max_age = self.get_config("cleanup_uploads_max_age_days")
@@ -286,13 +273,6 @@ class CleanupManager:
                 f["project"] = "(workspace root)"
             preview.videos.extend(files)
 
-        if self.get_config("cleanup_shared_files_enabled"):
-            max_age = self.get_config("cleanup_shared_files_max_age_days")
-            files = self._scan_old_files(root_folders["shared_files"], max_age)
-            for f in files:
-                f["project"] = "(workspace root)"
-            preview.shared_files.extend(files)
-
         if self.get_config("cleanup_uploads_enabled"):
             max_age = self.get_config("cleanup_uploads_max_age_days")
             files = self._scan_old_files(root_folders["uploads"], max_age)
@@ -301,11 +281,10 @@ class CleanupManager:
             preview.uploads.extend(files)
 
         # Calculate totals
-        preview.total_count = len(preview.images) + len(preview.videos) + len(preview.shared_files) + len(preview.uploads)
+        preview.total_count = len(preview.images) + len(preview.videos) + len(preview.uploads)
         preview.total_bytes = (
             sum(f["size"] for f in preview.images) +
             sum(f["size"] for f in preview.videos) +
-            sum(f["size"] for f in preview.shared_files) +
             sum(f["size"] for f in preview.uploads)
         )
 
@@ -347,23 +326,17 @@ class CleanupManager:
             stats.videos_deleted = count
             stats.bytes_freed += bytes_freed
 
-        # Delete shared files
-        if preview.shared_files:
-            count, bytes_freed = self._delete_files(preview.shared_files)
-            stats.shared_files_deleted = count
-            stats.bytes_freed += bytes_freed
-
         # Delete uploads
         if preview.uploads:
             count, bytes_freed = self._delete_files(preview.uploads)
             stats.uploads_deleted = count
             stats.bytes_freed += bytes_freed
 
-        if stats.images_deleted or stats.videos_deleted or stats.shared_files_deleted or stats.uploads_deleted:
+        if stats.images_deleted or stats.videos_deleted or stats.uploads_deleted:
             logger.info(
                 f"File cleanup: deleted {stats.images_deleted} images, "
-                f"{stats.videos_deleted} videos, {stats.shared_files_deleted} shared files, "
-                f"{stats.uploads_deleted} uploads ({stats.bytes_freed / 1024 / 1024:.2f} MB freed)"
+                f"{stats.videos_deleted} videos, {stats.uploads_deleted} uploads "
+                f"({stats.bytes_freed / 1024 / 1024:.2f} MB freed)"
             )
 
         return stats
@@ -415,7 +388,6 @@ class CleanupManager:
         file_stats = await self.run_file_cleanup()
         stats.images_deleted = file_stats.images_deleted
         stats.videos_deleted = file_stats.videos_deleted
-        stats.shared_files_deleted = file_stats.shared_files_deleted
         stats.uploads_deleted = file_stats.uploads_deleted
         stats.bytes_freed = file_stats.bytes_freed
 
