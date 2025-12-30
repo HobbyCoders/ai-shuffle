@@ -19,7 +19,19 @@ logger = logging.getLogger(__name__)
 # v21: Force re-run to ensure agent_runs, agent_tasks, agent_logs tables exist
 # v22: Add credential_policies and api_user_credentials tables
 # v23: Worktree-session decoupling - add worktree_id to sessions, remove UNIQUE from worktrees.session_id
-SCHEMA_VERSION = 23
+# v24: Add unique index on active worktrees to prevent race conditions, fix N+1 queries
+SCHEMA_VERSION = 24
+
+
+# =============================================================================
+# Worktree Status Constants
+# =============================================================================
+# Use these constants instead of string literals for consistency
+class WorktreeStatus:
+    """Worktree status values - use these constants for consistency"""
+    ACTIVE = "active"       # Worktree exists and is usable
+    DELETED = "deleted"     # Worktree was intentionally deleted
+    ORPHANED = "orphaned"   # Worktree path no longer exists on disk (cleanup needed)
 
 
 def get_connection() -> sqlite3.Connection:
@@ -266,17 +278,32 @@ def _create_schema(cursor: sqlite3.Cursor):
 
     # Migrate existing worktree-session relationships from worktrees.session_id to sessions.worktree_id
     # This preserves backward compatibility while moving to the new model
-    try:
-        cursor.execute("""
-            UPDATE sessions SET worktree_id = (
-                SELECT w.id FROM worktrees w WHERE w.session_id = sessions.id
-            )
-            WHERE worktree_id IS NULL
-            AND EXISTS (SELECT 1 FROM worktrees w WHERE w.session_id = sessions.id)
-        """)
-        logger.info("Migrated existing worktree-session relationships to sessions.worktree_id")
-    except Exception as e:
-        logger.warning(f"Worktree migration may have already completed or failed: {e}")
+    # First check if migration is needed (any sessions without worktree_id that should have one)
+    cursor.execute("""
+        SELECT COUNT(*) as cnt FROM sessions s
+        WHERE s.worktree_id IS NULL
+        AND EXISTS (SELECT 1 FROM worktrees w WHERE w.session_id = s.id)
+    """)
+    migration_needed = cursor.fetchone()["cnt"] > 0
+    
+    if migration_needed:
+        try:
+            cursor.execute("""
+                UPDATE sessions SET worktree_id = (
+                    SELECT w.id FROM worktrees w WHERE w.session_id = sessions.id
+                )
+                WHERE worktree_id IS NULL
+                AND EXISTS (SELECT 1 FROM worktrees w WHERE w.session_id = sessions.id)
+            """)
+            migrated_count = cursor.rowcount
+            logger.info(f"Migrated {migrated_count} worktree-session relationships to sessions.worktree_id")
+        except sqlite3.OperationalError as e:
+            # Handle specific SQLite errors (e.g., table doesn't exist during initial setup)
+            if "no such table" in str(e).lower():
+                logger.debug("Worktrees table does not exist yet, skipping migration")
+            else:
+                logger.error(f"Failed to migrate worktree-session relationships: {e}")
+                raise  # Re-raise unexpected errors
 
     # Login attempts tracking for brute force protection
     cursor.execute("""
@@ -606,6 +633,15 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_session ON worktrees(session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_branch ON worktrees(branch_name)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_status ON worktrees(status)")
+    # Composite index for efficient active worktree queries
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_repo_status ON worktrees(repository_id, status)")
+    # CRITICAL: Unique index to prevent race condition - only one active worktree per branch
+    # This enforces at database level that two concurrent requests cannot create worktrees for the same branch
+    cursor.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_worktrees_active_branch
+        ON worktrees(repository_id, branch_name)
+        WHERE status = 'active'
+    """)
 
     # =========================================================================
     # Background Agent Runs (autonomous agent execution)
@@ -4238,6 +4274,73 @@ def get_sessions_for_worktree(worktree_id: str) -> List[Dict[str, Any]]:
             (worktree_id,)
         )
         return rows_to_list(cursor.fetchall())
+
+
+def get_worktrees_with_sessions(repository_id: str) -> List[Dict[str, Any]]:
+    """Get all worktrees for a repository with their sessions in a single query.
+    
+    This avoids the N+1 query pattern by fetching all data in one query.
+    Returns worktrees with a 'sessions' field containing list of session dicts.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Get all worktrees with their sessions using a LEFT JOIN
+        cursor.execute("""
+            SELECT 
+                w.id as worktree_id,
+                w.repository_id,
+                w.session_id as legacy_session_id,
+                w.branch_name,
+                w.worktree_path,
+                w.base_branch,
+                w.status,
+                w.created_at as worktree_created_at,
+                s.id as session_id,
+                s.title as session_title,
+                s.status as session_status,
+                s.updated_at as session_updated_at
+            FROM worktrees w
+            LEFT JOIN sessions s ON s.worktree_id = w.id
+            WHERE w.repository_id = ?
+            ORDER BY w.created_at DESC, s.updated_at DESC
+        """, (repository_id,))
+        
+        rows = cursor.fetchall()
+        
+        # Group by worktree
+        worktrees_map = {}
+        for row in rows:
+            wt_id = row["worktree_id"]
+            if wt_id not in worktrees_map:
+                worktrees_map[wt_id] = {
+                    "id": wt_id,
+                    "repository_id": row["repository_id"],
+                    "session_id": row["legacy_session_id"],  # Deprecated field
+                    "branch_name": row["branch_name"],
+                    "worktree_path": row["worktree_path"],
+                    "base_branch": row["base_branch"],
+                    "status": row["status"],
+                    "created_at": row["worktree_created_at"],
+                    "sessions": [],
+                    "session_count": 0,
+                    "active_session": None
+                }
+            
+            # Add session if present
+            if row["session_id"]:
+                session = {
+                    "id": row["session_id"],
+                    "title": row["session_title"],
+                    "status": row["session_status"],
+                    "updated_at": row["session_updated_at"]
+                }
+                worktrees_map[wt_id]["sessions"].append(session)
+                worktrees_map[wt_id]["session_count"] += 1
+                
+                if row["session_status"] == "active" and not worktrees_map[wt_id]["active_session"]:
+                    worktrees_map[wt_id]["active_session"] = session
+        
+        return list(worktrees_map.values())
 
 
 def get_worktree_by_branch(repository_id: str, branch_name: str) -> Optional[Dict[str, Any]]:

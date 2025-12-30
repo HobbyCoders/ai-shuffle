@@ -22,6 +22,7 @@ from typing import Optional, Tuple, Dict, Any, List
 from app.core.config import settings
 from app.core.git_service import GitService, git_service
 from app.db import database
+from app.db.database import WorktreeStatus
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +151,7 @@ class WorktreeManager:
             if not worktree_full_path.exists():
                 # Stale record - worktree was deleted outside the app
                 logger.info(f"Cleaning up stale worktree record: {wt['branch_name']} (path: {worktree_full_path})")
-                database.update_worktree(wt["id"], status="deleted")
+                database.update_worktree(wt["id"], status=WorktreeStatus.DELETED)
                 cleaned_up.append({
                     "id": wt["id"],
                     "branch_name": wt["branch_name"],
@@ -222,7 +223,7 @@ class WorktreeManager:
                 if not worktree_full_path.exists():
                     # Stale record - clean it up
                     logger.info(f"Cleaning up stale worktree record for branch '{branch_name}'")
-                    database.update_worktree(wt["id"], status="deleted")
+                    database.update_worktree(wt["id"], status=WorktreeStatus.DELETED)
                     continue
                 # Valid existing worktree - return it instead of creating new
                 logger.info(f"Branch '{branch_name}' already has an active worktree, returning existing")
@@ -282,11 +283,20 @@ class WorktreeManager:
                 worktree_path=relative_worktree_path,
                 session_id=None,  # No session - standalone worktree
                 base_branch=base_branch,
-                status="active"
+                status=WorktreeStatus.ACTIVE
             )
         except Exception as e:
             logger.error(f"Failed to create worktree record: {e}")
             self.git_service.remove_worktree(main_dir, str(worktree_path), force=True)
+            # Check if this is a unique constraint violation (race condition - another request won)
+            error_msg = str(e).lower()
+            if "unique constraint" in error_msg or "unique" in error_msg:
+                # Another concurrent request created the worktree first
+                # Return the existing worktree instead of failing
+                existing = database.get_worktree_by_branch(repo["id"], branch_name)
+                if existing and existing.get("status") == WorktreeStatus.ACTIVE:
+                    logger.info(f"Concurrent creation detected, returning existing worktree for branch '{branch_name}'")
+                    return existing
             raise WorktreeError(f"Failed to create worktree record: {str(e)}")
 
         logger.info(f"Created standalone worktree {worktree_id} at {worktree_path} for branch {branch_name}")
@@ -328,7 +338,7 @@ class WorktreeManager:
             wt["session_count"] = len(sessions)
 
             # Find active session (if any)
-            active_sessions = [s for s in sessions if s.get("status") == "active"]
+            active_sessions = [s for s in sessions if s.get("status") == WorktreeStatus.ACTIVE]
             wt["active_session"] = active_sessions[0] if active_sessions else None
 
             result.append(wt)
@@ -383,7 +393,7 @@ class WorktreeManager:
                 if not worktree_full_path.exists():
                     # Stale record - worktree was deleted outside the app
                     logger.info(f"Cleaning up stale worktree record for branch '{branch_name}' (path no longer exists: {worktree_full_path})")
-                    database.update_worktree(wt["id"], status="deleted")
+                    database.update_worktree(wt["id"], status=WorktreeStatus.DELETED)
                     continue  # Allow creation to proceed
 
                 logger.error(f"Branch {branch_name} already has an active worktree")
@@ -460,11 +470,15 @@ class WorktreeManager:
                 worktree_path=relative_worktree_path,
                 session_id=None,  # New model: no session_id on worktree
                 base_branch=base_branch,
-                status="active"
+                status=WorktreeStatus.ACTIVE
             )
         except Exception as e:
             logger.error(f"Failed to create worktree record: {e}")
             self.git_service.remove_worktree(main_dir, str(worktree_path), force=True)
+            # Check if this is a unique constraint violation (race condition)
+            error_msg = str(e).lower()
+            if "unique constraint" in error_msg or "unique" in error_msg:
+                raise WorktreeError(f"Branch '{branch_name}' already has an active worktree (created by concurrent request).")
             raise WorktreeError(f"Failed to create worktree record: {str(e)}")
 
         # Create session with worktree_id (new relationship model)
@@ -497,6 +511,7 @@ class WorktreeManager:
         """Get all worktrees for a project with session info.
 
         Uses the new sessions.worktree_id relationship model.
+        Uses a single query to avoid N+1 pattern.
         Returns worktrees enriched with:
         - exists: whether worktree folder exists on disk
         - sessions: list of all sessions for this worktree
@@ -507,33 +522,15 @@ class WorktreeManager:
         if not repo:
             return []
 
-        worktrees = database.get_worktrees_for_repository(repo["id"])
+        # Use optimized single-query function to avoid N+1 pattern
+        worktrees = database.get_worktrees_with_sessions(repo["id"])
 
         for wt in worktrees:
             # Check if worktree folder exists
             worktree_path = settings.workspace_dir / wt["worktree_path"]
             wt["exists"] = worktree_path.exists()
 
-            # Get all sessions that have used this worktree (new model)
-            sessions = database.get_sessions_for_worktree(wt["id"])
-            wt["sessions"] = [{
-                "id": s["id"],
-                "title": s["title"],
-                "status": s["status"],
-                "updated_at": s["updated_at"]
-            } for s in sessions]
-            wt["session_count"] = len(sessions)
-
-            # Find active session
-            active_sessions = [s for s in sessions if s.get("status") == "active"]
-            wt["active_session"] = {
-                "id": active_sessions[0]["id"],
-                "title": active_sessions[0]["title"],
-                "status": active_sessions[0]["status"],
-                "updated_at": active_sessions[0]["updated_at"]
-            } if active_sessions else None
-
-            # Legacy support: also check deprecated worktrees.session_id
+            # Legacy support: also check deprecated worktrees.session_id if no sessions found
             if not wt["sessions"] and wt.get("session_id"):
                 session = database.get_session(wt["session_id"])
                 if session:
@@ -573,7 +570,7 @@ class WorktreeManager:
         worktree["session_count"] = len(sessions)
 
         # Find active session
-        active_sessions = [s for s in sessions if s.get("status") == "active"]
+        active_sessions = [s for s in sessions if s.get("status") == WorktreeStatus.ACTIVE]
         worktree["active_session"] = {
             "id": active_sessions[0]["id"],
             "title": active_sessions[0]["title"],
@@ -592,7 +589,7 @@ class WorktreeManager:
                     "updated_at": session["updated_at"]
                 }]
                 worktree["session_count"] = 1
-                if session.get("status") == "active":
+                if session.get("status") == WorktreeStatus.ACTIVE:
                     worktree["active_session"] = worktree["sessions"][0]
 
         return worktree
@@ -648,7 +645,7 @@ class WorktreeManager:
                 logger.info(f"Deleted branch {branch_name}")
 
         # Update database record
-        database.update_worktree(worktree_id, status="removed")
+        database.update_worktree(worktree_id, status=WorktreeStatus.DELETED)
 
         # Delete the worktree record
         database.delete_worktree(worktree_id)
@@ -700,12 +697,12 @@ class WorktreeManager:
             if worktree_abs_path in git_worktree_paths:
                 # Worktree exists in both git and database
                 result["synced"] += 1
-            elif db_wt["status"] == "active":
+            elif db_wt["status"] == WorktreeStatus.ACTIVE:
                 # Worktree is in database but not on filesystem - mark as orphaned
                 logger.warning(f"Worktree {db_wt['id']} is orphaned (path doesn't exist)")
-                database.update_worktree(db_wt["id"], status="orphaned")
+                database.update_worktree(db_wt["id"], status=WorktreeStatus.ORPHANED)
                 result["orphaned"] += 1
-            elif db_wt["status"] in ["removed", "orphaned"]:
+            elif db_wt["status"] in [WorktreeStatus.DELETED, WorktreeStatus.ORPHANED]:
                 # Clean up stale records
                 database.delete_worktree(db_wt["id"])
                 result["cleaned_up"] += 1
