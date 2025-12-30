@@ -116,7 +116,8 @@
 	let reorderDragCardId: string | null = $state(null);
 	let reorderDragPosition: { x: number; y: number } | null = $state(null);
 	let isReorderTransitioning = $state(false);
-	let lastReorderTargetIndex: number = -1; // Track last target to avoid redundant reorders
+	let lastReorderTargetIndex = $state(-1); // Track last target to avoid redundant reorders
+	let isProcessingReorder = $state(false); // Prevent re-entrant reorder calls
 
 	// Terminal modal state
 	let terminalCommand = $state('/resume');
@@ -711,6 +712,9 @@
 			reorderDragCardId = id;
 			reorderDragPosition = { x, y };
 
+			// Prevent re-entrant calls during reorder processing
+			if (isProcessingReorder) return;
+
 			// Calculate target slot - only reorder if slot actually changed
 			// This prevents calling reorderCard+applyLayout 60 times per second
 			const targetIndex = deck.calculateSlotIndex(x, y);
@@ -718,7 +722,14 @@
 				lastReorderTargetIndex = targetIndex;
 				// Enable transitions for other cards to animate
 				isReorderTransitioning = true;
-				deck.reorderCard(id, targetIndex);
+
+				// Mark as processing and schedule reorder
+				isProcessingReorder = true;
+				try {
+					deck.reorderCard(id, targetIndex);
+				} finally {
+					isProcessingReorder = false;
+				}
 			}
 			return;
 		}
@@ -741,6 +752,7 @@
 			reorderDragCardId = null;
 			reorderDragPosition = null;
 			lastReorderTargetIndex = -1; // Reset for next drag
+			isProcessingReorder = false; // Ensure flag is cleared
 
 			// Keep transitions briefly for snap animation, then disable
 			setTimeout(() => {
