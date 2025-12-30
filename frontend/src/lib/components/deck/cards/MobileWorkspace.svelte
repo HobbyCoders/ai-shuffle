@@ -10,9 +10,10 @@
 	 * - Empty state with create buttons
 	 */
 
-	import { ChevronLeft, X, MessageSquare, Bot, Terminal, Plus, Settings, User, Users, FolderKanban } from 'lucide-svelte';
+	import { ChevronLeft, X, MessageSquare, Terminal, Plus, Settings, User, Users, FolderKanban, Image, Box, AudioLines, FolderOpen, Puzzle } from 'lucide-svelte';
 	import type { DeckCard, CardType } from './types';
 	import type { Snippet } from 'svelte';
+	import { MobileWelcome } from '../welcome';
 
 	interface Props {
 		cards: DeckCard[];
@@ -20,6 +21,7 @@
 		onCardChange: (index: number) => void;
 		onCloseCard: (id: string) => void;
 		onCreateCard: (type: CardType) => void;
+		onOpenNavigator?: () => void;
 		children?: Snippet<[DeckCard]>;
 	}
 
@@ -29,6 +31,7 @@
 		onCardChange,
 		onCloseCard,
 		onCreateCard,
+		onOpenNavigator,
 		children
 	}: Props = $props();
 
@@ -44,23 +47,21 @@
 	const VELOCITY_THRESHOLD = 0.3;
 	const DIRECTION_LOCK_THRESHOLD = 10;
 
-	// Icon mapping
+	// Icon mapping - all 12 card types
 	const cardIcons: Record<CardType, typeof MessageSquare> = {
 		chat: MessageSquare,
-		agent: Bot,
 		terminal: Terminal,
 		settings: Settings,
 		profile: User,
 		subagent: Users,
 		project: FolderKanban,
+		'user-settings': Settings,
+		'image-studio': Image,
+		'model-studio': Box,
+		'audio-studio': AudioLines,
+		'file-browser': FolderOpen,
+		plugins: Puzzle,
 	};
-
-	// Card type config for create buttons
-	const cardTypes: { type: CardType; label: string; icon: typeof MessageSquare }[] = [
-		{ type: 'chat', label: 'Chat', icon: MessageSquare },
-		{ type: 'agent', label: 'Agent', icon: Bot },
-		{ type: 'terminal', label: 'Terminal', icon: Terminal },
-	];
 
 	// Current card
 	const activeCard = $derived(cards[activeCardIndex]);
@@ -198,27 +199,8 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="mobile-workspace">
 	{#if cards.length === 0}
-		<!-- Empty State -->
-		<div class="empty-state">
-			<div class="empty-content">
-				<div class="empty-icon">
-					<Plus size={32} />
-				</div>
-				<h2 class="empty-title">No cards open</h2>
-				<p class="empty-text">Create a card to get started</p>
-				<div class="create-grid">
-					{#each cardTypes as { type, label, icon: Icon }}
-						<button
-							class="create-card"
-							onclick={() => onCreateCard(type)}
-						>
-							<Icon size={24} />
-							<span>{label}</span>
-						</button>
-					{/each}
-				</div>
-			</div>
-		</div>
+		<!-- Mobile Welcome Screen with Carousel -->
+		<MobileWelcome {onCreateCard} />
 	{:else}
 		<!-- Mobile Header -->
 		<header class="mobile-header">
@@ -240,6 +222,15 @@
 			</div>
 
 			<div class="header-actions">
+				{#if onOpenNavigator}
+					<button
+						class="header-btn add"
+						onclick={onOpenNavigator}
+						aria-label="Open card navigator"
+					>
+						<Plus size={20} />
+					</button>
+				{/if}
 				<button
 					class="header-btn close"
 					onclick={handleClose}
@@ -368,6 +359,16 @@
 
 	.header-btn:disabled:active {
 		transform: none;
+	}
+
+	.header-btn.add:hover {
+		background: hsl(var(--primary) / 0.1);
+		color: hsl(var(--primary));
+	}
+
+	.header-btn.add:active {
+		background: hsl(var(--primary) / 0.15);
+		color: hsl(var(--primary));
 	}
 
 	.header-btn.close:hover {
@@ -538,112 +539,7 @@
 		background: hsl(var(--primary));
 	}
 
-	/* Empty State - properly centered */
-	.empty-state {
-		flex: 1;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		padding: 24px;
-		/* Ensure safe area is respected */
-		padding-bottom: max(24px, env(safe-area-inset-bottom, 24px));
-		/* Center in available space */
-		min-height: 0;
-	}
-
-	.empty-content {
-		text-align: center;
-		max-width: 320px;
-		width: 100%;
-		/* Slight offset to visually center */
-		margin-top: -5vh;
-	}
-
-	.empty-icon {
-		width: 72px;
-		height: 72px;
-		margin: 0 auto 20px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: hsl(var(--muted));
-		border-radius: 50%;
-		color: hsl(var(--muted-foreground));
-		/* Subtle animation on mount */
-		animation: empty-icon-appear 0.4s ease-out;
-	}
-
-	@keyframes empty-icon-appear {
-		from {
-			opacity: 0;
-			transform: scale(0.8);
-		}
-		to {
-			opacity: 1;
-			transform: scale(1);
-		}
-	}
-
-	.empty-title {
-		font-size: 1.25rem;
-		font-weight: 600;
-		color: hsl(var(--foreground));
-		margin-bottom: 8px;
-	}
-
-	.empty-text {
-		font-size: 0.9375rem;
-		color: hsl(var(--muted-foreground));
-		margin-bottom: 28px;
-	}
-
-	.create-grid {
-		display: grid;
-		grid-template-columns: repeat(2, 1fr);
-		gap: 12px;
-	}
-
-	.create-card {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 10px;
-		/* Ensure minimum touch target height */
-		padding: 24px 16px;
-		min-height: 88px;
-		background: hsl(var(--card));
-		border: 1px solid hsl(var(--border));
-		border-radius: 14px;
-		color: hsl(var(--foreground));
-		font-size: 0.9375rem;
-		font-weight: 500;
-		cursor: pointer;
-		transition: all 0.15s ease;
-		-webkit-tap-highlight-color: transparent;
-	}
-
-	.create-card:hover {
-		background: hsl(var(--accent));
-		border-color: hsl(var(--primary) / 0.3);
-	}
-
-	.create-card:active {
-		transform: scale(0.97);
-		background: hsl(var(--accent));
-	}
-
-	/* Tablet adjustments - landscape orientation */
-	@media (min-width: 600px) and (orientation: landscape) {
-		.create-grid {
-			grid-template-columns: repeat(4, 1fr);
-			max-width: 480px;
-			margin: 0 auto;
-		}
-
-		.empty-content {
-			max-width: 500px;
-		}
-	}
+	/* Empty state now uses MobileWelcome component */
 
 	/* Large phone / small tablet portrait */
 	@media (min-width: 414px) {
