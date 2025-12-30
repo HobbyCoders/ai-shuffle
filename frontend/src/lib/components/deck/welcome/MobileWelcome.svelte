@@ -7,20 +7,33 @@
 	 * - Touch-friendly with momentum scrolling
 	 * - Dot indicators for position
 	 * - Same cards as desktop WelcomeCards but optimized for mobile
+	 * - Full accessibility support with ARIA attributes
 	 */
 
 	import { MessageSquare, Terminal, FolderOpen, User, Bot } from 'lucide-svelte';
 	import WelcomeTitle from './WelcomeTitle.svelte';
 	import SpotlightEffect from './SpotlightEffect.svelte';
+	import type { CardType } from '../cards/types';
 
 	interface Props {
-		onCreateCard: (type: string) => void;
+		onCreateCard: (type: CardType) => void;
 	}
 
 	let { onCreateCard }: Props = $props();
 
-	// Card definitions - same as WelcomeCards.svelte
-	const cards = [
+	// Carousel layout constants - single source of truth
+	const CARD_WIDTH_PERCENT = 0.75; // Card is 75% of viewport
+	const CARD_GAP = 16; // Gap between cards in pixels
+	const SWIPE_THRESHOLD = 50; // Minimum swipe distance to change cards
+	const SCROLL_DEBOUNCE_MS = 50; // Debounce delay for scroll handler
+
+	// Card definitions - same as WelcomeCards.svelte with proper typing
+	const cards: Array<{
+		type: CardType;
+		label: string;
+		description: string;
+		icon: typeof MessageSquare;
+	}> = [
 		{
 			type: 'chat',
 			label: 'CHAT',
@@ -59,6 +72,16 @@
 	let touchStartX = $state(0);
 	let touchDeltaX = $state(0);
 	let isDragging = $state(false);
+	let scrollDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+	// Helper to calculate card dimensions
+	function getCardMetrics() {
+		if (!carouselEl) return { cardWidth: 0, gap: CARD_GAP };
+		return {
+			cardWidth: carouselEl.offsetWidth * CARD_WIDTH_PERCENT,
+			gap: CARD_GAP
+		};
+	}
 
 	// Navigate to specific card
 	function goToCard(index: number) {
@@ -68,8 +91,7 @@
 
 	function scrollToCard(index: number) {
 		if (!carouselEl) return;
-		const cardWidth = carouselEl.offsetWidth * 0.75; // Card is 75% of viewport
-		const gap = 16;
+		const { cardWidth, gap } = getCardMetrics();
 		const offset = index * (cardWidth + gap);
 		carouselEl.scrollTo({ left: offset, behavior: 'smooth' });
 	}
@@ -90,10 +112,9 @@
 		if (!isDragging) return;
 		isDragging = false;
 
-		const threshold = 50;
-		if (touchDeltaX < -threshold && currentIndex < cards.length - 1) {
+		if (touchDeltaX < -SWIPE_THRESHOLD && currentIndex < cards.length - 1) {
 			goToCard(currentIndex + 1);
-		} else if (touchDeltaX > threshold && currentIndex > 0) {
+		} else if (touchDeltaX > SWIPE_THRESHOLD && currentIndex > 0) {
 			goToCard(currentIndex - 1);
 		} else {
 			scrollToCard(currentIndex);
@@ -101,16 +122,25 @@
 		touchDeltaX = 0;
 	}
 
-	// Handle scroll snap detection
+	// Handle scroll snap detection (debounced to prevent excessive updates)
 	function handleScroll() {
 		if (!carouselEl || isDragging) return;
-		const cardWidth = carouselEl.offsetWidth * 0.75;
-		const gap = 16;
-		const scrollPos = carouselEl.scrollLeft;
-		const newIndex = Math.round(scrollPos / (cardWidth + gap));
-		if (newIndex !== currentIndex && newIndex >= 0 && newIndex < cards.length) {
-			currentIndex = newIndex;
+
+		// Clear any pending debounce timer
+		if (scrollDebounceTimer) {
+			clearTimeout(scrollDebounceTimer);
 		}
+
+		// Debounce the index update
+		scrollDebounceTimer = setTimeout(() => {
+			if (!carouselEl) return;
+			const { cardWidth, gap } = getCardMetrics();
+			const scrollPos = carouselEl.scrollLeft;
+			const newIndex = Math.round(scrollPos / (cardWidth + gap));
+			if (newIndex !== currentIndex && newIndex >= 0 && newIndex < cards.length) {
+				currentIndex = newIndex;
+			}
+		}, SCROLL_DEBOUNCE_MS);
 	}
 </script>
 
@@ -125,10 +155,13 @@
 
 		<p class="welcome-tagline">Your AI workspace awaits</p>
 
-		<!-- Horizontal Carousel -->
+		<!-- Horizontal Carousel with ARIA support -->
 		<div
 			bind:this={carouselEl}
 			class="carousel"
+			role="region"
+			aria-label="Welcome cards carousel"
+			aria-roledescription="carousel"
 			ontouchstart={handleTouchStart}
 			ontouchmove={handleTouchMove}
 			ontouchend={handleTouchEnd}
@@ -139,6 +172,8 @@
 					class="carousel-card"
 					class:active={i === currentIndex}
 					onclick={() => onCreateCard(card.type)}
+					aria-current={i === currentIndex ? 'true' : undefined}
+					aria-label="{card.label}: {card.description}"
 				>
 					<div class="card-icon">
 						<card.icon size={32} strokeWidth={1.5} />
@@ -149,32 +184,45 @@
 			{/each}
 		</div>
 
-		<!-- Dot Indicators -->
-		<div class="dots">
-			{#each cards as _, i}
+		<!-- Dot Indicators with proper ARIA -->
+		<div class="dots" role="tablist" aria-label="Carousel navigation">
+			{#each cards as card, i}
 				<button
 					class="dot"
 					class:active={i === currentIndex}
 					onclick={() => goToCard(i)}
-					aria-label="Go to card {i + 1}"
+					role="tab"
+					aria-selected={i === currentIndex}
+					aria-label="Go to {card.label} card"
 				></button>
 			{/each}
 		</div>
 
 		<!-- Swipe hint -->
-		<p class="swipe-hint">Swipe to explore</p>
+		<p class="swipe-hint" aria-hidden="true">Swipe to explore</p>
 	</div>
 </div>
 
 <style>
+	/* CSS Custom Properties for consistent theming */
 	.mobile-welcome {
+		--accent-cyan: #22d3ee;
+		--accent-cyan-rgb: 34, 211, 238;
+
 		position: absolute;
 		inset: 0;
 		display: flex;
 		align-items: center;
 		justify-content: center;
 
-		/* Dark workspace gradient - subtle depth */
+		/* Dark workspace gradient with HSL fallback for oklch */
+		background:
+			radial-gradient(
+				ellipse 80% 60% at 50% 40%,
+				hsl(250, 10%, 18%) 0%,
+				hsl(250, 10%, 14%) 60%,
+				hsl(250, 10%, 12%) 100%
+			);
 		background:
 			radial-gradient(
 				ellipse 80% 60% at 50% 40%,
@@ -257,6 +305,8 @@
 		aspect-ratio: 3 / 4;
 		padding: 1.5rem 1rem;
 
+		/* HSL fallback for oklch */
+		background: hsl(250, 10%, 17%);
 		background: oklch(0.17 0.01 260);
 		border: 1px solid rgba(255, 255, 255, 0.08);
 		border-radius: 20px;
@@ -288,10 +338,10 @@
 	.carousel-card:nth-child(5) { --i: 4; }
 
 	.carousel-card.active {
-		border-color: var(--accent-cyan, #22d3ee);
+		border-color: var(--accent-cyan);
 		box-shadow:
 			0 12px 32px rgba(0, 0, 0, 0.5),
-			0 0 24px rgba(34, 211, 238, 0.15);
+			0 0 24px rgba(var(--accent-cyan-rgb), 0.15);
 	}
 
 	.carousel-card:active {
@@ -313,10 +363,10 @@
 	}
 
 	.carousel-card.active .card-icon {
-		background: rgba(34, 211, 238, 0.1);
-		border-color: var(--accent-cyan, #22d3ee);
-		color: var(--accent-cyan, #22d3ee);
-		box-shadow: 0 0 20px rgba(34, 211, 238, 0.2);
+		background: rgba(var(--accent-cyan-rgb), 0.1);
+		border-color: var(--accent-cyan);
+		color: var(--accent-cyan);
+		box-shadow: 0 0 20px rgba(var(--accent-cyan-rgb), 0.2);
 	}
 
 	.card-label {
@@ -355,22 +405,21 @@
 	}
 
 	.dot.active {
-		background: var(--accent-cyan, #22d3ee);
-		box-shadow: 0 0 8px rgba(34, 211, 238, 0.4);
+		background: var(--accent-cyan);
+		box-shadow: 0 0 8px rgba(var(--accent-cyan-rgb), 0.4);
 	}
 
 	.dot:not(.active):hover {
 		background: rgba(255, 255, 255, 0.4);
 	}
 
-	/* Swipe Hint */
+	/* Swipe Hint - fixed opacity animation */
 	.swipe-hint {
 		font-size: 0.7rem;
 		color: var(--muted-foreground);
-		opacity: 0.6;
 		margin-top: 0.25rem;
-		animation: fadeInUp 0.6s ease-out 1s forwards;
 		opacity: 0;
+		animation: fadeInHint 0.6s ease-out 1s forwards;
 	}
 
 	/* Animations */
@@ -381,6 +430,17 @@
 		}
 		to {
 			opacity: 1;
+			transform: translateY(0);
+		}
+	}
+
+	@keyframes fadeInHint {
+		from {
+			opacity: 0;
+			transform: translateY(10px);
+		}
+		to {
+			opacity: 0.6;
 			transform: translateY(0);
 		}
 	}
@@ -402,6 +462,10 @@
 		.swipe-hint {
 			animation: none;
 			opacity: 1;
+		}
+
+		.swipe-hint {
+			opacity: 0.6;
 		}
 
 		.carousel-card {
