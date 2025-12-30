@@ -216,10 +216,18 @@ async def chat_websocket(
                 # disconnects and reconnects, its NEW websocket should receive sync events.
                 # The frontend handles any potential duplication.
                 if not stream_started and event_type in ('stream_start', 'stream_delta', 'chunk', 'tool_use'):
+                    # Extract usage data from stream_start event if available
+                    usage_data = None
+                    if event_type == 'stream_start':
+                        message_data = event.get('message', {})
+                        if isinstance(message_data, dict):
+                            usage_data = message_data.get('usage')
+
                     await sync_engine.broadcast_stream_start(
                         session_id=session_id,
                         message_id=message_id,
-                        source_device_id=None  # Don't exclude - let all registered devices receive
+                        source_device_id=None,  # Don't exclude - let all registered devices receive
+                        usage=usage_data
                     )
                     stream_started = True
 
@@ -407,6 +415,20 @@ async def chat_websocket(
                         session_id=session_id,
                         message_id=message_id,
                         chunk_type='stream_block_stop',
+                        chunk_data=chunk_data,
+                        source_device_id=None
+                    )
+                elif event_type == 'stream_message_delta':
+                    # Final message metadata with output token usage
+                    # Broadcast to sync output tokens across devices
+                    chunk_data = {
+                        'delta': event.get('delta', {}),
+                        'usage': event.get('usage', {})
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='stream_message_delta',
                         chunk_data=chunk_data,
                         source_device_id=None
                     )

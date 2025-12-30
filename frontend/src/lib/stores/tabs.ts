@@ -627,14 +627,40 @@ function createTabsStore() {
 				// Another device started streaming
 				console.log(`[Tab ${tabId}] Another device started streaming`);
 				const messageId = eventData.message_id as string;
+				const usage = eventData.usage as Record<string, number> | undefined;
 
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(t => {
 						if (t.id !== tabId) return t;
+
+						// Extract input token counts from usage data (synced from message_start)
+						// These represent the full context sent to Claude for this turn
+						const inputTokens = usage?.input_tokens || 0;
+						const cacheCreationTokens = usage?.cache_creation_input_tokens || 0;
+						const cacheReadTokens = usage?.cache_read_input_tokens || 0;
+
+						// Only update context if we have usage data
+						const contextUpdate = usage ? {
+							totalTokensIn: t.totalTokensIn + inputTokens,
+							totalCacheCreationTokens: cacheCreationTokens,
+							totalCacheReadTokens: cacheReadTokens,
+							contextUsed: inputTokens + cacheCreationTokens + cacheReadTokens
+						} : {};
+
+						if (usage) {
+							console.log(`[Tab ${tabId}] Sync stream_start with usage:`, {
+								inputTokens,
+								cacheCreationTokens,
+								cacheReadTokens,
+								contextUsed: inputTokens + cacheCreationTokens + cacheReadTokens
+							});
+						}
+
 						return {
 							...t,
 							isStreaming: true,
+							...contextUpdate,
 							messages: [...t.messages, {
 								id: messageId || `assistant-sync-${Date.now()}`,
 								role: 'assistant' as const,
@@ -1074,6 +1100,26 @@ function createTabsStore() {
 				} else if (chunkType === 'stream_block_stop') {
 					// End of a content block - just log for now
 					console.log(`[Tab ${tabId}] stream_block_stop sync:`, { index: eventData.index });
+				} else if (chunkType === 'stream_message_delta') {
+					// Final message metadata with output token usage (synced from another device)
+					const usage = eventData.usage as Record<string, number> | undefined;
+					if (usage && usage.output_tokens) {
+						console.log(`[Tab ${tabId}] Sync stream_message_delta with output usage:`, usage);
+						update(s => ({
+							...s,
+							tabs: s.tabs.map(t => {
+								if (t.id !== tabId) return t;
+
+								// Update output token count
+								const outputTokens = usage.output_tokens || 0;
+
+								return {
+									...t,
+									totalTokensOut: t.totalTokensOut + outputTokens
+								};
+							})
+						}));
+					}
 				}
 				break;
 			}
@@ -1083,6 +1129,13 @@ function createTabsStore() {
 				console.log(`[Tab ${tabId}] Another device finished streaming`);
 				const metadata = eventData.metadata as Record<string, unknown>;
 				const interrupted = eventData.interrupted as boolean;
+
+				// Extract token counts from final metadata for reconciliation
+				// This ensures context is updated even if stream_start usage was missed
+				const tokensIn = metadata?.tokens_in as number | undefined;
+				const tokensOut = metadata?.tokens_out as number | undefined;
+				const cacheCreation = metadata?.cache_creation_tokens as number | undefined;
+				const cacheRead = metadata?.cache_read_tokens as number | undefined;
 
 				update(s => ({
 					...s,
@@ -1113,7 +1166,35 @@ function createTabsStore() {
 							}
 						}
 
-						return { ...t, messages, isStreaming: false };
+						// Reconcile token counts from final metadata
+						// Only update if we have the data and contextUsed is not already set
+						// This acts as a fallback if stream_start usage was missed
+						let tokenUpdates: Partial<typeof t> = {};
+						if (tokensIn !== undefined && cacheCreation !== undefined && cacheRead !== undefined) {
+							const newContextUsed = tokensIn + cacheCreation + cacheRead;
+							// Only update if contextUsed seems stale (more than 10% different)
+							// This prevents overwriting values from stream_start with potentially stale final metadata
+							const currentContext = t.contextUsed || 0;
+							const percentDiff = currentContext > 0 ? Math.abs(newContextUsed - currentContext) / currentContext : 1;
+
+							if (percentDiff > 0.1 || currentContext === 0) {
+								console.log(`[Tab ${tabId}] Reconciling context from stream_end metadata:`, {
+									newContextUsed,
+									currentContext,
+									percentDiff,
+									tokensIn,
+									cacheCreation,
+									cacheRead
+								});
+								tokenUpdates = {
+									contextUsed: newContextUsed,
+									totalCacheCreationTokens: cacheCreation,
+									totalCacheReadTokens: cacheRead
+								};
+							}
+						}
+
+						return { ...t, messages, isStreaming: false, ...tokenUpdates };
 					})
 				}));
 

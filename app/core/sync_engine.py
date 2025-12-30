@@ -275,22 +275,33 @@ class SyncEngine:
         self,
         session_id: str,
         message_id: str,
-        source_device_id: Optional[str] = None
+        source_device_id: Optional[str] = None,
+        usage: Optional[Dict[str, Any]] = None
     ):
         """Notify all devices that streaming has started for a session.
 
         This method is idempotent - calling it multiple times for the same session
         is safe and won't clear the streaming buffer.
+
+        Args:
+            session_id: The session ID
+            message_id: The assistant message ID
+            source_device_id: Device that originated the event (will be excluded from broadcast)
+            usage: Token usage data from message_start event (input_tokens, cache_creation_input_tokens, cache_read_input_tokens)
         """
         # Only create buffer if not already streaming (idempotent)
         if session_id not in self._streaming_sessions:
             self._streaming_sessions.add(session_id)
             self._streaming_buffers[session_id] = StreamingBuffer(session_id=session_id)
 
+        data = {"message_id": message_id}
+        if usage:
+            data["usage"] = usage
+
         event = SyncEvent(
             event_type="stream_start",
             session_id=session_id,
-            data={"message_id": message_id},
+            data=data,
             source_device_id=source_device_id
         )
         await self.broadcast_event(event, exclude_device_id=source_device_id)
