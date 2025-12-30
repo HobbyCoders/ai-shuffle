@@ -11,6 +11,7 @@
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
+	import { AUTO_COMPACTION_BASE, CONTEXT_MAX } from '$lib/constants/chat';
 
 	interface Command {
 		name: string;
@@ -43,7 +44,6 @@
 	const currentProfile = $derived($profiles.find(p => p.id === tab.profile));
 
 	// Auto-compaction reserve: 13k base + CLAUDE_CODE_MAX_OUTPUT_TOKENS from profile env vars
-	const AUTO_COMPACTION_BASE = 13000;
 	const maxOutputTokens = $derived(
 		parseInt((currentProfile?.config as any)?.env?.CLAUDE_CODE_MAX_OUTPUT_TOKENS || '0', 10) || 0
 	);
@@ -53,8 +53,7 @@
 	// Add auto-compaction reserve to show effective context usage
 	const baseContextUsed = $derived(tab.contextUsed ?? (tab.totalTokensIn + tab.totalCacheCreationTokens + tab.totalCacheReadTokens));
 	const contextUsed = $derived(baseContextUsed + autoCompactionReserve);
-	const contextMax = 200000;
-	const contextPercent = $derived(Math.min((contextUsed / contextMax) * 100, 100));
+	const contextPercent = $derived(Math.min((contextUsed / CONTEXT_MAX) * 100, 100));
 
 
 	// Input state - use tab.draft for persistence across card switches
