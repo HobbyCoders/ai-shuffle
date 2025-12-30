@@ -36,6 +36,10 @@
 		--dealer-shadow: #d4d0c5;
 		--dealer-text: #1a1a1a;
 
+		/* Felt (casino table surface) */
+		--felt: oklch(0.16 0.012 260);
+		--felt-deep: oklch(0.12 0.01 260);
+
 		/* Menu Card */
 		--menu-card-bg: oklch(0.14 0.015 260);
 		--menu-card-border: oklch(0.25 0.01 260);
@@ -146,6 +150,16 @@
 		--gold-bright: var(--accent-cyan-bright);
 		--gold-glow: var(--accent-glow);
 		--gold-glow-strong: var(--accent-glow-strong);
+
+		/* Dealer Button - Light theme: subtle gray tones for contrast */
+		--dealer-white: #e8e8e8;
+		--dealer-cream: #d8d8d8;
+		--dealer-shadow: #b8b8b8;
+		--dealer-text: #2a2a2a;
+
+		/* Felt (casino table surface) - Light theme: soft gray surface */
+		--felt: oklch(0.94 0.008 260);
+		--felt-deep: oklch(0.90 0.01 260);
 
 		/* Elevated surfaces */
 		--card: oklch(1 0 0);
