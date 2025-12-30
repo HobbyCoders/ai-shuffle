@@ -1267,10 +1267,10 @@ function createDeckStore() {
 			if (state.cards.length === 0) return state;
 
 			const { width: boundsW, height: boundsH } = state.workspaceBounds;
-			// Asymmetric padding: minimal top space for CardShuffle trigger zone
+			// Symmetric padding - menu moved to bottom left
 			const paddingX = 8;    // Left/right padding between cards
 			const paddingY = 8;    // Bottom padding
-			const paddingTop = 28; // Top padding - buffer for CardShuffle dropdown trigger
+			const paddingTop = 8;  // Top padding - minimal, no UI at top anymore
 
 			let updatedCards: DeckCard[];
 

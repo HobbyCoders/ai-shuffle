@@ -13,7 +13,7 @@
 	import { onMount } from 'svelte';
 	import {
 		Plus,
-		ChevronsDown,
+		ChevronsUp,
 		ChevronDown,
 		Move,
 		Columns,
@@ -147,10 +147,10 @@
 			</div>
 		{/if}
 
-		<!-- Menu Container - Top left, hidden by default with hover indicator -->
+		<!-- Menu Container - Bottom left, hidden by default with hover indicator -->
 		{#if showDealerButton && !isMobile}
 			<div class="menu-container">
-				<!-- Hover indicator - bouncing arrow -->
+				<!-- Hover indicator - bouncing arrow pointing up -->
 				<div
 					class="menu-indicator"
 					class:hidden={isMenuVisible}
@@ -160,7 +160,7 @@
 					tabindex="0"
 					aria-label="Menu"
 				>
-					<ChevronsDown size={16} strokeWidth={2} class="indicator-arrow" />
+					<ChevronsUp size={16} strokeWidth={2} class="indicator-arrow" />
 				</div>
 
 				<!-- Menu buttons - revealed on hover -->
@@ -269,16 +269,16 @@
 	}
 
 	/* ===================================
-	   MENU CONTAINER - Top left hover reveal
+	   MENU CONTAINER - Bottom left hover reveal
 	   =================================== */
 
 	.menu-container {
 		position: absolute;
-		top: 6px;
+		bottom: 16px;
 		left: 16px;
 		z-index: 10001;
 		display: flex;
-		flex-direction: column;
+		flex-direction: column-reverse;
 		align-items: flex-start;
 	}
 
@@ -316,7 +316,7 @@
 			opacity: 0.7;
 		}
 		50% {
-			transform: translateY(3px);
+			transform: translateY(-3px);
 			opacity: 1;
 		}
 	}
@@ -326,14 +326,14 @@
 		display: flex;
 		flex-direction: column;
 		gap: 6px;
-		margin-top: 4px;
+		margin-bottom: 4px;
 		animation: fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 	}
 
 	@keyframes fadeIn {
 		from {
 			opacity: 0;
-			transform: translateY(-8px);
+			transform: translateY(8px);
 		}
 		to {
 			opacity: 1;
@@ -431,13 +431,13 @@
 		border-radius: 12px;
 		box-shadow: var(--shadow-l, 0 8px 32px rgba(0, 0, 0, 0.4));
 		min-width: 160px;
-		animation: slideDown 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+		animation: slideUp 0.15s cubic-bezier(0.16, 1, 0.3, 1);
 	}
 
-	@keyframes slideDown {
+	@keyframes slideUp {
 		from {
 			opacity: 0;
-			transform: translateY(-8px) scale(0.96);
+			transform: translateY(8px) scale(0.96);
 		}
 		to {
 			opacity: 1;
