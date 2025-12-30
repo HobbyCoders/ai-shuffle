@@ -438,34 +438,6 @@
 					</div>
 				{/if}
 
-				<!-- Delete confirmation banner -->
-				{#if deletingId}
-					<div class="card-delete-banner">
-						<p>
-							Delete <strong>{subagents.find(s => s.id === deletingId)?.name}</strong>? This cannot be undone.
-						</p>
-						<div class="button-group">
-							<button
-								onclick={() => (deletingId = null)}
-								disabled={deleteLoading}
-								class="card-btn-secondary flex-1"
-							>
-								Cancel
-							</button>
-							<button
-								onclick={confirmDelete}
-								disabled={deleteLoading}
-								class="card-btn-destructive flex-1"
-							>
-								{#if deleteLoading}
-									<div class="card-spinner card-spinner--small"></div>
-								{/if}
-								Delete
-							</button>
-						</div>
-					</div>
-				{/if}
-
 				{#if loading}
 					<div class="loading-container">
 						<div class="card-spinner"></div>
@@ -488,51 +460,84 @@
 					</div>
 				{:else}
 					{#each filteredSubagents() as agent (agent.id)}
-						<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-						<div
-							class="card-list-item"
-							onclick={() => handleEdit(agent)}
-						>
-							<div class="card-item-icon">
-								<Monitor />
-							</div>
-							<div class="card-item-content">
-								<div class="card-item-header">
-									<span class="card-item-name">{agent.name}</span>
-									<span class="card-badge {getModelBadgeClass(agent.model)}">
-										{getModelDisplay(agent.model)}
-									</span>
-									{#if agent.tools && agent.tools.length > 0}
-										<span class="card-badge card-badge--tools">
-											{agent.tools.length} tools
-										</span>
-									{/if}
-									{#if $groups.subagents.assignments[agent.id]}
-										<span class="card-badge card-badge--primary">
-											{$groups.subagents.assignments[agent.id]}
-										</span>
-									{/if}
-								</div>
-								<span class="card-item-id">{agent.id}</span>
-								<p class="card-item-description">{agent.description}</p>
-							</div>
-							<div class="card-item-actions">
-								<button
-									onclick={(e) => exportSubagent(agent.id, e)}
-									class="card-action-btn"
-									title="Export"
-								>
-									<Download />
-								</button>
-								<button
-									onclick={(e) => handleDeleteClick(agent.id, e)}
-									class="card-action-btn card-action-btn--destructive"
-									title="Delete"
-								>
+						{#if deletingId === agent.id}
+							<!-- Inline delete confirmation -->
+							<div class="card-list-item card-list-item--deleting">
+								<div class="card-item-icon card-item-icon--destructive">
 									<Trash2 />
-								</button>
+								</div>
+								<div class="card-item-content">
+									<p class="delete-confirm-text">
+										Delete <strong>{agent.name}</strong>? This cannot be undone.
+									</p>
+									<div class="delete-confirm-actions">
+										<button
+											onclick={() => (deletingId = null)}
+											disabled={deleteLoading}
+											class="card-btn-secondary"
+										>
+											Cancel
+										</button>
+										<button
+											onclick={confirmDelete}
+											disabled={deleteLoading}
+											class="card-btn-destructive"
+										>
+											{#if deleteLoading}
+												<div class="card-spinner card-spinner--small"></div>
+											{/if}
+											Delete
+										</button>
+									</div>
+								</div>
 							</div>
-						</div>
+						{:else}
+							<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+							<div
+								class="card-list-item"
+								onclick={() => handleEdit(agent)}
+							>
+								<div class="card-item-icon">
+									<Monitor />
+								</div>
+								<div class="card-item-content">
+									<div class="card-item-header">
+										<span class="card-item-name">{agent.name}</span>
+										<span class="card-badge {getModelBadgeClass(agent.model)}">
+											{getModelDisplay(agent.model)}
+										</span>
+										{#if agent.tools && agent.tools.length > 0}
+											<span class="card-badge card-badge--tools">
+												{agent.tools.length} tools
+											</span>
+										{/if}
+										{#if $groups.subagents.assignments[agent.id]}
+											<span class="card-badge card-badge--primary">
+												{$groups.subagents.assignments[agent.id]}
+											</span>
+										{/if}
+									</div>
+									<span class="card-item-id">{agent.id}</span>
+									<p class="card-item-description">{agent.description}</p>
+								</div>
+								<div class="card-item-actions">
+									<button
+										onclick={(e) => exportSubagent(agent.id, e)}
+										class="card-action-btn"
+										title="Export"
+									>
+										<Download />
+									</button>
+									<button
+										onclick={(e) => handleDeleteClick(agent.id, e)}
+										class="card-action-btn card-action-btn--destructive"
+										title="Delete"
+									>
+										<Trash2 />
+									</button>
+								</div>
+							</div>
+						{/if}
 					{/each}
 				{/if}
 				</div>
@@ -888,6 +893,9 @@
 		width: 100%;
 		max-width: 800px;
 		margin: 0 auto;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-4, 16px);
 	}
 
 	.hidden {
