@@ -82,7 +82,7 @@
 	let currentView = $state<'main' | 'recent' | 'deck'>('main');
 	let currentDeckId = $state<string | null>(null);
 
-	// Carousel state
+	// Carousel state (desktop)
 	let carouselRef = $state<HTMLDivElement | null>(null);
 	let isDragging = $state(false);
 	let hasDragged = $state(false);
@@ -90,6 +90,18 @@
 	let scrollLeft = $state(0);
 	let scrollProgress = $state(0);
 	const DRAG_THRESHOLD = 5;
+
+	// Mobile carousel state (MobileWelcome-style)
+	const MOBILE_CARD_WIDTH_PERCENT = 0.75; // Card is 75% of viewport
+	const MOBILE_CARD_GAP = 16; // Gap between cards in pixels
+	const MOBILE_SWIPE_THRESHOLD = 50; // Minimum swipe distance to change cards
+	const MOBILE_SCROLL_DEBOUNCE_MS = 50; // Debounce delay for scroll handler
+	let mobileCarouselRef = $state<HTMLDivElement | null>(null);
+	let mobileCurrentIndex = $state(0);
+	let mobileTouchStartX = $state(0);
+	let mobileTouchDeltaX = $state(0);
+	let mobileIsSwiping = $state(false);
+	let mobileScrollDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 	// Edit mode state
 	let isEditMode = $state(false);
@@ -520,6 +532,7 @@
 			navStack = [...navStack, { id: 'recent', name: 'Recent', type: 'category' }];
 		}
 		if (carouselRef) carouselRef.scrollLeft = 0;
+		resetMobileCarousel();
 	}
 
 	// Navigate to custom deck
@@ -528,6 +541,7 @@
 		currentDeckId = deckId;
 		navStack = [...navStack, { id: deckId, name, type: 'deck' }];
 		if (carouselRef) carouselRef.scrollLeft = 0;
+		resetMobileCarousel();
 	}
 
 	// Navigate back via breadcrumb
@@ -549,6 +563,7 @@
 		}
 
 		if (carouselRef) carouselRef.scrollLeft = 0;
+		resetMobileCarousel();
 	}
 
 	// Reset state when closing
@@ -1120,6 +1135,103 @@
 	const dotCount = $derived(Math.min(5, Math.ceil(currentCards.length / 3)));
 	const activeDot = $derived(Math.round(scrollProgress * (dotCount - 1)));
 
+	// ========================================
+	// MOBILE CAROUSEL HANDLERS (MobileWelcome-style)
+	// ========================================
+
+	// Helper to calculate mobile card dimensions
+	function getMobileCardMetrics() {
+		if (!mobileCarouselRef) return { cardWidth: 0, gap: MOBILE_CARD_GAP };
+		return {
+			cardWidth: mobileCarouselRef.offsetWidth * MOBILE_CARD_WIDTH_PERCENT,
+			gap: MOBILE_CARD_GAP
+		};
+	}
+
+	// Navigate to specific card in mobile carousel
+	function goToMobileCard(index: number) {
+		const cards = displayCards.filter(c => c.type !== 'add-deck' || isEditMode);
+		mobileCurrentIndex = Math.max(0, Math.min(index, cards.length - 1));
+		scrollToMobileCard(mobileCurrentIndex);
+	}
+
+	function scrollToMobileCard(index: number) {
+		if (!mobileCarouselRef) return;
+		const { cardWidth, gap } = getMobileCardMetrics();
+		const offset = index * (cardWidth + gap);
+		mobileCarouselRef.scrollTo({ left: offset, behavior: 'smooth' });
+	}
+
+	// Mobile touch handlers for swiping (not edit mode drag)
+	function handleMobileTouchStart(e: TouchEvent) {
+		// Don't interfere with edit mode drag
+		if (isEditMode && isPointerDragging) return;
+
+		mobileTouchStartX = e.touches[0].clientX;
+		mobileTouchDeltaX = 0;
+		mobileIsSwiping = true;
+	}
+
+	function handleMobileTouchMove(e: TouchEvent) {
+		if (!mobileIsSwiping) return;
+		// Don't interfere with edit mode drag
+		if (isEditMode && isPointerDragging) return;
+
+		mobileTouchDeltaX = e.touches[0].clientX - mobileTouchStartX;
+	}
+
+	function handleMobileTouchEnd() {
+		if (!mobileIsSwiping) return;
+		mobileIsSwiping = false;
+
+		// Don't process swipe if we were dragging in edit mode
+		if (isEditMode && didDragInEditMode) return;
+
+		const cards = displayCards.filter(c => c.type !== 'add-deck' || isEditMode);
+
+		if (mobileTouchDeltaX < -MOBILE_SWIPE_THRESHOLD && mobileCurrentIndex < cards.length - 1) {
+			goToMobileCard(mobileCurrentIndex + 1);
+		} else if (mobileTouchDeltaX > MOBILE_SWIPE_THRESHOLD && mobileCurrentIndex > 0) {
+			goToMobileCard(mobileCurrentIndex - 1);
+		} else {
+			// Snap back to current card
+			scrollToMobileCard(mobileCurrentIndex);
+		}
+		mobileTouchDeltaX = 0;
+	}
+
+	// Handle mobile scroll snap detection (debounced)
+	function handleMobileScroll() {
+		if (!mobileCarouselRef || mobileIsSwiping) return;
+		// Don't update during edit mode drag
+		if (isEditMode && isPointerDragging) return;
+
+		// Clear any pending debounce timer
+		if (mobileScrollDebounceTimer) {
+			clearTimeout(mobileScrollDebounceTimer);
+		}
+
+		// Debounce the index update
+		mobileScrollDebounceTimer = setTimeout(() => {
+			if (!mobileCarouselRef) return;
+			const { cardWidth, gap } = getMobileCardMetrics();
+			const scrollPos = mobileCarouselRef.scrollLeft;
+			const newIndex = Math.round(scrollPos / (cardWidth + gap));
+			const cards = displayCards.filter(c => c.type !== 'add-deck' || isEditMode);
+			if (newIndex !== mobileCurrentIndex && newIndex >= 0 && newIndex < cards.length) {
+				mobileCurrentIndex = newIndex;
+			}
+		}, MOBILE_SCROLL_DEBOUNCE_MS);
+	}
+
+	// Reset mobile carousel when view changes
+	function resetMobileCarousel() {
+		mobileCurrentIndex = 0;
+		if (mobileCarouselRef) {
+			mobileCarouselRef.scrollTo({ left: 0, behavior: 'instant' });
+		}
+	}
+
 	// Initialize navigator store
 	onMount(() => {
 		navigator.initialize();
@@ -1244,8 +1356,130 @@
 						{/if}
 					</div>
 				{/key}
+			{:else if isMobile}
+				<!-- Mobile Card Carousel (MobileWelcome-style) -->
+				{#key `mobile-${currentView}-${currentDeckId}`}
+					<div class="mobile-carousel-container">
+						<div
+							class="mobile-carousel"
+							class:edit-mode={isEditMode}
+							class:is-dragging={isPointerDragging}
+							bind:this={mobileCarouselRef}
+							ontouchstart={handleMobileTouchStart}
+							ontouchmove={handleMobileTouchMove}
+							ontouchend={handleMobileTouchEnd}
+							onscroll={handleMobileScroll}
+							role="region"
+							aria-label="Card navigator carousel"
+							aria-roledescription="carousel"
+							in:fly={{ y: 30, duration: 300, easing: cubicOut }}
+							out:fly={{ y: -30, duration: 200, easing: cubicOut }}
+						>
+							{#each displayCards as card, index (card.id)}
+								<button
+									class="mobile-card"
+									class:active={index === mobileCurrentIndex}
+									class:thread-card={card.type === 'thread'}
+									class:deck-card={card.type === 'deck'}
+									class:add-deck-card={card.type === 'add-deck'}
+									class:is-being-dragged={isPointerDragging && card.id === draggedCardId}
+									class:drop-into-deck={card.type === 'deck' && card.deckId === dragOverDeckId}
+									data-ai-active={card.isStreaming}
+									data-has-children={card.hasChildren}
+									data-card-id={card.id}
+									style:--deck-color={card.iconColor}
+									style:--card-index={index}
+									onclick={(e) => handleCardClick(card, e)}
+									oncontextmenu={(e) => isEditMode && showContextMenu(card.id, e)}
+									aria-current={index === mobileCurrentIndex ? 'true' : undefined}
+									aria-label="{card.title}: {card.subtitle}"
+								>
+									{#if isEditMode && card.type !== 'add-deck'}
+										<!-- svelte-ignore a11y_no_static_element_interactions -->
+										<div
+											class="mobile-drag-handle"
+											onpointerdown={(e) => handleDragHandlePointerDown(e, card, index)}
+										>
+											<GripVertical size={20} />
+										</div>
+									{/if}
+
+									{#if card.isStreaming}
+										<div class="mobile-card-status">
+											<span class="status-dot"></span>
+											Streaming
+										</div>
+									{/if}
+
+									<div class="mobile-card-icon" style:--icon-color={card.iconColor}>
+										<card.icon size={32} strokeWidth={1.5} />
+									</div>
+
+									<span class="mobile-card-label">{card.title}</span>
+
+									{#if card.type === 'thread'}
+										<div class="mobile-card-meta">
+											{#if card.lastActive}
+												<span class="meta-item">
+													<Clock size={14} />
+													{card.lastActive}
+												</span>
+											{/if}
+											{#if card.messageCount}
+												<span class="meta-item">
+													<MessageSquare size={14} />
+													{card.messageCount}
+												</span>
+											{/if}
+										</div>
+									{:else if card.subtitle}
+										<span class="mobile-card-description">{card.subtitle}</span>
+									{/if}
+
+									{#if card.hasChildren}
+										<div class="mobile-card-chevron">
+											<ChevronRight size={20} />
+										</div>
+									{/if}
+								</button>
+							{/each}
+
+							{#if currentCards.length === 0}
+								<div class="mobile-empty-state">
+									{#if currentView === 'deck'}
+										<p>This deck is empty</p>
+										<p class="empty-hint">Add cards from the main view</p>
+									{:else}
+										<p>No items to show</p>
+									{/if}
+								</div>
+							{/if}
+						</div>
+
+						<!-- Mobile Dot Indicators -->
+						{#if displayCards.filter(c => c.type !== 'add-deck' || isEditMode).length > 1}
+							<div class="mobile-dots" role="tablist" aria-label="Carousel navigation">
+								{#each displayCards.filter(c => c.type !== 'add-deck' || isEditMode) as card, i}
+									<button
+										class="mobile-dot"
+										class:active={i === mobileCurrentIndex}
+										onclick={() => goToMobileCard(i)}
+										role="tab"
+										aria-selected={i === mobileCurrentIndex}
+										aria-label="Go to {card.title}"
+									></button>
+								{/each}
+							</div>
+						{/if}
+
+						<!-- Swipe hint -->
+						{#if !isEditMode}
+							<p class="mobile-swipe-hint" aria-hidden="true">Swipe to explore</p>
+						{/if}
+					</div>
+				{/key}
 			{:else}
-				<!-- Default Card Carousel -->
+				<!-- Desktop Card Carousel -->
 				{#key `${currentView}-${currentDeckId}`}
 					<div
 						class="carousel"
@@ -1350,10 +1584,10 @@
 					</div>
 				{/key}
 
-				<!-- Scroll hint with dots (only for card carousel) -->
+				<!-- Scroll hint with dots (only for desktop card carousel) -->
 				{#if currentCards.length > 3 && !isEditMode}
 					<div class="scroll-hint">
-						<span class="scroll-hint-text">{isMobile ? 'Swipe' : 'Scroll'} to browse</span>
+						<span class="scroll-hint-text">Scroll to browse</span>
 						<div class="scroll-dots">
 							{#each Array(dotCount) as _, i}
 								<span class="scroll-dot" class:active={i === activeDot}></span>
@@ -1368,22 +1602,41 @@
 		{#if isPointerDragging && draggedCardId}
 			{@const draggedCard = currentCards.find(c => c.id === draggedCardId)}
 			{#if draggedCard}
-				<div
-					class="floating-drag-card"
-					style:left="{pointerDragPosition.x}px"
-					style:top="{pointerDragPosition.y}px"
-					style:--deck-color={draggedCard.iconColor}
-				>
-					<div class="card-inner">
-						<div class="card-icon" style:--icon-color={draggedCard.iconColor}>
-							<draggedCard.icon size={20} strokeWidth={1.75} />
+				{#if isMobile}
+					<!-- Mobile floating drag card - larger, matches mobile-card style -->
+					<div
+						class="floating-drag-card mobile"
+						style:left="{pointerDragPosition.x}px"
+						style:top="{pointerDragPosition.y}px"
+						style:--deck-color={draggedCard.iconColor}
+					>
+						<div class="mobile-card-icon" style:--icon-color={draggedCard.iconColor}>
+							<draggedCard.icon size={32} strokeWidth={1.5} />
 						</div>
-						<h3 class="card-title">{draggedCard.title}</h3>
+						<span class="mobile-card-label">{draggedCard.title}</span>
 						{#if draggedCard.subtitle}
-							<p class="card-subtitle">{draggedCard.subtitle}</p>
+							<span class="mobile-card-description">{draggedCard.subtitle}</span>
 						{/if}
 					</div>
-				</div>
+				{:else}
+					<!-- Desktop floating drag card -->
+					<div
+						class="floating-drag-card"
+						style:left="{pointerDragPosition.x}px"
+						style:top="{pointerDragPosition.y}px"
+						style:--deck-color={draggedCard.iconColor}
+					>
+						<div class="card-inner">
+							<div class="card-icon" style:--icon-color={draggedCard.iconColor}>
+								<draggedCard.icon size={20} strokeWidth={1.75} />
+							</div>
+							<h3 class="card-title">{draggedCard.title}</h3>
+							{#if draggedCard.subtitle}
+								<p class="card-subtitle">{draggedCard.subtitle}</p>
+							{/if}
+						</div>
+					</div>
+				{/if}
 			{/if}
 		{/if}
 
@@ -1884,6 +2137,52 @@
 	.floating-drag-card .card-subtitle {
 		font-size: 0.8125rem;
 		color: var(--text-muted);
+	}
+
+	/* Mobile floating drag card */
+	.floating-drag-card.mobile {
+		width: min(75vw, 240px);
+		aspect-ratio: 3 / 4;
+		height: auto;
+		background: var(--bg-card);
+		border: 2px solid var(--ai-primary);
+		border-radius: 20px;
+		padding: 1.5rem 1rem;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 0.75rem;
+		box-shadow:
+			0 20px 60px rgba(0, 0, 0, 0.6),
+			0 0 30px var(--ai-glow),
+			0 0 0 2px rgba(34, 211, 238, 0.3);
+	}
+
+	.floating-drag-card.mobile .mobile-card-icon {
+		width: 64px;
+		height: 64px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border-radius: 16px;
+		background: var(--ai-subtle);
+		border: 1px solid var(--ai-primary);
+		color: var(--icon-color, var(--ai-primary));
+	}
+
+	.floating-drag-card.mobile .mobile-card-label {
+		font-size: 0.9rem;
+		font-weight: 600;
+		letter-spacing: 0.05em;
+		color: var(--text-primary);
+		text-transform: uppercase;
+	}
+
+	.floating-drag-card.mobile .mobile-card-description {
+		font-size: 0.8rem;
+		color: var(--text-muted);
+		text-align: center;
 	}
 
 	@keyframes pickUp {
@@ -2412,6 +2711,364 @@
 	}
 
 	/* ========================================
+	   MOBILE CAROUSEL (MobileWelcome-style)
+	   ======================================== */
+
+	.mobile-carousel-container {
+		position: absolute;
+		inset: 0;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		padding: 1rem 0;
+		gap: 1rem;
+	}
+
+	.mobile-carousel {
+		display: flex;
+		gap: 16px;
+		width: 100%;
+		overflow-x: auto;
+		scroll-snap-type: x mandatory;
+		scrollbar-width: none;
+		-ms-overflow-style: none;
+		padding: 1rem 12.5%; /* Center first/last cards */
+		-webkit-overflow-scrolling: touch;
+	}
+
+	.mobile-carousel::-webkit-scrollbar {
+		display: none;
+	}
+
+	/* Disable scroll-snap during edit mode drag for smooth reordering */
+	.mobile-carousel.edit-mode.is-dragging {
+		scroll-snap-type: none;
+	}
+
+	/* Mobile Card - MobileWelcome style */
+	.mobile-card {
+		flex-shrink: 0;
+		width: 75%;
+		min-width: 200px;
+		max-width: 280px;
+		aspect-ratio: 3 / 4;
+		padding: 1.5rem 1rem;
+
+		background: var(--bg-card);
+		border: 1px solid var(--border-default);
+		border-radius: 20px;
+
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 0.75rem;
+		position: relative;
+
+		cursor: pointer;
+		scroll-snap-align: center;
+		transition: all 0.3s var(--ease-out);
+		-webkit-tap-highlight-color: transparent;
+
+		box-shadow:
+			0 8px 24px rgba(0, 0, 0, 0.4),
+			0 4px 8px rgba(0, 0, 0, 0.3);
+
+		opacity: 0;
+		animation: mobileCardEnter 0.5s var(--ease-out) forwards;
+		animation-delay: calc(0.1s + var(--card-index, 0) * 0.08s);
+	}
+
+	@keyframes mobileCardEnter {
+		from {
+			opacity: 0;
+			transform: scale(0.9);
+		}
+		to {
+			opacity: 1;
+			transform: scale(1);
+		}
+	}
+
+	.mobile-card.active {
+		border-color: var(--ai-primary);
+		box-shadow:
+			0 12px 32px rgba(0, 0, 0, 0.5),
+			0 0 24px var(--ai-glow);
+	}
+
+	.mobile-card:active {
+		transform: scale(0.97);
+	}
+
+	/* Deck card styling */
+	.mobile-card.deck-card {
+		border-color: color-mix(in srgb, var(--deck-color, var(--ai-primary)) 40%, transparent);
+	}
+
+	.mobile-card.deck-card.active {
+		border-color: var(--deck-color, var(--ai-primary));
+		box-shadow:
+			0 12px 32px rgba(0, 0, 0, 0.5),
+			0 0 24px color-mix(in srgb, var(--deck-color, var(--ai-primary)) 30%, transparent);
+	}
+
+	/* Add deck card styling */
+	.mobile-card.add-deck-card {
+		border-style: dashed;
+		border-color: var(--border-default);
+		background: transparent;
+	}
+
+	.mobile-card.add-deck-card.active {
+		border-color: var(--ai-primary);
+		background: var(--ai-subtle);
+	}
+
+	/* Hide card being dragged (shown as floating clone) */
+	.mobile-card.is-being-dragged {
+		opacity: 0 !important;
+		pointer-events: none;
+	}
+
+	/* Drop into deck feedback */
+	.mobile-card.drop-into-deck {
+		transform: scale(1.05);
+		border-color: var(--deck-color, var(--ai-primary));
+		box-shadow:
+			0 0 30px color-mix(in srgb, var(--deck-color, var(--ai-primary)) 40%, transparent);
+	}
+
+	/* Mobile Card Icon */
+	.mobile-card-icon {
+		width: 64px;
+		height: 64px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border-radius: 16px;
+		background: var(--bg-elevated);
+		border: 1px solid var(--border-subtle);
+		color: var(--icon-color, var(--text-secondary));
+		transition: all 0.25s ease-out;
+	}
+
+	.mobile-card.active .mobile-card-icon {
+		background: var(--ai-subtle);
+		border-color: var(--ai-primary);
+		color: var(--icon-color, var(--ai-primary));
+		box-shadow: 0 0 20px var(--ai-glow);
+	}
+
+	.mobile-card.deck-card .mobile-card-icon {
+		background: color-mix(in srgb, var(--deck-color, var(--ai-primary)) 15%, transparent);
+		border-color: color-mix(in srgb, var(--deck-color, var(--ai-primary)) 30%, transparent);
+		color: var(--deck-color, var(--ai-primary));
+	}
+
+	.mobile-card.add-deck-card .mobile-card-icon {
+		background: transparent;
+		border-style: dashed;
+	}
+
+	/* Streaming indicator */
+	.mobile-card[data-ai-active="true"] .mobile-card-icon {
+		background: var(--ai-subtle);
+		border-color: var(--ai-primary);
+		color: var(--ai-primary);
+	}
+
+	.mobile-card[data-ai-active="true"] .mobile-card-icon :global(svg) {
+		animation: pulse 2s ease-in-out infinite;
+	}
+
+	/* Mobile Card Label */
+	.mobile-card-label {
+		font-family: var(--font-sans, system-ui);
+		font-size: 0.9rem;
+		font-weight: 600;
+		letter-spacing: 0.05em;
+		color: var(--text-primary);
+		text-transform: uppercase;
+		text-align: center;
+	}
+
+	/* Mobile Card Description */
+	.mobile-card-description {
+		font-size: 0.8rem;
+		color: var(--text-muted);
+		text-align: center;
+		line-height: 1.4;
+	}
+
+	/* Mobile Card Meta (for threads) */
+	.mobile-card-meta {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		margin-top: auto;
+		font-size: 0.75rem;
+		color: var(--text-dim);
+	}
+
+	.mobile-card-meta .meta-item {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+	}
+
+	/* Mobile Card Status */
+	.mobile-card-status {
+		position: absolute;
+		top: 12px;
+		right: 12px;
+		padding: 4px 10px;
+		background: var(--ai-subtle);
+		border: 1px solid rgba(34, 211, 238, 0.2);
+		border-radius: 6px;
+		font-family: ui-monospace, monospace;
+		font-size: 0.65rem;
+		font-weight: 500;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--ai-primary);
+		display: flex;
+		align-items: center;
+		gap: 5px;
+	}
+
+	.mobile-card-status .status-dot {
+		width: 6px;
+		height: 6px;
+		background: var(--ai-primary);
+		border-radius: 50%;
+		animation: blink 1.5s ease-in-out infinite;
+	}
+
+	/* Mobile Card Chevron */
+	.mobile-card-chevron {
+		position: absolute;
+		right: 12px;
+		top: 50%;
+		transform: translateY(-50%);
+		color: var(--text-dim);
+		opacity: 0.6;
+		transition: all 0.2s ease;
+	}
+
+	.mobile-card.active .mobile-card-chevron {
+		opacity: 1;
+		color: var(--ai-primary);
+		transform: translateY(-50%) translateX(2px);
+	}
+
+	/* Mobile Drag Handle */
+	.mobile-drag-handle {
+		position: absolute;
+		top: 10px;
+		left: 10px;
+		padding: 10px;
+		color: var(--text-dim);
+		opacity: 0.7;
+		cursor: grab;
+		transition: all 0.15s ease;
+		border-radius: var(--radius-md);
+		touch-action: none;
+		z-index: 5;
+		/* Larger touch target for mobile */
+		min-width: 44px;
+		min-height: 44px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.mobile-drag-handle:hover,
+	.mobile-drag-handle:active {
+		opacity: 1;
+		color: var(--ai-primary);
+		background: var(--ai-subtle);
+	}
+
+	.mobile-drag-handle:active {
+		cursor: grabbing;
+		transform: scale(0.95);
+	}
+
+	/* Mobile Dot Indicators */
+	.mobile-dots {
+		display: flex;
+		gap: 8px;
+		padding: 8px 0;
+	}
+
+	.mobile-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: var(--text-dim);
+		border: none;
+		padding: 0;
+		cursor: pointer;
+		transition: all 0.2s ease;
+		-webkit-tap-highlight-color: transparent;
+	}
+
+	.mobile-dot.active {
+		background: var(--ai-primary);
+		box-shadow: 0 0 8px var(--ai-glow);
+	}
+
+	.mobile-dot:not(.active):hover {
+		background: var(--text-muted);
+	}
+
+	/* Mobile Swipe Hint */
+	.mobile-swipe-hint {
+		font-size: 0.7rem;
+		color: var(--text-dim);
+		opacity: 0;
+		animation: fadeInHint 0.6s ease-out 0.8s forwards;
+	}
+
+	@keyframes fadeInHint {
+		from {
+			opacity: 0;
+			transform: translateY(10px);
+		}
+		to {
+			opacity: 0.6;
+			transform: translateY(0);
+		}
+	}
+
+	/* Mobile Empty State */
+	.mobile-empty-state {
+		width: 100%;
+		min-width: 200px;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		padding: 40px;
+		color: var(--text-muted);
+		font-size: 0.9375rem;
+		text-align: center;
+	}
+
+	.mobile-empty-state .empty-hint {
+		font-size: 0.8125rem;
+		color: var(--text-dim);
+		margin-top: 8px;
+	}
+
+	/* Thread card on mobile - taller for more content */
+	.mobile-card.thread-card {
+		aspect-ratio: 2.5 / 4;
+	}
+
+	/* ========================================
 	   REDUCED MOTION
 	   ======================================== */
 	@media (prefers-reduced-motion: reduce) {
@@ -2419,6 +3076,15 @@
 			animation-duration: 0.01ms !important;
 			animation-iteration-count: 1 !important;
 			transition-duration: 0.01ms !important;
+		}
+
+		.mobile-card {
+			opacity: 1;
+			transform: none;
+		}
+
+		.mobile-swipe-hint {
+			opacity: 0.6;
 		}
 	}
 </style>
