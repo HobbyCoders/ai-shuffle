@@ -14,7 +14,7 @@ export interface ApiUser {
 	name: string;
 	description?: string;
 	project_id?: string;
-	profile_id?: string;
+	profile_ids?: string[];
 	is_active: boolean;
 	web_login_allowed?: boolean;
 	username?: string;

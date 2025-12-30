@@ -52,7 +52,7 @@ class ApiUserInfo(BaseModel):
     id: str
     name: str
     project_id: Optional[str] = None
-    profile_id: Optional[str] = None
+    profile_ids: Optional[List[str]] = None  # List of allowed profile IDs (None = any profile)
 
 
 class AuthStatus(BaseModel):
@@ -428,7 +428,7 @@ class ApiUserBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     description: Optional[str] = None
     project_id: Optional[str] = None
-    profile_id: Optional[str] = None
+    profile_ids: Optional[List[str]] = None  # List of allowed profile IDs (None/empty = any profile)
     web_login_allowed: bool = True  # Whether user can login to web UI
 
 
@@ -442,7 +442,7 @@ class ApiUserUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     project_id: Optional[str] = None
-    profile_id: Optional[str] = None
+    profile_ids: Optional[List[str]] = None  # List of allowed profile IDs (empty list = any profile)
     is_active: Optional[bool] = None
     web_login_allowed: Optional[bool] = None
 

@@ -20,6 +20,10 @@
 	let verifying2FA = false;
 	let twoFactorError = '';
 
+	// Password visibility
+	let showPassword = false;
+	let showApiKey = false;
+
 	async function handleLogin() {
 		// Clear any previous errors at the start
 		auth.clearError();

@@ -105,3 +105,49 @@ export function getEffectiveStatusColor(status: CredentialPolicySummary['effecti
 			return 'gray';
 	}
 }
+
+// ============================================================================
+// Per-User Credential Policies
+// ============================================================================
+
+export interface UserCredentialPolicy {
+	credential_type: string;
+	name: string;
+	description: string;
+	policy: CredentialPolicyType;
+	source: 'user' | 'global';
+	global_policy: CredentialPolicyType;
+}
+
+export interface UserCredentialPoliciesResponse {
+	user_id: string;
+	user_name: string;
+	policies: UserCredentialPolicy[];
+}
+
+// Get credential policies for a specific user
+export async function getUserCredentialPolicies(userId: string): Promise<UserCredentialPoliciesResponse> {
+	return api.get<UserCredentialPoliciesResponse>(`/settings/users/${userId}/credential-policies`);
+}
+
+// Set a credential policy override for a specific user
+export async function setUserCredentialPolicy(
+	userId: string,
+	credentialType: string,
+	policy: CredentialPolicyType
+): Promise<{ success: boolean; user_id: string; credential_type: string; policy: CredentialPolicyType; source: string }> {
+	return api.put<{ success: boolean; user_id: string; credential_type: string; policy: CredentialPolicyType; source: string }>(
+		`/settings/users/${userId}/credential-policies/${credentialType}`,
+		{ policy }
+	);
+}
+
+// Delete a credential policy override (revert to global)
+export async function deleteUserCredentialPolicy(
+	userId: string,
+	credentialType: string
+): Promise<{ success: boolean; user_id: string; credential_type: string; deleted: boolean; fallback_policy: CredentialPolicyType; source: string }> {
+	return api.delete<{ success: boolean; user_id: string; credential_type: string; deleted: boolean; fallback_policy: CredentialPolicyType; source: string }>(
+		`/settings/users/${userId}/credential-policies/${credentialType}`
+	);
+}

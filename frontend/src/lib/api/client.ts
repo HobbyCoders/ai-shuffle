@@ -105,7 +105,7 @@ export interface ApiUserInfo {
 	id: string;
 	name: string;
 	project_id: string | null;
-	profile_id: string | null;
+	profile_ids: string[] | null;
 }
 
 export interface AuthStatus {
@@ -274,7 +274,7 @@ export interface ApiUser {
 	name: string;
 	description: string | null;
 	project_id: string | null;
-	profile_id: string | null;
+	profile_ids: string[] | null;
 	is_active: boolean;
 	web_login_allowed: boolean;
 	username: string | null;
