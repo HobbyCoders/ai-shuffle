@@ -164,21 +164,21 @@
 	role="group"
 	aria-label="Card layout mode selector"
 >
-	<!-- Visible indicator hint - shows users where to hover -->
-	<div class="hover-indicator" aria-hidden="true">
+	<!-- Three-dot indicator - this IS the hover target now -->
+	<div
+		class="hover-indicator"
+		onmouseenter={handleTriggerZoneEnter}
+		onmouseleave={handleTriggerZoneLeave}
+		role="button"
+		tabindex="0"
+		aria-label="Card layout options"
+	>
 		<div class="indicator-pill">
 			<div class="indicator-dot"></div>
 			<div class="indicator-dot"></div>
 			<div class="indicator-dot"></div>
 		</div>
 	</div>
-
-	<!-- Invisible trigger zone at top of workspace - always present to detect mouse -->
-	<div
-		class="trigger-zone"
-		onmouseenter={handleTriggerZoneEnter}
-		onmouseleave={handleTriggerZoneLeave}
-	></div>
 
 	<!-- Hover zone with the actual UI - only visible when triggered -->
 	{#if isVisible || isHovered || isExpanded}
@@ -279,18 +279,6 @@
 		pointer-events: none;
 	}
 
-	/* Invisible trigger zone - narrower area at top to detect mouse
-	   Narrowed to 160px to avoid overlap with card close buttons.
-	   Cards now have 48px top padding buffer for this trigger zone. */
-	.trigger-zone {
-		position: absolute;
-		top: 12px;
-		left: 50%;
-		transform: translateX(-50%);
-		width: 160px;
-		height: 32px;
-		pointer-events: auto;
-	}
 
 	.hover-zone {
 		pointer-events: auto;
@@ -594,14 +582,15 @@
 		}
 	}
 
-	/* Hover indicator - subtle hint at top showing where to hover */
+	/* Hover indicator - the actual hover target for showing layout dropdown */
 	.hover-indicator {
 		position: absolute;
-		top: 8px;
+		top: 4px;
 		left: 50%;
 		transform: translateX(-50%);
-		pointer-events: none;
+		pointer-events: auto;
 		z-index: 1;
+		cursor: pointer;
 	}
 
 	.indicator-pill {
@@ -617,8 +606,16 @@
 		transition: opacity 0.3s ease;
 	}
 
-	.card-shuffle-container:hover .indicator-pill {
+	/* Hide indicator when the full dropdown is showing */
+	.card-shuffle-container:has(.hover-zone) .indicator-pill {
 		opacity: 0;
+		pointer-events: none;
+	}
+
+	.hover-indicator:hover .indicator-pill {
+		opacity: 0.8;
+		background: rgba(255, 255, 255, 0.08);
+		border-color: rgba(255, 255, 255, 0.15);
 	}
 
 	.indicator-dot {
