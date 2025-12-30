@@ -116,6 +116,7 @@
 	let reorderDragCardId: string | null = $state(null);
 	let reorderDragPosition: { x: number; y: number } | null = $state(null);
 	let isReorderTransitioning = $state(false);
+	let lastReorderTargetIndex: number = -1; // Track last target to avoid redundant reorders
 
 	// Terminal modal state
 	let terminalCommand = $state('/resume');
@@ -706,16 +707,19 @@
 
 		// In managed grid layouts (sidebyside/tile), use reorder behavior
 		if ($layoutMode === 'sidebyside' || $layoutMode === 'tile') {
-			// Track drag position for the floating overlay
+			// Track drag position for the floating overlay (this is cheap, just local state)
 			reorderDragCardId = id;
 			reorderDragPosition = { x, y };
 
-			// Enable transitions for other cards to animate
-			isReorderTransitioning = true;
-
-			// Calculate target slot and reorder if needed
+			// Calculate target slot - only reorder if slot actually changed
+			// This prevents calling reorderCard+applyLayout 60 times per second
 			const targetIndex = deck.calculateSlotIndex(x, y);
-			deck.reorderCard(id, targetIndex);
+			if (targetIndex !== lastReorderTargetIndex) {
+				lastReorderTargetIndex = targetIndex;
+				// Enable transitions for other cards to animate
+				isReorderTransitioning = true;
+				deck.reorderCard(id, targetIndex);
+			}
 			return;
 		}
 
@@ -736,6 +740,7 @@
 			deck.commitReorder();
 			reorderDragCardId = null;
 			reorderDragPosition = null;
+			lastReorderTargetIndex = -1; // Reset for next drag
 
 			// Keep transitions briefly for snap animation, then disable
 			setTimeout(() => {
