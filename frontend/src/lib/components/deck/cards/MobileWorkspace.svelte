@@ -42,10 +42,12 @@
 	let touchStartTime = $state(0);
 	let isSwiping = $state(false);
 	let swipeDirection = $state<'horizontal' | 'vertical' | null>(null);
+	let isAnimating = $state(false);
 
 	const SWIPE_THRESHOLD = 50;
 	const VELOCITY_THRESHOLD = 0.3;
 	const DIRECTION_LOCK_THRESHOLD = 10;
+	const ANIMATION_DURATION = 300; // Match CSS transition duration
 
 	// Icon mapping - all 12 card types
 	const cardIcons: Record<CardType, typeof MessageSquare> = {
@@ -91,6 +93,9 @@
 	// Touch handlers
 	function handleTouchStart(e: TouchEvent) {
 		if (cards.length <= 1) return;
+
+		// Block new swipes during animation
+		if (isAnimating) return;
 
 		// Don't initiate swipe if touching an interactive element
 		if (isInteractiveElement(e.target)) return;
@@ -155,7 +160,13 @@
 			if (document.activeElement instanceof HTMLElement) {
 				document.activeElement.blur();
 			}
+
+			// Lock animation to prevent rapid successive swipes
+			isAnimating = true;
 			onCardChange(newIndex);
+			setTimeout(() => {
+				isAnimating = false;
+			}, ANIMATION_DURATION);
 		}
 
 		resetSwipeState();
@@ -172,12 +183,19 @@
 
 	// Navigate to specific card via dot indicator
 	function navigateToCard(index: number) {
+		if (isAnimating) return;
 		if (index !== activeCardIndex && index >= 0 && index < cards.length) {
 			// Blur any focused element before switching to prevent focus jumping issues
 			if (document.activeElement instanceof HTMLElement) {
 				document.activeElement.blur();
 			}
+
+			// Lock animation to prevent rapid tapping
+			isAnimating = true;
 			onCardChange(index);
+			setTimeout(() => {
+				isAnimating = false;
+			}, ANIMATION_DURATION);
 		}
 	}
 

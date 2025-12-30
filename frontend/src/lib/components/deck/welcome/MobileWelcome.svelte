@@ -72,7 +72,10 @@
 	let touchStartX = $state(0);
 	let touchDeltaX = $state(0);
 	let isDragging = $state(false);
+	let isAnimating = $state(false);
 	let scrollDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const ANIMATION_DURATION = 300; // Match scroll behavior duration
 
 	// Helper to calculate card dimensions
 	function getCardMetrics() {
@@ -85,8 +88,16 @@
 
 	// Navigate to specific card
 	function goToCard(index: number) {
-		currentIndex = Math.max(0, Math.min(index, cards.length - 1));
+		if (isAnimating) return;
+		const clampedIndex = Math.max(0, Math.min(index, cards.length - 1));
+		if (clampedIndex === currentIndex) return;
+
+		isAnimating = true;
+		currentIndex = clampedIndex;
 		scrollToCard(currentIndex);
+		setTimeout(() => {
+			isAnimating = false;
+		}, ANIMATION_DURATION);
 	}
 
 	function scrollToCard(index: number) {
@@ -98,6 +109,7 @@
 
 	// Touch handlers
 	function handleTouchStart(e: TouchEvent) {
+		if (isAnimating) return;
 		touchStartX = e.touches[0].clientX;
 		touchDeltaX = 0;
 		isDragging = true;
@@ -112,11 +124,22 @@
 		if (!isDragging) return;
 		isDragging = false;
 
+		let newIndex = currentIndex;
 		if (touchDeltaX < -SWIPE_THRESHOLD && currentIndex < cards.length - 1) {
-			goToCard(currentIndex + 1);
+			newIndex = currentIndex + 1;
 		} else if (touchDeltaX > SWIPE_THRESHOLD && currentIndex > 0) {
-			goToCard(currentIndex - 1);
+			newIndex = currentIndex - 1;
+		}
+
+		if (newIndex !== currentIndex) {
+			isAnimating = true;
+			currentIndex = newIndex;
+			scrollToCard(currentIndex);
+			setTimeout(() => {
+				isAnimating = false;
+			}, ANIMATION_DURATION);
 		} else {
+			// Snap back to current card
 			scrollToCard(currentIndex);
 		}
 		touchDeltaX = 0;
@@ -124,7 +147,7 @@
 
 	// Handle scroll snap detection (debounced to prevent excessive updates)
 	function handleScroll() {
-		if (!carouselEl || isDragging) return;
+		if (!carouselEl || isDragging || isAnimating) return;
 
 		// Clear any pending debounce timer
 		if (scrollDebounceTimer) {
@@ -133,7 +156,7 @@
 
 		// Debounce the index update
 		scrollDebounceTimer = setTimeout(() => {
-			if (!carouselEl) return;
+			if (!carouselEl || isAnimating) return;
 			const { cardWidth, gap } = getCardMetrics();
 			const scrollPos = carouselEl.scrollLeft;
 			const newIndex = Math.round(scrollPos / (cardWidth + gap));
