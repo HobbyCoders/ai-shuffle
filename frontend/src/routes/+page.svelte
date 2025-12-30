@@ -52,8 +52,7 @@
 		ModelStudioCard,
 		AudioStudioCard,
 		FileBrowserCard,
-		PluginManagerCard,
-		ActiveSessionsCard
+		PluginManagerCard
 	} from '$lib/components/deck/cards';
 	import type { CardType, DeckCard as CardsDeckCard } from '$lib/components/deck/cards/types';
 
@@ -978,16 +977,6 @@
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
 							/>
-						{:else if card.type === 'active-sessions'}
-							<ActiveSessionsCard
-								{card}
-								mobile={true}
-								onClose={() => handleCardClose(card.id)}
-								onMaximize={() => handleCardMaximize(card.id)}
-								onFocus={() => handleCardFocus(card.id)}
-								onMove={(x, y) => handleCardMove(card.id, x, y)}
-								onResize={(w, h) => handleCardResize(card.id, w, h)}
-							/>
 						{:else}
 							<div class="p-4">
 								<p class="text-muted-foreground">Unknown card type</p>
@@ -1167,17 +1156,6 @@
 											onDragEnd={() => handleCardDragEnd(card.id)}
 											onResizeEnd={() => handleCardResizeEnd(card.id)}
 										/>
-									{:else if card.type === 'active-sessions'}
-										<ActiveSessionsCard
-											{card}
-											onClose={() => handleCardClose(card.id)}
-											onMaximize={() => handleCardMaximize(card.id)}
-											onFocus={() => handleCardFocus(card.id)}
-											onMove={(x, y) => handleCardMove(card.id, x, y)}
-											onResize={(w, h) => handleCardResize(card.id, w, h)}
-											onDragEnd={() => handleCardDragEnd(card.id)}
-											onResizeEnd={() => handleCardResizeEnd(card.id)}
-										/>
 									{:else}
 										<!-- Other card types -->
 										<div class="card-placeholder">
@@ -1213,7 +1191,6 @@
 		onOpenSubagents={() => handleCreateCard('subagent')}
 		onOpenSettings={() => handleCreateCard('settings')}
 		onOpenPlugins={() => handleCreateCard('plugins')}
-		onOpenActiveSessions={() => handleCreateCard('active-sessions')}
 		isAdmin={$isAdmin}
 		{isMobile}
 	/>

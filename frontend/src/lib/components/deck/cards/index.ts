@@ -28,6 +28,3 @@ export { default as FileBrowserCard } from './FileBrowserCard.svelte';
 
 // Plugin Management
 export { default as PluginManagerCard } from './PluginManagerCard.svelte';
-
-// Session Management
-export { default as ActiveSessionsCard } from './ActiveSessionsCard.svelte';
