@@ -1407,10 +1407,25 @@
 			gap: 0;
 		}
 
+		/* Left and right columns don't need to flex, just fit content */
+		.controls-left,
+		.controls-right {
+			flex: none;
+		}
+
+		/* Center section fills remaining space, no forced centering */
+		.controls-center {
+			flex: 1;
+			justify-content: flex-start;
+			gap: 4px;
+			min-width: 0; /* Allow shrinking */
+			overflow: hidden;
+		}
+
 		/* Show selector text on mobile (profile/project names) */
 		.selector-text {
 			display: block;
-			max-width: 60px;
+			max-width: 80px;
 			font-size: 11px;
 		}
 
@@ -1429,11 +1444,6 @@
 		/* Hide chevron on mobile to save space */
 		.context-selector-btn .chevron {
 			display: none;
-		}
-
-		/* Reduce center gap */
-		.controls-center {
-			gap: 2px;
 		}
 	}
 </style>
