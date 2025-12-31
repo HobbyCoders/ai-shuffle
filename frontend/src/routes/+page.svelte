@@ -194,6 +194,8 @@
 				return 'file-browser';
 			case 'plugins':
 				return 'plugins';
+			case 'conversation':
+				return 'conversation';
 			default:
 				return 'chat';
 		}
