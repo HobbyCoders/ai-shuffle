@@ -17,7 +17,7 @@ AI Shuffle is a **configurable AI agent platform** built on Claude Code. Create 
 
 | Mode | Description |
 |------|-------------|
-| **Interactive (UI)** | Chat with agents in "The Deck"—a desktop-like workspace with draggable cards |
+| **Interactive (UI)** | Chat with agents in a desktop-like workspace with draggable, resizable cards |
 | **Programmatic (API)** | Call your configured agents from scripts, apps, or automation workflows |
 
 Same agents. Same configurations. Choose your interface.
@@ -41,7 +41,6 @@ Create specialized agents for different jobs:
 │                 critical. Focus on bugs, security, and perf."   │
 │  Tools:        Read, Grep, Glob (no Write, no Bash)             │
 │  Permissions:  Auto-accept all                                   │
-│  Background:   No (interactive)                                  │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
@@ -52,7 +51,6 @@ Create specialized agents for different jobs:
 │                 Write clean, tested, documented code."          │
 │  Tools:        All tools enabled                                 │
 │  Permissions:  Ask before destructive actions                    │
-│  Background:   Optional (can run autonomously with worktrees)    │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
@@ -62,7 +60,6 @@ Create specialized agents for different jobs:
 │  System:       "Summarize findings concisely. Cite sources."    │
 │  Tools:        WebSearch, WebFetch, Read                         │
 │  Permissions:  Auto-accept all                                   │
-│  Background:   No (interactive)                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -75,19 +72,6 @@ Create specialized agents for different jobs:
 | **Tools** | Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch, etc. | Control what actions the agent can take |
 | **Permission Mode** | Ask, Auto-accept, Bypass | How to handle tool confirmations |
 | **Project Scope** | Specific directories | Limit agent access to certain codebases |
-| **Background Mode** | Enable/disable | Run agent autonomously in a git worktree |
-| **Worktree/Branching** | Auto-branch, auto-PR | Isolate agent work on separate branches |
-
-### Background Agents via Configuration
-
-Want an agent that works autonomously? Configure it in the profile:
-
-- **Enable background mode** — Agent runs without waiting for your input
-- **Auto-branch** — Automatically creates a feature branch for the work
-- **Worktree isolation** — Agent works in a separate git worktree, keeping your main branch clean
-- **Auto-PR** — Creates a pull request when the task completes
-
-This means you control *how* agents work through configuration—interactive assistants, autonomous workers, or anything in between.
 
 ### Use Profiles Two Ways
 
@@ -222,53 +206,43 @@ Create API users with specific permissions:
 
 ---
 
-## The Deck Interface
+## The Workspace
 
-When you want to work interactively, AI Shuffle provides "The Deck"—a desktop-like workspace.
+AI Shuffle provides a clean, full-screen workspace where all your cards live together. Cards are draggable, resizable windows that you can arrange however you like.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ [Rail]           [Workspace]                      [Context]     │
-│ ┌─────┐ ┌─────────────────────────────────────┐ ┌─────────────┐ │
-│ │     │ │  ┌──────────────┐  ┌─────────────┐  │ │ Sessions    │ │
-│ │ 🖥️  │ │  │  Chat Card   │  │  Chat Card  │  │ │ ├─ Chat 1   │ │
-│ │ 📁  │ │  │  (draggable) │  │ (draggable) │  │ │ └─ Chat 2   │ │
-│ │     │ │  └──────────────┘  └─────────────┘  │ │             │ │
-│ │     │ │                                     │ │ Projects    │ │
-│ │     │ │     ┌─────────────────────┐         │ │ ├─ my-app   │ │
-│ │     │ │     │    Chat Card        │         │ │ └─ api      │ │
-│ │     │ │     │    (resizable)      │         │ │             │ │
-│ │ ⚙️  │ │     └─────────────────────┘         │ │ Profiles    │ │
-│ └─────┘ └─────────────────────────────────────┘ └─────────────┘ │
-│ RAIL              WORKSPACE (free-form)         CONTEXT PANEL   │
-│         ┌───────────────────────────────────────────────────┐   │
-│         │ [minimized cards]                                 │   │
-│         └───────────────────────────────────────────────────┘   │
-│                              DOCK                               │
-└─────────────────────────────────────────────────────────────────┘
-```
+### Card Types
 
-### Activity Modes
+| Card | Purpose |
+|------|---------|
+| **Chat** | Conversations with Claude using your configured profiles |
+| **Settings** | Configure AI Shuffle, authentication, and API keys |
+| **Profile** | Create and edit agent profiles |
+| **Project** | Manage project directories and workspaces |
+| **File Browser** | Browse and manage files in your projects |
 
-| Mode | Icon | Purpose |
-|------|------|---------|
-| **Workspace** | 🖥️ | Your main canvas with draggable chat cards |
-| **Files** | 📁 | Browse and manage project files |
+### Layout Modes
+
+Switch between different card arrangements:
+
+| Mode | Description |
+|------|-------------|
+| **Free Flow** | Position cards freely anywhere in the workspace |
+| **Side by Side** | Cards arranged in vertical columns |
+| **Tile** | Cards arranged in a grid pattern |
+| **Stack** | Cards stacked with one main card and a sidebar deck |
+| **Focus** | One card maximized, navigate between cards |
 
 ### Card Behaviors
 
-Cards act like windows on a desktop:
-
-- **Drag anywhere** — Position cards freely in the workspace
+- **Drag** — Move cards anywhere in the workspace
 - **Resize** — Drag edges and corners to adjust size
-- **Snap** — Drag to edges to snap to half-screen or quarters
-- **Minimize** — Collapse to the dock at the bottom
+- **Snap** — Drag to screen edges to snap to half or quarter positions
+- **Minimize** — Collapse cards to the dock
 - **Maximize** — Double-click title bar to fill workspace
-- **Z-order** — Click to bring a card to front
 
 ### Mobile Experience
 
-On mobile, the workspace transforms into a swipeable card stack with full-screen cards and dot indicators.
+On mobile, cards become full-screen and swipeable. Navigate between cards with swipe gestures or the card indicator dots.
 
 ---
 
@@ -420,7 +394,7 @@ Full interactive docs at `/docs` when running.
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    Web Browser / API Client                  │
-│              "The Deck" UI  |  REST API  |  WebSocket        │
+│                  Workspace UI  |  REST API                   │
 └──────────────────────────┬──────────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────┐
