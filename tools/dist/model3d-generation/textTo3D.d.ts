@@ -71,6 +71,27 @@ export interface TextTo3DInput {
      */
     target_polycount?: number;
     /**
+     * Symmetry mode for the generated model.
+     * - "auto": Automatically detect and apply symmetry
+     * - "on": Force symmetrical generation
+     * - "off": No symmetry enforcement
+     * @default "auto"
+     */
+    symmetry_mode?: 'auto' | 'on' | 'off';
+    /**
+     * Whether to apply remeshing for cleaner topology.
+     * @default true
+     */
+    should_remesh?: boolean;
+    /**
+     * Pose mode for humanoid/character models.
+     * - "a-pose": Arms at ~45 degrees (good for rigging)
+     * - "t-pose": Arms horizontal (standard for rigging)
+     * - "": No specific pose
+     * @default ""
+     */
+    pose_mode?: 'a-pose' | 't-pose' | '';
+    /**
      * Whether to wait for the generation to complete.
      * - true: Poll until complete and return the model (may take 1-5 minutes)
      * - false: Return immediately with task_id for later checking

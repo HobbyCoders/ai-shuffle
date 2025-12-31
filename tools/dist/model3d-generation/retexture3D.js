@@ -98,11 +98,15 @@ export async function retexture3D(input) {
         };
     }
     // Get model from environment or use default
-    const model = input.model || process.env.MODEL3D_MODEL || 'meshy-5';
+    // Valid models for retexture: meshy-4, meshy-5, latest
+    const envModel = process.env.MODEL3D_MODEL;
+    // Map meshy-6 to latest for backwards compatibility
+    const normalizedEnvModel = envModel === 'meshy-6' ? 'latest' : envModel;
+    const model = input.model || normalizedEnvModel || 'meshy-5';
     try {
         // Build request body
         const requestBody = {
-            ai_model: model === 'latest' ? 'meshy-5' : model
+            ai_model: model // Valid: meshy-4, meshy-5, latest
         };
         // Determine if input is a task ID or file path
         if (isTaskId(input.model_path_or_task_id)) {

@@ -123,6 +123,15 @@ export async function textTo3D(input) {
         if (input.target_polycount !== undefined) {
             requestBody.target_polycount = input.target_polycount;
         }
+        if (input.symmetry_mode) {
+            requestBody.symmetry_mode = input.symmetry_mode;
+        }
+        if (input.should_remesh !== undefined) {
+            requestBody.should_remesh = input.should_remesh;
+        }
+        if (input.pose_mode !== undefined) {
+            requestBody.pose_mode = input.pose_mode;
+        }
         // Start the 3D generation
         const response = await fetch(`${MESHY_API_BASE}/openapi/v2/text-to-3d`, {
             method: 'POST',

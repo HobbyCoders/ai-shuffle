@@ -895,13 +895,18 @@ import {{ textTo3D }} from '{tool_path}';
 
 const result = await textTo3D({{
   prompt: 'A medieval sword with ornate handle',
-  art_style: 'realistic',  // or 'cartoon', 'low-poly', 'sculpture'
+  art_style: 'realistic',  // or 'sculpture'
+  model: 'latest',  // or 'meshy-5', 'meshy-4'
   topology: 'quad',  // or 'triangle'
+  target_polycount: 50000,  // 100 to 300,000 (default 30,000)
+  symmetry_mode: 'auto',  // or 'on', 'off'
+  pose_mode: 't-pose',  // or 'a-pose', '' (for characters)
+  wait_for_completion: true  // Wait for result vs return task_id
 }});
 console.log(JSON.stringify(result));
 ```
 
-**Response fields:** `task_id`, `status`, `model_urls` (when complete), `thumbnail_url`, `video_url`
+**Response fields:** `task_id`, `status`, `model_urls` (glb/fbx/obj/usdz when complete), `thumbnail_url`
 
 """
 
@@ -919,13 +924,20 @@ console.log(JSON.stringify(result));
 import {{ imageTo3D }} from '{tool_path}';
 
 const result = await imageTo3D({{
-  image_path: '/path/to/reference.png',
+  image_path: '/path/to/character.png',
+  prompt: 'A fantasy warrior character',  // Optional guidance
+  model: 'latest',  // or 'meshy-5', 'meshy-4'
   topology: 'quad',  // or 'triangle'
+  target_polycount: 50000,  // 100 to 300,000
+  symmetry_mode: 'auto',  // or 'on', 'off'
+  should_texture: true,
+  enable_pbr: true,  // Generate metallic/roughness/normal maps
+  wait_for_completion: true
 }});
 console.log(JSON.stringify(result));
 ```
 
-**Response fields:** `task_id`, `status`, `model_urls` (when complete), `thumbnail_url`
+**Response fields:** `task_id`, `status`, `model_urls` (glb/fbx/obj/usdz), `texture_urls`, `thumbnail_url`
 
 """
 
@@ -941,14 +953,17 @@ console.log(JSON.stringify(result));
 import {{ retexture3D }} from '{tool_path}';
 
 const result = await retexture3D({{
-  model_path: '/path/to/model.glb',  // or URL
-  prompt: 'Worn leather texture with scratches',
-  art_style: 'realistic',
+  model_path_or_task_id: '/path/to/model.glb',  // or Meshy task_id
+  style_prompt: 'Worn leather texture with scratches',
+  style_image: '/path/to/reference.png',  // Optional style reference
+  model: 'meshy-5',  // or 'meshy-4', 'latest'
+  enable_pbr: true,  // Generate metallic/roughness/normal maps
+  wait_for_completion: true
 }});
 console.log(JSON.stringify(result));
 ```
 
-**Response fields:** `task_id`, `status`, `model_urls` (when complete)
+**Response fields:** `task_id`, `status`, `model_urls` (glb/fbx/obj/usdz), `texture_urls`
 
 """
 
@@ -960,15 +975,18 @@ console.log(JSON.stringify(result));
 **🎯 USE WHEN:** User wants to add animation skeleton to a humanoid 3D model
 **❌ DO NOT USE:** For non-humanoid models (rigging only works for humanoid shapes)
 
-⚠️ Only works with humanoid models. Model must have proper proportions.
+⚠️ Only works with humanoid models. Use t-pose or a-pose for best results.
 
 ```typescript
 import {{ rig3D }} from '{tool_path}';
 
 const result = await rig3D({{
-  model_path: '/path/to/humanoid.glb',  // or URL to a Meshy-generated model
+  model_path_or_task_id: '/path/to/humanoid.glb',  // or Meshy task_id
+  height_meters: 1.8,  // Character height for proper scaling
+  wait_for_completion: true
 }});
 console.log(JSON.stringify(result));
+// Use result.task_id with animate3D
 ```
 
 **Response fields:** `task_id`, `status`, `model_urls` (rigged model with skeleton)
@@ -989,13 +1007,17 @@ console.log(JSON.stringify(result));
 import {{ animate3D }} from '{tool_path}';
 
 const result = await animate3D({{
-  model_path: '/path/to/rigged_model.glb',
-  animation: 'walk',  // or 'run', 'jump', 'idle', 'wave', etc.
+  rig_task_id: 'task-id-from-rig3D',  // Required: from rig3D result
+  action_id: 'walk_forward',  // See action list below
+  fps: 30,  // 24, 25, 30, or 60
+  wait_for_completion: true
 }});
 console.log(JSON.stringify(result));
 ```
 
-**Response fields:** `task_id`, `status`, `model_urls` (animated model), `video_url` (preview)
+**Common action_ids:** walk_forward, run_forward, jump, idle, idle_breathing, wave, clap, punch, kick, dance_hip_hop, dance_salsa, sit, crouch (500+ available)
+
+**Response fields:** `task_id`, `status`, `model_urls` (animated FBX), `video_url` (preview)
 
 """
 

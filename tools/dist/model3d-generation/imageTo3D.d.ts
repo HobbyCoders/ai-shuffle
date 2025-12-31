@@ -43,13 +43,12 @@ export interface ImageTo3DInput {
     prompt?: string;
     /**
      * AI model to use for generation.
-     * - "meshy-6": Latest model, best quality (20 credits)
+     * - "latest": Meshy 6 Preview, best quality (20 credits, 10 during promo)
      * - "meshy-5": Balanced quality and speed (5 credits)
      * - "meshy-4": Fast generation (5 credits)
-     * - "latest": Alias for the latest model
-     * @default "meshy-6"
+     * @default "latest"
      */
-    model?: 'meshy-4' | 'meshy-5' | 'meshy-6' | 'latest';
+    model?: 'meshy-4' | 'meshy-5' | 'latest';
     /**
      * Whether to generate textures for the model.
      * @default true
