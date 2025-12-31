@@ -137,16 +137,14 @@
 
 	onMount(async () => {
 		// Initialize with defaults from card meta if available
-		selectedProfileId = (card.meta?.profileId as string) ?? profileList[0]?.id ?? '';
-		selectedProjectId = (card.meta?.projectId as string) ?? projectList[0]?.id ?? '';
+		// Only pre-select if explicitly saved in card meta, otherwise leave empty for user to choose
+		selectedProfileId = (card.meta?.profileId as string) ?? '';
+		selectedProjectId = (card.meta?.projectId as string) ?? '';
 
 		// Load TTS settings from user preferences
 		await loadTtsSettings();
 
-		// Create session if not exists
-		if (!session && selectedProfileId && selectedProjectId) {
-			await initializeSession();
-		}
+		// Don't auto-create session - wait for user to click Start
 	});
 
 	/**
@@ -485,7 +483,8 @@
 		<!-- Header: Profile & Status -->
 		<div class="conversation-header">
 			<div class="profile-section">
-				{#if session}
+				{#if session && status !== 'idle'}
+					<!-- Show profile info only when conversation is active -->
 					<div class="profile-avatar">
 						<MessageSquare size={24} />
 					</div>
@@ -494,7 +493,7 @@
 						<div class="profile-project">{session.projectName}</div>
 					</div>
 				{:else}
-					<!-- Profile/Project Selection -->
+					<!-- Profile/Project Selection - always show when idle -->
 					<div class="selection-row">
 						<select
 							class="profile-select"
