@@ -308,7 +308,7 @@ async def get_auth_status(request: Request):
                     "id": api_key_session["api_user_id"],
                     "name": api_key_session["user_name"],
                     "project_id": api_key_session["project_id"],
-                    "profile_id": api_key_session["profile_id"]
+                    "profile_ids": api_key_session.get("profile_ids")
                 }
 
     return {
@@ -487,7 +487,7 @@ async def login_with_api_key(req: Request, login_data: ApiKeyLoginRequest, respo
             "id": api_user["id"],
             "name": api_user["name"],
             "project_id": api_user["project_id"],
-            "profile_id": api_user["profile_id"]
+            "profile_ids": api_user.get("profile_ids")
         }
     }
 
@@ -600,7 +600,7 @@ async def register_api_user(req: Request, register_data: ApiUserRegisterRequest,
             "name": updated_user["name"],
             "username": updated_user["username"],
             "project_id": updated_user["project_id"],
-            "profile_id": updated_user["profile_id"]
+            "profile_ids": updated_user.get("profile_ids")
         }
     }
 
@@ -698,7 +698,7 @@ async def login_api_user(req: Request, login_data: ApiUserLoginRequest, response
             "name": api_user["name"],
             "username": api_user["username"],
             "project_id": api_user["project_id"],
-            "profile_id": api_user["profile_id"]
+            "profile_ids": api_user.get("profile_ids")
         }
     }
 

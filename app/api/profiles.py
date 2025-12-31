@@ -42,13 +42,18 @@ class EnabledAgentsRequest(BaseModel):
 
 @router.get("", response_model=List[Profile])
 async def list_profiles(request: Request, token: str = Depends(require_auth)):
-    """List all agent profiles. API users only see their assigned profile."""
+    """List all agent profiles. API users only see their assigned profiles."""
     api_user = get_api_user_from_request(request)
 
-    if api_user and api_user.get("profile_id"):
-        # API user with assigned profile - only return that profile
-        profile = database.get_profile(api_user["profile_id"])
-        return [profile] if profile else []
+    profile_ids = api_user.get("profile_ids") if api_user else None
+    if profile_ids:
+        # API user with assigned profiles - only return those profiles
+        allowed_profiles = []
+        for pid in profile_ids:
+            profile = database.get_profile(pid)
+            if profile:
+                allowed_profiles.append(profile)
+        return allowed_profiles
 
     # Admin or unrestricted API user - return all profiles
     profiles = database.get_all_profiles()
@@ -57,12 +62,13 @@ async def list_profiles(request: Request, token: str = Depends(require_auth)):
 
 @router.get("/{profile_id}", response_model=Profile)
 async def get_profile(request: Request, profile_id: str, token: str = Depends(require_auth)):
-    """Get a specific profile. API users can only access their assigned profile."""
+    """Get a specific profile. API users can only access their assigned profiles."""
     api_user = get_api_user_from_request(request)
 
-    # Check if API user is restricted to a specific profile
-    if api_user and api_user.get("profile_id"):
-        if api_user["profile_id"] != profile_id:
+    # Check if API user is restricted to specific profiles
+    profile_ids = api_user.get("profile_ids") if api_user else None
+    if profile_ids:
+        if profile_id not in profile_ids:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this profile"

@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 # v22: Add credential_policies and api_user_credentials tables
 # v23: Worktree-session decoupling - add worktree_id to sessions, remove UNIQUE from worktrees.session_id
 # v24: Add unique index on active worktrees to prevent race conditions, fix N+1 queries
-SCHEMA_VERSION = 24
+# v25: Add api_user_profiles junction table for multi-profile support
+SCHEMA_VERSION = 25
 
 
 # =============================================================================
@@ -253,6 +254,18 @@ def _create_schema(cursor: sqlite3.Cursor):
         cursor.execute("ALTER TABLE api_users ADD COLUMN web_login_allowed BOOLEAN DEFAULT TRUE")
     except sqlite3.OperationalError:
         pass  # Column already exists
+
+    # API user profiles junction table (many-to-many relationship)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS api_user_profiles (
+            api_user_id TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (api_user_id, profile_id),
+            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE,
+            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+        )
+    """)
 
     # Add is_favorite column to sessions (migration for existing DBs)
     try:
@@ -532,6 +545,8 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_users_active ON api_users(is_active)")
     cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_api_users_username ON api_users(username) WHERE username IS NOT NULL")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_user_profiles_user ON api_user_profiles(api_user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_user_profiles_profile ON api_user_profiles(profile_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_api_user ON sessions(api_user_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_session ON sync_log(session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_created ON sync_log(created_at)")
@@ -1804,12 +1819,46 @@ def get_usage_stats() -> Dict[str, Any]:
 # API User Operations
 # ============================================================================
 
+def _get_api_user_profile_ids(cursor, user_id: str) -> List[str]:
+    """Get profile IDs for an API user from junction table"""
+    cursor.execute(
+        "SELECT profile_id FROM api_user_profiles WHERE api_user_id = ? ORDER BY created_at",
+        (user_id,)
+    )
+    return [row[0] for row in cursor.fetchall()]
+
+
+def _set_api_user_profile_ids(cursor, user_id: str, profile_ids: Optional[List[str]]):
+    """Set profile IDs for an API user (replaces existing)"""
+    # Clear existing associations
+    cursor.execute("DELETE FROM api_user_profiles WHERE api_user_id = ?", (user_id,))
+
+    # Add new associations
+    if profile_ids:
+        now = datetime.utcnow().isoformat()
+        for profile_id in profile_ids:
+            cursor.execute(
+                "INSERT INTO api_user_profiles (api_user_id, profile_id, created_at) VALUES (?, ?, ?)",
+                (user_id, profile_id, now)
+            )
+
+
+def _enrich_api_user_with_profiles(cursor, user: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Add profile_ids to API user dict from junction table"""
+    if not user:
+        return None
+    profile_ids = _get_api_user_profile_ids(cursor, user["id"])
+    user["profile_ids"] = profile_ids if profile_ids else None
+    return user
+
+
 def get_api_user(user_id: str) -> Optional[Dict[str, Any]]:
     """Get an API user by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM api_users WHERE id = ?", (user_id,))
-        return row_to_dict(cursor.fetchone())
+        user = row_to_dict(cursor.fetchone())
+        return _enrich_api_user_with_profiles(cursor, user)
 
 
 def get_api_user_by_key_hash(key_hash: str) -> Optional[Dict[str, Any]]:
@@ -1820,7 +1869,8 @@ def get_api_user_by_key_hash(key_hash: str) -> Optional[Dict[str, Any]]:
             "SELECT * FROM api_users WHERE api_key_hash = ? AND is_active = TRUE",
             (key_hash,)
         )
-        return row_to_dict(cursor.fetchone())
+        user = row_to_dict(cursor.fetchone())
+        return _enrich_api_user_with_profiles(cursor, user)
 
 
 def get_all_api_users() -> List[Dict[str, Any]]:
@@ -1828,7 +1878,11 @@ def get_all_api_users() -> List[Dict[str, Any]]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM api_users ORDER BY created_at DESC")
-        return rows_to_list(cursor.fetchall())
+        users = rows_to_list(cursor.fetchall())
+        # Enrich each user with profile_ids
+        for user in users:
+            _enrich_api_user_with_profiles(cursor, user)
+        return users
 
 
 def create_api_user(
@@ -1836,7 +1890,7 @@ def create_api_user(
     name: str,
     api_key_hash: str,
     project_id: Optional[str] = None,
-    profile_id: Optional[str] = None,
+    profile_ids: Optional[List[str]] = None,
     description: Optional[str] = None,
     username: Optional[str] = None,
     password_hash: Optional[str] = None,
@@ -1847,10 +1901,18 @@ def create_api_user(
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO api_users (id, name, api_key_hash, project_id, profile_id, description, username, password_hash, web_login_allowed, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (user_id, name, api_key_hash, project_id, profile_id, description, username, password_hash, web_login_allowed, now, now)
+            """INSERT INTO api_users (id, name, api_key_hash, project_id, description, username, password_hash, web_login_allowed, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user_id, name, api_key_hash, project_id, description, username, password_hash, web_login_allowed, now, now)
         )
+        # Set profile associations in junction table
+        if profile_ids:
+            _set_api_user_profile_ids(cursor, user_id, profile_ids)
+
+    # Create default credential policies for the new user
+    # By default, users must provide their own API keys
+    create_default_user_credential_policies(user_id)
+
     return get_api_user(user_id)
 
 
@@ -1858,7 +1920,7 @@ def update_api_user(
     user_id: str,
     name: Optional[str] = None,
     project_id: Optional[str] = None,
-    profile_id: Optional[str] = None,
+    profile_ids: Optional[List[str]] = None,
     description: Optional[str] = None,
     is_active: Optional[bool] = None,
     web_login_allowed: Optional[bool] = None
@@ -1876,9 +1938,6 @@ def update_api_user(
     if project_id is not None:
         updates.append("project_id = ?")
         values.append(project_id if project_id else None)
-    if profile_id is not None:
-        updates.append("profile_id = ?")
-        values.append(profile_id if profile_id else None)
     if description is not None:
         updates.append("description = ?")
         values.append(description)
@@ -1889,17 +1948,21 @@ def update_api_user(
         updates.append("web_login_allowed = ?")
         values.append(web_login_allowed)
 
-    if updates:
-        updates.append("updated_at = ?")
-        values.append(datetime.utcnow().isoformat())
-        values.append(user_id)
+    with get_db() as conn:
+        cursor = conn.cursor()
 
-        with get_db() as conn:
-            cursor = conn.cursor()
+        if updates:
+            updates.append("updated_at = ?")
+            values.append(datetime.utcnow().isoformat())
+            values.append(user_id)
             cursor.execute(
                 f"UPDATE api_users SET {', '.join(updates)} WHERE id = ?",
                 values
             )
+
+        # Update profile associations if provided (empty list means "any profile")
+        if profile_ids is not None:
+            _set_api_user_profile_ids(cursor, user_id, profile_ids if profile_ids else None)
 
     return get_api_user(user_id)
 
@@ -1941,7 +2004,8 @@ def get_api_user_by_username(username: str) -> Optional[Dict[str, Any]]:
             "SELECT * FROM api_users WHERE username = ? AND is_active = TRUE",
             (username,)
         )
-        return row_to_dict(cursor.fetchone())
+        user = row_to_dict(cursor.fetchone())
+        return _enrich_api_user_with_profiles(cursor, user)
 
 
 def is_api_key_claimed(key_hash: str) -> bool:
@@ -2124,16 +2188,73 @@ def delete_all_user_credential_policies(api_user_id: str) -> int:
         return cursor.rowcount
 
 
+# Default credential types that every user should have policies for
+DEFAULT_CREDENTIAL_TYPES = [
+    ("openai_api_key", "OpenAI API key for AI tools (TTS, STT, GPT Image, Sora)"),
+    ("gemini_api_key", "Google Gemini API key for Nano Banana, Imagen, Veo"),
+    ("meshy_api_key", "Meshy API key for 3D model generation"),
+    ("github_pat", "GitHub Personal Access Token for repository access"),
+]
+
+
+def create_default_user_credential_policies(api_user_id: str, default_policy: str = "user_provided") -> List[Dict[str, Any]]:
+    """
+    Create default credential policies for a new user.
+
+    By default, all policies are set to 'user_provided' meaning users must
+    provide their own API keys unless the admin changes this.
+
+    Args:
+        api_user_id: The user ID to create policies for
+        default_policy: The default policy to use (default: 'user_provided')
+
+    Returns:
+        List of created policy records
+    """
+    import uuid
+    now = datetime.utcnow().isoformat()
+    created = []
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for credential_type, description in DEFAULT_CREDENTIAL_TYPES:
+            # Check if policy already exists
+            cursor.execute(
+                "SELECT id FROM user_credential_policies WHERE api_user_id = ? AND credential_type = ?",
+                (api_user_id, credential_type)
+            )
+            if cursor.fetchone():
+                continue  # Already exists, skip
+
+            policy_id = str(uuid.uuid4())
+            cursor.execute(
+                """INSERT INTO user_credential_policies (id, api_user_id, credential_type, policy, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (policy_id, api_user_id, credential_type, default_policy, now, now)
+            )
+            created.append({
+                "id": policy_id,
+                "api_user_id": api_user_id,
+                "credential_type": credential_type,
+                "policy": default_policy
+            })
+
+    return created
+
+
 def get_effective_credential_policy(api_user_id: str, credential_type: str) -> Dict[str, Any]:
     """
-    Get the effective policy for a user+credential, checking user override first, then global.
+    Get the effective policy for a user+credential.
+
+    Policies are per-user only, no global fallback.
+    If no policy exists (shouldn't happen for properly created users),
+    defaults to 'user_provided'.
 
     Returns dict with:
     - policy: the effective policy value
-    - source: 'user' or 'global'
+    - source: 'user' or 'default'
     - credential_type: the credential type
     """
-    # Check for user override first
     user_policy = get_user_credential_policy(api_user_id, credential_type)
     if user_policy:
         return {
@@ -2142,18 +2263,10 @@ def get_effective_credential_policy(api_user_id: str, credential_type: str) -> D
             "credential_type": credential_type
         }
 
-    # Fall back to global policy
-    global_policy = get_credential_policy(credential_type)
-    if global_policy:
-        return {
-            "policy": global_policy["policy"],
-            "source": "global",
-            "credential_type": credential_type
-        }
-
-    # Default to optional if no policy exists
+    # Default to user_provided if no policy exists
+    # This shouldn't happen for properly created users
     return {
-        "policy": "optional",
+        "policy": "user_provided",
         "source": "default",
         "credential_type": credential_type
     }
@@ -2572,13 +2685,18 @@ def get_api_key_session(token: str) -> Optional[Dict[str, Any]]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """SELECT aks.*, au.name as user_name, au.project_id, au.profile_id, au.is_active
+            """SELECT aks.*, au.name as user_name, au.project_id, au.is_active
                FROM api_key_sessions aks
                JOIN api_users au ON aks.api_user_id = au.id
                WHERE aks.token = ? AND aks.expires_at > ? AND au.is_active = TRUE""",
             (token, datetime.utcnow().isoformat())
         )
-        return row_to_dict(cursor.fetchone())
+        session = row_to_dict(cursor.fetchone())
+        if session:
+            # Get profile_ids from junction table
+            profile_ids = _get_api_user_profile_ids(cursor, session["api_user_id"])
+            session["profile_ids"] = profile_ids if profile_ids else None
+        return session
 
 
 def delete_api_key_session(token: str):

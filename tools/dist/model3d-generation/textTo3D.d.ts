@@ -50,13 +50,12 @@ export interface TextTo3DInput {
     art_style?: 'realistic' | 'sculpture';
     /**
      * AI model to use for generation.
-     * - "meshy-6": Latest model, best quality (20 credits)
+     * - "latest": Meshy 6 Preview, best quality (20 credits, 10 during promo)
      * - "meshy-5": Balanced quality and speed (5 credits)
      * - "meshy-4": Fast generation (5 credits)
-     * - "latest": Alias for the latest model
-     * @default "meshy-6"
+     * @default "latest"
      */
-    model?: 'meshy-4' | 'meshy-5' | 'meshy-6' | 'latest';
+    model?: 'meshy-4' | 'meshy-5' | 'latest';
     /**
      * Mesh topology type.
      * - "quad": Four-sided polygons, better for subdivision
@@ -71,6 +70,27 @@ export interface TextTo3DInput {
      * @default 30000
      */
     target_polycount?: number;
+    /**
+     * Symmetry mode for the generated model.
+     * - "auto": Automatically detect and apply symmetry
+     * - "on": Force symmetrical generation
+     * - "off": No symmetry enforcement
+     * @default "auto"
+     */
+    symmetry_mode?: 'auto' | 'on' | 'off';
+    /**
+     * Whether to apply remeshing for cleaner topology.
+     * @default true
+     */
+    should_remesh?: boolean;
+    /**
+     * Pose mode for humanoid/character models.
+     * - "a-pose": Arms at ~45 degrees (good for rigging)
+     * - "t-pose": Arms horizontal (standard for rigging)
+     * - "": No specific pose
+     * @default ""
+     */
+    pose_mode?: 'a-pose' | 't-pose' | '';
     /**
      * Whether to wait for the generation to complete.
      * - true: Poll until complete and return the model (may take 1-5 minutes)

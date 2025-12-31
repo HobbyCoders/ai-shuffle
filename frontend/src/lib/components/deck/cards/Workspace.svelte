@@ -28,6 +28,7 @@
 		onLayoutModeChange?: (mode: LayoutMode) => void;
 		onFocusNavigate?: (direction: 'prev' | 'next') => void;
 		focusedCardId?: string | null;
+		isApiUser?: boolean;
 		children?: Snippet;
 	}
 
@@ -41,6 +42,7 @@
 		onLayoutModeChange,
 		onFocusNavigate,
 		focusedCardId = null,
+		isApiUser = false,
 		children
 	}: Props = $props();
 
@@ -147,7 +149,7 @@
 
 	<!-- Empty state when no cards - Casino Noir Welcome -->
 	{#if sortedCards.length === 0}
-		<WelcomeHero {onCreateCard} />
+		<WelcomeHero {onCreateCard} {isApiUser} />
 	{/if}
 
 </div>

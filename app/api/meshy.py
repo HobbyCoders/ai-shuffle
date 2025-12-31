@@ -405,7 +405,7 @@ async def remove_meshy_api_key(token: str = Depends(require_admin)):
 
 class Model3DSettingsRequest(BaseModel):
     """Request to update 3D model settings"""
-    model: Optional[str] = None  # meshy-6, meshy-5, meshy-4
+    model: Optional[str] = None  # latest, meshy-5, meshy-4
     provider: Optional[str] = None  # meshy
 
 
@@ -420,7 +420,8 @@ async def update_meshy_settings(
     Allows setting the default model and provider for 3D generation.
     """
     if request.model:
-        valid_models = ["meshy-6", "meshy-5", "meshy-4"]
+        # Valid models: latest (Meshy 6 Preview), meshy-5, meshy-4
+        valid_models = ["latest", "meshy-5", "meshy-4"]
         if request.model not in valid_models:
             raise HTTPException(
                 status_code=400,

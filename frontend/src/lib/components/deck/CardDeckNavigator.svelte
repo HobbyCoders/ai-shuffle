@@ -22,7 +22,7 @@
 		MessageSquare, Terminal, Clock, Image, Box, AudioLines,
 		Settings, FolderOpen, X, Files, User, Pencil, Check,
 		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronRight, Bot, Puzzle,
-		List, GitBranch
+		List, GitBranch, Key
 	} from 'lucide-svelte';
 	import { tabs, type Session } from '$lib/stores/tabs';
 	import { deck, type DeckCard as DeckCardType } from '$lib/stores/deck';
@@ -48,8 +48,11 @@
 		onOpenSubagents?: () => void;
 		onOpenSettings?: () => void;
 		onOpenPlugins?: () => void;
+		onOpenUserSettings?: () => void;
 		isAdmin?: boolean;
+		isApiUser?: boolean;
 		isMobile?: boolean;
+		initialView?: 'main' | 'recent';
 	}
 
 	let {
@@ -67,8 +70,11 @@
 		onOpenSubagents,
 		onOpenSettings,
 		onOpenPlugins,
+		onOpenUserSettings,
 		isAdmin = false,
-		isMobile = false
+		isApiUser = false,
+		isMobile = false,
+		initialView = 'main'
 	}: Props = $props();
 
 	// Navigation stack for breadcrumb
@@ -143,7 +149,10 @@
 	let renameDeckName = $state('');
 
 	// Card types for main deck
-	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'image-studio' | 'model-studio' | 'audio-studio' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins';
+	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'image-studio' | 'model-studio' | 'audio-studio' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins' | 'user-settings';
+
+	// Cards that API users are allowed to see (whitelist approach)
+	const API_USER_ALLOWED_CARDS = new Set(['new-chat', 'recent', 'file-browser', 'user-settings']);
 
 	interface NavigatorCard {
 		id: string;
@@ -169,6 +178,17 @@
 
 	// Get sessions from tabs store
 	const sessions = $derived($tabs.sessions);
+
+	// Navigate to initial view when opened
+	$effect(() => {
+		if (open && initialView === 'recent') {
+			currentView = 'recent';
+			navStack = [
+				{ id: 'root', name: 'AI Shuffle', type: 'root' },
+				{ id: 'recent', name: 'Recent', type: 'category' }
+			];
+		}
+	});
 
 	// Get active streaming cards
 	const activeCards = $derived($deck.cards.filter(c => c.type === 'chat'));
@@ -208,7 +228,8 @@
 
 	// Build base action cards (before filtering by deck membership)
 	const baseActionCards = $derived.by((): NavigatorCard[] => {
-		const cards: NavigatorCard[] = [
+		// Define all possible cards
+		const allCards: NavigatorCard[] = [
 			{
 				id: 'new-chat',
 				type: 'action',
@@ -292,8 +313,9 @@
 			}
 		];
 
+		// Add admin-only cards
 		if (isAdmin) {
-			cards.push(
+			allCards.push(
 				{
 					id: 'subagents',
 					type: 'action',
@@ -313,7 +335,34 @@
 			);
 		}
 
-		return cards;
+		// Add user-settings card for API users
+		if (isApiUser) {
+			allCards.push({
+				id: 'user-settings',
+				type: 'action',
+				action: 'user-settings',
+				title: 'My Settings',
+				subtitle: 'API keys & profile',
+				icon: Key
+			});
+		}
+
+		// For API users, filter to only allowed cards
+		if (isApiUser) {
+			return allCards.filter(card => {
+				// Allow category cards (like 'recent') if their id is in the whitelist
+				if (card.type === 'category') {
+					return API_USER_ALLOWED_CARDS.has(card.id);
+				}
+				// For action cards, check if action is in whitelist
+				if (card.type === 'action' && card.action) {
+					return API_USER_ALLOWED_CARDS.has(card.action);
+				}
+				return false;
+			});
+		}
+
+		return allCards;
 	});
 
 	// Build main deck cards (filtered - excludes cards in custom decks)
@@ -524,6 +573,7 @@
 			case 'subagents': onOpenSubagents?.(); break;
 			case 'settings': onOpenSettings?.(); break;
 			case 'plugins': onOpenPlugins?.(); break;
+			case 'user-settings': onOpenUserSettings?.(); break;
 		}
 	}
 

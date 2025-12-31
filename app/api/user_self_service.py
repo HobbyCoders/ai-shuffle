@@ -317,11 +317,18 @@ async def get_my_credentials(api_user: dict = Depends(get_current_api_user)):
 @router.get("/credentials/requirements")
 async def get_credential_requirements(api_user: dict = Depends(get_current_api_user)):
     """
-    Get which credentials the user needs to provide based on policies.
+    Get which credentials the user needs to provide based on their per-user policies.
 
     Returns a simplified view for UI to show required vs optional credentials.
     """
-    policies = {p["id"]: p for p in database.get_all_credential_policies()}
+    user_id = api_user["id"]
+
+    # Get user's policies
+    user_policies = {
+        p["credential_type"]: p["policy"]
+        for p in database.get_all_user_credential_policies(user_id)
+    }
+
     requirements = {
         "required": [],  # User MUST provide these
         "optional": [],  # User CAN provide these (admin has fallback)
@@ -329,14 +336,14 @@ async def get_credential_requirements(api_user: dict = Depends(get_current_api_u
     }
 
     for cred_type, info in CREDENTIAL_INFO.items():
-        policy_obj = policies.get(cred_type, {})
-        policy = policy_obj.get("policy", "optional")
+        # Default to user_provided if no policy exists
+        policy = user_policies.get(cred_type, "user_provided")
 
         cred_info = {
             "credential_type": cred_type,
             "name": info["name"],
             "description": info["description"],
-            "is_set": database.user_has_credential(api_user["id"], cred_type)
+            "is_set": database.user_has_credential(user_id, cred_type)
         }
 
         if policy == "user_provided":
@@ -367,9 +374,10 @@ async def set_my_credential(
     if credential_type not in CREDENTIAL_INFO:
         raise HTTPException(status_code=400, detail=f"Invalid credential type: {credential_type}")
 
-    # Check policy - user cannot set admin_provided credentials
-    policy = database.get_credential_policy(credential_type)
-    if policy and policy.get("policy") == "admin_provided":
+    # Check per-user policy - user cannot set admin_provided credentials
+    user_policy = database.get_user_credential_policy(api_user["id"], credential_type)
+    policy = user_policy.get("policy", "user_provided") if user_policy else "user_provided"
+    if policy == "admin_provided":
         raise HTTPException(
             status_code=403,
             detail="This credential is managed by the administrator"
@@ -425,9 +433,10 @@ async def delete_my_credential(
     if credential_type not in CREDENTIAL_INFO:
         raise HTTPException(status_code=400, detail=f"Invalid credential type: {credential_type}")
 
-    # Check policy - warn if this is a required credential
-    policy = database.get_credential_policy(credential_type)
-    is_required = policy and policy.get("policy") == "user_provided"
+    # Check per-user policy - warn if this is a required credential
+    user_policy = database.get_user_credential_policy(api_user["id"], credential_type)
+    policy = user_policy.get("policy", "user_provided") if user_policy else "user_provided"
+    is_required = policy == "user_provided"
 
     deleted = database.delete_user_credential(api_user["id"], credential_type)
 

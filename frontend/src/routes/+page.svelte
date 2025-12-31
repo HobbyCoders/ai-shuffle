@@ -10,7 +10,8 @@
 	 */
 	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { isAuthenticated, isAdmin } from '$lib/stores/auth';
+	import { isAuthenticated, isAdmin, apiUser } from '$lib/stores/auth';
+	import { credentials } from '$lib/stores/credentials';
 	import {
 		tabs,
 		allTabs,
@@ -114,6 +115,7 @@
 	let showSpotlight = $state(false);
 	let showAdvancedSearch = $state(false);
 	let showCardNavigator = $state(false);
+	let cardNavigatorInitialView = $state<'main' | 'recent'>('main');
 
 	// Reorder drag state (for sidebyside/tile layouts)
 	let reorderDragCardId: string | null = $state(null);
@@ -279,6 +281,11 @@
 		if ($isAdmin) {
 			tabs.loadApiUsers();
 			tabs.loadAdminSessions();
+		}
+
+		// Load credentials for API users (needed for feature gating)
+		if ($apiUser) {
+			credentials.load();
 		}
 
 		// Sync deck state from server for cross-device sync
@@ -595,6 +602,11 @@
 				deckCardType = 'terminal';
 				title = 'Terminal';
 				break;
+			case 'recent-sessions':
+				// Open the card navigator directly to the recent sessions view
+				cardNavigatorInitialView = 'recent';
+				showCardNavigator = true;
+				return; // Don't create a card
 			case 'settings': {
 				// Singleton - check if already open
 				const existingSettings = $allCards.find(c => c.type === 'settings');
@@ -929,6 +941,7 @@
 					onCloseCard={handleCardClose}
 					onCreateCard={handleCreateCard}
 					onOpenNavigator={() => showCardNavigator = true}
+					isApiUser={!!$apiUser}
 				>
 					{#snippet children(card)}
 						{@const tabId = getTabIdForCard(card)}
@@ -1077,6 +1090,7 @@
 					onLayoutModeChange={handleLayoutModeChange}
 					onFocusNavigate={handleFocusNavigate}
 					focusedCardId={$focusedCardId}
+					isApiUser={!!$apiUser}
 				>
 					{#snippet children()}
 						<!-- Don't sort cards - z-index CSS handles visual stacking order -->
@@ -1301,7 +1315,10 @@
 	<!-- Card Deck Navigator (AI Shuffle themed) -->
 	<CardDeckNavigator
 		open={showCardNavigator}
-		onClose={() => showCardNavigator = false}
+		onClose={() => {
+			showCardNavigator = false;
+			cardNavigatorInitialView = 'main'; // Reset for next open
+		}}
 		onCreateChat={() => handleCreateCard('chat')}
 		onCreateTerminal={() => handleCreateCard('terminal')}
 		onOpenThread={handleNavigatorOpenThread}
@@ -1314,8 +1331,11 @@
 		onOpenSubagents={() => handleCreateCard('subagent')}
 		onOpenSettings={() => handleCreateCard('settings')}
 		onOpenPlugins={() => handleCreateCard('plugins')}
+		onOpenUserSettings={() => handleCreateCard('user-settings')}
 		isAdmin={$isAdmin}
+		isApiUser={!!$apiUser}
 		{isMobile}
+		initialView={cardNavigatorInitialView}
 	/>
 
 
