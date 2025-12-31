@@ -232,7 +232,7 @@
 			tabs.setTabProject(tabId, selectedProjectId);
 
 			// Get the tab to get session ID
-			const tab = $tabs.find((t) => t.id === tabId);
+			const tab = $allTabs.find((t) => t.id === tabId);
 
 			// Create conversation session
 			const profile = profileList.find((p) => p.id === selectedProfileId);
