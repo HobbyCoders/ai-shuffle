@@ -237,7 +237,6 @@ Switch between different card arrangements:
 - **Drag** — Move cards anywhere in the workspace
 - **Resize** — Drag edges and corners to adjust size
 - **Snap** — Drag to screen edges to snap to half or quarter positions
-- **Minimize** — Collapse cards to the dock
 - **Maximize** — Double-click title bar to fill workspace
 
 ### Mobile Experience
@@ -264,12 +263,12 @@ On mobile, cards become full-screen and swipeable. Navigate between cards with s
 ### Docker (Recommended)
 
 ```bash
-docker pull ghcr.io/quickkill0/ai-shuffle:latest
+docker pull ghcr.io/hobbycoders/ai-shuffle:latest
 docker run -d \
   -p 8000:8000 \
   -v ai-shuffle-data:/data \
   -v ai-shuffle-claude:/home/appuser/.claude \
-  ghcr.io/quickkill0/ai-shuffle:latest
+  ghcr.io/hobbycoders/ai-shuffle:latest
 ```
 
 ### Docker Compose
@@ -278,7 +277,7 @@ docker run -d \
 version: '3.8'
 services:
   ai-shuffle:
-    image: ghcr.io/quickkill0/ai-shuffle:latest
+    image: ghcr.io/hobbycoders/ai-shuffle:latest
     ports:
       - "8000:8000"
     volumes:
@@ -460,7 +459,7 @@ Full interactive docs at `/docs` when running.
 ### Unraid
 
 1. **Docker** tab → **Add Container**
-2. Repository: `ghcr.io/quickkill0/ai-shuffle:latest`
+2. Repository: `ghcr.io/hobbycoders/ai-shuffle:latest`
 3. `PUID=99`, `PGID=100`
 4. Port `8000`
 5. Add volumes, start, authenticate

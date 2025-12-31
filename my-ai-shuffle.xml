@@ -1,14 +1,14 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>AI-Shuffle</Name>
-  <Repository>ghcr.io/quickkill0/ai-shuffle:latest</Repository>
+  <Repository>ghcr.io/hobbycoders/ai-shuffle:latest</Repository>
   <Registry>https://ghcr.io/</Registry>
   <Network>bridge</Network>
   <MyIP/>
   <Shell>bash</Shell>
   <Privileged>false</Privileged>
-  <Support>https://github.com/Quickkill0/ai-shuffle/issues</Support>
-  <Project>https://github.com/Quickkill0/ai-shuffle</Project>
+  <Support>https://github.com/HobbyCoders/ai-shuffle/issues</Support>
+  <Project>https://github.com/HobbyCoders/ai-shuffle</Project>
   <Overview>
     AI Shuffle - A self-hosted web interface and API server for Claude Code.
 
@@ -27,8 +27,8 @@
   </Overview>
   <Category>Tools:Utilities Network:Web</Category>
   <WebUI>http://[IP]:[PORT:8000]/</WebUI>
-  <TemplateURL>https://raw.githubusercontent.com/Quickkill0/ai-shuffle/main/unraid-template.xml</TemplateURL>
-  <Icon>https://raw.githubusercontent.com/Quickkill0/ai-shuffle/main/.github/claude-icon.png</Icon>
+  <TemplateURL>https://raw.githubusercontent.com/HobbyCoders/ai-shuffle/main/my-ai-shuffle.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/HobbyCoders/ai-shuffle/main/.github/claude-icon.png</Icon>
   <ExtraParams>--tty --interactive</ExtraParams>
   <PostArgs/>
   <CPUset/>
