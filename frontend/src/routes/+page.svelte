@@ -688,6 +688,11 @@
 				title = 'Plugins';
 				break;
 			}
+			case 'conversation': {
+				deckCardType = 'conversation';
+				title = 'Conversation';
+				break;
+			}
 			default:
 				deckCardType = 'chat';
 				title = 'New Card';
