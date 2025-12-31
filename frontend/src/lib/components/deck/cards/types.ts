@@ -4,6 +4,7 @@
 
 export type CardType =
   | 'chat'
+  | 'conversation'
   | 'terminal'
   | 'settings'
   | 'profile'
@@ -36,6 +37,7 @@ export interface DeckCard {
 
 export const DEFAULT_CARD_SIZES: Record<CardType, { width: number; height: number }> = {
   chat: { width: 480, height: 640 },
+  conversation: { width: 420, height: 600 },
   terminal: { width: 600, height: 400 },
   settings: { width: 700, height: 650 },
   profile: { width: 600, height: 620 },
@@ -51,6 +53,7 @@ export const DEFAULT_CARD_SIZES: Record<CardType, { width: number; height: numbe
 
 export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }> = {
   chat: { width: 360, height: 400 },
+  conversation: { width: 320, height: 400 },
   terminal: { width: 400, height: 200 },
   settings: { width: 500, height: 400 },
   profile: { width: 450, height: 400 },

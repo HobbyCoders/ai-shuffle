@@ -24,7 +24,8 @@
 		Image,
 		Box,
 		AudioLines,
-		FolderOpen
+		FolderOpen,
+		Mic
 	} from 'lucide-svelte';
 	import { allTabs } from '$lib/stores/tabs';
 	import type { DeckCard, CardType } from './types';
@@ -52,6 +53,7 @@
 	// Icon mapping for card types
 	const cardIcons: Record<CardType, typeof MessageSquare> = {
 		chat: MessageSquare,
+		conversation: Mic,
 		agent: Bot,
 		terminal: Terminal,
 		settings: Settings,
@@ -134,6 +136,8 @@
 				return 'File explorer';
 			case 'subagent':
 				return 'Agent management';
+			case 'conversation':
+				return 'Voice conversation';
 			default:
 				return '';
 		}

@@ -22,7 +22,7 @@
 		MessageSquare, Terminal, Clock, Image, Box, AudioLines,
 		Settings, FolderOpen, X, Files, User, Pencil, Check,
 		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronRight, Bot, Puzzle,
-		List, GitBranch, Key
+		List, GitBranch, Key, Mic
 	} from 'lucide-svelte';
 	import { tabs, type Session } from '$lib/stores/tabs';
 	import { deck, type DeckCard as DeckCardType } from '$lib/stores/deck';
@@ -42,6 +42,7 @@
 		onOpenImageStudio?: () => void;
 		onOpenModelStudio?: () => void;
 		onOpenAudioStudio?: () => void;
+		onOpenConversation?: () => void;
 		onOpenFileBrowser?: () => void;
 		onOpenProjects?: () => void;
 		onOpenProfiles?: () => void;
@@ -64,6 +65,7 @@
 		onOpenImageStudio,
 		onOpenModelStudio,
 		onOpenAudioStudio,
+		onOpenConversation,
 		onOpenFileBrowser,
 		onOpenProjects,
 		onOpenProfiles,
@@ -149,7 +151,7 @@
 	let renameDeckName = $state('');
 
 	// Card types for main deck
-	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'image-studio' | 'model-studio' | 'audio-studio' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins' | 'user-settings';
+	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'image-studio' | 'model-studio' | 'audio-studio' | 'conversation' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins' | 'user-settings';
 
 	// Cards that API users are allowed to see (whitelist approach)
 	const API_USER_ALLOWED_CARDS = new Set(['new-chat', 'recent', 'file-browser', 'user-settings']);
@@ -278,6 +280,14 @@
 				title: 'Audio Studio',
 				subtitle: 'Text to speech & more',
 				icon: AudioLines
+			},
+			{
+				id: 'conversation',
+				type: 'action',
+				action: 'conversation',
+				title: 'Conversation',
+				subtitle: 'Voice chat with AI',
+				icon: Mic
 			},
 			{
 				id: 'file-browser',
@@ -567,6 +577,7 @@
 			case 'image-studio': onOpenImageStudio?.(); break;
 			case 'model-studio': onOpenModelStudio?.(); break;
 			case 'audio-studio': onOpenAudioStudio?.(); break;
+			case 'conversation': onOpenConversation?.(); break;
 			case 'file-browser': onOpenFileBrowser?.(); break;
 			case 'projects': onOpenProjects?.(); break;
 			case 'profiles': onOpenProfiles?.(); break;

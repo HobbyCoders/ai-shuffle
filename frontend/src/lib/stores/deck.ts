@@ -29,6 +29,7 @@ export type LayoutMode = 'freeflow' | 'sidebyside' | 'tile' | 'stack' | 'focus';
 
 export type DeckCardType =
 	| 'chat'
+	| 'conversation'
 	| 'file-browser'
 	| 'settings'
 	| 'user-settings'
@@ -324,6 +325,8 @@ function getDefaultTitle(type: DeckCardType): string {
 	switch (type) {
 		case 'chat':
 			return 'New Chat';
+		case 'conversation':
+			return 'Conversation';
 		case 'file-browser':
 			return 'Files';
 		case 'settings':
