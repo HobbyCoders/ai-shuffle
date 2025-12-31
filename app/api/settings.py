@@ -157,7 +157,7 @@ class IntegrationSettingsResponse(BaseModel):
     meshy_api_key_set: bool = False
     meshy_api_key_masked: str = ""
     model3d_provider: Optional[str] = None  # "meshy"
-    model3d_model: Optional[str] = None  # "meshy-6", etc.
+    model3d_model: Optional[str] = None  # "latest", "meshy-5", "meshy-4"
 
 
 class OpenAIKeyRequest(BaseModel):

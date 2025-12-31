@@ -464,7 +464,7 @@ def _get_available_providers() -> Dict[str, Any]:
     if meshy_key:
         model3d_providers["meshy"] = {
             "name": "Meshy AI",
-            "models": ["meshy-6", "meshy-5", "meshy-4"],
+            "models": ["latest", "meshy-5", "meshy-4"],  # latest = Meshy 6 Preview
             "capabilities": ["text-to-3d", "image-to-3d", "retexture", "rigging", "animation"],
             "best_for": "3D model generation, texturing, rigging, animation",
             "credits": "5-20 per generation"
