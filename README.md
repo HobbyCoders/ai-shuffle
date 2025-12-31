@@ -41,6 +41,7 @@ Create specialized agents for different jobs:
 │                 critical. Focus on bugs, security, and perf."   │
 │  Tools:        Read, Grep, Glob (no Write, no Bash)             │
 │  Permissions:  Auto-accept all                                   │
+│  Background:   No (interactive)                                  │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
@@ -51,6 +52,7 @@ Create specialized agents for different jobs:
 │                 Write clean, tested, documented code."          │
 │  Tools:        All tools enabled                                 │
 │  Permissions:  Ask before destructive actions                    │
+│  Background:   Optional (can run autonomously with worktrees)    │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
@@ -60,6 +62,7 @@ Create specialized agents for different jobs:
 │  System:       "Summarize findings concisely. Cite sources."    │
 │  Tools:        WebSearch, WebFetch, Read                         │
 │  Permissions:  Auto-accept all                                   │
+│  Background:   No (interactive)                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -72,6 +75,19 @@ Create specialized agents for different jobs:
 | **Tools** | Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch, etc. | Control what actions the agent can take |
 | **Permission Mode** | Ask, Auto-accept, Bypass | How to handle tool confirmations |
 | **Project Scope** | Specific directories | Limit agent access to certain codebases |
+| **Background Mode** | Enable/disable | Run agent autonomously in a git worktree |
+| **Worktree/Branching** | Auto-branch, auto-PR | Isolate agent work on separate branches |
+
+### Background Agents via Configuration
+
+Want an agent that works autonomously? Configure it in the profile:
+
+- **Enable background mode** — Agent runs without waiting for your input
+- **Auto-branch** — Automatically creates a feature branch for the work
+- **Worktree isolation** — Agent works in a separate git worktree, keeping your main branch clean
+- **Auto-PR** — Creates a pull request when the task completes
+
+This means you control *how* agents work through configuration—interactive assistants, autonomous workers, or anything in between.
 
 ### Use Profiles Two Ways
 
@@ -89,6 +105,60 @@ curl -X POST http://localhost:8000/api/v1/query/stream \
     "project_id": "my-app"
   }'
 ```
+
+---
+
+## AI Service Integrations
+
+AI Shuffle integrates with multiple AI providers for enhanced capabilities directly in chat.
+
+### Text-to-Speech (TTS)
+
+Configure OpenAI for voice output:
+
+| Provider | Models | Use Case |
+|----------|--------|----------|
+| **OpenAI** | tts-1, tts-1-hd | Read responses aloud, voice assistants |
+
+### Image Generation
+
+Generate images directly in chat conversations:
+
+| Provider | Models | Best For |
+|----------|--------|----------|
+| **Google Gemini** | Nano Banana | Fast iteration, editing, reference images |
+| **Google Imagen** | Imagen 4 | Highest quality, photo-realism |
+| **OpenAI** | GPT Image | Accurate text in images, inpainting |
+
+### 3D Model Generation
+
+Create 3D models from text or images:
+
+| Provider | Capabilities | Use Case |
+|----------|--------------|----------|
+| **Meshy AI** | Text-to-3D, Image-to-3D, Retexturing, Rigging, Animation | Game assets, prototyping, visualization |
+
+### Video Generation
+
+Generate and analyze video content:
+
+| Provider | Models | Features |
+|----------|--------|----------|
+| **Google Veo** | Veo 2, Veo 3 | Video extension, frame bridging, native audio |
+| **OpenAI Sora** | Sora | Fast generation, up to 12 seconds |
+
+### Configuration
+
+Add your API keys in Settings to enable these integrations:
+
+```
+Settings → AI Services → Configure API Keys
+├── OpenAI API Key (for TTS, GPT Image, Sora)
+├── Google AI API Key (for Gemini, Imagen, Veo)
+└── Meshy API Key (for 3D generation)
+```
+
+Once configured, Claude can use these services directly in your conversations.
 
 ---
 
@@ -122,28 +192,21 @@ def review_pr(pr_diff: str) -> str:
     return response.json()["response"]
 ```
 
-### Example: Background Task Agent
+### Example: Streaming Response
 
 ```python
-# Launch an autonomous agent that works in the background
-response = httpx.post(
-    "http://localhost:8000/api/v1/agents/launch",
-    headers={"Authorization": "Bearer aih_dev_key"},
-    json={
-        "name": "Implement feature #123",
-        "prompt": "Add user authentication with OAuth. Create a feature branch.",
-        "profile_id": "full-stack-dev",
-        "project_id": "my-app",
-        "options": {
-            "auto_branch": True,
-            "auto_pr": True
-        }
-    }
-)
-agent_id = response.json()["agent_id"]
+import httpx
 
-# Check progress
-status = httpx.get(f"http://localhost:8000/api/v1/agents/{agent_id}")
+def stream_response(prompt: str, profile_id: str):
+    """Stream a response token by token."""
+    with httpx.stream(
+        "POST",
+        "http://localhost:8000/api/v1/query/stream",
+        headers={"Authorization": "Bearer aih_your_key"},
+        json={"prompt": prompt, "profile_id": profile_id}
+    ) as response:
+        for chunk in response.iter_text():
+            print(chunk, end="", flush=True)
 ```
 
 ### API User Management
@@ -168,14 +231,14 @@ When you want to work interactively, AI Shuffle provides "The Deck"—a desktop-
 │ [Rail]           [Workspace]                      [Context]     │
 │ ┌─────┐ ┌─────────────────────────────────────┐ ┌─────────────┐ │
 │ │     │ │  ┌──────────────┐  ┌─────────────┐  │ │ Sessions    │ │
-│ │ 🖥️  │ │  │  Chat Card   │  │ Agent Card  │  │ │ ├─ Chat 1   │ │
-│ │ 🤖  │ │  │  (draggable) │  │ (draggable) │  │ │ └─ Chat 2   │ │
-│ │ 🎨  │ │  └──────────────┘  └─────────────┘  │ │             │ │
-│ │ 📁  │ │                                     │ │ Agents      │ │
-│ │     │ │     ┌─────────────────────┐         │ │ ├─ Task 1   │ │
-│ │     │ │     │   Canvas Card       │         │ │ └─ Task 2   │ │
-│ │     │ │     │   (resizable)       │         │ │             │ │
-│ │ ⚙️  │ │     └─────────────────────┘         │ │ Generations │ │
+│ │ 🖥️  │ │  │  Chat Card   │  │  Chat Card  │  │ │ ├─ Chat 1   │ │
+│ │     │ │  │  (draggable) │  │ (draggable) │  │ │ └─ Chat 2   │ │
+│ │     │ │  └──────────────┘  └─────────────┘  │ │             │ │
+│ │     │ │                                     │ │ Projects    │ │
+│ │     │ │     ┌─────────────────────┐         │ │ ├─ my-app   │ │
+│ │     │ │     │    Chat Card        │         │ │ └─ api      │ │
+│ │     │ │     │    (resizable)      │         │ │             │ │
+│ │ ⚙️  │ │     └─────────────────────┘         │ │ Profiles    │ │
 │ └─────┘ └─────────────────────────────────────┘ └─────────────┘ │
 │ RAIL              WORKSPACE (free-form)         CONTEXT PANEL   │
 │         ┌───────────────────────────────────────────────────┐   │
@@ -196,65 +259,9 @@ Cards act like windows on a desktop:
 - **Maximize** — Double-click title bar to fill workspace
 - **Z-order** — Click to bring a card to front
 
-### Activity Modes
-
-| Mode | Icon | Purpose |
-|------|------|---------|
-| **Workspace** | 🖥️ | Your main canvas—chat cards, agents, terminals |
-| **Agents** | 🤖 | Launch and monitor background AI agents |
-| **Studio** | 🎨 | Generate images and videos with AI |
-| **Files** | 📁 | Browse and manage project files |
-
 ### Mobile Experience
 
 On mobile, the workspace transforms into a swipeable card stack with full-screen cards and dot indicators.
-
----
-
-## Background Agents (Subagents)
-
-Launch autonomous agents that work independently while you do other things.
-
-### From the UI
-
-1. Open the **Agents** mode from the rail
-2. Click **Launch Agent**
-3. Describe the task: *"Refactor the authentication module to use JWT tokens"*
-4. Select a profile and project
-5. Watch progress in real-time
-
-### From the API
-
-```python
-# Launch
-agent = httpx.post("/api/v1/agents/launch", json={
-    "name": "JWT Migration",
-    "prompt": "Migrate from session auth to JWT. Update all endpoints.",
-    "profile_id": "full-stack-dev",
-    "project_id": "backend-api"
-}).json()
-
-# Monitor
-while True:
-    status = httpx.get(f"/api/v1/agents/{agent['id']}").json()
-    print(f"Status: {status['status']}, Progress: {status['progress']}%")
-    if status['status'] in ['completed', 'failed']:
-        break
-    time.sleep(5)
-
-# Intervene if needed
-httpx.post(f"/api/v1/agents/{agent['id']}/intervene", json={
-    "message": "Also add refresh token support"
-})
-```
-
-### Agent Capabilities
-
-- **Autonomous execution** — Works without intervention
-- **Git integration** — Create branches, make commits
-- **Task tracking** — Visual task tree shows progress
-- **Intervention** — Jump in anytime to guide or correct
-- **Branch isolation** — Each agent can work on its own branch
 
 ---
 
@@ -311,8 +318,9 @@ volumes:
 1. Open `http://localhost:8000`
 2. Create your admin account
 3. Go to **Settings** → Authenticate with Claude
-4. Create your first **Profile** with custom system prompt and tools
-5. Start chatting or generate an API key
+4. (Optional) Add API keys for OpenAI, Google AI, Meshy
+5. Create your first **Profile** with custom system prompt and tools
+6. Start chatting or generate an API key
 
 ---
 
@@ -389,17 +397,6 @@ Full interactive docs at `/docs` when running.
 | PUT | `/api/v1/profiles/:id` | Update profile |
 | DELETE | `/api/v1/profiles/:id` | Delete profile |
 
-### Agent Management
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/v1/agents/launch` | Launch background agent |
-| GET | `/api/v1/agents` | List all agents |
-| GET | `/api/v1/agents/:id` | Get agent status |
-| POST | `/api/v1/agents/:id/intervene` | Send message to agent |
-| POST | `/api/v1/agents/:id/pause` | Pause agent |
-| POST | `/api/v1/agents/:id/cancel` | Cancel agent |
-
 ### API Users
 
 | Method | Endpoint | Description |
@@ -422,8 +419,8 @@ Full interactive docs at `/docs` when running.
 ┌──────────────────────────▼──────────────────────────────────┐
 │                      FastAPI Server                          │
 │  ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐   │
-│  │  Profile  │ │   Query   │ │   Agent   │ │    API    │   │
-│  │  Manager  │ │  Engine   │ │  Manager  │ │   Users   │   │
+│  │  Profile  │ │   Query   │ │    AI     │ │    API    │   │
+│  │  Manager  │ │  Engine   │ │ Services  │ │   Users   │   │
 │  └───────────┘ └───────────┘ └───────────┘ └───────────┘   │
 │                        │                                     │
 │  ┌───────────┐ ┌───────▼───┐ ┌───────────┐ ┌───────────┐   │
@@ -434,6 +431,7 @@ Full interactive docs at `/docs` when running.
                            │
 ┌──────────────────────────▼──────────────────────────────────┐
 │               Claude Code CLI (OAuth authenticated)          │
+│         + OpenAI API | Google AI API | Meshy API             │
 └──────────────────────────┬──────────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────┐
@@ -449,6 +447,7 @@ Full interactive docs at `/docs` when running.
 | **Backend** | Python 3.11, FastAPI, Claude Agent SDK |
 | **Database** | SQLite |
 | **Container** | Docker, Claude Code CLI, GitHub CLI |
+| **AI Services** | OpenAI, Google AI, Meshy (optional) |
 
 ---
 
@@ -469,7 +468,7 @@ Full interactive docs at `/docs` when running.
 
 ### For Automation
 
-- **CI/CD integration** — Run agents on PR events
+- **CI/CD integration** — Run agents on PR events via API
 - **Scheduled tasks** — Nightly code health checks
 - **Webhook triggers** — React to external events with AI agents
 
