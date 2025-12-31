@@ -1908,6 +1908,11 @@ def create_api_user(
         # Set profile associations in junction table
         if profile_ids:
             _set_api_user_profile_ids(cursor, user_id, profile_ids)
+
+    # Create default credential policies for the new user
+    # By default, users must provide their own API keys
+    create_default_user_credential_policies(user_id)
+
     return get_api_user(user_id)
 
 
@@ -2183,16 +2188,73 @@ def delete_all_user_credential_policies(api_user_id: str) -> int:
         return cursor.rowcount
 
 
+# Default credential types that every user should have policies for
+DEFAULT_CREDENTIAL_TYPES = [
+    ("openai_api_key", "OpenAI API key for AI tools (TTS, STT, GPT Image, Sora)"),
+    ("gemini_api_key", "Google Gemini API key for Nano Banana, Imagen, Veo"),
+    ("meshy_api_key", "Meshy API key for 3D model generation"),
+    ("github_pat", "GitHub Personal Access Token for repository access"),
+]
+
+
+def create_default_user_credential_policies(api_user_id: str, default_policy: str = "user_provided") -> List[Dict[str, Any]]:
+    """
+    Create default credential policies for a new user.
+
+    By default, all policies are set to 'user_provided' meaning users must
+    provide their own API keys unless the admin changes this.
+
+    Args:
+        api_user_id: The user ID to create policies for
+        default_policy: The default policy to use (default: 'user_provided')
+
+    Returns:
+        List of created policy records
+    """
+    import uuid
+    now = datetime.utcnow().isoformat()
+    created = []
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for credential_type, description in DEFAULT_CREDENTIAL_TYPES:
+            # Check if policy already exists
+            cursor.execute(
+                "SELECT id FROM user_credential_policies WHERE api_user_id = ? AND credential_type = ?",
+                (api_user_id, credential_type)
+            )
+            if cursor.fetchone():
+                continue  # Already exists, skip
+
+            policy_id = str(uuid.uuid4())
+            cursor.execute(
+                """INSERT INTO user_credential_policies (id, api_user_id, credential_type, policy, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (policy_id, api_user_id, credential_type, default_policy, now, now)
+            )
+            created.append({
+                "id": policy_id,
+                "api_user_id": api_user_id,
+                "credential_type": credential_type,
+                "policy": default_policy
+            })
+
+    return created
+
+
 def get_effective_credential_policy(api_user_id: str, credential_type: str) -> Dict[str, Any]:
     """
-    Get the effective policy for a user+credential, checking user override first, then global.
+    Get the effective policy for a user+credential.
+
+    Policies are per-user only, no global fallback.
+    If no policy exists (shouldn't happen for properly created users),
+    defaults to 'user_provided'.
 
     Returns dict with:
     - policy: the effective policy value
-    - source: 'user' or 'global'
+    - source: 'user' or 'default'
     - credential_type: the credential type
     """
-    # Check for user override first
     user_policy = get_user_credential_policy(api_user_id, credential_type)
     if user_policy:
         return {
@@ -2201,18 +2263,10 @@ def get_effective_credential_policy(api_user_id: str, credential_type: str) -> D
             "credential_type": credential_type
         }
 
-    # Fall back to global policy
-    global_policy = get_credential_policy(credential_type)
-    if global_policy:
-        return {
-            "policy": global_policy["policy"],
-            "source": "global",
-            "credential_type": credential_type
-        }
-
-    # Default to optional if no policy exists
+    # Default to user_provided if no policy exists
+    # This shouldn't happen for properly created users
     return {
-        "policy": "optional",
+        "policy": "user_provided",
         "source": "default",
         "credential_type": credential_type
     }

@@ -1949,42 +1949,30 @@ async def get_user_credential_policies(
     """
     Get all credential policies for a specific user (admin only).
 
-    Returns the effective policy for each credential type, indicating
-    whether it's a user-specific override or the global default.
+    Returns the policy for each credential type. Policies are per-user only.
     """
     # Verify user exists
     user = database.get_api_user(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Get global policies
-    global_policies = database.get_all_credential_policies()
-
-    # Get user overrides
-    user_overrides = {
+    # Get user's policies
+    user_policies = {
         p["credential_type"]: p["policy"]
         for p in database.get_all_user_credential_policies(user_id)
     }
 
+    # Build result from known credential types
     result = []
-    for gp in global_policies:
-        credential_type = gp["id"]
-        info = CREDENTIAL_POLICY_INFO.get(credential_type, {})
-
-        if credential_type in user_overrides:
-            policy = user_overrides[credential_type]
-            source = "user"
-        else:
-            policy = gp["policy"]
-            source = "global"
+    for credential_type, info in CREDENTIAL_POLICY_INFO.items():
+        policy = user_policies.get(credential_type, "user_provided")  # Default to user_provided
 
         result.append({
             "credential_type": credential_type,
             "name": info.get("name", credential_type),
-            "description": info.get("description", gp.get("description", "")),
+            "description": info.get("description", ""),
             "policy": policy,
-            "source": source,
-            "global_policy": gp["policy"]  # For comparison in UI
+            "source": "user" if credential_type in user_policies else "default"
         })
 
     return {
@@ -2002,9 +1990,9 @@ async def set_user_credential_policy(
     token: str = Depends(require_admin)
 ):
     """
-    Set a credential policy override for a specific user (admin only).
+    Set the credential policy for a specific user (admin only).
 
-    This overrides the global policy for this user only.
+    Policies are per-user only - this sets the user's policy for this credential type.
     """
     # Verify user exists
     user = database.get_api_user(user_id)
@@ -2060,9 +2048,9 @@ async def delete_user_credential_policy(
     token: str = Depends(require_admin)
 ):
     """
-    Remove a credential policy override for a user (admin only).
+    Reset a credential policy to default for a user (admin only).
 
-    The user will revert to using the global policy for this credential type.
+    The user will revert to the default policy (user_provided).
     """
     # Verify user exists
     user = database.get_api_user(user_id)
@@ -2071,9 +2059,8 @@ async def delete_user_credential_policy(
 
     deleted = database.delete_user_credential_policy(user_id, credential_type)
 
-    # Get the global policy they'll fall back to
-    global_policy = database.get_credential_policy(credential_type)
-    fallback_policy = global_policy.get("policy", "optional") if global_policy else "optional"
+    # Default policy when none is set
+    fallback_policy = "user_provided"
 
     return {
         "success": True,
@@ -2081,7 +2068,7 @@ async def delete_user_credential_policy(
         "credential_type": credential_type,
         "deleted": deleted,
         "fallback_policy": fallback_policy,
-        "source": "global"
+        "source": "default"
     }
 
 
@@ -2098,10 +2085,12 @@ async def resolve_credential(
     """
     Internal endpoint to resolve which API key to use.
 
-    Resolution order based on policy:
+    Resolution order based on per-user policy:
     1. If policy is 'user_provided' or 'optional': check user's credential first
     2. If not found and policy is 'admin_provided' or 'optional': use admin's key
     3. If not found: return error
+
+    Policies are per-user only. Default policy is 'user_provided'.
 
     This endpoint is for internal use by AI tools only.
     Requires admin authentication as it returns decrypted API keys.
@@ -2119,13 +2108,13 @@ async def resolve_credential(
     if credential_type not in admin_setting_map:
         raise HTTPException(status_code=400, detail=f"Unknown credential type: {credential_type}")
 
-    # Get effective policy (user override takes precedence over global)
+    # Get per-user policy (no global fallback, default to user_provided)
     if user_id:
         effective = database.get_effective_credential_policy(user_id, credential_type)
-        policy = effective.get("policy", "optional")
+        policy = effective.get("policy", "user_provided")
     else:
-        policy_obj = database.get_credential_policy(credential_type)
-        policy = policy_obj.get("policy", "optional") if policy_obj else "optional"
+        # No user specified, default to user_provided (won't resolve any key)
+        policy = "user_provided"
 
     resolved_key = None
     source = None

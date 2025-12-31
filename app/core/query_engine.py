@@ -480,7 +480,11 @@ def _get_available_providers() -> Dict[str, Any]:
     }
 
 
-def _build_ai_tools_section(ai_tools_config: Optional[Dict[str, Any]] = None, prefix: str = "\n\n") -> str:
+def _build_ai_tools_section(
+    ai_tools_config: Optional[Dict[str, Any]] = None,
+    prefix: str = "\n\n",
+    api_keys: Optional[Dict[str, str]] = None
+) -> str:
     """
     Build the <ai-tools> section for system prompts with multi-provider support.
 
@@ -490,6 +494,8 @@ def _build_ai_tools_section(ai_tools_config: Optional[Dict[str, Any]] = None, pr
     Args:
         ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
         prefix: String to prepend before the section (default: "\n\n")
+        api_keys: Optional dict with API keys to include in technical notes
+                  (keys: gemini_api_key, openai_api_key, meshy_api_key)
 
     Returns:
         The formatted <ai-tools> section, or empty string if no tools enabled
@@ -499,6 +505,13 @@ def _build_ai_tools_section(ai_tools_config: Optional[Dict[str, Any]] = None, pr
 
     providers = _get_available_providers()
     tools_dir = settings.effective_tools_dir
+
+    # Convert Windows paths to file:// URLs for ESM imports
+    # On Windows, Node.js ESM requires file:// URLs for absolute paths
+    tools_dir_str = str(tools_dir)
+    if platform.system() == "Windows" and len(tools_dir_str) >= 2 and tools_dir_str[1] == ':':
+        # Convert D:\path\to\tools to file:///D:/path/to/tools
+        tools_dir_str = "file:///" + tools_dir_str.replace("\\", "/")
 
     # Check if any AI tools are enabled
     any_image_tools = ai_tools_config.get("image_generation", False) or ai_tools_config.get("image_editing", False) or ai_tools_config.get("image_reference", False)
@@ -545,9 +558,45 @@ You have specialized tools for generating and analyzing images, videos, and 3D m
 ---
 ## 🔧 Technical Notes
 
-- Save scripts as `.mjs` files and run with `node script.mjs`
+- **CRITICAL ON WINDOWS**: You MUST save scripts to `.mjs` files - do NOT use `node -e` with inline code
+- The import paths use `file:///` URLs which only work in `.mjs` files, not inline `-e` scripts
 - Delete scripts after successful execution
 - All tools return JSON with `file_path` and URL fields
+
+"""
+
+    # Build environment variable string for inline use
+    env_vars_inline = []
+    if api_keys:
+        if api_keys.get("gemini_api_key"):
+            env_vars_inline.append(f'GEMINI_API_KEY="{api_keys["gemini_api_key"]}"')
+        if api_keys.get("openai_api_key"):
+            env_vars_inline.append(f'OPENAI_API_KEY="{api_keys["openai_api_key"]}"')
+        if api_keys.get("meshy_api_key"):
+            env_vars_inline.append(f'MESHY_API_KEY="{api_keys["meshy_api_key"]}"')
+
+    if env_vars_inline:
+        # Detect platform for correct syntax
+        if platform.system() == "Windows":
+            # PowerShell syntax: $env:VAR="value"; node script.mjs
+            env_prefix = "; ".join([f'$env:{v.split("=")[0]}={v.split("=")[1]}' for v in env_vars_inline]) + "; "
+            tools_section += f"""### Running Scripts with API Keys
+
+On Windows (PowerShell), prefix your node command with environment variables:
+```powershell
+{env_prefix}node script.mjs
+```
+
+"""
+        else:
+            # Unix syntax: VAR="value" node script.mjs
+            env_prefix = " ".join(env_vars_inline) + " "
+            tools_section += f"""### Running Scripts with API Keys
+
+Prefix your node command with environment variables:
+```bash
+{env_prefix}node script.mjs
+```
 
 """
 
@@ -580,7 +629,7 @@ You have specialized tools for generating and analyzing images, videos, and 3D m
 """
         # Image Generation
         if ai_tools_config.get("image_generation", False):
-            tool_path = f"{tools_dir}/dist/image-generation/generateImage.js"
+            tool_path = f"{tools_dir_str}/dist/image-generation/generateImage.js"
             tools_section += f"""### Generate Image
 
 **🎯 USE WHEN:** User says "generate", "create", "make", "draw", "design" + image/picture/photo/artwork/illustration
@@ -603,7 +652,7 @@ console.log(JSON.stringify(result));
 
         # Image Editing
         if ai_tools_config.get("image_editing", False):
-            tool_path = f"{tools_dir}/dist/image-generation/editImage.js"
+            tool_path = f"{tools_dir_str}/dist/image-generation/editImage.js"
             tools_section += f"""### Edit Image
 
 **🎯 USE WHEN:** User has an existing image AND wants to "edit", "modify", "add to", "remove from", "change", "fix", "adjust"
@@ -628,7 +677,7 @@ console.log(JSON.stringify(result));
 
         # Reference-based Generation
         if ai_tools_config.get("image_reference", False) and providers["has_gemini"]:
-            tool_path = f"{tools_dir}/dist/image-generation/generateWithReference.js"
+            tool_path = f"{tools_dir_str}/dist/image-generation/generateWithReference.js"
             tools_section += f"""### Generate with Reference Images
 
 **🎯 USE WHEN:** User wants to generate NEW image but maintain consistency with existing images - "like this character", "in this style", "same person/object as", "consistent with"
@@ -680,7 +729,7 @@ console.log(JSON.stringify(result));
 """
         # Video Generation
         if ai_tools_config.get("video_generation", False) or ai_tools_config.get("video_with_audio", False):
-            tool_path = f"{tools_dir}/dist/video-generation/generateVideo.js"
+            tool_path = f"{tools_dir_str}/dist/video-generation/generateVideo.js"
             tools_section += f"""### Generate Video
 
 **🎯 USE WHEN:** User says "generate", "create", "make" + video/clip/animation FROM TEXT DESCRIPTION
@@ -707,7 +756,7 @@ console.log(JSON.stringify(result));
 
         # Image to Video
         if ai_tools_config.get("image_to_video", False):
-            tool_path = f"{tools_dir}/dist/video-generation/imageToVideo.js"
+            tool_path = f"{tools_dir_str}/dist/video-generation/imageToVideo.js"
             tools_section += f"""### Image to Video
 
 **🎯 USE WHEN:** User has an existing IMAGE and wants to "animate", "bring to life", "make it move", "turn into video"
@@ -730,7 +779,7 @@ console.log(JSON.stringify(result));
 
         # Video Extension (Veo only)
         if ai_tools_config.get("video_extend", False) and providers["has_gemini"]:
-            tool_path = f"{tools_dir}/dist/video-generation/extendVideo.js"
+            tool_path = f"{tools_dir_str}/dist/video-generation/extendVideo.js"
             tools_section += f"""### Extend Video (Veo Only)
 
 **🎯 USE WHEN:** User wants to "extend", "continue", "make longer" an EXISTING Veo-generated video
@@ -754,7 +803,7 @@ console.log(JSON.stringify(result));
 
         # Frame Bridging (Veo only)
         if ai_tools_config.get("video_bridge", False) and providers["has_gemini"]:
-            tool_path = f"{tools_dir}/dist/video-generation/bridgeFrames.js"
+            tool_path = f"{tools_dir_str}/dist/video-generation/bridgeFrames.js"
             tools_section += f"""### Frame Bridging (Veo Only)
 
 **🎯 USE WHEN:** User has TWO images and wants to create a "transition", "morph", "bridge between", "interpolate"
@@ -777,7 +826,7 @@ console.log(JSON.stringify(result));
 
         # Video Analysis/Understanding
         if ai_tools_config.get("video_understanding", False) and providers["has_gemini"]:
-            tool_path = f"{tools_dir}/dist/video-analysis/analyzeVideo.js"
+            tool_path = f"{tools_dir_str}/dist/video-analysis/analyzeVideo.js"
             tools_section += f"""### Analyze Video
 
 **🎯 USE WHEN:** User has an EXISTING VIDEO FILE and wants to:
@@ -833,7 +882,7 @@ console.log(JSON.stringify(result));
 """
         # Text to 3D
         if ai_tools_config.get("text_to_3d", False):
-            tool_path = f"{tools_dir}/dist/model3d-generation/textTo3D.js"
+            tool_path = f"{tools_dir_str}/dist/model3d-generation/textTo3D.js"
             tools_section += f"""### Text to 3D
 
 **🎯 USE WHEN:** User says "create 3D model", "generate 3D", "make a 3D object" FROM TEXT DESCRIPTION
@@ -858,7 +907,7 @@ console.log(JSON.stringify(result));
 
         # Image to 3D
         if ai_tools_config.get("image_to_3d", False):
-            tool_path = f"{tools_dir}/dist/model3d-generation/imageTo3D.js"
+            tool_path = f"{tools_dir_str}/dist/model3d-generation/imageTo3D.js"
             tools_section += f"""### Image to 3D
 
 **🎯 USE WHEN:** User has an existing IMAGE and wants to convert it to a 3D model
@@ -882,7 +931,7 @@ console.log(JSON.stringify(result));
 
         # Retexture 3D
         if ai_tools_config.get("retexture_3d", False):
-            tool_path = f"{tools_dir}/dist/model3d-generation/retexture3D.js"
+            tool_path = f"{tools_dir_str}/dist/model3d-generation/retexture3D.js"
             tools_section += f"""### Retexture 3D
 
 **🎯 USE WHEN:** User has an existing 3D model and wants to apply new AI-generated textures
@@ -905,7 +954,7 @@ console.log(JSON.stringify(result));
 
         # Rig 3D
         if ai_tools_config.get("rig_3d", False):
-            tool_path = f"{tools_dir}/dist/model3d-generation/rig3D.js"
+            tool_path = f"{tools_dir_str}/dist/model3d-generation/rig3D.js"
             tools_section += f"""### Rig 3D (Auto-Rigging)
 
 **🎯 USE WHEN:** User wants to add animation skeleton to a humanoid 3D model
@@ -928,7 +977,7 @@ console.log(JSON.stringify(result));
 
         # Animate 3D
         if ai_tools_config.get("animate_3d", False):
-            tool_path = f"{tools_dir}/dist/model3d-generation/animate3D.js"
+            tool_path = f"{tools_dir_str}/dist/model3d-generation/animate3D.js"
             tools_section += f"""### Animate 3D
 
 **🎯 USE WHEN:** User wants to apply preset animations to a rigged 3D model
@@ -951,7 +1000,7 @@ console.log(JSON.stringify(result));
 """
 
         # Get Task (always include when any 3D tool is enabled)
-        tool_path = f"{tools_dir}/dist/model3d-generation/getTask3D.js"
+        tool_path = f"{tools_dir_str}/dist/model3d-generation/getTask3D.js"
         tools_section += f"""### Check Task Status
 
 **🎯 USE WHEN:** Need to check status of a 3D generation task or get download URLs
@@ -1035,9 +1084,13 @@ def _resolve_api_credential(
         logger.warning(f"Unknown credential type: {credential_type}")
         return None
 
-    # Get policy for this credential
-    policy_obj = database.get_credential_policy(credential_type)
-    policy = policy_obj.get("policy", "optional") if policy_obj else "optional"
+    # Get per-user policy for this credential
+    # Policies are always per-user, no global fallback
+    # Default to "user_provided" if no policy exists (shouldn't happen for properly created users)
+    policy_obj = None
+    if api_user_id:
+        policy_obj = database.get_user_credential_policy(api_user_id, credential_type)
+    policy = policy_obj.get("policy", "user_provided") if policy_obj else "user_provided"
 
     resolved_key = None
     source = None
