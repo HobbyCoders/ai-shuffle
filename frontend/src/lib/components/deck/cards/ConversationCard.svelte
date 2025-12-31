@@ -15,8 +15,9 @@
 	import BaseCard from './BaseCard.svelte';
 	import type { DeckCard } from './types';
 	import { conversation, type ConversationStatus, type ConversationTurn } from '$lib/stores/conversation';
-	import { profiles, projects, tabs } from '$lib/stores/tabs';
+	import { profiles, projects, tabs, allTabs, type ChatMessage } from '$lib/stores/tabs';
 	import { AudioService } from '$lib/services/audioService';
+	import { api } from '$lib/api/client';
 
 	interface Props {
 		card: DeckCard;
@@ -50,6 +51,17 @@
 	// Audio service instance
 	let audioService: AudioService | null = $state(null);
 
+	// TTS settings (loaded from user settings)
+	let ttsVoice = $state('nova');
+	let ttsModel = $state('gpt-4o-mini-tts');
+	let ttsSpeed = $state(1.0);
+
+	// Track the last processed message to avoid duplicate TTS
+	let lastProcessedMessageId = $state<string | null>(null);
+
+	// Track if we're currently generating/playing TTS
+	let isGeneratingTts = $state(false);
+
 	// Get derived session values
 	const status = $derived(session?.status ?? 'idle');
 	const isMuted = $derived(session?.isMuted ?? false);
@@ -60,6 +72,29 @@
 	// Profile/project lists
 	const profileList = $derived($profiles);
 	const projectList = $derived($projects);
+
+	// Get the linked chat tab for this conversation
+	const linkedTab = $derived.by(() => {
+		if (!session?.chatTabId) return null;
+		return $allTabs.find((t) => t.id === session.chatTabId) ?? null;
+	});
+
+	// Track the last assistant message for TTS
+	const lastAssistantMessage = $derived.by(() => {
+		if (!linkedTab) return null;
+		// Find the last non-streaming assistant text message
+		const messages = linkedTab.messages;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const msg = messages[i];
+			if (msg.role === 'assistant' && msg.type === 'text' && !msg.streaming) {
+				return msg;
+			}
+		}
+		return null;
+	});
+
+	// Check if the tab is currently streaming
+	const isTabStreaming = $derived(linkedTab?.isStreaming ?? false);
 
 	// Get selected profile/project names
 	const selectedProfileName = $derived(
@@ -102,11 +137,35 @@
 		selectedProfileId = (card.meta?.profileId as string) ?? profileList[0]?.id ?? '';
 		selectedProjectId = (card.meta?.projectId as string) ?? projectList[0]?.id ?? '';
 
+		// Load TTS settings from user preferences
+		await loadTtsSettings();
+
 		// Create session if not exists
 		if (!session && selectedProfileId && selectedProjectId) {
 			await initializeSession();
 		}
 	});
+
+	/**
+	 * Load TTS settings from user preferences
+	 */
+	async function loadTtsSettings(): Promise<void> {
+		try {
+			const response = await api.get<{
+				tts_model: string | null;
+				tts_voice: string | null;
+				tts_speed: number | null;
+			}>('/settings/integrations');
+
+			if (response.tts_model) ttsModel = response.tts_model;
+			if (response.tts_voice) ttsVoice = response.tts_voice;
+			if (response.tts_speed) ttsSpeed = response.tts_speed;
+
+			console.log('[ConversationCard] Loaded TTS settings:', { ttsModel, ttsVoice, ttsSpeed });
+		} catch (error) {
+			console.warn('[ConversationCard] Failed to load TTS settings, using defaults:', error);
+		}
+	}
 
 	onDestroy(() => {
 		// Clean up audio service
@@ -127,6 +186,31 @@
 					transcriptEl.scrollTop = transcriptEl.scrollHeight;
 				}
 			});
+		}
+	});
+
+	// Watch for new assistant messages and generate TTS
+	$effect(() => {
+		// Only process when conversation is active (not idle)
+		if (status === 'idle' || !session) return;
+
+		// Check if there's a new completed assistant message
+		if (lastAssistantMessage && lastAssistantMessage.id !== lastProcessedMessageId && !isTabStreaming) {
+			// We have a new completed message - generate TTS
+			handleNewAssistantMessage(lastAssistantMessage);
+		}
+	});
+
+	// Watch for streaming state changes to update status
+	$effect(() => {
+		if (!session) return;
+
+		if (isTabStreaming && status === 'listening') {
+			// Claude is responding, update status
+			conversation.setStatus(card.id, 'processing');
+		} else if (!isTabStreaming && status === 'processing' && !isGeneratingTts) {
+			// Claude finished, go back to listening (unless we're about to speak)
+			conversation.setStatus(card.id, 'listening');
 		}
 	});
 
@@ -228,6 +312,82 @@
 
 		if (audioService) {
 			audioService.setMuted(!isMuted);
+		}
+	}
+
+	// ========================================================================
+	// TTS Handling
+	// ========================================================================
+
+	/**
+	 * Handle a new assistant message - add to conversation and generate TTS
+	 */
+	async function handleNewAssistantMessage(message: ChatMessage): Promise<void> {
+		if (!session || !message.content) return;
+
+		// Mark this message as processed
+		lastProcessedMessageId = message.id;
+
+		// Add the assistant turn to the conversation
+		const turnId = conversation.addOrUpdateAssistantTurn(card.id, message.content, false);
+
+		// Generate and play TTS
+		await generateAndPlayTTS(message.content, turnId);
+	}
+
+	/**
+	 * Generate TTS audio and play it
+	 */
+	async function generateAndPlayTTS(text: string, turnId: string): Promise<void> {
+		if (!audioService || !session) return;
+
+		// Limit text length for TTS (4096 chars max)
+		const ttsText = text.length > 4000 ? text.substring(0, 4000) + '...' : text;
+
+		if (!ttsText.trim()) {
+			// Nothing to speak
+			return;
+		}
+
+		isGeneratingTts = true;
+		conversation.setStatus(card.id, 'speaking');
+
+		try {
+			console.log('[ConversationCard] Generating TTS for:', ttsText.substring(0, 100) + '...');
+
+			// Call the TTS endpoint
+			const response = await api.post<{
+				audio_url: string;
+				file_path: string;
+				duration_seconds?: number;
+			}>('/canvas/generate/tts', {
+				text: ttsText,
+				provider: 'openai-tts',
+				model: ttsModel,
+				voice: ttsVoice,
+				speed: ttsSpeed,
+				output_format: 'mp3',
+			});
+
+			if (response.audio_url) {
+				// Update the turn with the audio URL
+				conversation.completeAssistantTurn(card.id, turnId, response.audio_url);
+
+				// Play the audio
+				await audioService.playTts(response.audio_url);
+
+				console.log('[ConversationCard] TTS playback complete');
+			}
+		} catch (error) {
+			console.error('[ConversationCard] TTS generation failed:', error);
+			// Don't show error to user for TTS failures - just continue listening
+		} finally {
+			isGeneratingTts = false;
+
+			// Go back to listening if still in conversation
+			if (session && status !== 'idle') {
+				conversation.setStatus(card.id, 'listening');
+			}
 		}
 	}
 
