@@ -73,6 +73,9 @@
 	const profileList = $derived($profiles);
 	const projectList = $derived($projects);
 
+	// Check if data is still loading
+	const isDataLoading = $derived(profileList.length === 0 || projectList.length === 0);
+
 	// Get the linked chat tab for this conversation
 	const linkedTab = $derived.by(() => {
 		if (!session?.chatTabId) return null;
@@ -472,49 +475,56 @@
 {/if}
 
 {#snippet conversationUI()}
-	<!-- Header: Profile & Status -->
-	<div class="conversation-header">
-		<div class="profile-section">
-			{#if session}
-				<div class="profile-avatar">
-					<MessageSquare size={24} />
-				</div>
-				<div class="profile-info">
-					<div class="profile-name">{session.profileName}</div>
-					<div class="profile-project">{session.projectName}</div>
-				</div>
-			{:else}
-				<!-- Profile/Project Selection -->
-				<div class="selection-row">
-					<select
-						class="profile-select"
-						bind:value={selectedProfileId}
-						disabled={status !== 'idle'}
-					>
-						<option value="">Select Profile</option>
-						{#each profileList as profile}
-							<option value={profile.id}>{profile.name}</option>
-						{/each}
-					</select>
-					<select
-						class="project-select"
-						bind:value={selectedProjectId}
-						disabled={status !== 'idle'}
-					>
-						<option value="">Select Project</option>
-						{#each projectList as project}
-							<option value={project.id}>{project.name}</option>
-						{/each}
-					</select>
-				</div>
-			{/if}
+	<!-- Loading State -->
+	{#if isDataLoading}
+		<div class="loading-state">
+			<Loader2 size={32} class="animate-spin" />
+			<p>Loading profiles and projects...</p>
 		</div>
+	{:else}
+		<!-- Header: Profile & Status -->
+		<div class="conversation-header">
+			<div class="profile-section">
+				{#if session}
+					<div class="profile-avatar">
+						<MessageSquare size={24} />
+					</div>
+					<div class="profile-info">
+						<div class="profile-name">{session.profileName}</div>
+						<div class="profile-project">{session.projectName}</div>
+					</div>
+				{:else}
+					<!-- Profile/Project Selection -->
+					<div class="selection-row">
+						<select
+							class="profile-select"
+							bind:value={selectedProfileId}
+							disabled={status !== 'idle'}
+						>
+							<option value="">Select Profile</option>
+							{#each profileList as profile}
+								<option value={profile.id}>{profile.name}</option>
+							{/each}
+						</select>
+						<select
+							class="project-select"
+							bind:value={selectedProjectId}
+							disabled={status !== 'idle'}
+						>
+							<option value="">Select Project</option>
+							{#each projectList as project}
+								<option value={project.id}>{project.name}</option>
+							{/each}
+						</select>
+					</div>
+				{/if}
+			</div>
 
-		<div class="status-section">
-			<div class="status-indicator {statusColor}"></div>
-			<span class="status-text">{statusText}</span>
+			<div class="status-section">
+				<div class="status-indicator {statusColor}"></div>
+				<span class="status-text">{statusText}</span>
+			</div>
 		</div>
-	</div>
 
 	<!-- Transcript Area -->
 	<div class="transcript-area" bind:this={transcriptEl}>
@@ -636,6 +646,7 @@
 			</button>
 		{/if}
 	</div>
+	{/if}
 {/snippet}
 
 <style>
@@ -649,6 +660,25 @@
 
 	.conversation-content.mobile {
 		padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+	}
+
+	/* Loading State */
+	.loading-state {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 16px;
+		color: rgba(255, 255, 255, 0.5);
+	}
+
+	.loading-state p {
+		font-size: 14px;
+	}
+
+	:global(.light) .loading-state {
+		color: rgba(0, 0, 0, 0.5);
 	}
 
 	/* Header */
