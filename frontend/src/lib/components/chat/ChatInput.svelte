@@ -116,8 +116,12 @@
 	let isRecording = $state(false);
 	let isTranscribing = $state(false);
 	let mediaRecorder = $state<MediaRecorder | null>(null);
-	let audioChunks = $state<Blob[]>([]);
 	let recordingError = $state('');
+	let recordingStartTime = $state<number>(0);
+
+	// Use a non-reactive array for audio chunks to avoid Svelte 5 reactivity issues
+	// with rapid MediaRecorder ondataavailable events
+	let audioChunksRef: Blob[] = [];
 
 	// Check if recording is available based on OpenAI key policy
 	// For API users, they must have OpenAI key configured (either their own or admin-provided)
@@ -373,35 +377,37 @@
 	}
 
 	// Voice recording
+	// Minimum recording duration in milliseconds to avoid empty/too-short recordings
+	const MIN_RECORDING_DURATION = 500;
+
 	async function startRecording() {
 		recordingError = '';
+		audioChunksRef = []; // Reset chunks array
+
 		try {
 			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-			const recorder = new MediaRecorder(stream, {
-				mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4'
-			});
-			audioChunks = [];
 
+			// Determine best supported mime type
+			const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+				? 'audio/webm;codecs=opus'
+				: MediaRecorder.isTypeSupported('audio/webm')
+					? 'audio/webm'
+					: 'audio/mp4';
+
+			const recorder = new MediaRecorder(stream, { mimeType });
+
+			// Collect audio chunks - use non-reactive array to avoid issues
 			recorder.ondataavailable = (event) => {
 				if (event.data.size > 0) {
-					audioChunks = [...audioChunks, event.data];
+					audioChunksRef.push(event.data);
 				}
 			};
 
-			recorder.onstop = async () => {
-				stream.getTracks().forEach(track => track.stop());
-
-				if (audioChunks.length === 0) {
-					recordingError = 'No audio recorded';
-					return;
-				}
-
-				const audioBlob = new Blob(audioChunks, { type: recorder.mimeType });
-				await transcribeAudio(audioBlob);
-			};
-
-			recorder.start();
+			// Start recording with timeslice for chunked data collection
+			// This improves reliability by not buffering all audio at once
+			recorder.start(1000); // 1 second chunks
 			mediaRecorder = recorder;
+			recordingStartTime = Date.now();
 			isRecording = true;
 		} catch (error: unknown) {
 			console.error('Failed to start recording:', error);
@@ -416,11 +422,69 @@
 		}
 	}
 
-	function stopRecording() {
-		if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-			mediaRecorder.stop();
+	async function stopRecording() {
+		if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+			isRecording = false;
+			return;
 		}
+
+		const recorder = mediaRecorder;
+		const stream = recorder.stream;
+		const mimeType = recorder.mimeType;
+
+		// Check minimum recording duration
+		const recordingDuration = Date.now() - recordingStartTime;
+		if (recordingDuration < MIN_RECORDING_DURATION) {
+			recordingError = 'Recording too short. Please hold the button longer.';
+			recorder.stop();
+			stream.getTracks().forEach(track => track.stop());
+			isRecording = false;
+			return;
+		}
+
 		isRecording = false;
+
+		// Use a Promise-based approach to ensure all data is collected before processing
+		// This fixes the race condition between ondataavailable and onstop
+		try {
+			const audioBlob = await new Promise<Blob>((resolve, reject) => {
+				const handleDataAvailable = (event: BlobEvent) => {
+					if (event.data.size > 0) {
+						audioChunksRef.push(event.data);
+					}
+				};
+
+				const handleStop = () => {
+					// Clean up
+					recorder.removeEventListener('dataavailable', handleDataAvailable);
+					recorder.removeEventListener('stop', handleStop);
+					stream.getTracks().forEach(track => track.stop());
+
+					// Check if we got any audio
+					if (audioChunksRef.length === 0) {
+						reject(new Error('No audio recorded'));
+						return;
+					}
+
+					// Create blob from all collected chunks
+					resolve(new Blob(audioChunksRef, { type: mimeType }));
+				};
+
+				// Add listeners before stopping to catch final data
+				recorder.addEventListener('dataavailable', handleDataAvailable);
+				recorder.addEventListener('stop', handleStop);
+
+				// Request final data and stop - this ensures ondataavailable fires
+				// for any remaining buffered audio before onstop
+				recorder.requestData();
+				recorder.stop();
+			});
+
+			await transcribeAudio(audioBlob);
+		} catch (error: unknown) {
+			const err = error as { message?: string };
+			recordingError = err.message || 'Failed to process recording';
+		}
 	}
 
 	async function transcribeAudio(audioBlob: Blob) {
@@ -459,11 +523,11 @@
 		}
 	}
 
-	function toggleRecording() {
+	async function toggleRecording() {
 		if (isRecording) {
-			stopRecording();
+			await stopRecording();
 		} else {
-			startRecording();
+			await startRecording();
 		}
 	}
 
