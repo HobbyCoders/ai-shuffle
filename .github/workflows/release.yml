@@ -1,0 +1,450 @@
+name: Create Release Packages
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., v4.0.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  VERSION: ${{ github.event.inputs.version || github.ref_name }}
+
+jobs:
+  # Job 1: Build frontend once (platform-agnostic static files)
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Upload frontend build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/build/
+          retention-days: 1
+
+  # Job 2: Create platform-specific release packages
+  create-release-packages:
+    needs: build-frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download frontend build
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/build/
+
+      - name: Prepare base staging directory
+        run: |
+          STAGING="staging/ai-shuffle-${{ env.VERSION }}"
+          mkdir -p "${STAGING}/app/static"
+
+          # Copy Python backend
+          cp -r app/* "${STAGING}/app/"
+
+          # Copy pre-built frontend to static directory
+          cp -r frontend/build/* "${STAGING}/app/static/"
+
+          # Copy core files
+          cp requirements.txt "${STAGING}/"
+          cp run_local.py "${STAGING}/"
+          cp .env.example "${STAGING}/"
+          cp LICENSE "${STAGING}/"
+          cp auth_helper.py "${STAGING}/"
+          cp main.py "${STAGING}/"
+
+          # Copy tools if dist exists
+          if [ -d "tools/dist" ]; then
+            mkdir -p "${STAGING}/tools"
+            cp -r tools/dist "${STAGING}/tools/"
+            cp tools/package.json "${STAGING}/tools/" 2>/dev/null || true
+          fi
+
+      - name: Create Windows package
+        run: |
+          STAGING="staging/ai-shuffle-${{ env.VERSION }}"
+
+          # Copy Windows launcher
+          cp run_local.bat "${STAGING}/"
+
+          # Create Windows-specific INSTALL.md
+          cat > "${STAGING}/INSTALL.md" << 'INSTALL_EOF'
+          # AI Shuffle - Windows Installation
+
+          ## Prerequisites
+
+          Before running AI Shuffle, install these dependencies:
+
+          1. **Python 3.10+**: Download from https://python.org/downloads/
+             - During installation, check "Add Python to PATH"
+
+          2. **Node.js 18+**: Download from https://nodejs.org/
+             - Required only for Claude CLI installation
+
+          3. **Claude CLI**: Open Command Prompt or PowerShell and run:
+             ```
+             npm install -g @anthropic-ai/claude-code
+             ```
+
+          4. **Claude Authentication**: Run once to authenticate:
+             ```
+             claude login
+             ```
+
+          ## Quick Start
+
+          1. Extract this zip file to a folder (e.g., `C:\ai-shuffle`)
+
+          2. Open Command Prompt in that folder
+
+          3. Run first-time setup:
+             ```
+             python run_local.py --setup
+             ```
+
+          4. Start the server:
+             ```
+             run_local.bat
+             ```
+             Or: `python run_local.py`
+
+          5. Open http://localhost:8000 in your browser
+
+          ## Options
+
+          - Different port: `python run_local.py --port 3000`
+          - No browser auto-open: `python run_local.py --no-browser`
+          - Check prerequisites: `python run_local.py --check`
+
+          ## Troubleshooting
+
+          - **"python is not recognized"**: Reinstall Python with "Add to PATH" checked
+          - **"claude is not recognized"**: Reinstall Claude CLI with `npm install -g @anthropic-ai/claude-code`
+          - **Frontend not loading**: Run `python run_local.py --setup` to rebuild
+
+          ## Notes
+
+          - The frontend is pre-built - you do NOT need Node.js to run the app
+          - Data is stored in the `data/` subdirectory
+          - Virtual environment is created in `venv/` on first run
+          INSTALL_EOF
+
+          # Create zip (Windows format)
+          cd staging
+          zip -r "../ai-shuffle-${{ env.VERSION }}-windows.zip" "ai-shuffle-${{ env.VERSION }}"
+          cd ..
+
+          # Remove Windows-specific files for next package
+          rm "${STAGING}/run_local.bat"
+          rm "${STAGING}/INSTALL.md"
+
+      - name: Create macOS package
+        run: |
+          STAGING="staging/ai-shuffle-${{ env.VERSION }}"
+
+          # Copy Unix launcher
+          cp run_local.sh "${STAGING}/"
+          chmod +x "${STAGING}/run_local.sh"
+
+          # Create macOS-specific INSTALL.md
+          cat > "${STAGING}/INSTALL.md" << 'INSTALL_EOF'
+          # AI Shuffle - macOS Installation
+
+          ## Prerequisites
+
+          Before running AI Shuffle, install these dependencies:
+
+          1. **Python 3.10+**:
+             ```bash
+             brew install python@3.11
+             ```
+             Or download from https://python.org/downloads/
+
+          2. **Node.js 18+** (for Claude CLI only):
+             ```bash
+             brew install node
+             ```
+             Or download from https://nodejs.org/
+
+          3. **Claude CLI**:
+             ```bash
+             npm install -g @anthropic-ai/claude-code
+             ```
+
+          4. **Claude Authentication** (run once):
+             ```bash
+             claude login
+             ```
+
+          ## Quick Start
+
+          1. Extract the archive:
+             ```bash
+             tar -xzf ai-shuffle-vX.X.X-macos.tar.gz
+             cd ai-shuffle-vX.X.X
+             ```
+
+          2. Run first-time setup:
+             ```bash
+             python3 run_local.py --setup
+             ```
+
+          3. Start the server:
+             ```bash
+             ./run_local.sh
+             ```
+             Or: `python3 run_local.py`
+
+          4. Open http://localhost:8000 in your browser
+
+          ## Options
+
+          - Different port: `python3 run_local.py --port 3000`
+          - No browser auto-open: `python3 run_local.py --no-browser`
+          - Check prerequisites: `python3 run_local.py --check`
+
+          ## Troubleshooting
+
+          - **Permission denied**: Run `chmod +x run_local.sh`
+          - **python3 not found**: Install Python via Homebrew or python.org
+          - **claude not found**: Ensure Node.js is installed, then reinstall Claude CLI
+
+          ## Notes
+
+          - The frontend is pre-built - you do NOT need Node.js to run the app
+          - Data is stored in the `data/` subdirectory
+          - Virtual environment is created in `venv/` on first run
+          INSTALL_EOF
+
+          # Create tarball (preserves permissions)
+          cd staging
+          tar -czvf "../ai-shuffle-${{ env.VERSION }}-macos.tar.gz" "ai-shuffle-${{ env.VERSION }}"
+          cd ..
+
+          # Remove macOS-specific INSTALL.md for Linux (keep run_local.sh)
+          rm "${STAGING}/INSTALL.md"
+
+      - name: Create Linux package
+        run: |
+          STAGING="staging/ai-shuffle-${{ env.VERSION }}"
+
+          # run_local.sh already present from macOS step
+          chmod +x "${STAGING}/run_local.sh"
+
+          # Create Linux-specific INSTALL.md
+          cat > "${STAGING}/INSTALL.md" << 'INSTALL_EOF'
+          # AI Shuffle - Linux Installation
+
+          ## Prerequisites
+
+          Before running AI Shuffle, install these dependencies:
+
+          ### Ubuntu/Debian
+          ```bash
+          sudo apt update
+          sudo apt install python3.11 python3.11-venv python3-pip nodejs npm
+          ```
+
+          ### Fedora
+          ```bash
+          sudo dnf install python3.11 nodejs npm
+          ```
+
+          ### Arch Linux
+          ```bash
+          sudo pacman -S python nodejs npm
+          ```
+
+          ### Claude CLI (all distros)
+          ```bash
+          npm install -g @anthropic-ai/claude-code
+          ```
+
+          ### Claude Authentication (run once)
+          ```bash
+          claude login
+          ```
+
+          ## Quick Start
+
+          1. Extract the archive:
+             ```bash
+             tar -xzf ai-shuffle-vX.X.X-linux.tar.gz
+             cd ai-shuffle-vX.X.X
+             ```
+
+          2. Run first-time setup:
+             ```bash
+             python3 run_local.py --setup
+             ```
+
+          3. Start the server:
+             ```bash
+             ./run_local.sh
+             ```
+             Or: `python3 run_local.py`
+
+          4. Open http://localhost:8000 in your browser
+
+          ## Options
+
+          - Different port: `python3 run_local.py --port 3000`
+          - Different host: `python3 run_local.py --host 0.0.0.0`
+          - No browser auto-open: `python3 run_local.py --no-browser`
+          - Check prerequisites: `python3 run_local.py --check`
+
+          ## Running as a Service (systemd)
+
+          1. Create service file:
+             ```bash
+             sudo nano /etc/systemd/system/ai-shuffle.service
+             ```
+
+          2. Add content:
+             ```ini
+             [Unit]
+             Description=AI Shuffle
+             After=network.target
+
+             [Service]
+             Type=simple
+             User=your-username
+             WorkingDirectory=/path/to/ai-shuffle
+             ExecStart=/path/to/ai-shuffle/venv/bin/python -m app.main
+             Restart=on-failure
+             Environment=HOST=127.0.0.1
+             Environment=PORT=8000
+
+             [Install]
+             WantedBy=multi-user.target
+             ```
+
+          3. Enable and start:
+             ```bash
+             sudo systemctl enable ai-shuffle
+             sudo systemctl start ai-shuffle
+             ```
+
+          ## Troubleshooting
+
+          - **Permission denied**: Run `chmod +x run_local.sh`
+          - **python3.11 not found**: Use `python3` instead, or install python3.11
+          - **venv module not found**: Install python3-venv package
+
+          ## Notes
+
+          - The frontend is pre-built - you do NOT need Node.js to run the app
+          - Data is stored in the `data/` subdirectory
+          - Virtual environment is created in `venv/` on first run
+          INSTALL_EOF
+
+          # Create tarball
+          cd staging
+          tar -czvf "../ai-shuffle-${{ env.VERSION }}-linux.tar.gz" "ai-shuffle-${{ env.VERSION }}"
+          cd ..
+
+      - name: Upload release packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-packages
+          path: |
+            ai-shuffle-*-windows.zip
+            ai-shuffle-*-macos.tar.gz
+            ai-shuffle-*-linux.tar.gz
+          retention-days: 5
+
+  # Job 3: Create GitHub Release with all packages
+  create-release:
+    needs: create-release-packages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release packages
+        uses: actions/download-artifact@v4
+        with:
+          name: release-packages
+
+      - name: List packages
+        run: ls -la ai-shuffle-*
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION }}
+          name: AI Shuffle ${{ env.VERSION }}
+          draft: false
+          prerelease: ${{ contains(env.VERSION, '-') }}
+          generate_release_notes: true
+          files: |
+            ai-shuffle-*-windows.zip
+            ai-shuffle-*-macos.tar.gz
+            ai-shuffle-*-linux.tar.gz
+          body: |
+            ## AI Shuffle ${{ env.VERSION }}
+
+            ### Downloads
+
+            | Platform | Archive | Size |
+            |----------|---------|------|
+            | **Windows** | `ai-shuffle-${{ env.VERSION }}-windows.zip` | Extract and run `run_local.bat` |
+            | **macOS** | `ai-shuffle-${{ env.VERSION }}-macos.tar.gz` | Extract and run `./run_local.sh` |
+            | **Linux** | `ai-shuffle-${{ env.VERSION }}-linux.tar.gz` | Extract and run `./run_local.sh` |
+
+            ### Prerequisites
+
+            - **Python 3.10+** - [Download](https://python.org/downloads/)
+            - **Node.js 18+** - [Download](https://nodejs.org/) (for Claude CLI only)
+            - **Claude CLI** - `npm install -g @anthropic-ai/claude-code`
+            - **Claude Auth** - Run `claude login` once to authenticate
+
+            ### Quick Start
+
+            ```bash
+            # 1. Extract the archive for your platform
+            # 2. Run first-time setup
+            python run_local.py --setup
+
+            # 3. Start the server
+            python run_local.py
+
+            # 4. Open http://localhost:8000
+            ```
+
+            ### What's Included
+
+            - Pre-built frontend (no `npm run build` needed)
+            - Python backend with all modules
+            - Platform-specific launcher scripts
+            - Example environment configuration
+
+            See the included `INSTALL.md` for detailed platform-specific instructions.
+
+            ---
+
+            **Docker users**: Use `ghcr.io/hobbycoders/ai-shuffle:${{ env.VERSION }}` instead.
