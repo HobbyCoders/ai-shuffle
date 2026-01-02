@@ -6,7 +6,7 @@
 	 * Layer 2: Context Bar - inline profile/project dropdown selectors
 	 */
 	import { tick, onDestroy, onMount } from 'svelte';
-	import { tabs, profiles, projects, type ChatTab } from '$lib/stores/tabs';
+	import { tabs, profiles, projects, allTabs, type ChatTab } from '$lib/stores/tabs';
 	import { claudeAuthenticated, apiUser } from '$lib/stores/auth';
 	import { canUseOpenAI, credentialsLoaded } from '$lib/stores/credentials';
 	import { api, type FileUploadResponse } from '$lib/api/client';
@@ -41,8 +41,12 @@
 		return count.toString();
 	}
 
+	// Get live tab data directly from store to ensure reactivity in mobile context
+	// The prop `tab` may not update properly in mobile snippet rendering
+	const liveTab = $derived($allTabs.find(t => t.id === tab.id) ?? tab);
+
 	// Get current profile to access env vars for auto-compaction reserve calculation
-	const currentProfile = $derived($profiles.find(p => p.id === tab.profile));
+	const currentProfile = $derived($profiles.find(p => p.id === liveTab.profile));
 
 	// Auto-compaction reserve: 13k base + CLAUDE_CODE_MAX_OUTPUT_TOKENS from profile env vars
 	const maxOutputTokens = $derived(
@@ -52,7 +56,8 @@
 
 	// Context usage: use real-time tracked value, or calculate from token counts for resumed sessions
 	// Add auto-compaction reserve to show effective context usage
-	const baseContextUsed = $derived(tab.contextUsed ?? (tab.totalTokensIn + tab.totalCacheCreationTokens + tab.totalCacheReadTokens));
+	// Use liveTab to ensure we get real-time updates from the store
+	const baseContextUsed = $derived(liveTab.contextUsed ?? (liveTab.totalTokensIn + liveTab.totalCacheCreationTokens + liveTab.totalCacheReadTokens));
 	const contextUsed = $derived(baseContextUsed + autoCompactionReserve);
 	const contextPercent = $derived(Math.min((contextUsed / CONTEXT_MAX) * 100, 100));
 
@@ -144,8 +149,8 @@
 	let projectDropdownRef = $state<HTMLDivElement | null>(null);
 
 	// Get selected profile/project names for display
-	const selectedProfileName = $derived($profiles.find(p => p.id === tab.profile)?.name || 'Profile');
-	const selectedProjectName = $derived($projects.find(p => p.id === tab.project)?.name || 'Project');
+	const selectedProfileName = $derived($profiles.find(p => p.id === liveTab.profile)?.name || 'Profile');
+	const selectedProjectName = $derived($projects.find(p => p.id === liveTab.project)?.name || 'Project');
 
 	// Toggle profile dropdown
 	function handleProfileClick(e: MouseEvent) {
@@ -228,20 +233,20 @@
 	// Handle input changes for autocomplete
 	function handleInputChange() {
 		showCommandAutocomplete = inputValue.startsWith('/') && inputValue.length > 0;
-		showFileAutocomplete = hasActiveAtMention(inputValue) && !!tab.project;
+		showFileAutocomplete = hasActiveAtMention(inputValue) && !!liveTab.project;
 	}
 
 	// Handle form submission
 	async function handleSubmit() {
-		if (!inputValue.trim() || !tab || isUploading) return;
+		if (!inputValue.trim() || !liveTab || isUploading) return;
 
 		// Require profile and project to be selected
-		if (!tab.profile) {
-			tabs.setTabError(tab.id, 'Please select a profile before starting a chat');
+		if (!liveTab.profile) {
+			tabs.setTabError(liveTab.id, 'Please select a profile before starting a chat');
 			return;
 		}
-		if (!tab.project) {
-			tabs.setTabError(tab.id, 'Please select a project before starting a chat');
+		if (!liveTab.project) {
+			tabs.setTabError(liveTab.id, 'Please select a project before starting a chat');
 			return;
 		}
 
@@ -340,7 +345,7 @@
 
 	// File upload
 	function triggerFileUpload() {
-		if (!tab.project) {
+		if (!liveTab.project) {
 			alert('Please select a project first to upload files.');
 			return;
 		}
@@ -350,12 +355,12 @@
 	async function handleFileUpload(event: Event) {
 		const input = event.target as HTMLInputElement;
 		const files = input.files;
-		if (!files || files.length === 0 || !tab.project) return;
+		if (!files || files.length === 0 || !liveTab.project) return;
 
 		isUploading = true;
 		try {
 			for (const file of Array.from(files)) {
-				const result = await api.uploadFile(`/projects/${tab.project}/upload`, file);
+				const result = await api.uploadFile(`/projects/${liveTab.project}/upload`, file);
 				uploadedFiles = [...uploadedFiles, result];
 			}
 		} catch (error: unknown) {
@@ -530,7 +535,7 @@
 							<CommandAutocomplete
 								bind:this={commandAutocompleteRef}
 								inputValue={inputValue}
-								projectId={tab.project}
+								projectId={liveTab.project}
 								visible={showCommandAutocomplete}
 								onSelect={handleCommandSelect}
 								onClose={() => showCommandAutocomplete = false}
@@ -539,7 +544,7 @@
 							<FileAutocomplete
 								bind:this={fileAutocompleteRef}
 								inputValue={inputValue}
-								projectId={tab.project}
+								projectId={liveTab.project}
 								visible={showFileAutocomplete}
 								onSelect={handleFileSelect}
 								onClose={() => showFileAutocomplete = false}
@@ -559,7 +564,7 @@
 
 						<!-- Send button only -->
 						<div class="send-button-wrapper">
-							{#if tab.isStreaming}
+							{#if liveTab.isStreaming}
 								{#if inputValue.trim()}
 									<button type="submit" class="send-btn" title="Send message (interrupts current response)">
 										<svg class="w-[14px] h-[14px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -569,7 +574,7 @@
 								{:else}
 									<button
 										type="button"
-										onclick={() => tabs.stopGeneration(tab.id)}
+										onclick={() => tabs.stopGeneration(liveTab.id)}
 										class="stop-btn"
 										title="Stop generating"
 									>
@@ -612,7 +617,7 @@
 						<div class="selector-wrapper" bind:this={profileDropdownRef}>
 							<button
 								type="button"
-								class="context-selector-btn {tab.profile ? '' : 'unset'}"
+								class="context-selector-btn {liveTab.profile ? '' : 'unset'}"
 								onclick={handleProfileClick}
 								title="Change profile"
 							>
@@ -636,14 +641,14 @@
 											<button
 												type="button"
 												class="dropdown-item"
-												class:selected={profile.id === tab.profile}
+												class:selected={profile.id === liveTab.profile}
 												onclick={() => selectProfile(profile.id)}
 											>
 												<svg class="w-3.5 h-3.5 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
 												</svg>
 												<span>{profile.name}</span>
-												{#if profile.id === tab.profile}
+												{#if profile.id === liveTab.profile}
 													<svg class="w-3.5 h-3.5 ml-auto text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 													</svg>
@@ -659,7 +664,7 @@
 						<div class="selector-wrapper" bind:this={projectDropdownRef}>
 							<button
 								type="button"
-								class="context-selector-btn {tab.project ? '' : 'unset'}"
+								class="context-selector-btn {liveTab.project ? '' : 'unset'}"
 								onclick={handleProjectClick}
 								title="Change project"
 							>
@@ -683,14 +688,14 @@
 											<button
 												type="button"
 												class="dropdown-item"
-												class:selected={project.id === tab.project}
+												class:selected={project.id === liveTab.project}
 												onclick={() => selectProject(project.id)}
 											>
 												<svg class="w-3.5 h-3.5 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 												</svg>
 												<span>{project.name}</span>
-												{#if project.id === tab.project}
+												{#if project.id === liveTab.project}
 													<svg class="w-3.5 h-3.5 ml-auto text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 													</svg>
@@ -708,9 +713,9 @@
 						<button
 							type="button"
 							onclick={triggerFileUpload}
-							disabled={tab.isStreaming || !$claudeAuthenticated || isUploading}
+							disabled={liveTab.isStreaming || !$claudeAuthenticated || isUploading}
 							class="dock-action-btn"
-							title={isUploading ? 'Uploading...' : tab.project ? 'Attach file' : 'Select a project to attach files'}
+							title={isUploading ? 'Uploading...' : liveTab.project ? 'Attach file' : 'Select a project to attach files'}
 						>
 							{#if isUploading}
 								<svg class="w-[18px] h-[18px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
