@@ -91,13 +91,6 @@ export async function getPullRequests(
 }
 
 /**
- * Get a specific pull request
- */
-export async function getPullRequest(projectId: string, number: number): Promise<PullRequest> {
-    return api.get<PullRequest>(`${BASE}/${projectId}/github/pulls/${number}`);
-}
-
-/**
  * Create a new pull request
  */
 export async function createPullRequest(
@@ -145,13 +138,6 @@ export async function getWorkflowRuns(
     limit: number = 10
 ): Promise<WorkflowRun[]> {
     return api.get<WorkflowRun[]>(`${BASE}/${projectId}/github/actions?limit=${limit}`);
-}
-
-/**
- * Get a specific workflow run
- */
-export async function getWorkflowRun(projectId: string, runId: number): Promise<WorkflowRun> {
-    return api.get<WorkflowRun>(`${BASE}/${projectId}/github/actions/${runId}`);
 }
 
 /**

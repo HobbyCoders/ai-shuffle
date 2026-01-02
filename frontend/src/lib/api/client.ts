@@ -662,14 +662,6 @@ export async function advancedSearch(params: AdvancedSearchParams): Promise<Adva
 	return api.get<AdvancedSearchResult[]>(`/search?${searchParams.toString()}`);
 }
 
-/**
- * Get search suggestions based on session titles
- */
-export async function getSearchSuggestions(query: string, limit: number = 10): Promise<{ suggestions: string[] }> {
-	const params = new URLSearchParams({ q: query, limit: limit.toString() });
-	return api.get<{ suggestions: string[] }>(`/search/suggestions?${params.toString()}`);
-}
-
 // ============================================================================
 // Template API Types and Functions
 // ============================================================================

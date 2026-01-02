@@ -56,56 +56,6 @@ export async function updateCredentialPolicy(
 	);
 }
 
-// Helper function to get user-friendly policy labels
-export function getPolicyLabel(policy: CredentialPolicyType): string {
-	switch (policy) {
-		case 'admin_provided':
-			return 'Admin Provides';
-		case 'user_provided':
-			return 'User Must Provide';
-		case 'optional':
-			return 'Optional (User Override)';
-		default:
-			return policy;
-	}
-}
-
-// Helper function to get user-friendly effective status labels
-export function getEffectiveStatusLabel(status: CredentialPolicySummary['effective_status']): string {
-	switch (status) {
-		case 'admin_provides':
-			return 'Admin provides this key for all users';
-		case 'needs_admin_key':
-			return 'Set to admin-provided but admin key not configured';
-		case 'user_must_provide':
-			return 'Each user must provide their own key';
-		case 'optional_with_fallback':
-			return 'Users can optionally override admin key';
-		case 'optional_no_fallback':
-			return 'Optional, but no admin fallback configured';
-		default:
-			return status;
-	}
-}
-
-// Get color for effective status
-export function getEffectiveStatusColor(status: CredentialPolicySummary['effective_status']): 'green' | 'yellow' | 'red' | 'blue' | 'gray' {
-	switch (status) {
-		case 'admin_provides':
-			return 'green';
-		case 'needs_admin_key':
-			return 'red';
-		case 'user_must_provide':
-			return 'blue';
-		case 'optional_with_fallback':
-			return 'green';
-		case 'optional_no_fallback':
-			return 'yellow';
-		default:
-			return 'gray';
-	}
-}
-
 // ============================================================================
 // Per-User Credential Policies
 // ============================================================================

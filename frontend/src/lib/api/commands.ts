@@ -38,12 +38,6 @@ export interface ExecuteCommandResponse {
   is_interactive: boolean;
 }
 
-export interface SyncAfterRewindResponse {
-  success: boolean;
-  message: string;
-  deleted_count: number;
-  checkpoint_index?: number;
-}
 
 /**
  * Fetch all available commands
@@ -103,58 +97,4 @@ export async function executeCommand(command: string, sessionId: string): Promis
   }
 
   return response.json();
-}
-
-/**
- * Sync chat after rewind completes
- */
-export async function syncAfterRewind(
-  sessionId: string,
-  checkpointMessage: string,
-  restoreOption: number
-): Promise<SyncAfterRewindResponse> {
-  const params = new URLSearchParams({
-    session_id: sessionId,
-    checkpoint_message: checkpointMessage,
-    restore_option: restoreOption.toString()
-  });
-
-  const response = await fetch(`/api/v1/commands/sync-after-rewind?${params}`, {
-    method: 'POST',
-    credentials: 'include'
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to sync after rewind: ${response.statusText}`);
-  }
-
-  return response.json();
-}
-
-/**
- * Check if input is a slash command
- */
-export function isSlashCommand(input: string): boolean {
-  return input.startsWith('/') && input.length > 1;
-}
-
-/**
- * Parse command input into name and arguments
- */
-export function parseCommandInput(input: string): { name: string; args: string } {
-  if (!isSlashCommand(input)) {
-    return { name: '', args: input };
-  }
-
-  const withoutSlash = input.slice(1);
-  const spaceIndex = withoutSlash.indexOf(' ');
-
-  if (spaceIndex === -1) {
-    return { name: withoutSlash, args: '' };
-  }
-
-  return {
-    name: withoutSlash.slice(0, spaceIndex),
-    args: withoutSlash.slice(spaceIndex + 1)
-  };
 }
