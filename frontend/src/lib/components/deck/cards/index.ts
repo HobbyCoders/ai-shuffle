@@ -20,6 +20,7 @@ export { default as SettingsCard } from './SettingsCard.svelte';
 export { default as UserSettingsCard } from './UserSettingsCard.svelte';
 export { default as CardShuffle } from './CardShuffle.svelte';
 export { default as StackedCardPreview } from './StackedCardPreview.svelte';
+export { default as ConversationCard } from './ConversationCard.svelte';
 
 // Studio Cards
 export { default as ImageStudioCard } from './ImageStudioCard.svelte';
