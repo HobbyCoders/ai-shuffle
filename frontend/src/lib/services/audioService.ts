@@ -345,7 +345,16 @@ export class AudioService {
 	 * Handle speech end - collect audio and notify callback
 	 */
 	private handleSpeechEnd(): void {
-		console.log('[AudioService] Speech ended, duration:', this.vadState.speechDuration, 'ms, chunks:', this.audioChunks.length);
+		const duration = this.vadState.speechDuration;
+		const chunkCount = this.audioChunks.length;
+		console.log('[AudioService] Speech ended, duration:', duration, 'ms, chunks:', chunkCount);
+
+		// IMMEDIATELY reset VAD state to prevent this being called again
+		this.resetVADState();
+
+		// Capture current chunks before they get modified
+		const chunksToSend = [...this.audioChunks];
+		this.audioChunks = [];
 
 		// Request any pending data from the recorder
 		if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
@@ -354,9 +363,15 @@ export class AudioService {
 
 		// Use a small delay to ensure ondataavailable fires with the requested data
 		setTimeout(() => {
+			// Check if more chunks arrived after requestData
 			if (this.audioChunks.length > 0) {
+				chunksToSend.push(...this.audioChunks);
+				this.audioChunks = [];
+			}
+
+			if (chunksToSend.length > 0) {
 				const mimeType = this.mediaRecorder?.mimeType || 'audio/webm';
-				const audioBlob = new Blob(this.audioChunks, { type: mimeType });
+				const audioBlob = new Blob(chunksToSend, { type: mimeType });
 				console.log('[AudioService] Created audio blob:', audioBlob.size, 'bytes, type:', audioBlob.type);
 
 				if (this.onSpeechEnd && audioBlob.size > 0) {
@@ -365,11 +380,7 @@ export class AudioService {
 			} else {
 				console.log('[AudioService] No audio chunks to send');
 			}
-
-			// Reset state and clear chunks for next utterance
-			this.resetVADState();
-			this.audioChunks = [];
-		}, 100);
+		}, 150);
 	}
 
 	/**
