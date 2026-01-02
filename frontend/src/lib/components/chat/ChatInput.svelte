@@ -54,10 +54,6 @@
 		return count.toString();
 	}
 
-	// Get live tab data directly from store to ensure reactivity in mobile context
-	// The prop `tab` may not update properly in mobile snippet rendering
-	const liveTab = $derived($allTabs.find(t => t.id === tab.id) ?? tab);
-
 	// Get current profile to access env vars for auto-compaction reserve calculation
 	const currentProfile = $derived($profiles.find(p => p.id === liveTab.profile));
 
