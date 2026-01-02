@@ -174,8 +174,9 @@ export class AudioService {
 	 * Stop audio capture and cleanup
 	 */
 	stop(): void {
-		if (!this.isCapturing) return;
+		console.log('[AudioService] Stopping audio capture, isCapturing:', this.isCapturing);
 
+		// Set flag first to prevent any async callbacks from restarting things
 		this.isCapturing = false;
 
 		// Stop animation frame
@@ -184,27 +185,47 @@ export class AudioService {
 			this.animationFrameId = null;
 		}
 
-		// Stop MediaRecorder
-		if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
-			this.mediaRecorder.stop();
-		}
-		this.mediaRecorder = null;
+		// Stop TTS playback
+		this.stopTts();
 
-		// Stop media stream tracks
+		// Stop MediaRecorder - clear callbacks first to prevent restart
+		if (this.mediaRecorder) {
+			this.mediaRecorder.ondataavailable = null;
+			this.mediaRecorder.onstop = null;
+			if (this.mediaRecorder.state !== 'inactive') {
+				try {
+					this.mediaRecorder.stop();
+				} catch (e) {
+					// Ignore errors from stopping already stopped recorder
+				}
+			}
+			this.mediaRecorder = null;
+		}
+
+		// Stop media stream tracks - this is what releases the microphone
 		if (this.mediaStream) {
-			this.mediaStream.getTracks().forEach((track) => track.stop());
+			this.mediaStream.getTracks().forEach((track) => {
+				console.log('[AudioService] Stopping track:', track.kind, track.readyState);
+				track.stop();
+			});
 			this.mediaStream = null;
 		}
 
 		// Disconnect audio nodes
 		if (this.sourceNode) {
-			this.sourceNode.disconnect();
+			try {
+				this.sourceNode.disconnect();
+			} catch (e) {
+				// Ignore disconnect errors
+			}
 			this.sourceNode = null;
 		}
 
 		// Close audio context
 		if (this.audioContext) {
-			this.audioContext.close();
+			this.audioContext.close().catch(() => {
+				// Ignore close errors
+			});
 			this.audioContext = null;
 		}
 
@@ -212,7 +233,7 @@ export class AudioService {
 		this.analyserData = null;
 		this.audioChunks = [];
 
-		console.log('[AudioService] Stopped audio capture');
+		console.log('[AudioService] Stopped audio capture completely');
 	}
 
 	/**
@@ -315,11 +336,17 @@ export class AudioService {
 		// Stop any playing TTS (interruption)
 		this.stopTts();
 
-		// Clear and restart recording to capture this utterance fresh
-		this.audioChunks = [];
+		// Restart the MediaRecorder to capture fresh audio from speech start
+		// This ensures we don't include silence/noise from before speech began
 		if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
-			// Request any buffered data, then we'll continue capturing
-			this.mediaRecorder.requestData();
+			// Stop current recorder (discards buffered data)
+			this.mediaRecorder.stop();
+
+			// Clear any existing chunks
+			this.audioChunks = [];
+
+			// Start fresh recording
+			this.mediaRecorder.start(500);
 		}
 	}
 
@@ -329,17 +356,20 @@ export class AudioService {
 	private handleSpeechEnd(): void {
 		console.log('[AudioService] Speech ended, duration:', this.vadState.speechDuration, 'ms');
 
-		// Stop recording to flush remaining data
+		// Stop recording to get final data
 		if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
-			this.mediaRecorder.requestData();
+			// Set up one-time handler for the stop event to capture final data
+			const recorder = this.mediaRecorder;
+			const currentMimeType = recorder.mimeType || 'audio/webm';
 
-			// Small delay to ensure ondataavailable fires
-			setTimeout(() => {
+			recorder.onstop = () => {
+				console.log('[AudioService] Recorder stopped, chunks:', this.audioChunks.length);
+
 				if (this.audioChunks.length > 0) {
-					const mimeType = this.mediaRecorder?.mimeType || 'audio/webm';
-					const audioBlob = new Blob(this.audioChunks, { type: mimeType });
+					const audioBlob = new Blob(this.audioChunks, { type: currentMimeType });
+					console.log('[AudioService] Created audio blob:', audioBlob.size, 'bytes, type:', audioBlob.type);
 
-					if (this.onSpeechEnd) {
+					if (this.onSpeechEnd && audioBlob.size > 0) {
 						this.onSpeechEnd(audioBlob);
 					}
 				}
@@ -349,7 +379,15 @@ export class AudioService {
 
 				// Clear chunks for next utterance
 				this.audioChunks = [];
-			}, 100);
+
+				// Restart recording for next utterance (if still capturing)
+				if (this.isCapturing && this.mediaRecorder) {
+					this.mediaRecorder.start(500);
+				}
+			};
+
+			// Stop triggers ondataavailable with final chunk, then onstop
+			recorder.stop();
 		} else {
 			this.resetVADState();
 		}
