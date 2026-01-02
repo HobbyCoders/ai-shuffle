@@ -136,10 +136,10 @@
 	// ========================================================================
 
 	onMount(async () => {
-		// Initialize with defaults from card meta if available
-		// Only pre-select if explicitly saved in card meta, otherwise leave empty for user to choose
-		selectedProfileId = (card.meta?.profileId as string) ?? '';
-		selectedProjectId = (card.meta?.projectId as string) ?? '';
+		// Initialize with defaults from card data if available
+		// Only pre-select if explicitly saved in card data, otherwise leave empty for user to choose
+		selectedProfileId = (card.data?.profileId as string) ?? '';
+		selectedProjectId = (card.data?.projectId as string) ?? '';
 
 		// Load TTS settings from user preferences
 		await loadTtsSettings();

@@ -14,7 +14,6 @@
 
 	import {
 		MessageSquare,
-		Bot,
 		Terminal,
 		Settings,
 		User,
@@ -54,7 +53,6 @@
 	const cardIcons: Record<CardType, typeof MessageSquare> = {
 		chat: MessageSquare,
 		conversation: Mic,
-		agent: Bot,
 		terminal: Terminal,
 		settings: Settings,
 		profile: User,

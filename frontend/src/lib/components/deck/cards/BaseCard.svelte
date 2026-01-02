@@ -12,7 +12,7 @@
 	 * - Glassmorphism styling
 	 */
 
-	import { MessageSquare, Bot, Terminal, Square, X, Maximize2, Copy, Settings, User, Users, FolderKanban, Puzzle, Image, Box, AudioLines, FolderOpen } from 'lucide-svelte';
+	import { MessageSquare, Mic, Terminal, Square, X, Maximize2, Copy, Settings, User, Users, FolderKanban, Puzzle, Image, Box, AudioLines, FolderOpen } from 'lucide-svelte';
 	import type { DeckCard, CardType } from './types';
 	import type { Snippet } from 'svelte';
 	import { layoutMode } from '$lib/stores/deck';
@@ -64,7 +64,7 @@
 	// Icon mapping
 	const cardIcons: Record<CardType, typeof MessageSquare> = {
 		chat: MessageSquare,
-		agent: Bot,
+		conversation: Mic,
 		terminal: Terminal,
 		settings: Settings,
 		profile: User,
