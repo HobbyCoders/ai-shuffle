@@ -32,7 +32,16 @@
 
 	// Get live tab data directly from store to ensure reactivity in mobile snippet context
 	// The prop `tab` may not update properly when rendered via {@render} inside {#key} blocks
-	const liveTab = $derived($allTabs.find(t => t.id === tab.id) ?? tab);
+	// Use $state + $effect instead of $derived for more explicit reactivity tracking
+	let liveTab = $state<ChatTab>(tab);
+
+	$effect(() => {
+		// Subscribe to allTabs and update liveTab when the store changes
+		const foundTab = $allTabs.find(t => t.id === tab.id);
+		if (foundTab) {
+			liveTab = foundTab;
+		}
+	});
 
 	// Context usage calculation
 	function formatTokenCount(count: number): string {
