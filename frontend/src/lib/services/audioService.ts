@@ -336,61 +336,40 @@ export class AudioService {
 		// Stop any playing TTS (interruption)
 		this.stopTts();
 
-		// Restart the MediaRecorder to capture fresh audio from speech start
-		// This ensures we don't include silence/noise from before speech began
-		if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
-			// Stop current recorder (discards buffered data)
-			this.mediaRecorder.stop();
-
-			// Clear any existing chunks
-			this.audioChunks = [];
-
-			// Start fresh recording
-			this.mediaRecorder.start(500);
-		}
+		// Just clear chunks - we'll use whatever is recorded from now on
+		// Don't restart the recorder as that causes async state issues
+		this.audioChunks = [];
 	}
 
 	/**
 	 * Handle speech end - collect audio and notify callback
 	 */
 	private handleSpeechEnd(): void {
-		console.log('[AudioService] Speech ended, duration:', this.vadState.speechDuration, 'ms');
+		console.log('[AudioService] Speech ended, duration:', this.vadState.speechDuration, 'ms, chunks:', this.audioChunks.length);
 
-		// Stop recording to get final data
+		// Request any pending data from the recorder
 		if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
-			// Set up one-time handler for the stop event to capture final data
-			const recorder = this.mediaRecorder;
-			const currentMimeType = recorder.mimeType || 'audio/webm';
-
-			recorder.onstop = () => {
-				console.log('[AudioService] Recorder stopped, chunks:', this.audioChunks.length);
-
-				if (this.audioChunks.length > 0) {
-					const audioBlob = new Blob(this.audioChunks, { type: currentMimeType });
-					console.log('[AudioService] Created audio blob:', audioBlob.size, 'bytes, type:', audioBlob.type);
-
-					if (this.onSpeechEnd && audioBlob.size > 0) {
-						this.onSpeechEnd(audioBlob);
-					}
-				}
-
-				// Reset state
-				this.resetVADState();
-
-				// Clear chunks for next utterance
-				this.audioChunks = [];
-
-				// Restart recording for next utterance (if still capturing)
-				if (this.isCapturing && this.mediaRecorder) {
-					this.mediaRecorder.start(500);
-				}
-			};
-
-			// Stop triggers ondataavailable with final chunk, then onstop
-			recorder.stop();
-		} else {
-			this.resetVADState();
+			this.mediaRecorder.requestData();
 		}
+
+		// Use a small delay to ensure ondataavailable fires with the requested data
+		setTimeout(() => {
+			if (this.audioChunks.length > 0) {
+				const mimeType = this.mediaRecorder?.mimeType || 'audio/webm';
+				const audioBlob = new Blob(this.audioChunks, { type: mimeType });
+				console.log('[AudioService] Created audio blob:', audioBlob.size, 'bytes, type:', audioBlob.type);
+
+				if (this.onSpeechEnd && audioBlob.size > 0) {
+					this.onSpeechEnd(audioBlob);
+				}
+			} else {
+				console.log('[AudioService] No audio chunks to send');
+			}
+
+			// Reset state and clear chunks for next utterance
+			this.resetVADState();
+			this.audioChunks = [];
+		}, 100);
 	}
 
 	/**

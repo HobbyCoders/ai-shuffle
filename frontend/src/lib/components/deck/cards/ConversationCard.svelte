@@ -262,8 +262,28 @@
 	// ========================================================================
 
 	async function startConversation(): Promise<void> {
-		if (!session) {
+		// Prevent double-clicks while initializing
+		if (isInitializing) {
+			console.log('[ConversationCard] Already initializing, ignoring click');
+			return;
+		}
+
+		// Prevent starting if already started
+		if (audioService) {
+			console.log('[ConversationCard] Already started, ignoring click');
+			return;
+		}
+
+		// Initialize session if needed (check store directly, not derived)
+		const existingSession = conversation.getSession(card.id);
+		if (!existingSession) {
 			await initializeSession();
+			// Verify session was created
+			const newSession = conversation.getSession(card.id);
+			if (!newSession) {
+				console.error('[ConversationCard] Failed to create session');
+				return;
+			}
 		}
 
 		try {
