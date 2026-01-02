@@ -285,9 +285,8 @@
 	/* Hover indicator - bouncing arrow */
 	.menu-indicator {
 		padding: 6px 10px;
-		background: var(--hover-overlay);
-		border: 1px solid var(--border-subtle);
-		border-radius: 12px;
+		background: transparent;
+		border: none;
 		cursor: pointer;
 		opacity: 0.5;
 		transition: opacity 0.3s ease;
@@ -295,8 +294,6 @@
 
 	.menu-indicator:hover {
 		opacity: 0.8;
-		background: var(--active-overlay);
-		border-color: var(--border);
 	}
 
 	.menu-indicator.hidden {
