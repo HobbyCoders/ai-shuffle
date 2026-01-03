@@ -14,7 +14,7 @@
 	import { Mic, MicOff, Square, Volume2, VolumeX, Settings, Loader2, Phone, PhoneOff, MessageSquare } from 'lucide-svelte';
 	import BaseCard from './BaseCard.svelte';
 	import type { DeckCard } from './types';
-	import { conversation, type ConversationStatus, type ConversationTurn } from '$lib/stores/conversation';
+	import { conversation, getSessionStore, type ConversationStatus, type ConversationTurn } from '$lib/stores/conversation';
 	import { profiles, projects, tabs, allTabs, type ChatMessage } from '$lib/stores/tabs';
 	import { AudioService } from '$lib/services/audioService';
 	import { api } from '$lib/api/client';
@@ -37,13 +37,15 @@
 	// State
 	// ========================================================================
 
-	// Session state (reactive from store)
-	let session = $derived(conversation.getSession(card.id));
+	// Session state (reactive from store) - use derived store for proper reactivity
+	const sessionStore = getSessionStore(card.id);
+	let session = $derived($sessionStore);
 
 	// Local UI state
 	let selectedProfileId = $state<string>('');
 	let selectedProjectId = $state<string>('');
 	let audioLevel = $state(0);
+	let isUserSpeaking = $state(false);  // Track when VAD detects user speech
 	let isInitializing = $state(false);
 	let showSettings = $state(false);
 	let transcriptEl: HTMLDivElement | undefined = $state();
@@ -112,7 +114,10 @@
 		switch (status) {
 			case 'idle': return 'Ready';
 			case 'connecting': return 'Connecting...';
-			case 'listening': return isMuted ? 'Muted' : 'Listening...';
+			case 'listening':
+				if (isMuted) return 'Muted';
+				if (isUserSpeaking) return 'You\'re speaking...';
+				return 'Listening...';
 			case 'processing': return 'Processing...';
 			case 'speaking': return 'Speaking...';
 			case 'error': return 'Error';
@@ -300,6 +305,11 @@
 				audioLevel = level;
 			});
 
+			// Track VAD state for UI feedback
+			audioService.onVadStateChange((vadState) => {
+				isUserSpeaking = vadState.isSpeaking;
+			});
+
 			audioService.onSpeechEnded(async (audioBlob) => {
 				await handleSpeechEnd(audioBlob);
 			});
@@ -322,6 +332,7 @@
 		}
 
 		audioLevel = 0;
+		isUserSpeaking = false;
 		conversation.setStatus(card.id, 'idle');
 		console.log('[ConversationCard] Conversation stopped');
 	}
