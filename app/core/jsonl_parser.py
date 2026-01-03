@@ -64,9 +64,17 @@ def get_project_dir_name(working_dir: str) -> str:
 
     Claude converts paths like /workspace/github-projects to -workspace-github-projects
     The leading dash is kept as that's how Claude encodes absolute paths.
+
+    On Windows, backslashes and colons are also replaced with dashes, e.g.:
+    D:\\Development\\ai-shuffle -> D--Development-ai-shuffle
+
+    The colon after drive letter (D:) becomes a dash, and each backslash becomes a dash,
+    resulting in D-- at the start for D:\\ paths.
     """
-    # Replace path separators with dashes (keeps leading dash from absolute path)
-    return working_dir.replace("/", "-")
+    import os
+    # Replace Windows drive colon (D: -> D-), path separators (\, /), all with dashes
+    # Order matters: os.sep first for native, then / for any mixed paths, then : for Windows drives
+    return working_dir.replace(os.sep, "-").replace("/", "-").replace(":", "-")
 
 
 def get_session_jsonl_path(sdk_session_id: str, working_dir: str = "/workspace") -> Optional[Path]:

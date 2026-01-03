@@ -860,6 +860,8 @@ async def import_session(
 
     # Create JSONL file for the session
     try:
+        from app.core.jsonl_parser import get_project_dir_name
+
         # Get Claude projects directory
         claude_projects_dir = settings.get_claude_projects_dir
 
@@ -871,7 +873,7 @@ async def import_session(
                 working_dir = str(settings.workspace_dir / project["path"])
 
         # Convert working dir to Claude's project directory format
-        project_dir_name = working_dir.replace("/", "-")
+        project_dir_name = get_project_dir_name(working_dir)
         project_dir = claude_projects_dir / project_dir_name
 
         # Ensure project directory exists
@@ -1169,11 +1171,13 @@ async def fork_session(
 
     # Create new JSONL file with entries up to and including fork point
     try:
+        from app.core.jsonl_parser import get_project_dir_name
+
         # Get Claude projects directory
         claude_projects_dir = settings.get_claude_projects_dir
 
         # Convert working dir to Claude's project directory format
-        project_dir_name = working_dir.replace("/", "-")
+        project_dir_name = get_project_dir_name(working_dir)
         project_dir = claude_projects_dir / project_dir_name
 
         # Ensure project directory exists
