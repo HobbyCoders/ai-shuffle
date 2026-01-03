@@ -1176,9 +1176,33 @@
 		hasDragged = false;
 	}
 
+	// Check if element or any ancestor is horizontally scrollable
+	function isInScrollableArea(target: EventTarget | null): boolean {
+		let el = target as HTMLElement | null;
+		while (el && el !== carouselRef) {
+			// Check if element has horizontal overflow
+			const style = getComputedStyle(el);
+			const overflowX = style.overflowX;
+			const isScrollable = overflowX === 'auto' || overflowX === 'scroll';
+			// Check if actually scrollable (content wider than container)
+			if (isScrollable && el.scrollWidth > el.clientWidth) {
+				return true;
+			}
+			el = el.parentElement;
+		}
+		return false;
+	}
+
+	let touchStartedInScrollable = $state(false);
+
 	function handleTouchStart(e: TouchEvent) {
 		if (isEditMode) return;
 		if (!carouselRef) return;
+
+		// Check if touch started in a scrollable area (like code diffs)
+		touchStartedInScrollable = isInScrollableArea(e.target);
+		if (touchStartedInScrollable) return;
+
 		isDragging = true;
 		hasDragged = false;
 		startX = e.touches[0].pageX - carouselRef.offsetLeft;
@@ -1186,6 +1210,7 @@
 	}
 
 	function handleTouchMove(e: TouchEvent) {
+		if (touchStartedInScrollable) return;
 		if (!isDragging || !carouselRef || isEditMode) return;
 		const x = e.touches[0].pageX - carouselRef.offsetLeft;
 		const walk = (x - startX) * 1.5;
@@ -1198,6 +1223,7 @@
 	}
 
 	function handleTouchEnd(e: TouchEvent) {
+		touchStartedInScrollable = false;
 		isDragging = false;
 		// Clear long press timer if active
 		if (longPressTimer) {

@@ -220,8 +220,19 @@
 
 	function getToolSummary(toolInput?: Record<string, unknown>): string {
 		if (!toolInput) return '';
-		// Use the description field that tools provide, fallback to path fields
-		return String(toolInput.description || toolInput.file_path || toolInput.path || toolInput.notebook_path || '');
+		// Use the description field that tools provide, fallback to path/pattern fields
+		return String(
+			toolInput.description ||
+			toolInput.file_path ||
+			toolInput.path ||
+			toolInput.notebook_path ||
+			toolInput.pattern ||
+			toolInput.glob ||
+			toolInput.query ||
+			toolInput.command ||
+			toolInput.prompt ||
+			''
+		);
 	}
 
 	// Extract summary from partial JSON during streaming
@@ -231,19 +242,12 @@
 			const parsed = JSON.parse(partial);
 			return getToolSummary(parsed);
 		} catch {
-			// Fallback: extract fields via regex from incomplete JSON
-			const description = extractFieldFromPartial(partial, 'description');
-			if (description) return description;
-
-			const filePath = extractFieldFromPartial(partial, 'file_path');
-			if (filePath) return filePath;
-
-			const path = extractFieldFromPartial(partial, 'path');
-			if (path) return path;
-
-			const notebookPath = extractFieldFromPartial(partial, 'notebook_path');
-			if (notebookPath) return notebookPath;
-
+			// Fallback: extract fields via regex from incomplete JSON (in priority order)
+			const fields = ['description', 'file_path', 'path', 'notebook_path', 'pattern', 'glob', 'query', 'command', 'prompt'];
+			for (const field of fields) {
+				const value = extractFieldFromPartial(partial, field);
+				if (value) return value;
+			}
 			return '';
 		}
 	}
@@ -389,7 +393,7 @@
 				{#if isEditTool}
 					<!-- Side-by-side diff view for Edit tool -->
 					<div class="px-3 py-2">
-						<div class="grid grid-cols-2 gap-2">
+						<div class="grid grid-cols-1 md:grid-cols-2 gap-2">
 							<!-- Old (removed) -->
 							<div class="min-w-0">
 								<div class="text-[10px] text-red-400 mb-1 font-medium flex items-center gap-1">
@@ -450,9 +454,9 @@
 						</div>
 					</div>
 				{:else if isBashTool}
-					<!-- Side-by-side view for Bash tool - command and output -->
+					<!-- Stacked on mobile, side-by-side on desktop for Bash tool -->
 					<div class="px-3 py-2">
-						<div class="grid grid-cols-2 gap-2">
+						<div class="grid grid-cols-1 md:grid-cols-2 gap-2">
 							<!-- Command -->
 							<div class="min-w-0">
 								<div class="text-[10px] text-yellow-500 mb-1 font-medium flex items-center gap-1">
@@ -487,7 +491,7 @@
 					</div>
 				{:else if partialInput || input}
 					<div class="px-3 py-2">
-						<div class="grid grid-cols-2 gap-2">
+						<div class="grid grid-cols-1 md:grid-cols-2 gap-2">
 							<!-- Input -->
 							<div class="min-w-0">
 								<div class="text-[10px] text-muted-foreground mb-1 font-medium">Input</div>
