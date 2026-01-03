@@ -14,11 +14,54 @@
 
 	let { name, input, partialInput, result, status, streaming = false }: Props = $props();
 
-	// Check if this is an Edit tool with old_string/new_string
-	const isEditTool = $derived(name === 'Edit' && input?.old_string !== undefined && input?.new_string !== undefined);
-	const editFilePath = $derived(isEditTool ? String(input?.file_path || '') : '');
-	const oldString = $derived(isEditTool ? String(input?.old_string || '') : '');
-	const newString = $derived(isEditTool ? String(input?.new_string || '') : '');
+	// Extract field from partial JSON string using regex (for streaming)
+	function extractFieldFromPartial(partial: string, fieldName: string): string {
+		// Match "fieldName": "value" patterns, handling escaped quotes
+		const regex = new RegExp(`"${fieldName}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`);
+		const match = partial.match(regex);
+		if (match) {
+			// Unescape the value
+			return match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+		}
+		return '';
+	}
+
+	// Extract Edit tool fields - works with both complete input and streaming partialInput
+	const editFields = $derived.by(() => {
+		if (name !== 'Edit') return { isEdit: false, filePath: '', oldString: '', newString: '' };
+
+		// Try complete input first
+		if (input?.old_string !== undefined && input?.new_string !== undefined) {
+			return {
+				isEdit: true,
+				filePath: String(input.file_path || ''),
+				oldString: String(input.old_string || ''),
+				newString: String(input.new_string || '')
+			};
+		}
+
+		// During streaming, extract from partialInput
+		if (streaming && partialInput) {
+			const oldStr = extractFieldFromPartial(partialInput, 'old_string');
+			const newStr = extractFieldFromPartial(partialInput, 'new_string');
+			// Only show diff if we have at least old_string
+			if (oldStr) {
+				return {
+					isEdit: true,
+					filePath: extractFieldFromPartial(partialInput, 'file_path'),
+					oldString: oldStr,
+					newString: newStr
+				};
+			}
+		}
+
+		return { isEdit: false, filePath: '', oldString: '', newString: '' };
+	});
+
+	const isEditTool = $derived(editFields.isEdit);
+	const editFilePath = $derived(editFields.filePath);
+	const oldString = $derived(editFields.oldString);
+	const newString = $derived(editFields.newString);
 
 	// Simple line-based diff for Edit tool
 	function computeDiff(oldStr: string, newStr: string): Array<{ type: 'context' | 'removed' | 'added'; line: string }> {
@@ -94,19 +137,6 @@
 		if (!toolInput) return '';
 		// Use the description field that tools provide, fallback to path fields
 		return String(toolInput.description || toolInput.file_path || toolInput.path || toolInput.notebook_path || '');
-	}
-
-	// Extract field from partial JSON string using regex (for streaming)
-	function extractFieldFromPartial(partial: string, fieldName: string): string {
-		// Match "fieldName": "value" or "fieldName": 'value' patterns
-		// Handle escaped quotes in the value
-		const regex = new RegExp(`"${fieldName}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`);
-		const match = partial.match(regex);
-		if (match) {
-			// Unescape the value
-			return match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-		}
-		return '';
 	}
 
 	// Extract summary from partial JSON during streaming
