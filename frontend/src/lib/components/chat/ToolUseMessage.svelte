@@ -45,8 +45,7 @@
 	function getToolSummary(toolName: string, toolInput?: Record<string, unknown>): string {
 		if (!toolInput) return '';
 
-		const MAX_LEN = 50;
-		const truncate = (s: string) => s.length > MAX_LEN ? s.slice(0, MAX_LEN) + '…' : s;
+		// No JS truncation - CSS handles responsive truncation via text-overflow: ellipsis
 		const quote = (s: string) => `"${s}"`;
 
 		switch (toolName) {
@@ -57,7 +56,7 @@
 			case 'textTo3D':
 			case 'imageTo3D':
 			case 'retexture3D':
-				return truncate(quote(String(toolInput.prompt || toolInput.style_prompt || '')));
+				return quote(String(toolInput.prompt || toolInput.style_prompt || ''));
 
 			// Video generation - show duration + prompt
 			case 'generateVideo':
@@ -65,57 +64,57 @@
 			case 'bridgeFrames':
 			case 'extendVideo': {
 				const dur = toolInput.duration ? `${toolInput.duration}s: ` : '';
-				return truncate(`${dur}${quote(String(toolInput.prompt || ''))}`);
+				return `${dur}${quote(String(toolInput.prompt || ''))}`;
 			}
 
 			// Video analysis
 			case 'analyzeVideo':
-				return truncate(String(toolInput.video_path || ''));
+				return String(toolInput.video_path || '');
 
 			// 3D rigging/animation
 			case 'rig3D':
 			case 'animate3D':
 			case 'getTask3D':
-				return truncate(String(toolInput.task_id || toolInput.rig_task_id || toolInput.action_id || ''));
+				return String(toolInput.task_id || toolInput.rig_task_id || toolInput.action_id || '');
 
 			// File operations - show path
 			case 'Read':
 			case 'Write':
 			case 'Edit':
 			case 'NotebookEdit':
-				return truncate(String(toolInput.file_path || toolInput.notebook_path || ''));
+				return String(toolInput.file_path || toolInput.notebook_path || '');
 
 			// Glob - show pattern
 			case 'Glob':
-				return truncate(String(toolInput.pattern || ''));
+				return String(toolInput.pattern || '');
 
 			// Grep - show pattern and optional path
 			case 'Grep': {
 				const pattern = quote(String(toolInput.pattern || ''));
 				const path = toolInput.path ? ` in ${toolInput.path}` : '';
-				return truncate(`${pattern}${path}`);
+				return `${pattern}${path}`;
 			}
 
 			// Bash - show command
 			case 'Bash':
-				return truncate(String(toolInput.command || ''));
+				return String(toolInput.command || '');
 
 			// Web fetch - show hostname + path
 			case 'WebFetch':
 				try {
 					const url = new URL(String(toolInput.url || ''));
-					return truncate(url.hostname + url.pathname);
+					return url.hostname + url.pathname;
 				} catch {
-					return truncate(String(toolInput.url || ''));
+					return String(toolInput.url || '');
 				}
 
 			// Web search - show query
 			case 'WebSearch':
-				return truncate(quote(String(toolInput.query || '')));
+				return quote(String(toolInput.query || ''));
 
 			// Task agent - show description
 			case 'Task':
-				return truncate(String(toolInput.description || toolInput.prompt || ''));
+				return String(toolInput.description || toolInput.prompt || '');
 
 			// Todo - show count
 			case 'TodoWrite': {
@@ -132,7 +131,7 @@
 				// Try common field names as fallback
 				for (const key of ['prompt', 'query', 'command', 'file_path', 'path', 'pattern', 'description']) {
 					if (toolInput[key] && typeof toolInput[key] === 'string') {
-						return truncate(String(toolInput[key]));
+						return String(toolInput[key]);
 					}
 				}
 				return '';
