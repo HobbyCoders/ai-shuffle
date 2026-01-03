@@ -63,6 +63,38 @@
 	const oldString = $derived(editFields.oldString);
 	const newString = $derived(editFields.newString);
 
+	// Extract Bash tool fields - works with both complete input and streaming partialInput
+	const bashFields = $derived.by(() => {
+		if (name !== 'Bash') return { isBash: false, command: '', description: '' };
+
+		// Try complete input first
+		if (input?.command !== undefined) {
+			return {
+				isBash: true,
+				command: String(input.command || ''),
+				description: String(input.description || '')
+			};
+		}
+
+		// During streaming, extract from partialInput
+		if (streaming && partialInput) {
+			const cmd = extractFieldFromPartial(partialInput, 'command');
+			if (cmd) {
+				return {
+					isBash: true,
+					command: cmd,
+					description: extractFieldFromPartial(partialInput, 'description')
+				};
+			}
+		}
+
+		return { isBash: false, command: '', description: '' };
+	});
+
+	const isBashTool = $derived(bashFields.isBash);
+	const bashCommand = $derived(bashFields.command);
+	const bashDescription = $derived(bashFields.description);
+
 	// Simple line-based diff for Edit tool
 	function computeDiff(oldStr: string, newStr: string): Array<{ type: 'context' | 'removed' | 'added'; line: string }> {
 		const oldLines = oldStr.split('\n');
@@ -327,6 +359,35 @@
 							</div>
 						</div>
 					</div>
+				{:else if isBashTool}
+					<!-- Terminal-style view for Bash tool -->
+					<div class="px-3 py-2">
+						<!-- Command -->
+						<div class="rounded bg-zinc-900 border border-zinc-700 overflow-hidden">
+							<!-- Terminal header bar -->
+							<div class="flex items-center gap-1.5 px-2 py-1 bg-zinc-800 border-b border-zinc-700">
+								<div class="w-2.5 h-2.5 rounded-full bg-red-500/80"></div>
+								<div class="w-2.5 h-2.5 rounded-full bg-yellow-500/80"></div>
+								<div class="w-2.5 h-2.5 rounded-full bg-green-500/80"></div>
+								{#if bashDescription}
+									<span class="ml-2 text-[10px] text-zinc-400">{bashDescription}</span>
+								{/if}
+							</div>
+							<!-- Command line -->
+							<div class="px-2 py-1.5 max-h-32 overflow-scroll">
+								<div class="flex items-start gap-2">
+									<span class="text-green-400 text-xs font-mono flex-shrink-0">$</span>
+									<pre class="text-xs font-mono text-zinc-100 m-0 w-max whitespace-pre">{bashCommand || ' '}{#if streaming && !result}<span class="inline-block w-1.5 h-3 ml-0.5 bg-green-400 animate-pulse"></span>{/if}</pre>
+								</div>
+							</div>
+						</div>
+						<!-- Output (if complete) -->
+						{#if result}
+							<div class="mt-2 rounded bg-zinc-900 border border-zinc-700 max-h-60 overflow-scroll">
+								<pre class="text-[10px] font-mono px-2 py-1.5 text-zinc-300 m-0 w-max whitespace-pre">{result}</pre>
+							</div>
+						{/if}
+					</div>
 				{:else if partialInput || input}
 					<div class="px-4 py-3 border-b border-border/50">
 						<div class="text-xs text-muted-foreground mb-1 font-medium">Input</div>
@@ -342,7 +403,7 @@
 						{/if}
 					</div>
 				{/if}
-				{#if result && !isEditTool}
+				{#if result && !isEditTool && !isBashTool}
 					<div class="px-4 py-3">
 						<div class="text-xs text-muted-foreground mb-1 font-medium">Result</div>
 						{#if toolResultHasMedia(result)}
