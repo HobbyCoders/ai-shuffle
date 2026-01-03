@@ -97,7 +97,9 @@ export async function deleteUserCredentialPolicy(
 	userId: string,
 	credentialType: string
 ): Promise<{ success: boolean; user_id: string; credential_type: string; deleted: boolean; fallback_policy: CredentialPolicyType; source: string }> {
-	return api.delete<{ success: boolean; user_id: string; credential_type: string; deleted: boolean; fallback_policy: CredentialPolicyType; source: string }>(
+	const result = await api.delete<{ success: boolean; user_id: string; credential_type: string; deleted: boolean; fallback_policy: CredentialPolicyType; source: string }>(
 		`/settings/users/${userId}/credential-policies/${credentialType}`
 	);
+	// API always returns JSON for this endpoint, assert non-void
+	return result as { success: boolean; user_id: string; credential_type: string; deleted: boolean; fallback_policy: CredentialPolicyType; source: string };
 }

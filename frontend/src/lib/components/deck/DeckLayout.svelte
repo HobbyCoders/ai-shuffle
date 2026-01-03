@@ -50,11 +50,11 @@
 
 	const currentModeInfo = $derived(layoutModes.find((m) => m.mode === layoutMode) || layoutModes[0]);
 
+	// Track mobile state (must be declared before use in derived)
+	let isMobile = $state(false);
+
 	// On mobile, hide dealer button when cards are open (user can access via header)
 	const showDealerButton = $derived(!isMobile || !hasOpenCards);
-
-	// Track mobile state
-	let isMobile = $state(false);
 
 	// Hover state for menu reveal
 	let isMenuVisible = $state(false);

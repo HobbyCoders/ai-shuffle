@@ -586,7 +586,7 @@
 	// ============================================
 	// Card Lifecycle Handlers
 	// ============================================
-	function handleCreateCard(type: CardType) {
+	function handleCreateCard(type: CardType | 'recent-sessions') {
 		let deckCardType: DeckCardType;
 		let title: string;
 		let dataId: string | null = null;

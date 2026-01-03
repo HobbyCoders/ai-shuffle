@@ -25,7 +25,7 @@
   let filteredCommands = $state<Command[]>([]);
   let selectedIndex = $state(0);
   let loading = $state(false);
-  let listElement: HTMLUListElement;
+  let listElement = $state<HTMLUListElement | null>(null);
 
   // Fetch commands on mount and when projectId changes
   $effect(() => {

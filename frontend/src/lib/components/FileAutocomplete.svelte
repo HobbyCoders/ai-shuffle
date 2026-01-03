@@ -22,7 +22,7 @@
   let loading = $state(false);
   let currentPath = $state('');
   let lastFetchedPath = $state<string | null>(null);
-  let listElement: HTMLUListElement;
+  let listElement = $state<HTMLUListElement | null>(null);
 
   // Extract the @ query from input - finds the last @ and text after it
   // Supports paths with spaces by capturing everything after @ until end of input

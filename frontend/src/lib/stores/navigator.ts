@@ -615,6 +615,7 @@ function createNavigatorStore() {
 			const freshState: NavigatorState = {
 				cardOrder: [],
 				decks: [],
+				recentSessionsView: 'list',
 				lastModified: Date.now(),
 				editMode: false,
 				initialized: true,
