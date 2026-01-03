@@ -389,27 +389,27 @@
 				{#if isEditTool}
 					<!-- Side-by-side diff view for Edit tool -->
 					<div class="px-3 py-2">
-						<div class="grid grid-cols-2 gap-2 items-stretch">
+						<div class="grid grid-cols-2 gap-2">
 							<!-- Old (removed) -->
-							<div class="min-w-0 flex flex-col">
+							<div class="min-w-0">
 								<div class="text-[10px] text-red-400 mb-1 font-medium flex items-center gap-1">
 									<span>−</span>
 									<span>Removed</span>
 								</div>
-								<div class="rounded border border-red-500/20 bg-red-500/5 flex-1 flex flex-col">
-									<div class="max-h-60 overflow-scroll flex-1">
+								<div class="rounded border border-red-500/20 bg-red-500/5">
+									<div class="max-h-60 overflow-scroll">
 										<pre class="text-[10px] font-mono px-1.5 py-1 text-red-400 m-0 w-max !bg-transparent !p-0 !rounded-none">{oldString || ' '}</pre>
 									</div>
 								</div>
 							</div>
 							<!-- New (added) -->
-							<div class="min-w-0 flex flex-col">
+							<div class="min-w-0">
 								<div class="text-[10px] text-green-400 mb-1 font-medium flex items-center gap-1">
 									<span>+</span>
 									<span>Added</span>
 								</div>
-								<div class="rounded border border-green-500/20 bg-green-500/5 flex-1 flex flex-col">
-									<div class="max-h-60 overflow-scroll flex-1">
+								<div class="rounded border border-green-500/20 bg-green-500/5">
+									<div class="max-h-60 overflow-scroll">
 										<pre class="text-[10px] font-mono px-1.5 py-1 text-green-400 m-0 w-max !bg-transparent !p-0 !rounded-none">{newString || ' '}</pre>
 									</div>
 								</div>
@@ -428,8 +428,8 @@
 							</svg>
 							<span>Content</span>
 						</div>
-						<div class="rounded border border-blue-500/20 bg-blue-500/5 flex-1 flex flex-col">
-							<div class="max-h-60 overflow-scroll flex-1">
+						<div class="rounded border border-blue-500/20 bg-blue-500/5">
+							<div class="max-h-60 overflow-scroll">
 								<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{readContent || (streaming ? '' : 'Loading...')}{#if streaming && !readContent}<span class="inline-block w-1.5 h-3 ml-0.5 bg-blue-400 animate-pulse"></span>{/if}</pre>
 							</div>
 						</div>
@@ -443,8 +443,8 @@
 							</svg>
 							<span>Content</span>
 						</div>
-						<div class="rounded border border-green-500/20 bg-green-500/5 flex-1 flex flex-col">
-							<div class="max-h-60 overflow-scroll flex-1">
+						<div class="rounded border border-green-500/20 bg-green-500/5">
+							<div class="max-h-60 overflow-scroll">
 								<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{writeContent || ' '}{#if streaming && !result}<span class="inline-block w-1.5 h-3 ml-0.5 bg-green-400 animate-pulse"></span>{/if}</pre>
 							</div>
 						</div>
@@ -452,9 +452,9 @@
 				{:else if isBashTool}
 					<!-- Side-by-side view for Bash tool - command and output -->
 					<div class="px-3 py-2">
-						<div class="grid grid-cols-2 gap-2 items-stretch">
+						<div class="grid grid-cols-2 gap-2">
 							<!-- Command -->
-							<div class="min-w-0 flex flex-col">
+							<div class="min-w-0">
 								<div class="text-[10px] text-yellow-500 mb-1 font-medium flex items-center gap-1">
 									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
 										<polyline points="4 17 10 11 4 5"/>
@@ -462,14 +462,14 @@
 									</svg>
 									<span>Command</span>
 								</div>
-								<div class="rounded border border-yellow-500/20 bg-yellow-500/5 flex-1 flex flex-col">
-									<div class="max-h-60 overflow-scroll flex-1">
+								<div class="rounded border border-yellow-500/20 bg-yellow-500/5">
+									<div class="max-h-60 overflow-scroll">
 										<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{bashCommand || ' '}{#if streaming && !result}<span class="inline-block w-1.5 h-3 ml-0.5 bg-yellow-500 animate-pulse"></span>{/if}</pre>
 									</div>
 								</div>
 							</div>
 							<!-- Output -->
-							<div class="min-w-0 flex flex-col">
+							<div class="min-w-0">
 								<div class="text-[10px] text-zinc-400 mb-1 font-medium flex items-center gap-1">
 									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
 										<polyline points="9 10 4 15 9 20"/>
@@ -477,8 +477,8 @@
 									</svg>
 									<span>Output</span>
 								</div>
-								<div class="rounded border border-zinc-500/20 bg-zinc-500/5 flex-1 flex flex-col">
-									<div class="max-h-60 overflow-scroll flex-1">
+								<div class="rounded border border-zinc-500/20 bg-zinc-500/5">
+									<div class="max-h-60 overflow-scroll">
 										<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{result || ' '}</pre>
 									</div>
 								</div>
@@ -487,12 +487,12 @@
 					</div>
 				{:else if partialInput || input}
 					<div class="px-3 py-2">
-						<div class="grid grid-cols-2 gap-2 items-stretch">
+						<div class="grid grid-cols-2 gap-2">
 							<!-- Input -->
-							<div class="min-w-0 flex flex-col">
+							<div class="min-w-0">
 								<div class="text-[10px] text-muted-foreground mb-1 font-medium">Input</div>
-								<div class="rounded border border-zinc-500/20 bg-zinc-500/5 flex-1 flex flex-col">
-									<div class="max-h-60 overflow-scroll flex-1">
+								<div class="rounded border border-zinc-500/20 bg-zinc-500/5">
+									<div class="max-h-60 overflow-scroll">
 										{#if streaming && partialInput}
 											<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{partialInput}<span class="inline-block w-1.5 h-3 ml-0.5 bg-primary animate-pulse"></span></pre>
 										{:else if input && Object.keys(input).length > 0}
@@ -504,10 +504,10 @@
 								</div>
 							</div>
 							<!-- Result -->
-							<div class="min-w-0 flex flex-col">
+							<div class="min-w-0">
 								<div class="text-[10px] text-muted-foreground mb-1 font-medium">Result</div>
-								<div class="rounded border border-zinc-500/20 bg-zinc-500/5 flex-1 flex flex-col">
-									<div class="max-h-60 overflow-scroll flex-1">
+								<div class="rounded border border-zinc-500/20 bg-zinc-500/5">
+									<div class="max-h-60 overflow-scroll">
 										{#if result}
 											{#if toolResultHasMedia(result)}
 												<span class="text-[10px] text-green-500 px-1.5 py-1">✓ {toolResultHasVideo(result) ? 'Video' : 'Image'} generated</span>
