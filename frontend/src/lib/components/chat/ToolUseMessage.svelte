@@ -396,8 +396,10 @@
 									<span>−</span>
 									<span>Removed</span>
 								</div>
-								<div class="rounded border border-red-500/20 bg-red-500/5 max-h-60 overflow-scroll flex-1">
-									<pre class="text-[10px] font-mono px-1.5 py-1 text-red-400 m-0 w-max">{oldString || ' '}</pre>
+								<div class="rounded border border-red-500/20 bg-red-500/5 flex-1 flex flex-col">
+									<div class="max-h-60 overflow-scroll flex-1">
+										<pre class="text-[10px] font-mono px-1.5 py-1 text-red-400 m-0 w-max">{oldString || ' '}</pre>
+									</div>
 								</div>
 							</div>
 							<!-- New (added) -->
@@ -406,8 +408,10 @@
 									<span>+</span>
 									<span>Added</span>
 								</div>
-								<div class="rounded border border-green-500/20 bg-green-500/5 max-h-60 overflow-scroll flex-1">
-									<pre class="text-[10px] font-mono px-1.5 py-1 text-green-400 m-0 w-max">{newString || ' '}</pre>
+								<div class="rounded border border-green-500/20 bg-green-500/5 flex-1 flex flex-col">
+									<div class="max-h-60 overflow-scroll flex-1">
+										<pre class="text-[10px] font-mono px-1.5 py-1 text-green-400 m-0 w-max">{newString || ' '}</pre>
+									</div>
 								</div>
 							</div>
 						</div>
@@ -424,8 +428,10 @@
 							</svg>
 							<span>Content</span>
 						</div>
-						<div class="rounded border border-blue-500/20 bg-blue-500/5 max-h-60 overflow-scroll">
-							<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max">{readContent || (streaming ? '' : 'Loading...')}{#if streaming && !readContent}<span class="inline-block w-1.5 h-3 ml-0.5 bg-blue-400 animate-pulse"></span>{/if}</pre>
+						<div class="rounded border border-blue-500/20 bg-blue-500/5 flex-1 flex flex-col">
+							<div class="max-h-60 overflow-scroll flex-1">
+								<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max">{readContent || (streaming ? '' : 'Loading...')}{#if streaming && !readContent}<span class="inline-block w-1.5 h-3 ml-0.5 bg-blue-400 animate-pulse"></span>{/if}</pre>
+							</div>
 						</div>
 					</div>
 				{:else if isWriteTool}
@@ -437,8 +443,10 @@
 							</svg>
 							<span>Content</span>
 						</div>
-						<div class="rounded border border-green-500/20 bg-green-500/5 max-h-60 overflow-scroll">
-							<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max">{writeContent || ' '}{#if streaming && !result}<span class="inline-block w-1.5 h-3 ml-0.5 bg-green-400 animate-pulse"></span>{/if}</pre>
+						<div class="rounded border border-green-500/20 bg-green-500/5 flex-1 flex flex-col">
+							<div class="max-h-60 overflow-scroll flex-1">
+								<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max">{writeContent || ' '}{#if streaming && !result}<span class="inline-block w-1.5 h-3 ml-0.5 bg-green-400 animate-pulse"></span>{/if}</pre>
+							</div>
 						</div>
 					</div>
 				{:else if isBashTool}
@@ -454,8 +462,10 @@
 									</svg>
 									<span>Command</span>
 								</div>
-								<div class="rounded border border-yellow-500/20 bg-yellow-500/5 max-h-60 overflow-scroll flex-1">
-									<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max">{bashCommand || ' '}{#if streaming && !result}<span class="inline-block w-1.5 h-3 ml-0.5 bg-yellow-500 animate-pulse"></span>{/if}</pre>
+								<div class="rounded border border-yellow-500/20 bg-yellow-500/5 flex-1 flex flex-col">
+									<div class="max-h-60 overflow-scroll flex-1">
+										<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max">{bashCommand || ' '}{#if streaming && !result}<span class="inline-block w-1.5 h-3 ml-0.5 bg-yellow-500 animate-pulse"></span>{/if}</pre>
+									</div>
 								</div>
 							</div>
 							<!-- Output -->
@@ -467,8 +477,10 @@
 									</svg>
 									<span>Output</span>
 								</div>
-								<div class="rounded border border-border bg-muted/30 max-h-60 overflow-scroll flex-1">
-									<pre class="text-[10px] font-mono px-1.5 py-1 text-muted-foreground m-0 w-max">{result || ' '}</pre>
+								<div class="rounded border border-border bg-muted/30 flex-1 flex flex-col">
+									<div class="max-h-60 overflow-scroll flex-1">
+										<pre class="text-[10px] font-mono px-1.5 py-1 text-muted-foreground m-0 w-max">{result || ' '}</pre>
+									</div>
 								</div>
 							</div>
 						</div>
