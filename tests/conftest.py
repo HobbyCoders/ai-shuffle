@@ -106,6 +106,42 @@ def create_test_schema(cursor: sqlite3.Cursor):
         )
     """)
 
+    # Git repositories
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS git_repositories (
+            id TEXT PRIMARY KEY,
+            project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            path TEXT NOT NULL,
+            remote_url TEXT,
+            default_branch TEXT DEFAULT 'main',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Worktrees (for parallel session work on branches)
+    # Note: session_id is deprecated - relationship is now tracked via sessions.worktree_id
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS worktrees (
+            id TEXT PRIMARY KEY,
+            repository_id TEXT NOT NULL,
+            session_id TEXT,
+            branch_name TEXT NOT NULL,
+            worktree_path TEXT NOT NULL,
+            base_branch TEXT,
+            status TEXT DEFAULT 'active',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (repository_id) REFERENCES git_repositories(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Worktree indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_repository ON worktrees(repository_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_session ON worktrees(session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_branch ON worktrees(branch_name)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_status ON worktrees(status)")
+
     # Sessions
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
@@ -113,26 +149,10 @@ def create_test_schema(cursor: sqlite3.Cursor):
             title TEXT,
             profile_id TEXT REFERENCES agent_profiles(id) ON DELETE SET NULL,
             project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
-            worktree_id TEXT,
+            worktree_id TEXT REFERENCES worktrees(id) ON DELETE SET NULL,
             status TEXT DEFAULT 'active',
             is_pinned INTEGER DEFAULT 0,
             metadata TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Worktrees
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS worktrees (
-            id TEXT PRIMARY KEY,
-            session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            branch_name TEXT NOT NULL,
-            path TEXT NOT NULL,
-            status TEXT DEFAULT 'active',
-            base_branch TEXT DEFAULT 'main',
-            auto_created INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
