@@ -470,16 +470,16 @@
 							</div>
 							<!-- Output -->
 							<div class="min-w-0 flex flex-col">
-								<div class="text-[10px] text-muted-foreground mb-1 font-medium flex items-center gap-1">
+								<div class="text-[10px] text-zinc-400 mb-1 font-medium flex items-center gap-1">
 									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
 										<polyline points="9 10 4 15 9 20"/>
 										<path d="M20 4v7a4 4 0 0 1-4 4H4"/>
 									</svg>
 									<span>Output</span>
 								</div>
-								<div class="rounded border border-border bg-muted/30 flex-1 flex flex-col">
+								<div class="rounded border border-zinc-500/20 bg-zinc-500/5 flex-1 flex flex-col">
 									<div class="max-h-60 overflow-scroll flex-1">
-										<pre class="text-[10px] font-mono px-1.5 py-1 text-muted-foreground m-0 w-max">{result || ' '}</pre>
+										<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max">{result || ' '}</pre>
 									</div>
 								</div>
 							</div>
