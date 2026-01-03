@@ -508,6 +508,66 @@ async def delete_file_or_folder(
 
 
 # ============================================================================
+# Chat History References
+# ============================================================================
+
+class ChatHistoryItem(BaseModel):
+    """A chat history session available for reference"""
+    name: str
+    type: str  # Always "chat_history"
+    path: str
+    sdk_session_id: str
+    title: str | None
+    preview: str | None
+    message_count: int
+    modified_at: str
+    size_bytes: int
+
+
+class ChatHistoryResponse(BaseModel):
+    """Response containing list of chat history sessions"""
+    sessions: List[ChatHistoryItem]
+
+
+@router.get("/{project_id}/chat-history", response_model=ChatHistoryResponse)
+async def list_chat_history(
+    request: Request,
+    project_id: str,
+    search: str = Query("", description="Search query for filtering sessions"),
+    limit: int = Query(50, ge=1, le=100, description="Maximum sessions to return"),
+    token: str = Depends(require_auth)
+):
+    """
+    List chat history sessions available for referencing in the @ mention UI.
+
+    Returns sessions from the Claude SDK's JSONL history files for this project.
+    These can be referenced as context in new chat sessions.
+    """
+    from app.core.jsonl_parser import list_chat_history_sessions
+
+    check_project_access(request, project_id)
+
+    project = database.get_project(project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {project_id}"
+        )
+
+    # Get the project's working directory
+    working_dir = str(settings.workspace_dir / project["path"])
+
+    # List chat history sessions
+    sessions = list_chat_history_sessions(
+        working_dir=working_dir,
+        search=search,
+        limit=limit
+    )
+
+    return ChatHistoryResponse(sessions=[ChatHistoryItem(**s) for s in sessions])
+
+
+# ============================================================================
 # Git/Worktree Sync
 # ============================================================================
 

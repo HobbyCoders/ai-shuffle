@@ -371,6 +371,21 @@ To make any workspace file downloadable, use this markdown format:
 ```
 
 Provide download links when you create standalone files the user might want (documents, exports, scripts, etc.).
+
+---
+
+## Chat History References
+
+When the user references a chat history file (`.jsonl` file from `~/.claude/projects/`):
+
+1. **Purpose**: This is a previous conversation provided as context - NOT a file to edit
+2. **Efficient reading**: Scan for relevant context rather than reading every message in full. The JSONL format contains one message per line with `type`, `message`, and `timestamp` fields
+3. **Focus on**: Key decisions made, code discussed, problems solved, user preferences expressed
+4. **Don't**: Read the entire file message-by-message unless specifically asked to summarize the whole conversation
+5. **Summarize**: Tell the user what relevant context you found from the referenced conversation
+6. **Format**: Messages alternate between `"type":"user"` and `"type":"assistant"`. Tool uses are embedded in assistant messages, tool results follow in subsequent user messages.
+
+This helps the model understand past context without overwhelming the current conversation.
 """
 
 
