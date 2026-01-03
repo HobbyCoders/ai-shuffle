@@ -277,14 +277,14 @@
 						title={getToolSummary(name, input)}
 					>{summary}</span>
 				{/if}
-				<!-- Status badge for running/error states -->
+				<!-- Status badge for running/error states (inline after summary) -->
 				{#if status === 'running' || streaming}
-					<span class="text-primary text-xs flex-shrink-0 ml-auto">(running)</span>
+					<span class="text-primary text-xs flex-shrink-0">(running)</span>
 				{:else if status === 'error'}
-					<span class="text-red-500 text-xs flex-shrink-0 ml-auto">(error)</span>
+					<span class="text-red-500 text-xs flex-shrink-0">(error)</span>
 				{/if}
 				<!-- Chevron -->
-				<svg class="w-4 h-4 text-muted-foreground transition-transform group-open:rotate-180 flex-shrink-0 {status !== 'running' && status !== 'error' && !streaming ? 'ml-auto' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+				<svg class="w-4 h-4 text-muted-foreground transition-transform group-open:rotate-180 flex-shrink-0 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 				</svg>
 			</summary>
