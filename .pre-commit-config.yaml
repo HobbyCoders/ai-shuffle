@@ -1,0 +1,53 @@
+# Pre-commit hooks for AI Shuffle
+# Install: pip install pre-commit && pre-commit install
+
+repos:
+  # ==========================================================================
+  # Python - Ruff (Fast linting and formatting)
+  # ==========================================================================
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.1.6
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+        files: ^(app|tests)/.*\.py$
+
+      - id: ruff-format
+        files: ^(app|tests)/.*\.py$
+
+  # ==========================================================================
+  # General file checks
+  # ==========================================================================
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^(frontend/|tools/)
+      - id: end-of-file-fixer
+        exclude: ^(frontend/|tools/)
+      - id: check-yaml
+        args: [--unsafe]
+      - id: check-json
+        exclude: ^(frontend/|tools/)
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  # ==========================================================================
+  # Security checks
+  # ==========================================================================
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.4.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        exclude: \.lock$|package-lock\.json$
+
+# CI configuration
+ci:
+  autofix_commit_msg: |
+    [pre-commit.ci] auto fixes from pre-commit hooks
+  autofix_prs: false
+  autoupdate_commit_msg: '[pre-commit.ci] pre-commit autoupdate'
+  autoupdate_schedule: weekly
