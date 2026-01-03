@@ -44,8 +44,8 @@
 
 	function getToolSummary(toolInput?: Record<string, unknown>): string {
 		if (!toolInput) return '';
-		// Use the description field that tools provide
-		return String(toolInput.description || '');
+		// Use the description field that tools provide, fallback to path fields
+		return String(toolInput.description || toolInput.file_path || toolInput.path || toolInput.notebook_path || '');
 	}
 
 	// Compute summary - use input if available, try parsing partialInput during streaming
