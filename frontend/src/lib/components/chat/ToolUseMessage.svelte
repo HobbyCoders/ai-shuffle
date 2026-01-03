@@ -281,8 +281,8 @@
 									<span>−</span>
 									<span>Removed</span>
 								</div>
-								<div class="rounded border border-red-500/20 bg-red-500/5 overflow-hidden max-h-48 overflow-auto">
-									<pre class="text-[10px] font-mono px-1.5 py-1 text-red-400 m-0">{oldString || ' '}</pre>
+								<div class="rounded border border-red-500/20 bg-red-500/5 max-h-60 overflow-scroll">
+									<pre class="text-[10px] font-mono px-1.5 py-1 text-red-400 m-0 w-max">{oldString || ' '}</pre>
 								</div>
 							</div>
 							<!-- New (added) -->
@@ -291,8 +291,8 @@
 									<span>+</span>
 									<span>Added</span>
 								</div>
-								<div class="rounded border border-green-500/20 bg-green-500/5 overflow-hidden max-h-48 overflow-auto">
-									<pre class="text-[10px] font-mono px-1.5 py-1 text-green-400 m-0">{newString || ' '}</pre>
+								<div class="rounded border border-green-500/20 bg-green-500/5 max-h-60 overflow-scroll">
+									<pre class="text-[10px] font-mono px-1.5 py-1 text-green-400 m-0 w-max">{newString || ' '}</pre>
 								</div>
 							</div>
 						</div>
