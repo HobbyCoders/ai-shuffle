@@ -7,7 +7,6 @@ through the gh CLI.
 
 import logging
 from typing import Optional, List, Dict, Any
-from dataclasses import asdict
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 from pydantic import BaseModel, Field

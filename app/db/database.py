@@ -6,7 +6,6 @@ import sqlite3
 import json
 import logging
 from datetime import datetime
-from pathlib import Path
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 

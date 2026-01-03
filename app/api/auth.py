@@ -8,18 +8,17 @@ import secrets
 import subprocess
 import logging
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Response, Request, Depends, status
 
 from app.core.models import (
-    SetupRequest, LoginRequest, AuthStatus, HealthResponse, ApiKeyLoginRequest,
+    SetupRequest, LoginRequest, ApiKeyLoginRequest,
     ApiUserRegisterRequest, ApiUserLoginRequest, ChangePasswordRequest,
     TwoFactorLoginRequest
 )
 import bcrypt
-import json
 from app.core.auth import auth_service
 from app.core.config import settings
 from app.core import encryption

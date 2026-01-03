@@ -284,7 +284,6 @@ async def auth_diagnostics():
             diagnostics["config_files"] = [f.name for f in config_dir.iterdir()]
 
             # Check permissions
-            import stat
             st = config_dir.stat()
             diagnostics["config_dir_permissions"] = oct(st.st_mode)[-3:]
             diagnostics["config_dir_owner_uid"] = st.st_uid

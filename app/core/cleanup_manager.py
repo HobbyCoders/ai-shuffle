@@ -7,13 +7,11 @@ Handles:
 - Sleep mode to reduce resource usage when idle
 """
 
-import asyncio
 import logging
-import os
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Dict, List, Any, Set
+from typing import Optional, Dict, List, Any
 from dataclasses import dataclass, field
 
 from app.db import database

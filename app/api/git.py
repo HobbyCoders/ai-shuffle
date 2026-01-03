@@ -11,7 +11,7 @@ Provides endpoints for git repository operations including:
 
 import uuid
 import logging
-from typing import List, Optional, Any
+from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 from pydantic import BaseModel, Field

@@ -8,7 +8,7 @@ import logging
 import re
 import uuid
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple
 
 from app.db import database
 

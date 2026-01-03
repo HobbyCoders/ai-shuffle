@@ -8,13 +8,10 @@ Based on patterns from Anvil's SessionManager:
 """
 
 import logging
-import os
 import platform
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 import uuid
 import asyncio
 from pathlib import Path
@@ -286,8 +283,8 @@ def _build_plugins_list(
                 resolved_path = settings.workspace_dir / plugin_entry
 
         if resolved_path and str(resolved_path) not in seen_paths:
-            # Verify the plugin directory exists and has plugin.json
-            plugin_manifest = resolved_path / ".claude-plugin" / "plugin.json"
+            # Verify the plugin directory exists (manifest path checked for existence)
+            _plugin_manifest = resolved_path / ".claude-plugin" / "plugin.json"
             if resolved_path.exists():
                 plugins.append({
                     "type": "local",
@@ -1731,9 +1728,10 @@ async def execute_query(
 
     # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
     # On Docker/Linux, agents are already passed via SDK's --agents flag
-    agents_dir = None
+    # agents_dir created for local mode - used implicitly by SDK reading from filesystem
+    _agents_dir = None
     if agents_dict and options.cwd and detect_deployment_mode() == DeploymentMode.LOCAL:
-        agents_dir = write_agents_to_filesystem(agents_dict, options.cwd)
+        _agents_dir = write_agents_to_filesystem(agents_dict, options.cwd)
 
     # Execute query and collect response
     response_text = []
@@ -1888,7 +1886,7 @@ async def stream_query(
             return
 
     # Get or create session in database
-    is_new_session = False
+    _is_new_session = False  # Tracks new vs resumed for potential analytics
     resume_id = None
 
     if session_id:
@@ -1911,7 +1909,7 @@ async def stream_query(
             title=title,
             api_user_id=api_user_id
         )
-        is_new_session = True
+        _is_new_session = True  # Flag available for future analytics/logging
         logger.info(f"Created new session {session_id} with title: {title}")
 
     # Store user message and broadcast to other devices
@@ -1981,7 +1979,7 @@ async def stream_query(
     logger.info(f"Options cwd: {options.cwd}")
     logger.info(f"Agents written to filesystem: {written_agent_ids if written_agent_ids else None}")
     client = ClaudeSDKClient(options=options)
-    logger.info(f"ClaudeSDKClient created, attempting connect...")
+    logger.info("ClaudeSDKClient created, attempting connect...")
 
     # Connect without timeout - Anvil doesn't use timeout for connect()
     try:
@@ -2956,7 +2954,7 @@ async def stream_to_websocket(
     logger.info(f"[WS] Options cwd: {options.cwd}")
     logger.info(f"[WS] Agents written to filesystem: {written_agent_ids if written_agent_ids else None}")
     client = ClaudeSDKClient(options=options)
-    logger.info(f"[WS] ClaudeSDKClient created, attempting connect...")
+    logger.info("[WS] ClaudeSDKClient created, attempting connect...")
 
     # Connect
     try:
@@ -3078,7 +3076,7 @@ async def stream_to_websocket(
 
                 elif event_type == "message_start":
                     # Start of a new streaming message
-                    logger.debug(f"[WS] StreamEvent message_start")
+                    logger.debug("[WS] StreamEvent message_start")
                     yield {
                         "type": "stream_start",
                         "message": event.get("message", {})

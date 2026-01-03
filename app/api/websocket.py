@@ -11,25 +11,17 @@ Additional endpoints:
 """
 
 import logging
-import json
 import asyncio
 import uuid
 from typing import Optional, Dict, Any
-from datetime import datetime
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, HTTPException, status
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from fastapi.websockets import WebSocketState
 
-from app.core.sync_engine import sync_engine, SyncEvent
+from app.core.sync_engine import sync_engine
 from app.db import database
-from app.core.auth import auth_service
 from app.core.webhook_service import dispatch_session_complete, dispatch_session_error
-from app.core.profiles import get_profile
-from app.core.cli_bridge import CLIBridge, RewindParser, is_pty_available
-from app.core.slash_commands import (
-    discover_commands, get_command_by_name, is_slash_command,
-    parse_command_input, is_interactive_command, get_all_commands
-)
+from app.core.cli_bridge import CLIBridge, RewindParser
 from app.core.permission_handler import permission_handler
 from app.core.user_question_handler import user_question_handler
 
@@ -957,7 +949,7 @@ async def chat_websocket(
             # The query will complete naturally and broadcast stream_end to all devices.
             # If the user wants to stop the query, they should use the "stop" message explicitly.
             if query_task and not query_task.done():
-                logger.info(f"WebSocket closed but query task still running for session - letting it continue for other devices")
+                logger.info("WebSocket closed but query task still running for session - letting it continue for other devices")
 
             # Unregister device from sync engine, but only if still using this websocket
             # This prevents race conditions where a new connection was established

@@ -17,11 +17,7 @@ from pydantic import BaseModel, Field
 
 from app.api.auth import require_auth, require_admin
 from app.core.plugin_service import (
-    get_plugin_service,
-    MarketplaceInfo,
-    PluginInfo,
-    PluginDetails,
-    AvailablePlugin
+    get_plugin_service
 )
 
 router = APIRouter(prefix="/api/v1/plugins", tags=["Plugins"])

@@ -21,7 +21,7 @@ from fastapi import APIRouter, HTTPException, Depends, status, Query, UploadFile
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
-from app.api.auth import require_auth, require_admin
+from app.api.auth import require_auth
 from app.db import database
 from app.core import encryption
 
@@ -1271,7 +1271,8 @@ console.log(JSON.stringify(result));
 """
 
     # Set up environment with audio output directory
-    env_override = {
+    # Note: env_override prepared for future use when execute_ai_tool supports it
+    _env_override = {
         "GENERATED_AUDIO_DIR": str(get_audio_dir()),
     }
 
@@ -1297,7 +1298,8 @@ console.log(JSON.stringify(result));
     # Get file info
     file_path_obj = Path(file_path)
     filename = file_path_obj.name
-    file_size = file_path_obj.stat().st_size if file_path_obj.exists() else 0
+    # file_size available if needed for response metadata
+    _file_size = file_path_obj.stat().st_size if file_path_obj.exists() else 0
 
     # Determine mime type
     ext = file_path_obj.suffix.lower().lstrip(".")

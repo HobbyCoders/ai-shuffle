@@ -9,16 +9,14 @@ This provides a unified interface for the rewind feature, managing both
 conversation context and file changes.
 """
 
-import json
 import logging
 import subprocess
 import os
-from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
 
-from app.core.jsonl_rewind import jsonl_rewind_service, Checkpoint, RewindResult
+from app.core.jsonl_rewind import jsonl_rewind_service
 from app.core.config import settings
 from app.db import database
 
@@ -703,7 +701,8 @@ class CheckpointManager:
         for cp in chat_checkpoints:
             # Look up stored checkpoint for git_ref
             stored = stored_by_uuid.get(cp.uuid)
-            git_ref = stored.get('git_ref') if stored else None
+            # git_ref available for debugging/logging if needed
+            _git_ref = stored.get('git_ref') if stored else None
             cp_index = cp.index
 
             # Determine the git_ref to restore to for this checkpoint

@@ -3,7 +3,6 @@ AI Hub - Claude Code Web Interface and API
 Main FastAPI application entry point
 """
 
-import os
 import asyncio
 import logging
 from pathlib import Path

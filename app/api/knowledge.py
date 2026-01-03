@@ -4,7 +4,7 @@ Knowledge Base API routes
 Per-project knowledge base management for RAG context injection.
 """
 
-from typing import List, Optional
+from typing import List
 
 from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File, Query, Request
 
@@ -16,7 +16,7 @@ from app.core.models import (
 )
 from app.core import knowledge_service
 from app.db import database
-from app.api.auth import require_auth, require_admin, get_api_user_from_request
+from app.api.auth import require_auth, get_api_user_from_request
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}/knowledge", tags=["Knowledge Base"])
 
@@ -119,7 +119,7 @@ async def upload_document(
     if len(content) > max_size:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"File too large. Maximum size is 5MB"
+            detail="File too large. Maximum size is 5MB"
         )
 
     try:

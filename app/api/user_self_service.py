@@ -6,7 +6,7 @@ import logging
 import httpx
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.db import database
@@ -134,7 +134,7 @@ def get_decrypted_user_credential(api_user_id: str, credential_type: str) -> Opt
 
     if encryption.is_encrypted(encrypted_value):
         if not encryption.is_encryption_ready():
-            logger.warning(f"Cannot decrypt user credential - encryption key not loaded")
+            logger.warning("Cannot decrypt user credential - encryption key not loaded")
             return None
         try:
             return encryption.decrypt_value(encrypted_value)

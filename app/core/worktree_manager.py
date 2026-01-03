@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict, Any, List
 
 from app.core.config import settings
-from app.core.git_service import GitService, git_service
+from app.core.git_service import git_service
 from app.db import database
 from app.db.database import WorktreeStatus
 

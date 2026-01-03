@@ -13,15 +13,15 @@ This is bulletproof - no terminal parsing, no race conditions.
 
 import logging
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from app.db import database
 from app.core.config import settings
 from app.core.slash_commands import (
-    discover_commands, get_command_by_name, get_all_commands,
+    get_command_by_name, get_all_commands,
     is_interactive_command, is_rest_api_command, get_rest_api_command_info,
-    parse_command_input, SlashCommand
+    parse_command_input
 )
 # New V2 rewind services - direct JSONL manipulation
 from app.core.jsonl_rewind import jsonl_rewind_service
@@ -29,7 +29,7 @@ from app.core.checkpoint_manager import checkpoint_manager
 from app.core.sync_engine import sync_engine
 from app.core.models import (
     RewindRequest, RewindCheckpoint, RewindCheckpointsResponse,
-    RewindExecuteResponse, RewindStatus
+    RewindExecuteResponse
 )
 
 logger = logging.getLogger(__name__)

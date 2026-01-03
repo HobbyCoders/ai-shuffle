@@ -210,7 +210,7 @@ class DirectOAuth:
                     try:
                         error_json = response.json()
                         error_msg = error_json.get("error_description") or error_json.get("error") or error_text
-                    except:
+                    except (ValueError, KeyError):
                         error_msg = error_text
 
                     return None, f"Token exchange failed: {error_msg}"

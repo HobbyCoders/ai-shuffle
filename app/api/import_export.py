@@ -11,7 +11,6 @@ from datetime import datetime
 import json
 
 from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.db import database

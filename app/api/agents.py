@@ -14,9 +14,9 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Qu
 from fastapi.websockets import WebSocketState
 from pydantic import BaseModel, Field
 
-from app.api.auth import require_auth, require_admin
+from app.api.auth import require_auth
 from app.db import database
-from app.core.agent_engine import agent_engine, AgentStatus, TaskStatus
+from app.core.agent_engine import agent_engine, AgentStatus
 
 logger = logging.getLogger(__name__)
 

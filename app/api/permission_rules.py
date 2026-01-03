@@ -6,13 +6,12 @@ Rules can be profile-level (persist across sessions) or session-level (in-memory
 """
 
 from typing import List, Optional
-from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Depends, status
 from pydantic import BaseModel, Field
 
 from app.db import database
-from app.api.auth import require_auth, require_admin
+from app.api.auth import require_admin
 
 router = APIRouter(prefix="/api/v1/permission-rules", tags=["Permission Rules"])
 

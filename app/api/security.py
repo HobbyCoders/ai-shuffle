@@ -3,7 +3,6 @@ Security API routes for 2FA and audit logging
 """
 
 import json
-import secrets
 import logging
 from typing import Optional
 
@@ -21,7 +20,7 @@ from app.core.models import (
 from app.core import totp_service
 from app.core import audit_service
 from app.core.auth import auth_service
-from app.api.auth import require_admin, get_client_ip
+from app.api.auth import require_admin
 from app.db import database as db
 
 logger = logging.getLogger(__name__)

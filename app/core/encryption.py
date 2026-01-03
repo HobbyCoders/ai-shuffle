@@ -8,11 +8,10 @@ Alternatively, set ADMIN_PASSWORD env var to auto-derive the key on startup.
 """
 
 import base64
-import hashlib
 import os
 import secrets
 import logging
-from typing import Optional, Tuple
+from typing import Optional
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC

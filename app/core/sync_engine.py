@@ -7,11 +7,9 @@ watching the same session.
 
 import asyncio
 import logging
-import json
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Set, Callable, Any
-from weakref import WeakSet
+from typing import Dict, List, Optional, Set, Any
 
 from fastapi import WebSocket
 

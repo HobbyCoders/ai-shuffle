@@ -14,6 +14,8 @@ from pydantic import BaseModel
 from app.db import database
 from app.api.auth import require_admin, require_auth
 from app.core import encryption
+from app.core.ai_tools import AI_TOOLS
+from app.core.cleanup_manager import cleanup_manager
 
 logger = logging.getLogger(__name__)
 
@@ -718,7 +720,7 @@ async def transcribe_audio(
             }
 
             response = None
-            last_error = None
+            _last_error = None  # Tracks error type for potential logging
 
             for attempt in range(max_retries):
                 # Need to recreate BytesIO for each attempt since it gets consumed
@@ -732,7 +734,7 @@ async def transcribe_audio(
 
                 if response.status_code == 429:
                     # Rate limited - wait and retry
-                    last_error = "rate_limit"
+                    _last_error = "rate_limit"  # Tracked for potential logging/metrics
                     if attempt < max_retries - 1:
                         # Try to get retry-after header, otherwise use exponential backoff
                         retry_after = response.headers.get("retry-after")
@@ -811,8 +813,9 @@ async def get_image_models(token: str = Depends(require_auth)):
     # Get current settings
     current_provider = database.get_system_setting("image_provider")
     current_model = database.get_system_setting("image_model")
-    openai_key = get_decrypted_api_key("openai_api_key")
-    image_api_key = get_decrypted_api_key("image_api_key")
+    # API keys retrieved for availability checking in model iteration below
+    _openai_key = get_decrypted_api_key("openai_api_key")
+    _image_api_key = get_decrypted_api_key("image_api_key")
 
     # Build models list with availability info
     models = []
@@ -1291,8 +1294,9 @@ async def get_video_models(token: str = Depends(require_auth)):
     # Get current settings
     current_provider = database.get_system_setting("video_provider")
     current_model = database.get_system_setting("video_model")
-    openai_key = get_decrypted_api_key("openai_api_key")
-    image_api_key = get_decrypted_api_key("image_api_key")
+    # API keys retrieved for availability checking in model iteration below
+    _openai_key = get_decrypted_api_key("openai_api_key")
+    _image_api_key = get_decrypted_api_key("image_api_key")
 
     # Build models list with availability info
     models = []
@@ -1342,9 +1346,7 @@ async def get_video_models(token: str = Depends(require_auth)):
 # AI Tools Configuration (for Profile Management)
 # ============================================================================
 
-# Import from centralized registry - single source of truth
-# To add new AI tools, edit app/core/ai_tools.py
-from app.core.ai_tools import AI_TOOLS, PROVIDER_KEY_MAP
+# AI_TOOLS imported at top of file from app.core.ai_tools
 
 
 @router.get("/ai-tools/available")
@@ -1432,144 +1434,17 @@ async def get_available_ai_tools(token: str = Depends(require_auth)):
     }
 
 
-@router.post("/transcribe", response_model=VoiceToTextResponse)
-async def transcribe_audio(
-    audio: UploadFile = File(...),
-    language: Optional[str] = None,
-    token: str = Depends(require_auth)
-):
-    """
-    Transcribe audio to text using OpenAI Whisper API.
-
-    Accepts audio files (mp3, mp4, mpeg, mpga, m4a, wav, webm).
-    Returns the transcribed text.
-
-    Args:
-        audio: Audio file to transcribe
-        language: Optional language code (e.g., 'en', 'es', 'fr')
-    """
-    # Check if OpenAI API key is configured
-    api_key = get_decrypted_api_key("openai_api_key")
-
-    if not api_key:
-        raise HTTPException(
-            status_code=400,
-            detail="OpenAI API key not configured. Go to Settings > Integrations to set up voice-to-text."
-        )
-
-    # Validate file type
-    allowed_types = ["audio/mpeg", "audio/mp3", "audio/mp4", "audio/m4a",
-                     "audio/wav", "audio/webm", "audio/x-wav", "video/mp4",
-                     "video/webm", "audio/ogg", "audio/flac"]
-    content_type = audio.content_type or ""
-
-    # Also check by extension
-    filename = audio.filename or ""
-    allowed_extensions = [".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".ogg", ".flac"]
-    ext = "." + filename.split(".")[-1].lower() if "." in filename else ""
-
-    if content_type not in allowed_types and ext not in allowed_extensions:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported audio format: {content_type or ext}. Supported: mp3, mp4, m4a, wav, webm, ogg, flac"
-        )
-
-    # Read audio file
-    try:
-        audio_content = await audio.read()
-
-        # Check file size (25MB limit for Whisper API)
-        if len(audio_content) > 25 * 1024 * 1024:
-            raise HTTPException(
-                status_code=400,
-                detail="Audio file too large. Maximum size is 25MB."
-            )
-
-        if len(audio_content) == 0:
-            raise HTTPException(
-                status_code=400,
-                detail="Audio file is empty."
-            )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error reading audio file: {e}")
-        raise HTTPException(status_code=400, detail="Failed to read audio file")
-
-    # Call OpenAI Whisper API
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            # Prepare multipart form data
-            files = {
-                "file": (filename or "audio.webm", audio_content, content_type or "audio/webm"),
-                "model": (None, "whisper-1"),
-            }
-
-            if language:
-                files["language"] = (None, language)
-
-            response = await client.post(
-                "https://api.openai.com/v1/audio/transcriptions",
-                files=files,
-                headers={"Authorization": f"Bearer {api_key}"}
-            )
-
-            if response.status_code == 401:
-                raise HTTPException(
-                    status_code=400,
-                    detail="OpenAI API key is invalid or expired. Please update it in Settings > Integrations."
-                )
-
-            elif response.status_code == 429:
-                raise HTTPException(
-                    status_code=429,
-                    detail="Rate limit exceeded. Please wait a moment and try again."
-                )
-
-            elif response.status_code != 200:
-                error_text = response.text
-                logger.error(f"Whisper API error: {response.status_code} - {error_text}")
-                try:
-                    error_data = response.json()
-                    error_msg = error_data.get("error", {}).get("message", error_text)
-                except Exception:
-                    error_msg = error_text
-
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Transcription failed: {error_msg}"
-                )
-
-            result = response.json()
-
-            return VoiceToTextResponse(
-                success=True,
-                text=result.get("text", ""),
-                language=result.get("language"),
-                duration=result.get("duration")
-            )
-
-    except HTTPException:
-        raise
-    except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=504,
-            detail="Transcription timed out. Please try with a shorter audio file."
-        )
-    except Exception as e:
-        logger.error(f"Transcription error: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Transcription failed: {str(e)}"
-        )
-
+# NOTE: Duplicate transcribe_audio endpoint removed - use the one defined earlier
+# in the "Voice Transcription" section (around line 652) which has:
+# - Retry logic for rate limits
+# - Configurable STT model selection from settings
+# - More comprehensive error handling
 
 # ============================================================================
 # Background Cleanup Settings
 # ============================================================================
 
-from app.core.cleanup_manager import cleanup_manager, CleanupStats, FileCleanupPreview
+# cleanup_manager imported at top of file from app.core.cleanup_manager
 
 
 class CleanupConfigResponse(BaseModel):
@@ -1872,7 +1747,7 @@ async def update_credential_policy(
         if not info.get("admin_has_key", lambda: False)():
             raise HTTPException(
                 status_code=400,
-                detail=f"Cannot set to 'admin_provided' - admin has not configured this key yet"
+                detail="Cannot set to 'admin_provided' - admin has not configured this key yet"
             )
 
     updated = database.update_credential_policy(policy_id, request.policy)
@@ -2024,7 +1899,7 @@ async def set_user_credential_policy(
         if not info.get("admin_has_key", lambda: False)():
             raise HTTPException(
                 status_code=400,
-                detail=f"Cannot set to 'admin_provided' - admin has not configured this key yet"
+                detail="Cannot set to 'admin_provided' - admin has not configured this key yet"
             )
 
     # Set the override

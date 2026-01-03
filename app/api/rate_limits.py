@@ -14,8 +14,8 @@ from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
 from app.db import database
-from app.core.rate_limiter import rate_limiter, RateLimitConfig
-from app.core.queue_manager import request_queue, QueueStatus
+from app.core.rate_limiter import rate_limiter
+from app.core.queue_manager import request_queue
 
 logger = logging.getLogger(__name__)
 

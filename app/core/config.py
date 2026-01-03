@@ -8,7 +8,6 @@ Supports both Docker and Local deployment modes:
 Set LOCAL_MODE=true environment variable to force local mode.
 """
 
-import os
 from pathlib import Path
 from typing import Optional
 from pydantic_settings import BaseSettings

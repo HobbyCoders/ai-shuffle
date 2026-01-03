@@ -4,7 +4,6 @@ Query API routes - main AI interface
 
 import json
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends, status
 from fastapi.responses import StreamingResponse
@@ -12,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from app.core.models import (
     QueryRequest, QueryResponse, ConversationRequest, QueryMetadata
 )
-from app.core.query_engine import execute_query, stream_query, interrupt_session, get_active_sessions, start_background_query
+from app.core.query_engine import execute_query, stream_query, interrupt_session, start_background_query
 from app.core.auth import auth_service
 from app.api.auth import require_api_key, require_auth
 
