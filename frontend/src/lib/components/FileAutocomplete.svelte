@@ -58,16 +58,19 @@
   }
 
   // Get the directory path from query
+  // Handles paths with spaces like "Chat History/"
   function getPathFromQuery(query: string): string {
     if (!query.includes('/')) return '';
-    const parts = query.split('/');
-    return parts.slice(0, -1).join('/');
+    // Find the last slash position
+    const lastSlashIndex = query.lastIndexOf('/');
+    return query.slice(0, lastSlashIndex);
   }
 
-  // Get the filename filter from query
+  // Get the filename filter from query (text after the last /)
   function getFilterFromQuery(query: string): string {
     if (!query.includes('/')) return query;
-    return query.split('/').pop() || '';
+    const lastSlashIndex = query.lastIndexOf('/');
+    return query.slice(lastSlashIndex + 1);
   }
 
   // Fetch files when visible and projectId changes - initial load
@@ -116,9 +119,13 @@
       );
     }
 
-    // Sort: directories first, then by match relevance
+    // Sort: Chat History first, then directories, then by match relevance
     filteredFiles = filtered.sort((a, b) => {
-      // Directories first
+      // Chat History folder always first
+      if (a.name === CHAT_HISTORY_FOLDER && b.name !== CHAT_HISTORY_FOLDER) return -1;
+      if (b.name === CHAT_HISTORY_FOLDER && a.name !== CHAT_HISTORY_FOLDER) return 1;
+
+      // Directories before files
       if (a.type === 'directory' && b.type !== 'directory') return -1;
       if (b.type === 'directory' && a.type !== 'directory') return 1;
 

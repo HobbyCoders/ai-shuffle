@@ -334,9 +334,10 @@
 			return;
 		}
 
-		// For directories, replace with path and keep autocomplete open
+		// For directories, replace with path (with trailing /) and keep autocomplete open
 		if (file.type === 'directory') {
-			inputValue = inputValue.substring(0, atStartIndex) + '@' + file.path;
+			const pathWithSlash = file.path.endsWith('/') ? file.path : file.path + '/';
+			inputValue = inputValue.substring(0, atStartIndex) + '@' + pathWithSlash;
 			tick().then(() => textareaRef?.focus());
 			return;
 		}
