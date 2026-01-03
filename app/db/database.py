@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 # v23: Worktree-session decoupling - add worktree_id to sessions, remove UNIQUE from worktrees.session_id
 # v24: Add unique index on active worktrees to prevent race conditions, fix N+1 queries
 # v25: Add api_user_profiles junction table for multi-profile support
-SCHEMA_VERSION = 25
+# v26: Add built-in subagent support with default values storage and protection
+SCHEMA_VERSION = 26
 
 
 # =============================================================================
@@ -517,6 +518,30 @@ def _create_schema(cursor: sqlite3.Cursor):
         cursor.execute("ALTER TABLE admin ADD COLUMN totp_verified_at TIMESTAMP")
     except sqlite3.OperationalError:
         pass  # Column already exists
+
+    # Add built-in subagent columns (migration for v26)
+    # These store the original default values so admins can revert after editing
+    try:
+        cursor.execute("ALTER TABLE subagents ADD COLUMN default_name TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        cursor.execute("ALTER TABLE subagents ADD COLUMN default_description TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        cursor.execute("ALTER TABLE subagents ADD COLUMN default_prompt TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        cursor.execute("ALTER TABLE subagents ADD COLUMN default_tools JSON")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        cursor.execute("ALTER TABLE subagents ADD COLUMN default_model TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
     # Create indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_templates_category ON templates(category)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_templates_profile ON templates(profile_id)")
@@ -2814,17 +2839,45 @@ def create_subagent(
     prompt: str,
     tools: Optional[List[str]] = None,
     model: Optional[str] = None,
-    is_builtin: bool = False
+    is_builtin: bool = False,
+    store_defaults: bool = False
 ) -> Dict[str, Any]:
-    """Create a new subagent"""
+    """
+    Create a new subagent.
+
+    Args:
+        subagent_id: Unique identifier for the subagent
+        name: Display name
+        description: When to use this subagent
+        prompt: System prompt for the subagent
+        tools: List of allowed tools (None = inherit all)
+        model: Model override (None = inherit from profile)
+        is_builtin: Whether this is a built-in subagent (cannot be deleted)
+        store_defaults: If True, also store current values as defaults (for built-in subagents)
+    """
     now = datetime.utcnow().isoformat()
+    tools_json = json.dumps(tools) if tools else None
+
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            """INSERT INTO subagents (id, name, description, prompt, tools, model, is_builtin, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (subagent_id, name, description, prompt, json.dumps(tools) if tools else None, model, is_builtin, now, now)
-        )
+        if store_defaults:
+            # For built-in subagents, store both current values and defaults
+            cursor.execute(
+                """INSERT INTO subagents (
+                    id, name, description, prompt, tools, model, is_builtin,
+                    default_name, default_description, default_prompt, default_tools, default_model,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (subagent_id, name, description, prompt, tools_json, model, is_builtin,
+                 name, description, prompt, tools_json, model,
+                 now, now)
+            )
+        else:
+            cursor.execute(
+                """INSERT INTO subagents (id, name, description, prompt, tools, model, is_builtin, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (subagent_id, name, description, prompt, tools_json, model, is_builtin, now, now)
+            )
     return get_subagent(subagent_id)
 
 
@@ -2891,6 +2944,72 @@ def set_subagent_builtin(subagent_id: str, is_builtin: bool) -> bool:
             (is_builtin, datetime.utcnow().isoformat(), subagent_id)
         )
         return cursor.rowcount > 0
+
+
+def revert_subagent_to_defaults(subagent_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Revert a built-in subagent to its original default values.
+
+    Only works for built-in subagents that have stored defaults.
+    Returns the reverted subagent or None if not found/not built-in.
+    """
+    subagent = get_subagent(subagent_id)
+    if not subagent:
+        return None
+
+    if not subagent.get("is_builtin"):
+        return None
+
+    # Check if defaults exist
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT default_name, default_description, default_prompt, default_tools, default_model
+               FROM subagents WHERE id = ?""",
+            (subagent_id,)
+        )
+        row = cursor.fetchone()
+        if not row or not row["default_prompt"]:
+            # No defaults stored
+            return None
+
+        # Revert to defaults
+        cursor.execute(
+            """UPDATE subagents SET
+                name = default_name,
+                description = default_description,
+                prompt = default_prompt,
+                tools = default_tools,
+                model = default_model,
+                updated_at = ?
+               WHERE id = ?""",
+            (datetime.utcnow().isoformat(), subagent_id)
+        )
+
+    return get_subagent(subagent_id)
+
+
+def has_subagent_been_modified(subagent_id: str) -> bool:
+    """
+    Check if a built-in subagent has been modified from its defaults.
+
+    Returns True if any field differs from the stored default.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT
+                name != default_name OR
+                description != default_description OR
+                prompt != default_prompt OR
+                COALESCE(tools, '') != COALESCE(default_tools, '') OR
+                COALESCE(model, '') != COALESCE(default_model, '')
+               AS is_modified
+               FROM subagents WHERE id = ? AND is_builtin = 1""",
+            (subagent_id,)
+        )
+        row = cursor.fetchone()
+        return bool(row and row["is_modified"])
 
 
 # ============================================================================

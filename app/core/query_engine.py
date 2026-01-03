@@ -1569,6 +1569,19 @@ def build_options_from_profile(
                 logger.warning(f"Subagent not found in database: {agent_id}")
         logger.info(f"Final agents_dict keys: {list(agents_dict.keys()) if agents_dict else 'None'}")
 
+    # Inject built-in agent instructions into system prompt (only for enabled built-in agents)
+    if enabled_agent_ids:
+        from app.core.builtin_subagents import get_system_prompt_instructions
+        builtin_instructions = get_system_prompt_instructions(enabled_agent_ids)
+        if builtin_instructions:
+            if isinstance(final_system_prompt, dict):
+                # Append to the append field
+                current_append = final_system_prompt.get("append", "")
+                final_system_prompt["append"] = current_append + builtin_instructions
+            else:
+                # Append to string system prompt
+                final_system_prompt += builtin_instructions
+
     # Determine permission mode
     permission_mode = overrides.get("permission_mode") or config.get("permission_mode", "default")
 
