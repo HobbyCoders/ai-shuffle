@@ -304,24 +304,24 @@
 				{#if isEditTool}
 					<!-- Side-by-side diff view for Edit tool -->
 					<div class="px-3 py-2">
-						<div class="grid grid-cols-2 gap-2">
+						<div class="grid grid-cols-2 gap-2 items-stretch">
 							<!-- Old (removed) -->
-							<div class="min-w-0">
+							<div class="min-w-0 flex flex-col">
 								<div class="text-[10px] text-red-400 mb-1 font-medium flex items-center gap-1">
 									<span>−</span>
 									<span>Removed</span>
 								</div>
-								<div class="rounded border border-red-500/20 bg-red-500/5 max-h-60 overflow-scroll">
+								<div class="rounded border border-red-500/20 bg-red-500/5 max-h-60 overflow-scroll flex-1">
 									<pre class="text-[10px] font-mono px-1.5 py-1 text-red-400 m-0 w-max">{oldString || ' '}</pre>
 								</div>
 							</div>
 							<!-- New (added) -->
-							<div class="min-w-0">
+							<div class="min-w-0 flex flex-col">
 								<div class="text-[10px] text-green-400 mb-1 font-medium flex items-center gap-1">
 									<span>+</span>
 									<span>Added</span>
 								</div>
-								<div class="rounded border border-green-500/20 bg-green-500/5 max-h-60 overflow-scroll">
+								<div class="rounded border border-green-500/20 bg-green-500/5 max-h-60 overflow-scroll flex-1">
 									<pre class="text-[10px] font-mono px-1.5 py-1 text-green-400 m-0 w-max">{newString || ' '}</pre>
 								</div>
 							</div>
