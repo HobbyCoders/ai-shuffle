@@ -286,8 +286,8 @@
 
 <div class="w-full tool-use-message">
 	<div class="min-w-0">
-		<details class="w-full group">
-			<summary class="w-full py-1 flex items-center gap-2 cursor-pointer list-none transition-colors hover:opacity-80">
+		<details class="w-full border border-border rounded-lg overflow-hidden shadow-s group">
+			<summary class="w-full px-4 py-2 bg-muted/30 hover:bg-muted/50 flex items-center gap-2 cursor-pointer list-none transition-colors">
 				<!-- Status indicator -->
 				{#if status === 'running' || streaming}
 					<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -486,29 +486,41 @@
 						</div>
 					</div>
 				{:else if partialInput || input}
-					<div class="px-4 py-3 border-b border-border/50">
-						<div class="text-xs text-muted-foreground mb-1 font-medium">Input</div>
-						{#if streaming && partialInput}
-							<!-- Show raw streaming input with cursor -->
-							<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32 whitespace-pre-wrap break-words font-mono">{partialInput}<span class="inline-block w-1.5 h-3 ml-0.5 bg-primary animate-pulse"></span></pre>
-						{:else if input && Object.keys(input).length > 0}
-							<!-- Show formatted JSON when complete -->
-							<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32 whitespace-pre-wrap break-words font-mono">{JSON.stringify(input, null, 2)}</pre>
-						{:else if partialInput}
-							<!-- Fallback: show partial input if toolInput is empty but we have partial -->
-							<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32 whitespace-pre-wrap break-words font-mono">{partialInput}</pre>
-						{/if}
-					</div>
-				{/if}
-				{#if result && !isEditTool && !isReadTool && !isWriteTool && !isBashTool}
-					<div class="px-4 py-3">
-						<div class="text-xs text-muted-foreground mb-1 font-medium">Result</div>
-						{#if toolResultHasMedia(result)}
-							<!-- Show compact message for media - full media displayed outside tool group -->
-							<span class="text-xs text-green-500">&#10003; {toolResultHasVideo(result) ? 'Video' : 'Image'} generated successfully (see below)</span>
-						{:else}
-							<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{result}</pre>
-						{/if}
+					<div class="px-3 py-2">
+						<div class="grid grid-cols-2 gap-2 items-stretch">
+							<!-- Input -->
+							<div class="min-w-0 flex flex-col">
+								<div class="text-[10px] text-muted-foreground mb-1 font-medium">Input</div>
+								<div class="rounded border border-border bg-muted/10 flex-1 flex flex-col">
+									<div class="max-h-60 overflow-scroll flex-1">
+										{#if streaming && partialInput}
+											<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max">{partialInput}<span class="inline-block w-1.5 h-3 ml-0.5 bg-primary animate-pulse"></span></pre>
+										{:else if input && Object.keys(input).length > 0}
+											<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max">{JSON.stringify(input, null, 2)}</pre>
+										{:else if partialInput}
+											<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max">{partialInput}</pre>
+										{/if}
+									</div>
+								</div>
+							</div>
+							<!-- Result -->
+							<div class="min-w-0 flex flex-col">
+								<div class="text-[10px] text-muted-foreground mb-1 font-medium">Result</div>
+								<div class="rounded border border-border bg-muted/10 flex-1 flex flex-col">
+									<div class="max-h-60 overflow-scroll flex-1">
+										{#if result}
+											{#if toolResultHasMedia(result)}
+												<span class="text-[10px] text-green-500 px-1.5 py-1">✓ {toolResultHasVideo(result) ? 'Video' : 'Image'} generated</span>
+											{:else}
+												<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max">{result}</pre>
+											{/if}
+										{:else}
+											<pre class="text-[10px] font-mono px-1.5 py-1 text-muted-foreground m-0 w-max"> </pre>
+										{/if}
+									</div>
+								</div>
+							</div>
+						</div>
 					</div>
 				{/if}
 			</div>
