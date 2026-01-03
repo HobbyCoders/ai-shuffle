@@ -119,6 +119,35 @@
 	const writeFilePath = $derived(writeFields.filePath);
 	const writeContent = $derived(writeFields.content);
 
+	// Extract Bash tool fields
+	const bashFields = $derived.by(() => {
+		if (name !== 'Bash') return { isBash: false, command: '' };
+
+		// Try complete input first
+		if (input?.command !== undefined) {
+			return {
+				isBash: true,
+				command: String(input.command || '')
+			};
+		}
+
+		// During streaming, extract from partialInput
+		if (partialInput) {
+			const cmd = extractFieldFromPartial(partialInput, 'command');
+			if (cmd) {
+				return {
+					isBash: true,
+					command: cmd
+				};
+			}
+		}
+
+		return { isBash: true, command: '' };
+	});
+
+	const isBashTool = $derived(bashFields.isBash);
+	const bashCommand = $derived(bashFields.command);
+
 	// Simple line-based diff for Edit tool
 	function computeDiff(oldStr: string, newStr: string): Array<{ type: 'context' | 'removed' | 'added'; line: string }> {
 		const oldLines = oldStr.split('\n');
@@ -412,6 +441,38 @@
 							<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max">{writeContent || ' '}{#if streaming && !result}<span class="inline-block w-1.5 h-3 ml-0.5 bg-green-400 animate-pulse"></span>{/if}</pre>
 						</div>
 					</div>
+				{:else if isBashTool}
+					<!-- Side-by-side view for Bash tool - command and output -->
+					<div class="px-3 py-2">
+						<div class="grid grid-cols-2 gap-2 items-stretch">
+							<!-- Command -->
+							<div class="min-w-0 flex flex-col">
+								<div class="text-[10px] text-yellow-500 mb-1 font-medium flex items-center gap-1">
+									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+										<polyline points="4 17 10 11 4 5"/>
+										<line x1="12" y1="19" x2="20" y2="19"/>
+									</svg>
+									<span>Command</span>
+								</div>
+								<div class="rounded border border-yellow-500/20 bg-yellow-500/5 max-h-60 overflow-scroll flex-1">
+									<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max">{bashCommand || ' '}{#if streaming && !result}<span class="inline-block w-1.5 h-3 ml-0.5 bg-yellow-500 animate-pulse"></span>{/if}</pre>
+								</div>
+							</div>
+							<!-- Output -->
+							<div class="min-w-0 flex flex-col">
+								<div class="text-[10px] text-muted-foreground mb-1 font-medium flex items-center gap-1">
+									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+										<polyline points="9 10 4 15 9 20"/>
+										<path d="M20 4v7a4 4 0 0 1-4 4H4"/>
+									</svg>
+									<span>Output</span>
+								</div>
+								<div class="rounded border border-border bg-muted/30 max-h-60 overflow-scroll flex-1">
+									<pre class="text-[10px] font-mono px-1.5 py-1 text-muted-foreground m-0 w-max">{result || ' '}</pre>
+								</div>
+							</div>
+						</div>
+					</div>
 				{:else if partialInput || input}
 					<div class="px-4 py-3 border-b border-border/50">
 						<div class="text-xs text-muted-foreground mb-1 font-medium">Input</div>
@@ -427,7 +488,7 @@
 						{/if}
 					</div>
 				{/if}
-				{#if result && !isEditTool && !isReadTool && !isWriteTool}
+				{#if result && !isEditTool && !isReadTool && !isWriteTool && !isBashTool}
 					<div class="px-4 py-3">
 						<div class="text-xs text-muted-foreground mb-1 font-medium">Result</div>
 						{#if toolResultHasMedia(result)}
