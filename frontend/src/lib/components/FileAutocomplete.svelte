@@ -125,9 +125,15 @@
       if (a.name === CHAT_HISTORY_FOLDER && b.name !== CHAT_HISTORY_FOLDER) return -1;
       if (b.name === CHAT_HISTORY_FOLDER && a.name !== CHAT_HISTORY_FOLDER) return 1;
 
-      // Directories before files
-      if (a.type === 'directory' && b.type !== 'directory') return -1;
-      if (b.type === 'directory' && a.type !== 'directory') return 1;
+      // Directories before files (but not for chat_history items which have their own order)
+      if (a.type === 'directory' && b.type !== 'directory' && b.type !== 'chat_history') return -1;
+      if (b.type === 'directory' && a.type !== 'directory' && a.type !== 'chat_history') return 1;
+
+      // Chat history items: preserve backend order (most recent first by modified_at)
+      // Don't re-sort them - the backend already sorted by date
+      if (a.type === 'chat_history' && b.type === 'chat_history') {
+        return 0; // Preserve original order from backend
+      }
 
       const aName = a.name.toLowerCase();
       const bName = b.name.toLowerCase();
@@ -142,7 +148,7 @@
       if (aStarts && !bStarts) return -1;
       if (bStarts && !aStarts) return 1;
 
-      // Alphabetical
+      // Alphabetical for files/directories
       return aName.localeCompare(bName);
     });
 
