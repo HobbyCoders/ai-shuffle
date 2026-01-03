@@ -385,7 +385,7 @@
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 				</svg>
 			</summary>
-			<div class="bg-card border-t border-border">
+			<div class="border-t border-border">
 				{#if isEditTool}
 					<!-- Side-by-side diff view for Edit tool -->
 					<div class="px-3 py-2">
