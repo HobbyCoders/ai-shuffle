@@ -59,7 +59,7 @@ def create_test_schema(cursor: sqlite3.Cursor):
         )
     """)
 
-    # Agent profiles
+    # Agent profiles (legacy table name)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS agent_profiles (
             id TEXT PRIMARY KEY,
@@ -72,6 +72,20 @@ def create_test_schema(cursor: sqlite3.Cursor):
             permission_mode TEXT DEFAULT 'default',
             custom_instructions TEXT,
             config_json TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Profiles (current table name used by the app)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS profiles (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            is_builtin BOOLEAN DEFAULT FALSE,
+            config JSON NOT NULL DEFAULT '{}',
+            mcp_tools JSON DEFAULT '[]',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -149,12 +163,34 @@ def create_test_schema(cursor: sqlite3.Cursor):
         )
     """)
 
-    # Rate limiting
+    # Rate limit configurations
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS rate_limits (
-            key TEXT PRIMARY KEY,
-            count INTEGER DEFAULT 0,
-            window_start TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            id TEXT PRIMARY KEY,
+            user_id TEXT,
+            api_key_id TEXT,
+            requests_per_minute INTEGER DEFAULT 20,
+            requests_per_hour INTEGER DEFAULT 200,
+            requests_per_day INTEGER DEFAULT 1000,
+            concurrent_requests INTEGER DEFAULT 3,
+            priority INTEGER DEFAULT 0,
+            is_unlimited BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (api_key_id) REFERENCES api_users(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Request log for rate limit tracking
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS request_log (
+            id TEXT PRIMARY KEY,
+            user_id TEXT,
+            api_key_id TEXT,
+            endpoint TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            duration_ms INTEGER,
+            status TEXT DEFAULT 'success'
         )
     """)
 
@@ -171,22 +207,24 @@ def create_test_schema(cursor: sqlite3.Cursor):
         )
     """)
 
-    # API users
+    # API users (for programmatic access with isolated workspaces)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS api_users (
             id TEXT PRIMARY KEY,
-            api_key_id TEXT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
-            username TEXT NOT NULL,
-            display_name TEXT,
-            avatar_url TEXT,
-            permissions TEXT,
-            profile_id TEXT REFERENCES agent_profiles(id) ON DELETE SET NULL,
-            daily_limit INTEGER DEFAULT 100,
-            requests_today INTEGER DEFAULT 0,
-            last_request_date TEXT,
+            name TEXT NOT NULL,
+            username TEXT UNIQUE,
+            password_hash TEXT,
+            api_key_hash TEXT NOT NULL,
+            project_id TEXT,
+            profile_id TEXT,
+            is_active BOOLEAN DEFAULT TRUE,
+            web_login_allowed BOOLEAN DEFAULT TRUE,
+            description TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(api_key_id, username)
+            last_used_at TIMESTAMP,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
+            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL
         )
     """)
 
@@ -279,6 +317,240 @@ def create_test_schema(cursor: sqlite3.Cursor):
         )
     """)
 
+    # Subagents (global subagents independent of profiles)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS subagents (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            tools JSON,
+            model TEXT,
+            is_builtin BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Permission rules for tool access control
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS permission_rules (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT,
+            tool_name TEXT NOT NULL,
+            tool_pattern TEXT,
+            decision TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Tags for organizing sessions
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tags (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            color TEXT NOT NULL DEFAULT '#6366f1',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Junction table for session-tag relationships
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_tags (
+            session_id TEXT NOT NULL,
+            tag_id TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (session_id, tag_id),
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Session templates for starter prompts
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS templates (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            prompt TEXT NOT NULL,
+            profile_id TEXT,
+            icon TEXT,
+            category TEXT,
+            is_builtin BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL
+        )
+    """)
+
+    # Webhooks for external integrations
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS webhooks (
+            id TEXT PRIMARY KEY,
+            url TEXT NOT NULL,
+            secret TEXT,
+            events JSON NOT NULL DEFAULT '[]',
+            is_active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_triggered_at TIMESTAMP,
+            failure_count INTEGER DEFAULT 0
+        )
+    """)
+
+    # Audit log for security events
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id TEXT PRIMARY KEY,
+            user_id TEXT,
+            user_type TEXT DEFAULT 'admin',
+            event_type TEXT NOT NULL,
+            ip_address TEXT,
+            user_agent TEXT,
+            details JSON,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Knowledge base documents
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS knowledge_documents (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            content TEXT NOT NULL,
+            content_type TEXT DEFAULT 'text/plain',
+            file_size INTEGER DEFAULT 0,
+            chunk_count INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Knowledge chunks for search
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS knowledge_chunks (
+            id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            embedding BLOB,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (document_id) REFERENCES knowledge_documents(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Session messages
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            tool_name TEXT,
+            tool_input JSON,
+            metadata JSON,
+            version INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Sync log for tracking changes
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sync_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT,
+            data JSON,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Usage tracking
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS usage_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            profile_id TEXT,
+            model TEXT,
+            tokens_in INTEGER,
+            tokens_out INTEGER,
+            cost_usd REAL,
+            duration_ms INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Login attempts tracking
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS login_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip_address TEXT NOT NULL,
+            username TEXT,
+            success BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Account lockout tracking
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS account_lockouts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip_address TEXT,
+            username TEXT,
+            locked_until TIMESTAMP NOT NULL,
+            reason TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # API key web sessions
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS api_key_sessions (
+            token TEXT PRIMARY KEY,
+            api_user_id TEXT NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Checkpoints for rewind functionality
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS checkpoints (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            sdk_session_id TEXT NOT NULL,
+            message_uuid TEXT NOT NULL,
+            message_preview TEXT,
+            message_index INTEGER DEFAULT 0,
+            git_ref TEXT,
+            git_available BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+    """)
+
+    # User preferences
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_preferences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_type TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value JSON,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_type, user_id, key)
+        )
+    """)
+
     # Insert schema version
     cursor.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (25)")
 
@@ -351,17 +623,43 @@ def client(mock_db):
         yield test_client
 
 
+def _mock_require_auth():
+    """Mock require_auth dependency that returns a valid session token."""
+    return "test-session-token"
+
+
+def _mock_require_admin():
+    """Mock require_admin dependency that returns None (passes admin check)."""
+    return None
+
+
 @pytest.fixture(scope="function")
-def authenticated_client(client, mock_auth):
+def authenticated_client(mock_db):
     """
-    Create an authenticated test client.
+    Create an authenticated test client with FastAPI dependency overrides.
+
+    This properly overrides the authentication dependencies at the FastAPI level
+    so that all protected endpoints accept requests without real authentication.
 
     Usage:
         def test_protected_endpoint(authenticated_client):
             response = authenticated_client.get("/api/v1/sessions")
             assert response.status_code == 200
     """
-    return client
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.api.auth import require_auth, require_admin
+
+    # Override the dependencies at the FastAPI app level
+    app.dependency_overrides[require_auth] = _mock_require_auth
+    app.dependency_overrides[require_admin] = _mock_require_admin
+
+    with TestClient(app) as test_client:
+        yield test_client
+
+    # Clean up the overrides after the test
+    app.dependency_overrides.pop(require_auth, None)
+    app.dependency_overrides.pop(require_admin, None)
 
 
 # =============================================================================
@@ -371,7 +669,11 @@ def authenticated_client(client, mock_auth):
 @pytest.fixture(scope="function")
 def mock_auth():
     """
-    Mock authentication for protected endpoints.
+    Mock authentication for protected endpoints using patches.
+
+    Note: For HTTP tests with authenticated_client, use the authenticated_client
+    fixture which properly overrides FastAPI dependencies. This fixture is for
+    direct function calls that need mocked auth.
 
     This fixture patches:
     - require_auth: Returns a valid session token
