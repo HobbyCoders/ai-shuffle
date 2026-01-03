@@ -63,6 +63,62 @@
 	const oldString = $derived(editFields.oldString);
 	const newString = $derived(editFields.newString);
 
+	// Extract Read tool fields
+	const readFields = $derived.by(() => {
+		if (name !== 'Read') return { isRead: false, filePath: '', content: '' };
+
+		const filePath = input?.file_path !== undefined
+			? String(input.file_path || '')
+			: extractFieldFromPartial(partialInput || '', 'file_path');
+
+		if (filePath) {
+			return {
+				isRead: true,
+				filePath,
+				content: result || ''
+			};
+		}
+
+		return { isRead: false, filePath: '', content: '' };
+	});
+
+	const isReadTool = $derived(readFields.isRead);
+	const readFilePath = $derived(readFields.filePath);
+	const readContent = $derived(readFields.content);
+
+	// Extract Write tool fields
+	const writeFields = $derived.by(() => {
+		if (name !== 'Write') return { isWrite: false, filePath: '', content: '' };
+
+		// Try complete input first
+		if (input?.file_path !== undefined && input?.content !== undefined) {
+			return {
+				isWrite: true,
+				filePath: String(input.file_path || ''),
+				content: String(input.content || '')
+			};
+		}
+
+		// During streaming, extract from partialInput
+		if (partialInput) {
+			const fp = extractFieldFromPartial(partialInput, 'file_path');
+			const content = extractFieldFromPartial(partialInput, 'content');
+			if (fp) {
+				return {
+					isWrite: true,
+					filePath: fp,
+					content: content
+				};
+			}
+		}
+
+		return { isWrite: false, filePath: '', content: '' };
+	});
+
+	const isWriteTool = $derived(writeFields.isWrite);
+	const writeFilePath = $derived(writeFields.filePath);
+	const writeContent = $derived(writeFields.content);
+
 	// Simple line-based diff for Edit tool
 	function computeDiff(oldStr: string, newStr: string): Array<{ type: 'context' | 'removed' | 'added'; line: string }> {
 		const oldLines = oldStr.split('\n');
@@ -327,6 +383,28 @@
 							</div>
 						</div>
 					</div>
+				{:else if isReadTool}
+					<!-- Code block view for Read tool -->
+					<div class="px-3 py-2">
+						<div class="text-[10px] text-blue-400 mb-1 font-medium flex items-center gap-1">
+							<span>📄</span>
+							<span>Content</span>
+						</div>
+						<div class="rounded border border-blue-500/20 bg-blue-500/5 max-h-60 overflow-scroll">
+							<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max">{readContent || (streaming ? '' : 'Loading...')}{#if streaming && !readContent}<span class="inline-block w-1.5 h-3 ml-0.5 bg-blue-400 animate-pulse"></span>{/if}</pre>
+						</div>
+					</div>
+				{:else if isWriteTool}
+					<!-- Code block view for Write tool -->
+					<div class="px-3 py-2">
+						<div class="text-[10px] text-green-400 mb-1 font-medium flex items-center gap-1">
+							<span>✎</span>
+							<span>Content</span>
+						</div>
+						<div class="rounded border border-green-500/20 bg-green-500/5 max-h-60 overflow-scroll">
+							<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max">{writeContent || ' '}{#if streaming && !result}<span class="inline-block w-1.5 h-3 ml-0.5 bg-green-400 animate-pulse"></span>{/if}</pre>
+						</div>
+					</div>
 				{:else if partialInput || input}
 					<div class="px-4 py-3 border-b border-border/50">
 						<div class="text-xs text-muted-foreground mb-1 font-medium">Input</div>
@@ -342,7 +420,7 @@
 						{/if}
 					</div>
 				{/if}
-				{#if result && !isEditTool}
+				{#if result && !isEditTool && !isReadTool && !isWriteTool}
 					<div class="px-4 py-3">
 						<div class="text-xs text-muted-foreground mb-1 font-medium">Result</div>
 						{#if toolResultHasMedia(result)}
