@@ -491,7 +491,7 @@
 							<!-- Input -->
 							<div class="min-w-0 flex flex-col">
 								<div class="text-[10px] text-muted-foreground mb-1 font-medium">Input</div>
-								<div class="rounded border border-border bg-muted/10 flex-1 flex flex-col">
+								<div class="rounded border border-zinc-500/20 bg-zinc-500/5 flex-1 flex flex-col">
 									<div class="max-h-60 overflow-scroll flex-1">
 										{#if streaming && partialInput}
 											<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max">{partialInput}<span class="inline-block w-1.5 h-3 ml-0.5 bg-primary animate-pulse"></span></pre>
@@ -506,7 +506,7 @@
 							<!-- Result -->
 							<div class="min-w-0 flex flex-col">
 								<div class="text-[10px] text-muted-foreground mb-1 font-medium">Result</div>
-								<div class="rounded border border-border bg-muted/10 flex-1 flex flex-col">
+								<div class="rounded border border-zinc-500/20 bg-zinc-500/5 flex-1 flex flex-col">
 									<div class="max-h-60 overflow-scroll flex-1">
 										{#if result}
 											{#if toolResultHasMedia(result)}
