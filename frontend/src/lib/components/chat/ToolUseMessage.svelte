@@ -286,8 +286,8 @@
 
 <div class="w-full tool-use-message">
 	<div class="min-w-0">
-		<details class="w-full border border-border rounded-lg overflow-hidden shadow-s group">
-			<summary class="w-full px-4 py-2 bg-muted/30 hover:bg-muted/50 flex items-center gap-2 cursor-pointer list-none transition-colors">
+		<details class="w-full border border-border rounded-lg overflow-hidden group">
+			<summary class="w-full px-3 py-2 hover:bg-muted/30 flex items-center gap-2 cursor-pointer list-none transition-colors">
 				<!-- Status indicator -->
 				{#if status === 'running' || streaming}
 					<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
