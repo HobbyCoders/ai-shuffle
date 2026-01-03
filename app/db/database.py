@@ -351,21 +351,6 @@ def _create_schema(cursor: sqlite3.Cursor):
         )
     """)
 
-    # Checkpoints for rewind functionality
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS checkpoints (
-            id TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            sdk_session_id TEXT NOT NULL,
-            message_uuid TEXT NOT NULL,
-            message_preview TEXT,
-            message_index INTEGER DEFAULT 0,
-            git_ref TEXT,
-            git_available BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-        )
-    """)
 
     # User preferences (for persisting open tabs across devices)
     cursor.execute("""
@@ -554,8 +539,6 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_account_lockouts_ip ON account_lockouts(ip_address)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_account_lockouts_username ON account_lockouts(username)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_key_sessions_user ON api_key_sessions(api_user_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON checkpoints(session_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_checkpoints_message_uuid ON checkpoints(message_uuid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_preferences_user ON user_preferences(user_type, user_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_subagents_name ON subagents(name)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_permission_rules_profile ON permission_rules(profile_id)")
@@ -2720,92 +2703,6 @@ def cleanup_expired_api_key_sessions():
             "DELETE FROM api_key_sessions WHERE expires_at < ?",
             (datetime.utcnow().isoformat(),)
         )
-        return cursor.rowcount
-
-
-# ============================================================================
-# Checkpoint Operations (for rewind functionality)
-# ============================================================================
-
-def create_checkpoint(
-    checkpoint_id: str,
-    session_id: str,
-    sdk_session_id: str,
-    message_uuid: str,
-    message_preview: Optional[str] = None,
-    message_index: int = 0,
-    git_ref: Optional[str] = None,
-    git_available: bool = False
-) -> Dict[str, Any]:
-    """Create a checkpoint for rewind functionality"""
-    now = datetime.utcnow().isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """INSERT INTO checkpoints (id, session_id, sdk_session_id, message_uuid,
-               message_preview, message_index, git_ref, git_available, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (checkpoint_id, session_id, sdk_session_id, message_uuid,
-             message_preview, message_index, git_ref, git_available, now)
-        )
-    return get_checkpoint(checkpoint_id)
-
-
-def get_checkpoint(checkpoint_id: str) -> Optional[Dict[str, Any]]:
-    """Get a checkpoint by ID"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM checkpoints WHERE id = ?", (checkpoint_id,))
-        return row_to_dict(cursor.fetchone())
-
-
-def get_checkpoint_by_message_uuid(session_id: str, message_uuid: str) -> Optional[Dict[str, Any]]:
-    """Get a checkpoint by session and message UUID"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM checkpoints WHERE session_id = ? AND message_uuid = ?",
-            (session_id, message_uuid)
-        )
-        return row_to_dict(cursor.fetchone())
-
-
-def get_session_checkpoints(session_id: str) -> List[Dict[str, Any]]:
-    """Get all checkpoints for a session ordered by message index"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """SELECT * FROM checkpoints WHERE session_id = ?
-               ORDER BY message_index ASC""",
-            (session_id,)
-        )
-        return rows_to_list(cursor.fetchall())
-
-
-def delete_checkpoint(checkpoint_id: str) -> bool:
-    """Delete a checkpoint"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM checkpoints WHERE id = ?", (checkpoint_id,))
-        return cursor.rowcount > 0
-
-
-def delete_session_checkpoints_after(session_id: str, message_index: int) -> int:
-    """Delete all checkpoints after a specific message index (for rewind cleanup)"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "DELETE FROM checkpoints WHERE session_id = ? AND message_index > ?",
-            (session_id, message_index)
-        )
-        return cursor.rowcount
-
-
-def delete_all_session_checkpoints(session_id: str) -> int:
-    """Delete all checkpoints for a session"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM checkpoints WHERE session_id = ?", (session_id,))
         return cursor.rowcount
 
 

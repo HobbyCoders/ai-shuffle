@@ -24,8 +24,7 @@ from app.core.slash_commands import (
     parse_command_input
 )
 # New V2 rewind services - direct JSONL manipulation
-from app.core.jsonl_rewind import jsonl_rewind_service
-from app.core.checkpoint_manager import checkpoint_manager
+from app.core.jsonl_rewind import jsonl_rewind_service, RewindResult
 from app.core.sync_engine import sync_engine
 from app.core.models import (
     RewindRequest, RewindCheckpoint, RewindCheckpointsResponse,
@@ -324,11 +323,28 @@ async def sync_after_rewind(
 # Rewind API V2 - Direct JSONL manipulation (bulletproof)
 # =============================================================================
 
+class CheckpointV2(BaseModel):
+    """V2 Checkpoint model for rewind operations"""
+    uuid: str
+    index: int
+    message_preview: str
+    full_message: str
+    timestamp: Optional[str] = None
+
+
+class CheckpointsResponseV2(BaseModel):
+    """V2 Response containing available checkpoints"""
+    success: bool
+    session_id: str
+    sdk_session_id: Optional[str] = None
+    checkpoints: List[CheckpointV2] = []
+    error: Optional[str] = None
+
+
 class RewindRequestV2(BaseModel):
     """V2 Rewind request using message UUID instead of index"""
     target_uuid: str  # UUID of the message to rewind to
     restore_chat: bool = True  # Truncate JSONL (rewind conversation)
-    restore_code: bool = False  # Restore git snapshot (rewind code)
     include_response: bool = True  # Keep Claude's response to target message
 
 
@@ -337,29 +353,7 @@ class RewindResponseV2(BaseModel):
     success: bool
     message: str
     chat_rewound: bool = False
-    code_rewound: bool = False
     messages_removed: int = 0
-    error: Optional[str] = None
-
-
-class CheckpointV2(BaseModel):
-    """V2 Checkpoint with UUID and git info"""
-    uuid: str
-    index: int
-    message_preview: str
-    full_message: str
-    timestamp: Optional[str] = None
-    git_available: bool = False
-    git_ref: Optional[str] = None
-    has_changes_after: bool = False  # Whether there are git snapshots after this checkpoint
-
-
-class CheckpointsResponseV2(BaseModel):
-    """V2 Response containing checkpoints"""
-    success: bool
-    session_id: str
-    sdk_session_id: Optional[str] = None
-    checkpoints: List[CheckpointV2] = []
     error: Optional[str] = None
 
 
@@ -368,8 +362,7 @@ async def get_rewind_checkpoints(session_id: str):
     """
     Get available checkpoints for a session that can be rewound to.
 
-    V2: Uses CheckpointManager which combines JSONL checkpoints with
-    persisted git snapshot information from the database.
+    Uses JSONL rewind service to parse checkpoints directly from JSONL file.
     """
     # Get session info
     session = database.get_session(session_id)
@@ -385,8 +378,11 @@ async def get_rewind_checkpoints(session_id: str):
             error="Session has no SDK session ID - start a conversation first"
         )
 
-    # Get checkpoints via CheckpointManager (combines JSONL + database git_refs)
-    checkpoints = checkpoint_manager.get_checkpoints(session_id, include_git=True)
+    # Get working directory for project
+    working_dir = get_working_dir_for_project(session.get("project_id"))
+
+    # Get checkpoints from JSONL rewind service
+    checkpoints = jsonl_rewind_service.get_checkpoints(sdk_session_id, working_dir)
 
     if not checkpoints:
         # Fallback: get from our local database (less accurate but better than nothing)
@@ -402,8 +398,6 @@ async def get_rewind_checkpoints(session_id: str):
                     message_preview=content[:100] + ('...' if len(content) > 100 else ''),
                     full_message=content,
                     timestamp=str(msg.get("created_at", "")),
-                    git_available=False,
-                    git_ref=None
                 ))
 
         return CheckpointsResponseV2(
@@ -417,14 +411,11 @@ async def get_rewind_checkpoints(session_id: str):
     # Convert to response model
     response_checkpoints = [
         CheckpointV2(
-            uuid=cp['message_uuid'],
-            index=cp['message_index'],
-            message_preview=cp['message_preview'],
-            full_message=cp.get('full_message', cp['message_preview']),
-            timestamp=cp.get('timestamp'),
-            git_available=cp.get('git_available', False),
-            git_ref=cp.get('git_ref'),
-            has_changes_after=cp.get('has_changes_after', False)
+            uuid=cp.uuid,
+            index=cp.index,
+            message_preview=cp.message_preview,
+            full_message=cp.full_message,
+            timestamp=cp.timestamp,
         )
         for cp in checkpoints
     ]
@@ -440,19 +431,17 @@ async def get_rewind_checkpoints(session_id: str):
 @router.post("/rewind/execute/{session_id}")
 async def execute_rewind(session_id: str, request: RewindRequestV2):
     """
-    Execute a rewind operation to restore conversation and/or code.
+    Execute a rewind operation to restore conversation.
 
-    V2: Direct JSONL truncation - bulletproof, no PTY/terminal needed.
+    Direct JSONL truncation - bulletproof, no PTY/terminal needed.
 
     How it works:
     1. Truncates the JSONL file at the target message UUID
-    2. Optionally restores git snapshot for code changes
-    3. Syncs our local database
-    4. Next SDK resume will use truncated context
+    2. Syncs our local database
+    3. Next SDK resume will use truncated context
 
     Options:
     - restore_chat: Truncate JSONL (rewind conversation context)
-    - restore_code: Restore git snapshot (rewind file changes)
     - include_response: Keep Claude's response to target message
     """
     # Get session info
@@ -476,17 +465,27 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
             error="JSONL file not found - rewind requires the original JSONL file"
         )
 
-    # Execute rewind using checkpoint manager
-    result = checkpoint_manager.rewind(
-        session_id=session_id,
-        target_uuid=request.target_uuid,
-        restore_chat=request.restore_chat,
-        restore_code=request.restore_code,
-        include_response=request.include_response
-    )
+    # Get working directory for project
+    working_dir = get_working_dir_for_project(session.get("project_id"))
+
+    # Execute rewind using JSONL rewind service
+    if request.restore_chat:
+        result = jsonl_rewind_service.truncate_to_checkpoint(
+            sdk_session_id=sdk_session_id,
+            target_uuid=request.target_uuid,
+            working_dir=working_dir,
+            include_response=request.include_response
+        )
+    else:
+        # If not restoring chat, nothing to do
+        result = RewindResult(
+            success=True,
+            message="No rewind action taken (restore_chat=False)",
+            messages_removed=0
+        )
 
     # Broadcast rewind event to all connected devices for this session
-    if result.success:
+    if result.success and result.messages_removed > 0:
         import asyncio
         asyncio.create_task(
             sync_engine.broadcast_session_rewound(
@@ -499,9 +498,8 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
     return RewindResponseV2(
         success=result.success,
         message=result.message,
-        chat_rewound=result.chat_rewound,
-        code_rewound=result.code_rewound,
-        messages_removed=result.messages_removed,
+        chat_rewound=request.restore_chat and result.success,
+        messages_removed=result.messages_removed or 0,
         error=result.error
     )
 
