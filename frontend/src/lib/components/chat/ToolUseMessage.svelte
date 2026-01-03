@@ -96,19 +96,50 @@
 		return String(toolInput.description || toolInput.file_path || toolInput.path || toolInput.notebook_path || '');
 	}
 
+	// Extract field from partial JSON string using regex (for streaming)
+	function extractFieldFromPartial(partial: string, fieldName: string): string {
+		// Match "fieldName": "value" or "fieldName": 'value' patterns
+		// Handle escaped quotes in the value
+		const regex = new RegExp(`"${fieldName}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`);
+		const match = partial.match(regex);
+		if (match) {
+			// Unescape the value
+			return match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+		}
+		return '';
+	}
+
+	// Extract summary from partial JSON during streaming
+	function getPartialSummary(partial: string): string {
+		// Try to parse as complete JSON first
+		try {
+			const parsed = JSON.parse(partial);
+			return getToolSummary(parsed);
+		} catch {
+			// Fallback: extract fields via regex from incomplete JSON
+			const description = extractFieldFromPartial(partial, 'description');
+			if (description) return description;
+
+			const filePath = extractFieldFromPartial(partial, 'file_path');
+			if (filePath) return filePath;
+
+			const path = extractFieldFromPartial(partial, 'path');
+			if (path) return path;
+
+			const notebookPath = extractFieldFromPartial(partial, 'notebook_path');
+			if (notebookPath) return notebookPath;
+
+			return '';
+		}
+	}
+
 	// Compute summary - use input if available, try parsing partialInput during streaming
 	const summary = $derived.by(() => {
 		if (input && Object.keys(input).length > 0) {
 			return getToolSummary(input);
 		}
 		if (streaming && partialInput) {
-			try {
-				const parsed = JSON.parse(partialInput);
-				return getToolSummary(parsed);
-			} catch {
-				// Partial JSON not parseable yet
-				return '';
-			}
+			return getPartialSummary(partialInput);
 		}
 		return '';
 	});
