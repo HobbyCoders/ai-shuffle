@@ -77,7 +77,7 @@
 		}
 
 		// During streaming, extract from partialInput
-		if (streaming && partialInput) {
+		if (partialInput) {
 			const cmd = extractFieldFromPartial(partialInput, 'command');
 			if (cmd) {
 				return {
@@ -88,7 +88,8 @@
 			}
 		}
 
-		return { isBash: false, command: '', description: '' };
+		// Fallback: it's a Bash tool but we don't have the command yet
+		return { isBash: true, command: '', description: '' };
 	});
 
 	const isBashTool = $derived(bashFields.isBash);
