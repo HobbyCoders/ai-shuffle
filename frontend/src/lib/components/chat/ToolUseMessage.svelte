@@ -42,111 +42,21 @@
 		return TOOL_ICON_MAP[toolName] || 'cog';
 	}
 
-	function getToolSummary(toolName: string, toolInput?: Record<string, unknown>): string {
+	function getToolSummary(toolInput?: Record<string, unknown>): string {
 		if (!toolInput) return '';
-
-		// No JS truncation - CSS handles responsive truncation via text-overflow: ellipsis
-		const quote = (s: string) => `"${s}"`;
-
-		switch (toolName) {
-			// AI Image generation - show prompt
-			case 'generateImage':
-			case 'editImage':
-			case 'generateWithReference':
-			case 'textTo3D':
-			case 'imageTo3D':
-			case 'retexture3D':
-				return quote(String(toolInput.prompt || toolInput.style_prompt || ''));
-
-			// Video generation - show duration + prompt
-			case 'generateVideo':
-			case 'imageToVideo':
-			case 'bridgeFrames':
-			case 'extendVideo': {
-				const dur = toolInput.duration ? `${toolInput.duration}s: ` : '';
-				return `${dur}${quote(String(toolInput.prompt || ''))}`;
-			}
-
-			// Video analysis
-			case 'analyzeVideo':
-				return String(toolInput.video_path || '');
-
-			// 3D rigging/animation
-			case 'rig3D':
-			case 'animate3D':
-			case 'getTask3D':
-				return String(toolInput.task_id || toolInput.rig_task_id || toolInput.action_id || '');
-
-			// File operations - show path
-			case 'Read':
-			case 'Write':
-			case 'Edit':
-			case 'NotebookEdit':
-				return String(toolInput.file_path || toolInput.notebook_path || '');
-
-			// Glob - show pattern
-			case 'Glob':
-				return String(toolInput.pattern || '');
-
-			// Grep - show pattern and optional path
-			case 'Grep': {
-				const pattern = quote(String(toolInput.pattern || ''));
-				const path = toolInput.path ? ` in ${toolInput.path}` : '';
-				return `${pattern}${path}`;
-			}
-
-			// Bash - show command
-			case 'Bash':
-				return String(toolInput.command || '');
-
-			// Web fetch - show hostname + path
-			case 'WebFetch':
-				try {
-					const url = new URL(String(toolInput.url || ''));
-					return url.hostname + url.pathname;
-				} catch {
-					return String(toolInput.url || '');
-				}
-
-			// Web search - show query
-			case 'WebSearch':
-				return quote(String(toolInput.query || ''));
-
-			// Task agent - show description
-			case 'Task':
-				return String(toolInput.description || toolInput.prompt || '');
-
-			// Todo - show count
-			case 'TodoWrite': {
-				const todos = toolInput.todos as Array<{ status?: string }> | undefined;
-				if (Array.isArray(todos)) {
-					const inProgress = todos.filter(t => t.status === 'in_progress').length;
-					const completed = todos.filter(t => t.status === 'completed').length;
-					return `${todos.length} tasks (${completed} done, ${inProgress} active)`;
-				}
-				return '';
-			}
-
-			default:
-				// Try common field names as fallback
-				for (const key of ['prompt', 'query', 'command', 'file_path', 'path', 'pattern', 'description']) {
-					if (toolInput[key] && typeof toolInput[key] === 'string') {
-						return String(toolInput[key]);
-					}
-				}
-				return '';
-		}
+		// Use the description field that tools provide
+		return String(toolInput.description || '');
 	}
 
 	// Compute summary - use input if available, try parsing partialInput during streaming
 	const summary = $derived.by(() => {
 		if (input && Object.keys(input).length > 0) {
-			return getToolSummary(name, input);
+			return getToolSummary(input);
 		}
 		if (streaming && partialInput) {
 			try {
 				const parsed = JSON.parse(partialInput);
-				return getToolSummary(name, parsed);
+				return getToolSummary(parsed);
 			} catch {
 				// Partial JSON not parseable yet
 				return '';
@@ -273,7 +183,7 @@
 					<span class="text-muted-foreground flex-shrink-0">•</span>
 					<span
 						class="text-sm text-muted-foreground truncate min-w-0"
-						title={getToolSummary(name, input)}
+						title={summary}
 					>{summary}</span>
 				{/if}
 				<!-- Chevron -->
