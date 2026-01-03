@@ -281,10 +281,8 @@
 									<span>−</span>
 									<span>Removed</span>
 								</div>
-								<div class="rounded border border-red-500/20 bg-red-500/5 overflow-hidden max-h-32 overflow-y-auto">
-									{#each oldString.split('\n') as line}
-										<div class="text-[10px] font-mono px-1.5 py-px text-red-400 whitespace-pre overflow-x-auto">{line || ' '}</div>
-									{/each}
+								<div class="rounded border border-red-500/20 bg-red-500/5 overflow-hidden max-h-48 overflow-auto">
+									<pre class="text-[10px] font-mono px-1.5 py-1 text-red-400 m-0">{oldString || ' '}</pre>
 								</div>
 							</div>
 							<!-- New (added) -->
@@ -293,10 +291,8 @@
 									<span>+</span>
 									<span>Added</span>
 								</div>
-								<div class="rounded border border-green-500/20 bg-green-500/5 overflow-hidden max-h-32 overflow-y-auto">
-									{#each newString.split('\n') as line}
-										<div class="text-[10px] font-mono px-1.5 py-px text-green-400 whitespace-pre overflow-x-auto">{line || ' '}</div>
-									{/each}
+								<div class="rounded border border-green-500/20 bg-green-500/5 overflow-hidden max-h-48 overflow-auto">
+									<pre class="text-[10px] font-mono px-1.5 py-1 text-green-400 m-0">{newString || ' '}</pre>
 								</div>
 							</div>
 						</div>
