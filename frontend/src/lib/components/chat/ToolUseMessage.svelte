@@ -241,29 +241,33 @@
 			</summary>
 			<div class="bg-card border-t border-border">
 				{#if isEditTool}
-					<!-- Special diff view for Edit tool -->
-					<div class="px-4 py-3">
-						<div class="text-xs text-muted-foreground mb-2 font-medium flex items-center gap-2">
-							<span>Changes</span>
-							{#if editFilePath}
-								<span class="text-muted-foreground/60">in</span>
-								<code class="text-xs bg-muted/50 px-1.5 py-0.5 rounded">{editFilePath}</code>
-							{/if}
-						</div>
-						<div class="diff-viewer rounded border border-border overflow-hidden max-h-64 overflow-y-auto">
-							{#each diffLines as { type, line }, idx}
-								<div
-									class="diff-line text-xs font-mono px-2 py-0.5 whitespace-pre-wrap break-all {
-										type === 'removed' ? 'bg-red-500/10 text-red-400' :
-										type === 'added' ? 'bg-green-500/10 text-green-400' :
-										'text-muted-foreground'
-									}"
-								>
-									<span class="inline-block w-4 text-center opacity-60 select-none mr-1">
-										{type === 'removed' ? '−' : type === 'added' ? '+' : ' '}
-									</span>{line || ' '}
+					<!-- Side-by-side diff view for Edit tool -->
+					<div class="px-3 py-2">
+						<div class="grid grid-cols-2 gap-2">
+							<!-- Old (removed) -->
+							<div class="min-w-0">
+								<div class="text-[10px] text-red-400 mb-1 font-medium flex items-center gap-1">
+									<span>−</span>
+									<span>Removed</span>
 								</div>
-							{/each}
+								<div class="rounded border border-red-500/20 bg-red-500/5 overflow-hidden max-h-32 overflow-y-auto">
+									{#each oldString.split('\n') as line}
+										<div class="text-[10px] font-mono px-1.5 py-px text-red-400 whitespace-pre overflow-x-auto">{line || ' '}</div>
+									{/each}
+								</div>
+							</div>
+							<!-- New (added) -->
+							<div class="min-w-0">
+								<div class="text-[10px] text-green-400 mb-1 font-medium flex items-center gap-1">
+									<span>+</span>
+									<span>Added</span>
+								</div>
+								<div class="rounded border border-green-500/20 bg-green-500/5 overflow-hidden max-h-32 overflow-y-auto">
+									{#each newString.split('\n') as line}
+										<div class="text-[10px] font-mono px-1.5 py-px text-green-400 whitespace-pre overflow-x-auto">{line || ' '}</div>
+									{/each}
+								</div>
+							</div>
 						</div>
 					</div>
 				{:else if partialInput || input}
