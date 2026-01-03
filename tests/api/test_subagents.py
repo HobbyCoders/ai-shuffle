@@ -797,8 +797,8 @@ class TestDeleteSubagentEndpoint:
         response = subagents_unauthenticated_client.delete("/api/v1/subagents/test-subagent")
         assert response.status_code == 403
 
-    def test_delete_builtin_subagent(self, subagents_test_client):
-        """DELETE /subagents/{id} should allow deleting builtin subagents."""
+    def test_delete_builtin_subagent_forbidden(self, subagents_test_client):
+        """DELETE /subagents/{id} should reject deleting builtin subagents."""
         existing_subagent = {
             "id": "builtin-subagent",
             "name": "Builtin",
@@ -813,11 +813,14 @@ class TestDeleteSubagentEndpoint:
 
         with patch("app.api.subagents.database") as mock_db:
             mock_db.get_subagent.return_value = existing_subagent
-            mock_db.delete_subagent.return_value = True
             response = subagents_test_client.delete("/api/v1/subagents/builtin-subagent")
 
-            # Per the API, all subagents can be deleted
-            assert response.status_code == 204
+            # Built-in subagents cannot be deleted
+            assert response.status_code == 403
+            data = response.json()
+            assert "Built-in subagents cannot be deleted" in data["detail"]
+            # Ensure delete was never called
+            mock_db.delete_subagent.assert_not_called()
 
 
 # =============================================================================
