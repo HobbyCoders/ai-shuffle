@@ -396,9 +396,9 @@
 									<span>−</span>
 									<span>Removed</span>
 								</div>
-								<div class="rounded border border-red-500/20 bg-red-500/5">
+								<div class="rounded border border-red-500/20 bg-red-500/5 p-2">
 									<div class="max-h-60 overflow-scroll">
-										<pre class="text-[10px] font-mono px-1.5 py-1 text-red-400 m-0 w-max !bg-transparent !p-0 !rounded-none">{oldString || ' '}</pre>
+										<pre class="text-[10px] font-mono text-red-400 m-0 w-max !bg-transparent !p-0 !rounded-none">{oldString || ' '}</pre>
 									</div>
 								</div>
 							</div>
@@ -408,9 +408,9 @@
 									<span>+</span>
 									<span>Added</span>
 								</div>
-								<div class="rounded border border-green-500/20 bg-green-500/5">
+								<div class="rounded border border-green-500/20 bg-green-500/5 p-2">
 									<div class="max-h-60 overflow-scroll">
-										<pre class="text-[10px] font-mono px-1.5 py-1 text-green-400 m-0 w-max !bg-transparent !p-0 !rounded-none">{newString || ' '}</pre>
+										<pre class="text-[10px] font-mono text-green-400 m-0 w-max !bg-transparent !p-0 !rounded-none">{newString || ' '}</pre>
 									</div>
 								</div>
 							</div>
@@ -428,9 +428,9 @@
 							</svg>
 							<span>Content</span>
 						</div>
-						<div class="rounded border border-blue-500/20 bg-blue-500/5">
+						<div class="rounded border border-blue-500/20 bg-blue-500/5 p-2">
 							<div class="max-h-60 overflow-scroll">
-								<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{readContent || (streaming ? '' : 'Loading...')}{#if streaming && !readContent}<span class="inline-block w-1.5 h-3 ml-0.5 bg-blue-400 animate-pulse"></span>{/if}</pre>
+								<pre class="text-[10px] font-mono text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{readContent || (streaming ? '' : 'Loading...')}{#if streaming && !readContent}<span class="inline-block w-1.5 h-3 ml-0.5 bg-blue-400 animate-pulse"></span>{/if}</pre>
 							</div>
 						</div>
 					</div>
@@ -443,9 +443,9 @@
 							</svg>
 							<span>Content</span>
 						</div>
-						<div class="rounded border border-green-500/20 bg-green-500/5">
+						<div class="rounded border border-green-500/20 bg-green-500/5 p-2">
 							<div class="max-h-60 overflow-scroll">
-								<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{writeContent || ' '}{#if streaming && !result}<span class="inline-block w-1.5 h-3 ml-0.5 bg-green-400 animate-pulse"></span>{/if}</pre>
+								<pre class="text-[10px] font-mono text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{writeContent || ' '}{#if streaming && !result}<span class="inline-block w-1.5 h-3 ml-0.5 bg-green-400 animate-pulse"></span>{/if}</pre>
 							</div>
 						</div>
 					</div>
@@ -462,9 +462,9 @@
 									</svg>
 									<span>Command</span>
 								</div>
-								<div class="rounded border border-yellow-500/20 bg-yellow-500/5">
+								<div class="rounded border border-yellow-500/20 bg-yellow-500/5 p-2">
 									<div class="max-h-60 overflow-scroll">
-										<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{bashCommand || ' '}{#if streaming && !result}<span class="inline-block w-1.5 h-3 ml-0.5 bg-yellow-500 animate-pulse"></span>{/if}</pre>
+										<pre class="text-[10px] font-mono text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{bashCommand || ' '}{#if streaming && !result}<span class="inline-block w-1.5 h-3 ml-0.5 bg-yellow-500 animate-pulse"></span>{/if}</pre>
 									</div>
 								</div>
 							</div>
@@ -477,9 +477,9 @@
 									</svg>
 									<span>Output</span>
 								</div>
-								<div class="rounded border border-zinc-500/20 bg-zinc-500/5">
+								<div class="rounded border border-zinc-500/20 bg-zinc-500/5 p-2">
 									<div class="max-h-60 overflow-scroll">
-										<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{result || ' '}</pre>
+										<pre class="text-[10px] font-mono text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{result || ' '}</pre>
 									</div>
 								</div>
 							</div>
@@ -491,14 +491,14 @@
 							<!-- Input -->
 							<div class="min-w-0">
 								<div class="text-[10px] text-muted-foreground mb-1 font-medium">Input</div>
-								<div class="rounded border border-zinc-500/20 bg-zinc-500/5">
+								<div class="rounded border border-zinc-500/20 bg-zinc-500/5 p-2">
 									<div class="max-h-60 overflow-scroll">
 										{#if streaming && partialInput}
-											<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{partialInput}<span class="inline-block w-1.5 h-3 ml-0.5 bg-primary animate-pulse"></span></pre>
+											<pre class="text-[10px] font-mono text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{partialInput}<span class="inline-block w-1.5 h-3 ml-0.5 bg-primary animate-pulse"></span></pre>
 										{:else if input && Object.keys(input).length > 0}
-											<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{JSON.stringify(input, null, 2)}</pre>
+											<pre class="text-[10px] font-mono text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{JSON.stringify(input, null, 2)}</pre>
 										{:else if partialInput}
-											<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{partialInput}</pre>
+											<pre class="text-[10px] font-mono text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{partialInput}</pre>
 										{/if}
 									</div>
 								</div>
@@ -506,16 +506,16 @@
 							<!-- Result -->
 							<div class="min-w-0">
 								<div class="text-[10px] text-muted-foreground mb-1 font-medium">Result</div>
-								<div class="rounded border border-zinc-500/20 bg-zinc-500/5">
+								<div class="rounded border border-zinc-500/20 bg-zinc-500/5 p-2">
 									<div class="max-h-60 overflow-scroll">
 										{#if result}
 											{#if toolResultHasMedia(result)}
-												<span class="text-[10px] text-green-500 px-1.5 py-1">✓ {toolResultHasVideo(result) ? 'Video' : 'Image'} generated</span>
+												<span class="text-[10px] text-green-500">✓ {toolResultHasVideo(result) ? 'Video' : 'Image'} generated</span>
 											{:else}
-												<pre class="text-[10px] font-mono px-1.5 py-1 text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{result}</pre>
+												<pre class="text-[10px] font-mono text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{result}</pre>
 											{/if}
 										{:else}
-											<pre class="text-[10px] font-mono px-1.5 py-1 text-muted-foreground m-0 w-max !bg-transparent !p-0 !rounded-none"> </pre>
+											<pre class="text-[10px] font-mono text-muted-foreground m-0 w-max !bg-transparent !p-0 !rounded-none"> </pre>
 										{/if}
 									</div>
 								</div>
