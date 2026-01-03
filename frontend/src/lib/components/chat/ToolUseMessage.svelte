@@ -14,6 +14,54 @@
 
 	let { name, input, partialInput, result, status, streaming = false }: Props = $props();
 
+	// Check if this is an Edit tool with old_string/new_string
+	const isEditTool = $derived(name === 'Edit' && input?.old_string !== undefined && input?.new_string !== undefined);
+	const editFilePath = $derived(isEditTool ? String(input?.file_path || '') : '');
+	const oldString = $derived(isEditTool ? String(input?.old_string || '') : '');
+	const newString = $derived(isEditTool ? String(input?.new_string || '') : '');
+
+	// Simple line-based diff for Edit tool
+	function computeDiff(oldStr: string, newStr: string): Array<{ type: 'context' | 'removed' | 'added'; line: string }> {
+		const oldLines = oldStr.split('\n');
+		const newLines = newStr.split('\n');
+		const result: Array<{ type: 'context' | 'removed' | 'added'; line: string }> = [];
+
+		// Simple diff: show all old lines as removed, all new lines as added
+		// For a more sophisticated diff, we'd use a proper diff algorithm
+		const maxLen = Math.max(oldLines.length, newLines.length);
+		let i = 0, j = 0;
+
+		// Find common prefix
+		while (i < oldLines.length && i < newLines.length && oldLines[i] === newLines[i]) {
+			result.push({ type: 'context', line: oldLines[i] });
+			i++;
+			j++;
+		}
+
+		// Find common suffix
+		let oldEnd = oldLines.length - 1;
+		let newEnd = newLines.length - 1;
+		const suffixLines: Array<{ type: 'context' | 'removed' | 'added'; line: string }> = [];
+		while (oldEnd > i && newEnd > j && oldLines[oldEnd] === newLines[newEnd]) {
+			suffixLines.unshift({ type: 'context', line: oldLines[oldEnd] });
+			oldEnd--;
+			newEnd--;
+		}
+
+		// Everything in between is changed
+		for (let k = i; k <= oldEnd; k++) {
+			result.push({ type: 'removed', line: oldLines[k] });
+		}
+		for (let k = j; k <= newEnd; k++) {
+			result.push({ type: 'added', line: newLines[k] });
+		}
+
+		result.push(...suffixLines);
+		return result;
+	}
+
+	const diffLines = $derived(isEditTool ? computeDiff(oldString, newString) : []);
+
 	// Tool icon categories - returns icon type for SVG rendering
 	type IconType = 'image' | 'video' | 'cube' | 'file' | 'pencil' | 'search' | 'terminal' | 'globe' | 'bot' | 'list' | 'cog';
 
@@ -192,7 +240,33 @@
 				</svg>
 			</summary>
 			<div class="bg-card border-t border-border">
-				{#if partialInput || input}
+				{#if isEditTool}
+					<!-- Special diff view for Edit tool -->
+					<div class="px-4 py-3">
+						<div class="text-xs text-muted-foreground mb-2 font-medium flex items-center gap-2">
+							<span>Changes</span>
+							{#if editFilePath}
+								<span class="text-muted-foreground/60">in</span>
+								<code class="text-xs bg-muted/50 px-1.5 py-0.5 rounded">{editFilePath}</code>
+							{/if}
+						</div>
+						<div class="diff-viewer rounded border border-border overflow-hidden max-h-64 overflow-y-auto">
+							{#each diffLines as { type, line }, idx}
+								<div
+									class="diff-line text-xs font-mono px-2 py-0.5 whitespace-pre-wrap break-all {
+										type === 'removed' ? 'bg-red-500/10 text-red-400' :
+										type === 'added' ? 'bg-green-500/10 text-green-400' :
+										'text-muted-foreground'
+									}"
+								>
+									<span class="inline-block w-4 text-center opacity-60 select-none mr-1">
+										{type === 'removed' ? '−' : type === 'added' ? '+' : ' '}
+									</span>{line || ' '}
+								</div>
+							{/each}
+						</div>
+					</div>
+				{:else if partialInput || input}
 					<div class="px-4 py-3 border-b border-border/50">
 						<div class="text-xs text-muted-foreground mb-1 font-medium">Input</div>
 						{#if streaming && partialInput}
@@ -207,7 +281,7 @@
 						{/if}
 					</div>
 				{/if}
-				{#if result}
+				{#if result && !isEditTool}
 					<div class="px-4 py-3">
 						<div class="text-xs text-muted-foreground mb-1 font-medium">Result</div>
 						{#if toolResultHasMedia(result)}
