@@ -78,3 +78,4 @@ tools/node_modules/
 /docs/API_DOCUMENTATION.md
 CLAUDE.md
 unban.py
+frontend/build-frontend.bat
