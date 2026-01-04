@@ -292,15 +292,16 @@ def _create_schema(cursor: sqlite3.Cursor):
     # Migrate existing worktree-session relationships from worktrees.session_id to sessions.worktree_id
     # This preserves backward compatibility while moving to the new model
     # First check if migration is needed (any sessions without worktree_id that should have one)
-    cursor.execute("""
-        SELECT COUNT(*) as cnt FROM sessions s
-        WHERE s.worktree_id IS NULL
-        AND EXISTS (SELECT 1 FROM worktrees w WHERE w.session_id = s.id)
-    """)
-    migration_needed = cursor.fetchone()["cnt"] > 0
-    
-    if migration_needed:
-        try:
+    # Note: This check and migration only applies to existing databases, not fresh installs
+    try:
+        cursor.execute("""
+            SELECT COUNT(*) as cnt FROM sessions s
+            WHERE s.worktree_id IS NULL
+            AND EXISTS (SELECT 1 FROM worktrees w WHERE w.session_id = s.id)
+        """)
+        migration_needed = cursor.fetchone()["cnt"] > 0
+
+        if migration_needed:
             cursor.execute("""
                 UPDATE sessions SET worktree_id = (
                     SELECT w.id FROM worktrees w WHERE w.session_id = sessions.id
@@ -310,13 +311,13 @@ def _create_schema(cursor: sqlite3.Cursor):
             """)
             migrated_count = cursor.rowcount
             logger.info(f"Migrated {migrated_count} worktree-session relationships to sessions.worktree_id")
-        except sqlite3.OperationalError as e:
-            # Handle specific SQLite errors (e.g., table doesn't exist during initial setup)
-            if "no such table" in str(e).lower():
-                logger.debug("Worktrees table does not exist yet, skipping migration")
-            else:
-                logger.error(f"Failed to migrate worktree-session relationships: {e}")
-                raise  # Re-raise unexpected errors
+    except sqlite3.OperationalError as e:
+        # Handle specific SQLite errors (e.g., table doesn't exist during initial setup)
+        if "no such table" in str(e).lower():
+            logger.debug("Worktrees table does not exist yet, skipping migration")
+        else:
+            logger.error(f"Failed to migrate worktree-session relationships: {e}")
+            raise  # Re-raise unexpected errors
 
     # Login attempts tracking for brute force protection
     cursor.execute("""

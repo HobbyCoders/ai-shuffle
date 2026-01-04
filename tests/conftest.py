@@ -15,7 +15,7 @@ import tempfile
 import pytest
 from pathlib import Path
 from typing import Generator
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from contextlib import contextmanager
 
 # Add the project root to the path
@@ -113,10 +113,33 @@ def create_test_schema(cursor: sqlite3.Cursor):
             title TEXT,
             profile_id TEXT REFERENCES agent_profiles(id) ON DELETE SET NULL,
             project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+            api_user_id TEXT REFERENCES api_users(id) ON DELETE SET NULL,
+            sdk_session_id TEXT,
             worktree_id TEXT,
             status TEXT DEFAULT 'active',
             is_pinned INTEGER DEFAULT 0,
+            is_favorite BOOLEAN DEFAULT FALSE,
+            total_cost_usd REAL DEFAULT 0,
+            total_tokens_in INTEGER DEFAULT 0,
+            total_tokens_out INTEGER DEFAULT 0,
+            turn_count INTEGER DEFAULT 0,
+            parent_session_id TEXT,
+            fork_point_message_index INTEGER,
             metadata TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Git repositories
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS git_repositories (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            remote_url TEXT NOT NULL,
+            local_path TEXT,
+            default_branch TEXT DEFAULT 'main',
+            is_primary BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -126,13 +149,12 @@ def create_test_schema(cursor: sqlite3.Cursor):
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS worktrees (
             id TEXT PRIMARY KEY,
+            repository_id TEXT NOT NULL REFERENCES git_repositories(id) ON DELETE CASCADE,
             session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
             branch_name TEXT NOT NULL,
-            path TEXT NOT NULL,
+            worktree_path TEXT NOT NULL,
+            base_branch TEXT,
             status TEXT DEFAULT 'active',
-            base_branch TEXT DEFAULT 'main',
-            auto_created INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -327,6 +349,11 @@ def create_test_schema(cursor: sqlite3.Cursor):
             tools JSON,
             model TEXT,
             is_builtin BOOLEAN DEFAULT FALSE,
+            default_name TEXT,
+            default_description TEXT,
+            default_prompt TEXT,
+            default_tools JSON,
+            default_model TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -552,7 +579,7 @@ def create_test_schema(cursor: sqlite3.Cursor):
     """)
 
     # Insert schema version
-    cursor.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (25)")
+    cursor.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (26)")
 
 
 @pytest.fixture(scope="function")
