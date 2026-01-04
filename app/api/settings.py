@@ -1362,18 +1362,24 @@ async def get_available_ai_tools(token: str = Depends(require_auth)):
     image_api_key = get_decrypted_api_key("image_api_key")
     meshy_api_key = get_decrypted_api_key("meshy_api_key")
 
-    # Determine which providers are available (for model tools only)
+    # Determine which providers are available
     available_providers = set()
     if image_api_key:
         available_providers.add("google-gemini")
         available_providers.add("google-imagen")
         available_providers.add("google-veo")
         available_providers.add("google-gemini-video")
+        available_providers.add("google")  # For collaboration tools
     if openai_key:
         available_providers.add("openai-gpt-image")
         available_providers.add("openai-sora")
+        available_providers.add("openai")  # For collaboration tools
     if meshy_api_key:
         available_providers.add("meshy")
+    # DeepSeek for collaboration tools
+    deepseek_api_key = get_decrypted_api_key("deepseek_api_key")
+    if deepseek_api_key:
+        available_providers.add("deepseek")
 
     # Get current configured providers
     current_image_provider = database.get_system_setting("image_provider")

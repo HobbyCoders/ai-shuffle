@@ -313,6 +313,11 @@
 		if (aiTools.retexture_3d) enabledAITools.push('retexture_3d');
 		if (aiTools.rig_3d) enabledAITools.push('rig_3d');
 		if (aiTools.animate_3d) enabledAITools.push('animate_3d');
+		// AI Collaboration Tools
+		if (aiTools.ai_collaborate) enabledAITools.push('ai_collaborate');
+		if (aiTools.ai_memory) enabledAITools.push('ai_memory');
+		if (aiTools.ai_review) enabledAITools.push('ai_review');
+		if (aiTools.ai_reason) enabledAITools.push('ai_reason');
 
 		// Determine tool selection mode
 		if (allowedTools.length > 0) {
@@ -455,6 +460,14 @@
 		}
 	}
 
+	function getAICategorySelectionState(category: AIToolCategory): 'all' | 'some' | 'none' {
+		const ids = category.tools.map((t) => t.id);
+		const selectedCount = ids.filter((id) => profileForm.enabled_ai_tools.includes(id)).length;
+		if (selectedCount === 0) return 'none';
+		if (selectedCount === ids.length) return 'all';
+		return 'some';
+	}
+
 	// Agent helpers
 	function toggleAgent(agentId: string) {
 		if (profileForm.enabled_agents.includes(agentId)) {
@@ -565,7 +578,12 @@
 				image_to_3d: effectiveAITools.includes('image_to_3d'),
 				retexture_3d: effectiveAITools.includes('retexture_3d'),
 				rig_3d: effectiveAITools.includes('rig_3d'),
-				animate_3d: effectiveAITools.includes('animate_3d')
+				animate_3d: effectiveAITools.includes('animate_3d'),
+				// AI Collaboration Tools
+				ai_collaborate: effectiveAITools.includes('ai_collaborate'),
+				ai_memory: effectiveAITools.includes('ai_memory'),
+				ai_review: effectiveAITools.includes('ai_review'),
+				ai_reason: effectiveAITools.includes('ai_reason')
 			};
 		}
 
@@ -1008,44 +1026,51 @@
 									<p class="card-empty-description">No AI tools available. Configure API keys in Settings.</p>
 								</div>
 							{:else}
-								<div class="ai-tools-list">
+								<div class="tools-list">
 									{#each aiToolCategories as category}
 										{#if category.tools.length > 0}
-											<div class="ai-category">
-												<div class="ai-category-header">
-													<span class="ai-category-name">{category.name}</span>
-													<button
-														type="button"
-														class="toggle-all-btn"
-														onclick={() => toggleAIToolCategory(category)}
+											{@const state = getAICategorySelectionState(category)}
+											<div class="tool-category">
+												<button
+													type="button"
+													class="category-header"
+													onclick={() => toggleAIToolCategory(category)}
+												>
+													<div
+														class="category-checkbox"
+														class:checked={state !== 'none'}
+														class:partial={state === 'some'}
 													>
-														Toggle all
-													</button>
-												</div>
-												<div class="ai-tools-grid">
+														{#if state === 'all'}
+															<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
+															</svg>
+														{:else if state === 'some'}
+															<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" />
+															</svg>
+														{/if}
+													</div>
+													<span class="category-name">{category.name}</span>
+													<span class="category-count">{category.tools.length}</span>
+												</button>
+												<div class="ai-category-tools">
 													{#each category.tools as tool}
 														{@const isSelected = profileForm.enabled_ai_tools.includes(tool.id)}
-														<label
-															class="ai-tool-item"
-															class:disabled={!tool.available}
-														>
+														<label class="ai-tool-row" class:disabled={!tool.available}>
 															<input
 																type="checkbox"
 																checked={isSelected}
 																disabled={!tool.available}
 																onchange={() => toggleAITool(tool.id)}
-																class="ai-tool-checkbox"
+																class="tool-checkbox"
 															/>
-															<div class="ai-tool-info">
-																<div class="ai-tool-header">
-																	<span class="ai-tool-name">{tool.name}</span>
-																	{#if !tool.available}
-																		<span class="card-badge card-badge--warning">No API key</span>
-																	{:else if tool.active_provider}
-																		<span class="card-badge card-badge--success">{tool.active_provider}</span>
-																	{/if}
-																</div>
-																<p class="ai-tool-desc">{tool.description}</p>
+															<div class="ai-tool-content">
+																<span class="tool-name">{tool.name}</span>
+																{#if !tool.available}
+																	<span class="card-badge card-badge--warning">No API key</span>
+																{/if}
+																<p class="ai-tool-description">{tool.description}</p>
 															</div>
 														</label>
 													{/each}
@@ -2059,111 +2084,56 @@
 		border-top: 1px solid var(--border-subtle);
 	}
 
-	/* AI Tools */
-	.ai-tools-list {
+	/* AI Tools - Category Tools with descriptions */
+	.ai-category-tools {
 		display: flex;
 		flex-direction: column;
-		gap: var(--space-3, 12px);
-		margin-top: var(--space-3, 12px);
+		padding: var(--space-2, 8px);
+		background: var(--surface-0);
 	}
 
-	.ai-category {
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		padding: var(--space-3, 12px);
-		background: var(--surface-1);
-	}
-
-	.ai-category-header {
+	.ai-tool-row {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
-		margin-bottom: var(--space-3, 12px);
-	}
-
-	.ai-category-name {
-		font-size: var(--text-md, 0.875rem);
-		font-weight: 500;
-		color: var(--text-primary);
-	}
-
-	.toggle-all-btn {
-		background: transparent;
-		border: none;
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--primary);
+		gap: var(--space-2, 8px);
+		padding: 6px var(--space-2, 8px);
+		border-radius: var(--radius-sm, 6px);
 		cursor: pointer;
+		transition: background var(--transition-fast, 100ms);
 	}
 
-	.toggle-all-btn:hover {
-		text-decoration: underline;
-	}
-
-	.ai-tools-grid {
-		display: grid;
-		grid-template-columns: repeat(2, 1fr);
-		gap: var(--space-2, 8px);
-	}
-
-	@media (max-width: 480px) {
-		.ai-tools-grid {
-			grid-template-columns: 1fr;
-		}
-	}
-
-	.ai-tool-item {
-		display: flex;
-		align-items: flex-start;
-		gap: var(--space-2, 8px);
-		padding: var(--space-3, 12px);
+	.ai-tool-row:hover {
 		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		cursor: pointer;
-		transition: all var(--transition-smooth, 200ms);
 	}
 
-	.ai-tool-item:hover {
-		background: var(--surface-hover);
-		border-color: var(--border-emphasis);
-	}
-
-	.ai-tool-item.disabled {
+	.ai-tool-row.disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
 	}
 
-	.ai-tool-checkbox {
-		margin-top: 2px;
-		width: 16px;
-		height: 16px;
-		flex-shrink: 0;
+	.ai-tool-content {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		overflow: hidden;
 	}
 
-	.ai-tool-info {
+	.ai-tool-description {
+		font-size: var(--text-sm, 0.75rem);
+		color: var(--text-secondary);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 		flex: 1;
 		min-width: 0;
 	}
 
-	.ai-tool-header {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		flex-wrap: wrap;
-	}
-
-	.ai-tool-name {
-		font-size: var(--text-md, 0.875rem);
-		color: var(--text-primary);
-	}
-
-	.ai-tool-desc {
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary);
-		margin-top: 2px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
+	.ai-tool-description::before {
+		content: "—";
+		margin-right: 6px;
+		color: var(--text-muted);
 	}
 
 	/* Agents Grid */
