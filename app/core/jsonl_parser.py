@@ -64,9 +64,17 @@ def get_project_dir_name(working_dir: str) -> str:
 
     Claude converts paths like /workspace/github-projects to -workspace-github-projects
     The leading dash is kept as that's how Claude encodes absolute paths.
+
+    On Windows, backslashes and colons are also replaced with dashes, e.g.:
+    D:\\Development\\ai-shuffle -> D--Development-ai-shuffle
+
+    The colon after drive letter (D:) becomes a dash, and each backslash becomes a dash,
+    resulting in D-- at the start for D:\\ paths.
     """
-    # Replace path separators with dashes (keeps leading dash from absolute path)
-    return working_dir.replace("/", "-")
+    import os
+    # Replace Windows drive colon (D: -> D-), path separators (\, /), all with dashes
+    # Order matters: os.sep first for native, then / for any mixed paths, then : for Windows drives
+    return working_dir.replace(os.sep, "-").replace("/", "-").replace(":", "-")
 
 
 def get_session_jsonl_path(sdk_session_id: str, working_dir: str = "/workspace") -> Optional[Path]:
@@ -773,3 +781,140 @@ def list_available_sessions(working_dir: str = "/workspace") -> List[Dict[str, A
     # Sort by modified time, newest first
     sessions.sort(key=lambda x: x["modified_at"], reverse=True)
     return sessions
+
+
+def _get_session_title_and_preview(jsonl_path: Path) -> tuple[Optional[str], Optional[str], int]:
+    """
+    Extract session title (first user message) and preview from JSONL file.
+
+    Returns:
+        tuple of (title, preview, message_count)
+    """
+    title = None
+    preview = None
+    message_count = 0
+
+    try:
+        for entry in parse_jsonl_file(jsonl_path):
+            entry_type = entry.get("type")
+
+            # Skip non-message entries
+            if entry_type in ("queue-operation", "file-history-snapshot", "system"):
+                continue
+
+            # Skip meta and sidechain messages
+            if entry.get("isMeta") or entry.get("isSidechain"):
+                continue
+
+            message_data = entry.get("message", {})
+            role = message_data.get("role")
+            content = message_data.get("content")
+
+            if entry_type == "user" and role == "user":
+                if isinstance(content, str) and not _is_system_content(content):
+                    message_count += 1
+                    if title is None:
+                        # First user message is the title
+                        title = content[:100].strip()
+                        if len(content) > 100:
+                            title = title.rsplit(' ', 1)[0] + "..."
+                elif isinstance(content, list):
+                    # Check for text blocks
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text = block.get("text", "")
+                            if text and not _is_system_content(text):
+                                message_count += 1
+                                if title is None:
+                                    title = text[:100].strip()
+                                    if len(text) > 100:
+                                        title = title.rsplit(' ', 1)[0] + "..."
+                                break
+
+            elif entry_type == "assistant" and role == "assistant":
+                message_count += 1
+                # Get preview from first assistant response
+                if preview is None and isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text = block.get("text", "")
+                            if text:
+                                preview = text[:150].strip()
+                                if len(text) > 150:
+                                    preview = preview.rsplit(' ', 1)[0] + "..."
+                                break
+
+    except Exception as e:
+        logger.warning(f"Failed to extract title/preview from {jsonl_path}: {e}")
+
+    return title, preview, message_count
+
+
+def list_chat_history_sessions(
+    working_dir: str = "/workspace",
+    search: str = "",
+    limit: int = 50
+) -> List[Dict[str, Any]]:
+    """
+    List chat history sessions with rich metadata for the @ reference UI.
+
+    Filters out agent-*.jsonl files as they are subagent logs, not main sessions.
+
+    Args:
+        working_dir: The project working directory
+        search: Optional search filter for title/content
+        limit: Maximum number of sessions to return
+
+    Returns:
+        List of session dicts with: name, path, title, preview, message_count,
+        modified_at, size_bytes, type='chat_history'
+    """
+    claude_projects_dir = settings.get_claude_projects_dir
+    project_dir_name = get_project_dir_name(working_dir)
+    project_dir = claude_projects_dir / project_dir_name
+
+    sessions = []
+    search_lower = search.lower() if search else ""
+
+    if not project_dir.exists():
+        return sessions
+
+    for jsonl_file in project_dir.glob("*.jsonl"):
+        try:
+            # Skip agent files (subagent logs)
+            if jsonl_file.name.startswith("agent-"):
+                continue
+
+            stat = jsonl_file.stat()
+            title, preview, message_count = _get_session_title_and_preview(jsonl_file)
+
+            # Apply search filter
+            if search_lower:
+                title_match = title and search_lower in title.lower()
+                preview_match = preview and search_lower in preview.lower()
+                if not title_match and not preview_match:
+                    continue
+
+            # Build display name
+            display_name = title or f"Session {jsonl_file.stem[:8]}..."
+
+            sessions.append({
+                "name": display_name,
+                "type": "chat_history",
+                "path": str(jsonl_file),
+                "sdk_session_id": jsonl_file.stem,
+                "title": title,
+                "preview": preview,
+                "message_count": message_count,
+                "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                "size_bytes": stat.st_size
+            })
+
+        except Exception as e:
+            logger.warning(f"Failed to process {jsonl_file}: {e}")
+
+    # Sort by modified time, newest first
+    sessions.sort(key=lambda x: x["modified_at"], reverse=True)
+
+    # Apply limit
+    return sessions[:limit]

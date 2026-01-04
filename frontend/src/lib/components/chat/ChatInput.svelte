@@ -326,7 +326,7 @@
 		}
 	}
 
-	// Handle file selection
+	// Handle file selection (including chat history items)
 	function handleFileSelect(file: FileItem) {
 		const atStartIndex = findLastAtIndex(inputValue);
 		if (atStartIndex === -1) {
@@ -334,19 +334,21 @@
 			return;
 		}
 
-		// For directories, replace with path and keep autocomplete open
+		// For directories, replace with path (with trailing /) and keep autocomplete open
 		if (file.type === 'directory') {
-			inputValue = inputValue.substring(0, atStartIndex) + '@' + file.path;
+			const pathWithSlash = file.path.endsWith('/') ? file.path : file.path + '/';
+			inputValue = inputValue.substring(0, atStartIndex) + '@' + pathWithSlash;
 			tick().then(() => textareaRef?.focus());
 			return;
 		}
 
-		// For files, add to uploaded files list
-		const fileRef: FileUploadResponse = {
+		// For files and chat history items, add to uploaded files list
+		const fileRef: FileUploadResponse & { type?: string } = {
 			filename: file.name,
 			path: file.path,
 			full_path: file.path,
-			size: file.size || 0
+			size: file.size || 0,
+			type: file.type // 'file' or 'chat_history'
 		};
 
 		uploadedFiles = [...uploadedFiles, fileRef];
@@ -584,10 +586,18 @@
 					{#if uploadedFiles.length > 0}
 						<div class="uploaded-files">
 							{#each uploadedFiles as file, index}
-								<div class="file-chip">
-									<svg class="w-3 h-3 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-									</svg>
+								<div class="file-chip" class:chat-history-chip={(file as any).type === 'chat_history'}>
+									{#if (file as any).type === 'chat_history'}
+										<!-- Chat history icon -->
+										<svg class="w-3 h-3 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+										</svg>
+									{:else}
+										<!-- File icon -->
+										<svg class="w-3 h-3 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+										</svg>
+									{/if}
 									<span class="file-name" title={file.path}>{file.filename}</span>
 									<button
 										type="button"
@@ -898,6 +908,11 @@
 		background: rgba(45, 212, 191, 0.15);
 		border-radius: 0.5rem;
 		font-size: 0.75rem;
+	}
+
+	/* Chat history reference chip - purple theme */
+	.file-chip.chat-history-chip {
+		background: rgba(168, 85, 247, 0.15);
 	}
 
 	.file-name {

@@ -1,10 +1,18 @@
 <script lang="ts">
   export interface FileItem {
     name: string;
-    type: 'file' | 'directory';
+    type: 'file' | 'directory' | 'chat_history';
     path: string;
     size?: number | null;
+    // Chat history specific fields
+    title?: string | null;
+    preview?: string | null;
+    message_count?: number;
+    modified_at?: string;
   }
+
+  // Virtual folder name for chat history
+  const CHAT_HISTORY_FOLDER = 'Chat History';
 
   interface Props {
     inputValue: string;
@@ -23,6 +31,7 @@
   let currentPath = $state('');
   let lastFetchedPath = $state<string | null>(null);
   let listElement = $state<HTMLUListElement | null>(null);
+  let inChatHistoryFolder = $state(false);
 
   // Extract the @ query from input - finds the last @ and text after it
   // Supports paths with spaces by capturing everything after @ until end of input
@@ -49,16 +58,19 @@
   }
 
   // Get the directory path from query
+  // Handles paths with spaces like "Chat History/"
   function getPathFromQuery(query: string): string {
     if (!query.includes('/')) return '';
-    const parts = query.split('/');
-    return parts.slice(0, -1).join('/');
+    // Find the last slash position
+    const lastSlashIndex = query.lastIndexOf('/');
+    return query.slice(0, lastSlashIndex);
   }
 
-  // Get the filename filter from query
+  // Get the filename filter from query (text after the last /)
   function getFilterFromQuery(query: string): string {
     if (!query.includes('/')) return query;
-    return query.split('/').pop() || '';
+    const lastSlashIndex = query.lastIndexOf('/');
+    return query.slice(lastSlashIndex + 1);
   }
 
   // Fetch files when visible and projectId changes - initial load
@@ -107,11 +119,21 @@
       );
     }
 
-    // Sort: directories first, then by match relevance
+    // Sort: Chat History first, then directories, then by match relevance
     filteredFiles = filtered.sort((a, b) => {
-      // Directories first
-      if (a.type === 'directory' && b.type !== 'directory') return -1;
-      if (b.type === 'directory' && a.type !== 'directory') return 1;
+      // Chat History folder always first
+      if (a.name === CHAT_HISTORY_FOLDER && b.name !== CHAT_HISTORY_FOLDER) return -1;
+      if (b.name === CHAT_HISTORY_FOLDER && a.name !== CHAT_HISTORY_FOLDER) return 1;
+
+      // Directories before files (but not for chat_history items which have their own order)
+      if (a.type === 'directory' && b.type !== 'directory' && b.type !== 'chat_history') return -1;
+      if (b.type === 'directory' && a.type !== 'directory' && a.type !== 'chat_history') return 1;
+
+      // Chat history items: preserve backend order (most recent first by modified_at)
+      // Don't re-sort them - the backend already sorted by date
+      if (a.type === 'chat_history' && b.type === 'chat_history') {
+        return 0; // Preserve original order from backend
+      }
 
       const aName = a.name.toLowerCase();
       const bName = b.name.toLowerCase();
@@ -126,7 +148,7 @@
       if (aStarts && !bStarts) return -1;
       if (bStarts && !aStarts) return 1;
 
-      // Alphabetical
+      // Alphabetical for files/directories
       return aName.localeCompare(bName);
     });
 
@@ -143,12 +165,36 @@
     }
   });
 
+  /**
+   * Check if the path indicates we're in the Chat History virtual folder
+   */
+  function isChatHistoryPath(path: string): boolean {
+    return path === CHAT_HISTORY_FOLDER || path.startsWith(CHAT_HISTORY_FOLDER + '/');
+  }
+
+  /**
+   * Get the search filter from a Chat History path
+   */
+  function getChatHistoryFilter(path: string): string {
+    if (path === CHAT_HISTORY_FOLDER) return '';
+    return path.slice(CHAT_HISTORY_FOLDER.length + 1);
+  }
+
   async function fetchFiles(path: string) {
     if (!projectId) return;
 
     loading = true;
     lastFetchedPath = path;
     currentPath = path;
+
+    // Check if we're in the Chat History virtual folder
+    if (isChatHistoryPath(path)) {
+      inChatHistoryFolder = true;
+      await fetchChatHistory(getChatHistoryFilter(path));
+      return;
+    }
+
+    inChatHistoryFolder = false;
 
     try {
       const params = new URLSearchParams();
@@ -162,12 +208,62 @@
 
       if (response.ok) {
         const data = await response.json();
-        files = data.files;
+        // Add Chat History virtual folder at root level
+        if (!path) {
+          files = [
+            {
+              name: CHAT_HISTORY_FOLDER,
+              type: 'directory' as const,
+              path: CHAT_HISTORY_FOLDER,
+              size: null
+            },
+            ...data.files
+          ];
+        } else {
+          files = data.files;
+        }
       } else {
         files = [];
       }
     } catch (error) {
       console.error('Failed to fetch files:', error);
+      files = [];
+    } finally {
+      loading = false;
+    }
+  }
+
+  async function fetchChatHistory(search: string = '') {
+    if (!projectId) return;
+
+    try {
+      const params = new URLSearchParams();
+      if (search) {
+        params.set('search', search);
+      }
+      params.set('limit', '30');
+
+      const response = await fetch(`/api/v1/projects/${projectId}/chat-history?${params}`, {
+        credentials: 'include'
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        files = data.sessions.map((session: any) => ({
+          name: session.name,
+          type: 'chat_history' as const,
+          path: session.path,
+          size: session.size_bytes,
+          title: session.title,
+          preview: session.preview,
+          message_count: session.message_count,
+          modified_at: session.modified_at
+        }));
+      } else {
+        files = [];
+      }
+    } catch (error) {
+      console.error('Failed to fetch chat history:', error);
       files = [];
     } finally {
       loading = false;
@@ -255,7 +351,32 @@
   }
 
   function goToRoot() {
+    inChatHistoryFolder = false;
     fetchFiles('');
+  }
+
+  function goToChatHistory() {
+    fetchFiles(CHAT_HISTORY_FOLDER);
+  }
+
+  function formatRelativeDate(isoDate: string): string {
+    const date = new Date(isoDate);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+    if (diffDays === 0) {
+      return 'Today';
+    } else if (diffDays === 1) {
+      return 'Yesterday';
+    } else if (diffDays < 7) {
+      return `${diffDays} days ago`;
+    } else if (diffDays < 30) {
+      const weeks = Math.floor(diffDays / 7);
+      return `${weeks} week${weeks > 1 ? 's' : ''} ago`;
+    } else {
+      return date.toLocaleDateString();
+    }
   }
 </script>
 
@@ -264,7 +385,9 @@
     <div class="px-3 py-2 border-b border-border bg-muted flex items-center justify-between">
       <span class="text-xs text-muted-foreground">
         {#if loading}
-          Loading files...
+          {inChatHistoryFolder ? 'Loading chat history...' : 'Loading files...'}
+        {:else if inChatHistoryFolder}
+          {filteredFiles.length} chat{filteredFiles.length !== 1 ? 's' : ''} in Chat History
         {:else}
           {filteredFiles.length} file{filteredFiles.length !== 1 ? 's' : ''}
           {#if currentPath}
@@ -296,8 +419,19 @@
               <!-- Icon -->
               <div class="flex-shrink-0">
                 {#if file.type === 'directory'}
-                  <svg class="w-4 h-4 text-warning" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                  <!-- Special icon for Chat History folder -->
+                  {#if file.name === CHAT_HISTORY_FOLDER}
+                    <svg class="w-4 h-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                    </svg>
+                  {:else}
+                    <svg class="w-4 h-4 text-warning" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                    </svg>
+                  {/if}
+                {:else if file.type === 'chat_history'}
+                  <svg class="w-4 h-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
                   </svg>
                 {:else}
                   <svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -306,25 +440,50 @@
                 {/if}
               </div>
 
-              <!-- Name -->
+              <!-- Name and details -->
               <div class="flex-1 min-w-0">
-                <span class="text-sm text-foreground truncate block">
-                  {file.name}{file.type === 'directory' ? '/' : ''}
-                </span>
+                {#if file.type === 'chat_history'}
+                  <span class="text-sm text-foreground truncate block">
+                    {file.name}
+                  </span>
+                  {#if file.preview}
+                    <span class="text-xs text-muted-foreground truncate block">
+                      {file.preview}
+                    </span>
+                  {/if}
+                {:else}
+                  <span class="text-sm text-foreground truncate block">
+                    {file.name}{file.type === 'directory' ? '/' : ''}
+                  </span>
+                {/if}
               </div>
 
-              <!-- Size (for files) -->
+              <!-- Size/count info -->
               {#if file.type === 'file' && file.size}
                 <span class="text-xs text-muted-foreground flex-shrink-0">
                   {formatSize(file.size)}
+                </span>
+              {:else if file.type === 'chat_history'}
+                <span class="text-xs text-muted-foreground flex-shrink-0">
+                  {file.message_count} msgs · {file.modified_at ? formatRelativeDate(file.modified_at) : ''}
                 </span>
               {/if}
 
               <!-- Type badge -->
               <div class="flex-shrink-0">
                 {#if file.type === 'directory'}
-                  <span class="px-1.5 py-0.5 text-xs bg-warning/20 text-warning rounded">
-                    folder
+                  {#if file.name === CHAT_HISTORY_FOLDER}
+                    <span class="px-1.5 py-0.5 text-xs bg-purple-500/20 text-purple-400 rounded">
+                      history
+                    </span>
+                  {:else}
+                    <span class="px-1.5 py-0.5 text-xs bg-warning/20 text-warning rounded">
+                      folder
+                    </span>
+                  {/if}
+                {:else if file.type === 'chat_history'}
+                  <span class="px-1.5 py-0.5 text-xs bg-purple-500/20 text-purple-400 rounded">
+                    chat
                   </span>
                 {/if}
               </div>

@@ -371,6 +371,21 @@ To make any workspace file downloadable, use this markdown format:
 ```
 
 Provide download links when you create standalone files the user might want (documents, exports, scripts, etc.).
+
+---
+
+## Chat History References
+
+When the user references a chat history file (`.jsonl` file from `~/.claude/projects/`):
+
+1. **Purpose**: This is a previous conversation provided as context - NOT a file to edit
+2. **Efficient reading**: Scan for relevant context rather than reading every message in full. The JSONL format contains one message per line with `type`, `message`, and `timestamp` fields
+3. **Focus on**: Key decisions made, code discussed, problems solved, user preferences expressed
+4. **Don't**: Read the entire file message-by-message unless specifically asked to summarize the whole conversation
+5. **Summarize**: Tell the user what relevant context you found from the referenced conversation
+6. **Format**: Messages alternate between `"type":"user"` and `"type":"assistant"`. Tool uses are embedded in assistant messages, tool results follow in subsequent user messages.
+
+This helps the model understand past context without overwhelming the current conversation.
 """
 
 
@@ -1553,6 +1568,19 @@ def build_options_from_profile(
             else:
                 logger.warning(f"Subagent not found in database: {agent_id}")
         logger.info(f"Final agents_dict keys: {list(agents_dict.keys()) if agents_dict else 'None'}")
+
+    # Inject built-in agent instructions into system prompt (only for enabled built-in agents)
+    if enabled_agent_ids:
+        from app.core.builtin_subagents import get_system_prompt_instructions
+        builtin_instructions = get_system_prompt_instructions(enabled_agent_ids)
+        if builtin_instructions:
+            if isinstance(final_system_prompt, dict):
+                # Append to the append field
+                current_append = final_system_prompt.get("append", "")
+                final_system_prompt["append"] = current_append + builtin_instructions
+            else:
+                # Append to string system prompt
+                final_system_prompt += builtin_instructions
 
     # Determine permission mode
     permission_mode = overrides.get("permission_mode") or config.get("permission_mode", "default")

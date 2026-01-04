@@ -27,6 +27,7 @@ class SubagentResponse(BaseModel):
     tools: Optional[List[str]] = None
     model: Optional[str] = None
     is_builtin: bool = False
+    is_modified: bool = False  # Only relevant for built-in subagents
     created_at: datetime
     updated_at: datetime
 
@@ -51,6 +52,31 @@ class SubagentUpdateRequest(BaseModel):
 
 
 # ============================================================================
+# Helper Functions
+# ============================================================================
+
+def _build_subagent_response(s: dict) -> SubagentResponse:
+    """Build a SubagentResponse from a database record"""
+    is_builtin = s.get("is_builtin", False)
+    is_modified = False
+    if is_builtin:
+        is_modified = database.has_subagent_been_modified(s["id"])
+
+    return SubagentResponse(
+        id=s["id"],
+        name=s["name"],
+        description=s["description"],
+        prompt=s["prompt"],
+        tools=s.get("tools"),
+        model=s.get("model"),
+        is_builtin=is_builtin,
+        is_modified=is_modified,
+        created_at=s["created_at"],
+        updated_at=s["updated_at"]
+    )
+
+
+# ============================================================================
 # Subagent CRUD Endpoints
 # ============================================================================
 
@@ -58,20 +84,7 @@ class SubagentUpdateRequest(BaseModel):
 async def list_subagents(token: str = Depends(require_auth)):
     """List all global subagents"""
     subagents = database.get_all_subagents()
-    return [
-        SubagentResponse(
-            id=s["id"],
-            name=s["name"],
-            description=s["description"],
-            prompt=s["prompt"],
-            tools=s.get("tools"),
-            model=s.get("model"),
-            is_builtin=s.get("is_builtin", False),
-            created_at=s["created_at"],
-            updated_at=s["updated_at"]
-        )
-        for s in subagents
-    ]
+    return [_build_subagent_response(s) for s in subagents]
 
 
 @router.get("/{subagent_id}", response_model=SubagentResponse)
@@ -84,17 +97,7 @@ async def get_subagent(subagent_id: str, token: str = Depends(require_auth)):
             detail=f"Subagent not found: {subagent_id}"
         )
 
-    return SubagentResponse(
-        id=subagent["id"],
-        name=subagent["name"],
-        description=subagent["description"],
-        prompt=subagent["prompt"],
-        tools=subagent.get("tools"),
-        model=subagent.get("model"),
-        is_builtin=subagent.get("is_builtin", False),
-        created_at=subagent["created_at"],
-        updated_at=subagent["updated_at"]
-    )
+    return _build_subagent_response(subagent)
 
 
 @router.post("", response_model=SubagentResponse, status_code=status.HTTP_201_CREATED)
@@ -118,17 +121,7 @@ async def create_subagent(request: SubagentCreateRequest, token: str = Depends(r
         is_builtin=False
     )
 
-    return SubagentResponse(
-        id=subagent["id"],
-        name=subagent["name"],
-        description=subagent["description"],
-        prompt=subagent["prompt"],
-        tools=subagent.get("tools"),
-        model=subagent.get("model"),
-        is_builtin=subagent.get("is_builtin", False),
-        created_at=subagent["created_at"],
-        updated_at=subagent["updated_at"]
-    )
+    return _build_subagent_response(subagent)
 
 
 @router.put("/{subagent_id}", response_model=SubagentResponse)
@@ -137,7 +130,7 @@ async def update_subagent(
     request: SubagentUpdateRequest,
     token: str = Depends(require_admin)
 ):
-    """Update a subagent - Admin only. All subagents are editable."""
+    """Update a subagent - Admin only. All subagents are editable (including built-in)."""
     existing = database.get_subagent(subagent_id)
     if not existing:
         raise HTTPException(
@@ -154,27 +147,53 @@ async def update_subagent(
         model=request.model
     )
 
-    return SubagentResponse(
-        id=subagent["id"],
-        name=subagent["name"],
-        description=subagent["description"],
-        prompt=subagent["prompt"],
-        tools=subagent.get("tools"),
-        model=subagent.get("model"),
-        is_builtin=subagent.get("is_builtin", False),
-        created_at=subagent["created_at"],
-        updated_at=subagent["updated_at"]
-    )
+    return _build_subagent_response(subagent)
 
 
-@router.delete("/{subagent_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_subagent(subagent_id: str, token: str = Depends(require_admin)):
-    """Delete a subagent - Admin only. All subagents can be deleted."""
+@router.post("/{subagent_id}/revert", response_model=SubagentResponse)
+async def revert_subagent(subagent_id: str, token: str = Depends(require_admin)):
+    """
+    Revert a built-in subagent to its original default settings.
+
+    Only works for built-in subagents. Admin only.
+    """
     existing = database.get_subagent(subagent_id)
     if not existing:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Subagent not found: {subagent_id}"
+        )
+
+    if not existing.get("is_builtin"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only built-in subagents can be reverted to defaults"
+        )
+
+    subagent = database.revert_subagent_to_defaults(subagent_id)
+    if not subagent:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to revert subagent - no defaults stored"
+        )
+
+    return _build_subagent_response(subagent)
+
+
+@router.delete("/{subagent_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_subagent(subagent_id: str, token: str = Depends(require_admin)):
+    """Delete a subagent - Admin only. Built-in subagents cannot be deleted."""
+    existing = database.get_subagent(subagent_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Subagent not found: {subagent_id}"
+        )
+
+    if existing.get("is_builtin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Built-in subagents cannot be deleted. You can disable them in profile settings."
         )
 
     database.delete_subagent(subagent_id)
