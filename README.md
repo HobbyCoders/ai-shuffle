@@ -4,7 +4,7 @@
 
 A sophisticated Claude Code web interface and workspace application that provides a rich, desktop-like experience for interacting with Claude AI.
 
-![AI Shuffle Demo](docs/images/ai-shuffle-demo.gif)
+![AI Shuffle Demo](docs/images/ai-shuffle-demo.jpg)
 
 ## Overview
 
