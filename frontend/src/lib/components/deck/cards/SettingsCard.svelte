@@ -278,6 +278,13 @@
 	let meshyKeySuccess = $state('');
 	let meshyKeyError = $state('');
 
+	// DeepSeek settings
+	let deepseekApiKey = $state('');
+	let deepseekApiKeyMasked = $state('');
+	let savingDeepseekKey = $state(false);
+	let deepseekKeySuccess = $state('');
+	let deepseekKeyError = $state('');
+
 	// 3D Model settings
 	let selected3DModel = $state('meshy-6');
 	let current3DModel = $state('meshy-6');
@@ -536,6 +543,8 @@
 				meshy_api_key_set: boolean;
 				meshy_api_key_masked: string;
 				model_3d_model: string | null;
+				deepseek_api_key_set: boolean;
+				deepseek_api_key_masked: string;
 			}>('/settings/integrations');
 			openaiApiKeyMasked = settings.openai_api_key_masked;
 			imageProvider = settings.image_provider || '';
@@ -560,6 +569,8 @@
 			meshyApiKeyMasked = settings.meshy_api_key_masked || '';
 			selected3DModel = settings.model_3d_model || 'meshy-6';
 			current3DModel = selected3DModel;
+			// DeepSeek settings
+			deepseekApiKeyMasked = settings.deepseek_api_key_masked || '';
 		} catch (e) {
 			console.error('Failed to load integration settings:', e);
 		}
@@ -666,6 +677,26 @@
 			meshyKeyError = e.detail || 'Failed to save Meshy key';
 		}
 		savingMeshyKey = false;
+	}
+
+	// DeepSeek API Key function
+	async function saveDeepseekKey() {
+		if (!deepseekApiKey.trim()) return;
+		savingDeepseekKey = true;
+		deepseekKeyError = '';
+		deepseekKeySuccess = '';
+		try {
+			await api.post('/settings/integrations/deepseek', {
+				api_key: deepseekApiKey
+			});
+			deepseekKeySuccess = 'DeepSeek API key saved';
+			deepseekApiKey = '';
+			await loadIntegrationSettings();
+			setTimeout(() => deepseekKeySuccess = '', 3000);
+		} catch (e: any) {
+			deepseekKeyError = e.detail || 'Failed to save DeepSeek key';
+		}
+		savingDeepseekKey = false;
 	}
 
 	// 3D Model function
@@ -1843,6 +1874,38 @@
 						<p class="text-success text-sm">{meshyKeySuccess}</p>
 					{:else if meshyKeyError}
 						<p class="text-error text-sm">{meshyKeyError}</p>
+					{/if}
+				</div>
+			</div>
+
+			<!-- DeepSeek -->
+			<div class="api-key-card">
+				<div class="api-key-header">
+					<div class="api-icon deepseek">🔮</div>
+					<div>
+						<div class="api-title">
+							<span>DeepSeek</span>
+							{#if deepseekApiKeyMasked}
+								<span class="badge success">Configured</span>
+							{/if}
+						</div>
+						<p class="text-muted text-sm">AI reasoning & collaboration</p>
+					</div>
+				</div>
+				<div class="api-key-form">
+					{#if deepseekApiKeyMasked}
+						<p class="text-muted text-sm font-mono">{deepseekApiKeyMasked}</p>
+					{/if}
+					<div class="input-row">
+						<input type="password" bind:value={deepseekApiKey} placeholder={deepseekApiKeyMasked ? 'Enter new key...' : 'sk-...'} class="input flex-1 font-mono" />
+						<button onclick={saveDeepseekKey} disabled={savingDeepseekKey || !deepseekApiKey.trim()} class="btn btn-primary">
+							{savingDeepseekKey ? '...' : 'Save'}
+						</button>
+					</div>
+					{#if deepseekKeySuccess}
+						<p class="text-success text-sm">{deepseekKeySuccess}</p>
+					{:else if deepseekKeyError}
+						<p class="text-error text-sm">{deepseekKeyError}</p>
 					{/if}
 				</div>
 			</div>
