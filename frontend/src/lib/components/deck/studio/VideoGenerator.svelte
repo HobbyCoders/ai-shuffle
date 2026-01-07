@@ -1,5 +1,9 @@
 <script lang="ts">
-	import { Clapperboard, Upload, X, Volume2, VolumeX, ImageIcon, Film, FastForward } from 'lucide-svelte';
+	import {
+		Clapperboard, Upload, X, Volume2, VolumeX, ImageIcon, Film,
+		Play, Pause, SkipForward, SkipBack, Download, Repeat,
+		Plus, ChevronRight, Sparkles, Zap, Settings2
+	} from 'lucide-svelte';
 	import { ALL_VIDEO_MODELS, getVideoModel, VIDEO_ASPECT_RATIOS, PROVIDER_DISPLAY_NAMES, type VideoModel } from '$lib/types/ai-models';
 	import { studio, videoModel, currentVideoModelInfo } from '$lib/stores/studio';
 
@@ -29,6 +33,9 @@
 		startFrame?: string;
 		endFrame?: string;
 	}
+
+	// Mode type
+	type GenerationMode = 'text-to-video' | 'image-to-video' | 'frame-bridge';
 
 	// Group models by provider
 	interface ProviderGroup {
@@ -68,12 +75,24 @@
 	let isGenerating = $state(false);
 	let startFrameInput: HTMLInputElement | null = $state(null);
 	let endFrameInput: HTMLInputElement | null = $state(null);
+	let currentMode: GenerationMode = $state('text-to-video');
+	let showAdvanced = $state(false);
+
+	// Video player state (placeholder)
+	let isPlaying = $state(false);
+	let videoProgress = $state(0);
 
 	// Derived - Current model info
 	let currentModel = $derived(getVideoModel(selectedModelId) || ALL_VIDEO_MODELS[0]);
 	let availableDurations = $derived(currentModel.durations);
 	let availableResolutions = $derived(currentModel.resolutions);
-	let canGenerate = $derived(prompt.trim().length > 0 && !isGenerating);
+	let canGenerate = $derived(
+		prompt.trim().length > 0 &&
+		!isGenerating &&
+		(currentMode === 'text-to-video' ||
+		 (currentMode === 'image-to-video' && startFrame !== null) ||
+		 (currentMode === 'frame-bridge' && startFrame !== null && endFrame !== null))
+	);
 
 	// Capability checks
 	let showAudioToggle = $derived(currentModel.capabilities.nativeAudio);
@@ -81,33 +100,29 @@
 	let showImageToVideo = $derived(currentModel.capabilities.imageToVideo);
 	let showExtend = $derived(currentModel.capabilities.extension);
 
-	// Capability badges
-	let capabilityBadges = $derived.by(() => {
-		const badges: { label: string; color: string }[] = [];
-		const caps = currentModel.capabilities;
-
-		if (caps.imageToVideo) badges.push({ label: 'Image to Video', color: 'bg-blue-500/20 text-blue-400' });
-		if (caps.frameBridging) badges.push({ label: 'Frame Bridging', color: 'bg-purple-500/20 text-purple-400' });
-		if (caps.extension) badges.push({ label: 'Extend', color: 'bg-green-500/20 text-green-400' });
-		if (caps.nativeAudio) badges.push({ label: 'Audio', color: 'bg-orange-500/20 text-orange-400' });
-		if (caps.remix) badges.push({ label: 'Remix', color: 'bg-pink-500/20 text-pink-400' });
-
-		return badges;
+	// Available modes based on current model
+	let availableModes = $derived.by(() => {
+		const modes: GenerationMode[] = ['text-to-video'];
+		if (currentModel.capabilities.imageToVideo) modes.push('image-to-video');
+		if (currentModel.capabilities.frameBridging) modes.push('frame-bridge');
+		return modes;
 	});
 
-	// Get badges for a specific model
-	function getModelBadges(model: VideoModel): { label: string; color: string }[] {
-		const badges: { label: string; color: string }[] = [];
-		const caps = model.capabilities;
+	// Get unique providers
+	let uniqueProviders = $derived.by(() => {
+		const providers = new Set<string>();
+		ALL_VIDEO_MODELS.forEach(model => {
+			if (!model.deprecated) providers.add(model.provider);
+		});
+		return Array.from(providers);
+	});
 
-		if (caps.imageToVideo) badges.push({ label: 'Image to Video', color: 'bg-blue-500/20 text-blue-400' });
-		if (caps.frameBridging) badges.push({ label: 'Frame Bridging', color: 'bg-purple-500/20 text-purple-400' });
-		if (caps.extension) badges.push({ label: 'Extend', color: 'bg-green-500/20 text-green-400' });
-		if (caps.nativeAudio) badges.push({ label: 'Audio', color: 'bg-orange-500/20 text-orange-400' });
-		if (caps.remix) badges.push({ label: 'Remix', color: 'bg-pink-500/20 text-pink-400' });
-
-		return badges;
-	}
+	// Filter models by selected provider
+	let selectedProvider = $state<string | null>(null);
+	let filteredModels = $derived.by(() => {
+		if (!selectedProvider) return ALL_VIDEO_MODELS.filter(m => !m.deprecated);
+		return ALL_VIDEO_MODELS.filter(m => m.provider === selectedProvider && !m.deprecated);
+	});
 
 	// Effects to validate duration when model changes
 	$effect(() => {
@@ -120,6 +135,13 @@
 	$effect(() => {
 		if (!availableResolutions.includes(selectedResolution)) {
 			selectedResolution = availableResolutions[0];
+		}
+	});
+
+	// Effect to validate mode when model changes
+	$effect(() => {
+		if (!availableModes.includes(currentMode)) {
+			currentMode = 'text-to-video';
 		}
 	});
 
@@ -197,6 +219,17 @@
 		}
 	}
 
+	function handleModeChange(mode: GenerationMode) {
+		currentMode = mode;
+		// Clear frames when switching modes
+		if (mode === 'text-to-video') {
+			clearFrame('start');
+			clearFrame('end');
+		} else if (mode === 'image-to-video') {
+			clearFrame('end');
+		}
+	}
+
 	async function handleGenerate() {
 		if (!canGenerate) return;
 
@@ -237,298 +270,526 @@
 	let availableAspectRatios = $derived(
 		VIDEO_ASPECT_RATIOS.filter(ar => currentModel.aspectRatios.includes(ar.value))
 	);
+
+	// Mock video player controls (for future implementation)
+	function togglePlay() {
+		isPlaying = !isPlaying;
+	}
 </script>
 
-<div class="p-4 space-y-6">
-	<!-- Prompt Input -->
-	<div>
-		<label for="video-prompt" class="block text-sm font-medium text-foreground mb-2">
-			Prompt
-		</label>
-		<textarea
-			id="video-prompt"
-			bind:value={prompt}
-			placeholder="Describe the video you want to create..."
-			rows="4"
-			class="w-full bg-muted border border-border rounded-xl px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
-			disabled={isGenerating}
-		></textarea>
-	</div>
-
-	<!-- Model Selector - Grouped by Provider -->
-	<div>
-		<label id="video-model-label" class="block text-xs text-muted-foreground mb-2">Model</label>
-		<div class="space-y-4" role="group" aria-labelledby="video-model-label">
-			{#each providerGroups as group}
-				<div>
-					<div class="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
-						{group.displayName}
+<div class="h-full flex flex-col bg-[var(--background)] overflow-hidden">
+	<!-- Video Preview Area (55%) -->
+	<div class="flex-[55] min-h-0 p-6 pb-3">
+		<div class="h-full relative rounded-2xl overflow-hidden border border-[var(--border)] bg-gradient-to-br from-[var(--card)] to-[var(--background)] shadow-xl">
+			<!-- Video Preview Placeholder -->
+			<div class="absolute inset-0 flex items-center justify-center">
+				<div class="text-center space-y-4">
+					<div class="w-20 h-20 mx-auto rounded-full bg-gradient-to-br from-[var(--primary)]/20 to-[var(--primary)]/5 flex items-center justify-center border border-[var(--primary)]/20">
+						<Film class="w-10 h-10 text-[var(--primary)]" />
 					</div>
-					<div class="space-y-2">
-						{#each group.models as model}
-							{@const badges = getModelBadges(model)}
+					<div class="space-y-1">
+						<p class="text-sm font-medium text-[var(--foreground)]">No video loaded</p>
+						<p class="text-xs text-[var(--muted-foreground)]">Generate a video to preview it here</p>
+					</div>
+				</div>
+			</div>
+
+			<!-- Video Controls Overlay (bottom) -->
+			<div class="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/80 via-black/50 to-transparent">
+				<div class="space-y-2">
+					<!-- Progress Bar -->
+					<div class="h-1 bg-white/20 rounded-full overflow-hidden">
+						<div class="h-full bg-[var(--primary)] transition-all duration-300" style="width: {videoProgress}%"></div>
+					</div>
+
+					<!-- Controls -->
+					<div class="flex items-center justify-between">
+						<div class="flex items-center gap-2">
 							<button
 								type="button"
-								onclick={() => handleModelChange(model.id)}
-								disabled={isGenerating}
-								class="w-full flex flex-col gap-2 p-3 rounded-lg border transition-colors text-left {selectedModelId === model.id ? 'border-primary bg-primary/5' : 'border-border hover:border-muted-foreground/50 hover:bg-muted'}"
-								aria-pressed={selectedModelId === model.id}
+								class="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 backdrop-blur-sm flex items-center justify-center transition-colors text-white"
+								disabled
 							>
-								<div class="flex items-start gap-3">
-									<div class="shrink-0 w-8 h-8 rounded-lg flex items-center justify-center {selectedModelId === model.id ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}">
-										<Film class="w-4 h-4" />
-									</div>
-									<div class="flex-1 min-w-0">
-										<div class="text-sm font-medium text-foreground">{model.displayName}</div>
-										<div class="text-xs text-muted-foreground">{model.description}</div>
-									</div>
-									{#if selectedModelId === model.id}
-										<div class="shrink-0 w-2 h-2 rounded-full bg-primary mt-2"></div>
-									{/if}
-								</div>
-								<!-- Capability Badges -->
-								{#if badges.length > 0}
-									<div class="flex flex-wrap gap-1 ml-11">
-										{#each badges as badge}
-											<span class="text-[10px] px-1.5 py-0.5 rounded {badge.color}">
-												{badge.label}
-											</span>
-										{/each}
-									</div>
+								<SkipBack class="w-4 h-4" />
+							</button>
+							<button
+								type="button"
+								onclick={togglePlay}
+								class="w-10 h-10 rounded-lg bg-[var(--primary)] hover:bg-[var(--primary)]/90 flex items-center justify-center transition-colors text-white shadow-lg"
+								disabled
+							>
+								{#if isPlaying}
+									<Pause class="w-5 h-5" />
+								{:else}
+									<Play class="w-5 h-5" />
 								{/if}
+							</button>
+							<button
+								type="button"
+								class="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 backdrop-blur-sm flex items-center justify-center transition-colors text-white"
+								disabled
+							>
+								<SkipForward class="w-4 h-4" />
+							</button>
+						</div>
+
+						<div class="flex items-center gap-2">
+							{#if showExtend}
+								<button
+									type="button"
+									class="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 backdrop-blur-sm flex items-center gap-1.5 transition-colors text-white text-xs font-medium"
+									disabled
+								>
+									<Plus class="w-3 h-3" />
+									Extend
+								</button>
+							{/if}
+							<button
+								type="button"
+								class="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 backdrop-blur-sm flex items-center gap-1.5 transition-colors text-white text-xs font-medium"
+								disabled
+							>
+								<Repeat class="w-3 h-3" />
+								Loop
+							</button>
+							<button
+								type="button"
+								class="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 backdrop-blur-sm flex items-center gap-1.5 transition-colors text-white text-xs font-medium"
+								disabled
+							>
+								<Download class="w-3 h-3" />
+								Download
+							</button>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<!-- Mini Timeline (10%) -->
+	<div class="flex-[10] min-h-0 px-6 py-2">
+		<div class="h-full">
+			<div class="flex items-center gap-2 h-full">
+				<!-- Placeholder thumbnails -->
+				<div class="flex items-center gap-2 flex-1 overflow-x-auto scrollbar-thin scrollbar-thumb-[var(--border)] scrollbar-track-transparent">
+					<div class="text-xs text-[var(--muted-foreground)] whitespace-nowrap">Timeline:</div>
+					<button
+						type="button"
+						class="shrink-0 w-24 h-14 rounded-lg border-2 border-dashed border-[var(--border)] hover:border-[var(--primary)]/50 flex items-center justify-center gap-1 transition-colors group"
+						disabled
+					>
+						<Plus class="w-4 h-4 text-[var(--muted-foreground)] group-hover:text-[var(--primary)]" />
+						<span class="text-xs text-[var(--muted-foreground)] group-hover:text-[var(--primary)]">Add clip</span>
+					</button>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<!-- Generation Controls (35%) -->
+	<div class="flex-[35] min-h-0 px-6 pb-6 pt-3 overflow-y-auto scrollbar-thin scrollbar-thumb-[var(--border)] scrollbar-track-transparent">
+		<div class="space-y-4">
+			<!-- Mode Switcher -->
+			<div class="space-y-2">
+				<label class="text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wider">Generation Mode</label>
+				<div class="grid grid-cols-3 gap-2 p-1 bg-[var(--card)] rounded-xl border border-[var(--border)]">
+					<button
+						type="button"
+						onclick={() => handleModeChange('text-to-video')}
+						disabled={!availableModes.includes('text-to-video') || isGenerating}
+						class="px-3 py-2.5 text-xs font-medium rounded-lg transition-all {currentMode === 'text-to-video' ? 'bg-[var(--primary)] text-white shadow-lg' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--muted)]'} disabled:opacity-50 disabled:cursor-not-allowed"
+					>
+						<div class="flex flex-col items-center gap-1">
+							<Sparkles class="w-4 h-4" />
+							<span>Text→Video</span>
+						</div>
+					</button>
+					<button
+						type="button"
+						onclick={() => handleModeChange('image-to-video')}
+						disabled={!availableModes.includes('image-to-video') || isGenerating}
+						class="px-3 py-2.5 text-xs font-medium rounded-lg transition-all {currentMode === 'image-to-video' ? 'bg-[var(--primary)] text-white shadow-lg' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--muted)]'} disabled:opacity-50 disabled:cursor-not-allowed"
+					>
+						<div class="flex flex-col items-center gap-1">
+							<ImageIcon class="w-4 h-4" />
+							<span>Image→Video</span>
+						</div>
+					</button>
+					<button
+						type="button"
+						onclick={() => handleModeChange('frame-bridge')}
+						disabled={!availableModes.includes('frame-bridge') || isGenerating}
+						class="px-3 py-2.5 text-xs font-medium rounded-lg transition-all {currentMode === 'frame-bridge' ? 'bg-[var(--primary)] text-white shadow-lg' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--muted)]'} disabled:opacity-50 disabled:cursor-not-allowed"
+					>
+						<div class="flex flex-col items-center gap-1">
+							<Zap class="w-4 h-4" />
+							<span>Bridge</span>
+						</div>
+					</button>
+				</div>
+			</div>
+
+			<!-- Frame Upload Section (for image-to-video and frame-bridge modes) -->
+			{#if currentMode === 'image-to-video' || currentMode === 'frame-bridge'}
+				<div class="space-y-3">
+					<div class="flex items-center gap-2">
+						<label class="text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wider">
+							{currentMode === 'frame-bridge' ? 'Start & End Frames' : 'Source Image'}
+						</label>
+					</div>
+
+					<div class="grid {currentMode === 'frame-bridge' ? 'grid-cols-2' : 'grid-cols-1'} gap-3">
+						<!-- Start Frame -->
+						<div class="space-y-2">
+							{#if currentMode === 'frame-bridge'}
+								<div class="text-xs text-[var(--muted-foreground)]">Start Frame</div>
+							{/if}
+							{#if startFrame}
+								<div class="relative group">
+									<img
+										src={startFrame.url}
+										alt="Start frame"
+										class="w-full aspect-video object-cover rounded-lg border border-[var(--border)]"
+									/>
+									<button
+										type="button"
+										onclick={() => clearFrame('start')}
+										disabled={isGenerating}
+										class="absolute -top-2 -right-2 w-6 h-6 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-lg disabled:opacity-50"
+										aria-label="Remove start frame"
+									>
+										<X class="w-4 h-4" />
+									</button>
+								</div>
+							{:else}
+								<button
+									type="button"
+									onclick={() => triggerFrameUpload('start')}
+									disabled={isGenerating}
+									class="w-full aspect-video rounded-lg border-2 border-dashed border-[var(--border)] hover:border-[var(--primary)]/50 hover:bg-[var(--primary)]/5 flex flex-col items-center justify-center transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
+									aria-label="Upload start frame"
+								>
+									<Upload class="w-6 h-6 text-[var(--muted-foreground)] group-hover:text-[var(--primary)] transition-colors" />
+									<span class="text-xs mt-2 text-[var(--muted-foreground)] group-hover:text-[var(--primary)] transition-colors">Upload Image</span>
+								</button>
+							{/if}
+							<input
+								bind:this={startFrameInput}
+								type="file"
+								accept="image/*"
+								onchange={(e) => handleFrameUpload(e, 'start')}
+								class="hidden"
+								aria-hidden="true"
+							/>
+						</div>
+
+						<!-- End Frame (Frame Bridging only) -->
+						{#if currentMode === 'frame-bridge'}
+							<div class="space-y-2">
+								<div class="text-xs text-[var(--muted-foreground)]">End Frame</div>
+								{#if endFrame}
+									<div class="relative group">
+										<img
+											src={endFrame.url}
+											alt="End frame"
+											class="w-full aspect-video object-cover rounded-lg border border-[var(--border)]"
+										/>
+										<button
+											type="button"
+											onclick={() => clearFrame('end')}
+											disabled={isGenerating}
+											class="absolute -top-2 -right-2 w-6 h-6 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-lg disabled:opacity-50"
+											aria-label="Remove end frame"
+										>
+											<X class="w-4 h-4" />
+										</button>
+									</div>
+								{:else}
+									<button
+										type="button"
+										onclick={() => triggerFrameUpload('end')}
+										disabled={isGenerating}
+										class="w-full aspect-video rounded-lg border-2 border-dashed border-[var(--border)] hover:border-[var(--primary)]/50 hover:bg-[var(--primary)]/5 flex flex-col items-center justify-center transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
+										aria-label="Upload end frame"
+									>
+										<Upload class="w-6 h-6 text-[var(--muted-foreground)] group-hover:text-[var(--primary)] transition-colors" />
+										<span class="text-xs mt-2 text-[var(--muted-foreground)] group-hover:text-[var(--primary)] transition-colors">Upload Image</span>
+									</button>
+								{/if}
+								<input
+									bind:this={endFrameInput}
+									type="file"
+									accept="image/*"
+									onchange={(e) => handleFrameUpload(e, 'end')}
+									class="hidden"
+									aria-hidden="true"
+								/>
+							</div>
+
+							<!-- Transition indicator -->
+							<div class="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-[var(--primary)] flex items-center justify-center shadow-lg pointer-events-none">
+								<ChevronRight class="w-5 h-5 text-white" />
+							</div>
+						{/if}
+					</div>
+				</div>
+			{/if}
+
+			<!-- Prompt Input -->
+			<div class="space-y-2">
+				<label for="video-prompt" class="text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wider">
+					Prompt
+				</label>
+				<textarea
+					id="video-prompt"
+					bind:value={prompt}
+					placeholder="Describe the video you want to create..."
+					rows="3"
+					class="w-full bg-[var(--card)] border border-[var(--border)] rounded-xl px-4 py-3 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--primary)]/50 resize-none transition-all"
+					disabled={isGenerating}
+				></textarea>
+			</div>
+
+			<!-- Provider & Model Selection -->
+			<div class="space-y-2">
+				<label class="text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wider">Provider & Model</label>
+				<div class="grid grid-cols-2 gap-2">
+					{#each providerGroups as group}
+						{@const isSelected = group.models.some(m => m.id === selectedModelId)}
+						<button
+							type="button"
+							onclick={() => handleModelChange(group.models[0].id)}
+							disabled={isGenerating}
+							class="p-3 rounded-xl border transition-all {isSelected ? 'border-[var(--primary)] bg-[var(--primary)]/10' : 'border-[var(--border)] hover:border-[var(--primary)]/50 bg-[var(--card)]'} disabled:opacity-50"
+						>
+							<div class="flex flex-col items-center gap-2">
+								<div class="w-10 h-10 rounded-lg bg-gradient-to-br {isSelected ? 'from-[var(--primary)] to-[var(--primary)]/70' : 'from-[var(--muted)] to-[var(--muted)]/70'} flex items-center justify-center">
+									<Film class="w-5 h-5 {isSelected ? 'text-white' : 'text-[var(--muted-foreground)]'}" />
+								</div>
+								<div class="text-xs font-medium {isSelected ? 'text-[var(--primary)]' : 'text-[var(--foreground)]'}">
+									{group.displayName}
+								</div>
+								<div class="flex flex-wrap gap-1 justify-center">
+									{#each group.models[0].capabilities as cap}
+										{#if typeof cap === 'object' && 'imageToVideo' in cap && cap.imageToVideo}
+											<div class="w-1.5 h-1.5 rounded-full bg-blue-400"></div>
+										{/if}
+										{#if typeof cap === 'object' && 'nativeAudio' in cap && cap.nativeAudio}
+											<div class="w-1.5 h-1.5 rounded-full bg-orange-400"></div>
+										{/if}
+									{/each}
+								</div>
+							</div>
+						</button>
+					{/each}
+				</div>
+
+				<!-- Model details dropdown -->
+				{#if providerGroups.length > 0}
+					<details class="group">
+						<summary class="px-3 py-2 rounded-lg bg-[var(--card)] border border-[var(--border)] cursor-pointer hover:bg-[var(--muted)] transition-colors text-xs text-[var(--muted-foreground)] flex items-center justify-between">
+							<span>{currentModel.displayName}</span>
+							<ChevronRight class="w-4 h-4 transition-transform group-open:rotate-90" />
+						</summary>
+						<div class="mt-2 p-3 rounded-lg bg-[var(--card)] border border-[var(--border)] space-y-2">
+							<p class="text-xs text-[var(--muted-foreground)]">{currentModel.description}</p>
+							<div class="flex flex-wrap gap-1">
+								{#if currentModel.capabilities.imageToVideo}
+									<span class="text-[10px] px-2 py-0.5 rounded bg-blue-500/20 text-blue-400">Image→Video</span>
+								{/if}
+								{#if currentModel.capabilities.frameBridging}
+									<span class="text-[10px] px-2 py-0.5 rounded bg-purple-500/20 text-purple-400">Frame Bridge</span>
+								{/if}
+								{#if currentModel.capabilities.extension}
+									<span class="text-[10px] px-2 py-0.5 rounded bg-green-500/20 text-green-400">Extend</span>
+								{/if}
+								{#if currentModel.capabilities.nativeAudio}
+									<span class="text-[10px] px-2 py-0.5 rounded bg-orange-500/20 text-orange-400">Audio</span>
+								{/if}
+							</div>
+						</div>
+					</details>
+				{/if}
+			</div>
+
+			<!-- Duration & Settings -->
+			<div class="grid grid-cols-2 gap-3">
+				<div class="space-y-2">
+					<label class="text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wider">Duration</label>
+					<div class="flex flex-wrap gap-1">
+						{#each availableDurations as duration}
+							<button
+								type="button"
+								onclick={() => handleDurationChange(duration)}
+								disabled={isGenerating}
+								class="px-3 py-2 text-xs font-medium rounded-lg transition-all {selectedDuration === duration ? 'bg-[var(--primary)] text-white shadow-lg' : 'bg-[var(--card)] text-[var(--foreground)] hover:bg-[var(--muted)] border border-[var(--border)]'} disabled:opacity-50"
+								aria-pressed={selectedDuration === duration}
+							>
+								{duration}s
 							</button>
 						{/each}
 					</div>
 				</div>
-			{/each}
-		</div>
-	</div>
 
-	<!-- Duration Selector -->
-	<div>
-		<label id="video-duration-label" class="block text-xs text-muted-foreground mb-2">Duration</label>
-		<div class="flex flex-wrap gap-2" role="group" aria-labelledby="video-duration-label">
-			{#each availableDurations as duration}
-				<button
-					type="button"
-					onclick={() => handleDurationChange(duration)}
-					disabled={isGenerating}
-					class="px-4 py-2.5 text-sm font-medium rounded-lg transition-colors min-w-[60px] {selectedDuration === duration ? 'bg-primary text-primary-foreground' : 'bg-muted text-foreground hover:bg-muted/80 border border-border'}"
-					aria-pressed={selectedDuration === duration}
-				>
-					{duration}s
-				</button>
-			{/each}
-		</div>
-	</div>
-
-	<!-- Resolution Selector -->
-	<div>
-		<label id="video-resolution-label" class="block text-xs text-muted-foreground mb-2">Resolution</label>
-		<div class="flex flex-wrap gap-2" role="group" aria-labelledby="video-resolution-label">
-			{#each availableResolutions as resolution}
-				<button
-					type="button"
-					onclick={() => handleResolutionChange(resolution)}
-					disabled={isGenerating}
-					class="px-4 py-2.5 text-sm font-medium rounded-lg transition-colors min-w-[70px] {selectedResolution === resolution ? 'bg-primary text-primary-foreground' : 'bg-muted text-foreground hover:bg-muted/80 border border-border'}"
-					aria-pressed={selectedResolution === resolution}
-				>
-					{resolution}
-				</button>
-			{/each}
-		</div>
-	</div>
-
-	<!-- Aspect Ratio -->
-	<div>
-		<label id="video-aspect-ratio-label" class="block text-xs text-muted-foreground mb-2">Aspect Ratio</label>
-		<div class="flex flex-wrap gap-2" role="group" aria-labelledby="video-aspect-ratio-label">
-			{#each availableAspectRatios as ratio}
-				<button
-					type="button"
-					onclick={() => handleAspectRatioChange(ratio.value)}
-					disabled={isGenerating}
-					class="flex flex-col items-center gap-1.5 px-3 py-2 rounded-lg transition-colors {selectedAspectRatio === ratio.value ? 'bg-primary/10 border-primary text-primary border-2' : 'bg-muted text-foreground hover:bg-muted/80 border border-border'}"
-					aria-pressed={selectedAspectRatio === ratio.value}
-					aria-label="Aspect ratio {ratio.label}"
-				>
-					<div
-						class="rounded-sm {selectedAspectRatio === ratio.value ? 'bg-primary' : 'bg-muted-foreground/50'}"
-						style="width: {ratio.width}px; height: {ratio.height}px;"
-					></div>
-					<span class="text-xs font-medium">{ratio.label}</span>
-				</button>
-			{/each}
-		</div>
-	</div>
-
-	<!-- Audio Toggle (only if model supports nativeAudio) -->
-	{#if showAudioToggle}
-		<div>
-			<label id="video-audio-label" class="block text-xs text-muted-foreground mb-2">Audio ({currentModel.displayName})</label>
-			<button
-				type="button"
-				onclick={toggleAudio}
-				disabled={isGenerating}
-				class="flex items-center gap-3 px-4 py-3 rounded-lg border transition-colors w-full {audioEnabled ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}"
-				aria-pressed={audioEnabled}
-				aria-labelledby="video-audio-label"
-			>
-				<div class="shrink-0 w-8 h-8 rounded-lg flex items-center justify-center {audioEnabled ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}">
-					{#if audioEnabled}
-						<Volume2 class="w-4 h-4" />
-					{:else}
-						<VolumeX class="w-4 h-4" />
-					{/if}
-				</div>
-				<div class="flex-1 text-left">
-					<div class="text-sm font-medium text-foreground">
-						{audioEnabled ? 'Audio Enabled' : 'Audio Disabled'}
-					</div>
-					<div class="text-xs text-muted-foreground">
-						Generate video with synchronized audio
-					</div>
-				</div>
-				<div class="shrink-0 w-10 h-6 rounded-full transition-colors {audioEnabled ? 'bg-primary' : 'bg-muted-foreground/30'}">
-					<div class="w-5 h-5 mt-0.5 rounded-full bg-white shadow-sm transition-transform {audioEnabled ? 'translate-x-4' : 'translate-x-0.5'}"></div>
-				</div>
-			</button>
-		</div>
-	{/if}
-
-	<!-- Image-to-Video Section (only if model supports imageToVideo) -->
-	{#if showImageToVideo}
-		<div>
-			<label class="block text-xs text-muted-foreground mb-2">
-				Image-to-Video (optional)
-			</label>
-			<p class="text-xs text-muted-foreground mb-3">
-				Upload frames to animate. {showFrameBridging ? 'Use end frame for frame bridging.' : ''}
-			</p>
-
-			<div class="flex gap-4">
-				<!-- Start Frame -->
-				<div class="flex-1">
-					<div class="text-xs font-medium text-foreground mb-2">Start Frame</div>
-					{#if startFrame}
-						<div class="relative group">
-							<img
-								src={startFrame.url}
-								alt="Start frame"
-								class="w-full aspect-video object-cover rounded-lg border border-border"
-							/>
+				<div class="space-y-2">
+					<label class="text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wider">Resolution</label>
+					<div class="flex flex-wrap gap-1">
+						{#each availableResolutions as resolution}
 							<button
 								type="button"
-								onclick={() => clearFrame('start')}
+								onclick={() => handleResolutionChange(resolution)}
 								disabled={isGenerating}
-								class="absolute -top-2 -right-2 w-6 h-6 bg-destructive text-destructive-foreground rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity disabled:opacity-50"
-								aria-label="Remove start frame"
+								class="px-3 py-2 text-xs font-medium rounded-lg transition-all {selectedResolution === resolution ? 'bg-[var(--primary)] text-white shadow-lg' : 'bg-[var(--card)] text-[var(--foreground)] hover:bg-[var(--muted)] border border-[var(--border)]'} disabled:opacity-50"
+								aria-pressed={selectedResolution === resolution}
 							>
-								<X class="w-4 h-4" />
+								{resolution}
 							</button>
-						</div>
-					{:else}
-						<button
-							type="button"
-							onclick={() => triggerFrameUpload('start')}
-							disabled={isGenerating}
-							class="w-full aspect-video rounded-lg border-2 border-dashed border-border hover:border-primary/50 flex flex-col items-center justify-center cursor-pointer transition-colors text-muted-foreground hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed"
-							aria-label="Upload start frame"
-						>
-							<ImageIcon class="w-6 h-6" />
-							<span class="text-xs mt-1">Upload</span>
-						</button>
-					{/if}
-					<input
-						bind:this={startFrameInput}
-						type="file"
-						accept="image/*"
-						onchange={(e) => handleFrameUpload(e, 'start')}
-						class="hidden"
-						aria-hidden="true"
-					/>
+						{/each}
+					</div>
 				</div>
+			</div>
 
-				<!-- End Frame (Frame Bridging - only if model supports frameBridging) -->
-				{#if showFrameBridging}
-					<div class="flex-1">
-						<div class="text-xs font-medium text-foreground mb-2">End Frame</div>
-						{#if endFrame}
-							<div class="relative group">
-								<img
-									src={endFrame.url}
-									alt="End frame"
-									class="w-full aspect-video object-cover rounded-lg border border-border"
-								/>
+			<!-- Advanced Settings Toggle -->
+			<div class="space-y-3">
+				<button
+					type="button"
+					onclick={() => showAdvanced = !showAdvanced}
+					class="w-full px-3 py-2 rounded-lg bg-[var(--card)] border border-[var(--border)] hover:bg-[var(--muted)] transition-colors flex items-center justify-between text-xs text-[var(--muted-foreground)]"
+				>
+					<div class="flex items-center gap-2">
+						<Settings2 class="w-4 h-4" />
+						<span>Advanced Settings</span>
+					</div>
+					<ChevronRight class="w-4 h-4 transition-transform {showAdvanced ? 'rotate-90' : ''}" />
+				</button>
+
+				{#if showAdvanced}
+					<div class="space-y-3 p-3 rounded-lg bg-[var(--card)] border border-[var(--border)]">
+						<!-- Aspect Ratio -->
+						<div class="space-y-2">
+							<label class="text-xs font-medium text-[var(--muted-foreground)]">Aspect Ratio</label>
+							<div class="flex flex-wrap gap-2">
+								{#each availableAspectRatios as ratio}
+									<button
+										type="button"
+										onclick={() => handleAspectRatioChange(ratio.value)}
+										disabled={isGenerating}
+										class="flex flex-col items-center gap-1.5 px-3 py-2 rounded-lg transition-all {selectedAspectRatio === ratio.value ? 'bg-[var(--primary)]/10 border-[var(--primary)] border-2' : 'bg-[var(--background)] border border-[var(--border)] hover:bg-[var(--muted)]'} disabled:opacity-50"
+										aria-pressed={selectedAspectRatio === ratio.value}
+										aria-label="Aspect ratio {ratio.label}"
+									>
+										<div
+											class="rounded-sm {selectedAspectRatio === ratio.value ? 'bg-[var(--primary)]' : 'bg-[var(--muted-foreground)]/50'}"
+											style="width: {ratio.width}px; height: {ratio.height}px;"
+										></div>
+										<span class="text-xs font-medium">{ratio.label}</span>
+									</button>
+								{/each}
+							</div>
+						</div>
+
+						<!-- Audio Toggle -->
+						{#if showAudioToggle}
+							<div class="space-y-2">
+								<label class="text-xs font-medium text-[var(--muted-foreground)]">Audio</label>
 								<button
 									type="button"
-									onclick={() => clearFrame('end')}
+									onclick={toggleAudio}
 									disabled={isGenerating}
-									class="absolute -top-2 -right-2 w-6 h-6 bg-destructive text-destructive-foreground rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity disabled:opacity-50"
-									aria-label="Remove end frame"
+									class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-all {audioEnabled ? 'border-[var(--primary)] bg-[var(--primary)]/10' : 'border-[var(--border)] hover:bg-[var(--muted)]'} disabled:opacity-50"
+									aria-pressed={audioEnabled}
 								>
-									<X class="w-4 h-4" />
+									<div class="shrink-0 w-8 h-8 rounded-lg flex items-center justify-center {audioEnabled ? 'bg-[var(--primary)] text-white' : 'bg-[var(--muted)] text-[var(--muted-foreground)]'}">
+										{#if audioEnabled}
+											<Volume2 class="w-4 h-4" />
+										{:else}
+											<VolumeX class="w-4 h-4" />
+										{/if}
+									</div>
+									<div class="flex-1 text-left">
+										<div class="text-xs font-medium text-[var(--foreground)]">
+											{audioEnabled ? 'Audio Enabled' : 'Audio Disabled'}
+										</div>
+									</div>
+									<div class="shrink-0 w-10 h-5 rounded-full transition-colors {audioEnabled ? 'bg-[var(--primary)]' : 'bg-[var(--muted-foreground)]/30'}">
+										<div class="w-4 h-4 mt-0.5 rounded-full bg-white shadow-sm transition-transform {audioEnabled ? 'translate-x-5' : 'translate-x-0.5'}"></div>
+									</div>
 								</button>
 							</div>
-						{:else}
-							<button
-								type="button"
-								onclick={() => triggerFrameUpload('end')}
-								disabled={isGenerating}
-								class="w-full aspect-video rounded-lg border-2 border-dashed border-border hover:border-primary/50 flex flex-col items-center justify-center cursor-pointer transition-colors text-muted-foreground hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed"
-								aria-label="Upload end frame"
-							>
-								<ImageIcon class="w-6 h-6" />
-								<span class="text-xs mt-1">Upload</span>
-							</button>
 						{/if}
-						<input
-							bind:this={endFrameInput}
-							type="file"
-							accept="image/*"
-							onchange={(e) => handleFrameUpload(e, 'end')}
-							class="hidden"
-							aria-hidden="true"
-						/>
 					</div>
 				{/if}
 			</div>
-		</div>
-	{/if}
 
-	<!-- Extend Button (only if model supports extension) -->
-	{#if showExtend}
-		<div class="p-3 rounded-lg border border-border bg-muted/50">
-			<div class="flex items-center gap-3">
-				<div class="shrink-0 w-8 h-8 rounded-lg bg-green-500/20 text-green-400 flex items-center justify-center">
-					<FastForward class="w-4 h-4" />
-				</div>
-				<div class="flex-1">
-					<div class="text-sm font-medium text-foreground">Video Extension</div>
-					<div class="text-xs text-muted-foreground">
-						This model supports extending existing videos up to {currentModel.maxDuration}s total
+			<!-- Generate Button -->
+			<button
+				type="button"
+				onclick={handleGenerate}
+				disabled={!canGenerate}
+				class="w-full px-6 py-4 text-sm font-semibold bg-gradient-to-r from-[var(--primary)] to-[var(--primary)]/80 text-white rounded-xl hover:from-[var(--primary)]/90 hover:to-[var(--primary)]/70 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg shadow-[var(--primary)]/20"
+			>
+				{#if isGenerating}
+					<div class="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin"></div>
+					<span>Generating...</span>
+				{:else}
+					<Clapperboard class="w-5 h-5" />
+					<span>Generate Video</span>
+				{/if}
+			</button>
+
+			<!-- Progress Display (when generating) -->
+			{#if isGenerating}
+				<div class="p-4 rounded-xl bg-[var(--card)] border border-[var(--border)] space-y-3">
+					<div class="flex items-center justify-between text-xs">
+						<span class="text-[var(--muted-foreground)]">Processing</span>
+						<span class="text-[var(--primary)] font-medium">45%</span>
+					</div>
+					<div class="h-2 bg-[var(--background)] rounded-full overflow-hidden">
+						<div class="h-full bg-gradient-to-r from-[var(--primary)] to-[var(--primary)]/70 transition-all duration-500 animate-pulse" style="width: 45%"></div>
+					</div>
+					<div class="flex items-center justify-between text-xs text-[var(--muted-foreground)]">
+						<span>Stage: Rendering</span>
+						<span>~30s remaining</span>
 					</div>
 				</div>
-			</div>
-		</div>
-	{/if}
-
-	<!-- Generate Button -->
-	<div class="pt-4 border-t border-border">
-		<button
-			type="button"
-			onclick={handleGenerate}
-			disabled={!canGenerate}
-			class="w-full px-6 py-3 text-sm font-medium bg-primary text-primary-foreground rounded-xl hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-		>
-			{#if isGenerating}
-				<div class="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin"></div>
-				Generating...
-			{:else}
-				<Clapperboard class="w-4 h-4" />
-				Generate Video
 			{/if}
-		</button>
+		</div>
 	</div>
 </div>
+
+<style>
+	/* Custom scrollbar styles */
+	.scrollbar-thin {
+		scrollbar-width: thin;
+	}
+
+	.scrollbar-thin::-webkit-scrollbar {
+		width: 6px;
+		height: 6px;
+	}
+
+	.scrollbar-thin::-webkit-scrollbar-track {
+		background: transparent;
+	}
+
+	.scrollbar-thin::-webkit-scrollbar-thumb {
+		background: var(--border);
+		border-radius: 3px;
+	}
+
+	.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+		background: var(--muted-foreground);
+	}
+
+	/* Smooth animations */
+	* {
+		transition-property: background-color, border-color, color, fill, stroke;
+		transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+		transition-duration: 150ms;
+	}
+
+	button {
+		transition-property: all;
+	}
+</style>

@@ -108,6 +108,10 @@ function createAuthStore() {
 
 		clearError() {
 			update(s => ({ ...s, error: null }));
+		},
+
+		setError(error: string) {
+			update(s => ({ ...s, error }));
 		}
 	};
 }

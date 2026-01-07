@@ -214,7 +214,7 @@ async def set_workspace_config(
         path.mkdir(parents=True, exist_ok=True)
 
         # Test write permissions by creating a temp file
-        test_file = path / ".ai-hub-test"
+        test_file = path / ".ai-shuffle-test"
         test_file.touch()
         test_file.unlink()
 
@@ -271,7 +271,7 @@ async def validate_workspace_path(request: WorkspaceConfigRequest) -> dict:
         if exists:
             # Check if writable
             try:
-                test_file = path / ".ai-hub-test"
+                test_file = path / ".ai-shuffle-test"
                 test_file.touch()
                 test_file.unlink()
                 writable = True
@@ -285,7 +285,7 @@ async def validate_workspace_path(request: WorkspaceConfigRequest) -> dict:
             if parent.exists():
                 try:
                     path.mkdir(parents=True, exist_ok=True)
-                    test_file = path / ".ai-hub-test"
+                    test_file = path / ".ai-shuffle-test"
                     test_file.touch()
                     test_file.unlink()
                     path.rmdir()  # Remove the test directory

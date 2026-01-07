@@ -6,12 +6,18 @@
 	onMount(() => {
 		requestAnimationFrame(() => (mounted = true));
 	});
+
+	const letters = ['S', 'H', 'U', 'F', 'F', 'L', 'E'];
 </script>
 
 <div class="title-container" class:mounted>
-	<div class="title-main">
-		<span class="title-ai">AI</span>
-		<span class="title-shuffle">Shuffle</span>
+	<span class="title-prefix">AI</span>
+	<div class="title-deck">
+		{#each letters as letter, i}
+			<span class="title-letter" style="--delay: {i * 60}ms" class:gold={i === 0}>
+				{letter}
+			</span>
+		{/each}
 	</div>
 	<div class="title-divider"></div>
 </div>
@@ -21,24 +27,16 @@
 		display: flex;
 		flex-direction: column;
 		align-items: center;
-		gap: 0.5rem;
+		gap: 0.25rem;
 	}
 
-	.title-main {
-		display: flex;
-		align-items: baseline;
-		gap: 0.35em;
-		line-height: 1;
-	}
-
-	.title-ai {
+	.title-prefix {
 		font-family: var(--font-sans, system-ui);
-		font-size: clamp(1.5rem, 4vw, 2rem);
-		font-weight: 600;
-		letter-spacing: 0.15em;
-		/* Use theme primary color instead of hardcoded accent-cyan */
-		color: var(--primary);
-		text-shadow: 0 0 30px var(--glow-color);
+		font-size: 0.85rem;
+		font-weight: 500;
+		letter-spacing: 0.5em;
+		color: var(--muted-foreground);
+		text-transform: uppercase;
 		opacity: 0;
 		transform: translateY(15px);
 		transition:
@@ -47,41 +45,47 @@
 		transition-delay: 0.2s;
 	}
 
-	.title-container.mounted .title-ai {
+	.title-container.mounted .title-prefix {
 		opacity: 1;
 		transform: translateY(0);
 	}
 
-	.title-shuffle {
-		font-family: var(--font-sans, system-ui);
-		font-size: clamp(3rem, 9vw, 5rem);
-		font-weight: 800;
-		letter-spacing: -0.02em;
+	.title-deck {
+		display: flex;
+		gap: 0.02em;
+		line-height: 1;
+	}
+
+	.title-letter {
+		font-family: var(--font-display, Georgia, serif);
+		font-size: clamp(3.5rem, 10vw, 6rem);
+		font-weight: 900;
 		color: var(--foreground);
 		opacity: 0;
 		transform: translateY(30px);
 		transition:
 			opacity 0.7s cubic-bezier(0.34, 1.56, 0.64, 1),
 			transform 0.7s cubic-bezier(0.34, 1.56, 0.64, 1);
-		transition-delay: 0.35s;
+		transition-delay: calc(0.3s + var(--delay, 0ms));
 	}
 
-	.title-container.mounted .title-shuffle {
+	.title-container.mounted .title-letter {
 		opacity: 1;
 		transform: translateY(0);
 	}
 
+	.title-letter.gold {
+		color: var(--gold);
+		text-shadow:
+			0 0 60px var(--gold-glow-strong),
+			0 0 120px var(--gold-glow);
+	}
+
 	.title-divider {
-		width: 100px;
-		height: 2px;
-		margin-top: 0.25rem;
-		/* Use theme primary color */
-		background: linear-gradient(
-			90deg,
-			transparent 0%,
-			var(--primary) 50%,
-			transparent 100%
-		);
+		width: 140px;
+		height: 1px;
+		margin-top: 0.5rem;
+		background: linear-gradient(90deg, transparent 0%, var(--gold) 50%, transparent 100%);
 		opacity: 0;
 		transform: scaleX(0);
 		transition:
@@ -91,31 +95,35 @@
 	}
 
 	.title-container.mounted .title-divider {
-		opacity: 0.7;
+		opacity: 0.6;
 		transform: scaleX(1);
 	}
 
 	@media (max-width: 640px) {
-		.title-shuffle {
+		.title-letter {
 			font-size: 2.5rem;
 		}
 
-		.title-ai {
-			font-size: 1rem;
+		.title-prefix {
+			font-size: 0.7rem;
 		}
 
 		.title-divider {
-			width: 80px;
+			width: 100px;
 		}
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.title-ai,
-		.title-shuffle,
+		.title-prefix,
+		.title-letter,
 		.title-divider {
 			opacity: 1;
 			transform: none;
 			transition: none;
+		}
+
+		.title-letter.gold {
+			color: var(--gold);
 		}
 	}
 </style>

@@ -133,7 +133,7 @@ function createPWAStore() {
       } else {
         console.log('[PWA] Install dismissed');
         // Store dismissal in localStorage to not prompt again for a while
-        localStorage.setItem('ai-hub-install-dismissed', Date.now().toString());
+        localStorage.setItem('ai-shuffle-install-dismissed', Date.now().toString());
         update(s => ({ ...s, installPromptEvent: null, isInstallable: false }));
         return false;
       }
@@ -146,7 +146,7 @@ function createPWAStore() {
   // Check if install prompt was recently dismissed
   function wasRecentlyDismissed(): boolean {
     if (!browser) return false;
-    const dismissed = localStorage.getItem('ai-hub-install-dismissed');
+    const dismissed = localStorage.getItem('ai-shuffle-install-dismissed');
     if (!dismissed) return false;
 
     const dismissedTime = parseInt(dismissed, 10);

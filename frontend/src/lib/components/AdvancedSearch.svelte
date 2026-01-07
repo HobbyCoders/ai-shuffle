@@ -36,7 +36,7 @@
 	let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 	// Local storage key
-	const HISTORY_KEY = 'ai-hub-search-history';
+	const HISTORY_KEY = 'ai-shuffle-search-history';
 	const MAX_HISTORY = 10;
 
 	// Load profiles and search history on mount

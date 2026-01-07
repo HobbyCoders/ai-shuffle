@@ -14,9 +14,8 @@
 	let animationId: number;
 
 	onMount(() => {
-		const ctxOrNull = canvas.getContext('2d');
-		if (!ctxOrNull) return;
-		const ctx = ctxOrNull;
+		const ctx = canvas.getContext('2d');
+		if (!ctx) return;
 
 		function resizeCanvas() {
 			canvas.width = window.innerWidth;
@@ -25,16 +24,16 @@
 
 		function createParticles() {
 			particles = [];
-			const count = Math.min(30, Math.floor(window.innerWidth / 40));
+			const count = Math.min(35, Math.floor(window.innerWidth / 35));
 
 			for (let i = 0; i < count; i++) {
 				particles.push({
 					x: Math.random() * canvas.width,
 					y: Math.random() * canvas.height,
-					vx: (Math.random() - 0.5) * 0.15,
-					vy: (Math.random() - 0.5) * 0.12,
-					size: Math.random() * 1.5 + 0.5,
-					opacity: Math.random() * 0.2 + 0.05,
+					vx: (Math.random() - 0.5) * 0.2,
+					vy: (Math.random() - 0.5) * 0.15,
+					size: Math.random() * 2 + 0.5,
+					opacity: Math.random() * 0.25 + 0.05,
 					pulse: Math.random() * Math.PI * 2
 				});
 			}
@@ -47,7 +46,7 @@
 				// Update position
 				p.x += p.vx;
 				p.y += p.vy;
-				p.pulse += 0.008;
+				p.pulse += 0.01;
 
 				// Wrap around edges
 				if (p.x < 0) p.x = canvas.width;
@@ -58,10 +57,10 @@
 				// Pulsing opacity
 				const opacity = p.opacity * (0.7 + 0.3 * Math.sin(p.pulse));
 
-				// Draw particle - cyan tint for AI aesthetic
+				// Draw particle
 				ctx.beginPath();
 				ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-				ctx.fillStyle = `rgba(150, 220, 235, ${opacity})`;
+				ctx.fillStyle = `rgba(245, 230, 200, ${opacity})`;
 				ctx.fill();
 			});
 

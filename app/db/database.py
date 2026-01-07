@@ -710,15 +710,32 @@ def _create_schema(cursor: sqlite3.Cursor):
         )
     """)
 
+    # Per-user credential policy overrides (admin can set different policies per user)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_credential_policies (
+            id TEXT PRIMARY KEY,
+            api_user_id TEXT NOT NULL,
+            credential_type TEXT NOT NULL,
+            policy TEXT NOT NULL DEFAULT 'optional',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE,
+            UNIQUE(api_user_id, credential_type)
+        )
+    """)
+
     # Create indexes for new tables
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_user_credentials_user ON api_user_credentials(api_user_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_user_credentials_type ON api_user_credentials(credential_type)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_user_github_config_user ON api_user_github_config(api_user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_credential_policies_user ON user_credential_policies(api_user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_credential_policies_type ON user_credential_policies(credential_type)")
 
     # Initialize default credential policies if not exist
     default_policies = [
         ('openai_api_key', 'optional', 'OpenAI API key for AI tools (TTS, STT, GPT Image, Sora)'),
         ('gemini_api_key', 'optional', 'Google Gemini API key for Nano Banana, Imagen, Veo'),
+        ('meshy_api_key', 'optional', 'Meshy API key for 3D model generation'),
         ('github_pat', 'user_provided', 'GitHub Personal Access Token for repository access'),
     ]
     for policy_id, policy, description in default_policies:
@@ -1940,6 +1957,124 @@ def update_credential_policy(policy_id: str, policy: str, description: Optional[
                 (policy, datetime.utcnow().isoformat(), policy_id)
             )
     return get_credential_policy(policy_id)
+
+
+# ============================================================================
+# User Credential Policy Overrides (per-user policy settings)
+# ============================================================================
+
+def get_user_credential_policy(api_user_id: str, credential_type: str) -> Optional[Dict[str, Any]]:
+    """Get a user's policy override for a specific credential type"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM user_credential_policies WHERE api_user_id = ? AND credential_type = ?",
+            (api_user_id, credential_type)
+        )
+        return row_to_dict(cursor.fetchone())
+
+
+def get_all_user_credential_policies(api_user_id: str) -> List[Dict[str, Any]]:
+    """Get all policy overrides for a user"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM user_credential_policies WHERE api_user_id = ? ORDER BY credential_type",
+            (api_user_id,)
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def set_user_credential_policy(api_user_id: str, credential_type: str, policy: str) -> Optional[Dict[str, Any]]:
+    """
+    Set or update a user's policy override for a credential type.
+
+    policy: 'admin_provided', 'user_provided', or 'optional'
+    """
+    import uuid
+    valid_policies = ['admin_provided', 'user_provided', 'optional']
+    if policy not in valid_policies:
+        return None
+
+    now = datetime.utcnow().isoformat()
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Try to update existing
+        cursor.execute(
+            """UPDATE user_credential_policies
+               SET policy = ?, updated_at = ?
+               WHERE api_user_id = ? AND credential_type = ?""",
+            (policy, now, api_user_id, credential_type)
+        )
+
+        if cursor.rowcount == 0:
+            # Insert new
+            policy_id = str(uuid.uuid4())
+            cursor.execute(
+                """INSERT INTO user_credential_policies (id, api_user_id, credential_type, policy, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (policy_id, api_user_id, credential_type, policy, now, now)
+            )
+
+    return get_user_credential_policy(api_user_id, credential_type)
+
+
+def delete_user_credential_policy(api_user_id: str, credential_type: str) -> bool:
+    """Delete a user's policy override (revert to global policy)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM user_credential_policies WHERE api_user_id = ? AND credential_type = ?",
+            (api_user_id, credential_type)
+        )
+        return cursor.rowcount > 0
+
+
+def delete_all_user_credential_policies(api_user_id: str) -> int:
+    """Delete all policy overrides for a user"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM user_credential_policies WHERE api_user_id = ?",
+            (api_user_id,)
+        )
+        return cursor.rowcount
+
+
+def get_effective_credential_policy(api_user_id: str, credential_type: str) -> Dict[str, Any]:
+    """
+    Get the effective policy for a user+credential, checking user override first, then global.
+
+    Returns dict with:
+    - policy: the effective policy value
+    - source: 'user' or 'global'
+    - credential_type: the credential type
+    """
+    # Check for user override first
+    user_policy = get_user_credential_policy(api_user_id, credential_type)
+    if user_policy:
+        return {
+            "policy": user_policy["policy"],
+            "source": "user",
+            "credential_type": credential_type
+        }
+
+    # Fall back to global policy
+    global_policy = get_credential_policy(credential_type)
+    if global_policy:
+        return {
+            "policy": global_policy["policy"],
+            "source": "global",
+            "credential_type": credential_type
+        }
+
+    # Default to optional if no policy exists
+    return {
+        "policy": "optional",
+        "source": "default",
+        "credential_type": credential_type
+    }
 
 
 # ============================================================================

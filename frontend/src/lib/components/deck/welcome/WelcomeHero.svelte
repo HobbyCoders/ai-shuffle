@@ -5,24 +5,26 @@
 
 	interface Props {
 		onCreateCard: (type: string) => void;
-		isApiUser?: boolean;
 	}
 
-	let { onCreateCard, isApiUser = false }: Props = $props();
+	let { onCreateCard }: Props = $props();
 </script>
 
 <div class="welcome-hero">
 	<SpotlightEffect />
 
-	<!-- Subtle grid pattern background -->
-	<div class="grid-pattern" aria-hidden="true"></div>
+	<!-- Corner ornaments -->
+	<div class="ornament top-left" aria-hidden="true"></div>
+	<div class="ornament top-right" aria-hidden="true"></div>
+	<div class="ornament bottom-left" aria-hidden="true"></div>
+	<div class="ornament bottom-right" aria-hidden="true"></div>
 
 	<div class="welcome-content">
 		<WelcomeTitle />
 
-		<p class="welcome-tagline">Your AI workspace awaits</p>
+		<p class="welcome-tagline">What's your opening move?</p>
 
-		<WelcomeCards {onCreateCard} {isApiUser} />
+		<WelcomeCards {onCreateCard} />
 	</div>
 </div>
 
@@ -34,37 +36,42 @@
 		align-items: center;
 		justify-content: center;
 
-		/* Use theme-aware background gradient */
+		/* Felt background with dramatic spotlight gradient - matching mockup */
 		background:
 			radial-gradient(
-				ellipse 80% 60% at 50% 40%,
-				color-mix(in oklch, var(--card) 100%, var(--background)) 0%,
-				var(--background) 60%,
-				color-mix(in oklch, var(--background) 95%, black) 100%
+				ellipse 70% 55% at 50% 42%,
+				oklch(0.92 0.05 85 / 0.08) 0%,
+				oklch(0.92 0.05 85 / 0.03) 35%,
+				oklch(0.92 0.05 85 / 0) 65%
+			),
+			linear-gradient(180deg,
+				oklch(0.08 0.02 145) 0%,
+				oklch(0.12 0.03 145) 30%,
+				oklch(0.15 0.035 145) 50%,
+				oklch(0.12 0.03 145) 70%,
+				oklch(0.08 0.02 145) 100%
 			);
 
 		overflow: hidden;
 	}
 
-	/* Subtle grid pattern overlay - tech/workspace feel */
-	.grid-pattern {
+	/* Felt texture noise overlay */
+	.welcome-hero::before {
+		content: '';
 		position: absolute;
 		inset: 0;
-		/* Use theme-aware grid color */
-		background-image:
-			linear-gradient(color-mix(in oklch, var(--border) 20%, transparent) 1px, transparent 1px),
-			linear-gradient(90deg, color-mix(in oklch, var(--border) 20%, transparent) 1px, transparent 1px);
-		background-size: 40px 40px;
-		opacity: 0.5;
+		background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+		opacity: 0.035;
 		pointer-events: none;
+		mix-blend-mode: overlay;
 	}
 
-	/* Soft vignette effect */
+	/* Vignette effect */
 	.welcome-hero::after {
 		content: '';
 		position: absolute;
 		inset: 0;
-		background: radial-gradient(ellipse 90% 90% at 50% 50%, transparent 40%, rgba(0, 0, 0, 0.3) 100%);
+		background: radial-gradient(ellipse 80% 80% at 50% 50%, transparent 30%, rgba(0, 0, 0, 0.4) 100%);
 		pointer-events: none;
 	}
 
@@ -83,7 +90,7 @@
 		font-size: 0.9rem;
 		font-weight: 400;
 		color: var(--muted-foreground);
-		letter-spacing: 0.15em;
+		letter-spacing: 0.2em;
 		text-transform: uppercase;
 		opacity: 0;
 		animation: fadeInUp 0.6s ease-out 0.9s forwards;
@@ -100,18 +107,107 @@
 		}
 	}
 
+	/* Corner ornaments - art deco style */
+	.ornament {
+		position: absolute;
+		width: 50px;
+		height: 50px;
+		opacity: 0;
+		pointer-events: none;
+		z-index: 5;
+		animation: fadeIn 1s ease-out 1.4s forwards;
+	}
+
+	.ornament::before,
+	.ornament::after {
+		content: '';
+		position: absolute;
+		background: var(--gold);
+		opacity: 0.15;
+	}
+
+	.ornament.top-left {
+		top: 2.5rem;
+		left: 2.5rem;
+	}
+	.ornament.top-left::before {
+		width: 100%;
+		height: 1px;
+		top: 0;
+	}
+	.ornament.top-left::after {
+		width: 1px;
+		height: 100%;
+		left: 0;
+	}
+
+	.ornament.top-right {
+		top: 2.5rem;
+		right: 2.5rem;
+	}
+	.ornament.top-right::before {
+		width: 100%;
+		height: 1px;
+		top: 0;
+	}
+	.ornament.top-right::after {
+		width: 1px;
+		height: 100%;
+		right: 0;
+	}
+
+	.ornament.bottom-left {
+		bottom: 2.5rem;
+		left: 2.5rem;
+	}
+	.ornament.bottom-left::before {
+		width: 100%;
+		height: 1px;
+		bottom: 0;
+	}
+	.ornament.bottom-left::after {
+		width: 1px;
+		height: 100%;
+		left: 0;
+	}
+
+	.ornament.bottom-right {
+		bottom: 2.5rem;
+		right: 2.5rem;
+	}
+	.ornament.bottom-right::before {
+		width: 100%;
+		height: 1px;
+		bottom: 0;
+	}
+	.ornament.bottom-right::after {
+		width: 1px;
+		height: 100%;
+		right: 0;
+	}
+
+	@keyframes fadeIn {
+		from {
+			opacity: 0;
+		}
+		to {
+			opacity: 1;
+		}
+	}
+
 	@media (max-width: 640px) {
-		.welcome-tagline {
-			font-size: 0.75rem;
+		.ornament {
+			display: none;
 		}
 
-		.grid-pattern {
-			background-size: 30px 30px;
+		.welcome-tagline {
+			font-size: 0.75rem;
 		}
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.welcome-tagline {
+		.welcome-tagline,
+		.ornament {
 			animation: none;
 			opacity: 1;
 		}

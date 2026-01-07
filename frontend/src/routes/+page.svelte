@@ -38,7 +38,6 @@
 
 	// Deck components
 	import { DeckLayout } from '$lib/components/deck';
-	import { StudioView } from '$lib/components/deck/studio';
 	import {
 		Workspace,
 		ChatCard,
@@ -50,7 +49,11 @@
 		SubagentCard,
 		SettingsCard,
 		UserSettingsCard,
-		CardShuffle
+		CardShuffle,
+		ImageStudioCard,
+		ModelStudioCard,
+		AudioStudioCard,
+		FileBrowserCard
 	} from '$lib/components/deck/cards';
 	import type { CardType, DeckCard as CardsDeckCard } from '$lib/components/deck/cards/types';
 
@@ -119,45 +122,12 @@
 		if (tab) tabs.setTabPermissionModeOverride(tab.id, mode);
 	}
 
-	function handleChatSettingsBackgroundModeChange(enabled: boolean) {
-		const tab = $activeTab;
-		if (tab) {
-			tabs.setTabBackgroundEnabled(tab.id, enabled);
-			if (enabled && tab.project) {
-				git.loadRepository(tab.project);
-			}
-		}
-	}
-
-	// Background config uses individual setters per field
-	interface BackgroundConfigUpdate {
-		taskName?: string;
-		branch?: string;
-		createNewBranch?: boolean;
-		autoPR?: boolean;
-		autoMerge?: boolean;
-		maxDurationMinutes?: number;
-	}
-
-	function handleChatSettingsBackgroundConfigChange(config: BackgroundConfigUpdate) {
-		const tab = $activeTab;
-		if (!tab) return;
-
-		if (config.taskName !== undefined) tabs.setTabBackgroundTaskName(tab.id, config.taskName);
-		if (config.branch !== undefined) tabs.setTabBackgroundBranch(tab.id, config.branch);
-		if (config.createNewBranch !== undefined) tabs.setTabBackgroundCreateNewBranch(tab.id, config.createNewBranch);
-		if (config.autoPR !== undefined) tabs.setTabBackgroundAutoPR(tab.id, config.autoPR);
-		if (config.autoMerge !== undefined) tabs.setTabBackgroundAutoMerge(tab.id, config.autoMerge);
-		if (config.maxDurationMinutes !== undefined) tabs.setTabBackgroundMaxDuration(tab.id, config.maxDurationMinutes);
-	}
-
 	// Derived overlay data - automatically updates when dependencies change
 	const chatSettingsOverlayData = $derived.by(() => {
 		// Compute data when desktop overlay OR mobile bottom sheet is open
 		if (overlayType !== 'chat-settings' && !showMobileSettingsSheet) return {};
 
 		const tab = $activeTab;
-		console.log('[OverlayData] Recomputing for activeTab:', tab?.id, 'backgroundEnabled:', tab?.backgroundEnabled, 'branch:', tab?.backgroundBranch);
 		if (!tab) return {};
 
 		// Get profile settings for effective values
@@ -205,30 +175,11 @@
 				{ value: 'bypassPermissions', label: 'Bypass' }
 			],
 
-			// Background mode state (from tab)
-			isBackgroundMode: tab.backgroundEnabled,
-			backgroundConfig: {
-				taskName: tab.backgroundTaskName,
-				branch: tab.backgroundBranch,
-				createNewBranch: tab.backgroundCreateNewBranch,
-				autoPR: tab.backgroundAutoPR,
-				autoMerge: tab.backgroundAutoMerge,
-				maxDurationMinutes: tab.backgroundMaxDurationMinutes
-			},
-
-			// Branch data - only show if tab has a project selected
-			branches: tab.project ? $gitBranches.filter(b => !b.remote).map(b => b.name) : [],
-			currentBranch: tab.project ? ($currentBranch?.name || 'main') : 'main',
-			defaultBranch: 'main',
-			loadingBranches: tab.project ? $gitLoading : false,
-
 			// Stable callbacks (don't change on re-render)
 			onProfileChange: handleChatSettingsProfileChange,
 			onProjectChange: handleChatSettingsProjectChange,
 			onModelChange: handleChatSettingsModelChange,
-			onModeChange: handleChatSettingsModeChange,
-			onBackgroundModeChange: handleChatSettingsBackgroundModeChange,
-			onBackgroundConfigChange: handleChatSettingsBackgroundConfigChange
+			onModeChange: handleChatSettingsModeChange
 		};
 	});
 
@@ -481,6 +432,14 @@
 				return 'subagent';
 			case 'project':
 				return 'project';
+			case 'image-studio':
+				return 'image-studio';
+			case 'model-studio':
+				return 'model-studio';
+			case 'audio-studio':
+				return 'audio-studio';
+			case 'file-browser':
+				return 'file-browser';
 			default:
 				return 'chat';
 		}
@@ -995,6 +954,26 @@
 				title = 'My Settings';
 				break;
 			}
+			case 'image-studio': {
+				deckCardType = 'image-studio';
+				title = 'Image Studio';
+				break;
+			}
+			case 'model-studio': {
+				deckCardType = 'model-studio';
+				title = '3D Models';
+				break;
+			}
+			case 'audio-studio': {
+				deckCardType = 'audio-studio';
+				title = 'Audio Studio';
+				break;
+			}
+			case 'file-browser': {
+				deckCardType = 'file-browser';
+				title = 'Files';
+				break;
+			}
 			default:
 				deckCardType = 'chat';
 				title = 'New Card';
@@ -1251,7 +1230,6 @@
 		onModeChange={handleModeChange}
 		onLogoClick={() => showCreateMenu = !showCreateMenu}
 		onSettingsClick={() => handleCreateCard('settings')}
-		onUserSettingsClick={() => handleCreateCard('user-settings')}
 		onContextToggle={() => {
 			deck.toggleContextPanel();
 			// Close chat settings overlay when collapsing the panel
@@ -1280,8 +1258,7 @@
 		}}
 		onProcessClick={() => {}}
 	>
-		{#if activeMode === 'workspace'}
-			{#if isMobile}
+		{#if isMobile}
 				<!-- Mobile Workspace -->
 				<MobileWorkspace
 					cards={workspaceCards}
@@ -1375,7 +1352,47 @@
 								{card}
 								mobile={true}
 								onClose={() => handleCardClose(card.id)}
-																onMaximize={() => handleCardMaximize(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
+						{:else if card.type === 'image-studio'}
+							<ImageStudioCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
+						{:else if card.type === 'model-studio'}
+							<ModelStudioCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
+						{:else if card.type === 'audio-studio'}
+							<AudioStudioCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
+						{:else if card.type === 'file-browser'}
+							<FileBrowserCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
 								onFocus={() => handleCardFocus(card.id)}
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1511,7 +1528,51 @@
 										<ProjectCard
 											{card}
 											onClose={() => handleCardClose(card.id)}
-																						onMaximize={() => handleCardMaximize(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
+										/>
+									{:else if card.type === 'image-studio'}
+										<ImageStudioCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
+										/>
+									{:else if card.type === 'model-studio'}
+										<ModelStudioCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
+										/>
+									{:else if card.type === 'audio-studio'}
+										<AudioStudioCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
+										/>
+									{:else if card.type === 'file-browser'}
+										<FileBrowserCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
 											onFocus={() => handleCardFocus(card.id)}
 											onMove={(x, y) => handleCardMove(card.id, x, y)}
 											onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1530,22 +1591,6 @@
 						{/each}
 					{/snippet}
 				</Workspace>
-			{/if}
-		{:else if activeMode === 'studio'}
-			<StudioView />
-		{:else}
-			<!-- Files mode placeholder -->
-			<div class="flex items-center justify-center h-full">
-				<div class="text-center">
-					<div class="w-16 h-16 mx-auto mb-4 rounded-2xl bg-muted/50 flex items-center justify-center">
-						<svg class="w-8 h-8 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-						</svg>
-					</div>
-					<p class="text-lg text-muted-foreground mb-2">File Browser</p>
-					<p class="text-sm text-muted-foreground/70">Coming soon</p>
-				</div>
-			</div>
 		{/if}
 	</DeckLayout>
 
@@ -1561,8 +1606,13 @@
 		onCreateTerminal={() => handleCreateCard('terminal')}
 		onOpenProfiles={() => handleCreateCard('profile')}
 		onOpenProjects={() => handleCreateCard('project')}
+		onOpenSubagents={() => handleCreateCard('subagent')}
 		onOpenSettings={() => handleCreateCard('settings')}
 		onOpenUserSettings={() => handleCreateCard('user-settings')}
+		onOpenImageStudio={() => handleCreateCard('image-studio')}
+		onOpenModelStudio={() => handleCreateCard('model-studio')}
+		onOpenAudioStudio={() => handleCreateCard('audio-studio')}
+		onOpenFileBrowser={() => handleCreateCard('file-browser')}
 		isAdmin={$isAdmin}
 		{isMobile}
 	/>

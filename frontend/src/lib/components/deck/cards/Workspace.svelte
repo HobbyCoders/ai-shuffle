@@ -16,6 +16,7 @@
 	import type { Snippet } from 'svelte';
 	import type { LayoutMode } from '$lib/stores/deck';
 	import CardShuffle from './CardShuffle.svelte';
+	import { WelcomeHero } from '../welcome';
 
 	interface Props {
 		cards: DeckCard[];
@@ -144,28 +145,9 @@
 		{@render children()}
 	{/if}
 
-	<!-- Empty state when no cards -->
+	<!-- Empty state when no cards - Casino Noir Welcome -->
 	{#if sortedCards.length === 0}
-		<div class="empty-state">
-			<div class="empty-content">
-				<div class="empty-icon">
-					<MessageSquare size={48} strokeWidth={1} />
-				</div>
-				<h2 class="empty-title">Welcome to The Deck</h2>
-				<p class="empty-text">Your workspace is empty. Create a card to get started.</p>
-				<div class="create-buttons">
-					{#each cardTypes as { type, label, icon: Icon }}
-						<button
-							class="create-btn"
-							onclick={() => onCreateCard(type)}
-						>
-							<Icon size={18} />
-							<span>{label}</span>
-						</button>
-					{/each}
-				</div>
-			</div>
-		</div>
+		<WelcomeHero {onCreateCard} />
 	{/if}
 
 </div>
@@ -194,72 +176,5 @@
 	.workspace.has-maximized {
 		/* Placeholder for maximized card styling - prevents z-index conflicts */
 		overflow: hidden;
-	}
-
-	/* Empty State */
-	.empty-state {
-		position: absolute;
-		inset: 0;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		pointer-events: none;
-	}
-
-	.empty-content {
-		text-align: center;
-		color: hsl(var(--muted-foreground));
-		pointer-events: auto;
-	}
-
-	.empty-icon {
-		width: 80px;
-		height: 80px;
-		margin: 0 auto 1.5rem;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: hsl(var(--muted) / 0.5);
-		border-radius: 50%;
-		color: hsl(var(--muted-foreground));
-	}
-
-	.empty-title {
-		font-size: 1.25rem;
-		font-weight: 600;
-		color: hsl(var(--foreground));
-		margin-bottom: 0.5rem;
-	}
-
-	.empty-text {
-		font-size: 0.875rem;
-		margin-bottom: 1.5rem;
-	}
-
-	.create-buttons {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.75rem;
-		justify-content: center;
-	}
-
-	.create-btn {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		padding: 0.625rem 1rem;
-		background: hsl(var(--card));
-		border: 1px solid hsl(var(--border));
-		border-radius: 8px;
-		color: hsl(var(--foreground));
-		font-size: 0.875rem;
-		font-weight: 500;
-		cursor: pointer;
-		transition: all 0.15s ease;
-	}
-
-	.create-btn:hover {
-		background: hsl(var(--accent));
-		border-color: hsl(var(--primary) / 0.3);
 	}
 </style>

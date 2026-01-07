@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Volume2, Play, Pause, Download, Mic2 } from 'lucide-svelte';
+	import { Volume2, Play, Pause, Download, Mic2, SkipBack, SkipForward, Repeat, Gauge } from 'lucide-svelte';
 	import {
 		ALL_TTS_MODELS,
 		getTTSModel,
@@ -47,8 +47,8 @@
 	});
 
 	const providerLabels: Record<string, string> = {
-		'google-tts': 'Google Cloud TTS',
-		'openai-tts': 'OpenAI TTS'
+		'google-tts': 'Google Cloud',
+		'openai-tts': 'OpenAI'
 	};
 
 	// State
@@ -66,6 +66,7 @@
 	let isPlaying = $state(false);
 	let audioDuration = $state(0);
 	let audioCurrentTime = $state(0);
+	let isLooping = $state(false);
 
 	// Derived
 	let currentModel = $derived(getTTSModel(selectedModel));
@@ -74,6 +75,9 @@
 	let outputFormats = $derived(currentModel?.outputFormats || ['mp3']);
 	let showVoiceInstructions = $derived(currentModel?.capabilities.steerability === true);
 	let canGenerate = $derived(text.trim().length > 0 && !isGenerating);
+	let characterCount = $derived(text.length);
+	let maxCharacters = $derived(currentModel?.maxInputLength || 4096);
+	let isNearLimit = $derived(characterCount > maxCharacters * 0.9);
 
 	// Effects to sync with store
 	$effect(() => {
@@ -114,10 +118,9 @@
 		}
 	}
 
-	function handleVoiceChange(event: Event) {
-		const select = event.target as HTMLSelectElement;
-		selectedVoice = select.value;
-		studio.setTTSVoice(selectedVoice);
+	function handleVoiceChange(voiceId: string) {
+		selectedVoice = voiceId;
+		studio.setTTSVoice(voiceId);
 	}
 
 	function handleSpeedChange(event: Event) {
@@ -198,7 +201,9 @@
 
 	function handleAudioEnded() {
 		isPlaying = false;
-		audioCurrentTime = 0;
+		if (!isLooping) {
+			audioCurrentTime = 0;
+		}
 	}
 
 	function handleAudioTimeUpdate() {
@@ -222,6 +227,25 @@
 		}
 	}
 
+	function skipBackward() {
+		if (audioElement) {
+			audioElement.currentTime = Math.max(0, audioElement.currentTime - 10);
+		}
+	}
+
+	function skipForward() {
+		if (audioElement) {
+			audioElement.currentTime = Math.min(audioDuration, audioElement.currentTime + 10);
+		}
+	}
+
+	function toggleLoop() {
+		isLooping = !isLooping;
+		if (audioElement) {
+			audioElement.loop = isLooping;
+		}
+	}
+
 	function downloadAudio() {
 		if (!audioUrl) return;
 		const a = document.createElement('a');
@@ -241,197 +265,26 @@
 	function getGenderIcon(gender?: 'male' | 'female' | 'neutral'): string {
 		switch (gender) {
 			case 'male':
-				return 'M';
+				return '♂';
 			case 'female':
-				return 'F';
+				return '♀';
 			case 'neutral':
-				return 'N';
+				return '◆';
 			default:
-				return '-';
+				return '';
 		}
 	}
 
-	function getCapabilityBadges(model: TTSModel): { label: string; active: boolean }[] {
-		return [
-			{ label: 'Streaming', active: model.capabilities.streaming },
-			{ label: 'SSML', active: model.capabilities.ssml },
-			{ label: 'Custom Voices', active: model.capabilities.customVoices },
-			{ label: 'Steerability', active: model.capabilities.steerability },
-			{ label: 'Multi-Speaker', active: model.capabilities.multiSpeaker },
-			{ label: 'Emotion Control', active: model.capabilities.emotionControl }
-		].filter(b => b.active);
+	function getVoiceInitial(voiceName: string): string {
+		return voiceName.charAt(0).toUpperCase();
 	}
 </script>
 
-<div class="p-4 space-y-6">
-	<!-- Text Input -->
-	<div>
-		<label for="tts-text" class="block text-sm font-medium text-foreground mb-2">
-			Text to Convert
-		</label>
-		<textarea
-			id="tts-text"
-			bind:value={text}
-			placeholder="Enter the text you want to convert to speech..."
-			rows="4"
-			class="w-full bg-muted border border-border rounded-xl px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
-			disabled={isGenerating}
-		></textarea>
-		{#if currentModel}
-			<p class="text-xs text-muted-foreground mt-1">
-				Max {currentModel.maxInputLength.toLocaleString()} characters
-			</p>
-		{/if}
-	</div>
-
-	<!-- Model Selector -->
-	<div>
-		<label class="block text-xs text-muted-foreground mb-2">Model</label>
-		<div class="space-y-4">
-			{#each Object.entries(modelsByProvider) as [provider, models]}
-				{#if models.length > 0}
-					<div>
-						<div class="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wide">
-							{providerLabels[provider]}
-						</div>
-						<div class="space-y-2">
-							{#each models as model}
-								<button
-									type="button"
-									onclick={() => handleModelChange(model.id)}
-									disabled={isGenerating}
-									class="w-full flex flex-col gap-2 p-3 rounded-lg border transition-colors text-left {selectedModel === model.id ? 'border-primary bg-primary/5' : 'border-border hover:border-muted-foreground/50 hover:bg-muted'}"
-									aria-pressed={selectedModel === model.id}
-								>
-									<div class="flex items-start gap-3">
-										<div class="shrink-0 w-8 h-8 rounded-lg flex items-center justify-center {selectedModel === model.id ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}">
-											<Volume2 class="w-4 h-4" />
-										</div>
-										<div class="flex-1 min-w-0">
-											<div class="text-sm font-medium text-foreground">{model.displayName}</div>
-											<div class="text-xs text-muted-foreground">{model.description}</div>
-										</div>
-										{#if selectedModel === model.id}
-											<div class="shrink-0 w-2 h-2 rounded-full bg-primary mt-2"></div>
-										{/if}
-									</div>
-									<!-- Capability Badges -->
-									{#if getCapabilityBadges(model).length > 0}
-										<div class="flex flex-wrap gap-1 pl-11">
-											{#each getCapabilityBadges(model) as badge}
-												<span class="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
-													{badge.label}
-												</span>
-											{/each}
-										</div>
-									{/if}
-								</button>
-							{/each}
-						</div>
-					</div>
-				{/if}
-			{/each}
-		</div>
-	</div>
-
-	<!-- Voice Selector -->
-	{#if availableVoices.length > 0}
-		<div>
-			<label for="voice-select" class="block text-xs text-muted-foreground mb-2">
-				Voice
-			</label>
-			<div class="relative">
-				<Mic2 class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-				<select
-					id="voice-select"
-					value={selectedVoice}
-					onchange={handleVoiceChange}
-					disabled={isGenerating}
-					class="w-full bg-muted border border-border rounded-lg pl-10 pr-4 py-2.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none cursor-pointer"
-				>
-					{#each availableVoices as voice}
-						<option value={voice.id}>
-							{voice.name} ({getGenderIcon(voice.gender)})
-						</option>
-					{/each}
-				</select>
-				<div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
-					<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-					</svg>
-				</div>
-			</div>
-		</div>
-	{/if}
-
-	<!-- Speed Slider -->
-	<div>
-		<div class="flex items-center justify-between mb-2">
-			<label for="speed-slider" class="text-xs text-muted-foreground">
-				Speed
-			</label>
-			<span class="text-xs font-medium text-foreground">{speed.toFixed(2)}x</span>
-		</div>
-		<input
-			id="speed-slider"
-			type="range"
-			min={speedRange.min}
-			max={speedRange.max}
-			step="0.05"
-			value={speed}
-			oninput={handleSpeedChange}
-			disabled={isGenerating}
-			class="w-full h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
-		/>
-		<div class="flex justify-between text-[10px] text-muted-foreground mt-1">
-			<span>{speedRange.min}x</span>
-			<span>1.0x</span>
-			<span>{speedRange.max}x</span>
-		</div>
-	</div>
-
-	<!-- Output Format -->
-	<div>
-		<label for="format-select" class="block text-xs text-muted-foreground mb-2">
-			Output Format
-		</label>
-		<select
-			id="format-select"
-			value={outputFormat}
-			onchange={handleFormatChange}
-			disabled={isGenerating}
-			class="w-full bg-muted border border-border rounded-lg px-4 py-2.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none cursor-pointer"
-		>
-			{#each outputFormats as format}
-				<option value={format}>{format.toUpperCase()}</option>
-			{/each}
-		</select>
-	</div>
-
-	<!-- Voice Instructions (for steerable models like GPT-4o-mini-TTS) -->
-	{#if showVoiceInstructions}
-		<div>
-			<label for="voice-instructions" class="block text-xs text-muted-foreground mb-2">
-				Voice Instructions (optional)
-			</label>
-			<p class="text-xs text-muted-foreground mb-2">
-				Describe how the voice should speak (e.g., "Speak slowly and calmly like a meditation guide")
-			</p>
-			<textarea
-				id="voice-instructions"
-				bind:value={voiceInstructions}
-				placeholder="Speak with enthusiasm and energy..."
-				rows="2"
-				class="w-full bg-muted border border-border rounded-xl px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
-				disabled={isGenerating}
-			></textarea>
-		</div>
-	{/if}
-
-	<!-- Audio Preview/Playback -->
+<div class="flex flex-col h-full overflow-hidden">
+	<!-- Audio Preview Section - 30% -->
 	{#if audioUrl}
-		<div class="border border-border rounded-xl p-4 bg-muted/50">
-			<div class="text-xs text-muted-foreground mb-3">Generated Audio</div>
+		<div class="h-[30%] border-b border-border/50 p-6 bg-gradient-to-b from-card via-card to-background/50">
+			<div class="text-xs text-muted-foreground mb-4 uppercase tracking-wider font-medium">Audio Preview</div>
 
 			<audio
 				bind:this={audioElement}
@@ -444,20 +297,50 @@
 				class="hidden"
 			></audio>
 
-			<div class="flex items-center gap-3">
+			<!-- Animated Waveform -->
+			<div class="mb-6 h-16 flex items-center justify-center gap-1 px-4 rounded-lg bg-card/50 backdrop-blur-sm border border-border/30">
+				{#each Array(32) as _, i}
+					<div
+						class="w-1 bg-primary/60 rounded-full transition-all duration-300"
+						style="height: {isPlaying ? Math.random() * 60 + 20 : 20}%; animation: {isPlaying ? `pulse ${0.5 + Math.random() * 0.5}s ease-in-out infinite alternate` : 'none'}; animation-delay: {i * 0.05}s;"
+					></div>
+				{/each}
+			</div>
+
+			<!-- Playback Controls -->
+			<div class="flex items-center gap-4 mb-4">
+				<button
+					type="button"
+					onclick={skipBackward}
+					class="w-9 h-9 rounded-lg bg-card border border-border/50 text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all flex items-center justify-center"
+					aria-label="Skip backward 10 seconds"
+				>
+					<SkipBack class="w-4 h-4" />
+				</button>
+
 				<button
 					type="button"
 					onclick={togglePlayback}
-					class="shrink-0 w-10 h-10 rounded-full bg-primary text-primary-foreground flex items-center justify-center hover:bg-primary/90 transition-colors"
+					class="w-12 h-12 rounded-full bg-primary text-primary-foreground flex items-center justify-center hover:bg-primary/90 transition-all shadow-lg shadow-primary/25"
 					aria-label={isPlaying ? 'Pause' : 'Play'}
 				>
 					{#if isPlaying}
-						<Pause class="w-4 h-4" />
+						<Pause class="w-5 h-5" />
 					{:else}
-						<Play class="w-4 h-4 ml-0.5" />
+						<Play class="w-5 h-5 ml-0.5" />
 					{/if}
 				</button>
 
+				<button
+					type="button"
+					onclick={skipForward}
+					class="w-9 h-9 rounded-lg bg-card border border-border/50 text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all flex items-center justify-center"
+					aria-label="Skip forward 10 seconds"
+				>
+					<SkipForward class="w-4 h-4" />
+				</button>
+
+				<!-- Progress Bar -->
 				<div class="flex-1">
 					<input
 						type="range"
@@ -466,18 +349,28 @@
 						step="0.1"
 						value={audioCurrentTime}
 						oninput={handleSeek}
-						class="w-full h-1.5 bg-border rounded-lg appearance-none cursor-pointer accent-primary"
+						class="w-full h-1.5 bg-border/30 rounded-full appearance-none cursor-pointer accent-primary"
+						style="background: linear-gradient(to right, oklch(0.72 0.14 180) 0%, oklch(0.72 0.14 180) {(audioCurrentTime / audioDuration) * 100}%, oklch(0.18 0.008 260 / 0.3) {(audioCurrentTime / audioDuration) * 100}%, oklch(0.18 0.008 260 / 0.3) 100%)"
 					/>
-					<div class="flex justify-between text-[10px] text-muted-foreground mt-1">
-						<span>{formatTime(audioCurrentTime)}</span>
-						<span>{formatTime(audioDuration)}</span>
+					<div class="flex justify-between text-[10px] text-muted-foreground mt-1 px-1">
+						<span class="font-mono">{formatTime(audioCurrentTime)}</span>
+						<span class="font-mono">{formatTime(audioDuration)}</span>
 					</div>
 				</div>
 
 				<button
 					type="button"
+					onclick={toggleLoop}
+					class="w-9 h-9 rounded-lg border transition-all flex items-center justify-center {isLooping ? 'bg-primary/10 border-primary/50 text-primary' : 'bg-card border-border/50 text-muted-foreground hover:text-foreground'}"
+					aria-label="Toggle loop"
+				>
+					<Repeat class="w-4 h-4" />
+				</button>
+
+				<button
+					type="button"
 					onclick={downloadAudio}
-					class="shrink-0 w-8 h-8 rounded-lg bg-muted text-muted-foreground flex items-center justify-center hover:bg-muted/80 hover:text-foreground transition-colors"
+					class="w-9 h-9 rounded-lg bg-card border border-border/50 text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all flex items-center justify-center"
 					aria-label="Download audio"
 				>
 					<Download class="w-4 h-4" />
@@ -486,21 +379,199 @@
 		</div>
 	{/if}
 
-	<!-- Generate Button -->
-	<div class="pt-4 border-t border-border">
+	<!-- Controls Section - 70% -->
+	<div class="flex-1 overflow-y-auto p-6 space-y-6">
+		<!-- Text Input -->
+		<div>
+			<label for="tts-text" class="block text-xs text-muted-foreground mb-2 uppercase tracking-wider font-medium">
+				Text Input
+			</label>
+			<div class="relative">
+				<textarea
+					id="tts-text"
+					bind:value={text}
+					placeholder="Enter text to speak..."
+					rows="5"
+					class="w-full bg-card border border-border/50 rounded-xl px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 resize-none transition-all"
+					disabled={isGenerating}
+				></textarea>
+				<div class="absolute bottom-3 right-3 text-xs font-mono {isNearLimit ? 'text-destructive' : 'text-muted-foreground'}">
+					{characterCount}/{maxCharacters}
+				</div>
+			</div>
+		</div>
+
+		<!-- Voice Selection Cards -->
+		{#if availableVoices.length > 0}
+			<div>
+				<label class="block text-xs text-muted-foreground mb-3 uppercase tracking-wider font-medium">
+					Voice Selection
+				</label>
+				<div class="grid grid-cols-2 gap-2">
+					{#each availableVoices.slice(0, 6) as voice}
+						<button
+							type="button"
+							onclick={() => handleVoiceChange(voice.id)}
+							disabled={isGenerating}
+							class="flex items-center gap-3 p-3 rounded-lg border transition-all text-left {selectedVoice === voice.id ? 'border-primary bg-primary/5 shadow-lg shadow-primary/10' : 'border-border/50 hover:border-primary/30 hover:bg-card/50'} disabled:opacity-50"
+						>
+							<div class="shrink-0 w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold {selectedVoice === voice.id ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}">
+								{getVoiceInitial(voice.name)}
+							</div>
+							<div class="flex-1 min-w-0">
+								<div class="text-xs font-medium text-foreground truncate">{voice.name}</div>
+								<div class="text-[10px] text-muted-foreground">{getGenderIcon(voice.gender)} {voice.language || 'EN'}</div>
+							</div>
+						</button>
+					{/each}
+				</div>
+				{#if availableVoices.length > 6}
+					<details class="mt-2">
+						<summary class="text-xs text-primary hover:text-primary/80 cursor-pointer select-none">
+							Show {availableVoices.length - 6} more voices
+						</summary>
+						<div class="grid grid-cols-2 gap-2 mt-2">
+							{#each availableVoices.slice(6) as voice}
+								<button
+									type="button"
+									onclick={() => handleVoiceChange(voice.id)}
+									disabled={isGenerating}
+									class="flex items-center gap-3 p-3 rounded-lg border transition-all text-left {selectedVoice === voice.id ? 'border-primary bg-primary/5 shadow-lg shadow-primary/10' : 'border-border/50 hover:border-primary/30 hover:bg-card/50'} disabled:opacity-50"
+								>
+									<div class="shrink-0 w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold {selectedVoice === voice.id ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}">
+										{getVoiceInitial(voice.name)}
+									</div>
+									<div class="flex-1 min-w-0">
+										<div class="text-xs font-medium text-foreground truncate">{voice.name}</div>
+										<div class="text-[10px] text-muted-foreground">{getGenderIcon(voice.gender)} {voice.language || 'EN'}</div>
+									</div>
+								</button>
+							{/each}
+						</div>
+					</details>
+				{/if}
+			</div>
+		{/if}
+
+		<!-- Provider Selection -->
+		<div>
+			<label class="block text-xs text-muted-foreground mb-3 uppercase tracking-wider font-medium">
+				Provider
+			</label>
+			<div class="flex gap-2">
+				{#each Object.entries(modelsByProvider) as [provider, models]}
+					{#if models.length > 0}
+						{@const model = models[0]}
+						<button
+							type="button"
+							onclick={() => handleModelChange(model.id)}
+							disabled={isGenerating}
+							class="flex-1 flex items-center gap-2 p-3 rounded-lg border transition-all {selectedModel === model.id ? 'border-primary bg-primary/5' : 'border-border/50 hover:border-primary/30 hover:bg-card/50'} disabled:opacity-50"
+						>
+							<div class="w-8 h-8 rounded-lg flex items-center justify-center {selectedModel === model.id ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}">
+								<Volume2 class="w-4 h-4" />
+							</div>
+							<div class="flex-1 text-left">
+								<div class="text-xs font-medium text-foreground">{providerLabels[provider]}</div>
+							</div>
+						</button>
+					{/if}
+				{/each}
+			</div>
+		</div>
+
+		<!-- Options -->
+		<div class="space-y-4 p-4 rounded-xl bg-card/30 border border-border/30">
+			<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">Options</div>
+
+			<!-- Speed Slider -->
+			<div>
+				<div class="flex items-center justify-between mb-2">
+					<label for="speed-slider" class="text-xs text-muted-foreground flex items-center gap-2">
+						<Gauge class="w-3.5 h-3.5" />
+						Speed
+					</label>
+					<span class="text-xs font-mono font-medium text-foreground bg-muted px-2 py-0.5 rounded">{speed.toFixed(2)}x</span>
+				</div>
+				<input
+					id="speed-slider"
+					type="range"
+					min={speedRange.min}
+					max={speedRange.max}
+					step="0.05"
+					value={speed}
+					oninput={handleSpeedChange}
+					disabled={isGenerating}
+					class="w-full h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
+				/>
+				<div class="flex justify-between text-[10px] text-muted-foreground mt-1">
+					<span>{speedRange.min}x</span>
+					<span>1.0x</span>
+					<span>{speedRange.max}x</span>
+				</div>
+			</div>
+
+			<!-- Output Format -->
+			<div>
+				<label for="format-select" class="block text-xs text-muted-foreground mb-2">
+					Format
+				</label>
+				<select
+					id="format-select"
+					value={outputFormat}
+					onchange={handleFormatChange}
+					disabled={isGenerating}
+					class="w-full bg-muted border border-border/50 rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none cursor-pointer"
+				>
+					{#each outputFormats as format}
+						<option value={format}>{format.toUpperCase()}</option>
+					{/each}
+				</select>
+			</div>
+		</div>
+
+		<!-- Voice Instructions (for steerable models) -->
+		{#if showVoiceInstructions}
+			<div>
+				<label for="voice-instructions" class="block text-xs text-muted-foreground mb-2 uppercase tracking-wider font-medium">
+					Voice Instructions (Optional)
+				</label>
+				<textarea
+					id="voice-instructions"
+					bind:value={voiceInstructions}
+					placeholder="Describe how the voice should speak (e.g., 'Speak slowly and calmly like a meditation guide')"
+					rows="2"
+					class="w-full bg-card border border-border/50 rounded-xl px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none transition-all"
+					disabled={isGenerating}
+				></textarea>
+			</div>
+		{/if}
+
+		<!-- Generate Button -->
 		<button
 			type="button"
 			onclick={handleGenerate}
 			disabled={!canGenerate}
-			class="w-full px-6 py-3 text-sm font-medium bg-primary text-primary-foreground rounded-xl hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+			class="w-full px-6 py-4 text-sm font-medium bg-primary text-primary-foreground rounded-xl hover:bg-primary/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg shadow-primary/25"
 		>
 			{#if isGenerating}
 				<div class="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin"></div>
-				Generating...
+				Generating Speech...
 			{:else}
-				<Volume2 class="w-4 h-4" />
+				<Volume2 class="w-5 h-5" />
 				Generate Speech
 			{/if}
 		</button>
 	</div>
 </div>
+
+<style>
+	@keyframes pulse {
+		from {
+			opacity: 0.6;
+		}
+		to {
+			opacity: 1;
+		}
+	}
+</style>

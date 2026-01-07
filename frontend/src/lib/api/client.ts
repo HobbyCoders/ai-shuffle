@@ -856,8 +856,8 @@ export function parseAgentExportFile(content: string): AgentExport {
 		throw new Error('Invalid JSON structure');
 	}
 
-	if (parsed.type !== 'ai-hub-agent') {
-		throw new Error(`Invalid file type: ${parsed.type}. Expected 'ai-hub-agent'`);
+	if (parsed.type !== 'ai-shuffle-agent') {
+		throw new Error(`Invalid file type: ${parsed.type}. Expected 'ai-shuffle-agent'`);
 	}
 
 	if (!parsed.version) {

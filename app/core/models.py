@@ -81,19 +81,9 @@ class SubagentDefinition(BaseModel):
 # Profile Models
 # ============================================================================
 
-class AIToolsConfig(BaseModel):
-    """Configuration for individual AI tools - each tool can be enabled/disabled"""
-    # Image tools (Nano Banana)
-    image_generation: bool = False  # Generate AI images from text prompts
-    image_editing: bool = False  # Edit existing images
-    image_reference: bool = False  # Reference-based generation (character/style consistency)
-    # Video tools (Veo)
-    video_generation: bool = False  # Generate AI videos from text prompts
-    video_with_audio: bool = False  # Generate video with native audio (Veo 3)
-    image_to_video: bool = False  # Animate a still image into a video
-    video_extend: bool = False  # Extend existing Veo videos
-    video_bridge: bool = False  # Generate smooth transitions between two images
-    video_understanding: bool = False  # Analyze videos and answer questions about content
+# AIToolsConfig is dynamically generated from the AI_TOOLS registry
+# This ensures the model always matches available tools - no manual sync needed
+from app.core.ai_tools import AIToolsConfig  # noqa: E402
 
 
 class SystemPromptConfig(BaseModel):
@@ -745,7 +735,7 @@ class AgentExportData(BaseModel):
 class AgentExport(BaseModel):
     """Full agent export format"""
     version: str = "1.0"
-    type: str = "ai-hub-agent"
+    type: str = "ai-shuffle-agent"
     exported_at: str
     agent: AgentExportData
 
@@ -753,7 +743,7 @@ class AgentExport(BaseModel):
 class AgentImportRequest(BaseModel):
     """Request to import an agent from JSON data"""
     version: str = Field(..., description="Export format version")
-    type: str = Field(..., description="Must be 'ai-hub-agent'")
+    type: str = Field(..., description="Must be 'ai-shuffle-agent'")
     exported_at: Optional[str] = None
     agent: AgentExportData
 

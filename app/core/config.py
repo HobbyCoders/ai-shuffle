@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     # Service info
-    service_name: str = "ai-hub"
+    service_name: str = "ai-shuffle"
     version: str = "4.0.0"
 
     # Deployment mode (auto-detected if not set)
@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     data_dir: Optional[Path] = None
     workspace_dir: Optional[Path] = None
     claude_projects_dir: Optional[Path] = None  # Override for Claude SDK projects dir (defaults to ~/.claude/projects)
-    tools_dir: Optional[Path] = None  # Path to AI tools directory (defaults to /workspace/ai-hub/tools in Docker)
+    tools_dir: Optional[Path] = None  # Path to AI tools directory (defaults to /workspace/ai-shuffle/tools in Docker)
 
     # Database
     database_url: Optional[str] = None

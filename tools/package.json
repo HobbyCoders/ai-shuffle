@@ -1,8 +1,8 @@
 {
-  "name": "@ai-hub/tools",
+  "name": "@ai-shuffle/tools",
   "version": "1.0.0",
   "type": "module",
-  "description": "AI Hub tools for Claude code execution",
+  "description": "AI Shuffle tools for Claude code execution",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {

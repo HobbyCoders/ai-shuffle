@@ -414,21 +414,61 @@ TTS_MODELS = {
 
 # Available STT models
 STT_MODELS = {
+    # Google STT Models
+    "gemini-2.5-flash": {
+        "name": "Gemini Audio",
+        "provider": "google-stt",
+        "description": "Long-form audio, diarization, context-aware transcription",
+        "price_display": "~$0.006/min",
+        "price_per_minute": 0.006
+    },
+    "chirp-3": {
+        "name": "Chirp 3",
+        "provider": "google-stt",
+        "description": "Multilingual, noisy environments, latest accuracy",
+        "price_display": "~$0.016/min",
+        "price_per_minute": 0.016
+    },
+    "latest-long": {
+        "name": "Latest Long",
+        "provider": "google-stt",
+        "description": "Long-form content, media, conversations",
+        "price_display": "~$0.016/min",
+        "price_per_minute": 0.016
+    },
+    "latest-short": {
+        "name": "Latest Short",
+        "provider": "google-stt",
+        "description": "Voice commands, short utterances",
+        "price_display": "~$0.016/min",
+        "price_per_minute": 0.016
+    },
+    # OpenAI STT Models
+    "gpt-4o-transcribe-diarize": {
+        "name": "GPT-4o Transcribe + Diarize",
+        "provider": "openai-stt",
+        "description": "Ultra-fast transcription with speaker identification",
+        "price_display": "~$0.006/min",
+        "price_per_minute": 0.006
+    },
     "gpt-4o-transcribe": {
         "name": "GPT-4o Transcribe",
-        "description": "Best quality transcription with improved accuracy",
+        "provider": "openai-stt",
+        "description": "Fast transcription (10 min in ~15 seconds)",
         "price_display": "~$0.006/min",
         "price_per_minute": 0.006
     },
     "gpt-4o-mini-transcribe": {
         "name": "GPT-4o Mini Transcribe",
-        "description": "Fast, affordable transcription",
+        "provider": "openai-stt",
+        "description": "Cost-efficient transcription",
         "price_display": "~$0.003/min",
         "price_per_minute": 0.003
     },
     "whisper-1": {
         "name": "Whisper",
-        "description": "Original Whisper model for transcription",
+        "provider": "openai-stt",
+        "description": "General-purpose with translation to English",
         "price_display": "~$0.006/min",
         "price_per_minute": 0.006
     }
@@ -1299,110 +1339,9 @@ async def get_video_models(token: str = Depends(require_auth)):
 # AI Tools Configuration (for Profile Management)
 # ============================================================================
 
-# AI Tools definitions with provider requirements
-# NOTE: These are tools the model (Claude) can use, not app features
-# TTS/STT are app features (voice input, read messages) - not model tools
-AI_TOOLS = {
-    # Image tools
-    "image_generation": {
-        "name": "Image Generation",
-        "description": "Generate AI images from text prompts (supports 1K-4K, multiple images)",
-        "category": "image",
-        "providers": ["google-gemini", "google-imagen", "openai-gpt-image"]
-    },
-    "image_editing": {
-        "name": "Image Editing",
-        "description": "Edit existing images - add, remove, or modify elements",
-        "category": "image",
-        "providers": ["google-gemini", "openai-gpt-image"]
-    },
-    "image_reference": {
-        "name": "Reference-Based Generation",
-        "description": "Generate images with character/style consistency using reference images",
-        "category": "image",
-        "providers": ["google-gemini"]  # Only Gemini supports this
-    },
-    # Video tools
-    "video_generation": {
-        "name": "Video Generation",
-        "description": "Generate AI videos from text prompts (4-12 sec)",
-        "category": "video",
-        "providers": ["google-veo", "openai-sora"]
-    },
-    "video_with_audio": {
-        "name": "Video with Audio",
-        "description": "Generate video with native audio (dialogue, effects, music) using Veo 3",
-        "category": "video",
-        "providers": ["google-veo"]  # Veo 3 models only
-    },
-    "image_to_video": {
-        "name": "Image to Video",
-        "description": "Animate a still image into a video",
-        "category": "video",
-        "providers": ["google-veo", "openai-sora"]
-    },
-    "video_extend": {
-        "name": "Video Extension",
-        "description": "Extend existing Veo videos by ~7 seconds",
-        "category": "video",
-        "providers": ["google-veo"]  # Only Veo supports this
-    },
-    "video_bridge": {
-        "name": "Frame Bridging",
-        "description": "Generate smooth transitions between two images",
-        "category": "video",
-        "providers": ["google-veo"]  # Only Veo supports this
-    },
-    # Video analysis (part of video tools)
-    "video_understanding": {
-        "name": "Video Understanding",
-        "description": "Analyze videos up to 2 hours and answer questions about content",
-        "category": "video",
-        "providers": ["google-gemini-video"]
-    },
-    # 3D Model tools (Meshy)
-    "text_to_3d": {
-        "name": "Text to 3D",
-        "description": "Generate 3D models from text descriptions",
-        "category": "3d",
-        "providers": ["meshy"]
-    },
-    "image_to_3d": {
-        "name": "Image to 3D",
-        "description": "Generate 3D models from reference images",
-        "category": "3d",
-        "providers": ["meshy"]
-    },
-    "retexture_3d": {
-        "name": "3D Retexturing",
-        "description": "Apply new textures to existing 3D models",
-        "category": "3d",
-        "providers": ["meshy"]
-    },
-    "rig_3d": {
-        "name": "3D Rigging",
-        "description": "Add animation skeleton to 3D models",
-        "category": "3d",
-        "providers": ["meshy"]
-    },
-    "animate_3d": {
-        "name": "3D Animation",
-        "description": "Animate rigged 3D models with preset animations",
-        "category": "3d",
-        "providers": ["meshy"]
-    }
-}
-
-# Map providers to their required API key
-PROVIDER_KEY_MAP = {
-    "google-gemini": "image_api_key",
-    "google-imagen": "image_api_key",
-    "openai-gpt-image": "openai_api_key",
-    "google-veo": "image_api_key",
-    "openai-sora": "openai_api_key",
-    "google-gemini-video": "image_api_key",
-    "meshy": "meshy_api_key"
-}
+# Import from centralized registry - single source of truth
+# To add new AI tools, edit app/core/ai_tools.py
+from app.core.ai_tools import AI_TOOLS, PROVIDER_KEY_MAP
 
 
 @router.get("/ai-tools/available")
@@ -1851,6 +1790,11 @@ CREDENTIAL_POLICY_INFO = {
         "description": "For Nano Banana image generation, Imagen, and Veo video",
         "admin_has_key": lambda: bool(get_decrypted_api_key("image_api_key"))
     },
+    "meshy_api_key": {
+        "name": "Meshy API Key",
+        "description": "For 3D model generation (text-to-3D, image-to-3D, rigging, animation)",
+        "admin_has_key": lambda: bool(get_decrypted_api_key("meshy_api_key"))
+    },
     "github_pat": {
         "name": "GitHub Personal Access Token",
         "description": "For accessing GitHub repositories",
@@ -1968,6 +1912,167 @@ def _compute_effective_status(policy: str, admin_has_key: bool) -> str:
 
 
 # ============================================================================
+# Per-User Credential Policy Overrides (Admin control per user)
+# ============================================================================
+
+class UserCredentialPolicyResponse(BaseModel):
+    """A user's credential policy override"""
+    api_user_id: str
+    credential_type: str
+    policy: str  # 'admin_provided', 'user_provided', 'optional'
+    source: str  # 'user' (override) or 'global' (fallback)
+
+
+class SetUserCredentialPolicyRequest(BaseModel):
+    """Request to set a user's credential policy override"""
+    policy: str  # 'admin_provided', 'user_provided', 'optional'
+
+
+@router.get("/users/{user_id}/credential-policies")
+async def get_user_credential_policies(
+    user_id: str,
+    token: str = Depends(require_admin)
+):
+    """
+    Get all credential policies for a specific user (admin only).
+
+    Returns the effective policy for each credential type, indicating
+    whether it's a user-specific override or the global default.
+    """
+    # Verify user exists
+    user = database.get_api_user(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Get global policies
+    global_policies = database.get_all_credential_policies()
+
+    # Get user overrides
+    user_overrides = {
+        p["credential_type"]: p["policy"]
+        for p in database.get_all_user_credential_policies(user_id)
+    }
+
+    result = []
+    for gp in global_policies:
+        credential_type = gp["id"]
+        info = CREDENTIAL_POLICY_INFO.get(credential_type, {})
+
+        if credential_type in user_overrides:
+            policy = user_overrides[credential_type]
+            source = "user"
+        else:
+            policy = gp["policy"]
+            source = "global"
+
+        result.append({
+            "credential_type": credential_type,
+            "name": info.get("name", credential_type),
+            "description": info.get("description", gp.get("description", "")),
+            "policy": policy,
+            "source": source,
+            "global_policy": gp["policy"]  # For comparison in UI
+        })
+
+    return {
+        "user_id": user_id,
+        "user_name": user.get("name", "Unknown"),
+        "policies": result
+    }
+
+
+@router.put("/users/{user_id}/credential-policies/{credential_type}")
+async def set_user_credential_policy(
+    user_id: str,
+    credential_type: str,
+    request: SetUserCredentialPolicyRequest,
+    token: str = Depends(require_admin)
+):
+    """
+    Set a credential policy override for a specific user (admin only).
+
+    This overrides the global policy for this user only.
+    """
+    # Verify user exists
+    user = database.get_api_user(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Validate policy
+    valid_policies = ['admin_provided', 'user_provided', 'optional']
+    if request.policy not in valid_policies:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid policy. Must be one of: {', '.join(valid_policies)}"
+        )
+
+    # Validate credential type
+    if credential_type not in CREDENTIAL_POLICY_INFO:
+        raise HTTPException(status_code=400, detail=f"Unknown credential type: {credential_type}")
+
+    # Special case: github_pat cannot be admin_provided
+    if credential_type == "github_pat" and request.policy == "admin_provided":
+        raise HTTPException(
+            status_code=400,
+            detail="GitHub PAT cannot be admin-provided. Each user must use their own GitHub account."
+        )
+
+    # Special case: can't set to admin_provided if admin doesn't have the key
+    if request.policy == "admin_provided":
+        info = CREDENTIAL_POLICY_INFO[credential_type]
+        if not info.get("admin_has_key", lambda: False)():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot set to 'admin_provided' - admin has not configured this key yet"
+            )
+
+    # Set the override
+    updated = database.set_user_credential_policy(user_id, credential_type, request.policy)
+    if not updated:
+        raise HTTPException(status_code=500, detail="Failed to set policy override")
+
+    return {
+        "success": True,
+        "user_id": user_id,
+        "credential_type": credential_type,
+        "policy": request.policy,
+        "source": "user"
+    }
+
+
+@router.delete("/users/{user_id}/credential-policies/{credential_type}")
+async def delete_user_credential_policy(
+    user_id: str,
+    credential_type: str,
+    token: str = Depends(require_admin)
+):
+    """
+    Remove a credential policy override for a user (admin only).
+
+    The user will revert to using the global policy for this credential type.
+    """
+    # Verify user exists
+    user = database.get_api_user(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    deleted = database.delete_user_credential_policy(user_id, credential_type)
+
+    # Get the global policy they'll fall back to
+    global_policy = database.get_credential_policy(credential_type)
+    fallback_policy = global_policy.get("policy", "optional") if global_policy else "optional"
+
+    return {
+        "success": True,
+        "user_id": user_id,
+        "credential_type": credential_type,
+        "deleted": deleted,
+        "fallback_policy": fallback_policy,
+        "source": "global"
+    }
+
+
+# ============================================================================
 # Credential Resolution (for internal use by AI tools)
 # ============================================================================
 
@@ -1994,15 +2099,20 @@ async def resolve_credential(
     admin_setting_map = {
         "openai_api_key": "openai_api_key",
         "gemini_api_key": "image_api_key",
+        "meshy_api_key": "meshy_api_key",
         "github_pat": None  # No admin fallback
     }
 
     if credential_type not in admin_setting_map:
         raise HTTPException(status_code=400, detail=f"Unknown credential type: {credential_type}")
 
-    # Get policy
-    policy_obj = database.get_credential_policy(credential_type)
-    policy = policy_obj.get("policy", "optional") if policy_obj else "optional"
+    # Get effective policy (user override takes precedence over global)
+    if user_id:
+        effective = database.get_effective_credential_policy(user_id, credential_type)
+        policy = effective.get("policy", "optional")
+    else:
+        policy_obj = database.get_credential_policy(credential_type)
+        policy = policy_obj.get("policy", "optional") if policy_obj else "optional"
 
     resolved_key = None
     source = None

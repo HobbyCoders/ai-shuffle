@@ -487,9 +487,34 @@ def _build_ai_tools_section(ai_tools_config: Optional[Dict[str, Any]] = None, pr
     tools_section = f"{prefix}<ai-tools>\n"
     tools_section += """## AI Content Generation Tools
 
-You have access to multiple AI providers for generating images and videos. You can dynamically choose which provider to use based on the task requirements - no settings changes needed!
+You have specialized tools for generating and analyzing images and videos. These tools use AI providers (Google, OpenAI) to create content.
 
-**IMPORTANT:** Always save scripts as `.mjs` files and run with `node script.mjs`. Delete scripts after execution.
+---
+## ⚠️ MANDATORY: Tool Selection Rules
+
+**BEFORE using WebFetch, Read, or any other tool on media files, CHECK THIS LIST:**
+
+| User Intent | Correct Tool | WRONG Approach |
+|-------------|--------------|----------------|
+| "Analyze this video" / "What's in this video" / "Describe this video" | `analyzeVideo` | ❌ WebFetch, ❌ Read |
+| "Generate an image of..." / "Create a picture of..." | `generateImage` | ❌ WebSearch |
+| "Edit this image" / "Add X to the image" / "Remove X from image" | `editImage` | ❌ generateImage from scratch |
+| "Make a video of..." / "Generate a video showing..." | `generateVideo` | ❌ WebSearch |
+| "Animate this image" / "Turn this image into video" | `imageToVideo` | ❌ generateVideo |
+| "Continue this video" / "Extend the video" | `extendVideo` | ❌ generateVideo |
+
+**Key Decision Rules:**
+1. **Video files (.mp4, .mov, .webm)** → ALWAYS use `analyzeVideo` for understanding content
+2. **Image files (.png, .jpg, .webp)** → Use `Read` tool (it supports images natively) OR use as input to other tools
+3. **"Create/Generate/Make" requests** → Use generation tools, not search tools
+4. **"Analyze/Describe/What's in" requests** → Use analysis tools
+
+---
+## 🔧 Technical Notes
+
+- Save scripts as `.mjs` files and run with `node script.mjs`
+- Delete scripts after successful execution
+- All tools return JSON with `file_path` and URL fields
 
 """
 
@@ -525,26 +550,21 @@ You have access to multiple AI providers for generating images and videos. You c
             tool_path = f"{tools_dir}/dist/image-generation/generateImage.js"
             tools_section += f"""### Generate Image
 
-Generate images from text prompts. Specify a provider or let the system use the default.
+**🎯 USE WHEN:** User says "generate", "create", "make", "draw", "design" + image/picture/photo/artwork/illustration
+**❌ DO NOT USE:** For editing existing images (use editImage), for understanding images (use Read tool)
 
 ```typescript
 import {{ generateImage }} from '{tool_path}';
 
-// Use default provider (from settings)
-const result = await generateImage({{ prompt: 'a sunset over mountains' }});
-
-// OR specify provider explicitly
 const result = await generateImage({{
   prompt: 'a sunset over mountains',
   provider: 'google-gemini',  // or 'google-imagen', 'openai-gpt-image'
-  model: 'gemini-2.5-flash-image'  // optional: specific model
 }});
-
 console.log(JSON.stringify(result));
-// DISPLAY: ![Description](result.image_url)
 ```
 
-**Response includes:** `image_url`, `file_path`, `provider_used`, `model_used`
+**Display result:** `![Description](result.image_url)`
+**Response fields:** `image_url`, `file_path`, `provider_used`, `model_used`
 
 """
 
@@ -553,7 +573,10 @@ console.log(JSON.stringify(result));
             tool_path = f"{tools_dir}/dist/image-generation/editImage.js"
             tools_section += f"""### Edit Image
 
-Edit existing images. **Only `google-gemini` and `openai-gpt-image` support editing.**
+**🎯 USE WHEN:** User has an existing image AND wants to "edit", "modify", "add to", "remove from", "change", "fix", "adjust"
+**❌ DO NOT USE:** For generating new images from scratch (use generateImage), for understanding what's in an image (use Read tool)
+
+**Supported providers:** `google-gemini`, `openai-gpt-image` only
 
 ```typescript
 import {{ editImage }} from '{tool_path}';
@@ -561,14 +584,12 @@ import {{ editImage }} from '{tool_path}';
 const result = await editImage({{
   prompt: 'Add a rainbow in the sky',
   image_path: '/path/to/image.png',
-  provider: 'google-gemini'  // Must be a provider that supports editing
+  provider: 'google-gemini'
 }});
-
 console.log(JSON.stringify(result));
-// DISPLAY: ![Description](result.image_url)
 ```
 
-**Tip:** Use the same provider that generated the original image for best results.
+**Display result:** `![Description](result.image_url)`
 
 """
 
@@ -577,19 +598,22 @@ console.log(JSON.stringify(result));
             tool_path = f"{tools_dir}/dist/image-generation/generateWithReference.js"
             tools_section += f"""### Generate with Reference Images
 
-Create images with character/style consistency. **Only available with `google-gemini`.**
+**🎯 USE WHEN:** User wants to generate NEW image but maintain consistency with existing images - "like this character", "in this style", "same person/object as", "consistent with"
+**❌ DO NOT USE:** For editing an image (use editImage), for generating without references (use generateImage)
+
+**Only available with:** `google-gemini`
 
 ```typescript
 import {{ generateWithReference }} from '{tool_path}';
 
 const result = await generateWithReference({{
   prompt: 'The character standing in a forest',
-  reference_images: ['/path/to/character.png']  // Up to 14 reference images
+  reference_images: ['/path/to/character.png']  // Up to 14 references
 }});
-
 console.log(JSON.stringify(result));
-// DISPLAY: ![Description](result.image_url)
 ```
+
+**Display result:** `![Description](result.image_url)`
 
 """
 
@@ -626,32 +650,25 @@ console.log(JSON.stringify(result));
             tool_path = f"{tools_dir}/dist/video-generation/generateVideo.js"
             tools_section += f"""### Generate Video
 
-Generate videos from text prompts. Video generation takes 1-6 minutes.
+**🎯 USE WHEN:** User says "generate", "create", "make" + video/clip/animation FROM TEXT DESCRIPTION
+**❌ DO NOT USE:** For analyzing existing videos (use analyzeVideo), for animating an image (use imageToVideo)
+
+⏱️ Takes 1-6 minutes. Use `veo-3-generate-preview` model for videos with audio/dialogue.
 
 ```typescript
 import {{ generateVideo }} from '{tool_path}';
 
-// Use default provider
-const result = await generateVideo({{
-  prompt: 'A cat playing with a ball of yarn',
-  duration: 8,
-  aspect_ratio: '16:9'
-}});
-
-// OR specify provider explicitly
 const result = await generateVideo({{
   prompt: 'A cat playing with a ball of yarn',
   duration: 8,
   aspect_ratio: '16:9',
   provider: 'google-veo',  // or 'openai-sora'
-  model: 'veo-3-generate-preview'  // For native audio support
 }});
-
 console.log(JSON.stringify(result));
-// DISPLAY: [Video](result.video_url)
 ```
 
-**Response includes:** `video_url`, `file_path`, `source_video_uri` (for extending), `provider_used`
+**Display result:** `[Video description](result.video_url)`
+**Response fields:** `video_url`, `file_path`, `source_video_uri` (for extending), `provider_used`
 
 """
 
@@ -660,7 +677,8 @@ console.log(JSON.stringify(result));
             tool_path = f"{tools_dir}/dist/video-generation/imageToVideo.js"
             tools_section += f"""### Image to Video
 
-Animate a still image into a video.
+**🎯 USE WHEN:** User has an existing IMAGE and wants to "animate", "bring to life", "make it move", "turn into video"
+**❌ DO NOT USE:** For generating video from text only (use generateVideo), for analyzing videos (use analyzeVideo)
 
 ```typescript
 import {{ imageToVideo }} from '{tool_path}';
@@ -670,10 +688,10 @@ const result = await imageToVideo({{
   prompt: 'The character starts walking forward',
   provider: 'google-veo'  // or 'openai-sora'
 }});
-
 console.log(JSON.stringify(result));
-// DISPLAY: [Video](result.video_url)
 ```
+
+**Display result:** `[Video description](result.video_url)`
 
 """
 
@@ -682,21 +700,22 @@ console.log(JSON.stringify(result));
             tool_path = f"{tools_dir}/dist/video-generation/extendVideo.js"
             tools_section += f"""### Extend Video (Veo Only)
 
-Extend Veo-generated videos by ~7 seconds. Uses `source_video_uri` from previous generation.
+**🎯 USE WHEN:** User wants to "extend", "continue", "make longer" an EXISTING Veo-generated video
+**❌ DO NOT USE:** For Sora videos (not supported), for analyzing videos (use analyzeVideo), for new videos (use generateVideo)
+
+**Requires:** `source_video_uri` from a previous Veo generateVideo/imageToVideo result
 
 ```typescript
 import {{ extendVideo }} from '{tool_path}';
 
 const result = await extendVideo({{
-  video_uri: previousResult.source_video_uri,  // From generateVideo/imageToVideo
+  video_uri: previousResult.source_video_uri,
   prompt: 'Continue the action smoothly'
 }});
-
 console.log(JSON.stringify(result));
-// DISPLAY: [Extended Video](result.video_url)
 ```
 
-**Note:** Can only extend videos generated by Veo, not Sora.
+**Display result:** `[Extended video](result.video_url)`
 
 """
 
@@ -705,7 +724,8 @@ console.log(JSON.stringify(result));
             tool_path = f"{tools_dir}/dist/video-generation/bridgeFrames.js"
             tools_section += f"""### Frame Bridging (Veo Only)
 
-Create smooth video transitions between two images.
+**🎯 USE WHEN:** User has TWO images and wants to create a "transition", "morph", "bridge between", "interpolate"
+**❌ DO NOT USE:** For single image animation (use imageToVideo), for analyzing videos (use analyzeVideo)
 
 ```typescript
 import {{ bridgeFrames }} from '{tool_path}';
@@ -715,10 +735,10 @@ const result = await bridgeFrames({{
   end_image: '/path/to/end.png',
   prompt: 'Smooth camera pan between scenes'
 }});
-
 console.log(JSON.stringify(result));
-// DISPLAY: [Transition Video](result.video_url)
 ```
+
+**Display result:** `[Transition video](result.video_url)`
 
 """
 
@@ -727,19 +747,27 @@ console.log(JSON.stringify(result));
             tool_path = f"{tools_dir}/dist/video-analysis/analyzeVideo.js"
             tools_section += f"""### Analyze Video
 
-Analyze video content using AI - understand scenes, extract information, get transcripts.
+**🎯 USE WHEN:** User has an EXISTING VIDEO FILE and wants to:
+- "Analyze", "describe", "what's in", "summarize", "review" the video
+- "Transcribe", "get transcript", "what are they saying"
+- "Report on", "break down", "explain what happens"
+- Understand scenes, actions, objects, people, text, or audio in the video
+
+**❌ DO NOT USE:** WebFetch (cannot fetch video content), Read tool (cannot read video files), generateVideo (that creates new videos)
+
+**⚠️ CRITICAL:** This is the ONLY tool that can understand video content. For ANY request involving understanding/analyzing an existing video file, use this tool.
 
 ```typescript
 import {{ analyzeVideo }} from '{tool_path}';
 
 const result = await analyzeVideo({{
   video_path: '/path/to/video.mp4',
-  prompt: 'Describe what happens in this video'
+  prompt: 'Provide a detailed analysis of this video including scenes, actions, dialogue, and any text visible'
 }});
-
 console.log(JSON.stringify(result));
-// Result includes: response, scenes, transcript, duration_seconds
 ```
+
+**Response fields:** `response` (AI analysis), `scenes` (scene breakdown), `transcript` (spoken words), `duration_seconds`
 
 """
 

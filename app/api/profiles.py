@@ -564,7 +564,7 @@ async def export_profile(
 
     export_data = AgentExport(
         version="1.0",
-        type="ai-hub-agent",
+        type="ai-shuffle-agent",
         exported_at=datetime.utcnow().isoformat() + "Z",
         agent=agent_data
     )
@@ -592,10 +592,10 @@ async def import_profile(
     A new unique ID is generated to avoid conflicts.
     """
     # Validate type
-    if import_request.type != "ai-hub-agent":
+    if import_request.type != "ai-shuffle-agent":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid export type: {import_request.type}. Expected 'ai-hub-agent'"
+            detail=f"Invalid export type: {import_request.type}. Expected 'ai-shuffle-agent'"
         )
 
     # Validate version

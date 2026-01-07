@@ -154,8 +154,8 @@
 	}
 
 	// Computed values
-	const autocompactBuffer = 45000;
-	const contextUsed = $derived((tab.contextUsed ?? (tab.totalTokensIn + tab.totalCacheCreationTokens + tab.totalCacheReadTokens)) + autocompactBuffer);
+	// Context usage: use real-time tracked value, or calculate from token counts for resumed sessions
+	const contextUsed = $derived(tab.contextUsed ?? (tab.totalTokensIn + tab.totalCacheCreationTokens + tab.totalCacheReadTokens));
 	const contextMax = 200000;
 	const contextPercent = $derived(Math.min((contextUsed / contextMax) * 100, 100));
 

@@ -2,15 +2,28 @@
 Project management API routes
 """
 
-from typing import List
+import shutil
+from datetime import datetime
+from typing import List, Optional
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File, Request
+from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File, Request, Query, Form
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from app.core.models import Project, ProjectCreate, ProjectUpdate
 from app.core.config import settings
 from app.db import database
 from app.api.auth import require_auth, require_admin, get_api_user_from_request, is_admin_request
+
+
+# File operation request models
+class CreateFolderRequest(BaseModel):
+    name: str
+
+
+class RenameRequest(BaseModel):
+    new_name: str
 
 router = APIRouter(prefix="/api/v1/projects", tags=["Projects"])
 
@@ -144,11 +157,30 @@ async def delete_project(project_id: str, token: str = Depends(require_admin)):
     database.delete_project(project_id)
 
 
+def get_file_extension(name: str) -> str:
+    """Get lowercase file extension without the dot"""
+    ext = Path(name).suffix.lower()
+    return ext[1:] if ext else ""
+
+
+def format_file_size(size_bytes: int) -> str:
+    """Format file size in human-readable format."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    else:
+        return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+
+
 @router.get("/{project_id}/files")
 async def list_project_files(
     request: Request,
     project_id: str,
     path: str = "",
+    show_hidden: bool = False,
     token: str = Depends(require_auth)
 ):
     """List files in a project directory. API users can only access their assigned project."""
@@ -182,21 +214,33 @@ async def list_project_files(
     # List directory contents
     files = []
     for item in full_path.iterdir():
-        # Skip hidden files
-        if item.name.startswith('.'):
+        # Skip hidden files unless requested
+        if item.name.startswith('.') and not show_hidden:
             continue
 
-        files.append({
-            "name": item.name,
-            "type": "directory" if item.is_dir() else "file",
-            "size": item.stat().st_size if item.is_file() else None,
-            "path": str(item.relative_to(base_path))
-        })
+        try:
+            stat_info = item.stat()
+            is_dir = item.is_dir()
+
+            file_info = {
+                "name": item.name,
+                "type": "directory" if is_dir else "file",
+                "size": stat_info.st_size if not is_dir else None,
+                "sizeFormatted": format_file_size(stat_info.st_size) if not is_dir else None,
+                "path": str(item.relative_to(base_path)),
+                "extension": get_file_extension(item.name) if not is_dir else None,
+                "modifiedAt": datetime.fromtimestamp(stat_info.st_mtime).isoformat(),
+                "createdAt": datetime.fromtimestamp(stat_info.st_ctime).isoformat(),
+            }
+            files.append(file_info)
+        except (OSError, PermissionError):
+            # Skip files we can't access
+            continue
 
     # Sort: directories first, then files
     files.sort(key=lambda x: (x["type"] != "directory", x["name"].lower()))
 
-    return {"files": files, "path": path}
+    return {"files": files, "path": path, "projectId": project_id}
 
 
 @router.post("/{project_id}/upload")
@@ -204,9 +248,10 @@ async def upload_file(
     request: Request,
     project_id: str,
     file: UploadFile = File(...),
+    path: str = Form(default=""),
     token: str = Depends(require_auth)
 ):
-    """Upload a file to the project's uploads directory. API users can only access their assigned project."""
+    """Upload a file to a specific path within the project. API users can only access their assigned project."""
     check_project_access(request, project_id)
     project = database.get_project(project_id)
     if not project:
@@ -215,9 +260,14 @@ async def upload_file(
             detail=f"Project not found: {project_id}"
         )
 
-    # Create uploads directory within project
-    uploads_path = validate_project_path(f"{project['path']}/uploads")
-    uploads_path.mkdir(parents=True, exist_ok=True)
+    # Build target directory path
+    if path:
+        target_dir = validate_project_path(f"{project['path']}/{path}")
+    else:
+        target_dir = validate_project_path(project['path'])
+
+    # Ensure directory exists
+    target_dir.mkdir(parents=True, exist_ok=True)
 
     # Sanitize filename
     safe_filename = Path(file.filename).name
@@ -228,7 +278,7 @@ async def upload_file(
         )
 
     # Full file path
-    file_path = uploads_path / safe_filename
+    file_path = target_dir / safe_filename
 
     # Handle duplicate filenames by adding counter
     if file_path.exists():
@@ -236,7 +286,7 @@ async def upload_file(
         suffix = file_path.suffix
         counter = 1
         while file_path.exists():
-            file_path = uploads_path / f"{stem}_{counter}{suffix}"
+            file_path = target_dir / f"{stem}_{counter}{suffix}"
             counter += 1
 
     # Save the file
@@ -257,5 +307,200 @@ async def upload_file(
         "filename": file_path.name,
         "path": str(relative_path),
         "full_path": str(file_path),
-        "size": len(content)
+        "size": len(content),
+        "sizeFormatted": format_file_size(len(content))
     }
+
+
+@router.get("/{project_id}/files/download")
+async def download_file(
+    request: Request,
+    project_id: str,
+    path: str = Query(..., description="Path to file relative to project root"),
+    token: str = Depends(require_auth)
+):
+    """Download a file from the project."""
+    check_project_access(request, project_id)
+    project = database.get_project(project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {project_id}"
+        )
+
+    # Validate and build full path
+    full_path = validate_project_path(f"{project['path']}/{path}")
+
+    if not full_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found"
+        )
+
+    if not full_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Path is not a file"
+        )
+
+    return FileResponse(
+        path=full_path,
+        filename=full_path.name,
+        media_type="application/octet-stream"
+    )
+
+
+@router.post("/{project_id}/files/folder")
+async def create_folder(
+    request: Request,
+    project_id: str,
+    body: CreateFolderRequest,
+    path: str = Query(default="", description="Parent directory path"),
+    token: str = Depends(require_auth)
+):
+    """Create a new folder within the project."""
+    check_project_access(request, project_id)
+    project = database.get_project(project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {project_id}"
+        )
+
+    # Validate folder name
+    folder_name = body.name.strip()
+    if not folder_name or "/" in folder_name or "\\" in folder_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid folder name"
+        )
+
+    # Build the folder path
+    if path:
+        folder_path = validate_project_path(f"{project['path']}/{path}/{folder_name}")
+    else:
+        folder_path = validate_project_path(f"{project['path']}/{folder_name}")
+
+    if folder_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Folder already exists"
+        )
+
+    try:
+        folder_path.mkdir(parents=True, exist_ok=False)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create folder: {str(e)}"
+        )
+
+    base_path = settings.workspace_dir / project["path"]
+    return {
+        "name": folder_name,
+        "path": str(folder_path.relative_to(base_path)),
+        "type": "directory"
+    }
+
+
+@router.put("/{project_id}/files/rename")
+async def rename_file_or_folder(
+    request: Request,
+    project_id: str,
+    body: RenameRequest,
+    path: str = Query(..., description="Path to file or folder to rename"),
+    token: str = Depends(require_auth)
+):
+    """Rename a file or folder within the project."""
+    check_project_access(request, project_id)
+    project = database.get_project(project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {project_id}"
+        )
+
+    # Validate new name
+    new_name = body.new_name.strip()
+    if not new_name or "/" in new_name or "\\" in new_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid name"
+        )
+
+    # Get current path
+    current_path = validate_project_path(f"{project['path']}/{path}")
+    if not current_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File or folder not found"
+        )
+
+    # Build new path
+    new_path = current_path.parent / new_name
+    if new_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A file or folder with that name already exists"
+        )
+
+    try:
+        current_path.rename(new_path)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to rename: {str(e)}"
+        )
+
+    base_path = settings.workspace_dir / project["path"]
+    return {
+        "name": new_name,
+        "path": str(new_path.relative_to(base_path)),
+        "type": "directory" if new_path.is_dir() else "file"
+    }
+
+
+@router.delete("/{project_id}/files")
+async def delete_file_or_folder(
+    request: Request,
+    project_id: str,
+    path: str = Query(..., description="Path to file or folder to delete"),
+    token: str = Depends(require_auth)
+):
+    """Delete a file or folder within the project."""
+    check_project_access(request, project_id)
+    project = database.get_project(project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {project_id}"
+        )
+
+    # Get the path to delete
+    target_path = validate_project_path(f"{project['path']}/{path}")
+    if not target_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File or folder not found"
+        )
+
+    # Don't allow deleting the project root
+    base_path = settings.workspace_dir / project["path"]
+    if target_path.resolve() == base_path.resolve():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete project root directory"
+        )
+
+    try:
+        if target_path.is_dir():
+            shutil.rmtree(target_path)
+        else:
+            target_path.unlink()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete: {str(e)}"
+        )
+
+    return {"deleted": path}
