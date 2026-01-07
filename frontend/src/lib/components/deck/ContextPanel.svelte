@@ -330,19 +330,17 @@
 <style>
 	.context-panel {
 		position: relative;
-		width: 320px;
+		width: 100%;
 		height: 100%;
 		background: var(--card);
 		backdrop-filter: blur(24px);
 		border-left: 1px solid var(--border);
 		display: flex;
 		flex-direction: column;
-		transition: width 0.2s ease;
-		overflow: hidden;
+		overflow: visible;
 	}
 
 	.context-panel.collapsed {
-		width: 0;
 		border-left: none;
 		overflow: hidden;
 	}
@@ -376,6 +374,7 @@
 	.panel-content {
 		flex: 1;
 		overflow-y: auto;
+		overflow-x: hidden;
 		padding: 12px;
 		display: flex;
 		flex-direction: column;
@@ -387,7 +386,8 @@
 		background: var(--secondary);
 		border: 1px solid var(--border);
 		border-radius: 10px;
-		overflow: hidden;
+		overflow: visible;
+		flex-shrink: 0;
 	}
 
 	.section-header {
@@ -444,8 +444,8 @@
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
-		max-height: 200px;
-		overflow-y: auto;
+		/* Allow section to expand to show all content - no max-height constraint */
+		overflow: visible;
 	}
 
 	.empty-state {

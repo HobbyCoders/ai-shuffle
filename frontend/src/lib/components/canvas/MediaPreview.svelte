@@ -106,7 +106,7 @@
 {#if $selectedItem}
 	<!-- Backdrop -->
 	<div
-		class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+		class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
 		onclick={handleBackdropClick}
 		role="dialog"
 		aria-modal="true"

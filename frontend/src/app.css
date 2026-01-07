@@ -288,7 +288,27 @@ code {
 	border: 1px solid var(--border);
 	border-radius: 0.5rem;
 	color: var(--foreground);
-	transition: border-color 0.2s, box-shadow 0.2s;
+	transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s;
+}
+
+/* Dark mode inputs - deeper background for contrast */
+.dark .input {
+	background-color: oklch(0.12 0.008 260);
+	border-color: oklch(0.30 0.012 260);
+}
+
+.dark .input:hover:not(:focus) {
+	border-color: oklch(0.38 0.015 260);
+}
+
+/* Light mode inputs - subtle gray background */
+.light .input {
+	background-color: oklch(0.97 0.003 260);
+	border-color: oklch(0.82 0.01 260);
+}
+
+.light .input:hover:not(:focus) {
+	border-color: oklch(0.72 0.015 260);
 }
 
 .input::placeholder {
@@ -298,6 +318,47 @@ code {
 .input:focus {
 	outline: none;
 	box-shadow: 0 0 0 2px var(--ring);
+}
+
+.dark .input:focus {
+	border-color: var(--ring);
+	background-color: oklch(0.14 0.01 260);
+}
+
+.light .input:focus {
+	border-color: var(--ring);
+	background-color: oklch(1 0 0);
+}
+
+/* Select element styling */
+select.input {
+	cursor: pointer;
+	appearance: none;
+	-webkit-appearance: none;
+	-moz-appearance: none;
+	background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+	background-position: right 0.5rem center;
+	background-repeat: no-repeat;
+	background-size: 1.25em 1.25em;
+	padding-right: 2.5rem;
+}
+
+.dark select.input {
+	background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%239ca3af' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+}
+
+select.input option {
+	background-color: var(--card);
+	color: var(--foreground);
+	padding: 0.5rem;
+}
+
+.dark select.input option {
+	background-color: oklch(0.18 0.01 260);
+}
+
+.light select.input option {
+	background-color: oklch(1 0 0);
 }
 
 /* Card styles */
@@ -548,4 +609,94 @@ button, a, .clickable {
 
 .theme-toggle-icon.rotating {
 	transform: rotate(180deg);
+}
+
+/* Floating Island Input Container */
+.floating-island {
+	background-color: var(--input);
+	border: 1px solid var(--border);
+	border-radius: 1rem;
+	box-shadow: var(--shadow-m);
+	transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s;
+}
+
+.floating-island:focus-within {
+	border-color: var(--ring);
+	box-shadow: var(--shadow-l), 0 0 0 2px oklch(from var(--ring) l c h / 0.15);
+}
+
+/* Dark mode floating island - slightly elevated */
+.dark .floating-island {
+	background-color: oklch(0.16 0.01 260);
+	border-color: oklch(0.32 0.012 260);
+}
+
+/* Light mode floating island - pure white with subtle shadow */
+.light .floating-island {
+	background-color: oklch(1 0 0);
+	border-color: oklch(0.82 0.01 260);
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+/* Chat Pill Island - Main container with glassmorphism */
+.chat-pill-island {
+	display: flex;
+	flex-direction: column;
+	background: color-mix(in srgb, var(--card) 90%, transparent);
+	backdrop-filter: blur(20px);
+	-webkit-backdrop-filter: blur(20px);
+	border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+	border-radius: 1.5rem;
+	box-shadow:
+		0 4px 24px -4px rgba(0, 0, 0, 0.12),
+		0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+	transition: border-color 0.2s, box-shadow 0.2s;
+	overflow: hidden;
+}
+
+.chat-pill-island:focus-within {
+	border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
+	box-shadow:
+		0 4px 32px -4px rgba(0, 0, 0, 0.15),
+		0 0 0 1px rgba(255, 255, 255, 0.08) inset,
+		0 0 0 3px color-mix(in srgb, var(--primary) 15%, transparent);
+}
+
+.dark .chat-pill-island {
+	background: color-mix(in srgb, oklch(0.14 0.01 260) 92%, transparent);
+	border-color: color-mix(in srgb, oklch(0.32 0.012 260) 70%, transparent);
+}
+
+.light .chat-pill-island {
+	background: color-mix(in srgb, white 95%, transparent);
+	border-color: color-mix(in srgb, oklch(0.82 0.01 260) 80%, transparent);
+	box-shadow:
+		0 4px 20px -4px rgba(0, 0, 0, 0.08),
+		0 2px 8px rgba(0, 0, 0, 0.04),
+		0 0 0 1px rgba(255, 255, 255, 0.5) inset;
+}
+
+/* Controls row inside the pill */
+.pill-controls-row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: center;
+	gap: 0.375rem;
+	padding: 0.625rem 0.75rem;
+	border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+}
+
+/* Input row inside the pill */
+.pill-input-row {
+	display: flex;
+	align-items: center;
+	gap: 0.25rem;
+	padding: 0.5rem 0.625rem;
+}
+
+@media (min-width: 640px) {
+	.pill-input-row {
+		padding: 0.625rem 0.75rem;
+	}
 }

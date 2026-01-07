@@ -10,84 +10,39 @@
 	 * - CSS connector lines
 	 */
 	import { ChevronRight, Check, X, Circle, Loader2 } from 'lucide-svelte';
-
-	type TaskStatus = 'completed' | 'running' | 'pending' | 'failed';
-
-	interface Task {
-		id: string;
-		name: string;
-		status: TaskStatus;
-		progress?: number;
-		children?: Task[];
-	}
+	import type { AgentTask, TaskStatus } from '$lib/stores/agents';
 
 	interface Props {
-		tasks?: Task[];
+		tasks: AgentTask[];
 	}
 
 	let { tasks }: Props = $props();
 
-	// Default mock data
-	const defaultTasks: Task[] = [
-		{
-			id: '1',
-			name: 'Set up authentication system',
-			status: 'running',
-			progress: 65,
-			children: [
-				{
-					id: '1.1',
-					name: 'Create auth middleware',
-					status: 'completed',
-					children: [
-						{ id: '1.1.1', name: 'JWT validation', status: 'completed' },
-						{ id: '1.1.2', name: 'Token refresh logic', status: 'completed' },
-						{ id: '1.1.3', name: 'Error handling', status: 'completed' }
-					]
-				},
-				{
-					id: '1.2',
-					name: 'Implement user model',
-					status: 'completed',
-					children: [
-						{ id: '1.2.1', name: 'Password hashing', status: 'completed' },
-						{ id: '1.2.2', name: 'Session management', status: 'completed' }
-					]
-				},
-				{
-					id: '1.3',
-					name: 'Create auth routes',
-					status: 'running',
-					progress: 50,
-					children: [
-						{ id: '1.3.1', name: 'Login endpoint', status: 'completed' },
-						{ id: '1.3.2', name: 'Register endpoint', status: 'running' },
-						{ id: '1.3.3', name: 'Logout endpoint', status: 'pending' },
-						{ id: '1.3.4', name: 'Password reset', status: 'pending' }
-					]
-				},
-				{
-					id: '1.4',
-					name: 'Add tests',
-					status: 'pending',
-					children: [
-						{ id: '1.4.1', name: 'Unit tests', status: 'pending' },
-						{ id: '1.4.2', name: 'Integration tests', status: 'pending' }
-					]
+	// Track expanded state - auto-expand tasks with in_progress children
+	let expandedIds = $state<Set<string>>(new Set());
+
+	// Auto-expand parent tasks that have in_progress children
+	$effect(() => {
+		const newExpanded = new Set(expandedIds);
+
+		function checkAndExpand(taskList: AgentTask[], parentId?: string) {
+			for (const task of taskList) {
+				if (task.status === 'in_progress' && parentId) {
+					newExpanded.add(parentId);
 				}
-			]
-		},
-		{
-			id: '2',
-			name: 'Update documentation',
-			status: 'pending'
+				if (task.children && task.children.length > 0) {
+					checkAndExpand(task.children, task.id);
+				}
+			}
 		}
-	];
 
-	const displayTasks = $derived(tasks ?? defaultTasks);
+		checkAndExpand(tasks);
 
-	// Track expanded state
-	let expandedIds = $state<Set<string>>(new Set(['1', '1.3']));
+		// Only update if there are changes
+		if (newExpanded.size !== expandedIds.size) {
+			expandedIds = newExpanded;
+		}
+	});
 
 	function toggleExpand(id: string) {
 		const newSet = new Set(expandedIds);
@@ -99,20 +54,35 @@
 		expandedIds = newSet;
 	}
 
+	// Calculate progress for a task with children
+	function calculateProgress(task: AgentTask): number | undefined {
+		if (!task.children || task.children.length === 0) {
+			return undefined;
+		}
+
+		const total = task.children.length;
+		const completed = task.children.filter(c => c.status === 'completed').length;
+		const inProgress = task.children.filter(c => c.status === 'in_progress').length;
+
+		// Count in_progress as 0.5
+		return Math.round(((completed + inProgress * 0.5) / total) * 100);
+	}
+
 	// Status icon component
 	const statusConfig: Record<TaskStatus, { icon: typeof Check; color: string; bgColor: string; animate: boolean }> = {
 		completed: { icon: Check, color: 'text-green-500', bgColor: 'bg-green-500/10', animate: false },
-		running: { icon: Loader2, color: 'text-blue-500', bgColor: 'bg-blue-500/10', animate: true },
+		in_progress: { icon: Loader2, color: 'text-blue-500', bgColor: 'bg-blue-500/10', animate: true },
 		pending: { icon: Circle, color: 'text-gray-400', bgColor: 'bg-gray-400/10', animate: false },
 		failed: { icon: X, color: 'text-red-500', bgColor: 'bg-red-500/10', animate: false }
 	};
 </script>
 
-{#snippet taskItem(task: Task, depth: number)}
+{#snippet taskItem(task: AgentTask, depth: number)}
 	{@const config = statusConfig[task.status]}
 	{@const Icon = config.icon}
 	{@const hasChildren = task.children && task.children.length > 0}
 	{@const isExpanded = expandedIds.has(task.id)}
+	{@const progress = calculateProgress(task)}
 
 	<div class="task-item" style:--depth={depth}>
 		<!-- Task row -->
@@ -142,9 +112,9 @@
 			</span>
 
 			<!-- Progress (for parent tasks) -->
-			{#if task.progress !== undefined && task.status === 'running'}
+			{#if progress !== undefined && task.status === 'in_progress'}
 				<span class="text-xs text-muted-foreground">
-					{task.progress}%
+					{progress}%
 				</span>
 			{/if}
 		</div>
@@ -161,7 +131,7 @@
 {/snippet}
 
 <div class="h-full overflow-y-auto p-4">
-	{#if displayTasks.length === 0}
+	{#if tasks.length === 0}
 		<div class="flex flex-col items-center justify-center h-full text-center">
 			<Circle class="w-12 h-12 text-muted-foreground/50 mb-3" />
 			<p class="text-sm text-muted-foreground">No tasks yet</p>
@@ -169,7 +139,7 @@
 		</div>
 	{:else}
 		<div class="space-y-1">
-			{#each displayTasks as task (task.id)}
+			{#each tasks as task (task.id)}
 				{@render taskItem(task, 0)}
 			{/each}
 		</div>

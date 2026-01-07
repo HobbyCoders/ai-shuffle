@@ -5,23 +5,25 @@
 	 * Features:
 	 * - Scrollable log area
 	 * - Search/filter input
-	 * - Log level filter: All, Info, Warn, Error
+	 * - Log level filter: All, Info, Warn, Error, Debug
 	 * - Timestamp toggle
 	 * - Auto-scroll toggle
 	 * - Copy all button
 	 * - Monospace font, dark background
 	 */
-	import { Search, Copy, ArrowDown, Clock } from 'lucide-svelte';
+	import { onMount } from 'svelte';
+	import { Search, Copy, ArrowDown, Clock, Loader2, RefreshCw } from 'lucide-svelte';
 	import { tick } from 'svelte';
+	import { agents, type AgentLogEntry } from '$lib/stores/agents';
 
-	type LogLevel = 'info' | 'warn' | 'error' | 'debug';
+	type LogLevel = 'info' | 'warning' | 'error' | 'debug';
 
-	interface LogEntry {
-		id: string;
-		timestamp: Date;
-		level: LogLevel;
-		message: string;
+	interface Props {
+		agentId: string;
+		initialLogs?: AgentLogEntry[];
 	}
+
+	let { agentId, initialLogs = [] }: Props = $props();
 
 	// State
 	let searchQuery = $state('');
@@ -29,58 +31,59 @@
 	let showTimestamps = $state(true);
 	let autoScroll = $state(true);
 	let copied = $state(false);
+	let loading = $state(false);
+	let logs = $state<AgentLogEntry[]>(initialLogs);
 
 	let logContainer: HTMLDivElement | undefined = $state();
 
-	// Mock log data
-	const mockLogs: LogEntry[] = [
-		{ id: '1', timestamp: new Date(Date.now() - 300000), level: 'info', message: 'Agent started' },
-		{ id: '2', timestamp: new Date(Date.now() - 295000), level: 'info', message: 'Analyzing task requirements...' },
-		{ id: '3', timestamp: new Date(Date.now() - 290000), level: 'debug', message: 'Parsed 15 requirement items' },
-		{ id: '4', timestamp: new Date(Date.now() - 280000), level: 'info', message: 'Creating feature branch: feature/auth' },
-		{ id: '5', timestamp: new Date(Date.now() - 275000), level: 'info', message: 'Branch created successfully' },
-		{ id: '6', timestamp: new Date(Date.now() - 260000), level: 'info', message: 'Starting subtask: Set up authentication middleware' },
-		{ id: '7', timestamp: new Date(Date.now() - 250000), level: 'debug', message: 'Reading existing middleware files...' },
-		{ id: '8', timestamp: new Date(Date.now() - 240000), level: 'info', message: 'Creating file: src/middleware/auth.ts' },
-		{ id: '9', timestamp: new Date(Date.now() - 230000), level: 'debug', message: 'Generating JWT validation logic' },
-		{ id: '10', timestamp: new Date(Date.now() - 220000), level: 'info', message: 'File created: src/middleware/auth.ts' },
-		{ id: '11', timestamp: new Date(Date.now() - 200000), level: 'info', message: 'Starting subtask: Create user model' },
-		{ id: '12', timestamp: new Date(Date.now() - 190000), level: 'warn', message: 'Existing user model found, will extend instead' },
-		{ id: '13', timestamp: new Date(Date.now() - 180000), level: 'info', message: 'Updating file: src/models/user.ts' },
-		{ id: '14', timestamp: new Date(Date.now() - 170000), level: 'debug', message: 'Adding password hash field' },
-		{ id: '15', timestamp: new Date(Date.now() - 160000), level: 'debug', message: 'Adding last login timestamp' },
-		{ id: '16', timestamp: new Date(Date.now() - 150000), level: 'info', message: 'File updated: src/models/user.ts' },
-		{ id: '17', timestamp: new Date(Date.now() - 120000), level: 'info', message: 'Starting subtask: Create auth routes' },
-		{ id: '18', timestamp: new Date(Date.now() - 110000), level: 'error', message: 'TypeScript error in auth.ts:45 - Property "user" does not exist' },
-		{ id: '19', timestamp: new Date(Date.now() - 100000), level: 'info', message: 'Fixing TypeScript error...' },
-		{ id: '20', timestamp: new Date(Date.now() - 90000), level: 'info', message: 'Error resolved, continuing...' },
-		{ id: '21', timestamp: new Date(Date.now() - 60000), level: 'info', message: 'Running tests...' },
-		{ id: '22', timestamp: new Date(Date.now() - 30000), level: 'info', message: 'Tests passed: 12/12' },
-		{ id: '23', timestamp: new Date(Date.now() - 10000), level: 'info', message: 'Committing changes...' }
-	];
+	// Fetch logs on mount
+	onMount(async () => {
+		if (logs.length === 0) {
+			await fetchLogs();
+		}
+	});
+
+	async function fetchLogs() {
+		loading = true;
+		try {
+			const fetchedLogs = await agents.fetchLogs(agentId, { limit: 500 });
+			logs = fetchedLogs;
+		} catch (err) {
+			console.error('Failed to fetch logs:', err);
+		} finally {
+			loading = false;
+		}
+	}
+
+	async function refreshLogs() {
+		await fetchLogs();
+		if (autoScroll) {
+			await scrollToBottom();
+		}
+	}
 
 	// Filtered logs
 	const filteredLogs = $derived(() => {
-		let logs = mockLogs;
+		let filtered = logs;
 
 		// Filter by level
 		if (levelFilter !== 'all') {
-			logs = logs.filter(log => log.level === levelFilter);
+			filtered = filtered.filter(log => log.level === levelFilter);
 		}
 
 		// Filter by search query
 		if (searchQuery.trim()) {
 			const query = searchQuery.toLowerCase();
-			logs = logs.filter(log => log.message.toLowerCase().includes(query));
+			filtered = filtered.filter(log => log.message.toLowerCase().includes(query));
 		}
 
-		return logs;
+		return filtered;
 	});
 
 	// Level colors
 	const levelColors: Record<LogLevel, string> = {
 		info: 'text-blue-400',
-		warn: 'text-yellow-400',
+		warning: 'text-yellow-400',
 		error: 'text-red-400',
 		debug: 'text-gray-400'
 	};
@@ -122,6 +125,13 @@
 			scrollToBottom();
 		}
 	});
+
+	// Watch for new logs from initialLogs prop (real-time updates via WebSocket)
+	$effect(() => {
+		if (initialLogs.length > logs.length) {
+			logs = initialLogs;
+		}
+	});
 </script>
 
 <div class="h-full flex flex-col bg-zinc-900">
@@ -145,10 +155,20 @@
 		>
 			<option value="all">All Levels</option>
 			<option value="info">Info</option>
-			<option value="warn">Warn</option>
+			<option value="warning">Warning</option>
 			<option value="error">Error</option>
 			<option value="debug">Debug</option>
 		</select>
+
+		<!-- Refresh button -->
+		<button
+			onclick={refreshLogs}
+			disabled={loading}
+			class="p-1.5 rounded-lg transition-colors text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+			title="Refresh logs"
+		>
+			<RefreshCw class="w-4 h-4 {loading ? 'animate-spin' : ''}" />
+		</button>
 
 		<!-- Timestamp toggle -->
 		<button
@@ -187,7 +207,11 @@
 		bind:this={logContainer}
 		class="flex-1 overflow-y-auto p-4 font-mono text-sm"
 	>
-		{#if filteredLogs().length === 0}
+		{#if loading && logs.length === 0}
+			<div class="flex items-center justify-center h-full">
+				<Loader2 class="w-6 h-6 text-zinc-500 animate-spin" />
+			</div>
+		{:else if filteredLogs().length === 0}
 			<div class="flex items-center justify-center h-full text-zinc-500">
 				{#if searchQuery || levelFilter !== 'all'}
 					No logs match your filter
@@ -197,14 +221,14 @@
 			</div>
 		{:else}
 			<div class="space-y-1">
-				{#each filteredLogs() as log (log.id)}
+				{#each filteredLogs() as log, index (log.timestamp.getTime() + '-' + index)}
 					<div class="flex items-start gap-2 hover:bg-zinc-800/50 px-2 py-0.5 rounded">
 						{#if showTimestamps}
 							<span class="text-zinc-500 flex-shrink-0">
 								{formatTimestamp(log.timestamp)}
 							</span>
 						{/if}
-						<span class="flex-shrink-0 w-12 text-right {levelColors[log.level]}">
+						<span class="flex-shrink-0 w-14 text-right {levelColors[log.level]}">
 							[{log.level.toUpperCase().slice(0, 4)}]
 						</span>
 						<span class="text-zinc-200 break-all">
@@ -219,8 +243,13 @@
 	<!-- Status bar -->
 	<div class="px-4 py-1.5 border-t border-zinc-700 text-xs text-zinc-500 flex items-center justify-between">
 		<span>{filteredLogs().length} {filteredLogs().length === 1 ? 'entry' : 'entries'}</span>
-		{#if autoScroll}
-			<span class="text-primary">Auto-scrolling</span>
-		{/if}
+		<div class="flex items-center gap-3">
+			{#if loading}
+				<span class="text-primary">Loading...</span>
+			{/if}
+			{#if autoScroll}
+				<span class="text-primary">Auto-scrolling</span>
+			{/if}
+		</div>
 	</div>
 </div>

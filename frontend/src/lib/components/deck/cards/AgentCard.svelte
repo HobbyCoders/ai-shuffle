@@ -1,16 +1,15 @@
 <script lang="ts">
 	/**
-	 * AgentCard - Agent monitoring card for The Deck
+	 * AgentCard - Agent card for The Deck
 	 *
-	 * Features:
-	 * - Status header with duration timer
-	 * - Branch badge (if exists)
-	 * - Mini task tree (collapsible)
-	 * - Last few log lines
-	 * - Control buttons: Pause, Resume, Cancel
-	 * - Progress bar
+	 * Operates in two modes:
+	 * 1. Launcher Mode: When no agentId is provided, shows agent configuration UI
+	 * 2. Monitor Mode: When agentId is provided, shows agent monitoring UI
+	 *
+	 * This keeps everything within the card-based paradigm - no modals needed.
 	 */
 
+	import { onMount, onDestroy } from 'svelte';
 	import {
 		Play,
 		Pause,
@@ -21,39 +20,38 @@
 		CheckCircle,
 		Circle,
 		Loader2,
-		AlertCircle
+		AlertCircle,
+		ExternalLink,
+		Trash2,
+		Rocket,
+		GitPullRequest,
+		Clock,
+		User,
+		FolderKanban,
+		Eye,
+		X
 	} from 'lucide-svelte';
 	import BaseCard from './BaseCard.svelte';
 	import type { DeckCard } from './types';
-
-	interface AgentTask {
-		id: string;
-		title: string;
-		status: 'pending' | 'running' | 'completed' | 'error';
-		children?: AgentTask[];
-	}
-
-	interface AgentData {
-		status: 'running' | 'paused' | 'idle' | 'error' | 'completed';
-		branch?: string;
-		startTime?: Date;
-		tasks?: AgentTask[];
-		logs?: string[];
-		progress?: number;
-	}
+	import {
+		agents,
+		type BackgroundAgent,
+		type AgentTask,
+		type AgentLogEntry
+	} from '$lib/stores/agents';
+	import { deck } from '$lib/stores/deck';
 
 	interface Props {
 		card: DeckCard;
-		agentId: string;
+		agentId?: string;
 		onClose: () => void;
 		onMinimize: () => void;
 		onMaximize: () => void;
 		onFocus: () => void;
 		onMove: (x: number, y: number) => void;
 		onResize: (w: number, h: number) => void;
-		onPause?: () => void;
-		onResume?: () => void;
-		onCancel?: () => void;
+		onDragEnd?: () => void;
+		onResizeEnd?: () => void;
 	}
 
 	let {
@@ -65,84 +63,374 @@
 		onFocus,
 		onMove,
 		onResize,
-		onPause,
-		onResume,
-		onCancel
+		onDragEnd,
+		onResizeEnd
 	}: Props = $props();
 
-	// Agent data (would come from store/props in real implementation)
-	let agentData = $state<AgentData>({
-		status: 'running',
-		branch: 'feature/add-cards',
-		startTime: new Date(Date.now() - 125000), // 2 min ago
-		progress: 45,
-		tasks: [
-			{
-				id: '1',
-				title: 'Analyze codebase',
-				status: 'completed',
-			},
-			{
-				id: '2',
-				title: 'Create components',
-				status: 'running',
-				children: [
-					{ id: '2.1', title: 'BaseCard.svelte', status: 'completed' },
-					{ id: '2.2', title: 'AgentCard.svelte', status: 'running' },
-					{ id: '2.3', title: 'CanvasCard.svelte', status: 'pending' },
-				],
-			},
-			{
-				id: '3',
-				title: 'Run tests',
-				status: 'pending',
-			},
-		],
-		logs: [
-			'[14:32:15] Starting task analysis...',
-			'[14:32:18] Found 12 files to modify',
-			'[14:32:20] Creating BaseCard.svelte...',
-			'[14:34:45] Creating AgentCard.svelte...',
-		],
+	// ============================================
+	// Mode Detection
+	// ============================================
+	// Launcher mode: no agentId OR agentId matches card.id (fresh card)
+	// Monitor mode: agentId is provided and is a real agent ID
+	let mode = $state<'launcher' | 'monitor'>('launcher');
+	let actualAgentId = $state<string | null>(null);
+
+	$effect(() => {
+		if (agentId && agentId !== card.id) {
+			mode = 'monitor';
+			actualAgentId = agentId;
+		} else {
+			mode = 'launcher';
+			actualAgentId = null;
+		}
 	});
 
+	// ============================================
+	// LAUNCHER MODE STATE
+	// ============================================
+	interface LaunchData {
+		name: string;
+		prompt: string;
+		autoBranch: boolean;
+		autoPR: boolean;
+		autoReview: boolean;
+		maxDuration: number;
+		profileId?: string;
+		projectId?: string;
+		baseBranch?: string;
+	}
+
+	interface Branch {
+		name: string;
+		is_current: boolean;
+	}
+
+	interface Profile {
+		id: string;
+		name: string;
+	}
+
+	interface Project {
+		id: string;
+		name: string;
+	}
+
+	// Form state
+	let name = $state('');
+	let prompt = $state('');
+	let autoBranch = $state(true);
+	let autoPR = $state(false);
+	let autoReview = $state(false);
+	let maxDuration = $state(30); // minutes
+	let profileId = $state<string | undefined>(undefined);
+	let projectId = $state<string | undefined>(undefined);
+	let showOptions = $state(false);
+	let isLaunching = $state(false);
+	let launchError = $state<string | null>(null);
+
+	// Data from API
+	let profiles = $state<Profile[]>([]);
+	let projects = $state<Project[]>([]);
+	let branches = $state<Branch[]>([]);
+	let baseBranch = $state<string | undefined>(undefined);
+	let loadingProfiles = $state(true);
+	let loadingProjects = $state(true);
+	let loadingBranches = $state(false);
+
+	const durations = [
+		{ value: 0, label: 'Unlimited' },
+		{ value: 15, label: '15 minutes' },
+		{ value: 30, label: '30 minutes' },
+		{ value: 60, label: '1 hour' },
+		{ value: 120, label: '2 hours' }
+	];
+
+	// Validation
+	const canLaunch = $derived(name.trim().length > 0 && prompt.trim().length > 0 && !isLaunching);
+
+	async function fetchProfiles() {
+		try {
+			const response = await fetch('/api/v1/profiles', {
+				credentials: 'include'
+			});
+			if (response.ok) {
+				const data = await response.json();
+				profiles = data.profiles ?? data ?? [];
+			}
+		} catch (err) {
+			console.error('Failed to fetch profiles:', err);
+		} finally {
+			loadingProfiles = false;
+		}
+	}
+
+	async function fetchProjects() {
+		try {
+			const response = await fetch('/api/v1/projects', {
+				credentials: 'include'
+			});
+			if (response.ok) {
+				const data = await response.json();
+				projects = data.projects ?? data ?? [];
+			}
+		} catch (err) {
+			console.error('Failed to fetch projects:', err);
+		} finally {
+			loadingProjects = false;
+		}
+	}
+
+	async function fetchBranches(projId: string) {
+		loadingBranches = true;
+		branches = [];
+		baseBranch = undefined;
+		try {
+			const response = await fetch(`/api/v1/projects/${projId}/git/branches`, {
+				credentials: 'include'
+			});
+			if (response.ok) {
+				const data = await response.json();
+				branches = data.branches ?? [];
+				// Set default to the default branch (main/master) or current branch
+				const defaultBranch = branches.find(b => b.name === 'main' || b.name === 'master') ?? branches.find(b => b.is_current);
+				if (defaultBranch) {
+					baseBranch = defaultBranch.name;
+				}
+			}
+		} catch (err) {
+			console.error('Failed to fetch branches:', err);
+		} finally {
+			loadingBranches = false;
+		}
+	}
+
+	// Watch for project selection changes to fetch branches
+	$effect(() => {
+		if (projectId) {
+			fetchBranches(projectId);
+		} else {
+			branches = [];
+			baseBranch = undefined;
+		}
+	});
+
+	async function handleLaunch() {
+		if (!canLaunch) return;
+
+		isLaunching = true;
+		launchError = null;
+
+		try {
+			const launchedAgent = await agents.launchAgent({
+				name: name.trim(),
+				prompt: prompt.trim(),
+				profileId,
+				projectId,
+				autoBranch,
+				autoPr: autoPR,
+				autoReview,
+				maxDurationMinutes: maxDuration,
+				baseBranch
+			});
+
+			// Transition to monitor mode
+			actualAgentId = launchedAgent.id;
+			mode = 'monitor';
+
+			// Update the card's data to reflect the new agent
+			deck.setCardDataId(card.id, launchedAgent.id);
+			deck.setCardMeta(card.id, { agentId: launchedAgent.id });
+			deck.setCardTitle(card.id, launchedAgent.name);
+
+		} catch (err) {
+			launchError = err instanceof Error ? err.message : 'Failed to launch agent';
+			isLaunching = false;
+		}
+	}
+
+	// ============================================
+	// MONITOR MODE STATE
+	// ============================================
+	let agent = $state<BackgroundAgent | null>(null);
+	let loading = $state(true);
+	let error = $state<string | null>(null);
+
 	// Task tree expanded state
-	let expandedTasks = $state<Set<string>>(new Set(['2']));
+	let expandedTasks = $state<Set<string>>(new Set());
 
 	// Duration timer
 	let duration = $state('0:00');
+	let durationInterval: ReturnType<typeof setInterval> | null = null;
+
+	// Time remaining for timeout
+	let timeRemaining = $state<string | null>(null);
+
+	// Fetch agent data
+	async function fetchAgent() {
+		if (!actualAgentId) return;
+
+		loading = true;
+		error = null;
+		try {
+			const fetchedAgent = await agents.fetchAgent(actualAgentId);
+			if (fetchedAgent) {
+				agent = fetchedAgent;
+				// Auto-expand tasks with running children
+				const runningTaskIds = new Set<string>();
+				function findRunningParents(tasks: AgentTask[], parentIds: string[] = []) {
+					for (const task of tasks) {
+						if (task.status === 'in_progress') {
+							parentIds.forEach((id) => runningTaskIds.add(id));
+						}
+						if (task.children) {
+							findRunningParents(task.children, [...parentIds, task.id]);
+						}
+					}
+				}
+				findRunningParents(fetchedAgent.tasks);
+				expandedTasks = runningTaskIds;
+
+				// Fetch logs
+				await agents.fetchLogs(actualAgentId, { limit: 10 });
+				// Update agent with logs
+				agent = agents.getAgent(actualAgentId) || agent;
+			} else {
+				error = 'Agent not found';
+			}
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Failed to load agent';
+		} finally {
+			loading = false;
+		}
+	}
+
+	// Subscribe to agent updates via store when in monitor mode
+	$effect(() => {
+		if (mode === 'monitor' && actualAgentId) {
+			fetchAgent();
+			agents.subscribeToAgent(actualAgentId);
+		}
+	});
+
+	// Poll for updates every 5 seconds as backup (only in monitor mode)
+	let pollInterval: ReturnType<typeof setInterval> | null = null;
 
 	$effect(() => {
-		if (agentData.status !== 'running' || !agentData.startTime) return;
+		if (pollInterval) {
+			clearInterval(pollInterval);
+			pollInterval = null;
+		}
+
+		if (mode === 'monitor' && actualAgentId) {
+			pollInterval = setInterval(() => {
+				const updated = agents.getAgent(actualAgentId!);
+				if (updated && agent) {
+					// Only update if status, progress, or logs changed
+					const hasChanged =
+						updated.status !== agent.status ||
+						updated.progress !== agent.progress ||
+						updated.error !== agent.error ||
+						updated.prUrl !== agent.prUrl ||
+						(updated.logs?.length || 0) !== (agent.logs?.length || 0) ||
+						(updated.tasks?.length || 0) !== (agent.tasks?.length || 0);
+
+					if (hasChanged) {
+						agent = updated;
+					}
+				} else if (updated && !agent) {
+					agent = updated;
+				}
+			}, 5000);
+		}
+
+		return () => {
+			if (pollInterval) {
+				clearInterval(pollInterval);
+				pollInterval = null;
+			}
+		};
+	});
+
+	// Initialize launcher data on mount
+	onMount(async () => {
+		if (mode === 'launcher') {
+			await Promise.all([fetchProfiles(), fetchProjects()]);
+		}
+	});
+
+	onDestroy(() => {
+		if (actualAgentId) {
+			agents.unsubscribeFromAgent(actualAgentId);
+		}
+		if (durationInterval) {
+			clearInterval(durationInterval);
+		}
+		if (pollInterval) {
+			clearInterval(pollInterval);
+		}
+	});
+
+	// Duration timer effect
+	$effect(() => {
+		if (durationInterval) {
+			clearInterval(durationInterval);
+			durationInterval = null;
+		}
+
+		if (agent?.status !== 'running' || !agent?.startedAt) {
+			return;
+		}
 
 		function updateDuration() {
-			if (!agentData.startTime) return;
-			const elapsed = Math.floor((Date.now() - agentData.startTime.getTime()) / 1000);
+			if (!agent?.startedAt) return;
+			const elapsed = Math.floor((Date.now() - agent.startedAt.getTime()) / 1000);
 			const mins = Math.floor(elapsed / 60);
 			const secs = elapsed % 60;
 			duration = `${mins}:${secs.toString().padStart(2, '0')}`;
+
+			// Calculate time remaining (if maxDurationMinutes is set and > 0)
+			const maxDurationMinutes = agent?.maxDurationMinutes;
+			if (maxDurationMinutes && maxDurationMinutes > 0) {
+				const maxDurationSeconds = maxDurationMinutes * 60;
+				const remainingSeconds = maxDurationSeconds - elapsed;
+				if (remainingSeconds > 0) {
+					const remainingMins = Math.floor(remainingSeconds / 60);
+					const remainingSecs = remainingSeconds % 60;
+					timeRemaining = `${remainingMins}:${remainingSecs.toString().padStart(2, '0')}`;
+				} else {
+					timeRemaining = '0:00';
+				}
+			} else {
+				// Unlimited duration
+				timeRemaining = null;
+			}
 		}
 
 		updateDuration();
-		const interval = setInterval(updateDuration, 1000);
+		durationInterval = setInterval(updateDuration, 1000);
 
-		return () => clearInterval(interval);
+		return () => {
+			if (durationInterval) {
+				clearInterval(durationInterval);
+				durationInterval = null;
+			}
+		};
 	});
 
-	// Status colors and icons
-	const statusConfig: Record<AgentData['status'], { color: string; label: string }> = {
-		running: { color: 'text-blue-500', label: 'Running' },
-		paused: { color: 'text-yellow-500', label: 'Paused' },
-		idle: { color: 'text-muted-foreground', label: 'Idle' },
-		error: { color: 'text-destructive', label: 'Error' },
-		completed: { color: 'text-green-500', label: 'Completed' },
+	// Status colors and icons - using semantic CSS variables
+	const statusConfig = {
+		running: { color: 'status-running', label: 'Running' },
+		paused: { color: 'status-warning', label: 'Paused' },
+		queued: { color: 'status-muted', label: 'Queued' },
+		failed: { color: 'status-destructive', label: 'Failed' },
+		completed: { color: 'status-success', label: 'Completed' }
 	};
 
 	const taskStatusIcons = {
 		pending: Circle,
-		running: Loader2,
+		in_progress: Loader2,
 		completed: CheckCircle,
-		error: AlertCircle,
+		failed: AlertCircle
 	};
 
 	// Toggle task expansion
@@ -157,154 +445,830 @@
 	}
 
 	// Control actions
-	function handlePause() {
-		agentData.status = 'paused';
-		onPause?.();
+	async function handlePause() {
+		if (!agent || !actualAgentId) return;
+		try {
+			await agents.pauseAgent(actualAgentId);
+			agent = agents.getAgent(actualAgentId) || agent;
+		} catch (e) {
+			console.error('Failed to pause agent:', e);
+		}
 	}
 
-	function handleResume() {
-		agentData.status = 'running';
-		onResume?.();
+	async function handleResume() {
+		if (!agent || !actualAgentId) return;
+		try {
+			await agents.resumeAgent(actualAgentId);
+			agent = agents.getAgent(actualAgentId) || agent;
+		} catch (e) {
+			console.error('Failed to resume agent:', e);
+		}
 	}
 
-	function handleCancel() {
-		agentData.status = 'idle';
-		onCancel?.();
+	async function handleCancel() {
+		if (!agent || !actualAgentId) return;
+		try {
+			await agents.cancelAgent(actualAgentId);
+			agent = agents.getAgent(actualAgentId) || agent;
+		} catch (e) {
+			console.error('Failed to cancel agent:', e);
+		}
+	}
+
+	async function handleDelete() {
+		if (!agent || !actualAgentId) return;
+		try {
+			await agents.deleteAgent(actualAgentId);
+			onClose();
+		} catch (e) {
+			console.error('Failed to delete agent:', e);
+		}
+	}
+
+	// Format log timestamp
+	function formatLogTime(date: Date): string {
+		return date.toLocaleTimeString([], {
+			hour: '2-digit',
+			minute: '2-digit',
+			second: '2-digit'
+		});
+	}
+
+	// Format log entry
+	function formatLog(log: AgentLogEntry): string {
+		return `[${formatLogTime(log.timestamp)}] ${log.message}`;
 	}
 </script>
 
-<BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize}>
-	<div class="agent-content">
-		<!-- Status Header -->
-		<div class="status-header">
-			<div class="status-left">
-				<span class="status-indicator {statusConfig[agentData.status].color}">
-					{#if agentData.status === 'running'}
-						<Loader2 size={14} class="animate-spin" />
-					{:else if agentData.status === 'completed'}
-						<CheckCircle size={14} />
-					{:else if agentData.status === 'error'}
-						<AlertCircle size={14} />
-					{:else}
-						<Circle size={14} />
-					{/if}
-					<span>{statusConfig[agentData.status].label}</span>
-				</span>
-				{#if agentData.status === 'running'}
-					<span class="duration">{duration}</span>
+<BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
+	{#if mode === 'launcher'}
+		<!-- LAUNCHER MODE UI -->
+		<div class="launcher-content">
+			<!-- Header -->
+			<div class="launcher-header">
+				<div class="launcher-header-icon">
+					<Rocket class="w-5 h-5 text-primary" />
+				</div>
+				<div>
+					<h3 class="launcher-title">Launch Agent</h3>
+					<p class="launcher-subtitle">Start an autonomous coding agent</p>
+				</div>
+			</div>
+
+			<!-- Content -->
+			<div class="launcher-form">
+				<!-- Error message -->
+				{#if launchError}
+					<div class="error-message">
+						{launchError}
+					</div>
+				{/if}
+
+				<!-- Task name -->
+				<div class="form-group">
+					<label for="agent-name" class="form-label">Task Name</label>
+					<input
+						id="agent-name"
+						type="text"
+						bind:value={name}
+						placeholder="e.g., Implement user authentication"
+						class="form-input"
+						disabled={isLaunching}
+					/>
+				</div>
+
+				<!-- Prompt -->
+				<div class="form-group">
+					<label for="agent-prompt" class="form-label">Instructions</label>
+					<textarea
+						id="agent-prompt"
+						bind:value={prompt}
+						placeholder="Describe what you want the agent to accomplish..."
+						rows="5"
+						class="form-textarea"
+						disabled={isLaunching}
+					></textarea>
+					<p class="form-hint">Be specific about requirements, constraints, and expected outcomes</p>
+				</div>
+
+				<!-- Options toggle -->
+				<button
+					onclick={() => showOptions = !showOptions}
+					class="options-toggle"
+				>
+					<svg
+						class="options-chevron {showOptions ? 'rotate-90' : ''}"
+						fill="none"
+						stroke="currentColor"
+						viewBox="0 0 24 24"
+					>
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+					</svg>
+					Advanced Options
+				</button>
+
+				<!-- Options (collapsible) -->
+				{#if showOptions}
+					<div class="options-panel">
+						<!-- Git options -->
+						<div class="options-section">
+							<h4 class="options-section-label">Git</h4>
+
+							<!-- Auto-branch toggle -->
+							<label class="toggle-row">
+								<div class="toggle-label">
+									<GitBranch class="w-4 h-4 text-muted-foreground" />
+									<span>Create branch automatically</span>
+								</div>
+								<button
+									type="button"
+									onclick={() => autoBranch = !autoBranch}
+									disabled={isLaunching}
+									class="toggle-button {autoBranch ? 'active' : ''}"
+								>
+									<span class="toggle-knob {autoBranch ? 'active' : ''}"></span>
+								</button>
+							</label>
+
+							<!-- Auto-PR toggle -->
+							<label class="toggle-row">
+								<div class="toggle-label">
+									<GitPullRequest class="w-4 h-4 text-muted-foreground" />
+									<span>Create PR on completion</span>
+								</div>
+								<button
+									type="button"
+									onclick={() => autoPR = !autoPR}
+									disabled={isLaunching}
+									class="toggle-button {autoPR ? 'active' : ''}"
+								>
+									<span class="toggle-knob {autoPR ? 'active' : ''}"></span>
+								</button>
+							</label>
+
+							<!-- Auto-Review toggle -->
+							<label class="toggle-row">
+								<div class="toggle-label">
+									<Eye class="w-4 h-4 text-muted-foreground" />
+									<span>Auto-review changes</span>
+								</div>
+								<button
+									type="button"
+									onclick={() => autoReview = !autoReview}
+									disabled={isLaunching}
+									class="toggle-button {autoReview ? 'active' : ''}"
+								>
+									<span class="toggle-knob {autoReview ? 'active' : ''}"></span>
+								</button>
+							</label>
+						</div>
+
+						<!-- Duration -->
+						<div class="form-group">
+							<label class="form-label with-icon">
+								<Clock class="w-4 h-4 text-muted-foreground" />
+								Max Duration
+							</label>
+							<select
+								bind:value={maxDuration}
+								disabled={isLaunching}
+								class="form-select"
+							>
+								{#each durations as d}
+									<option value={d.value}>{d.label}</option>
+								{/each}
+							</select>
+						</div>
+
+						<!-- Profile selector -->
+						<div class="form-group">
+							<label class="form-label with-icon">
+								<User class="w-4 h-4 text-muted-foreground" />
+								Profile (optional)
+							</label>
+							<select
+								bind:value={profileId}
+								disabled={isLaunching || loadingProfiles}
+								class="form-select"
+							>
+								<option value={undefined}>
+									{loadingProfiles ? 'Loading profiles...' : 'Use default'}
+								</option>
+								{#each profiles as profile}
+									<option value={profile.id}>{profile.name}</option>
+								{/each}
+							</select>
+						</div>
+
+						<!-- Project selector -->
+						<div class="form-group">
+							<label class="form-label with-icon">
+								<FolderKanban class="w-4 h-4 text-muted-foreground" />
+								Project (optional)
+							</label>
+							<select
+								bind:value={projectId}
+								disabled={isLaunching || loadingProjects}
+								class="form-select"
+							>
+								<option value={undefined}>
+									{loadingProjects ? 'Loading projects...' : 'Current workspace'}
+								</option>
+								{#each projects as project}
+									<option value={project.id}>{project.name}</option>
+								{/each}
+							</select>
+						</div>
+
+						<!-- Branch selector (shows when project is selected) -->
+						{#if projectId && branches.length > 0}
+							<div class="form-group">
+								<label class="form-label with-icon">
+									<GitBranch class="w-4 h-4 text-muted-foreground" />
+									Base Branch
+								</label>
+								<select
+									bind:value={baseBranch}
+									disabled={isLaunching || loadingBranches}
+									class="form-select"
+								>
+									{#if loadingBranches}
+										<option value={undefined}>Loading branches...</option>
+									{:else}
+										{#each branches as branch}
+											<option value={branch.name}>
+												{branch.name}{branch.is_current ? ' (current)' : ''}
+											</option>
+										{/each}
+									{/if}
+								</select>
+								<p class="form-hint">The worktree will be created from this branch</p>
+							</div>
+						{/if}
+					</div>
 				{/if}
 			</div>
 
-			{#if agentData.branch}
-				<div class="branch-badge">
-					<GitBranch size={12} />
-					<span>{agentData.branch}</span>
-				</div>
-			{/if}
-		</div>
-
-		<!-- Progress Bar -->
-		{#if agentData.progress !== undefined && agentData.status === 'running'}
-			<div class="progress-container">
-				<div class="progress-bar" style:width="{agentData.progress}%"></div>
+			<!-- Footer -->
+			<div class="launcher-footer">
+				<p class="launcher-hint">
+					{#if canLaunch}
+						Press <kbd class="kbd">Cmd+Enter</kbd> to launch
+					{:else if isLaunching}
+						Launching agent...
+					{:else}
+						Enter task name and instructions
+					{/if}
+				</p>
+				<button
+					onclick={handleLaunch}
+					disabled={!canLaunch}
+					class="launch-button"
+				>
+					{#if isLaunching}
+						<Loader2 class="w-4 h-4 animate-spin" />
+						Launching...
+					{:else}
+						<Rocket class="w-4 h-4" />
+						Launch Agent
+					{/if}
+				</button>
 			</div>
-		{/if}
-
-		<!-- Task Tree -->
-		{#if agentData.tasks && agentData.tasks.length > 0}
-			<div class="task-tree">
-				<div class="section-label">Tasks</div>
-				<div class="tasks">
-					{#each agentData.tasks as task}
-						{@const TaskIcon = taskStatusIcons[task.status]}
-						{@const hasChildren = task.children && task.children.length > 0}
-						{@const isExpanded = expandedTasks.has(task.id)}
-
-						<div class="task-item">
-							<button
-								class="task-row"
-								onclick={() => hasChildren && toggleTask(task.id)}
-								class:has-children={hasChildren}
-							>
-								{#if hasChildren}
-									{#if isExpanded}
-										<ChevronDown size={14} class="expand-icon" />
-									{:else}
-										<ChevronRight size={14} class="expand-icon" />
-									{/if}
-								{:else}
-									<span class="expand-placeholder"></span>
-								{/if}
-								<TaskIcon
-									size={14}
-									class="task-icon {task.status === 'running' ? 'animate-spin' : ''} {task.status === 'completed' ? 'text-green-500' : task.status === 'error' ? 'text-destructive' : ''}"
-								/>
-								<span class="task-title">{task.title}</span>
-							</button>
-
-							{#if hasChildren && isExpanded}
-								<div class="task-children">
-									{#each task.children as child}
-										{@const ChildIcon = taskStatusIcons[child.status]}
-										<div class="task-row child">
-											<span class="expand-placeholder"></span>
-											<ChildIcon
-												size={12}
-												class="task-icon {child.status === 'running' ? 'animate-spin' : ''} {child.status === 'completed' ? 'text-green-500' : child.status === 'error' ? 'text-destructive' : ''}"
-											/>
-											<span class="task-title">{child.title}</span>
-										</div>
-									{/each}
-								</div>
+		</div>
+	{:else}
+		<!-- MONITOR MODE UI -->
+		<div class="agent-content">
+			{#if loading}
+				<div class="loading-state">
+					<Loader2 size={24} class="animate-spin text-muted-foreground" />
+					<span class="text-sm text-muted-foreground">Loading agent...</span>
+				</div>
+			{:else if error}
+				<div class="error-state">
+					<AlertCircle size={24} class="text-destructive" />
+					<span class="text-sm text-destructive">{error}</span>
+					<button class="retry-btn" onclick={fetchAgent}>Retry</button>
+				</div>
+			{:else if agent}
+				<!-- Status Header -->
+				<div class="status-header">
+					<div class="status-left">
+						<span class="status-indicator {statusConfig[agent.status].color}">
+							{#if agent.status === 'running'}
+								<Loader2 size={14} class="animate-spin" />
+							{:else if agent.status === 'completed'}
+								<CheckCircle size={14} />
+							{:else if agent.status === 'failed'}
+								<AlertCircle size={14} />
+							{:else if agent.status === 'paused'}
+								<Pause size={14} />
+							{:else}
+								<Circle size={14} />
 							{/if}
+							<span>{statusConfig[agent.status].label}</span>
+						</span>
+						{#if agent.status === 'running'}
+							<span class="duration">{duration}</span>
+							{#if timeRemaining !== null}
+								<span class="time-remaining" title="Time remaining">({timeRemaining} left)</span>
+							{:else}
+								<span class="time-remaining unlimited" title="Unlimited duration">(Unlimited)</span>
+							{/if}
+						{/if}
+					</div>
+
+					<div class="header-right">
+						{#if agent.prUrl}
+							<a
+								href={agent.prUrl}
+								target="_blank"
+								rel="noopener noreferrer"
+								class="pr-badge"
+								title="View Pull Request"
+							>
+								<ExternalLink size={12} />
+								<span>PR</span>
+							</a>
+						{/if}
+						{#if agent.branch}
+							<div class="branch-badge">
+								<GitBranch size={12} />
+								<span>{agent.branch}</span>
+							</div>
+						{/if}
+					</div>
+				</div>
+
+				<!-- Progress Bar -->
+				{#if agent.progress !== undefined && agent.status === 'running'}
+					<div class="progress-container">
+						<div class="progress-bar" style:width="{agent.progress}%"></div>
+					</div>
+				{/if}
+
+				<!-- Error Message -->
+				{#if agent.status === 'failed' && agent.error}
+					<div class="error-banner">
+						<AlertCircle size={14} />
+						<span>{agent.error}</span>
+					</div>
+				{/if}
+
+				<!-- Result Summary -->
+				{#if agent.status === 'completed' && agent.resultSummary}
+					<div class="result-banner">
+						<CheckCircle size={14} />
+						<span>{agent.resultSummary}</span>
+					</div>
+				{/if}
+
+				<!-- Task Tree -->
+				{#if agent.tasks && agent.tasks.length > 0}
+					<div class="task-tree">
+						<div class="section-label">Tasks</div>
+						<div class="tasks">
+							{#each agent.tasks as task}
+								{@const TaskIcon = taskStatusIcons[task.status]}
+								{@const hasChildren = task.children && task.children.length > 0}
+								{@const isExpanded = expandedTasks.has(task.id)}
+
+								<div class="task-item">
+									<button
+										class="task-row"
+										onclick={() => hasChildren && toggleTask(task.id)}
+										class:has-children={hasChildren}
+									>
+										{#if hasChildren}
+											{#if isExpanded}
+												<ChevronDown size={14} class="expand-icon" />
+											{:else}
+												<ChevronRight size={14} class="expand-icon" />
+											{/if}
+										{:else}
+											<span class="expand-placeholder"></span>
+										{/if}
+										<TaskIcon
+											size={14}
+											class="task-icon {task.status === 'in_progress' ? 'animate-spin' : ''} {task.status === 'completed' ? 'task-completed' : task.status === 'failed' ? 'task-failed' : ''}"
+										/>
+										<span class="task-title">{task.name}</span>
+									</button>
+
+									{#if hasChildren && isExpanded}
+										<div class="task-children">
+											{#each task.children as child}
+												{@const ChildIcon = taskStatusIcons[child.status]}
+												<div class="task-row child">
+													<span class="expand-placeholder"></span>
+													<ChildIcon
+														size={12}
+														class="task-icon {child.status === 'in_progress' ? 'animate-spin' : ''} {child.status === 'completed' ? 'task-completed' : child.status === 'failed' ? 'task-failed' : ''}"
+													/>
+													<span class="task-title">{child.name}</span>
+												</div>
+											{/each}
+										</div>
+									{/if}
+								</div>
+							{/each}
 						</div>
-					{/each}
+					</div>
+				{/if}
+
+				<!-- Log Lines -->
+				{#if agent.logs && agent.logs.length > 0}
+					<div class="logs-section">
+						<div class="section-label">Recent Logs</div>
+						<div class="logs">
+							{#each agent.logs.slice(-4) as log}
+								<div class="log-line">{formatLog(log)}</div>
+							{/each}
+						</div>
+					</div>
+				{/if}
+
+				<!-- Control Buttons -->
+				<div class="controls">
+					{#if agent.status === 'running'}
+						<button class="control-btn pause" onclick={handlePause}>
+							<Pause size={14} />
+							<span>Pause</span>
+						</button>
+					{:else if agent.status === 'paused'}
+						<button class="control-btn resume" onclick={handleResume}>
+							<Play size={14} />
+							<span>Resume</span>
+						</button>
+					{/if}
+
+					{#if agent.status === 'running' || agent.status === 'paused' || agent.status === 'queued'}
+						<button class="control-btn cancel" onclick={handleCancel}>
+							<Square size={14} />
+							<span>Cancel</span>
+						</button>
+					{/if}
+
+					{#if agent.status === 'completed' || agent.status === 'failed'}
+						<button class="control-btn delete" onclick={handleDelete}>
+							<Trash2 size={14} />
+							<span>Delete</span>
+						</button>
+					{/if}
 				</div>
-			</div>
-		{/if}
-
-		<!-- Log Lines -->
-		{#if agentData.logs && agentData.logs.length > 0}
-			<div class="logs-section">
-				<div class="section-label">Recent Logs</div>
-				<div class="logs">
-					{#each agentData.logs.slice(-4) as log}
-						<div class="log-line">{log}</div>
-					{/each}
-				</div>
-			</div>
-		{/if}
-
-		<!-- Control Buttons -->
-		<div class="controls">
-			{#if agentData.status === 'running'}
-				<button class="control-btn pause" onclick={handlePause}>
-					<Pause size={14} />
-					<span>Pause</span>
-				</button>
-			{:else if agentData.status === 'paused'}
-				<button class="control-btn resume" onclick={handleResume}>
-					<Play size={14} />
-					<span>Resume</span>
-				</button>
-			{/if}
-
-			{#if agentData.status === 'running' || agentData.status === 'paused'}
-				<button class="control-btn cancel" onclick={handleCancel}>
-					<Square size={14} />
-					<span>Cancel</span>
-				</button>
 			{/if}
 		</div>
-	</div>
+	{/if}
 </BaseCard>
 
 <style>
+	/* ============================================
+	   LAUNCHER MODE STYLES
+	   ============================================ */
+	.launcher-content {
+		display: flex;
+		flex-direction: column;
+		height: 100%;
+		overflow: hidden;
+		background: var(--card);
+	}
+
+	.launcher-header {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding: 16px;
+		border-bottom: 1px solid var(--border);
+		background: linear-gradient(to right, color-mix(in oklch, var(--primary) 8%, transparent), transparent);
+		flex-shrink: 0;
+	}
+
+	.launcher-header-icon {
+		width: 40px;
+		height: 40px;
+		border-radius: 10px;
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		box-shadow: var(--shadow-s);
+	}
+
+	.launcher-title {
+		font-size: 1rem;
+		font-weight: 600;
+		color: var(--foreground);
+		margin: 0;
+	}
+
+	.launcher-subtitle {
+		font-size: 0.75rem;
+		color: var(--muted-foreground);
+		margin: 0;
+	}
+
+	.launcher-form {
+		flex: 1;
+		overflow-y: auto;
+		padding: 16px;
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
+	}
+
+	.error-message {
+		padding: 10px 14px;
+		background: color-mix(in oklch, var(--destructive) 12%, transparent);
+		border: 1px solid color-mix(in oklch, var(--destructive) 25%, transparent);
+		border-radius: 10px;
+		font-size: 0.8125rem;
+		color: var(--destructive);
+		box-shadow: var(--shadow-s);
+	}
+
+	.form-group {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.form-label {
+		font-size: 0.8125rem;
+		font-weight: 500;
+		color: var(--foreground);
+	}
+
+	.form-label.with-icon {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.form-input,
+	.form-textarea,
+	.form-select {
+		width: 100%;
+		padding: 10px 14px;
+		background: oklch(0.12 0.008 260);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		color: var(--foreground);
+		font-size: 0.875rem;
+		transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+	}
+
+	.form-input::placeholder,
+	.form-textarea::placeholder {
+		color: var(--muted-foreground);
+	}
+
+	.form-input:hover,
+	.form-textarea:hover,
+	.form-select:hover {
+		border-color: color-mix(in oklch, var(--border) 100%, var(--primary) 30%);
+	}
+
+	.form-input:focus,
+	.form-textarea:focus,
+	.form-select:focus {
+		outline: none;
+		border-color: var(--primary);
+		background: oklch(0.14 0.01 260);
+		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 20%, transparent);
+	}
+
+	/* Select dropdown styling for dark mode */
+	.form-select {
+		cursor: pointer;
+		appearance: none;
+		-webkit-appearance: none;
+		-moz-appearance: none;
+		background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%239ca3af' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+		background-position: right 10px center;
+		background-repeat: no-repeat;
+		background-size: 1.25em 1.25em;
+		padding-right: 2.5rem;
+	}
+
+	.form-select option {
+		background: oklch(0.18 0.01 260);
+		color: var(--foreground);
+		padding: 8px;
+	}
+
+	.form-textarea {
+		resize: none;
+	}
+
+	.form-hint {
+		font-size: 0.6875rem;
+		color: var(--muted-foreground);
+		margin: 0;
+	}
+
+	.options-toggle {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		background: none;
+		border: none;
+		color: var(--muted-foreground);
+		font-size: 0.8125rem;
+		cursor: pointer;
+		padding: 6px 0;
+		transition: color 0.15s ease;
+	}
+
+	.options-toggle:hover {
+		color: var(--foreground);
+	}
+
+	.options-chevron {
+		width: 16px;
+		height: 16px;
+		transition: transform 0.15s ease;
+	}
+
+	.options-chevron.rotate-90 {
+		transform: rotate(90deg);
+	}
+
+	.options-panel {
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
+		padding: 12px;
+		padding-left: 16px;
+		margin-left: 4px;
+		border-left: 2px solid var(--border);
+		background: color-mix(in oklch, var(--muted) 30%, transparent);
+		border-radius: 0 8px 8px 0;
+	}
+
+	.options-section {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.options-section-label {
+		font-size: 0.6875rem;
+		font-weight: 600;
+		color: var(--muted-foreground);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		margin: 0;
+	}
+
+	.toggle-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		cursor: pointer;
+		padding: 6px 8px;
+		border-radius: 8px;
+		transition: background-color 0.15s ease;
+	}
+
+	.toggle-row:hover {
+		background: color-mix(in oklch, var(--accent) 50%, transparent);
+	}
+
+	.toggle-label {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		font-size: 0.8125rem;
+		color: var(--foreground);
+	}
+
+	.toggle-button {
+		position: relative;
+		width: 40px;
+		height: 24px;
+		border-radius: 12px;
+		background: var(--muted);
+		border: 1px solid var(--border);
+		cursor: pointer;
+		transition: background 0.15s ease, border-color 0.15s ease;
+	}
+
+	.toggle-button.active {
+		background: var(--primary);
+		border-color: var(--primary);
+	}
+
+	.toggle-knob {
+		position: absolute;
+		top: 3px;
+		left: 3px;
+		width: 16px;
+		height: 16px;
+		border-radius: 8px;
+		background: var(--foreground);
+		transition: transform 0.15s ease;
+		box-shadow: var(--shadow-s);
+	}
+
+	.toggle-knob.active {
+		transform: translateX(16px);
+		background: var(--primary-foreground);
+	}
+
+	.launcher-footer {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 14px 16px;
+		border-top: 1px solid var(--border);
+		background: color-mix(in oklch, var(--muted) 40%, transparent);
+		flex-shrink: 0;
+	}
+
+	.launcher-hint {
+		font-size: 0.75rem;
+		color: var(--muted-foreground);
+		margin: 0;
+	}
+
+	.kbd {
+		padding: 3px 7px;
+		background: var(--muted);
+		border: 1px solid var(--border);
+		border-radius: 5px;
+		font-size: 0.6875rem;
+		font-family: monospace;
+		color: var(--foreground);
+	}
+
+	.launch-button {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 10px 18px;
+		background: var(--primary);
+		color: var(--primary-foreground);
+		border: none;
+		border-radius: 10px;
+		font-size: 0.8125rem;
+		font-weight: 600;
+		cursor: pointer;
+		transition: all 0.15s ease;
+		box-shadow: var(--shadow-m);
+	}
+
+	.launch-button:hover:not(:disabled) {
+		filter: brightness(1.1);
+		box-shadow: var(--shadow-l);
+		transform: translateY(-1px);
+	}
+
+	.launch-button:active:not(:disabled) {
+		transform: translateY(0);
+	}
+
+	.launch-button:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	/* ============================================
+	   MONITOR MODE STYLES
+	   ============================================ */
 	.agent-content {
 		display: flex;
 		flex-direction: column;
 		height: 100%;
 		overflow: hidden;
+		background: var(--card);
+	}
+
+	/* Loading/Error States */
+	.loading-state,
+	.error-state {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 12px;
+		height: 100%;
+		padding: 24px;
+	}
+
+	.retry-btn {
+		padding: 8px 16px;
+		background: var(--muted);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		font-size: 0.75rem;
+		color: var(--foreground);
+		cursor: pointer;
+		transition: all 0.15s ease;
+		box-shadow: var(--shadow-s);
+	}
+
+	.retry-btn:hover {
+		background: var(--accent);
+		box-shadow: var(--shadow-m);
 	}
 
 	/* Status Header */
@@ -312,8 +1276,9 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		padding: 12px 16px;
-		border-bottom: 1px solid hsl(var(--border) / 0.5);
+		padding: 14px 16px;
+		border-bottom: 1px solid var(--border);
+		background: color-mix(in oklch, var(--muted) 30%, transparent);
 		flex-shrink: 0;
 	}
 
@@ -323,84 +1288,185 @@
 		gap: 12px;
 	}
 
+	.header-right {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
 	.status-indicator {
 		display: flex;
 		align-items: center;
-		gap: 6px;
+		gap: 8px;
 		font-size: 0.8125rem;
-		font-weight: 500;
+		font-weight: 600;
+		padding: 6px 12px;
+		border-radius: 8px;
+		box-shadow: var(--shadow-s);
+	}
+
+	/* Status color classes */
+	.status-indicator.status-running {
+		background: color-mix(in oklch, var(--info) 15%, transparent);
+		color: var(--info);
+		border: 1px solid color-mix(in oklch, var(--info) 30%, transparent);
+	}
+
+	.status-indicator.status-warning {
+		background: color-mix(in oklch, var(--warning) 15%, transparent);
+		color: var(--warning);
+		border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
+	}
+
+	.status-indicator.status-muted {
+		background: var(--muted);
+		color: var(--muted-foreground);
+		border: 1px solid var(--border);
+	}
+
+	.status-indicator.status-destructive {
+		background: color-mix(in oklch, var(--destructive) 15%, transparent);
+		color: var(--destructive);
+		border: 1px solid color-mix(in oklch, var(--destructive) 30%, transparent);
+	}
+
+	.status-indicator.status-success {
+		background: color-mix(in oklch, var(--success) 15%, transparent);
+		color: var(--success);
+		border: 1px solid color-mix(in oklch, var(--success) 30%, transparent);
 	}
 
 	.duration {
 		font-size: 0.75rem;
-		color: hsl(var(--muted-foreground));
+		color: var(--muted-foreground);
+		font-family: monospace;
+		padding: 4px 8px;
+		background: var(--muted);
+		border-radius: 6px;
+	}
+
+	.time-remaining {
+		font-size: 0.6875rem;
+		color: var(--muted-foreground);
 		font-family: monospace;
 	}
 
-	.branch-badge {
+	.time-remaining.unlimited {
+		color: var(--primary);
+	}
+
+	.branch-badge,
+	.pr-badge {
 		display: flex;
 		align-items: center;
 		gap: 4px;
-		padding: 4px 8px;
-		background: hsl(var(--muted));
-		border-radius: 4px;
+		padding: 5px 10px;
+		background: var(--muted);
+		border: 1px solid var(--border);
+		border-radius: 6px;
 		font-size: 0.6875rem;
-		color: hsl(var(--muted-foreground));
+		color: var(--foreground);
+		text-decoration: none;
+		font-weight: 500;
+		transition: all 0.15s ease;
+	}
+
+	.branch-badge:hover {
+		background: var(--accent);
+	}
+
+	.pr-badge {
+		background: color-mix(in oklch, var(--success) 15%, transparent);
+		border-color: color-mix(in oklch, var(--success) 30%, transparent);
+		color: var(--success);
+	}
+
+	.pr-badge:hover {
+		background: color-mix(in oklch, var(--success) 25%, transparent);
 	}
 
 	/* Progress Bar */
 	.progress-container {
-		height: 3px;
-		background: hsl(var(--muted));
+		height: 4px;
+		background: var(--muted);
 		flex-shrink: 0;
 	}
 
 	.progress-bar {
 		height: 100%;
-		background: hsl(var(--primary));
+		background: linear-gradient(90deg, var(--primary), var(--info));
 		transition: width 0.3s ease;
+		box-shadow: 0 0 8px color-mix(in oklch, var(--primary) 50%, transparent);
+	}
+
+	/* Error/Result Banners */
+	.error-banner,
+	.result-banner {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 10px 16px;
+		font-size: 0.8125rem;
+		flex-shrink: 0;
+		font-weight: 500;
+	}
+
+	.error-banner {
+		background: color-mix(in oklch, var(--destructive) 12%, transparent);
+		color: var(--destructive);
+		border-bottom: 1px solid color-mix(in oklch, var(--destructive) 25%, transparent);
+	}
+
+	.result-banner {
+		background: color-mix(in oklch, var(--success) 12%, transparent);
+		color: var(--success);
+		border-bottom: 1px solid color-mix(in oklch, var(--success) 25%, transparent);
 	}
 
 	/* Task Tree */
 	.task-tree {
 		flex: 1;
 		overflow-y: auto;
-		padding: 12px 16px;
+		padding: 14px 16px;
 	}
 
 	.section-label {
 		font-size: 0.6875rem;
-		font-weight: 500;
-		color: hsl(var(--muted-foreground));
+		font-weight: 600;
+		color: var(--muted-foreground);
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
-		margin-bottom: 8px;
+		margin-bottom: 10px;
 	}
 
 	.tasks {
 		display: flex;
 		flex-direction: column;
-		gap: 2px;
+		gap: 4px;
 	}
 
 	.task-item {
 		display: flex;
 		flex-direction: column;
+		background: color-mix(in oklch, var(--muted) 30%, transparent);
+		border-radius: 8px;
+		border: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
+		overflow: hidden;
 	}
 
 	.task-row {
 		display: flex;
 		align-items: center;
-		gap: 6px;
-		padding: 6px 4px;
+		gap: 8px;
+		padding: 10px 12px;
 		background: transparent;
 		border: none;
-		border-radius: 4px;
-		color: hsl(var(--foreground));
+		color: var(--foreground);
 		font-size: 0.8125rem;
 		text-align: left;
 		width: 100%;
 		cursor: default;
+		transition: background-color 0.15s ease;
 	}
 
 	.task-row.has-children {
@@ -408,17 +1474,23 @@
 	}
 
 	.task-row.has-children:hover {
-		background: hsl(var(--accent) / 0.5);
+		background: color-mix(in oklch, var(--accent) 60%, transparent);
 	}
 
 	.task-row.child {
-		padding-left: 20px;
+		padding-left: 28px;
 		font-size: 0.75rem;
-		color: hsl(var(--muted-foreground));
+		color: var(--muted-foreground);
+		background: color-mix(in oklch, var(--muted) 20%, transparent);
+		border-top: 1px solid color-mix(in oklch, var(--border) 30%, transparent);
+	}
+
+	.task-row.child:hover {
+		background: color-mix(in oklch, var(--accent) 40%, transparent);
 	}
 
 	.expand-icon {
-		color: hsl(var(--muted-foreground));
+		color: var(--muted-foreground);
 		flex-shrink: 0;
 	}
 
@@ -429,7 +1501,16 @@
 
 	.task-icon {
 		flex-shrink: 0;
-		color: hsl(var(--muted-foreground));
+		color: var(--muted-foreground);
+	}
+
+	/* Task status icon colors */
+	:global(.task-completed) {
+		color: var(--success) !important;
+	}
+
+	:global(.task-failed) {
+		color: var(--destructive) !important;
 	}
 
 	.task-title {
@@ -441,38 +1522,43 @@
 	.task-children {
 		display: flex;
 		flex-direction: column;
-		gap: 2px;
-		margin-left: 4px;
 	}
 
 	/* Logs Section */
 	.logs-section {
-		padding: 12px 16px;
-		border-top: 1px solid hsl(var(--border) / 0.5);
+		padding: 14px 16px;
+		border-top: 1px solid var(--border);
+		background: color-mix(in oklch, var(--muted) 20%, transparent);
 		flex-shrink: 0;
 	}
 
 	.logs {
 		display: flex;
 		flex-direction: column;
-		gap: 2px;
+		gap: 4px;
+		padding: 10px 12px;
+		background: oklch(0.12 0.008 260);
+		border-radius: 8px;
+		border: 1px solid var(--border);
 	}
 
 	.log-line {
 		font-family: monospace;
 		font-size: 0.6875rem;
-		color: hsl(var(--muted-foreground));
+		color: var(--foreground);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+		opacity: 0.85;
 	}
 
 	/* Controls */
 	.controls {
 		display: flex;
-		gap: 8px;
-		padding: 12px 16px;
-		border-top: 1px solid hsl(var(--border) / 0.5);
+		gap: 10px;
+		padding: 14px 16px;
+		border-top: 1px solid var(--border);
+		background: color-mix(in oklch, var(--muted) 40%, transparent);
 		flex-shrink: 0;
 	}
 
@@ -480,25 +1566,45 @@
 		display: flex;
 		align-items: center;
 		gap: 6px;
-		padding: 8px 16px;
-		background: hsl(var(--muted));
-		border: 1px solid hsl(var(--border));
-		border-radius: 6px;
+		padding: 10px 18px;
+		background: var(--muted);
+		border: 1px solid var(--border);
+		border-radius: 8px;
 		font-size: 0.8125rem;
 		font-weight: 500;
-		color: hsl(var(--foreground));
+		color: var(--foreground);
 		cursor: pointer;
 		transition: all 0.15s ease;
+		box-shadow: var(--shadow-s);
 	}
 
 	.control-btn:hover {
-		background: hsl(var(--accent));
+		background: var(--accent);
+		box-shadow: var(--shadow-m);
+		transform: translateY(-1px);
 	}
 
-	.control-btn.cancel:hover {
-		background: hsl(var(--destructive) / 0.1);
-		border-color: hsl(var(--destructive) / 0.3);
-		color: hsl(var(--destructive));
+	.control-btn:active {
+		transform: translateY(0);
+	}
+
+	.control-btn.cancel:hover,
+	.control-btn.delete:hover {
+		background: color-mix(in oklch, var(--destructive) 15%, transparent);
+		border-color: color-mix(in oklch, var(--destructive) 40%, transparent);
+		color: var(--destructive);
+	}
+
+	.control-btn.resume:hover {
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		border-color: color-mix(in oklch, var(--primary) 40%, transparent);
+		color: var(--primary);
+	}
+
+	.control-btn.pause:hover {
+		background: color-mix(in oklch, var(--warning) 15%, transparent);
+		border-color: color-mix(in oklch, var(--warning) 40%, transparent);
+		color: var(--warning);
 	}
 
 	/* Utility classes */
@@ -513,17 +1619,5 @@
 		to {
 			transform: rotate(360deg);
 		}
-	}
-
-	:global(.text-green-500) {
-		color: rgb(34 197 94);
-	}
-
-	:global(.text-blue-500) {
-		color: rgb(59 130 246);
-	}
-
-	:global(.text-yellow-500) {
-		color: rgb(234 179 8);
 	}
 </style>

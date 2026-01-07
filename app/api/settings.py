@@ -506,6 +506,84 @@ async def update_stt_model(
     return {"success": True, "model": model}
 
 
+@router.get("/integrations/tts/models")
+async def get_tts_models(token: str = Depends(require_auth)):
+    """
+    Get available TTS models.
+
+    Returns list of TTS models with their availability status.
+    """
+    openai_key = get_decrypted_api_key("openai_api_key")
+    current_tts = database.get_system_setting("tts_model") or "gpt-4o-mini-tts"
+
+    # OpenAI TTS voices
+    voices = [
+        {"id": "alloy", "name": "Alloy", "description": "Neutral, versatile"},
+        {"id": "ash", "name": "Ash", "description": "Clear, professional"},
+        {"id": "ballad", "name": "Ballad", "description": "Warm, storytelling"},
+        {"id": "coral", "name": "Coral", "description": "Friendly, conversational"},
+        {"id": "echo", "name": "Echo", "description": "Resonant, dramatic"},
+        {"id": "fable", "name": "Fable", "description": "Engaging, expressive"},
+        {"id": "onyx", "name": "Onyx", "description": "Deep, authoritative"},
+        {"id": "nova", "name": "Nova", "description": "Soft, gentle"},
+        {"id": "sage", "name": "Sage", "description": "Calm, measured"},
+        {"id": "shimmer", "name": "Shimmer", "description": "Bright, energetic"},
+        {"id": "verse", "name": "Verse", "description": "Lyrical, musical"},
+    ]
+
+    models = [
+        {
+            "id": model_id,
+            "name": info["name"],
+            "description": info["description"],
+            "price_display": info["price_display"],
+            "available": bool(openai_key),
+            "is_current": model_id == current_tts,
+            "supports_instructions": model_id == "gpt-4o-mini-tts"
+        }
+        for model_id, info in TTS_MODELS.items()
+    ]
+
+    return {
+        "models": models,
+        "voices": voices,
+        "output_formats": ["mp3", "opus", "aac", "flac", "wav", "pcm"],
+        "current_model": current_tts,
+        "openai_configured": bool(openai_key)
+    }
+
+
+@router.get("/integrations/stt/models")
+async def get_stt_models(token: str = Depends(require_auth)):
+    """
+    Get available STT models.
+
+    Returns list of STT models with their availability status.
+    """
+    openai_key = get_decrypted_api_key("openai_api_key")
+    current_stt = database.get_system_setting("stt_model") or "whisper-1"
+
+    models = [
+        {
+            "id": model_id,
+            "name": info["name"],
+            "description": info["description"],
+            "price_display": info["price_display"],
+            "available": bool(openai_key),
+            "is_current": model_id == current_stt,
+            "supports_diarization": False  # Not yet supported
+        }
+        for model_id, info in STT_MODELS.items()
+    ]
+
+    return {
+        "models": models,
+        "supported_formats": ["mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm", "ogg", "flac"],
+        "current_model": current_stt,
+        "openai_configured": bool(openai_key)
+    }
+
+
 # ============================================================================
 # Voice Transcription
 # ============================================================================

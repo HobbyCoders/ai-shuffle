@@ -17,9 +17,7 @@
 	import type { DeckCard } from './types';
 	import { api } from '$lib/api/client';
 	import { groups } from '$lib/stores/groups';
-	import { Search, Plus, Trash2, Download, Upload, X, ArrowLeft, Monitor, User, Settings, Terminal, Check, Lock, RotateCcw } from 'lucide-svelte';
-	import GroupDropdown from '$lib/components/GroupDropdown.svelte';
-	import './card-design-system.css';
+	import { Search, Plus, Trash2, Download, Upload, X, ArrowLeft, Monitor, User, Settings, Terminal, Check } from 'lucide-svelte';
 
 	interface Subagent {
 		id: string;
@@ -29,7 +27,6 @@
 		tools?: string[];
 		model?: string;
 		is_builtin: boolean;
-		is_modified: boolean;  // Whether built-in subagent has been modified from defaults
 		created_at: string;
 		updated_at: string;
 	}
@@ -56,6 +53,7 @@
 	interface Props {
 		card: DeckCard;
 		onClose: () => void;
+		onMinimize: () => void;
 		onMaximize: () => void;
 		onFocus: () => void;
 		onMove: (x: number, y: number) => void;
@@ -68,6 +66,7 @@
 	let {
 		card,
 		onClose,
+		onMinimize,
 		onMaximize,
 		onFocus,
 		onMove,
@@ -116,11 +115,11 @@
 
 	// Model options
 	const MODEL_OPTIONS = [
-		{ value: '', label: 'Inherit', description: 'Use profile default' },
-		{ value: 'haiku', label: 'Haiku', description: 'Fast & cheap' },
-		{ value: 'sonnet', label: 'Sonnet', description: 'Balanced' },
-		{ value: 'sonnet-1m', label: 'Sonnet 1M', description: 'Extended context' },
-		{ value: 'opus', label: 'Opus', description: 'Most capable' }
+		{ value: '', label: 'Inherit', description: 'Use profile default', color: 'bg-muted text-muted-foreground' },
+		{ value: 'haiku', label: 'Haiku', description: 'Fast & cheap', color: 'bg-emerald-500/10 text-emerald-500' },
+		{ value: 'sonnet', label: 'Sonnet', description: 'Balanced', color: 'bg-blue-500/10 text-blue-500' },
+		{ value: 'sonnet-1m', label: 'Sonnet 1M', description: 'Extended context', color: 'bg-violet-500/10 text-violet-500' },
+		{ value: 'opus', label: 'Opus', description: 'Most capable', color: 'bg-amber-500/10 text-amber-500' }
 	];
 
 	// Filtered subagents
@@ -189,9 +188,9 @@
 		return opt?.label || 'Inherit';
 	}
 
-	function getModelBadgeClass(model?: string): string {
-		if (!model || model === '') return 'card-badge--inherit';
-		return `card-badge--${model}`;
+	function getModelColor(model?: string): string {
+		const opt = MODEL_OPTIONS.find(o => o.value === model);
+		return opt?.color || 'bg-muted text-muted-foreground';
 	}
 
 	// Open editor for new subagent
@@ -270,12 +269,6 @@
 	// Delete subagent
 	function handleDeleteClick(id: string, e: Event) {
 		e.stopPropagation();
-		// Don't allow deleting built-in subagents
-		const agent = subagents.find(s => s.id === id);
-		if (agent?.is_builtin) {
-			error = 'Built-in subagents cannot be deleted. You can disable them in profile settings.';
-			return;
-		}
 		deletingId = id;
 	}
 
@@ -291,37 +284,6 @@
 			error = err.detail || err.message || 'Failed to delete subagent';
 		} finally {
 			deleteLoading = false;
-		}
-	}
-
-	// Revert built-in subagent to defaults
-	let revertingId = $state<string | null>(null);
-	let revertLoading = $state(false);
-
-	async function handleRevert(id: string, e: Event) {
-		e.stopPropagation();
-		revertingId = id;
-	}
-
-	async function confirmRevert() {
-		if (!revertingId) return;
-		revertLoading = true;
-		try {
-			await api.post(`/subagents/${revertingId}/revert`);
-			revertingId = null;
-			await loadSubagents();
-			// If we're in the editor for this agent, reload the form
-			if (editingSubagent?.id === revertingId) {
-				const updated = subagents.find(s => s.id === revertingId);
-				if (updated) {
-					handleEdit(updated);
-				}
-			}
-		} catch (e: unknown) {
-			const err = e as { detail?: string; message?: string };
-			error = err.detail || err.message || 'Failed to revert subagent';
-		} finally {
-			revertLoading = false;
 		}
 	}
 
@@ -435,281 +397,244 @@
 <input type="file" accept=".json" bind:this={importInput} onchange={handleImport} class="hidden" />
 
 {#snippet content()}
-	<div class="card-system subagent-card" class:maximized={card.maximized}>
+	<div class="subagent-card-content flex flex-col h-full bg-card">
 		{#if viewMode === 'list'}
 			<!-- LIST VIEW -->
 			<!-- Header -->
-			<div class="card-header">
-				<div class="card-header-info">
-					{#if mobile}
-						<span class="card-header-title">Subagents</span>
-					{/if}
-					<span class="card-header-subtitle">
-						{subagents.length} subagent{subagents.length !== 1 ? 's' : ''} configured
-					</span>
+			<div class="px-4 py-3 border-b border-border bg-gradient-to-r from-primary/5 to-transparent">
+				<div class="flex items-center justify-between">
+					<div>
+						{#if !mobile}
+							<p class="text-xs text-muted-foreground">
+								{subagents.length} subagent{subagents.length !== 1 ? 's' : ''} configured
+							</p>
+						{:else}
+							<h2 class="text-lg font-semibold text-foreground">Subagents</h2>
+							<p class="text-xs text-muted-foreground">
+								{subagents.length} agent{subagents.length !== 1 ? 's' : ''}
+							</p>
+						{/if}
+					</div>
 				</div>
-			</div>
 
-			<!-- Search bar (show if > 3 subagents) -->
-			{#if subagents.length > 3}
-				<div class="card-search-wrapper">
-					<div class="card-search-container">
-						<Search class="card-search-icon" />
+				<!-- Search bar (show if > 3 subagents) -->
+				{#if subagents.length > 3}
+					<div class="mt-3 relative">
+						<Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
 						<input
 							type="text"
 							bind:value={searchQuery}
 							placeholder="Search subagents..."
-							class="card-search-input"
+							class="search-input w-full pl-10 pr-4 py-2.5 border rounded-xl text-sm focus:outline-none"
 						/>
 					</div>
-				</div>
-			{/if}
+				{/if}
+			</div>
 
 			<!-- Content -->
-			<div class="card-content">
-				<div class="centered-content">
+			<div class="flex-1 overflow-y-auto p-4">
 				{#if error}
-					<div class="card-error-banner">
+					<div class="error-banner mb-4 p-3 rounded-xl text-sm flex items-center gap-2">
 						<span class="flex-1">{error}</span>
-						<button onclick={() => (error = null)}>
+						<button onclick={() => (error = null)} class="hover:opacity-70 transition-opacity">
 							<X class="w-4 h-4" />
 						</button>
 					</div>
 				{/if}
 
+				<!-- Delete confirmation banner -->
+				{#if deletingId}
+					<div class="delete-confirm-banner mb-4 p-4 rounded-xl">
+						<p class="text-sm text-foreground mb-3">
+							Delete <strong>{subagents.find(s => s.id === deletingId)?.name}</strong>? This cannot be undone.
+						</p>
+						<div class="flex gap-2">
+							<button
+								onclick={() => (deletingId = null)}
+								disabled={deleteLoading}
+								class="btn-secondary flex-1 px-3 py-2.5 rounded-lg text-sm"
+							>
+								Cancel
+							</button>
+							<button
+								onclick={confirmDelete}
+								disabled={deleteLoading}
+								class="btn-destructive flex-1 px-3 py-2.5 rounded-lg text-sm flex items-center justify-center gap-2"
+							>
+								{#if deleteLoading}
+									<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+										<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+										<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+									</svg>
+								{/if}
+								Delete
+							</button>
+						</div>
+					</div>
+				{/if}
+
 				{#if loading}
-					<div class="loading-container">
-						<div class="card-spinner"></div>
+					<div class="flex items-center justify-center py-12">
+						<svg class="w-8 h-8 animate-spin text-primary" fill="none" viewBox="0 0 24 24">
+							<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+							<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+						</svg>
 					</div>
 				{:else if filteredSubagents().length === 0}
-					<div class="card-empty-state">
+					<div class="text-center py-8">
 						{#if searchQuery}
-							<Search class="card-empty-icon" />
-							<p class="card-empty-title">No subagents match "{searchQuery}"</p>
-							<button onclick={() => (searchQuery = '')} class="card-empty-action">
+							<Search class="w-12 h-12 mx-auto text-muted-foreground/50 mb-3" />
+							<p class="text-sm text-muted-foreground">No subagents match "{searchQuery}"</p>
+							<button onclick={() => (searchQuery = '')} class="mt-2 text-xs text-primary hover:underline">
 								Clear search
 							</button>
 						{:else}
-							<Monitor class="card-empty-icon" />
-							<p class="card-empty-title">No subagents configured yet</p>
-							<p class="card-empty-description">
+							<Monitor class="w-12 h-12 mx-auto text-muted-foreground/50 mb-3" />
+							<p class="text-sm text-muted-foreground mb-2">No subagents configured yet</p>
+							<p class="text-xs text-muted-foreground/70 max-w-xs mx-auto">
 								Subagents are specialized AI assistants that can be delegated to for specific tasks.
 							</p>
 						{/if}
 					</div>
 				{:else}
-					{#each filteredSubagents() as agent (agent.id)}
-						{#if deletingId === agent.id}
-							<!-- Inline delete confirmation -->
-							<div class="card-list-item card-list-item--deleting">
-								<div class="card-item-icon card-item-icon--destructive">
-									<Trash2 />
-								</div>
-								<div class="card-item-content">
-									<p class="delete-confirm-text">
-										Delete <strong>{agent.name}</strong>? This cannot be undone.
-									</p>
-									<div class="delete-confirm-actions">
-										<button
-											onclick={() => (deletingId = null)}
-											disabled={deleteLoading}
-											class="card-btn-secondary"
-										>
-											Cancel
-										</button>
-										<button
-											onclick={confirmDelete}
-											disabled={deleteLoading}
-											class="card-btn-destructive"
-										>
-											{#if deleteLoading}
-												<div class="card-spinner card-spinner--small"></div>
-											{/if}
-											Delete
-										</button>
-									</div>
-								</div>
-							</div>
-						{:else if revertingId === agent.id}
-							<!-- Inline revert confirmation -->
-							<div class="card-list-item card-list-item--deleting">
-								<div class="card-item-icon" style="color: var(--color-warning);">
-									<RotateCcw />
-								</div>
-								<div class="card-item-content">
-									<p class="delete-confirm-text">
-										Revert <strong>{agent.name}</strong> to original defaults? Your customizations will be lost.
-									</p>
-									<div class="delete-confirm-actions">
-										<button
-											onclick={() => (revertingId = null)}
-											disabled={revertLoading}
-											class="card-btn-secondary"
-										>
-											Cancel
-										</button>
-										<button
-											onclick={confirmRevert}
-											disabled={revertLoading}
-											class="card-btn-primary"
-										>
-											{#if revertLoading}
-												<div class="card-spinner card-spinner--small"></div>
-											{/if}
-											Revert
-										</button>
-									</div>
-								</div>
-							</div>
-						{:else}
+					<div class="space-y-3">
+						{#each filteredSubagents() as agent (agent.id)}
 							<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 							<div
-								class="card-list-item"
+								class="agent-list-item p-4 rounded-xl group cursor-pointer"
 								onclick={() => handleEdit(agent)}
 							>
-								<div class="card-item-icon">
-									<Monitor />
-								</div>
-								<div class="card-item-content">
-									<div class="card-item-header">
-										<span class="card-item-name">{agent.name}</span>
-										{#if agent.is_builtin}
-											<span class="card-badge card-badge--builtin" title="Built-in subagent">
-												<Lock style="width: 10px; height: 10px;" />
-												Built-in
+								<div class="flex items-start gap-3">
+									<div class="agent-icon w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0">
+										<Monitor class="w-5 h-5 text-primary" />
+									</div>
+									<div class="flex-1 min-w-0">
+										<div class="flex items-center gap-2 flex-wrap">
+											<span class="font-semibold text-foreground text-sm">{agent.name}</span>
+											<span class="model-badge model-badge-{agent.model || 'inherit'} text-[10px]">
+												{getModelDisplay(agent.model)}
 											</span>
-											{#if agent.is_modified}
-												<span class="card-badge card-badge--modified" title="Modified from defaults">
-													Modified
+											{#if agent.tools && agent.tools.length > 0}
+												<span class="tools-badge text-[10px]">
+													{agent.tools.length} tools
 												</span>
 											{/if}
-										{/if}
-										<span class="card-badge {getModelBadgeClass(agent.model)}">
-											{getModelDisplay(agent.model)}
-										</span>
-										{#if agent.tools && agent.tools.length > 0}
-											<span class="card-badge card-badge--tools">
-												{agent.tools.length} tools
-											</span>
-										{/if}
-										{#if $groups.subagents.assignments[agent.id]}
-											<span class="card-badge card-badge--primary">
-												{$groups.subagents.assignments[agent.id]}
-											</span>
-										{/if}
+											{#if $groups.subagents.assignments[agent.id]}
+												<span class="group-badge text-[10px]">
+													{$groups.subagents.assignments[agent.id]}
+												</span>
+											{/if}
+										</div>
+										<p class="text-xs text-muted-foreground font-mono mt-1">{agent.id}</p>
+										<p class="text-xs text-muted-foreground mt-1.5 line-clamp-2">{agent.description}</p>
 									</div>
-									<span class="card-item-id">{agent.id}</span>
-									<p class="card-item-description">{agent.description}</p>
-								</div>
-								<div class="card-item-actions">
-									<!-- Group dropdown (portal-based to escape overflow:hidden) -->
-									<GroupDropdown entityType="subagents" entityId={agent.id} />
-									{#if agent.is_builtin && agent.is_modified}
+									<div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
 										<button
-											onclick={(e) => handleRevert(agent.id, e)}
-											class="card-action-btn"
-											title="Revert to defaults"
+											onclick={(e) => exportSubagent(agent.id, e)}
+											class="action-btn text-muted-foreground hover:text-foreground"
+											title="Export"
 										>
-											<RotateCcw />
+											<Download class="w-4 h-4" />
 										</button>
-									{/if}
-									<button
-										onclick={(e) => exportSubagent(agent.id, e)}
-										class="card-action-btn"
-										title="Export"
-									>
-										<Download />
-									</button>
-									{#if !agent.is_builtin}
 										<button
 											onclick={(e) => handleDeleteClick(agent.id, e)}
-											class="card-action-btn card-action-btn--destructive"
+											class="action-btn action-btn-delete text-muted-foreground"
 											title="Delete"
 										>
-											<Trash2 />
+											<Trash2 class="w-4 h-4" />
 										</button>
-									{/if}
+									</div>
 								</div>
 							</div>
-						{/if}
-					{/each}
+						{/each}
+					</div>
 				{/if}
-				</div>
 			</div>
 
 			<!-- Footer -->
-			<div class="card-footer">
-				<div class="card-footer-content">
-				<button
-					onclick={handleCreate}
-					class="card-btn-primary"
-				>
-					<Plus />
-					New Subagent
-				</button>
-				<button
-					onclick={triggerImport}
-					disabled={importing}
-					class="card-btn-secondary"
-					title="Import from file"
-				>
-					{#if importing}
-						<div class="card-spinner card-spinner--small"></div>
-					{:else}
-						<Upload />
-					{/if}
-				</button>
+			<div class="footer-section px-4 py-4">
+				<div class="flex gap-3">
+					<button
+						onclick={handleCreate}
+						class="btn-primary flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl"
+					>
+						<Plus class="w-4 h-4" />
+						New Subagent
+					</button>
+					<button
+						onclick={triggerImport}
+						disabled={importing}
+						class="btn-secondary px-4 py-2.5 rounded-xl flex items-center gap-2"
+						title="Import from file"
+					>
+						{#if importing}
+							<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+								<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+								<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+							</svg>
+						{:else}
+							<Upload class="w-4 h-4" />
+						{/if}
+					</button>
 				</div>
 			</div>
 		{:else}
 			<!-- EDITOR VIEW -->
 			<!-- Header -->
-			<div class="card-header">
-				<div class="editor-header-left">
+			<div class="px-4 py-3 border-b border-border bg-gradient-to-r from-primary/5 to-transparent">
+				<div class="flex items-center gap-3">
 					<button
 						onclick={handleBack}
-						class="card-back-btn"
+						class="p-2 hover:bg-muted rounded-lg transition-colors"
 						title="Back to list"
 					>
-						<ArrowLeft />
+						<ArrowLeft class="w-4 h-4 text-muted-foreground" />
 					</button>
-					<div class="card-header-info">
-						<span class="card-header-title">
+					<div>
+						<h3 class="text-sm font-semibold text-foreground">
 							{isEditMode ? 'Edit Subagent' : 'New Subagent'}
-						</span>
+						</h3>
 						{#if isEditMode && editingSubagent}
-							<span class="card-header-subtitle">{editingSubagent.id}</span>
+							<p class="text-xs text-muted-foreground font-mono">{editingSubagent.id}</p>
 						{/if}
 					</div>
 				</div>
 			</div>
 
 			<!-- Tab Navigation -->
-			<div class="card-tabs">
+			<div class="tab-nav flex border-b border-border">
 				{#each tabs as tab}
 					<button
 						onclick={() => activeTab = tab.id}
-						class="card-tab"
-						class:card-tab--active={activeTab === tab.id}
+						class="tab-button flex-1 flex items-center justify-center gap-2 px-4 py-3 text-sm font-medium transition-all relative
+							{activeTab === tab.id
+								? 'text-primary active'
+								: 'text-muted-foreground hover:text-foreground'}"
 					>
-						<tab.icon />
-						<span class="tab-label">{tab.label}</span>
-						<span
-							class="card-tab-indicator"
-							class:card-tab-indicator--valid={tabStatus()[tab.id]}
-							class:card-tab-indicator--invalid={!tabStatus()[tab.id]}
-						></span>
+						<tab.icon class="w-4 h-4" />
+						<span>{tab.label}</span>
+
+						<!-- Validation indicator -->
+						{#if !tabStatus()[tab.id]}
+							<span class="validation-dot-invalid w-2 h-2 rounded-full"></span>
+						{:else}
+							<span class="validation-dot-valid w-2 h-2 rounded-full"></span>
+						{/if}
+
+						<!-- Active indicator -->
+						{#if activeTab === tab.id}
+							<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-primary"></div>
+						{/if}
 					</button>
 				{/each}
 			</div>
 
 			<!-- Tab Content -->
-			<div class="card-content">
-				<div class="centered-content">
+			<div class="flex-1 overflow-y-auto p-4">
 				{#if error}
-					<div class="card-error-banner">
+					<div class="error-banner mb-4 p-3 rounded-xl text-sm flex items-center gap-2">
 						<span class="flex-1">{error}</span>
-						<button onclick={() => (error = null)}>
+						<button onclick={() => (error = null)} class="hover:opacity-70 transition-opacity">
 							<X class="w-4 h-4" />
 						</button>
 					</div>
@@ -717,50 +642,50 @@
 
 				<!-- Identity Tab -->
 				{#if activeTab === 'identity'}
-					<div class="editor-tab-content">
+					<div class="space-y-4">
 						{#if !isEditMode}
-							<div class="card-form-section">
-								<label for="agent-id" class="card-form-label">
-									ID <span class="required">*</span>
+							<div class="space-y-2">
+								<label for="agent-id" class="block text-sm font-medium text-foreground">
+									ID <span class="text-destructive">*</span>
 								</label>
 								<input
 									id="agent-id"
 									type="text"
 									bind:value={formId}
 									placeholder="my-agent-id"
-									class="card-form-input card-form-input--mono"
+									class="form-input w-full px-4 py-2.5 rounded-xl"
 								/>
-								<p class="card-form-hint">
+								<p class="text-xs text-muted-foreground">
 									Lowercase letters, numbers, and hyphens only.
 								</p>
 							</div>
 						{/if}
 
-						<div class="card-form-section">
-							<label for="agent-name" class="card-form-label">
-								Display Name <span class="required">*</span>
+						<div class="space-y-2">
+							<label for="agent-name" class="block text-sm font-medium text-foreground">
+								Display Name <span class="text-destructive">*</span>
 							</label>
 							<input
 								id="agent-name"
 								type="text"
 								bind:value={formName}
 								placeholder="Research Assistant"
-								class="card-form-input"
+								class="form-input w-full px-4 py-2.5 rounded-xl"
 							/>
 						</div>
 
-						<div class="card-form-section">
-							<label for="agent-description" class="card-form-label">
-								Description <span class="required">*</span>
+						<div class="space-y-2">
+							<label for="agent-description" class="block text-sm font-medium text-foreground">
+								Description <span class="text-destructive">*</span>
 							</label>
 							<textarea
 								id="agent-description"
 								bind:value={formDescription}
 								placeholder="Use this agent when you need to research topics..."
 								rows={3}
-								class="card-form-input card-form-textarea"
+								class="form-input w-full px-4 py-2.5 rounded-xl resize-none"
 							></textarea>
-							<p class="card-form-hint">
+							<p class="text-xs text-muted-foreground">
 								Describes when Claude should invoke this subagent.
 							</p>
 						</div>
@@ -769,57 +694,57 @@
 
 				<!-- Config Tab -->
 				{#if activeTab === 'config'}
-					<div class="editor-tab-content">
+					<div class="space-y-6">
 						<!-- Model Selection -->
-						<div class="card-form-section">
-							<label class="card-form-label">Model</label>
-							<div class="card-selection-grid">
+						<div class="space-y-3">
+							<label class="block text-sm font-medium text-foreground">Model</label>
+							<div class="grid grid-cols-2 gap-3">
 								{#each MODEL_OPTIONS as opt}
 									<button
 										type="button"
 										onclick={() => formModel = opt.value}
-										class="card-selection-item"
-										class:card-selection-item--selected={formModel === opt.value}
+										class="model-option flex flex-col items-center gap-1 p-3 rounded-xl
+											{formModel === opt.value ? 'selected' : ''}"
 									>
-										<span class="card-selection-label">{opt.label}</span>
-										<span class="card-selection-desc">{opt.description}</span>
+										<span class="text-sm font-semibold">{opt.label}</span>
+										<span class="text-[10px] text-muted-foreground">{opt.description}</span>
 									</button>
 								{/each}
 							</div>
 						</div>
 
 						<!-- Tool Access Mode -->
-						<div class="card-form-section">
-							<div class="section-header">
-								<label class="card-form-label">Tool Access</label>
+						<div class="space-y-3">
+							<div class="flex items-center justify-between">
+								<label class="block text-sm font-medium text-foreground">Tool Access</label>
 								{#if toolSelectionMode === 'select'}
-									<span class="card-badge card-badge--primary">{formTools.length} selected</span>
+									<span class="text-xs text-primary font-medium">{formTools.length} selected</span>
 								{/if}
 							</div>
 
-							<div class="card-mode-selector">
+							<div class="flex gap-3">
 								<button
 									type="button"
 									onclick={() => { toolSelectionMode = 'all'; formTools = []; }}
-									class="card-mode-btn"
-									class:card-mode-btn--active={toolSelectionMode === 'all'}
+									class="tool-access-btn flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl
+										{toolSelectionMode === 'all' ? 'selected' : ''}"
 								>
-									<Check />
+									<Check class="w-4 h-4" />
 									All Tools
 								</button>
 								<button
 									type="button"
 									onclick={() => toolSelectionMode = 'select'}
-									class="card-mode-btn"
-									class:card-mode-btn--active={toolSelectionMode === 'select'}
+									class="tool-access-btn flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl
+										{toolSelectionMode === 'select' ? 'selected' : ''}"
 								>
-									<Settings />
+									<Settings class="w-4 h-4" />
 									Custom
 								</button>
 							</div>
 
 							{#if toolSelectionMode === 'all'}
-								<p class="info-box">
+								<p class="info-box text-xs rounded-lg p-3">
 									The subagent will have access to all tools available in the profile.
 								</p>
 							{/if}
@@ -827,45 +752,46 @@
 
 						<!-- Tool Selection -->
 						{#if toolSelectionMode === 'select'}
-							<div class="card-form-section">
-								<div class="tool-actions">
-									<button type="button" onclick={selectAllTools} class="text-action">
+							<div class="space-y-4">
+								<div class="flex gap-3 text-xs">
+									<button type="button" onclick={selectAllTools} class="text-primary hover:underline font-medium">
 										Select all
 									</button>
-									<span class="separator">|</span>
-									<button type="button" onclick={clearAllTools} class="text-action">
+									<span class="text-muted-foreground">|</span>
+									<button type="button" onclick={clearAllTools} class="text-primary hover:underline font-medium">
 										Clear all
 									</button>
 								</div>
 
-								<div class="tool-categories">
+								<div class="space-y-4 max-h-64 overflow-y-auto pr-2">
 									{#each availableTools.categories as category}
 										{#if category.tools.length > 0}
-											<div class="tool-category">
+											<div class="space-y-2">
 												<button
 													type="button"
 													onclick={() => selectAllInCategory(category)}
-													class="category-header"
+													class="flex items-center gap-2 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
 												>
-													<span
-														class="category-checkbox"
-														class:category-checkbox--partial={getCategorySelectionState(category) === 'partial'}
-														class:category-checkbox--checked={getCategorySelectionState(category) !== 'none'}
-													>
+													<span class="category-checkbox w-4 h-4 rounded flex items-center justify-center
+														{getCategorySelectionState(category) === 'all'
+															? 'checked'
+															: getCategorySelectionState(category) === 'partial'
+																? 'partial'
+																: ''}">
 														{#if getCategorySelectionState(category) !== 'none'}
-															<Check class="w-3 h-3" />
+															<Check class="w-3 h-3 text-primary-foreground" />
 														{/if}
 													</span>
-													<span class="category-name">{category.name}</span>
+													<span class="uppercase tracking-wider">{category.name}</span>
 												</button>
 
-												<div class="card-tool-chips">
+												<div class="flex flex-wrap gap-2">
 													{#each category.tools as tool}
 														<button
 															type="button"
 															onclick={() => toggleTool(tool.name)}
-															class="card-tool-chip"
-															class:card-tool-chip--selected={formTools.includes(tool.name)}
+															class="tool-chip px-3 py-1.5 text-xs rounded-lg
+																{formTools.includes(tool.name) ? 'selected' : ''}"
 															title={tool.description}
 														>
 															{tool.name}
@@ -878,7 +804,7 @@
 								</div>
 
 								{#if formTools.length === 0}
-									<p class="warning-box">
+									<p class="warning-box text-xs rounded-lg p-3">
 										No tools selected. The subagent won't be able to perform any actions.
 									</p>
 								{/if}
@@ -889,12 +815,12 @@
 
 				<!-- Prompt Tab -->
 				{#if activeTab === 'prompt'}
-					<div class="editor-tab-content prompt-tab">
-						<div class="prompt-header">
-							<label for="agent-prompt" class="card-form-label">
-								System Prompt <span class="required">*</span>
+					<div class="h-full flex flex-col space-y-2">
+						<div class="flex items-center justify-between">
+							<label for="agent-prompt" class="block text-sm font-medium text-foreground">
+								System Prompt <span class="text-destructive">*</span>
 							</label>
-							<span class="char-count">
+							<span class="text-xs text-muted-foreground">
 								{formPrompt.length} characters
 							</span>
 						</div>
@@ -902,37 +828,39 @@
 							id="agent-prompt"
 							bind:value={formPrompt}
 							placeholder="You are a specialized agent that helps users with..."
-							class="card-form-input card-form-textarea prompt-textarea"
+							class="form-input flex-1 min-h-[200px] w-full px-4 py-3 rounded-xl font-mono text-sm resize-none"
 						></textarea>
-						<p class="card-form-hint">
+						<p class="text-xs text-muted-foreground">
 							Instructions that define the subagent's behavior and capabilities.
 						</p>
 					</div>
 				{/if}
-				</div>
 			</div>
 
 			<!-- Footer -->
-			<div class="card-footer">
-				<div class="card-footer-content">
-				<button
-					onclick={handleBack}
-					class="card-btn-secondary"
-				>
-					Cancel
-				</button>
-				<button
-					onclick={handleSave}
-					disabled={!isValid() || saving}
-					class="card-btn-primary"
-				>
-					{#if saving}
-						<div class="card-spinner card-spinner--small"></div>
-						Saving...
-					{:else}
-						{isEditMode ? 'Save Changes' : 'Create'}
-					{/if}
-				</button>
+			<div class="footer-section px-4 py-4">
+				<div class="flex gap-3">
+					<button
+						onclick={handleBack}
+						class="btn-secondary flex-1 px-4 py-2.5 rounded-xl"
+					>
+						Cancel
+					</button>
+					<button
+						onclick={handleSave}
+						disabled={!isValid() || saving}
+						class="btn-primary flex-1 px-4 py-2.5 rounded-xl disabled:opacity-50 flex items-center justify-center gap-2"
+					>
+						{#if saving}
+							<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+								<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+								<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+							</svg>
+							Saving...
+						{:else}
+							{isEditMode ? 'Save Changes' : 'Create'}
+						{/if}
+					</button>
 				</div>
 			</div>
 		{/if}
@@ -947,6 +875,7 @@
 	<BaseCard
 		{card}
 		{onClose}
+		{onMinimize}
 		{onMaximize}
 		{onFocus}
 		{onMove}
@@ -959,246 +888,333 @@
 {/if}
 
 <style>
-	.subagent-card {
-		display: flex;
-		flex-direction: column;
-		height: 100%;
+	.subagent-card-content {
 		background: var(--card);
+	}
+
+	.line-clamp-2 {
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		-webkit-box-orient: vertical;
 		overflow: hidden;
-		/* Set footer max-width to match centered-content */
-		--card-footer-max-width: 800px;
 	}
 
-	/* Maximized state - constrain width and center content */
-	.subagent-card.maximized {
-		--card-max-width: 900px;
-		--card-footer-max-width: var(--card-max-width);
+	/* ============================================
+	   IMPROVED THEMING
+	   ============================================ */
+
+	/* Card header styling */
+	.subagent-card-content :global(.header-section) {
+		background: linear-gradient(to right, color-mix(in oklch, var(--primary) 8%, transparent), transparent);
 	}
 
-	.subagent-card.maximized :global(.card-tabs),
-	.subagent-card.maximized :global(.card-header),
-	.subagent-card.maximized .card-search-wrapper,
-	.subagent-card.maximized :global(.card-footer) {
-		max-width: var(--card-max-width);
-		margin-left: auto;
-		margin-right: auto;
-		width: 100%;
+	/* Search input - dark mode friendly */
+	.subagent-card-content :global(.search-input) {
+		background: oklch(0.12 0.008 260);
+		border-color: var(--border);
+		color: var(--foreground);
+		transition: all 0.15s ease;
 	}
 
-	.subagent-card.maximized .centered-content {
-		max-width: var(--card-max-width);
+	.subagent-card-content :global(.search-input:hover) {
+		border-color: color-mix(in oklch, var(--border) 100%, var(--primary) 30%);
 	}
 
-	/* Centered content wrapper - prevents content from stretching too wide on large screens */
-	.centered-content {
-		width: 100%;
-		max-width: 800px;
-		margin: 0 auto;
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-4, 16px);
-	}
-
-	.hidden {
-		display: none;
-	}
-
-	.flex-1 {
-		flex: 1;
-	}
-
-	/* Search wrapper */
-	.card-search-wrapper {
-		padding: 0 var(--space-4) var(--space-3);
-		border-bottom: 1px solid var(--border-subtle);
-		background: linear-gradient(180deg, transparent 0%, color-mix(in oklch, var(--muted) 20%, transparent) 100%);
-	}
-
-	/* Loading state */
-	.loading-container {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		padding: var(--space-8);
-	}
-
-	/* Editor header */
-	.editor-header-left {
-		display: flex;
-		align-items: center;
-		gap: var(--space-3);
-	}
-
-	/* Tab label visibility */
-	.tab-label {
-		display: none;
-	}
-
-	@media (min-width: 400px) {
-		.tab-label {
-			display: inline;
-		}
-	}
-
-	/* Editor tab content */
-	.editor-tab-content {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-4);
-	}
-
-	.prompt-tab {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-	}
-
-	.prompt-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-	}
-
-	.char-count {
-		font-size: var(--text-xs);
-		color: var(--text-tertiary);
-	}
-
-	.prompt-textarea {
-		flex: 1;
-		min-height: 200px;
-		font-family: var(--card-font-mono);
-		font-size: var(--text-sm);
-	}
-
-	/* Section header */
-	.section-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		margin-bottom: var(--space-2);
-	}
-
-	.section-header .card-form-label {
-		margin-bottom: 0;
-	}
-
-	/* Info and warning boxes */
-	.info-box {
-		font-size: var(--text-xs);
-		padding: var(--space-3);
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md);
-		color: var(--text-primary);
-		margin-top: var(--space-3);
-	}
-
-	.warning-box {
-		font-size: var(--text-xs);
-		padding: var(--space-3);
-		background: color-mix(in oklch, var(--warning) 10%, transparent);
-		border: 1px solid color-mix(in oklch, var(--warning) 25%, transparent);
-		border-radius: var(--radius-md);
-		color: var(--warning);
-		margin-top: var(--space-3);
-	}
-
-	/* Tool actions */
-	.tool-actions {
-		display: flex;
-		gap: var(--space-3);
-		align-items: center;
-		margin-bottom: var(--space-3);
-	}
-
-	.text-action {
-		background: none;
-		border: none;
-		color: var(--primary);
-		font-size: var(--text-xs);
-		font-weight: 500;
-		cursor: pointer;
-		padding: 0;
-	}
-
-	.text-action:hover {
-		text-decoration: underline;
-	}
-
-	.separator {
-		color: var(--text-tertiary);
-	}
-
-	/* Tool categories */
-	.tool-categories {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-4);
-		max-height: 260px;
-		overflow-y: auto;
-		padding-right: var(--space-2);
-	}
-
-	.tool-category {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-2);
-	}
-
-	.category-header {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-		background: none;
-		border: none;
-		padding: 0;
-		cursor: pointer;
-		color: var(--text-secondary);
-		font-size: var(--text-xs);
-		font-weight: 500;
-		text-transform: uppercase;
-		letter-spacing: var(--tracking-caps);
-	}
-
-	.category-header:hover {
-		color: var(--text-primary);
-	}
-
-	.category-checkbox {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 16px;
-		height: 16px;
-		background: var(--surface-1);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-sm);
-		transition: all var(--transition-fast);
-	}
-
-	.category-checkbox--checked {
-		background: var(--primary);
+	.subagent-card-content :global(.search-input:focus) {
+		background: oklch(0.14 0.01 260);
 		border-color: var(--primary);
-		color: var(--primary-foreground);
+		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 20%, transparent);
 	}
 
-	.category-checkbox--partial {
-		background: color-mix(in oklch, var(--primary) 50%, var(--surface-1));
+	/* List item cards */
+	.subagent-card-content :global(.agent-list-item) {
+		background: color-mix(in oklch, var(--muted) 40%, transparent);
+		border: 1px solid var(--border);
+		box-shadow: var(--shadow-s);
+		transition: all 0.15s ease;
 	}
 
-	.category-name {
-		flex: 1;
-		text-align: left;
+	.subagent-card-content :global(.agent-list-item:hover) {
+		background: var(--accent);
+		box-shadow: var(--shadow-m);
+		transform: translateY(-1px);
+		border-color: color-mix(in oklch, var(--primary) 30%, var(--border));
 	}
 
-	/* Required indicator */
-	.required {
+	/* Agent icon container */
+	.subagent-card-content :global(.agent-icon) {
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		box-shadow: var(--shadow-s);
+	}
+
+	/* Model badges */
+	.subagent-card-content :global(.model-badge) {
+		font-weight: 600;
+		padding: 3px 8px;
+		border-radius: 6px;
+		box-shadow: var(--shadow-s);
+	}
+
+	.subagent-card-content :global(.model-badge-inherit) {
+		background: var(--muted);
+		color: var(--muted-foreground);
+		border: 1px solid var(--border);
+	}
+
+	.subagent-card-content :global(.model-badge-haiku) {
+		background: color-mix(in oklch, oklch(0.65 0.18 145) 15%, transparent);
+		color: oklch(0.65 0.18 145);
+		border: 1px solid color-mix(in oklch, oklch(0.65 0.18 145) 30%, transparent);
+	}
+
+	.subagent-card-content :global(.model-badge-sonnet) {
+		background: color-mix(in oklch, var(--info) 15%, transparent);
+		color: var(--info);
+		border: 1px solid color-mix(in oklch, var(--info) 30%, transparent);
+	}
+
+	.subagent-card-content :global(.model-badge-sonnet-1m) {
+		background: color-mix(in oklch, oklch(0.65 0.18 300) 15%, transparent);
+		color: oklch(0.7 0.18 300);
+		border: 1px solid color-mix(in oklch, oklch(0.65 0.18 300) 30%, transparent);
+	}
+
+	.subagent-card-content :global(.model-badge-opus) {
+		background: color-mix(in oklch, var(--warning) 15%, transparent);
+		color: var(--warning);
+		border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
+	}
+
+	/* Tool count badge */
+	.subagent-card-content :global(.tools-badge) {
+		background: var(--muted);
+		color: var(--foreground);
+		border: 1px solid var(--border);
+		font-weight: 500;
+		padding: 3px 8px;
+		border-radius: 6px;
+	}
+
+	/* Group assignment badge */
+	.subagent-card-content :global(.group-badge) {
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		color: var(--primary);
+		border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
+		font-weight: 500;
+		padding: 3px 8px;
+		border-radius: 6px;
+	}
+
+	/* Action buttons on list items */
+	.subagent-card-content :global(.action-btn) {
+		padding: 8px;
+		border-radius: 8px;
+		transition: all 0.15s ease;
+	}
+
+	.subagent-card-content :global(.action-btn:hover) {
+		background: var(--accent);
+	}
+
+	.subagent-card-content :global(.action-btn-delete:hover) {
+		background: color-mix(in oklch, var(--destructive) 15%, transparent);
 		color: var(--destructive);
 	}
 
-	/* Responsive footer */
-	.subagent-card :global(.card-footer) {
-		flex-wrap: wrap;
+	/* Error messages */
+	.subagent-card-content :global(.error-banner) {
+		background: color-mix(in oklch, var(--destructive) 12%, transparent);
+		border: 1px solid color-mix(in oklch, var(--destructive) 25%, transparent);
+		color: var(--destructive);
+		box-shadow: var(--shadow-s);
+	}
+
+	/* Delete confirmation banner */
+	.subagent-card-content :global(.delete-confirm-banner) {
+		background: color-mix(in oklch, var(--destructive) 10%, transparent);
+		border: 1px solid color-mix(in oklch, var(--destructive) 25%, transparent);
+		box-shadow: var(--shadow-m);
+	}
+
+	/* Primary button */
+	.subagent-card-content :global(.btn-primary) {
+		background: var(--primary);
+		color: var(--primary-foreground);
+		font-weight: 600;
+		box-shadow: var(--shadow-m);
+		transition: all 0.15s ease;
+	}
+
+	.subagent-card-content :global(.btn-primary:hover) {
+		filter: brightness(1.1);
+		box-shadow: var(--shadow-l);
+		transform: translateY(-1px);
+	}
+
+	/* Secondary button */
+	.subagent-card-content :global(.btn-secondary) {
+		background: var(--muted);
+		color: var(--foreground);
+		border: 1px solid var(--border);
+		box-shadow: var(--shadow-s);
+		transition: all 0.15s ease;
+	}
+
+	.subagent-card-content :global(.btn-secondary:hover) {
+		background: var(--accent);
+		box-shadow: var(--shadow-m);
+	}
+
+	/* Destructive button */
+	.subagent-card-content :global(.btn-destructive) {
+		background: var(--destructive);
+		color: var(--destructive-foreground);
+		font-weight: 600;
+		box-shadow: var(--shadow-m);
+		transition: all 0.15s ease;
+	}
+
+	.subagent-card-content :global(.btn-destructive:hover) {
+		filter: brightness(1.1);
+	}
+
+	/* Footer */
+	.subagent-card-content :global(.footer-section) {
+		background: color-mix(in oklch, var(--muted) 40%, transparent);
+		border-top: 1px solid var(--border);
+	}
+
+	/* Tab navigation */
+	.subagent-card-content :global(.tab-nav) {
+		background: color-mix(in oklch, var(--muted) 40%, transparent);
+	}
+
+	.subagent-card-content :global(.tab-button) {
+		transition: all 0.15s ease;
+	}
+
+	.subagent-card-content :global(.tab-button:hover) {
+		background: color-mix(in oklch, var(--accent) 50%, transparent);
+	}
+
+	.subagent-card-content :global(.tab-button.active) {
+		color: var(--primary);
+	}
+
+	/* Validation indicators */
+	.subagent-card-content :global(.validation-dot-valid) {
+		background: var(--success);
+		box-shadow: 0 0 4px var(--success);
+	}
+
+	.subagent-card-content :global(.validation-dot-invalid) {
+		background: var(--warning);
+		box-shadow: 0 0 4px var(--warning);
+	}
+
+	/* Form inputs - dark mode friendly */
+	.subagent-card-content :global(.form-input) {
+		background: oklch(0.12 0.008 260);
+		border: 1px solid var(--border);
+		color: var(--foreground);
+		transition: all 0.15s ease;
+	}
+
+	.subagent-card-content :global(.form-input::placeholder) {
+		color: var(--muted-foreground);
+	}
+
+	.subagent-card-content :global(.form-input:hover) {
+		border-color: color-mix(in oklch, var(--border) 100%, var(--primary) 30%);
+	}
+
+	.subagent-card-content :global(.form-input:focus) {
+		outline: none;
+		background: oklch(0.14 0.01 260);
+		border-color: var(--primary);
+		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 20%, transparent);
+	}
+
+	/* Model selection buttons */
+	.subagent-card-content :global(.model-option) {
+		background: color-mix(in oklch, var(--muted) 40%, transparent);
+		border: 1px solid var(--border);
+		transition: all 0.15s ease;
+		box-shadow: var(--shadow-s);
+	}
+
+	.subagent-card-content :global(.model-option:hover) {
+		border-color: color-mix(in oklch, var(--primary) 50%, var(--border));
+		background: var(--accent);
+	}
+
+	.subagent-card-content :global(.model-option.selected) {
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		border-color: var(--primary);
+		color: var(--primary);
+	}
+
+	/* Tool access buttons */
+	.subagent-card-content :global(.tool-access-btn) {
+		background: color-mix(in oklch, var(--muted) 40%, transparent);
+		border: 1px solid var(--border);
+		transition: all 0.15s ease;
+		box-shadow: var(--shadow-s);
+	}
+
+	.subagent-card-content :global(.tool-access-btn:hover) {
+		border-color: color-mix(in oklch, var(--primary) 50%, var(--border));
+	}
+
+	.subagent-card-content :global(.tool-access-btn.selected) {
+		background: var(--primary);
+		color: var(--primary-foreground);
+		border-color: var(--primary);
+	}
+
+	/* Tool selection chips */
+	.subagent-card-content :global(.tool-chip) {
+		background: color-mix(in oklch, var(--muted) 40%, transparent);
+		border: 1px solid var(--border);
+		color: var(--foreground);
+		transition: all 0.15s ease;
+	}
+
+	.subagent-card-content :global(.tool-chip:hover) {
+		border-color: color-mix(in oklch, var(--primary) 50%, var(--border));
+	}
+
+	.subagent-card-content :global(.tool-chip.selected) {
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		border-color: var(--primary);
+		color: var(--primary);
+	}
+
+	/* Info/warning boxes */
+	.subagent-card-content :global(.info-box) {
+		background: color-mix(in oklch, var(--muted) 40%, transparent);
+		border: 1px solid var(--border);
+		color: var(--foreground);
+	}
+
+	.subagent-card-content :global(.warning-box) {
+		background: color-mix(in oklch, var(--warning) 12%, transparent);
+		border: 1px solid color-mix(in oklch, var(--warning) 25%, transparent);
+		color: var(--warning);
+	}
+
+	/* Category checkbox styling */
+	.subagent-card-content :global(.category-checkbox) {
+		background: var(--muted);
+		border: 1px solid var(--border);
+		transition: all 0.15s ease;
+	}
+
+	.subagent-card-content :global(.category-checkbox.partial) {
+		background: color-mix(in oklch, var(--primary) 50%, var(--muted));
+	}
+
+	.subagent-card-content :global(.category-checkbox.checked) {
+		background: var(--primary);
 	}
 </style>

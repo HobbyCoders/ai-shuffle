@@ -102,23 +102,21 @@
 </script>
 
 <div class="deck-layout" class:mobile={isMobile} class:context-collapsed={localContextCollapsed}>
-	<!-- Activity Rail - Desktop: left side, Mobile: bottom -->
-	{#if !isMobile}
-		<aside class="rail-container">
-			<ActivityRail
-				{activeMode}
-				{badges}
-				{isMobile}
-				{onModeChange}
-				{onLogoClick}
-				{onSettingsClick}
-			/>
-		</aside>
-	{/if}
+	<!-- Floating Activity Pill - Desktop: top-left, Mobile: bottom-center -->
+	<div class="floating-pill-container" class:mobile={isMobile}>
+		<ActivityRail
+			{activeMode}
+			{badges}
+			{isMobile}
+			{onModeChange}
+			{onLogoClick}
+			{onSettingsClick}
+		/>
+	</div>
 
 	<!-- Main content area -->
 	<div class="main-area">
-		<!-- Workspace slot -->
+		<!-- Workspace slot - contains cards and the context panel overlay -->
 		<main class="workspace-container">
 			{#if children}
 				{@render children()}
@@ -126,6 +124,36 @@
 				<div class="workspace-placeholder">
 					<p>Workspace content goes here</p>
 				</div>
+			{/if}
+
+			<!-- Context Panel - Inside workspace, overlays cards -->
+			{#if !isMobile}
+				<aside class="context-container" class:collapsed={localContextCollapsed}>
+					<ContextPanel
+						collapsed={localContextCollapsed}
+						{sessions}
+						{recentSessions}
+						{agents}
+						{generations}
+						sessionInfo={currentSession}
+						onToggleCollapse={handleContextToggle}
+						{onSessionClick}
+						{onHistorySessionClick}
+						{onAgentClick}
+						{onGenerationClick}
+					/>
+				</aside>
+
+				<!-- Expand button - shown when context panel is collapsed -->
+				{#if localContextCollapsed}
+					<button
+						class="context-expand-toggle"
+						onclick={handleContextToggle}
+						title="Expand panel"
+					>
+						<ChevronLeft size={16} strokeWidth={2} />
+					</button>
+				{/if}
 			{/if}
 		</main>
 
@@ -142,75 +170,35 @@
 		{/if}
 	</div>
 
-	<!-- Context Panel - Hidden on mobile -->
-	{#if !isMobile}
-		<aside class="context-container">
-			<ContextPanel
-				collapsed={localContextCollapsed}
-				{sessions}
-				{recentSessions}
-				{agents}
-				{generations}
-				sessionInfo={currentSession}
-				onToggleCollapse={handleContextToggle}
-				{onSessionClick}
-				{onHistorySessionClick}
-				{onAgentClick}
-				{onGenerationClick}
-			/>
-		</aside>
-
-		<!-- Expand button - shown when context panel is collapsed -->
-		{#if localContextCollapsed}
-			<button
-				class="context-expand-toggle"
-				onclick={handleContextToggle}
-				title="Expand panel"
-			>
-				<ChevronLeft size={16} strokeWidth={2} />
-			</button>
-		{/if}
-	{/if}
-
-	<!-- Mobile Rail - Bottom of screen -->
-	{#if isMobile}
-		<footer class="mobile-rail-container">
-			<ActivityRail
-				{activeMode}
-				{badges}
-				{isMobile}
-				{onModeChange}
-				{onLogoClick}
-				{onSettingsClick}
-			/>
-		</footer>
-	{/if}
 </div>
 
 <style>
 	.deck-layout {
-		display: grid;
-		grid-template-columns: 64px 1fr 320px;
-		grid-template-rows: 1fr;
+		position: relative;
+		display: flex;
+		flex-direction: column;
 		width: 100%;
 		height: 100vh;
+		height: 100dvh; /* Dynamic viewport height for mobile browsers */
 		background: var(--background);
 		overflow: hidden;
 	}
 
-	.deck-layout.context-collapsed {
-		grid-template-columns: 64px 1fr 0;
+	/* Floating pill container - positions the activity pill */
+	.floating-pill-container {
+		position: fixed;
+		top: 50%;
+		left: 16px;
+		transform: translateY(-50%);
+		z-index: 9999;
+		pointer-events: auto;
 	}
 
-	.deck-layout.mobile {
-		grid-template-columns: 1fr;
-		grid-template-rows: 1fr 64px;
-	}
-
-	.rail-container {
-		grid-column: 1;
-		grid-row: 1;
-		z-index: 50;
+	.floating-pill-container.mobile {
+		top: auto;
+		bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+		left: 50%;
+		transform: translateX(-50%);
 	}
 
 	.main-area {
@@ -220,16 +208,7 @@
 		min-width: 0;
 		min-height: 0;
 		height: 100%;
-	}
-
-	.deck-layout:not(.mobile) .main-area {
-		grid-column: 2;
-		grid-row: 1;
-	}
-
-	.mobile .main-area {
-		grid-column: 1;
-		grid-row: 1;
+		flex: 1;
 	}
 
 	.workspace-container {
@@ -254,22 +233,23 @@
 		flex-shrink: 0;
 	}
 
+	/* Context panel - positioned inside workspace as an overlay */
+	/* z-index: 10000 ensures it's always above maximized cards which use dynamic z-index values */
 	.context-container {
-		grid-column: 3;
-		grid-row: 1;
-		z-index: 40;
-		transition: width 0.2s ease;
+		position: absolute;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		width: 320px;
+		z-index: 10000;
+		transition: transform 0.2s ease, opacity 0.2s ease;
+		pointer-events: auto;
 	}
 
-	.context-collapsed .context-container {
-		width: 0;
-		overflow: visible;
-	}
-
-	.mobile-rail-container {
-		grid-column: 1;
-		grid-row: 2;
-		z-index: 50;
+	.context-container.collapsed {
+		transform: translateX(100%);
+		opacity: 0;
+		pointer-events: none;
 	}
 
 	/* Ensure proper layering */
@@ -280,7 +260,7 @@
 
 	/* Expand toggle button - shown when context panel is collapsed */
 	.context-expand-toggle {
-		position: fixed;
+		position: absolute;
 		right: 0;
 		top: 50%;
 		transform: translateY(-50%);
@@ -296,7 +276,7 @@
 		align-items: center;
 		justify-content: center;
 		transition: all 0.15s ease;
-		z-index: 60;
+		z-index: 10001;
 	}
 
 	.context-expand-toggle:hover {

@@ -10,7 +10,7 @@
 	 * - Empty state with create buttons
 	 */
 
-	import { ChevronLeft, X, MessageSquare, Bot, Palette, Terminal, Plus, Settings, Layers } from 'lucide-svelte';
+	import { ChevronLeft, X, MessageSquare, Bot, Palette, Terminal, Plus, Layers, Settings, User, Users, FolderKanban } from 'lucide-svelte';
 	import type { DeckCard, CardType } from './types';
 	import type { Snippet } from 'svelte';
 
@@ -21,7 +21,6 @@
 		onCardChange: (index: number) => void;
 		onCloseCard: (id: string) => void;
 		onCreateCard: (type: CardType) => void;
-		onSettingsClick?: () => void;
 		onMinimizedClick?: () => void;
 		children?: Snippet<[DeckCard]>;
 	}
@@ -33,7 +32,6 @@
 		onCardChange,
 		onCloseCard,
 		onCreateCard,
-		onSettingsClick,
 		onMinimizedClick,
 		children
 	}: Props = $props();
@@ -56,6 +54,10 @@
 		agent: Bot,
 		canvas: Palette,
 		terminal: Terminal,
+		settings: Settings,
+		profile: User,
+		subagent: Users,
+		project: FolderKanban,
 	};
 
 	// Card type config for create buttons
@@ -72,9 +74,25 @@
 	// Swipe offset for animation
 	const swipeOffset = $derived(isSwiping && swipeDirection === 'horizontal' ? touchCurrentX - touchStartX : 0);
 
+	// Check if touch target is an interactive element (input, textarea, etc.)
+	function isInteractiveElement(target: EventTarget | null): boolean {
+		if (!(target instanceof HTMLElement)) return false;
+		const tagName = target.tagName.toLowerCase();
+		const interactiveTags = ['input', 'textarea', 'select', 'button', 'a'];
+		if (interactiveTags.includes(tagName)) return true;
+		// Check for contenteditable
+		if (target.isContentEditable) return true;
+		// Check if inside an interactive element
+		const interactive = target.closest('input, textarea, select, button, a, [contenteditable="true"]');
+		return interactive !== null;
+	}
+
 	// Touch handlers
 	function handleTouchStart(e: TouchEvent) {
 		if (cards.length <= 1) return;
+
+		// Don't initiate swipe if touching an interactive element
+		if (isInteractiveElement(e.target)) return;
 
 		touchStartX = e.touches[0].clientX;
 		touchStartY = e.touches[0].clientY;
@@ -132,6 +150,10 @@
 		}
 
 		if (newIndex !== activeCardIndex) {
+			// Blur any focused element before switching to prevent focus jumping issues
+			if (document.activeElement instanceof HTMLElement) {
+				document.activeElement.blur();
+			}
 			onCardChange(newIndex);
 		}
 
@@ -150,6 +172,10 @@
 	// Navigate to specific card via dot indicator
 	function navigateToCard(index: number) {
 		if (index !== activeCardIndex && index >= 0 && index < cards.length) {
+			// Blur any focused element before switching to prevent focus jumping issues
+			if (document.activeElement instanceof HTMLElement) {
+				document.activeElement.blur();
+			}
 			onCardChange(index);
 		}
 	}
@@ -171,28 +197,6 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="mobile-workspace">
-	<!-- Mobile Toolbar - always visible at top -->
-	<div class="mobile-toolbar">
-		<button
-			class="toolbar-btn"
-			onclick={() => onMinimizedClick?.()}
-			title="Minimized cards"
-			disabled={minimizedCount === 0}
-		>
-			<Layers size={20} />
-			{#if minimizedCount > 0}
-				<span class="badge">{minimizedCount}</span>
-			{/if}
-		</button>
-		<button
-			class="toolbar-btn"
-			onclick={() => onSettingsClick?.()}
-			title="Settings"
-		>
-			<Settings size={20} />
-		</button>
-	</div>
-
 	{#if cards.length === 0}
 		<!-- Empty State -->
 		<div class="empty-state">
@@ -235,13 +239,26 @@
 				{/if}
 			</div>
 
-			<button
-				class="header-btn close"
-				onclick={handleClose}
-				aria-label="Close card"
-			>
-				<X size={20} />
-			</button>
+			<div class="header-actions">
+				<button
+					class="header-btn small"
+					onclick={() => onMinimizedClick?.()}
+					title="Minimized cards"
+					disabled={minimizedCount === 0}
+				>
+					<Layers size={18} />
+					{#if minimizedCount > 0}
+						<span class="badge">{minimizedCount}</span>
+					{/if}
+				</button>
+				<button
+					class="header-btn close"
+					onclick={handleClose}
+					aria-label="Close card"
+				>
+					<X size={20} />
+				</button>
+			</div>
 		</header>
 
 		<!-- Card Container with Swipe -->
@@ -257,7 +274,10 @@
 				style:transform="translateX({swipeOffset}px)"
 			>
 				{#if activeCard && children}
-					{@render children(activeCard)}
+					<!-- Use optional chaining to prevent undefined.id error during card removal -->
+					{#key activeCard?.id ?? 'none'}
+						{@render children(activeCard)}
+					{/key}
 				{/if}
 			</div>
 		</div>
@@ -286,60 +306,6 @@
 		flex-direction: column;
 		height: 100%;
 		background: hsl(var(--background));
-	}
-
-	/* Mobile Toolbar */
-	.mobile-toolbar {
-		display: flex;
-		align-items: center;
-		justify-content: flex-end;
-		gap: 8px;
-		padding: 8px 12px;
-		background: hsl(var(--card));
-		border-bottom: 1px solid hsl(var(--border));
-		flex-shrink: 0;
-	}
-
-	.toolbar-btn {
-		position: relative;
-		width: 40px;
-		height: 40px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: transparent;
-		border: none;
-		border-radius: 8px;
-		color: hsl(var(--muted-foreground));
-		cursor: pointer;
-		transition: all 0.15s ease;
-	}
-
-	.toolbar-btn:hover {
-		background: hsl(var(--accent));
-		color: hsl(var(--foreground));
-	}
-
-	.toolbar-btn:disabled {
-		opacity: 0.4;
-		cursor: default;
-	}
-
-	.toolbar-btn .badge {
-		position: absolute;
-		top: 4px;
-		right: 4px;
-		min-width: 16px;
-		height: 16px;
-		padding: 0 4px;
-		background: hsl(var(--primary));
-		border-radius: 8px;
-		font-size: 0.625rem;
-		font-weight: 600;
-		color: hsl(var(--primary-foreground));
-		display: flex;
-		align-items: center;
-		justify-content: center;
 	}
 
 	/* Header */
@@ -382,6 +348,35 @@
 		color: hsl(var(--destructive));
 	}
 
+	.header-btn.small {
+		width: 36px;
+		height: 36px;
+		position: relative;
+	}
+
+	.header-actions {
+		display: flex;
+		align-items: center;
+		gap: 2px;
+	}
+
+	.header-actions .badge {
+		position: absolute;
+		top: 2px;
+		right: 2px;
+		min-width: 14px;
+		height: 14px;
+		padding: 0 3px;
+		background: hsl(var(--primary));
+		border-radius: 7px;
+		font-size: 0.5625rem;
+		font-weight: 600;
+		color: hsl(var(--primary-foreground));
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+
 	.header-center {
 		display: flex;
 		align-items: center;
@@ -405,7 +400,8 @@
 	.card-container {
 		flex: 1;
 		overflow: hidden;
-		touch-action: pan-y;
+		/* Allow normal touch behavior for inputs - swipe is controlled by JS */
+		touch-action: auto;
 	}
 
 	.card-wrapper {

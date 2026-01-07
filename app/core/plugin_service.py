@@ -1,14 +1,10 @@
 """
 Plugin Service - Core business logic for Claude Code plugin management.
 
-This service reads and writes to Claude's native plugin configuration files.
-
-Plugin Scopes:
-- USER: ~/.claude/plugins/ (user-global plugins)
-- LOCAL: <project>/.claude/plugins/ (project-local, gitignored)
-- PROJECT: <project>/plugins/ (project plugins, committed to git)
-
-Docker mode uses /home/appuser/.claude/ for user scope.
+This service reads and writes to Claude's native plugin configuration files:
+- /home/appuser/.claude/plugins/known_marketplaces.json
+- /home/appuser/.claude/plugins/installed_plugins.json
+- /home/appuser/.claude/settings.json
 
 It provides a Python API for managing marketplaces, installing/uninstalling plugins,
 and enabling/disabling plugins.
@@ -24,15 +20,12 @@ from typing import List, Optional, Dict, Any
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 
-from app.core.platform import is_docker_mode, get_claude_credentials_dir
-
 logger = logging.getLogger(__name__)
 
 
 class PluginScope(str, Enum):
-    USER = "user"       # ~/.claude/plugins/
-    LOCAL = "local"     # <project>/.claude/plugins/
-    PROJECT = "project" # <project>/plugins/
+    USER = "user"
+    PROJECT = "project"
 
 
 @dataclass
@@ -138,98 +131,31 @@ class AvailablePlugin:
         return asdict(self)
 
 
-def _get_claude_dir() -> Path:
-    """
-    Get the Claude configuration directory based on deployment mode.
-
-    Returns:
-        - Docker: /home/appuser/.claude
-        - Local (Windows/macOS/Linux): ~/.claude
-    """
-    if is_docker_mode():
-        return Path("/home/appuser/.claude")
-    return get_claude_credentials_dir()
-
-
 class PluginService:
     """
     Service for managing Claude Code plugins.
 
     Reads and writes to Claude's native configuration files to maintain
     compatibility with the Claude CLI.
-
-    Plugin Scopes:
-        - USER: ~/.claude/plugins/ - User-global plugins
-        - LOCAL: <project>/.claude/plugins/ - Project-local (gitignored)
-        - PROJECT: <project>/plugins/ - Project plugins (committed)
     """
 
-    def __init__(self, project_dir: Optional[Path] = None):
-        """
-        Initialize the plugin service.
+    CLAUDE_DIR = Path("/home/appuser/.claude")
+    PLUGINS_DIR = CLAUDE_DIR / "plugins"
+    SETTINGS_FILE = CLAUDE_DIR / "settings.json"
+    MARKETPLACES_FILE = PLUGINS_DIR / "known_marketplaces.json"
+    INSTALLED_FILE = PLUGINS_DIR / "installed_plugins.json"
+    CACHE_DIR = PLUGINS_DIR / "cache"
+    MARKETPLACES_DIR = PLUGINS_DIR / "marketplaces"
 
-        Args:
-            project_dir: Optional project directory for LOCAL/PROJECT scope plugins.
-                        If not provided, only USER scope is available.
-        """
-        # User scope paths (always available)
-        self.CLAUDE_DIR = _get_claude_dir()
-        self.PLUGINS_DIR = self.CLAUDE_DIR / "plugins"
-        self.SETTINGS_FILE = self.CLAUDE_DIR / "settings.json"
-        self.MARKETPLACES_FILE = self.PLUGINS_DIR / "known_marketplaces.json"
-        self.INSTALLED_FILE = self.PLUGINS_DIR / "installed_plugins.json"
-        self.CACHE_DIR = self.PLUGINS_DIR / "cache"
-        self.MARKETPLACES_DIR = self.PLUGINS_DIR / "marketplaces"
-
-        # Project scope paths (optional)
-        self.project_dir = project_dir
-        if project_dir:
-            self.LOCAL_PLUGINS_DIR = project_dir / ".claude" / "plugins"
-            self.PROJECT_PLUGINS_DIR = project_dir / "plugins"
-        else:
-            self.LOCAL_PLUGINS_DIR = None
-            self.PROJECT_PLUGINS_DIR = None
-
+    def __init__(self):
+        """Initialize the plugin service"""
         self._ensure_directories()
 
     def _ensure_directories(self):
-        """Ensure required directories exist for USER scope"""
+        """Ensure required directories exist"""
         self.PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
         self.CACHE_DIR.mkdir(parents=True, exist_ok=True)
         self.MARKETPLACES_DIR.mkdir(parents=True, exist_ok=True)
-
-    def get_plugins_dir_for_scope(self, scope: PluginScope) -> Optional[Path]:
-        """
-        Get the plugins directory for a given scope.
-
-        Args:
-            scope: The plugin scope (USER, LOCAL, or PROJECT)
-
-        Returns:
-            Path to the plugins directory, or None if scope is not available
-        """
-        if scope == PluginScope.USER:
-            return self.PLUGINS_DIR
-        elif scope == PluginScope.LOCAL:
-            return self.LOCAL_PLUGINS_DIR
-        elif scope == PluginScope.PROJECT:
-            return self.PROJECT_PLUGINS_DIR
-        return None
-
-    def ensure_scope_directory(self, scope: PluginScope) -> Optional[Path]:
-        """
-        Ensure the plugins directory exists for a given scope.
-
-        Args:
-            scope: The plugin scope
-
-        Returns:
-            Path to the created/existing directory, or None if scope unavailable
-        """
-        plugins_dir = self.get_plugins_dir_for_scope(scope)
-        if plugins_dir:
-            plugins_dir.mkdir(parents=True, exist_ok=True)
-        return plugins_dir
 
     def _read_json_file(self, path: Path, default: Any = None) -> Any:
         """Safely read a JSON file"""
@@ -466,7 +392,7 @@ class PluginService:
                 readme_path = plugin_dir / "README.md"
                 if readme_path.exists():
                     try:
-                        content = readme_path.read_text(encoding='utf-8')
+                        content = readme_path.read_text()
                         # Extract first paragraph as description
                         lines = content.strip().split("\n")
                         for line in lines:
@@ -474,7 +400,7 @@ class PluginService:
                             if line and not line.startswith("#"):
                                 description = line[:200]
                                 break
-                    except (IOError, UnicodeDecodeError):
+                    except IOError:
                         pass
 
                 # Check what components the plugin has
@@ -510,21 +436,13 @@ class PluginService:
         enabled_plugins = settings.get("enabledPlugins", {})
 
         plugins = []
-        file_version = installed_data.get("version", 1)
 
-        for plugin_id, installation_data in installed_data.get("plugins", {}).items():
-            if not installation_data:
+        for plugin_id, installations in installed_data.get("plugins", {}).items():
+            if not installations:
                 continue
 
-            # Handle both version 1 (single object) and version 2 (array) formats
-            if file_version == 1 or isinstance(installation_data, dict):
-                # Version 1: plugins are single objects
-                install = installation_data
-            else:
-                # Version 2: plugins are arrays
-                install = installation_data[0] if installation_data else None
-                if not install:
-                    continue
+            # Use the first (usually only) installation
+            install = installations[0]
             parts = plugin_id.rsplit("@", 1)
             name = parts[0]
             marketplace = parts[1] if len(parts) > 1 else "local"
@@ -553,14 +471,14 @@ class PluginService:
             readme_path = install_path / "README.md"
             if readme_path.exists():
                 try:
-                    content = readme_path.read_text(encoding='utf-8')
+                    content = readme_path.read_text()
                     lines = content.strip().split("\n")
                     for line in lines:
                         line = line.strip()
                         if line and not line.startswith("#"):
                             description = line[:200]
                             break
-                except (IOError, UnicodeDecodeError):
+                except IOError:
                     pass
 
             plugins.append(PluginInfo(
@@ -586,19 +504,12 @@ class PluginService:
         installed_data = self._read_json_file(self.INSTALLED_FILE, {"version": 2, "plugins": {}})
         settings = self._read_json_file(self.SETTINGS_FILE, {})
         enabled_plugins = settings.get("enabledPlugins", {})
-        file_version = installed_data.get("version", 1)
 
-        installation_data = installed_data.get("plugins", {}).get(plugin_id)
-        if not installation_data:
+        installations = installed_data.get("plugins", {}).get(plugin_id, [])
+        if not installations:
             return None
 
-        # Handle both version 1 (single object) and version 2 (array) formats
-        if file_version == 1 or isinstance(installation_data, dict):
-            install = installation_data
-        else:
-            install = installation_data[0] if installation_data else None
-            if not install:
-                return None
+        install = installations[0]
         parts = plugin_id.rsplit("@", 1)
         name = parts[0]
         marketplace = parts[1] if len(parts) > 1 else "local"
@@ -647,8 +558,8 @@ class PluginService:
         readme_path = install_path / "README.md"
         if readme_path.exists():
             try:
-                readme = readme_path.read_text(encoding='utf-8')
-            except (IOError, UnicodeDecodeError):
+                readme = readme_path.read_text()
+            except IOError:
                 pass
 
         # Extract description from README
@@ -789,18 +700,11 @@ class PluginService:
             True if successful
         """
         installed = self._read_json_file(self.INSTALLED_FILE, {"version": 2, "plugins": {}})
-        file_version = installed.get("version", 1)
 
         if plugin_id not in installed.get("plugins", {}):
             raise ValueError(f"Plugin not installed: {plugin_id}")
 
-        installation_data = installed["plugins"][plugin_id]
-
-        # Handle both version 1 (single object) and version 2 (array) formats
-        if file_version == 1 or isinstance(installation_data, dict):
-            installations = [installation_data]
-        else:
-            installations = installation_data if installation_data else []
+        installations = installed["plugins"][plugin_id]
 
         # Remove from filesystem
         for install in installations:
@@ -873,7 +777,7 @@ class PluginService:
 
             for agent_file in agents_dir.glob("**/*.md"):
                 try:
-                    content = agent_file.read_text(encoding='utf-8')
+                    content = agent_file.read_text()
 
                     # Parse YAML frontmatter
                     agent_data = self._parse_agent_frontmatter(content)
@@ -935,143 +839,13 @@ class PluginService:
         return result
 
 
-# Global service instance cache (keyed by project_dir)
-_plugin_services: Dict[Optional[str], PluginService] = {}
+# Global service instance
+_plugin_service: Optional[PluginService] = None
 
 
-def get_plugin_service(project_dir: Optional[Path] = None) -> PluginService:
-    """
-    Get a plugin service instance, optionally scoped to a project directory.
-
-    Args:
-        project_dir: Optional project directory for LOCAL/PROJECT scope support.
-                    If None, only USER scope plugins are accessible.
-
-    Returns:
-        PluginService instance (cached per project_dir)
-    """
-    cache_key = str(project_dir) if project_dir else None
-
-    if cache_key not in _plugin_services:
-        _plugin_services[cache_key] = PluginService(project_dir=project_dir)
-
-    return _plugin_services[cache_key]
-
-
-def clear_plugin_service_cache():
-    """Clear the plugin service cache (useful for testing)"""
-    global _plugin_services
-    _plugin_services = {}
-
-
-def get_all_plugin_hooks() -> List[Dict[str, Any]]:
-    """
-    Get all hooks contributed by installed plugins.
-
-    Returns a list of hook info dicts with:
-    - plugin_id: Plugin ID
-    - plugin_name: Plugin display name
-    - event: Hook event type
-    - hook_type: 'prompt' or 'command'
-    - description: Optional description
-    - tool_matcher: Optional tool name pattern
-    """
-    result = []
-    service = get_plugin_service()
-
-    for plugin in service.get_installed_plugins():
-        plugin_dir = Path(plugin.install_path) if plugin.install_path else None
-        if not plugin_dir:
-            continue
-
-        # Check for hooks directory
-        hooks_dir = plugin_dir / "hooks"
-        if hooks_dir.exists() and hooks_dir.is_dir():
-            for hook_file in hooks_dir.glob("*.md"):
-                # Parse hook file to extract metadata
-                hook_info = _parse_plugin_hook_file(hook_file, plugin)
-                if hook_info:
-                    result.append(hook_info)
-
-        # Also check plugin.json for hooks section
-        plugin_json = plugin_dir / "plugin.json"
-        if plugin_json.exists():
-            try:
-                import json
-                with open(plugin_json) as f:
-                    data = json.load(f)
-
-                hooks = data.get("hooks", [])
-                for hook in hooks:
-                    result.append({
-                        "plugin_id": plugin.id,
-                        "plugin_name": plugin.name,
-                        "event": hook.get("event", "Unknown"),
-                        "hook_type": hook.get("type", "prompt"),
-                        "description": hook.get("description"),
-                        "tool_matcher": hook.get("toolMatcher"),
-                    })
-            except Exception:
-                pass
-
-    return result
-
-
-def _parse_plugin_hook_file(hook_file: Path, plugin: "PluginInfo") -> Optional[Dict[str, Any]]:
-    """
-    Parse a plugin hook markdown file and extract metadata.
-
-    Hook files use YAML frontmatter like:
-    ---
-    event: PreToolUse
-    toolMatcher: Bash|Edit
-    description: Validates tool usage
-    ---
-    Hook prompt content...
-    """
-    try:
-        content = hook_file.read_text()
-
-        # Check for frontmatter
-        if not content.startswith("---"):
-            return None
-
-        # Find end of frontmatter
-        end_marker = content.find("---", 3)
-        if end_marker == -1:
-            return None
-
-        frontmatter = content[3:end_marker].strip()
-
-        # Parse frontmatter
-        event = None
-        tool_matcher = None
-        description = None
-
-        for line in frontmatter.split("\n"):
-            if ":" in line:
-                key, value = line.split(":", 1)
-                key = key.strip().lower()
-                value = value.strip().strip('"').strip("'")
-
-                if key == "event":
-                    event = value
-                elif key in ("toolmatcher", "tool_matcher"):
-                    tool_matcher = value
-                elif key == "description":
-                    description = value
-
-        if not event:
-            return None
-
-        return {
-            "plugin_id": plugin.id,
-            "plugin_name": plugin.name,
-            "event": event,
-            "hook_type": "prompt",
-            "description": description,
-            "tool_matcher": tool_matcher,
-        }
-
-    except Exception:
-        return None
+def get_plugin_service() -> PluginService:
+    """Get the global plugin service instance"""
+    global _plugin_service
+    if _plugin_service is None:
+        _plugin_service = PluginService()
+    return _plugin_service

@@ -185,8 +185,8 @@
 	loadDocuments();
 </script>
 
-<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-	<div class="bg-background border border-border rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col">
+<div class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+	<div class="bg-background border border-border rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] max-sm:max-h-full flex flex-col">
 		<!-- Header -->
 		<div class="flex items-center justify-between px-5 py-4 border-b border-border">
 			<div>
@@ -413,8 +413,8 @@
 
 <!-- Preview modal -->
 {#if previewDocument}
-	<div class="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm">
-		<div class="bg-background border border-border rounded-xl shadow-2xl w-full max-w-lg max-h-[70vh] flex flex-col">
+	<div class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm">
+		<div class="bg-background border border-border rounded-xl shadow-2xl w-full max-w-lg max-h-[70vh] max-sm:max-h-full flex flex-col">
 			<div class="flex items-center justify-between px-4 py-3 border-b border-border">
 				<h3 class="font-medium text-foreground">{previewDocument.filename}</h3>
 				<button

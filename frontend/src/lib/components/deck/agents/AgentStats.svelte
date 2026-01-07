@@ -7,68 +7,94 @@
 	 * - Stats cards: Total agents, Success rate, Avg time, Running
 	 * - 7-day activity bar chart
 	 */
-	import { Rocket, TrendingUp, Clock, Play } from 'lucide-svelte';
+	import { onMount } from 'svelte';
+	import { Rocket, TrendingUp, Clock, Play, Loader2, AlertCircle } from 'lucide-svelte';
+	import { agents, agentStats, runningCount } from '$lib/stores/agents';
+	import type { AgentStats } from '$lib/stores/agents';
 
 	// State
 	let timeFilter = $state<'today' | 'week' | 'month' | 'all'>('week');
+	let loading = $state(true);
+	let error = $state<string | null>(null);
 
-	// Mock stats data
-	const stats = {
-		today: {
-			total: 5,
-			success: 4,
-			failed: 1,
-			avgTime: 1800000, // 30 minutes
-			running: 2
-		},
-		week: {
-			total: 28,
-			success: 24,
-			failed: 4,
-			avgTime: 2400000, // 40 minutes
-			running: 2
-		},
-		month: {
-			total: 95,
-			success: 82,
-			failed: 13,
-			avgTime: 2700000, // 45 minutes
-			running: 2
-		},
-		all: {
-			total: 312,
-			success: 275,
-			failed: 37,
-			avgTime: 2520000, // 42 minutes
-			running: 2
-		}
+	// Derived from store
+	const stats = $derived($agentStats);
+	const running = $derived($runningCount);
+
+	// Time filter to days mapping
+	const filterToDays: Record<typeof timeFilter, number> = {
+		today: 1,
+		week: 7,
+		month: 30,
+		all: 365
 	};
 
-	// 7-day activity data
-	const activityData = [
-		{ day: 'Mon', count: 8, success: 7, failed: 1 },
-		{ day: 'Tue', count: 5, success: 5, failed: 0 },
-		{ day: 'Wed', count: 3, success: 2, failed: 1 },
-		{ day: 'Thu', count: 6, success: 5, failed: 1 },
-		{ day: 'Fri', count: 4, success: 4, failed: 0 },
-		{ day: 'Sat', count: 1, success: 1, failed: 0 },
-		{ day: 'Sun', count: 1, success: 0, failed: 1 }
-	];
+	// Fetch stats on mount and when filter changes
+	onMount(() => {
+		fetchStats();
+	});
 
-	const maxCount = Math.max(...activityData.map(d => d.count));
+	$effect(() => {
+		// Re-fetch when timeFilter changes
+		timeFilter;
+		fetchStats();
+	});
 
-	const currentStats = $derived(stats[timeFilter]);
-	const successRate = $derived(currentStats.total > 0 ? Math.round((currentStats.success / currentStats.total) * 100) : 0);
+	async function fetchStats() {
+		loading = true;
+		error = null;
+		try {
+			await agents.fetchStats(filterToDays[timeFilter]);
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to load stats';
+		} finally {
+			loading = false;
+		}
+	}
+
+	// Calculate success rate
+	const successRate = $derived(() => {
+		if (!stats) return 0;
+		return stats.total > 0 ? Math.round((stats.completed / stats.total) * 100) : 0;
+	});
+
+	// Calculate activity data from byDay
+	const activityData = $derived(() => {
+		if (!stats?.byDay) return [];
+
+		// Get the last 7 days
+		const days: { day: string; count: number; label: string }[] = [];
+		const dayLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+		for (let i = 6; i >= 0; i--) {
+			const date = new Date();
+			date.setDate(date.getDate() - i);
+			const dateKey = date.toISOString().split('T')[0];
+			const dayOfWeek = date.getDay();
+
+			days.push({
+				day: dayLabels[dayOfWeek],
+				count: stats.byDay[dateKey] ?? 0,
+				label: dateKey
+			});
+		}
+
+		return days;
+	});
+
+	const maxCount = $derived(() => {
+		const data = activityData();
+		return data.length > 0 ? Math.max(...data.map(d => d.count), 1) : 1;
+	});
 
 	// Format duration
-	function formatDuration(ms: number): string {
-		const minutes = Math.floor(ms / 60000);
+	function formatDuration(minutes: number): string {
 		if (minutes >= 60) {
 			const hours = Math.floor(minutes / 60);
-			const mins = minutes % 60;
+			const mins = Math.round(minutes % 60);
 			return `${hours}h ${mins}m`;
 		}
-		return `${minutes}m`;
+		return `${Math.round(minutes)}m`;
 	}
 
 	// Time filter options
@@ -93,130 +119,141 @@
 		{/each}
 	</div>
 
-	<!-- Stats cards -->
-	<div class="grid grid-cols-2 gap-3">
-		<!-- Total agents -->
-		<div class="p-4 bg-card border border-border rounded-xl">
-			<div class="flex items-center gap-2 text-muted-foreground mb-2">
-				<Rocket class="w-4 h-4" />
-				<span class="text-xs font-medium">Total Agents</span>
-			</div>
-			<p class="text-2xl font-bold text-foreground">{currentStats.total}</p>
-			<p class="text-xs text-muted-foreground mt-1">
-				{currentStats.success} completed, {currentStats.failed} failed
-			</p>
+	{#if loading}
+		<div class="flex items-center justify-center py-12">
+			<Loader2 class="w-8 h-8 text-primary animate-spin" />
 		</div>
-
-		<!-- Success rate -->
-		<div class="p-4 bg-card border border-border rounded-xl">
-			<div class="flex items-center gap-2 text-muted-foreground mb-2">
-				<TrendingUp class="w-4 h-4" />
-				<span class="text-xs font-medium">Success Rate</span>
-			</div>
-			<p class="text-2xl font-bold {successRate >= 80 ? 'text-green-500' : successRate >= 60 ? 'text-yellow-500' : 'text-red-500'}">
-				{successRate}%
-			</p>
-			<div class="h-1.5 bg-muted rounded-full overflow-hidden mt-2">
-				<div
-					class="h-full rounded-full transition-all {successRate >= 80 ? 'bg-green-500' : successRate >= 60 ? 'bg-yellow-500' : 'bg-red-500'}"
-					style:width="{successRate}%"
-				></div>
-			</div>
+	{:else if error}
+		<div class="flex flex-col items-center justify-center py-12 text-center">
+			<AlertCircle class="w-8 h-8 text-red-500 mb-2" />
+			<p class="text-sm text-red-500">{error}</p>
+			<button
+				onclick={fetchStats}
+				class="mt-2 text-sm text-primary hover:underline"
+			>
+				Retry
+			</button>
 		</div>
-
-		<!-- Average time -->
-		<div class="p-4 bg-card border border-border rounded-xl">
-			<div class="flex items-center gap-2 text-muted-foreground mb-2">
-				<Clock class="w-4 h-4" />
-				<span class="text-xs font-medium">Avg. Completion</span>
-			</div>
-			<p class="text-2xl font-bold text-foreground">{formatDuration(currentStats.avgTime)}</p>
-			<p class="text-xs text-muted-foreground mt-1">
-				Per agent task
-			</p>
-		</div>
-
-		<!-- Currently running -->
-		<div class="p-4 bg-card border border-border rounded-xl">
-			<div class="flex items-center gap-2 text-muted-foreground mb-2">
-				<Play class="w-4 h-4" />
-				<span class="text-xs font-medium">Running Now</span>
-			</div>
-			<p class="text-2xl font-bold text-blue-500">{currentStats.running}</p>
-			<p class="text-xs text-muted-foreground mt-1">
-				Active agents
-			</p>
-		</div>
-	</div>
-
-	<!-- 7-day activity chart -->
-	<div class="p-4 bg-card border border-border rounded-xl">
-		<h3 class="text-sm font-medium text-foreground mb-4">7-Day Activity</h3>
-
-		<div class="flex items-end justify-between gap-2 h-32">
-			{#each activityData as day}
-				{@const height = maxCount > 0 ? (day.count / maxCount) * 100 : 0}
-				{@const successHeight = day.count > 0 ? (day.success / day.count) * 100 : 0}
-
-				<div class="flex-1 flex flex-col items-center gap-2">
-					<!-- Bar -->
-					<div class="w-full relative flex flex-col-reverse" style:height="100%">
-						<div
-							class="w-full bg-muted rounded-t relative overflow-hidden transition-all"
-							style:height="{height}%"
-						>
-							<!-- Success portion -->
-							<div
-								class="absolute bottom-0 left-0 right-0 bg-green-500/80"
-								style:height="{successHeight}%"
-							></div>
-							<!-- Failed portion -->
-							<div
-								class="absolute top-0 left-0 right-0 bg-red-500/80"
-								style:height="{100 - successHeight}%"
-							></div>
-						</div>
-					</div>
-
-					<!-- Label -->
-					<span class="text-xs text-muted-foreground">{day.day}</span>
+	{:else if stats}
+		<!-- Stats cards -->
+		<div class="grid grid-cols-2 gap-3">
+			<!-- Total agents -->
+			<div class="p-4 bg-card border border-border rounded-xl">
+				<div class="flex items-center gap-2 text-muted-foreground mb-2">
+					<Rocket class="w-4 h-4" />
+					<span class="text-xs font-medium">Total Agents</span>
 				</div>
-			{/each}
+				<p class="text-2xl font-bold text-foreground">{stats.total}</p>
+				<p class="text-xs text-muted-foreground mt-1">
+					{stats.completed} completed, {stats.failed} failed
+				</p>
+			</div>
+
+			<!-- Success rate -->
+			<div class="p-4 bg-card border border-border rounded-xl">
+				<div class="flex items-center gap-2 text-muted-foreground mb-2">
+					<TrendingUp class="w-4 h-4" />
+					<span class="text-xs font-medium">Success Rate</span>
+				</div>
+				<p class="text-2xl font-bold {successRate() >= 80 ? 'text-green-500' : successRate() >= 60 ? 'text-yellow-500' : 'text-red-500'}">
+					{successRate()}%
+				</p>
+				<div class="h-1.5 bg-muted rounded-full overflow-hidden mt-2">
+					<div
+						class="h-full rounded-full transition-all {successRate() >= 80 ? 'bg-green-500' : successRate() >= 60 ? 'bg-yellow-500' : 'bg-red-500'}"
+						style:width="{successRate()}%"
+					></div>
+				</div>
+			</div>
+
+			<!-- Average time -->
+			<div class="p-4 bg-card border border-border rounded-xl">
+				<div class="flex items-center gap-2 text-muted-foreground mb-2">
+					<Clock class="w-4 h-4" />
+					<span class="text-xs font-medium">Avg. Completion</span>
+				</div>
+				<p class="text-2xl font-bold text-foreground">{formatDuration(stats.avgDurationMinutes)}</p>
+				<p class="text-xs text-muted-foreground mt-1">
+					Per agent task
+				</p>
+			</div>
+
+			<!-- Currently running -->
+			<div class="p-4 bg-card border border-border rounded-xl">
+				<div class="flex items-center gap-2 text-muted-foreground mb-2">
+					<Play class="w-4 h-4" />
+					<span class="text-xs font-medium">Running Now</span>
+				</div>
+				<p class="text-2xl font-bold text-blue-500">{running}</p>
+				<p class="text-xs text-muted-foreground mt-1">
+					{stats.queued} queued
+				</p>
+			</div>
 		</div>
 
-		<!-- Legend -->
-		<div class="flex items-center justify-center gap-4 mt-4 text-xs">
-			<div class="flex items-center gap-1.5">
-				<div class="w-3 h-3 rounded bg-green-500/80"></div>
-				<span class="text-muted-foreground">Success</span>
-			</div>
-			<div class="flex items-center gap-1.5">
-				<div class="w-3 h-3 rounded bg-red-500/80"></div>
-				<span class="text-muted-foreground">Failed</span>
-			</div>
-		</div>
-	</div>
+		<!-- 7-day activity chart -->
+		<div class="p-4 bg-card border border-border rounded-xl">
+			<h3 class="text-sm font-medium text-foreground mb-4">7-Day Activity</h3>
 
-	<!-- Recent summary -->
-	<div class="p-4 bg-card border border-border rounded-xl">
-		<h3 class="text-sm font-medium text-foreground mb-3">Quick Summary</h3>
-		<div class="space-y-2 text-sm">
-			<div class="flex items-center justify-between">
-				<span class="text-muted-foreground">Most productive day</span>
-				<span class="text-foreground font-medium">Monday (8 agents)</span>
-			</div>
-			<div class="flex items-center justify-between">
-				<span class="text-muted-foreground">Fastest completion</span>
-				<span class="text-foreground font-medium">12 minutes</span>
-			</div>
-			<div class="flex items-center justify-between">
-				<span class="text-muted-foreground">Longest running</span>
-				<span class="text-foreground font-medium">2h 15m</span>
-			</div>
-			<div class="flex items-center justify-between">
-				<span class="text-muted-foreground">Most common error</span>
-				<span class="text-foreground font-medium">Timeout (3)</span>
+			{#if activityData().length > 0}
+				<div class="flex items-end justify-between gap-2 h-32">
+					{#each activityData() as day}
+						{@const height = maxCount() > 0 ? (day.count / maxCount()) * 100 : 0}
+
+						<div class="flex-1 flex flex-col items-center gap-2">
+							<!-- Bar -->
+							<div class="w-full relative flex flex-col-reverse" style:height="100%">
+								<div
+									class="w-full bg-primary/80 rounded-t transition-all"
+									style:height="{height}%"
+									title="{day.label}: {day.count} agents"
+								></div>
+							</div>
+
+							<!-- Count label -->
+							<span class="text-xs text-muted-foreground font-medium">{day.count}</span>
+
+							<!-- Day label -->
+							<span class="text-xs text-muted-foreground">{day.day}</span>
+						</div>
+					{/each}
+				</div>
+			{:else}
+				<div class="flex items-center justify-center h-32 text-muted-foreground text-sm">
+					No activity data available
+				</div>
+			{/if}
+		</div>
+
+		<!-- Quick summary -->
+		<div class="p-4 bg-card border border-border rounded-xl">
+			<h3 class="text-sm font-medium text-foreground mb-3">Quick Summary</h3>
+			<div class="space-y-2 text-sm">
+				<div class="flex items-center justify-between">
+					<span class="text-muted-foreground">Total completed</span>
+					<span class="text-foreground font-medium">{stats.completed} agents</span>
+				</div>
+				<div class="flex items-center justify-between">
+					<span class="text-muted-foreground">Total failed</span>
+					<span class="text-foreground font-medium">{stats.failed} agents</span>
+				</div>
+				<div class="flex items-center justify-between">
+					<span class="text-muted-foreground">Average duration</span>
+					<span class="text-foreground font-medium">{formatDuration(stats.avgDurationMinutes)}</span>
+				</div>
+				<div class="flex items-center justify-between">
+					<span class="text-muted-foreground">Success rate</span>
+					<span class="text-foreground font-medium {successRate() >= 80 ? 'text-green-500' : successRate() >= 60 ? 'text-yellow-500' : 'text-red-500'}">
+						{successRate()}%
+					</span>
+				</div>
 			</div>
 		</div>
-	</div>
+	{:else}
+		<div class="flex flex-col items-center justify-center py-12 text-center">
+			<Rocket class="w-12 h-12 text-muted-foreground/50 mb-3" />
+			<p class="text-sm text-muted-foreground">No stats available</p>
+			<p class="text-xs text-muted-foreground/70 mt-1">Launch some agents to see statistics</p>
+		</div>
+	{/if}
 </div>

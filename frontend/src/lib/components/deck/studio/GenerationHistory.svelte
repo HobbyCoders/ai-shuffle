@@ -2,6 +2,7 @@
 	import {
 		Image as ImageIcon,
 		Film,
+		Volume2,
 		RefreshCw,
 		Trash2,
 		Clock,
@@ -23,7 +24,13 @@
 	let { onSelect, onRegenerate, onDelete }: Props = $props();
 
 	// Map store generation to component's expected format
-	function mapStoreGeneration(gen: StoreDeckGeneration): DeckGeneration {
+	function mapStoreGeneration(gen: StoreDeckGeneration): DeckGeneration | null {
+		// Skip invalid generations (missing required fields)
+		if (!gen || !gen.id || !gen.type || !gen.prompt) {
+			console.warn('[GenerationHistory] Skipping invalid generation:', gen);
+			return null;
+		}
+
 		// Map status: store uses 'completed'/'failed', component uses 'complete'/'error'
 		let status: DeckGeneration['status'];
 		switch (gen.status) {
@@ -37,19 +44,31 @@
 				status = gen.status;
 		}
 
+		// Map type: store uses 'tts'/'stt', component expects 'audio'
+		let type: DeckGeneration['type'] = gen.type as DeckGeneration['type'];
+		if (gen.type === 'tts' || gen.type === 'stt') {
+			type = 'audio';
+		}
+
 		return {
 			id: gen.id,
-			type: gen.type,
+			type,
 			prompt: gen.prompt,
 			status,
-			progress: gen.progress,
+			progress: gen.progress ?? 0,
 			thumbnailUrl: gen.result?.url,
-			resultUrl: gen.result?.url
+			resultUrl: gen.result?.url,
+			provider: gen.provider,
+			model: gen.model
 		};
 	}
 
-	// Derived history from store
-	let history = $derived($recentGenerations.map(mapStoreGeneration));
+	// Derived history from store - filter out null/invalid generations
+	let history = $derived(
+		$recentGenerations
+			.map(mapStoreGeneration)
+			.filter((gen): gen is DeckGeneration => gen !== null)
+	);
 
 	// Handle delete with store
 	function handleDeleteGeneration(generation: DeckGeneration, event: MouseEvent) {
@@ -157,6 +176,10 @@
 							<div class="w-full h-full bg-muted flex items-center justify-center">
 								{#if generation.type === 'image'}
 									<ImageIcon class="w-6 h-6 text-muted-foreground" />
+								{:else if generation.type === 'video'}
+									<Film class="w-6 h-6 text-muted-foreground" />
+								{:else if generation.type === 'audio'}
+									<Volume2 class="w-6 h-6 text-muted-foreground" />
 								{:else}
 									<Film class="w-6 h-6 text-muted-foreground" />
 								{/if}
@@ -167,6 +190,10 @@
 						<div class="absolute top-1.5 left-1.5 flex items-center gap-1 px-1.5 py-0.5 rounded bg-black/60 text-white text-[10px]">
 							{#if generation.type === 'image'}
 								<ImageIcon class="w-2.5 h-2.5" />
+							{:else if generation.type === 'video'}
+								<Film class="w-2.5 h-2.5" />
+							{:else if generation.type === 'audio'}
+								<Volume2 class="w-2.5 h-2.5" />
 							{:else}
 								<Film class="w-2.5 h-2.5" />
 							{/if}

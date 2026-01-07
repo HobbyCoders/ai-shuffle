@@ -41,6 +41,9 @@ export interface DeckGeneration {
 	progress?: number;
 	thumbnailUrl?: string;
 	resultUrl?: string;
+	// Extended fields for store integration
+	provider?: string;
+	model?: string;
 }
 
 // Session info for the context panel
@@ -66,7 +69,7 @@ export interface CardGeometry {
 // Card state for workspace cards
 export interface CardState {
 	id: string;
-	type: 'chat' | 'agent' | 'generation' | 'file' | 'settings';
+	type: 'chat' | 'agent' | 'generation' | 'file' | 'settings' | 'profile' | 'subagent' | 'project' | 'canvas' | 'terminal';
 	title: string;
 	state: 'normal' | 'minimized' | 'maximized';
 	geometry: CardGeometry;
@@ -78,7 +81,7 @@ export interface CardState {
 // Minimized card for the dock
 export interface MinimizedCard {
 	id: string;
-	type: CardState['type'];
+	type: string; // Allow any card type from deck store
 	title: string;
 	icon?: string;
 }
