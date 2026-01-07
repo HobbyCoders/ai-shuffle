@@ -42,6 +42,68 @@
 	const currentProfile = $derived($profiles.find(p => p.id === tab.profile));
 	const hasPartialMessages = $derived(currentProfile?.config?.include_partial_messages !== false);
 
+	// Find the last streaming message index - only that message should show the streaming indicator
+	// This prevents multiple bouncing dots from appearing after each tool call
+	const lastStreamingMessageIndex = $derived(() => {
+		for (let i = tab.messages.length - 1; i >= 0; i--) {
+			if (tab.messages[i].streaming) {
+				return i;
+			}
+		}
+		return -1;
+	});
+
+	/**
+	 * Extract todos from a TodoWrite message, handling both complete and partial input.
+	 * During streaming, the toolInput might not be fully parsed yet, so we also try
+	 * to extract from partialToolInput.
+	 */
+	function extractTodosFromMessage(message: ChatMessage): Array<{content: string; status: string; activeForm: string}> | null {
+		// First, try the complete toolInput
+		if (message.toolInput?.todos && Array.isArray(message.toolInput.todos)) {
+			return message.toolInput.todos;
+		}
+
+		// During streaming, try to extract from partialToolInput
+		if (message.streaming && message.partialToolInput) {
+			try {
+				// Try to parse the partial JSON
+				const parsed = JSON.parse(message.partialToolInput);
+				if (parsed?.todos && Array.isArray(parsed.todos)) {
+					return parsed.todos;
+				}
+			} catch {
+				// Partial JSON not yet complete - try to extract todos array using regex
+				// Look for "todos": [ followed by todo objects
+				const todosMatch = message.partialToolInput.match(/"todos"\s*:\s*\[/);
+				if (todosMatch) {
+					// Find the start of the array
+					const arrayStart = message.partialToolInput.indexOf('[', todosMatch.index);
+					if (arrayStart !== -1) {
+						// Try to extract any complete todo objects
+						// This regex finds complete todo objects with content, status, and activeForm
+						const todoRegex = /\{\s*"content"\s*:\s*"([^"]*)"[^}]*"status"\s*:\s*"([^"]*)"[^}]*"activeForm"\s*:\s*"([^"]*)"\s*\}/g;
+						const todos: Array<{content: string; status: string; activeForm: string}> = [];
+						let match;
+						const searchStr = message.partialToolInput.slice(arrayStart);
+						while ((match = todoRegex.exec(searchStr)) !== null) {
+							todos.push({
+								content: match[1],
+								status: match[2],
+								activeForm: match[3]
+							});
+						}
+						if (todos.length > 0) {
+							return todos;
+						}
+					}
+				}
+			}
+		}
+
+		return null;
+	}
+
 	// Check if near bottom of scroll container (within threshold)
 	function isNearBottom(): boolean {
 		if (!containerRef) return true;
@@ -208,16 +270,17 @@
 						messageIndex={messageIndex}
 						messageId={message.id}
 						sessionId={tab.sessionId}
-						streaming={message.streaming}
+						streaming={message.streaming && messageIndex === lastStreamingMessageIndex()}
 						{hasPartialMessages}
 						metadata={message.metadata}
 					/>
 				{:else if message.type === 'tool_use' && message.toolName === 'TodoWrite'}
-					<!-- TodoWrite - Render as TodoList component -->
-					{#if message.toolInput?.todos && Array.isArray(message.toolInput.todos)}
+					<!-- TodoWrite - Render as TodoList component (also handles streaming partial input) -->
+					{@const todos = extractTodosFromMessage(message)}
+					{#if todos && todos.length > 0}
 						<div class="w-full">
 							<div class="min-w-0">
-								<TodoList todos={message.toolInput.todos} />
+								<TodoList {todos} />
 							</div>
 						</div>
 					{/if}

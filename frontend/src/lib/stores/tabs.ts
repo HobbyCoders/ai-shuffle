@@ -174,8 +174,12 @@ const tabExpectedSessionId: Map<string, string> = new Map();
 const stopTimeouts: Map<string, ReturnType<typeof setTimeout>> = new Map();
 // Track last received message timestamp for connection health monitoring
 const tabLastMessageTime: Map<string, number> = new Map();
-// Connection health check - if no message for 90s (3 missed pings), force reconnect
+// Connection health check timeouts:
+// - Normal: if no message for 90s (3 missed pings), force reconnect
+// - Streaming: if no message for 15s during active streaming, force reconnect
+//   (messages should arrive frequently during streaming)
 const CONNECTION_HEALTH_TIMEOUT_MS = 90000;
+const STREAMING_HEALTH_TIMEOUT_MS = 15000;
 
 // Server-authoritative polling for streaming sessions
 // When streaming, poll /sessions/{id}/live for ground truth state
@@ -615,44 +619,41 @@ function createTabsStore() {
 					currentWs.send(JSON.stringify({ type: 'pong' }));
 
 					// Check connection health - if no message received for too long, connection may be dead
+					// Use shorter timeout during streaming (messages should arrive frequently)
+					const currentTab = getTab(tabId);
+					const healthTimeout = currentTab?.isStreaming ? STREAMING_HEALTH_TIMEOUT_MS : CONNECTION_HEALTH_TIMEOUT_MS;
 					const lastMessageTime = tabLastMessageTime.get(tabId) || 0;
 					const timeSinceLastMessage = Date.now() - lastMessageTime;
-					if (timeSinceLastMessage > CONNECTION_HEALTH_TIMEOUT_MS) {
-						console.warn(`[Tab ${tabId}] Connection appears stale (${Math.round(timeSinceLastMessage / 1000)}s since last message), forcing reconnect`);
+					if (timeSinceLastMessage > healthTimeout) {
+						console.warn(`[Tab ${tabId}] Connection appears stale (${Math.round(timeSinceLastMessage / 1000)}s since last message, streaming=${currentTab?.isStreaming}), forcing reconnect`);
 						// Force close to trigger reconnect
 						currentWs.close(4000, 'Connection health timeout');
 					}
 				}
-			}, 25000);
+			}, 10000); // Check every 10s instead of 25s for faster detection
 			tabPingTimers.set(tabId, pingTimer);
 		};
 
 		ws.onclose = (event) => {
 			console.log(`[Tab ${tabId}] WebSocket closed:`, event.code, event.reason);
 
-			// If the WebSocket closes while streaming, reset the streaming state
-			// to prevent the UI from being stuck in a frozen state
+			// Check if tab was streaming when connection dropped
 			const tab = getTab(tabId);
-			if (tab?.isStreaming) {
-				console.warn(`[Tab ${tabId}] WebSocket closed while streaming - resetting UI state`);
-				update(s => ({
-					...s,
-					tabs: s.tabs.map(t => {
-						if (t.id !== tabId) return t;
+			const wasStreaming = tab?.isStreaming;
+			const sessionId = tab?.sessionId;
 
-						let messages = t.messages.map(m =>
-							m.streaming ? { ...m, streaming: false } : m
-						);
-						// Remove empty assistant messages
-						messages = messages.filter(
-							m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
-						);
+			// Mark as disconnected but DON'T reset streaming state yet
+			// The server might still be streaming - we'll poll to find out
+			updateTab(tabId, { wsConnected: false });
 
-						return { ...t, messages, isStreaming: false, wsConnected: false };
-					})
-				}));
-			} else {
-				updateTab(tabId, { wsConnected: false });
+			// If we were streaming, start polling immediately to keep getting updates
+			// This provides continuity even when WebSocket is disconnected
+			if (wasStreaming && sessionId) {
+				console.log(`[Tab ${tabId}] WebSocket closed during streaming - starting fallback polling`);
+				// Start polling if not already polling
+				if (!tabPollingTimers.has(tabId)) {
+					startPolling(tabId, sessionId);
+				}
 			}
 
 			// Clear any pending stop timeout
@@ -1949,6 +1950,9 @@ function createTabsStore() {
 				if (isStreaming && receivedSession) {
 					console.log(`[Tab ${tabId}] Session is streaming, starting server-authoritative polling`);
 					startPolling(tabId, receivedSession);
+				} else {
+					// Not streaming - stop any existing polling (e.g., from a previous disconnect)
+					stopPolling(tabId);
 				}
 
 				// Process any queued sync events that arrived while waiting for history
