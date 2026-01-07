@@ -1142,15 +1142,19 @@ async def stream_to_websocket(
         state.is_streaming = False
         state.last_activity = datetime.now()
 
-    # Update session in database
-    if sdk_session_id:
-        database.update_session(
-            session_id=session_id,
-            sdk_session_id=sdk_session_id,
-            cost_increment=metadata.get("total_cost_usd", 0),
-            turn_increment=metadata.get("num_turns", 0)
-        )
-        logger.info(f"[WS] Updated session {session_id}, sdk_session_id={sdk_session_id}")
+    # Update session in database - always update title to the last user message
+    title = prompt[:50].strip()
+    if len(prompt) > 50:
+        title += "..."
+
+    database.update_session(
+        session_id=session_id,
+        sdk_session_id=sdk_session_id,
+        title=title,
+        cost_increment=metadata.get("total_cost_usd", 0),
+        turn_increment=metadata.get("num_turns", 0)
+    )
+    logger.info(f"[WS] Updated session {session_id}, sdk_session_id={sdk_session_id}, title={title}")
 
     # Store assistant response
     full_response = "".join(response_text)

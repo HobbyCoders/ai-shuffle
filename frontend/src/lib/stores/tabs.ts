@@ -9,6 +9,18 @@ import { writable, derived, get } from 'svelte/store';
 import type { Session, Profile } from '$lib/api/client';
 import { api } from '$lib/api/client';
 
+export interface ApiUser {
+	id: string;
+	name: string;
+	description?: string;
+	project_id?: string;
+	profile_id?: string;
+	is_active: boolean;
+	created_at: string;
+	updated_at: string;
+	last_used_at?: string;
+}
+
 export type MessageType = 'text' | 'tool_use' | 'tool_result';
 
 export interface ChatMessage {
@@ -51,6 +63,9 @@ interface TabsState {
 	profiles: Profile[];
 	projects: Project[];
 	sessions: Session[];
+	adminSessions: Session[];
+	apiUsers: ApiUser[];
+	adminSessionsFilter: string | null; // null = all, '' = admin only, 'user_id' = specific user
 	defaultProfile: string;
 	defaultProject: string;
 }
@@ -98,6 +113,9 @@ function createTabsStore() {
 		profiles: [],
 		projects: [],
 		sessions: [],
+		adminSessions: [],
+		apiUsers: [],
+		adminSessionsFilter: null,
 		defaultProfile: getPersistedProfile(),
 		defaultProject: getPersistedProject()
 	});
@@ -526,14 +544,47 @@ function createTabsStore() {
 	}
 
 	/**
-	 * Load sessions list
+	 * Load sessions list (user's own sessions)
+	 * For admins: loads sessions where api_user_id IS NULL (their own chats)
+	 * For API users: the backend automatically filters to their sessions
 	 */
 	async function loadSessionsInternal() {
 		try {
-			const sessions = await api.get<Session[]>('/sessions?limit=50');
+			// Load user's own sessions (admin_only=true for admins gets sessions without api_user_id)
+			const sessions = await api.get<Session[]>('/sessions?limit=50&admin_only=true');
 			update(s => ({ ...s, sessions }));
 		} catch (e) {
 			console.error('Failed to load sessions:', e);
+		}
+	}
+
+	/**
+	 * Load admin sessions (all API user sessions for admin view)
+	 */
+	async function loadAdminSessionsInternal(apiUserId?: string | null) {
+		try {
+			let url = '/sessions?limit=50';
+			if (apiUserId) {
+				url += `&api_user_id=${encodeURIComponent(apiUserId)}`;
+			}
+			// Don't add admin_only - we want API user sessions here
+			const adminSessions = await api.get<Session[]>(url);
+			update(s => ({ ...s, adminSessions, adminSessionsFilter: apiUserId ?? null }));
+		} catch (e) {
+			console.error('Failed to load admin sessions:', e);
+		}
+	}
+
+	/**
+	 * Load API users list (admin only)
+	 */
+	async function loadApiUsersInternal() {
+		try {
+			const apiUsers = await api.get<ApiUser[]>('/api-users');
+			update(s => ({ ...s, apiUsers }));
+		} catch (e) {
+			// Non-admins will get 403, that's expected
+			console.debug('Failed to load API users (may not be admin):', e);
 		}
 	}
 
@@ -814,6 +865,19 @@ function createTabsStore() {
 			await loadSessionsInternal();
 		},
 
+		async loadAdminSessions(apiUserId?: string | null) {
+			await loadAdminSessionsInternal(apiUserId);
+		},
+
+		async loadApiUsers() {
+			await loadApiUsersInternal();
+		},
+
+		setAdminSessionsFilter(apiUserId: string | null) {
+			update(s => ({ ...s, adminSessionsFilter: apiUserId }));
+			loadAdminSessionsInternal(apiUserId);
+		},
+
 		// Profile/Project CRUD operations
 		async createProfile(data: { id: string; name: string; description?: string; config: Record<string, unknown> }) {
 			await api.post('/profiles', data);
@@ -866,5 +930,8 @@ export const activeTab = derived(tabs, $tabs => $tabs.tabs.find(t => t.id === $t
 export const profiles = derived(tabs, $tabs => $tabs.profiles);
 export const projects = derived(tabs, $tabs => $tabs.projects);
 export const sessions = derived(tabs, $tabs => $tabs.sessions);
+export const adminSessions = derived(tabs, $tabs => $tabs.adminSessions);
+export const apiUsers = derived(tabs, $tabs => $tabs.apiUsers);
+export const adminSessionsFilter = derived(tabs, $tabs => $tabs.adminSessionsFilter);
 export const defaultProfile = derived(tabs, $tabs => $tabs.defaultProfile);
 export const defaultProject = derived(tabs, $tabs => $tabs.defaultProject);

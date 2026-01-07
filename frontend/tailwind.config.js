@@ -4,19 +4,49 @@ export default {
 	theme: {
 		extend: {
 			colors: {
+				border: 'var(--border)',
+				input: 'var(--input)',
+				ring: 'var(--ring)',
+				background: 'var(--background)',
+				foreground: 'var(--foreground)',
 				primary: {
-					50: '#fdf4f3',
-					100: '#fce7e4',
-					200: '#fbd3cd',
-					300: '#f7b3a9',
-					400: '#f08778',
-					500: '#e5604d',
-					600: '#d14430',
-					700: '#af3625',
-					800: '#913022',
-					900: '#782d22',
-					950: '#41140d'
+					DEFAULT: 'var(--primary)',
+					foreground: 'var(--primary-foreground)'
+				},
+				secondary: {
+					DEFAULT: 'var(--secondary)',
+					foreground: 'var(--secondary-foreground)'
+				},
+				destructive: {
+					DEFAULT: 'var(--destructive)',
+					foreground: 'var(--destructive-foreground)'
+				},
+				muted: {
+					DEFAULT: 'var(--muted)',
+					foreground: 'var(--muted-foreground)'
+				},
+				accent: {
+					DEFAULT: 'var(--accent)',
+					foreground: 'var(--accent-foreground)'
+				},
+				popover: {
+					DEFAULT: 'var(--popover)',
+					foreground: 'var(--popover-foreground)'
+				},
+				card: {
+					DEFAULT: 'var(--card)',
+					foreground: 'var(--card-foreground)'
 				}
+			},
+			borderRadius: {
+				lg: 'var(--radius)',
+				md: 'calc(var(--radius) - 2px)',
+				sm: 'calc(var(--radius) - 4px)'
+			},
+			boxShadow: {
+				s: 'var(--shadow-s)',
+				m: 'var(--shadow-m)',
+				l: 'var(--shadow-l)'
 			}
 		}
 	},
