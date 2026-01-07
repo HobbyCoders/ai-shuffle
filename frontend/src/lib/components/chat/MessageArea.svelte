@@ -14,11 +14,12 @@
 	 * - This prevents scroll jumping when switching between cards
 	 */
 	import { tick, onMount, onDestroy } from 'svelte';
-	import { tabs, profiles, type ChatTab, type ChatMessage } from '$lib/stores/tabs';
+	import { tabs, profiles, type ChatTab, type ChatMessage, type TodoItem } from '$lib/stores/tabs';
 	import UserMessage from './UserMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import ToolUseMessage from './ToolUseMessage.svelte';
-	import ToolResultMessage from './ToolResultMessage.svelte';
+	// Note: ToolResultMessage is intentionally not imported - tool_result messages are
+	// always merged into tool_use messages to prevent flickering during streaming
 	import SystemMessage from '$lib/components/SystemMessage.svelte';
 	import SubagentMessage from '$lib/components/SubagentMessage.svelte';
 	import TodoList from '$lib/components/TodoList.svelte';
@@ -58,10 +59,14 @@
 	 * During streaming, the toolInput might not be fully parsed yet, so we also try
 	 * to extract from partialToolInput.
 	 */
-	function extractTodosFromMessage(message: ChatMessage): Array<{content: string; status: string; activeForm: string}> | null {
+	function extractTodosFromMessage(message: ChatMessage): TodoItem[] | null {
+		// Helper to validate and cast status
+		const isValidStatus = (s: string): s is TodoItem['status'] =>
+			s === 'pending' || s === 'in_progress' || s === 'completed';
+
 		// First, try the complete toolInput
 		if (message.toolInput?.todos && Array.isArray(message.toolInput.todos)) {
-			return message.toolInput.todos;
+			return message.toolInput.todos as TodoItem[];
 		}
 
 		// During streaming, try to extract from partialToolInput
@@ -70,7 +75,7 @@
 				// Try to parse the partial JSON
 				const parsed = JSON.parse(message.partialToolInput);
 				if (parsed?.todos && Array.isArray(parsed.todos)) {
-					return parsed.todos;
+					return parsed.todos as TodoItem[];
 				}
 			} catch {
 				// Partial JSON not yet complete - try to extract todos array using regex
@@ -83,13 +88,14 @@
 						// Try to extract any complete todo objects
 						// This regex finds complete todo objects with content, status, and activeForm
 						const todoRegex = /\{\s*"content"\s*:\s*"([^"]*)"[^}]*"status"\s*:\s*"([^"]*)"[^}]*"activeForm"\s*:\s*"([^"]*)"\s*\}/g;
-						const todos: Array<{content: string; status: string; activeForm: string}> = [];
+						const todos: TodoItem[] = [];
 						let match;
 						const searchStr = message.partialToolInput.slice(arrayStart);
 						while ((match = todoRegex.exec(searchStr)) !== null) {
+							const status = match[2];
 							todos.push({
 								content: match[1],
-								status: match[2],
+								status: isValidStatus(status) ? status : 'pending',
 								activeForm: match[3]
 							});
 						}
@@ -294,10 +300,8 @@
 						streaming={message.streaming}
 					/>
 				{:else if message.type === 'tool_result'}
-					<ToolResultMessage
-						content={message.content}
-						toolId={message.toolId}
-					/>
+					<!-- Skip standalone tool_result messages - they should be merged into tool_use -->
+					<!-- This prevents flickering where result briefly appears separately -->
 				{:else if message.type === 'system'}
 					<div class="w-full">
 						<div class="min-w-0">
