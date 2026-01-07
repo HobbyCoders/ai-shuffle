@@ -1,0 +1,1517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Card Deck Navigator - Casino Noir</title>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <style>
+    /* ========================================
+       CASINO NOIR DESIGN SYSTEM
+       ======================================== */
+    :root {
+      /* Felt & Environment */
+      --felt: oklch(0.12 0.03 180);
+      --felt-highlight: oklch(0.15 0.035 180);
+      --felt-deep: oklch(0.06 0.02 180);
+
+      /* Gold Accent System */
+      --gold: oklch(0.75 0.14 75);
+      --gold-dim: oklch(0.55 0.11 75);
+      --gold-bright: oklch(0.85 0.16 75);
+      --gold-glow: oklch(0.75 0.14 75 / 0.35);
+
+      /* Card Surfaces */
+      --card-face: oklch(0.96 0.01 75);
+      --card-back: oklch(0.18 0.025 200);
+      --card-border: oklch(0.88 0.02 75);
+      --card-shadow: oklch(0 0 0 / 0.4);
+
+      /* Text */
+      --text-dark: oklch(0.15 0.01 260);
+      --text-light: oklch(0.92 0.01 75);
+      --text-muted: oklch(0.55 0.02 260);
+      --text-gold: var(--gold);
+
+      /* Typography */
+      --font-display: 'Cormorant Garamond', Georgia, serif;
+      --font-body: 'Outfit', -apple-system, sans-serif;
+
+      /* Timing */
+      --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+      --smooth: cubic-bezier(0.4, 0, 0.2, 1);
+      --snap: cubic-bezier(0.68, -0.55, 0.265, 1.55);
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    html, body {
+      font-family: var(--font-body);
+      background: var(--felt-deep);
+      color: var(--text-light);
+      min-height: 100vh;
+      min-height: 100dvh;
+      overflow: hidden;
+      touch-action: manipulation;
+    }
+
+    /* ========================================
+       BACKDROP - Felt Table Environment
+       ======================================== */
+    .environment {
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(ellipse 80% 60% at 50% 100%,
+          oklch(0.18 0.04 180 / 0.6) 0%,
+          transparent 60%),
+        radial-gradient(ellipse 60% 40% at 20% 20%,
+          oklch(0.15 0.03 200 / 0.3) 0%,
+          transparent 50%),
+        linear-gradient(180deg,
+          var(--felt-deep) 0%,
+          var(--felt) 40%,
+          var(--felt-highlight) 70%,
+          var(--felt) 100%);
+    }
+
+    /* Noise texture overlay */
+    .environment::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+      opacity: 0.03;
+      pointer-events: none;
+    }
+
+    /* Vignette */
+    .environment::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(ellipse at center, transparent 40%, oklch(0 0 0 / 0.5) 100%);
+      pointer-events: none;
+    }
+
+    /* ========================================
+       DECK NAVIGATOR CONTAINER
+       ======================================== */
+    .deck-navigator {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      z-index: 1000;
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.3s ease, visibility 0.3s ease;
+    }
+
+    .deck-navigator.open {
+      opacity: 1;
+      visibility: visible;
+    }
+
+    /* Backdrop blur */
+    .deck-backdrop {
+      position: absolute;
+      inset: 0;
+      background: oklch(0 0 0 / 0.7);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+    }
+
+    /* ========================================
+       NAVIGATION HEADER
+       ======================================== */
+    .deck-header {
+      position: relative;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 20px 24px;
+      padding-top: max(20px, env(safe-area-inset-top, 20px));
+    }
+
+    .deck-breadcrumb {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .breadcrumb-item {
+      font-family: var(--font-display);
+      font-size: 1.125rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 4px 0;
+      transition: color 0.2s ease;
+    }
+
+    .breadcrumb-item:hover {
+      color: var(--gold);
+    }
+
+    .breadcrumb-item.active {
+      color: var(--gold);
+    }
+
+    .breadcrumb-separator {
+      color: var(--gold-dim);
+      font-size: 0.875rem;
+    }
+
+    .deck-close {
+      width: 44px;
+      height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: oklch(1 0 0 / 0.05);
+      border: 1px solid oklch(1 0 0 / 0.1);
+      border-radius: 50%;
+      color: var(--text-light);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .deck-close:hover {
+      background: oklch(1 0 0 / 0.1);
+      border-color: var(--gold-dim);
+      color: var(--gold);
+    }
+
+    .deck-close svg {
+      width: 20px;
+      height: 20px;
+      stroke: currentColor;
+      stroke-width: 2;
+      fill: none;
+    }
+
+    /* ========================================
+       CARD CAROUSEL CONTAINER
+       ======================================== */
+    .deck-stage {
+      flex: 1;
+      position: relative;
+      display: flex;
+      align-items: center;
+      overflow: hidden;
+    }
+
+    .card-carousel {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      padding: 40px 80px;
+      height: 100%;
+      overflow-x: auto;
+      overflow-y: hidden;
+      scroll-snap-type: x mandatory;
+      scroll-behavior: smooth;
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+      cursor: grab;
+    }
+
+    .card-carousel::-webkit-scrollbar {
+      display: none;
+    }
+
+    .card-carousel:active {
+      cursor: grabbing;
+    }
+
+    .card-carousel.dragging {
+      scroll-behavior: auto;
+      cursor: grabbing;
+    }
+
+    /* Scroll edge gradients */
+    .deck-stage::before,
+    .deck-stage::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 120px;
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    .deck-stage::before {
+      left: 0;
+      background: linear-gradient(90deg, var(--felt-deep) 0%, transparent 100%);
+    }
+
+    .deck-stage::after {
+      right: 0;
+      background: linear-gradient(-90deg, var(--felt-deep) 0%, transparent 100%);
+    }
+
+    /* ========================================
+       PLAYING CARDS
+       ======================================== */
+    .deck-card {
+      flex-shrink: 0;
+      width: 200px;
+      height: 280px;
+      perspective: 1000px;
+      scroll-snap-align: center;
+      cursor: pointer;
+      transition: transform 0.3s var(--spring);
+    }
+
+    .deck-card:hover {
+      transform: translateY(-12px);
+    }
+
+    .deck-card:active {
+      transform: translateY(-8px) scale(0.98);
+    }
+
+    .card-inner {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      border-radius: 16px;
+      overflow: hidden;
+      transform-style: preserve-3d;
+      transition: transform 0.4s var(--spring), box-shadow 0.3s ease;
+
+      /* Card shadow */
+      box-shadow:
+        0 4px 8px var(--card-shadow),
+        0 12px 40px oklch(0 0 0 / 0.5),
+        0 0 0 1px oklch(1 0 0 / 0.1) inset;
+    }
+
+    .deck-card:hover .card-inner {
+      box-shadow:
+        0 8px 16px var(--card-shadow),
+        0 20px 60px oklch(0 0 0 / 0.6),
+        0 0 30px var(--gold-glow),
+        0 0 0 1px var(--gold-dim) inset;
+    }
+
+    /* Card Face */
+    .card-face {
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(145deg,
+        var(--card-face) 0%,
+        oklch(0.92 0.015 75) 100%);
+      display: flex;
+      flex-direction: column;
+      padding: 16px;
+    }
+
+    /* Suit watermark */
+    .card-face::before {
+      content: attr(data-suit);
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 120px;
+      color: var(--gold);
+      opacity: 0.06;
+      pointer-events: none;
+    }
+
+    /* Corner indices */
+    .card-index {
+      position: absolute;
+      font-family: var(--font-display);
+      font-size: 1rem;
+      font-weight: 700;
+      color: var(--text-dark);
+      line-height: 1;
+    }
+
+    .card-index.top-left {
+      top: 12px;
+      left: 14px;
+    }
+
+    .card-index.bottom-right {
+      bottom: 12px;
+      right: 14px;
+      transform: rotate(180deg);
+    }
+
+    .card-index .suit {
+      font-size: 0.875rem;
+      color: var(--gold-dim);
+      display: block;
+      margin-top: 2px;
+    }
+
+    /* Card content */
+    .card-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 20px 8px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .card-icon {
+      width: 48px;
+      height: 48px;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, var(--gold) 0%, var(--gold-dim) 100%);
+      border-radius: 12px;
+      box-shadow: 0 4px 12px oklch(0 0 0 / 0.15);
+    }
+
+    .card-icon svg {
+      width: 24px;
+      height: 24px;
+      stroke: var(--card-face);
+      stroke-width: 2;
+      fill: none;
+    }
+
+    .card-title {
+      font-family: var(--font-display);
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: var(--text-dark);
+      margin-bottom: 6px;
+      line-height: 1.2;
+    }
+
+    .card-subtitle {
+      font-size: 0.75rem;
+      font-weight: 400;
+      color: var(--text-muted);
+      letter-spacing: 0.02em;
+    }
+
+    /* Category indicator - shows it has sub-items */
+    .card-has-children::after {
+      content: '';
+      position: absolute;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 24px;
+      height: 4px;
+      background: linear-gradient(90deg, transparent, var(--gold-dim), transparent);
+      border-radius: 2px;
+    }
+
+    /* Card type variations */
+    .deck-card[data-type="action"] .card-icon {
+      background: linear-gradient(135deg, var(--gold) 0%, var(--gold-bright) 100%);
+    }
+
+    .deck-card[data-type="category"] .card-face {
+      background: linear-gradient(145deg,
+        oklch(0.94 0.02 75) 0%,
+        oklch(0.88 0.025 80) 100%);
+    }
+
+    .deck-card[data-type="thread"] .card-face {
+      background: linear-gradient(145deg,
+        oklch(0.97 0.005 260) 0%,
+        oklch(0.92 0.01 260) 100%);
+    }
+
+    .deck-card[data-type="thread"] .card-icon {
+      background: linear-gradient(135deg, oklch(0.55 0.15 240) 0%, oklch(0.45 0.12 250) 100%);
+    }
+
+    /* Active/open thread indicator */
+    .deck-card[data-active="true"] {
+      position: relative;
+    }
+
+    .deck-card[data-active="true"]::before {
+      content: 'IN PLAY';
+      position: absolute;
+      top: -8px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 4px 12px;
+      background: var(--gold);
+      color: var(--text-dark);
+      font-size: 0.5625rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      border-radius: 4px;
+      z-index: 10;
+      box-shadow: 0 2px 8px var(--gold-glow);
+    }
+
+    /* ========================================
+       THREAD CARD VARIANT (More detailed)
+       ======================================== */
+    .deck-card.thread-card .card-content {
+      align-items: flex-start;
+      text-align: left;
+      padding: 12px;
+    }
+
+    .thread-card .card-title {
+      font-size: 1rem;
+      margin-bottom: 8px;
+    }
+
+    .thread-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: auto;
+      font-size: 0.6875rem;
+      color: var(--text-muted);
+    }
+
+    .thread-meta-item {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .thread-meta svg {
+      width: 12px;
+      height: 12px;
+      stroke: currentColor;
+      stroke-width: 2;
+      fill: none;
+    }
+
+    /* ========================================
+       SCROLL INDICATOR
+       ======================================== */
+    .scroll-indicator {
+      position: absolute;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 20px;
+      background: oklch(0 0 0 / 0.4);
+      backdrop-filter: blur(8px);
+      border: 1px solid oklch(1 0 0 / 0.1);
+      border-radius: 24px;
+      z-index: 20;
+    }
+
+    .scroll-hint {
+      font-size: 0.75rem;
+      font-weight: 500;
+      color: var(--text-light);
+      opacity: 0.8;
+    }
+
+    .scroll-dots {
+      display: flex;
+      gap: 6px;
+    }
+
+    .scroll-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: oklch(1 0 0 / 0.3);
+      transition: all 0.2s ease;
+    }
+
+    .scroll-dot.active {
+      width: 18px;
+      border-radius: 3px;
+      background: var(--gold);
+    }
+
+    /* ========================================
+       DEALER BUTTON (Trigger)
+       ======================================== */
+    .dealer-button {
+      position: fixed;
+      bottom: 32px;
+      left: 32px;
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      border: none;
+      cursor: pointer;
+      z-index: 100;
+      transition: all 0.3s var(--spring);
+
+      /* Dealer chip appearance */
+      background:
+        radial-gradient(ellipse 80% 50% at 50% 20%,
+          oklch(1 0 0 / 0.9) 0%,
+          transparent 60%),
+        linear-gradient(180deg,
+          oklch(0.98 0.01 75) 0%,
+          oklch(0.90 0.02 75) 50%,
+          oklch(0.82 0.03 75) 100%);
+
+      /* Embossed shadow */
+      box-shadow:
+        inset 0 3px 6px oklch(1 0 0 / 0.8),
+        inset 0 -4px 8px oklch(0 0 0 / 0.15),
+        0 6px 20px oklch(0 0 0 / 0.5),
+        0 3px 6px oklch(0 0 0 / 0.3);
+    }
+
+    .dealer-button::before {
+      content: '';
+      position: absolute;
+      inset: 6px;
+      border: 2.5px solid var(--gold);
+      border-radius: 50%;
+      opacity: 0.7;
+      transition: opacity 0.2s ease;
+    }
+
+    .dealer-button:hover {
+      transform: scale(1.08) translateY(-3px);
+      box-shadow:
+        inset 0 3px 6px oklch(1 0 0 / 0.9),
+        inset 0 -4px 8px oklch(0 0 0 / 0.1),
+        0 10px 30px oklch(0 0 0 / 0.6),
+        0 4px 10px oklch(0 0 0 / 0.3),
+        0 0 30px var(--gold-glow);
+    }
+
+    .dealer-button:hover::before {
+      opacity: 1;
+    }
+
+    .dealer-button:active {
+      transform: scale(0.95);
+      transition-duration: 0.1s;
+    }
+
+    .dealer-button svg {
+      width: 26px;
+      height: 26px;
+      stroke: var(--text-dark);
+      stroke-width: 2.5;
+      fill: none;
+      filter: drop-shadow(0 1px 0 oklch(1 0 0 / 0.5));
+      transition: transform 0.3s var(--spring);
+    }
+
+    .dealer-button:hover svg {
+      transform: rotate(90deg);
+    }
+
+    .dealer-button.open svg {
+      transform: rotate(45deg);
+    }
+
+    /* Mobile adjustments */
+    @media (max-width: 640px) {
+      .dealer-button {
+        bottom: max(24px, env(safe-area-inset-bottom, 24px));
+        left: 50%;
+        transform: translateX(-50%);
+      }
+
+      .dealer-button:hover {
+        transform: translateX(-50%) scale(1.08);
+      }
+
+      .dealer-button.open {
+        transform: translateX(-50%);
+      }
+    }
+
+    /* ========================================
+       MOBILE OPTIMIZATIONS
+       ======================================== */
+    @media (max-width: 640px) {
+      .deck-header {
+        padding: 16px 20px;
+        padding-top: max(16px, env(safe-area-inset-top, 16px));
+      }
+
+      .breadcrumb-item {
+        font-size: 1rem;
+      }
+
+      .card-carousel {
+        padding: 30px 40px;
+        gap: 16px;
+      }
+
+      .deck-card {
+        width: 160px;
+        height: 224px;
+      }
+
+      .card-icon {
+        width: 40px;
+        height: 40px;
+        margin-bottom: 10px;
+      }
+
+      .card-icon svg {
+        width: 20px;
+        height: 20px;
+      }
+
+      .card-title {
+        font-size: 1.0625rem;
+      }
+
+      .card-subtitle {
+        font-size: 0.6875rem;
+      }
+
+      .card-index {
+        font-size: 0.875rem;
+      }
+
+      .deck-stage::before,
+      .deck-stage::after {
+        width: 60px;
+      }
+
+      .scroll-indicator {
+        bottom: max(90px, calc(env(safe-area-inset-bottom, 24px) + 80px));
+      }
+    }
+
+    /* Large screens - bigger cards */
+    @media (min-width: 1200px) {
+      .deck-card {
+        width: 240px;
+        height: 336px;
+      }
+
+      .card-icon {
+        width: 56px;
+        height: 56px;
+      }
+
+      .card-icon svg {
+        width: 28px;
+        height: 28px;
+      }
+
+      .card-title {
+        font-size: 1.375rem;
+      }
+
+      .card-carousel {
+        gap: 28px;
+      }
+    }
+
+    /* ========================================
+       ANIMATIONS
+       ======================================== */
+    @keyframes dealIn {
+      0% {
+        opacity: 0;
+        transform: translateY(60px) rotateX(-15deg) scale(0.8);
+      }
+      60% {
+        opacity: 1;
+        transform: translateY(-10px) rotateX(5deg) scale(1.02);
+      }
+      100% {
+        opacity: 1;
+        transform: translateY(0) rotateX(0) scale(1);
+      }
+    }
+
+    .deck-navigator.open .deck-card {
+      animation: dealIn 0.5s var(--spring) backwards;
+    }
+
+    .deck-navigator.open .deck-card:nth-child(1) { animation-delay: 0.05s; }
+    .deck-navigator.open .deck-card:nth-child(2) { animation-delay: 0.1s; }
+    .deck-navigator.open .deck-card:nth-child(3) { animation-delay: 0.15s; }
+    .deck-navigator.open .deck-card:nth-child(4) { animation-delay: 0.2s; }
+    .deck-navigator.open .deck-card:nth-child(5) { animation-delay: 0.25s; }
+    .deck-navigator.open .deck-card:nth-child(6) { animation-delay: 0.3s; }
+    .deck-navigator.open .deck-card:nth-child(7) { animation-delay: 0.35s; }
+    .deck-navigator.open .deck-card:nth-child(8) { animation-delay: 0.4s; }
+
+    /* Sub-deck slide in */
+    @keyframes slideInRight {
+      0% {
+        opacity: 0;
+        transform: translateX(100px);
+      }
+      100% {
+        opacity: 1;
+        transform: translateX(0);
+      }
+    }
+
+    .deck-level.entering .deck-card {
+      animation: slideInRight 0.4s var(--spring) backwards;
+    }
+
+    /* ========================================
+       EMPTY STATE
+       ======================================== */
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 60px 40px;
+      text-align: center;
+    }
+
+    .empty-icon {
+      width: 80px;
+      height: 80px;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: oklch(1 0 0 / 0.05);
+      border: 1px dashed oklch(1 0 0 / 0.2);
+      border-radius: 16px;
+    }
+
+    .empty-icon svg {
+      width: 36px;
+      height: 36px;
+      stroke: var(--gold-dim);
+      stroke-width: 1.5;
+      fill: none;
+      opacity: 0.6;
+    }
+
+    .empty-title {
+      font-family: var(--font-display);
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: var(--text-light);
+      margin-bottom: 8px;
+    }
+
+    .empty-description {
+      font-size: 0.875rem;
+      color: var(--text-muted);
+      max-width: 280px;
+    }
+
+    /* ========================================
+       DEMO ENVIRONMENT
+       ======================================== */
+    .demo-workspace {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1;
+    }
+
+    .demo-placeholder {
+      text-align: center;
+      opacity: 0.4;
+    }
+
+    .demo-placeholder h1 {
+      font-family: var(--font-display);
+      font-size: 2rem;
+      font-weight: 600;
+      color: var(--gold);
+      margin-bottom: 8px;
+    }
+
+    .demo-placeholder p {
+      font-size: 0.875rem;
+      color: var(--text-light);
+    }
+
+    /* ========================================
+       REDUCED MOTION
+       ======================================== */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <!-- Environment backdrop -->
+  <div class="environment"></div>
+
+  <!-- Demo workspace placeholder -->
+  <div class="demo-workspace">
+    <div class="demo-placeholder">
+      <h1>The Deck</h1>
+      <p>Click the dealer button to browse your cards</p>
+    </div>
+  </div>
+
+  <!-- Dealer Button -->
+  <button class="dealer-button" id="dealerBtn" aria-label="Open deck navigator">
+    <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+  </button>
+
+  <!-- Deck Navigator Overlay -->
+  <div class="deck-navigator" id="deckNavigator">
+    <div class="deck-backdrop" id="deckBackdrop"></div>
+
+    <!-- Navigation Header -->
+    <header class="deck-header">
+      <nav class="deck-breadcrumb" id="breadcrumb">
+        <button class="breadcrumb-item active">The Deck</button>
+      </nav>
+      <button class="deck-close" id="closeBtn" aria-label="Close">
+        <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </header>
+
+    <!-- Card Carousel Stage -->
+    <div class="deck-stage">
+      <div class="card-carousel" id="cardCarousel">
+        <!-- Main Deck -->
+        <div class="deck-level" id="mainDeck">
+          <!-- New Chat -->
+          <article class="deck-card" data-type="action" data-action="new-chat">
+            <div class="card-inner">
+              <div class="card-face" data-suit="♠">
+                <span class="card-index top-left">A<span class="suit">♠</span></span>
+                <span class="card-index bottom-right">A<span class="suit">♠</span></span>
+                <div class="card-content">
+                  <div class="card-icon">
+                    <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                  </div>
+                  <h3 class="card-title">New Chat</h3>
+                  <p class="card-subtitle">Start a conversation</p>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <!-- New Agent -->
+          <article class="deck-card" data-type="action" data-action="new-agent">
+            <div class="card-inner">
+              <div class="card-face" data-suit="♦">
+                <span class="card-index top-left">K<span class="suit">♦</span></span>
+                <span class="card-index bottom-right">K<span class="suit">♦</span></span>
+                <div class="card-content">
+                  <div class="card-icon">
+                    <svg viewBox="0 0 24 24"><path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M8 12h.01M16 12h.01M9 16s.9 1 3 1 3-1 3-1"/></svg>
+                  </div>
+                  <h3 class="card-title">New Agent</h3>
+                  <p class="card-subtitle">Background automation</p>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <!-- Terminal -->
+          <article class="deck-card" data-type="action" data-action="terminal">
+            <div class="card-inner">
+              <div class="card-face" data-suit="♣">
+                <span class="card-index top-left">J<span class="suit">♣</span></span>
+                <span class="card-index bottom-right">J<span class="suit">♣</span></span>
+                <div class="card-content">
+                  <div class="card-icon">
+                    <svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                  </div>
+                  <h3 class="card-title">Terminal</h3>
+                  <p class="card-subtitle">Command line</p>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <!-- Recent Threads (Category) -->
+          <article class="deck-card" data-type="category" data-category="recent">
+            <div class="card-inner">
+              <div class="card-face card-has-children" data-suit="♥">
+                <span class="card-index top-left">Q<span class="suit">♥</span></span>
+                <span class="card-index bottom-right">Q<span class="suit">♥</span></span>
+                <div class="card-content">
+                  <div class="card-icon">
+                    <svg viewBox="0 0 24 24"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="10"/></svg>
+                  </div>
+                  <h3 class="card-title">Recent</h3>
+                  <p class="card-subtitle">12 threads</p>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <!-- Image Studio -->
+          <article class="deck-card" data-type="action" data-action="image-studio">
+            <div class="card-inner">
+              <div class="card-face" data-suit="♠">
+                <span class="card-index top-left">10<span class="suit">♠</span></span>
+                <span class="card-index bottom-right">10<span class="suit">♠</span></span>
+                <div class="card-content">
+                  <div class="card-icon">
+                    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+                  </div>
+                  <h3 class="card-title">Image Studio</h3>
+                  <p class="card-subtitle">Generate visuals</p>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <!-- Projects (Category) -->
+          <article class="deck-card" data-type="category" data-category="projects">
+            <div class="card-inner">
+              <div class="card-face card-has-children" data-suit="♦">
+                <span class="card-index top-left">9<span class="suit">♦</span></span>
+                <span class="card-index bottom-right">9<span class="suit">♦</span></span>
+                <div class="card-content">
+                  <div class="card-icon">
+                    <svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                  </div>
+                  <h3 class="card-title">Projects</h3>
+                  <p class="card-subtitle">4 projects</p>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <!-- Settings -->
+          <article class="deck-card" data-type="action" data-action="settings">
+            <div class="card-inner">
+              <div class="card-face" data-suit="♣">
+                <span class="card-index top-left">8<span class="suit">♣</span></span>
+                <span class="card-index bottom-right">8<span class="suit">♣</span></span>
+                <div class="card-content">
+                  <div class="card-icon">
+                    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                  </div>
+                  <h3 class="card-title">Settings</h3>
+                  <p class="card-subtitle">Preferences</p>
+                </div>
+              </div>
+            </div>
+          </article>
+        </div>
+      </div>
+
+      <!-- Scroll Indicator -->
+      <div class="scroll-indicator">
+        <span class="scroll-hint">Scroll to browse</span>
+        <div class="scroll-dots">
+          <span class="scroll-dot active"></span>
+          <span class="scroll-dot"></span>
+          <span class="scroll-dot"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sub-deck Templates (hidden, used by JS) -->
+  <template id="recentThreadsTemplate">
+    <article class="deck-card thread-card" data-type="thread" data-active="true">
+      <div class="card-inner">
+        <div class="card-face" data-suit="♠">
+          <span class="card-index top-left">A<span class="suit">♠</span></span>
+          <span class="card-index bottom-right">A<span class="suit">♠</span></span>
+          <div class="card-content">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            </div>
+            <h3 class="card-title">Activity Panel Redesign</h3>
+            <div class="thread-meta">
+              <span class="thread-meta-item">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                2m ago
+              </span>
+              <span class="thread-meta-item">
+                <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                24 msgs
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+    <article class="deck-card thread-card" data-type="thread">
+      <div class="card-inner">
+        <div class="card-face" data-suit="♦">
+          <span class="card-index top-left">K<span class="suit">♦</span></span>
+          <span class="card-index bottom-right">K<span class="suit">♦</span></span>
+          <div class="card-content">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            </div>
+            <h3 class="card-title">Database Schema Design</h3>
+            <div class="thread-meta">
+              <span class="thread-meta-item">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                2h ago
+              </span>
+              <span class="thread-meta-item">
+                <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                18 msgs
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+    <article class="deck-card thread-card" data-type="thread">
+      <div class="card-inner">
+        <div class="card-face" data-suit="♥">
+          <span class="card-index top-left">Q<span class="suit">♥</span></span>
+          <span class="card-index bottom-right">Q<span class="suit">♥</span></span>
+          <div class="card-content">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            </div>
+            <h3 class="card-title">Fix Auth Bug</h3>
+            <div class="thread-meta">
+              <span class="thread-meta-item">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                4h ago
+              </span>
+              <span class="thread-meta-item">
+                <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                12 msgs
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+    <article class="deck-card thread-card" data-type="thread">
+      <div class="card-inner">
+        <div class="card-face" data-suit="♣">
+          <span class="card-index top-left">J<span class="suit">♣</span></span>
+          <span class="card-index bottom-right">J<span class="suit">♣</span></span>
+          <div class="card-content">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            </div>
+            <h3 class="card-title">API Endpoint Planning</h3>
+            <div class="thread-meta">
+              <span class="thread-meta-item">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                1d ago
+              </span>
+              <span class="thread-meta-item">
+                <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                31 msgs
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+    <article class="deck-card thread-card" data-type="thread">
+      <div class="card-inner">
+        <div class="card-face" data-suit="♠">
+          <span class="card-index top-left">10<span class="suit">♠</span></span>
+          <span class="card-index bottom-right">10<span class="suit">♠</span></span>
+          <div class="card-content">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            </div>
+            <h3 class="card-title">UI Animations Review</h3>
+            <div class="thread-meta">
+              <span class="thread-meta-item">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                1d ago
+              </span>
+              <span class="thread-meta-item">
+                <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                8 msgs
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+    <article class="deck-card thread-card" data-type="thread">
+      <div class="card-inner">
+        <div class="card-face" data-suit="♦">
+          <span class="card-index top-left">9<span class="suit">♦</span></span>
+          <span class="card-index bottom-right">9<span class="suit">♦</span></span>
+          <div class="card-content">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            </div>
+            <h3 class="card-title">Component Refactoring</h3>
+            <div class="thread-meta">
+              <span class="thread-meta-item">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                2d ago
+              </span>
+              <span class="thread-meta-item">
+                <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                45 msgs
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+  </template>
+
+  <template id="projectsTemplate">
+    <article class="deck-card" data-type="category" data-category="project-ai-shuffle">
+      <div class="card-inner">
+        <div class="card-face card-has-children" data-suit="♠">
+          <span class="card-index top-left">A<span class="suit">♠</span></span>
+          <span class="card-index bottom-right">A<span class="suit">♠</span></span>
+          <div class="card-content">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            </div>
+            <h3 class="card-title">ai-shuffle</h3>
+            <p class="card-subtitle">8 threads</p>
+          </div>
+        </div>
+      </div>
+    </article>
+    <article class="deck-card" data-type="category" data-category="project-api">
+      <div class="card-inner">
+        <div class="card-face card-has-children" data-suit="♦">
+          <span class="card-index top-left">K<span class="suit">♦</span></span>
+          <span class="card-index bottom-right">K<span class="suit">♦</span></span>
+          <div class="card-content">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            </div>
+            <h3 class="card-title">backend-api</h3>
+            <p class="card-subtitle">3 threads</p>
+          </div>
+        </div>
+      </div>
+    </article>
+    <article class="deck-card" data-type="category" data-category="project-docs">
+      <div class="card-inner">
+        <div class="card-face card-has-children" data-suit="♥">
+          <span class="card-index top-left">Q<span class="suit">♥</span></span>
+          <span class="card-index bottom-right">Q<span class="suit">♥</span></span>
+          <div class="card-content">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            </div>
+            <h3 class="card-title">documentation</h3>
+            <p class="card-subtitle">1 thread</p>
+          </div>
+        </div>
+      </div>
+    </article>
+    <article class="deck-card" data-type="category" data-category="project-mobile">
+      <div class="card-inner">
+        <div class="card-face card-has-children" data-suit="♣">
+          <span class="card-index top-left">J<span class="suit">♣</span></span>
+          <span class="card-index bottom-right">J<span class="suit">♣</span></span>
+          <div class="card-content">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            </div>
+            <h3 class="card-title">mobile-app</h3>
+            <p class="card-subtitle">0 threads</p>
+          </div>
+        </div>
+      </div>
+    </article>
+  </template>
+
+  <script>
+    // ========================================
+    // DECK NAVIGATOR LOGIC
+    // ========================================
+
+    const dealerBtn = document.getElementById('dealerBtn');
+    const deckNavigator = document.getElementById('deckNavigator');
+    const deckBackdrop = document.getElementById('deckBackdrop');
+    const closeBtn = document.getElementById('closeBtn');
+    const cardCarousel = document.getElementById('cardCarousel');
+    const breadcrumb = document.getElementById('breadcrumb');
+    const mainDeck = document.getElementById('mainDeck');
+    const scrollDots = document.querySelectorAll('.scroll-dot');
+
+    // Navigation state
+    let navigationStack = [{ name: 'The Deck', element: mainDeck }];
+    let isDragging = false;
+    let startX = 0;
+    let scrollLeft = 0;
+
+    // Open/Close
+    function openDeck() {
+      deckNavigator.classList.add('open');
+      dealerBtn.classList.add('open');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeDeck() {
+      deckNavigator.classList.remove('open');
+      dealerBtn.classList.remove('open');
+      document.body.style.overflow = '';
+
+      // Reset to main deck after close animation
+      setTimeout(() => {
+        resetToMainDeck();
+      }, 300);
+    }
+
+    function resetToMainDeck() {
+      // Remove all sub-decks
+      const subDecks = cardCarousel.querySelectorAll('.deck-level:not(#mainDeck)');
+      subDecks.forEach(deck => deck.remove());
+
+      // Show main deck
+      mainDeck.style.display = 'flex';
+
+      // Reset navigation
+      navigationStack = [{ name: 'The Deck', element: mainDeck }];
+      updateBreadcrumb();
+
+      // Reset scroll
+      cardCarousel.scrollLeft = 0;
+    }
+
+    // Event listeners
+    dealerBtn.addEventListener('click', () => {
+      if (deckNavigator.classList.contains('open')) {
+        closeDeck();
+      } else {
+        openDeck();
+      }
+    });
+
+    closeBtn.addEventListener('click', closeDeck);
+    deckBackdrop.addEventListener('click', closeDeck);
+
+    // Keyboard navigation
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && deckNavigator.classList.contains('open')) {
+        if (navigationStack.length > 1) {
+          navigateBack();
+        } else {
+          closeDeck();
+        }
+      }
+    });
+
+    // Card click handling
+    cardCarousel.addEventListener('click', (e) => {
+      const card = e.target.closest('.deck-card');
+      if (!card || isDragging) return;
+
+      const type = card.dataset.type;
+      const category = card.dataset.category;
+      const action = card.dataset.action;
+
+      if (type === 'category') {
+        navigateToCategory(category, card);
+      } else if (type === 'action') {
+        handleAction(action);
+      } else if (type === 'thread') {
+        handleThreadClick(card);
+      }
+    });
+
+    // Navigate to sub-deck
+    function navigateToCategory(category, sourceCard) {
+      const template = document.getElementById(category + 'Template') ||
+                       document.getElementById('recentThreadsTemplate'); // Fallback
+
+      if (!template) return;
+
+      // Hide current deck
+      const currentDeck = navigationStack[navigationStack.length - 1].element;
+      currentDeck.style.display = 'none';
+
+      // Create new deck level
+      const newDeck = document.createElement('div');
+      newDeck.className = 'deck-level entering';
+      newDeck.innerHTML = template.innerHTML;
+      cardCarousel.appendChild(newDeck);
+
+      // Get category name from card
+      const cardTitle = sourceCard.querySelector('.card-title')?.textContent || category;
+
+      // Update navigation stack
+      navigationStack.push({ name: cardTitle, element: newDeck });
+      updateBreadcrumb();
+
+      // Reset scroll
+      cardCarousel.scrollLeft = 0;
+
+      // Remove entering class after animation
+      setTimeout(() => {
+        newDeck.classList.remove('entering');
+      }, 500);
+    }
+
+    // Navigate back
+    function navigateBack(targetIndex = navigationStack.length - 2) {
+      if (targetIndex < 0) return;
+
+      // Remove decks after target
+      while (navigationStack.length > targetIndex + 1) {
+        const removed = navigationStack.pop();
+        if (removed.element !== mainDeck) {
+          removed.element.remove();
+        }
+      }
+
+      // Show target deck
+      const targetDeck = navigationStack[targetIndex].element;
+      targetDeck.style.display = 'flex';
+
+      updateBreadcrumb();
+      cardCarousel.scrollLeft = 0;
+    }
+
+    // Update breadcrumb
+    function updateBreadcrumb() {
+      breadcrumb.innerHTML = navigationStack.map((item, index) => {
+        const isLast = index === navigationStack.length - 1;
+        const separator = index > 0 ? '<span class="breadcrumb-separator">›</span>' : '';
+        return `
+          ${separator}
+          <button class="breadcrumb-item ${isLast ? 'active' : ''}"
+                  data-index="${index}"
+                  ${isLast ? 'disabled' : ''}>
+            ${item.name}
+          </button>
+        `;
+      }).join('');
+
+      // Add click handlers
+      breadcrumb.querySelectorAll('.breadcrumb-item:not(.active)').forEach(btn => {
+        btn.addEventListener('click', () => {
+          navigateBack(parseInt(btn.dataset.index));
+        });
+      });
+    }
+
+    // Handle actions
+    function handleAction(action) {
+      console.log('Action:', action);
+      closeDeck();
+      // In real implementation, this would create a new card, open settings, etc.
+      alert(`Action: ${action}\n\nThis would create a new card or open the relevant interface.`);
+    }
+
+    // Handle thread click
+    function handleThreadClick(card) {
+      const title = card.querySelector('.card-title')?.textContent;
+      console.log('Open thread:', title);
+      closeDeck();
+      alert(`Opening thread: ${title}\n\nThis would focus that thread's card in the workspace.`);
+    }
+
+    // ========================================
+    // DRAG TO SCROLL (Desktop)
+    // ========================================
+
+    cardCarousel.addEventListener('mousedown', (e) => {
+      isDragging = true;
+      startX = e.pageX - cardCarousel.offsetLeft;
+      scrollLeft = cardCarousel.scrollLeft;
+      cardCarousel.classList.add('dragging');
+    });
+
+    cardCarousel.addEventListener('mouseleave', () => {
+      isDragging = false;
+      cardCarousel.classList.remove('dragging');
+    });
+
+    cardCarousel.addEventListener('mouseup', () => {
+      setTimeout(() => {
+        isDragging = false;
+        cardCarousel.classList.remove('dragging');
+      }, 10);
+    });
+
+    cardCarousel.addEventListener('mousemove', (e) => {
+      if (!isDragging) return;
+      e.preventDefault();
+      const x = e.pageX - cardCarousel.offsetLeft;
+      const walk = (x - startX) * 1.5;
+      cardCarousel.scrollLeft = scrollLeft - walk;
+    });
+
+    // ========================================
+    // SCROLL INDICATOR UPDATE
+    // ========================================
+
+    cardCarousel.addEventListener('scroll', () => {
+      const scrollWidth = cardCarousel.scrollWidth - cardCarousel.clientWidth;
+      const scrollPercent = cardCarousel.scrollLeft / scrollWidth;
+
+      scrollDots.forEach((dot, index) => {
+        const dotPercent = index / (scrollDots.length - 1);
+        const isActive = Math.abs(scrollPercent - dotPercent) < 0.2;
+        dot.classList.toggle('active', isActive);
+      });
+    });
+
+    // ========================================
+    // TOUCH SUPPORT (Mobile)
+    // ========================================
+
+    let touchStartX = 0;
+    let touchStartY = 0;
+    let isHorizontalSwipe = null;
+
+    cardCarousel.addEventListener('touchstart', (e) => {
+      touchStartX = e.touches[0].clientX;
+      touchStartY = e.touches[0].clientY;
+      isHorizontalSwipe = null;
+    }, { passive: true });
+
+    cardCarousel.addEventListener('touchmove', (e) => {
+      if (isHorizontalSwipe === null) {
+        const deltaX = Math.abs(e.touches[0].clientX - touchStartX);
+        const deltaY = Math.abs(e.touches[0].clientY - touchStartY);
+        isHorizontalSwipe = deltaX > deltaY;
+      }
+    }, { passive: true });
+
+    // Swipe back gesture (swipe right from left edge)
+    document.addEventListener('touchstart', (e) => {
+      if (e.touches[0].clientX < 30 && deckNavigator.classList.contains('open')) {
+        touchStartX = e.touches[0].clientX;
+      }
+    }, { passive: true });
+
+    document.addEventListener('touchend', (e) => {
+      if (touchStartX < 30 && e.changedTouches[0].clientX > 100) {
+        if (navigationStack.length > 1) {
+          navigateBack();
+        }
+      }
+    }, { passive: true });
+
+    // Initialize
+    updateBreadcrumb();
+  </script>
+</body>
+</html>

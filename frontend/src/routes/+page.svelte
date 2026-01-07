@@ -70,118 +70,13 @@
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
 	import CreateMenu from '$lib/components/deck/CreateMenu.svelte';
-
-	// Mobile components
-	import BottomSheet from '$lib/components/chat/BottomSheet.svelte';
-	import ChatSettingsOverlay from '$lib/components/deck/overlays/ChatSettingsOverlay.svelte';
-
-	// Types from deck/types
-	import type {
-		ActivityMode,
-		DeckSession,
-		DeckAgent,
-		DeckGeneration,
-		RunningProcess
-	} from '$lib/components/deck/types';
-	import type { ActiveSession, HistorySession, ActivityTabType, OverlayType } from '$lib/components/deck';
+	import CardDeckNavigator from '$lib/components/deck/CardDeckNavigator.svelte';
 
 	// ============================================
 	// State: Deck Layout
 	// ============================================
-	let activeMode = $state<ActivityMode>('workspace');
-	let contextCollapsed = $state(false);
 	let isMobile = $state(false);
 	let workspaceRef: Workspace | undefined = $state();
-
-	// Activity Panel State
-	let activityPanelTab = $state<ActivityTabType>('threads');
-	let overlayType = $state<OverlayType>(null);
-
-	// Mobile Settings Sheet
-	let showMobileSettingsSheet = $state(false);
-
-	// Stable callbacks for chat settings (defined once, reused)
-	function handleChatSettingsProfileChange(profileId: string) {
-		const tab = $activeTab;
-		if (tab) tabs.setTabProfile(tab.id, profileId);
-	}
-
-	function handleChatSettingsProjectChange(projectId: string) {
-		const tab = $activeTab;
-		if (tab) tabs.setTabProject(tab.id, projectId);
-		git.loadRepository(projectId);
-	}
-
-	function handleChatSettingsModelChange(model: string | null) {
-		const tab = $activeTab;
-		if (tab) tabs.setTabModelOverride(tab.id, model);
-	}
-
-	function handleChatSettingsModeChange(mode: string | null) {
-		const tab = $activeTab;
-		if (tab) tabs.setTabPermissionModeOverride(tab.id, mode);
-	}
-
-	// Derived overlay data - automatically updates when dependencies change
-	const chatSettingsOverlayData = $derived.by(() => {
-		// Compute data when desktop overlay OR mobile bottom sheet is open
-		if (overlayType !== 'chat-settings' && !showMobileSettingsSheet) return {};
-
-		const tab = $activeTab;
-		if (!tab) return {};
-
-		// Get profile settings for effective values
-		const currentProfile = $profiles.find(p => p.id === tab.profile);
-		const profileModel = currentProfile?.config?.model || 'sonnet';
-		const profileMode = currentProfile?.config?.permission_mode || 'default';
-
-		// Calculate context usage
-		const autocompactBuffer = 45000;
-		const contextUsed = (tab.contextUsed ?? (tab.totalTokensIn + tab.totalCacheCreationTokens + tab.totalCacheReadTokens)) + autocompactBuffer;
-		const contextMax = tab.contextMax || 200000;
-		const contextPercent = Math.min((contextUsed / contextMax) * 100, 100);
-
-		return {
-			// Current values
-			selectedProfile: tab.profile,
-			selectedProject: tab.project,
-			selectedModel: tab.modelOverride,
-			selectedMode: tab.permissionModeOverride,
-			effectiveModel: tab.modelOverride || profileModel,
-			effectiveMode: tab.permissionModeOverride || profileMode,
-			contextUsage: {
-				used: contextUsed,
-				total: contextMax,
-				percentage: contextPercent
-			},
-
-			// Locked states
-			isProfileLocked: false,
-			isProjectLocked: !!tab.sessionId,
-
-			// Options
-			profiles: $profiles,
-			projects: $projects,
-			models: [
-				{ value: 'sonnet', label: 'Sonnet' },
-				{ value: 'sonnet-1m', label: 'Sonnet 1M' },
-				{ value: 'opus', label: 'Opus' },
-				{ value: 'haiku', label: 'Haiku' }
-			],
-			modes: [
-				{ value: 'default', label: 'Ask' },
-				{ value: 'acceptEdits', label: 'Auto-Accept' },
-				{ value: 'plan', label: 'Plan' },
-				{ value: 'bypassPermissions', label: 'Bypass' }
-			],
-
-			// Stable callbacks (don't change on re-render)
-			onProfileChange: handleChatSettingsProfileChange,
-			onProjectChange: handleChatSettingsProjectChange,
-			onModelChange: handleChatSettingsModelChange,
-			onModeChange: handleChatSettingsModeChange
-		};
-	});
 
 	// Track last loaded git project to avoid unnecessary reloads
 	let lastGitProjectId: string | null = null;
@@ -220,6 +115,7 @@
 	let showSpotlight = $state(false);
 	let showAdvancedSearch = $state(false);
 	let showCreateMenu = $state(false);
+	let showCardNavigator = $state(false);
 
 	// Terminal modal state
 	let terminalCommand = $state('/resume');
@@ -230,7 +126,6 @@
 
 	// Shortcut registrations for cleanup
 	let shortcutRegistrations: ShortcutRegistration[] = [];
-	let deckUnsubscribe: (() => void) | null = null;
 
 	// ============================================
 	// Derived State: Cards for Workspace
@@ -261,155 +156,6 @@
 			updatedAt: c.createdAt
 		}))
 	);
-
-	// Active Threads: Show all open cards in the sidebar (legacy)
-	const deckSessions = $derived<DeckSession[]>(
-		$allCards.map((c) => ({
-			id: c.id,
-			title: c.title || 'Untitled',
-			lastMessage: c.type === 'chat' ? 'Chat' : c.type === 'terminal' ? 'Terminal' : c.type,
-			timestamp: new Date(c.createdAt),
-			isActive: c.id === $focusedCardId
-		}))
-	);
-
-	// Active Sessions for Activity Panel: Combines open cards and active agents (running + paused)
-	// Track which agent IDs have open cards to avoid duplicates
-	const openAgentCardIds = $derived(
-		new Set($allCards.filter(c => c.type === 'agent').map(c => c.dataId))
-	);
-
-	const activeSessions = $derived<ActiveSession[]>([
-		// Open cards - map to correct types, get agent status from store
-		...$allCards.map((c) => {
-			if (c.type === 'agent') {
-				// Agent card - get status from agent store
-				const agentData = $allAgents.find(a => a.id === c.dataId);
-				return {
-					id: c.id, // Use card ID for focusing
-					type: 'agent' as const,
-					title: agentData?.name || c.title || 'Agent',
-					status: agentData?.status === 'running' ? 'running' as const :
-					        agentData?.status === 'paused' ? 'idle' as const :
-					        agentData?.status === 'failed' ? 'error' as const :
-					        c.id === $focusedCardId ? 'active' as const : 'idle' as const,
-					progress: agentData?.progress,
-					isSelected: c.id === $focusedCardId,
-					unread: false
-				};
-			}
-			// Regular chat card
-			return {
-				id: c.id,
-				type: 'chat' as const,
-				title: c.title || 'Untitled',
-				status: c.id === $focusedCardId ? 'active' as const : 'idle' as const,
-				isSelected: c.id === $focusedCardId,
-				unread: false
-			};
-		}),
-		// Active agents that don't have an open card yet (running + paused)
-		...$activeAgents
-			.filter(agent => !openAgentCardIds.has(agent.id))
-			.map(agent => ({
-				id: agent.id,
-				type: 'agent' as const,
-				title: agent.name || agent.prompt?.slice(0, 30) || `Agent ${agent.id.slice(0, 8)}`,
-				status: agent.status === 'running' ? 'running' as const :
-				        agent.status === 'paused' ? 'idle' as const :
-				        agent.status === 'failed' ? 'error' as const : 'idle' as const,
-				progress: agent.progress,
-				isSelected: false,
-				unread: false
-			}))
-	]);
-
-	// Recent Sessions: Session history for loading old chats
-	// Shows sessions that are NOT currently open as cards
-	const openSessionIds = $derived(
-		new Set($allCards
-			.filter(c => c.dataId)
-			.map(c => c.dataId))
-	);
-
-	const recentSessions = $derived<HistorySession[]>(
-		$sessions.slice(0, 20).map((s) => ({
-			id: s.id,
-			title: s.title || 'Untitled',
-			timestamp: new Date(s.updated_at),
-			isOpen: openSessionIds.has(s.id)
-		}))
-	);
-
-	const badges = $derived<import('$lib/components/deck/types').ActivityBadges>({
-		workspace: $allCards.length > 0 ? $allCards.length : undefined,
-		studio: undefined,
-		files: undefined
-	});
-
-	// Map all agents to DeckAgent format for ContextPanel
-	// Uses allAgents so we track status changes including completed/failed
-	const deckAgents = $derived.by<DeckAgent[]>(() => {
-		const mapped = $allAgents.map(agent => ({
-			id: agent.id,
-			name: agent.name,
-			status: agent.status === 'running' ? 'running' :
-			        agent.status === 'paused' ? 'paused' :
-			        agent.status === 'queued' ? 'queued' :
-			        agent.status === 'completed' ? 'idle' :
-			        agent.status === 'failed' ? 'error' : 'idle',
-			task: agent.prompt?.slice(0, 50),
-			progress: agent.progress
-		} as DeckAgent));
-		console.log('[DeckAgents] allAgents count:', $allAgents.length, 'mapped:', mapped);
-		return mapped;
-	});
-
-	// Split agents for Activity Panel tabs (running/queued go to active sessions)
-	const runningAgentsForPanel = $derived<DeckAgent[]>(
-		deckAgents.filter(a => a.status === 'running' || a.status === 'paused' || a.status === 'queued')
-	);
-	const completedAgentsForPanel = $derived<DeckAgent[]>(
-		deckAgents.filter(a => a.status === 'idle' || a.status === 'error')
-	);
-
-	const deckGenerations: DeckGeneration[] = [];
-	const runningProcesses = $derived<RunningProcess[]>([]);
-
-	// Compute current session info from focused chat card
-	const currentSessionInfo = $derived.by<import('$lib/components/deck/types').SessionInfo | null>(() => {
-		// Find the focused card
-		const focusedCard = $allCards.find(c => c.id === $focusedCardId);
-		if (!focusedCard || focusedCard.type !== 'chat') return null;
-
-		// Get the tab for this card (by dataId which is the tabId)
-		const tabId = focusedCard.dataId;
-		if (!tabId) return null;
-
-		const tab = $allTabs.find(t => t.id === tabId);
-		if (!tab) return null;
-
-		// Get the profile to find the model name
-		const profilesList = $profiles;
-		const profile = profilesList.find(p => p.id === tab.profile);
-		const modelName = tab.modelOverride || profile?.config?.model || 'claude-sonnet-4-20250514';
-
-		// Calculate cost (rough estimate based on Claude pricing)
-		// Sonnet: $3/$15 per 1M tokens (input/output)
-		const inputCost = (tab.totalTokensIn / 1_000_000) * 3;
-		const outputCost = (tab.totalTokensOut / 1_000_000) * 15;
-		const totalCost = inputCost + outputCost;
-
-		return {
-			model: modelName,
-			tokens: {
-				input: tab.totalTokensIn,
-				output: tab.totalTokensOut,
-				total: tab.totalTokensIn + tab.totalTokensOut
-			},
-			cost: totalCost
-		};
-	});
 
 	// ============================================
 	// Helper Functions
@@ -554,12 +300,6 @@
 		// Initial workspace bounds
 		updateWorkspaceBounds();
 
-		// Sync activeMode from deck store
-		deckUnsubscribe = deck.subscribe((state) => {
-			activeMode = state.activeMode as ActivityMode;
-			contextCollapsed = state.contextPanelCollapsed;
-		});
-
 		// Register keyboard shortcuts
 		shortcutRegistrations = [
 			// Spotlight search (Cmd+K)
@@ -589,7 +329,7 @@
 				key: 'b',
 				cmdOrCtrl: true,
 				shift: true,
-				category: 'agents',
+				category: 'general',
 				action: () => { handleCreateCard('agent'); }
 			}),
 
@@ -786,9 +526,6 @@
 				document.removeEventListener('visibilitychange', visibilityChangeHandler);
 			}
 		}
-		if (deckUnsubscribe) {
-			deckUnsubscribe();
-		}
 		shortcutRegistrations.forEach((reg) => reg.unregister());
 		shortcutRegistrations = [];
 		tabs.destroy();
@@ -824,56 +561,22 @@
 	// ============================================
 	// Mode & Navigation Handlers
 	// ============================================
-	function handleModeChange(mode: ActivityMode) {
-		activeMode = mode;
-		deck.setMode(mode as 'workspace' | 'studio' | 'files');
-	}
-
-	function handleSessionClick(session: ActiveSession) {
-		if (session.type === 'chat') {
-			// It's a chat card - focus it
-			const existingCard = $allCards.find((c) => c.id === session.id);
-			if (existingCard) {
-				deck.focusCard(existingCard.id);
-			}
-		} else if (session.type === 'agent') {
-			// It's an agent session - could be a card ID or agent ID
-			// First check if session.id is a card ID (for already open agent cards)
-			const existingCardById = $allCards.find((c) => c.id === session.id);
-			if (existingCardById) {
-				// It's an open card - just focus it
-				deck.focusCard(existingCardById.id);
-				return;
-			}
-
-			// Check if there's already an agent card with this dataId
-			const existingAgentCard = $allCards.find((c) => c.type === 'agent' && c.dataId === session.id);
-			if (existingAgentCard) {
-				deck.focusCard(existingAgentCard.id);
-				return;
-			}
-
-			// No existing card - open a new one
-			deck.setMode('workspace');
-			deck.openOrFocusCard('agent', session.id, {
-				title: session.title,
-				meta: { agentId: session.id }
-			});
-		}
-	}
-
-	function handleHistorySessionClick(historySession: HistorySession) {
+	/**
+	 * Open a thread from the CardDeckNavigator
+	 */
+	function handleNavigatorOpenThread(sessionId: string) {
 		// Check if this session is already open as a card
-		const existingCard = deck.findCardByDataId(historySession.id);
+		const existingCard = deck.findCardByDataId(sessionId);
 		if (existingCard) {
 			// Focus the existing card
 			deck.focusCard(existingCard.id);
 		} else {
 			// Open the session as a new card
-			const tabId = tabs.openSession(historySession.id);
+			const tabId = tabs.openSession(sessionId);
+			const sessionData = $sessions.find(s => s.id === sessionId);
 			deck.addCard('chat', {
-				title: historySession.title || 'Chat',
-				dataId: historySession.id,
+				title: sessionData?.title || 'Chat',
+				dataId: sessionId,
 				meta: { tabId }
 			});
 		}
@@ -1063,67 +766,6 @@
 	}
 
 	// ============================================
-	// Profile/Project Card Handlers (from ChatHeader context menu)
-	// ============================================
-	function handleOpenProfileCard(editId?: string) {
-		// Find or create profile card
-		const existingProfile = $allCards.find(c => c.type === 'profile');
-		if (existingProfile) {
-			deck.focusCard(existingProfile.id);
-			// If editing a specific profile, set metadata to open in edit mode
-			if (editId) {
-				deck.setCardMeta(existingProfile.id, { editProfileId: editId });
-			}
-		} else {
-			deck.addCard('profile', {
-				title: 'Profiles',
-				meta: editId ? { editProfileId: editId } : undefined
-			});
-		}
-	}
-
-	function handleOpenChatSettings() {
-		// On mobile, use the bottom sheet instead of the hidden side panel
-		if (isMobile) {
-			showMobileSettingsSheet = !showMobileSettingsSheet;
-			return;
-		}
-
-		// Desktop: Toggle overlay if already open
-		if (overlayType === 'chat-settings') {
-			overlayType = null;
-			// Also collapse the side panel when closing settings
-			deck.collapseContextPanel();
-			return;
-		}
-
-		// Expand the context panel if collapsed
-		deck.expandContextPanel();
-
-		// Just set the overlay type - data is derived reactively
-		overlayType = 'chat-settings';
-	}
-
-	function handleCloseMobileSettings() {
-		showMobileSettingsSheet = false;
-	}
-
-	function handleOpenProjectCard(editId?: string) {
-		// Find or create project card
-		const existingProject = $allCards.find(c => c.type === 'project');
-		if (existingProject) {
-			deck.focusCard(existingProject.id);
-			// If editing a specific project, set metadata to open in edit mode
-			if (editId) {
-				deck.setCardMeta(existingProject.id, { editProjectId: editId });
-			}
-		} else {
-			deck.addCard('project', {
-				title: 'Projects',
-				meta: editId ? { editProjectId: editId } : undefined
-			});
-		}
-	}
 
 	// ============================================
 	// Spotlight Search Handlers
@@ -1211,52 +853,7 @@
 {:else}
 	<!-- Main Deck Layout -->
 	<DeckLayout
-		{activeMode}
-		{badges}
-		contextCollapsed={contextCollapsed}
-		isAdmin={$isAdmin}
-		activeTab={activityPanelTab}
-		{activeSessions}
-		{recentSessions}
-		runningAgents={runningAgentsForPanel}
-		completedAgents={completedAgentsForPanel}
-		generations={deckGenerations}
-		currentSession={currentSessionInfo}
-		{overlayType}
-		overlayData={chatSettingsOverlayData}
-		sessions={deckSessions}
-		agents={deckAgents}
-		{runningProcesses}
-		onModeChange={handleModeChange}
-		onLogoClick={() => showCreateMenu = !showCreateMenu}
-		onSettingsClick={() => handleCreateCard('settings')}
-		onContextToggle={() => {
-			deck.toggleContextPanel();
-			// Close chat settings overlay when collapsing the panel
-			if (overlayType === 'chat-settings') {
-				overlayType = null;
-			}
-		}}
-		onTabChange={(tab) => activityPanelTab = tab}
-		onSessionClick={handleSessionClick}
-		onHistorySessionClick={handleHistorySessionClick}
-		onAgentClick={(agent) => {
-			// Open agent card in workspace
-			console.log('[onAgentClick] Clicked agent:', agent.id, agent.name);
-			deck.setMode('workspace');
-			const cardId = deck.openOrFocusCard('agent', agent.id, {
-				title: agent.name,
-				meta: { agentId: agent.id }
-			});
-			console.log('[onAgentClick] Opened/focused card:', cardId, 'with dataId:', agent.id);
-		}}
-		onGenerationClick={() => {}}
-		onOverlayClose={() => {
-			overlayType = null;
-			// Collapse activity panel when closing chat settings
-			deck.collapseContextPanel();
-		}}
-		onProcessClick={() => {}}
+		onLogoClick={() => showCardNavigator = !showCardNavigator}
 	>
 		{#if isMobile}
 				<!-- Mobile Workspace -->
@@ -1275,16 +872,13 @@
 								{tabId}
 								mobile={true}
 								onClose={() => handleCardClose(card.id)}
-																onMaximize={() => handleCardMaximize(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
 								onFocus={() => handleCardFocus(card.id)}
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
 								onFork={(sessionId, messageIndex, messageId) =>
 									handleFork(card.id, sessionId, messageIndex, messageId)
 								}
-								onOpenProfileCard={handleOpenProfileCard}
-								onOpenProjectCard={handleOpenProjectCard}
-								onOpenSettings={handleOpenChatSettings}
 							/>
 						{:else if card.type === 'agent'}
 							<AgentCard
@@ -1439,7 +1033,7 @@
 												{card}
 												{tabId}
 												onClose={() => handleCardClose(card.id)}
-																								onMaximize={() => handleCardMaximize(card.id)}
+												onMaximize={() => handleCardMaximize(card.id)}
 												onFocus={() => handleCardFocus(card.id)}
 												onMove={(x, y) => handleCardMove(card.id, x, y)}
 												onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1448,9 +1042,6 @@
 												onFork={(sessionId, messageIndex, messageId) =>
 													handleFork(card.id, sessionId, messageIndex, messageId)
 												}
-												onOpenProfileCard={handleOpenProfileCard}
-												onOpenProjectCard={handleOpenProjectCard}
-												onOpenSettings={handleOpenChatSettings}
 											/>
 										{:else}
 											<div class="card-loading">
@@ -1598,11 +1189,31 @@
 	<!-- MODALS -->
 	<!-- ========================================== -->
 
-	<!-- Create Menu -->
+	<!-- Card Deck Navigator (AI Shuffle themed) -->
+	<CardDeckNavigator
+		open={showCardNavigator}
+		onClose={() => showCardNavigator = false}
+		onCreateChat={() => handleCreateCard('chat')}
+		onCreateAgent={() => handleCreateCard('agent')}
+		onCreateTerminal={() => handleCreateCard('terminal')}
+		onOpenThread={handleNavigatorOpenThread}
+		onOpenImageStudio={() => handleCreateCard('image-studio')}
+		onOpenModelStudio={() => handleCreateCard('model-studio')}
+		onOpenAudioStudio={() => handleCreateCard('audio-studio')}
+		onOpenFileBrowser={() => handleCreateCard('file-browser')}
+		onOpenProjects={() => handleCreateCard('project')}
+		onOpenProfiles={() => handleCreateCard('profile')}
+		onOpenSettings={() => handleCreateCard('settings')}
+		isAdmin={$isAdmin}
+		{isMobile}
+	/>
+
+	<!-- Create Menu (legacy - kept for potential fallback) -->
 	<CreateMenu
 		open={showCreateMenu}
 		onClose={() => showCreateMenu = false}
 		onCreateChat={() => handleCreateCard('chat')}
+		onCreateAgent={() => handleCreateCard('agent')}
 		onCreateTerminal={() => handleCreateCard('terminal')}
 		onOpenProfiles={() => handleCreateCard('profile')}
 		onOpenProjects={() => handleCreateCard('project')}
@@ -1731,18 +1342,6 @@
 			onClose={closeTerminalModal}
 		/>
 	{/if}
-
-	<!-- Mobile Settings Bottom Sheet -->
-	<BottomSheet
-		open={showMobileSettingsSheet}
-		onClose={handleCloseMobileSettings}
-		title="Chat Settings"
-	>
-		<ChatSettingsOverlay
-			{...chatSettingsOverlayData}
-			onClose={handleCloseMobileSettings}
-		/>
-	</BottomSheet>
 
 {/if}
 

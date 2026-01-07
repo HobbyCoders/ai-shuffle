@@ -19,18 +19,13 @@
 
 	import { onMount } from 'svelte';
 	import {
-		MessageSquare, Terminal, Clock,
-		Settings, FolderOpen, X, Files, User, Users, Pencil, Check,
-		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronRight, Bot, Puzzle,
-		List, GitBranch, Key, Zap, StickyNote
+		MessageSquare, Terminal, Clock, Image, Box, AudioLines,
+		Settings, FolderOpen, X, Cpu, Files, User, Pencil, Check,
+		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronRight
 	} from 'lucide-svelte';
-	import { tabs, type ApiUser } from '$lib/stores/tabs';
-	import type { Session } from '$lib/api/client';
+	import { tabs, type Session } from '$lib/stores/tabs';
 	import { deck, type DeckCard as DeckCardType } from '$lib/stores/deck';
-	import { navigator, type CustomDeck, DECK_COLORS, type RecentSessionsViewMode } from '$lib/stores/navigator';
-	import RecentSessionsList from './RecentSessionsList.svelte';
-	import RecentSessionsTimeline from './RecentSessionsTimeline.svelte';
-	import ApiUserSessionsList from './ApiUserSessionsList.svelte';
+	import { navigator, type CustomDeck, DECK_COLORS } from '$lib/stores/navigator';
 	import { fly, fade, scale } from 'svelte/transition';
 	import { cubicOut } from 'svelte/easing';
 	import { flip } from 'svelte/animate';
@@ -39,42 +34,36 @@
 		open: boolean;
 		onClose: () => void;
 		onCreateChat: () => void;
+		onCreateAgent: () => void;
 		onCreateTerminal: () => void;
 		onOpenThread: (sessionId: string) => void;
+		onOpenImageStudio?: () => void;
+		onOpenModelStudio?: () => void;
+		onOpenAudioStudio?: () => void;
 		onOpenFileBrowser?: () => void;
 		onOpenProjects?: () => void;
 		onOpenProfiles?: () => void;
-		onOpenSubagents?: () => void;
 		onOpenSettings?: () => void;
-		onOpenPlugins?: () => void;
-		onOpenHooks?: () => void;
-		onOpenNotes?: () => void;
-		onOpenUserSettings?: () => void;
 		isAdmin?: boolean;
-		isApiUser?: boolean;
 		isMobile?: boolean;
-		initialView?: 'main' | 'recent';
 	}
 
 	let {
 		open,
 		onClose,
 		onCreateChat,
+		onCreateAgent,
 		onCreateTerminal,
 		onOpenThread,
+		onOpenImageStudio,
+		onOpenModelStudio,
+		onOpenAudioStudio,
 		onOpenFileBrowser,
 		onOpenProjects,
 		onOpenProfiles,
-		onOpenSubagents,
 		onOpenSettings,
-		onOpenPlugins,
-		onOpenHooks,
-		onOpenNotes,
-		onOpenUserSettings,
 		isAdmin = false,
-		isApiUser = false,
-		isMobile = false,
-		initialView = 'main'
+		isMobile = false
 	}: Props = $props();
 
 	// Navigation stack for breadcrumb
@@ -85,10 +74,10 @@
 	}
 
 	let navStack = $state<NavItem[]>([{ id: 'root', name: 'AI Shuffle', type: 'root' }]);
-	let currentView = $state<'main' | 'recent' | 'deck' | 'api-users'>('main');
+	let currentView = $state<'main' | 'recent' | 'deck'>('main');
 	let currentDeckId = $state<string | null>(null);
 
-	// Carousel state (desktop)
+	// Carousel state
 	let carouselRef = $state<HTMLDivElement | null>(null);
 	let isDragging = $state(false);
 	let hasDragged = $state(false);
@@ -96,15 +85,6 @@
 	let scrollLeft = $state(0);
 	let scrollProgress = $state(0);
 	const DRAG_THRESHOLD = 5;
-
-	// Mobile carousel state - relies on CSS scroll-snap for smooth swiping
-	const MOBILE_CARD_WIDTH_PERCENT = 0.75; // Card is 75% of viewport
-	const MOBILE_CARD_GAP = 16; // Gap between cards in pixels
-	const MOBILE_SCROLL_DEBOUNCE_MS = 100; // Debounce delay to let scroll-snap settle
-	const MOBILE_FAST_SCROLL_THRESHOLD = 6; // Above this many cards, allow momentum scrolling
-	let mobileCarouselRef = $state<HTMLDivElement | null>(null);
-	let mobileCurrentIndex = $state(0);
-	let mobileScrollDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 	// Edit mode state
 	let isEditMode = $state(false);
@@ -121,17 +101,7 @@
 	let draggedCardElement = $state<HTMLElement | null>(null);
 	let didDragInEditMode = $state(false); // Track if drag occurred to prevent click
 	let dragStartPosition = $state({ x: 0, y: 0 }); // Track start position for drag threshold
-	let railYPosition = $state(0); // Y position to lock horizontal dragging
 	const DRAG_START_THRESHOLD = 8; // Pixels to move before drag starts
-
-	// Live reorder state - tracks the current visual order during drag
-	let liveCardOrder = $state<string[]>([]);
-	// Original card positions captured at drag start (before any reordering)
-	let originalCardPositions = $state<{ id: string; left: number; width: number }[]>([]);
-
-	// Pending edit mode state - tracks uncommitted changes until user confirms
-	let pendingCardOrder = $state<string[]>([]); // The working order during edit mode
-	let originalCardOrder = $state<string[]>([]); // Order when edit mode started (for revert)
 
 	// Context menu state
 	let contextMenuOpen = $state(false);
@@ -149,10 +119,7 @@
 	let renameDeckName = $state('');
 
 	// Card types for main deck
-	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins' | 'hooks' | 'notes' | 'user-settings';
-
-	// Cards that API users are allowed to see (whitelist approach)
-	const API_USER_ALLOWED_CARDS = new Set(['new-chat', 'recent', 'file-browser', 'user-settings']);
+	type CardAction = 'new-chat' | 'new-agent' | 'terminal' | 'recent' | 'image-studio' | 'model-studio' | 'audio-studio' | 'file-browser' | 'projects' | 'profiles' | 'settings';
 
 	interface NavigatorCard {
 		id: string;
@@ -174,26 +141,9 @@
 	// Get navigator state
 	const navigatorState = $derived($navigator);
 	const userDecks = $derived(navigatorState.decks);
-	const recentViewMode = $derived(navigatorState.recentSessionsView);
 
 	// Get sessions from tabs store
 	const sessions = $derived($tabs.sessions);
-
-	// Get admin sessions and API users from tabs store (admin only)
-	const adminSessions = $derived($tabs.adminSessions);
-	const apiUsers = $derived($tabs.apiUsers);
-	const adminSessionsFilter = $derived($tabs.adminSessionsFilter);
-
-	// Navigate to initial view when opened
-	$effect(() => {
-		if (open && initialView === 'recent') {
-			currentView = 'recent';
-			navStack = [
-				{ id: 'root', name: 'AI Shuffle', type: 'root' },
-				{ id: 'recent', name: 'Recent', type: 'category' }
-			];
-		}
-	});
 
 	// Get active streaming cards
 	const activeCards = $derived($deck.cards.filter(c => c.type === 'chat'));
@@ -233,8 +183,7 @@
 
 	// Build base action cards (before filtering by deck membership)
 	const baseActionCards = $derived.by((): NavigatorCard[] => {
-		// Define all possible cards
-		const allCards: NavigatorCard[] = [
+		const cards: NavigatorCard[] = [
 			{
 				id: 'new-chat',
 				type: 'action',
@@ -242,6 +191,14 @@
 				title: 'New Chat',
 				subtitle: 'Start a conversation with AI',
 				icon: MessageSquare
+			},
+			{
+				id: 'new-agent',
+				type: 'action',
+				action: 'new-agent',
+				title: 'New Agent',
+				subtitle: 'Autonomous background task',
+				icon: Cpu
 			},
 			{
 				id: 'terminal',
@@ -259,6 +216,30 @@
 				subtitle: `${sessions.length} conversations`,
 				icon: Clock,
 				hasChildren: true
+			},
+			{
+				id: 'image-studio',
+				type: 'action',
+				action: 'image-studio',
+				title: 'Image Studio',
+				subtitle: 'Generate & edit images',
+				icon: Image
+			},
+			{
+				id: 'model-studio',
+				type: 'action',
+				action: 'model-studio',
+				title: '3D Models',
+				subtitle: 'Generate 3D assets',
+				icon: Box
+			},
+			{
+				id: 'audio-studio',
+				type: 'action',
+				action: 'audio-studio',
+				title: 'Audio Studio',
+				subtitle: 'Text to speech & more',
+				icon: AudioLines
 			},
 			{
 				id: 'file-browser',
@@ -283,92 +264,21 @@
 				title: 'Profiles',
 				subtitle: 'Agent configurations',
 				icon: User
-			},
-			{
-				id: 'plugins',
-				type: 'action',
-				action: 'plugins',
-				title: 'Plugins',
-				subtitle: 'Manage extensions',
-				icon: Puzzle
-			},
-			{
-				id: 'hooks',
-				type: 'action',
-				action: 'hooks',
-				title: 'Hooks',
-				subtitle: 'Event automation',
-				icon: Zap
-			},
-			{
-				id: 'notes',
-				type: 'action',
-				action: 'notes',
-				title: 'Notes',
-				subtitle: 'Project notes & ideas',
-				icon: StickyNote
 			}
 		];
 
-		// Add admin-only cards
 		if (isAdmin) {
-			allCards.push(
-				{
-					id: 'api-users',
-					type: 'category',
-					category: 'api-users',
-					title: 'API User Sessions',
-					subtitle: `${apiUsers.length} user${apiUsers.length !== 1 ? 's' : ''}`,
-					icon: Users,
-					hasChildren: true
-				},
-				{
-					id: 'subagents',
-					type: 'action',
-					action: 'subagents',
-					title: 'Subagents',
-					subtitle: 'Manage AI subagents',
-					icon: Bot
-				},
-				{
-					id: 'settings',
-					type: 'action',
-					action: 'settings',
-					title: 'Settings',
-					subtitle: 'Preferences & config',
-					icon: Settings
-				}
-			);
-		}
-
-		// Add user-settings card for API users
-		if (isApiUser) {
-			allCards.push({
-				id: 'user-settings',
+			cards.push({
+				id: 'settings',
 				type: 'action',
-				action: 'user-settings',
-				title: 'My Settings',
-				subtitle: 'API keys & profile',
-				icon: Key
+				action: 'settings',
+				title: 'Settings',
+				subtitle: 'Preferences & config',
+				icon: Settings
 			});
 		}
 
-		// For API users, filter to only allowed cards
-		if (isApiUser) {
-			return allCards.filter(card => {
-				// Allow category cards (like 'recent') if their id is in the whitelist
-				if (card.type === 'category') {
-					return API_USER_ALLOWED_CARDS.has(card.id);
-				}
-				// For action cards, check if action is in whitelist
-				if (card.type === 'action' && card.action) {
-					return API_USER_ALLOWED_CARDS.has(card.action);
-				}
-				return false;
-			});
-		}
-
-		return allCards;
+		return cards;
 	});
 
 	// Build main deck cards (filtered - excludes cards in custom decks)
@@ -388,11 +298,8 @@
 			hasChildren: true
 		}));
 
-		// In edit mode, use pending order (uncommitted changes)
-		// Otherwise use persisted order from store
-		const order = isEditMode && pendingCardOrder.length > 0
-			? pendingCardOrder
-			: navigatorState.cardOrder;
+		// Sort by persisted order (excluding add-deck card)
+		const order = navigatorState.cardOrder;
 		const sortableCards = [...filteredCards, ...deckCards];
 
 		let sortedCards: NavigatorCard[];
@@ -436,7 +343,7 @@
 				icon: MessageSquare,
 				sessionId: session.id,
 				isStreaming: isSessionStreaming(session.id),
-				messageCount: session.turn_count,
+				messageCount: session.message_count,
 				lastActive: formatRelativeTime(session.updated_at)
 			}));
 	});
@@ -462,7 +369,7 @@
 						icon: MessageSquare,
 						sessionId: session.id,
 						isStreaming: isSessionStreaming(session.id),
-						messageCount: session.turn_count,
+						messageCount: session.message_count,
 						lastActive: formatRelativeTime(session.updated_at)
 					});
 				}
@@ -489,46 +396,6 @@
 				return mainDeckCards;
 		}
 	});
-
-	// Snapshot of cards captured at drag start - prevents reactive updates from causing mismatches
-	let dragStartCards = $state<NavigatorCard[]>([]);
-
-	// Display cards - reordered in real-time during drag based on liveCardOrder
-	// IMPORTANT: Keep ALL cards in the list (including dragged card) so flip animation works
-	// The dragged card is hidden via CSS, not removed from the DOM
-	const displayCards = $derived.by((): NavigatorCard[] => {
-		// If not dragging or no live order, use current cards
-		if (!isPointerDragging || liveCardOrder.length === 0) {
-			return currentCards;
-		}
-
-		// During drag, use the SNAPSHOT of cards from drag start, not the reactive currentCards
-		// This prevents the derived from seeing inconsistent state when the store updates
-		const cardsToUse = dragStartCards.length > 0 ? dragStartCards : currentCards;
-
-		// Reorder cards based on live order (keep dragged card in list for flip to work)
-		const orderedCards: NavigatorCard[] = [];
-		const addDeckCard = cardsToUse.find(c => c.type === 'add-deck');
-
-		for (const cardId of liveCardOrder) {
-			const card = cardsToUse.find(c => c.id === cardId);
-			if (card) {
-				orderedCards.push(card);
-			}
-		}
-
-		// Add the add-deck card at the end if it exists
-		if (addDeckCard) {
-			orderedCards.push(addDeckCard);
-		}
-
-		return orderedCards;
-	});
-
-	// Mobile card count (excluding add-deck when not in edit mode) for dynamic scroll behavior
-	const mobileCardCount = $derived(
-		displayCards.filter(c => c.type !== 'add-deck' || isEditMode).length
-	);
 
 	// Handle card click
 	function handleCardClick(card: NavigatorCard, e: MouseEvent) {
@@ -569,16 +436,15 @@
 		onClose();
 		switch (action) {
 			case 'new-chat': onCreateChat(); break;
+			case 'new-agent': onCreateAgent(); break;
 			case 'terminal': onCreateTerminal(); break;
+			case 'image-studio': onOpenImageStudio?.(); break;
+			case 'model-studio': onOpenModelStudio?.(); break;
+			case 'audio-studio': onOpenAudioStudio?.(); break;
 			case 'file-browser': onOpenFileBrowser?.(); break;
 			case 'projects': onOpenProjects?.(); break;
 			case 'profiles': onOpenProfiles?.(); break;
-			case 'subagents': onOpenSubagents?.(); break;
 			case 'settings': onOpenSettings?.(); break;
-			case 'plugins': onOpenPlugins?.(); break;
-			case 'hooks': onOpenHooks?.(); break;
-			case 'notes': onOpenNotes?.(); break;
-			case 'user-settings': onOpenUserSettings?.(); break;
 		}
 	}
 
@@ -587,15 +453,8 @@
 		if (card.category === 'recent') {
 			currentView = 'recent';
 			navStack = [...navStack, { id: 'recent', name: 'Recent', type: 'category' }];
-		} else if (card.category === 'api-users') {
-			currentView = 'api-users';
-			navStack = [...navStack, { id: 'api-users', name: 'API User Sessions', type: 'category' }];
-			// Load API users and their sessions
-			tabs.loadApiUsers();
-			tabs.loadAdminSessions();
 		}
 		if (carouselRef) carouselRef.scrollLeft = 0;
-		resetMobileCarousel();
 	}
 
 	// Navigate to custom deck
@@ -604,7 +463,6 @@
 		currentDeckId = deckId;
 		navStack = [...navStack, { id: deckId, name, type: 'deck' }];
 		if (carouselRef) carouselRef.scrollLeft = 0;
-		resetMobileCarousel();
 	}
 
 	// Navigate back via breadcrumb
@@ -620,40 +478,22 @@
 		} else if (target.id === 'recent') {
 			currentView = 'recent';
 			currentDeckId = null;
-		} else if (target.id === 'api-users') {
-			currentView = 'api-users';
-			currentDeckId = null;
 		} else if (target.type === 'deck') {
 			currentView = 'deck';
 			currentDeckId = target.id;
 		}
 
 		if (carouselRef) carouselRef.scrollLeft = 0;
-		resetMobileCarousel();
 	}
 
 	// Reset state when closing
 	function handleClose() {
-		// In edit mode, close button just exits edit mode without closing the navigator
 		if (isEditMode) {
-			cancelEditMode();
-			return;
+			navigator.exitEditMode();
+			isEditMode = false;
 		}
-
 		contextMenuOpen = false;
 		showNewDeckDialog = false;
-
-		// Reset drag-related state that could block clicks on next open
-		didDragInEditMode = false;
-		hasDragged = false;
-		isDragging = false;
-		isPointerDragging = false;
-		draggedCardId = null;
-		liveCardOrder = [];
-		dragStartCards = [];
-		pendingCardOrder = [];
-		originalCardOrder = [];
-
 		onClose();
 		setTimeout(() => {
 			navStack = [{ id: 'root', name: 'AI Shuffle', type: 'root' }];
@@ -663,45 +503,18 @@
 		}, 300);
 	}
 
-	// Enter edit mode - capture original state for potential revert
-	function enterEditMode() {
-		// Capture original order before any changes
-		originalCardOrder = currentCards.filter(c => c.type !== 'add-deck').map(c => c.id);
-		pendingCardOrder = [...originalCardOrder];
-		navigator.enterEditMode();
-		isEditMode = true;
-		contextMenuOpen = false;
-	}
-
-	// Confirm edit mode - save pending changes
-	function confirmEditMode() {
-		if (pendingCardOrder.length > 0) {
-			navigator.setCardOrder(pendingCardOrder);
-		}
-		navigator.exitEditMode();
-		isEditMode = false;
-		pendingCardOrder = [];
-		originalCardOrder = [];
-		contextMenuOpen = false;
-	}
-
-	// Cancel edit mode - revert to original order
-	function cancelEditMode() {
-		// Revert to original order (no store update needed, just discard pending)
-		navigator.exitEditMode();
-		isEditMode = false;
-		pendingCardOrder = [];
-		originalCardOrder = [];
-		contextMenuOpen = false;
-	}
-
-	// Toggle edit mode (for button click - confirms when exiting)
+	// Toggle edit mode
 	function toggleEditMode() {
 		if (isEditMode) {
-			confirmEditMode();
+			// Save card order when exiting
+			const cardIds = currentCards.map(c => c.id);
+			navigator.setCardOrder(cardIds);
+			navigator.exitEditMode();
 		} else {
-			enterEditMode();
+			navigator.enterEditMode();
 		}
+		isEditMode = !isEditMode;
+		contextMenuOpen = false;
 	}
 
 	// Handle keyboard
@@ -733,34 +546,23 @@
 	let pendingDragIndex = $state<number>(-1);
 	let pendingDragElement = $state<HTMLElement | null>(null);
 
-	function handleDragHandlePointerDown(e: PointerEvent, card: NavigatorCard, index: number) {
+	function handleCardPointerDown(e: PointerEvent, card: NavigatorCard, index: number) {
 		if (!isEditMode || card.type === 'add-deck') return;
 
-		// Stop propagation so card click doesn't fire
-		e.stopPropagation();
-		e.preventDefault();
-
-		const cardElement = (e.currentTarget as HTMLElement).closest('[data-card-id]') as HTMLElement;
-		if (!cardElement) return;
+		const target = e.currentTarget as HTMLElement;
 
 		// Store the start position and card info
 		dragStartPosition = { x: e.clientX, y: e.clientY };
 		pendingDragCard = card;
 		pendingDragIndex = index;
-		pendingDragElement = cardElement;
+		pendingDragElement = target;
 
-		// Calculate offset from card top-left to pointer - use card element, not handle
-		const rect = cardElement.getBoundingClientRect();
+		// Calculate offset from card top-left to pointer
+		const rect = target.getBoundingClientRect();
 		pointerDragOffset = {
 			x: e.clientX - rect.left,
 			y: e.clientY - rect.top
 		};
-
-		// Store the carousel's Y position to lock horizontal movement
-		if (carouselRef) {
-			const carouselRect = carouselRef.getBoundingClientRect();
-			railYPosition = rect.top; // Lock to this card's Y position
-		}
 
 		// Start long press timer for mobile
 		if (isMobile) {
@@ -768,63 +570,24 @@
 				// Mobile long-press triggers drag immediately
 				startDragging(e);
 			}, LONG_PRESS_DURATION);
-		} else {
-			// On desktop, start drag immediately from handle
-			startDragging(e);
 		}
-	}
 
-	// Keep the old function but make it a no-op for non-handle clicks
-	function handleCardPointerDown(e: PointerEvent, card: NavigatorCard, index: number) {
-		// Only allow drag initiation from the drag handle, not the card body
-		// This function now does nothing - drag is handled by handleDragHandlePointerDown
-		return;
+		// Don't prevent default yet - allow click to work if no drag
 	}
 
 	function startDragging(e: PointerEvent | { clientX: number; clientY: number }) {
 		if (!pendingDragCard || !pendingDragElement) return;
 
-		// Capture snapshots FIRST, before setting isPointerDragging
-		// This ensures displayCards has valid data when it re-evaluates
-		const cardsSnapshot = [...currentCards];
-		const orderSnapshot = currentCards.filter(c => c.type !== 'add-deck').map(c => c.id);
-
 		draggedCardId = pendingDragCard.id;
 		draggedCardIndex = pendingDragIndex;
 		draggedCardElement = pendingDragElement;
+		isPointerDragging = true;
 		didDragInEditMode = true;
 
-		// Set snapshots before enabling drag mode
-		dragStartCards = cardsSnapshot;
-		liveCardOrder = orderSnapshot;
-
-		// NOW enable drag mode - displayCards will have valid data
-		isPointerDragging = true;
-
-		// Capture original card positions BEFORE any reordering happens
-		// These positions stay fixed throughout the drag operation
-		const cardElements = carouselRef?.querySelectorAll('[data-card-id]') as NodeListOf<HTMLElement>;
-		originalCardPositions = [];
-		if (cardElements) {
-			for (const el of cardElements) {
-				const cardId = el.dataset.cardId;
-				if (!cardId) continue;
-				const card = currentCards.find(c => c.id === cardId);
-				if (!card || card.type === 'add-deck') continue;
-
-				const rect = el.getBoundingClientRect();
-				originalCardPositions.push({
-					id: cardId,
-					left: rect.left,
-					width: rect.width
-				});
-			}
-		}
-
-		// Set initial position - lock Y to rail position
+		// Set initial position
 		pointerDragPosition = {
 			x: e.clientX - pointerDragOffset.x,
-			y: railYPosition // Lock to rail Y position
+			y: e.clientY - pointerDragOffset.y
 		};
 
 		// Haptic feedback on mobile
@@ -884,72 +647,50 @@
 	function handleEditPointerMove(e: PointerEvent | MouseEvent) {
 		if (!isPointerDragging || !draggedCardId) return;
 
-		// Update drag position - LOCK Y axis to rail position
+		// Update drag position
 		pointerDragPosition = {
 			x: e.clientX - pointerDragOffset.x,
-			y: railYPosition // Always keep Y locked to the rail
+			y: e.clientY - pointerDragOffset.y
 		};
 
-		// Use the ORIGINAL positions captured at drag start (not current DOM positions)
-		// This prevents feedback loops where positions shift as we reorder
-		if (originalCardPositions.length === 0) {
-			e.preventDefault();
-			return;
-		}
+		// Find which card we're over using elementsFromPoint
+		const elements = document.elementsFromPoint(e.clientX, e.clientY);
 
-		// Find the dragged card's original position to calculate its center
-		const draggedOriginal = originalCardPositions.find(p => p.id === draggedCardId);
-		const draggedCardWidth = draggedOriginal?.width || 220;
-		const dragCenterX = pointerDragPosition.x + draggedCardWidth / 2;
-
+		let hoveredIndex = -1;
 		let hoveredDeckId: string | null = null;
 
-		// Check for deck drop-into using original positions
-		const draggedCard = currentCards.find(c => c.id === draggedCardId);
-		if (draggedCard?.type !== 'deck') {
-			for (const pos of originalCardPositions) {
-				if (pos.id === draggedCardId) continue;
-				const card = currentCards.find(c => c.id === pos.id);
-				if (card?.type === 'deck' && card.deckId) {
-					const posRight = pos.left + pos.width;
-					if (dragCenterX >= pos.left && dragCenterX <= posRight) {
-						hoveredDeckId = card.deckId;
-						break;
-					}
-				}
-			}
-		}
+		// Find the first card element under the pointer (excluding the dragged one)
+		for (const el of elements) {
+			const cardEl = el.closest('[data-card-id]') as HTMLElement;
+			if (!cardEl) continue;
 
-		// Calculate new position in the order using ORIGINAL positions
-		if (!hoveredDeckId) {
-			// Get positions of other cards (excluding the dragged one) in their original order
-			const otherPositions = originalCardPositions.filter(p => p.id !== draggedCardId);
+			const cardId = cardEl.dataset.cardId;
+			if (!cardId || cardId === draggedCardId) continue;
 
-			// Find where the dragged card's center falls among the original slot positions
-			// Each "slot" is defined by the center of the original card position
-			let targetSlot = otherPositions.length; // Default to end
+			const card = currentCards.find(c => c.id === cardId);
+			if (!card) continue;
 
-			for (let i = 0; i < otherPositions.length; i++) {
-				const slotCenterX = otherPositions[i].left + otherPositions[i].width / 2;
-				if (dragCenterX < slotCenterX) {
-					targetSlot = i;
+			const idx = currentCards.findIndex(c => c.id === cardId);
+
+			// Check if it's a deck card (for drop-into)
+			if (card.type === 'deck' && card.deckId) {
+				const draggedCard = currentCards.find(c => c.id === draggedCardId);
+				if (draggedCard?.type !== 'deck') {
+					hoveredDeckId = card.deckId;
+					hoveredIndex = -1;
 					break;
 				}
 			}
 
-			// Build the new order: insert dragged card at targetSlot position
-			const otherCardIds = otherPositions.map(p => p.id);
-			const newOrder = [...otherCardIds];
-			newOrder.splice(targetSlot, 0, draggedCardId);
-
-			// Only update if order actually changed
-			const orderChanged = newOrder.some((id, i) => liveCardOrder[i] !== id);
-			if (orderChanged) {
-				liveCardOrder = newOrder;
+			// Regular card - use for reordering
+			if (card.type !== 'add-deck') {
+				hoveredIndex = idx;
 			}
+			break;
 		}
 
 		dragOverDeckId = hoveredDeckId;
+		dragOverIndex = hoveredIndex;
 
 		e.preventDefault();
 	}
@@ -957,38 +698,44 @@
 	function handleEditPointerUp(e: PointerEvent) {
 		if (!isPointerDragging || !draggedCardId) return;
 
-		// Capture the final order and drop target BEFORE clearing reactive state
-		const finalOrder = [...liveCardOrder];
-		const dropIntoDeckId = dragOverDeckId;
-		const droppedCardId = draggedCardId;
+		// Handle drop into deck
+		if (dragOverDeckId) {
+			navigator.addCardToDeck(dragOverDeckId, draggedCardId);
+		}
+		// Handle reorder
+		else if (dragOverIndex !== -1 && dragOverIndex !== draggedCardIndex) {
+			// Don't allow dropping past the add-deck card
+			let targetIndex = dragOverIndex;
+			const addDeckIndex = currentCards.findIndex(c => c.type === 'add-deck');
+			if (addDeckIndex !== -1 && targetIndex >= addDeckIndex) {
+				targetIndex = addDeckIndex - 1;
+			}
 
-		// Reset ALL drag state so displayCards falls back to pendingCardOrder
+			// Reorder cards (exclude add-deck from the order)
+			const cardIds = currentCards.filter(c => c.type !== 'add-deck').map(c => c.id);
+			const currentIdx = cardIds.indexOf(draggedCardId);
+			if (currentIdx !== -1) {
+				cardIds.splice(currentIdx, 1);
+				// Adjust target index if needed
+				const adjustedTarget = targetIndex > currentIdx ? targetIndex - 1 : targetIndex;
+				cardIds.splice(Math.min(adjustedTarget, cardIds.length), 0, draggedCardId);
+
+				navigator.setCardOrder(cardIds);
+			}
+		}
+
+		// Reset drag state
 		isPointerDragging = false;
 		draggedCardId = null;
 		draggedCardIndex = -1;
 		dragOverIndex = -1;
 		dragOverDeckId = null;
 		draggedCardElement = null;
-		liveCardOrder = [];
-		originalCardPositions = [];
-		dragStartCards = [];
 
-		// Clear pending drag state
+		// Clear pending state
 		pendingDragCard = null;
 		pendingDragIndex = -1;
 		pendingDragElement = null;
-
-		// Update PENDING order (not persisted until user confirms edit mode)
-		// This allows visual reordering without committing to the store
-		if (dropIntoDeckId) {
-			// Dropping into a deck is immediate (can't be undone easily)
-			navigator.addCardToDeck(dropIntoDeckId, droppedCardId);
-			// Remove from pending order
-			pendingCardOrder = pendingCardOrder.filter(id => id !== droppedCardId);
-		} else if (finalOrder.length > 0) {
-			// Just update the pending order - don't save to store yet
-			pendingCardOrder = finalOrder;
-		}
 	}
 
 	function handleEditPointerCancel(e: PointerEvent) {
@@ -1010,9 +757,6 @@
 		dragOverIndex = -1;
 		dragOverDeckId = null;
 		draggedCardElement = null;
-		liveCardOrder = [];
-		originalCardPositions = [];
-		dragStartCards = [];
 	}
 
 	// ========================================
@@ -1154,33 +898,9 @@
 		hasDragged = false;
 	}
 
-	// Check if element or any ancestor is horizontally scrollable
-	function isInScrollableArea(target: EventTarget | null): boolean {
-		let el = target as HTMLElement | null;
-		while (el && el !== carouselRef) {
-			// Check if element has horizontal overflow
-			const style = getComputedStyle(el);
-			const overflowX = style.overflowX;
-			const isScrollable = overflowX === 'auto' || overflowX === 'scroll';
-			// Check if actually scrollable (content wider than container)
-			if (isScrollable && el.scrollWidth > el.clientWidth) {
-				return true;
-			}
-			el = el.parentElement;
-		}
-		return false;
-	}
-
-	let touchStartedInScrollable = $state(false);
-
 	function handleTouchStart(e: TouchEvent) {
 		if (isEditMode) return;
 		if (!carouselRef) return;
-
-		// Check if touch started in a scrollable area (like code diffs)
-		touchStartedInScrollable = isInScrollableArea(e.target);
-		if (touchStartedInScrollable) return;
-
 		isDragging = true;
 		hasDragged = false;
 		startX = e.touches[0].pageX - carouselRef.offsetLeft;
@@ -1188,7 +908,6 @@
 	}
 
 	function handleTouchMove(e: TouchEvent) {
-		if (touchStartedInScrollable) return;
 		if (!isDragging || !carouselRef || isEditMode) return;
 		const x = e.touches[0].pageX - carouselRef.offsetLeft;
 		const walk = (x - startX) * 1.5;
@@ -1201,7 +920,6 @@
 	}
 
 	function handleTouchEnd(e: TouchEvent) {
-		touchStartedInScrollable = false;
 		isDragging = false;
 		// Clear long press timer if active
 		if (longPressTimer) {
@@ -1229,81 +947,6 @@
 	const dotCount = $derived(Math.min(5, Math.ceil(currentCards.length / 3)));
 	const activeDot = $derived(Math.round(scrollProgress * (dotCount - 1)));
 
-	// ========================================
-	// MOBILE CAROUSEL HANDLERS (MobileWelcome-style)
-	// ========================================
-
-	// Helper to calculate mobile card dimensions
-	function getMobileCardMetrics() {
-		if (!mobileCarouselRef) return { cardWidth: 0, gap: MOBILE_CARD_GAP };
-		return {
-			cardWidth: mobileCarouselRef.offsetWidth * MOBILE_CARD_WIDTH_PERCENT,
-			gap: MOBILE_CARD_GAP
-		};
-	}
-
-	// Navigate to specific card in mobile carousel
-	function goToMobileCard(index: number) {
-		const cards = displayCards.filter(c => c.type !== 'add-deck' || isEditMode);
-		mobileCurrentIndex = Math.max(0, Math.min(index, cards.length - 1));
-		scrollToMobileCard(mobileCurrentIndex);
-	}
-
-	function scrollToMobileCard(index: number) {
-		if (!mobileCarouselRef) return;
-		const { cardWidth, gap } = getMobileCardMetrics();
-		const offset = index * (cardWidth + gap);
-		mobileCarouselRef.scrollTo({ left: offset, behavior: 'smooth' });
-	}
-
-	// Handle mobile scroll snap detection (debounced) - CSS scroll-snap handles actual swiping
-	function handleMobileScroll() {
-		if (!mobileCarouselRef) return;
-		// Don't update during edit mode drag
-		if (isEditMode && isPointerDragging) return;
-
-		// Clear any pending debounce timer
-		if (mobileScrollDebounceTimer) {
-			clearTimeout(mobileScrollDebounceTimer);
-		}
-
-		// Debounce the index update to let scroll-snap settle
-		mobileScrollDebounceTimer = setTimeout(() => {
-			if (!mobileCarouselRef) return;
-
-			// Find which card is closest to the center of the viewport
-			const carouselRect = mobileCarouselRef.getBoundingClientRect();
-			const carouselCenter = carouselRect.left + carouselRect.width / 2;
-			const cardElements = mobileCarouselRef.querySelectorAll('.mobile-card');
-
-			let closestIndex = 0;
-			let closestDistance = Infinity;
-
-			cardElements.forEach((card, index) => {
-				const cardRect = card.getBoundingClientRect();
-				const cardCenter = cardRect.left + cardRect.width / 2;
-				const distance = Math.abs(carouselCenter - cardCenter);
-
-				if (distance < closestDistance) {
-					closestDistance = distance;
-					closestIndex = index;
-				}
-			});
-
-			if (closestIndex !== mobileCurrentIndex) {
-				mobileCurrentIndex = closestIndex;
-			}
-		}, MOBILE_SCROLL_DEBOUNCE_MS);
-	}
-
-	// Reset mobile carousel when view changes
-	function resetMobileCarousel() {
-		mobileCurrentIndex = 0;
-		if (mobileCarouselRef) {
-			mobileCarouselRef.scrollTo({ left: 0, behavior: 'instant' });
-		}
-	}
-
 	// Initialize navigator store
 	onMount(() => {
 		navigator.initialize();
@@ -1322,7 +965,6 @@
 		class="navigator"
 		class:open
 		class:edit-mode={isEditMode}
-		class:is-dragging={isPointerDragging}
 		transition:fade={{ duration: 200 }}
 	>
 		<!-- Backdrop -->
@@ -1347,30 +989,6 @@
 			</nav>
 
 			<div class="nav-actions">
-				<!-- View Switcher for Recent Sessions -->
-				{#if currentView === 'recent'}
-					<div class="view-switcher">
-						<button
-							class="view-switch-btn"
-							class:active={recentViewMode === 'list'}
-							onclick={() => navigator.setRecentSessionsView('list')}
-							aria-label="List view"
-							title="List view"
-						>
-							<List size={16} strokeWidth={2} />
-						</button>
-						<button
-							class="view-switch-btn"
-							class:active={recentViewMode === 'timeline'}
-							onclick={() => navigator.setRecentSessionsView('timeline')}
-							aria-label="Timeline view"
-							title="Timeline view"
-						>
-							<GitBranch size={16} strokeWidth={2} />
-						</button>
-					</div>
-				{/if}
-
 				<!-- Edit Mode Toggle -->
 				{#if currentView === 'main' || currentView === 'deck'}
 					<button
@@ -1401,290 +1019,123 @@
 			</div>
 		{/if}
 
-		<!-- Card carousel / Recent views -->
+		<!-- Card carousel -->
 		<div class="carousel-stage">
-			{#if currentView === 'recent'}
-				<!-- Recent Sessions: List or Timeline View -->
-				{#key recentViewMode}
-					<div
-						class="recent-view-container"
-						in:fly={{ x: 50, duration: 250, easing: cubicOut }}
-						out:fly={{ x: -50, duration: 200, easing: cubicOut }}
-					>
-						{#if recentViewMode === 'list'}
-							<RecentSessionsList
-								{sessions}
-								onOpenThread={(sessionId) => { onOpenThread(sessionId); onClose(); }}
-								{isSessionStreaming}
-								{formatRelativeTime}
-							/>
-						{:else}
-							<RecentSessionsTimeline
-								{sessions}
-								onOpenThread={(sessionId) => { onOpenThread(sessionId); onClose(); }}
-								{isSessionStreaming}
-								{formatRelativeTime}
-							/>
-						{/if}
-					</div>
-				{/key}
-			{:else if currentView === 'api-users'}
-				<!-- API User Sessions View (Admin Only) -->
-				{#key `api-users-${adminSessionsFilter}`}
-					<div
-						class="recent-view-container"
-						in:fly={{ x: 50, duration: 250, easing: cubicOut }}
-						out:fly={{ x: -50, duration: 200, easing: cubicOut }}
-					>
-						<ApiUserSessionsList
-							sessions={adminSessions}
-							{apiUsers}
-							selectedApiUserId={adminSessionsFilter}
-							onApiUserChange={(userId) => tabs.setAdminSessionsFilter(userId)}
-							onOpenThread={(sessionId) => { onOpenThread(sessionId); onClose(); }}
-							{isSessionStreaming}
-							{formatRelativeTime}
-						/>
-					</div>
-				{/key}
-			{:else if isMobile}
-				<!-- Mobile Card Carousel (MobileWelcome-style) -->
-				{#key `mobile-${currentView}-${currentDeckId}`}
-					<div class="mobile-carousel-container">
-						<!-- Uses CSS scroll-snap for smooth native swiping behavior -->
-						<div
-							class="mobile-carousel"
-							class:edit-mode={isEditMode}
-							class:is-dragging={isPointerDragging}
-							class:many-cards={mobileCardCount > MOBILE_FAST_SCROLL_THRESHOLD}
-							bind:this={mobileCarouselRef}
-							onscroll={handleMobileScroll}
-							role="region"
-							aria-label="Card navigator carousel"
-							aria-roledescription="carousel"
-							in:fly={{ y: 30, duration: 300, easing: cubicOut }}
-							out:fly={{ y: -30, duration: 200, easing: cubicOut }}
+			{#key `${currentView}-${currentDeckId}`}
+				<div
+					class="carousel"
+					class:dragging={isDragging}
+					class:edit-mode={isEditMode}
+					bind:this={carouselRef}
+					onmousedown={handleMouseDown}
+					onmousemove={handleMouseMove}
+					onmouseup={handleMouseUp}
+					onmouseleave={handleMouseLeave}
+					ontouchstart={handleTouchStart}
+					ontouchmove={handleTouchMove}
+					ontouchend={handleTouchEnd}
+					onwheel={handleWheel}
+					onscroll={handleScroll}
+					role="listbox"
+					aria-label="Card navigator"
+					in:fly={{ x: 100, duration: 300, easing: cubicOut }}
+					out:fly={{ x: -100, duration: 200, easing: cubicOut }}
+				>
+					{#each currentCards as card, index (card.id)}
+						<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+						<article
+							class="card"
+							class:thread-card={card.type === 'thread'}
+							class:deck-card={card.type === 'deck'}
+							class:add-deck-card={card.type === 'add-deck'}
+							class:dragging={isPointerDragging && draggedCardId === card.id}
+							class:drag-over={dragOverIndex === index && draggedCardId !== card.id}
+							class:drop-into-deck={card.type === 'deck' && card.deckId === dragOverDeckId}
+							data-ai-active={card.isStreaming}
+							data-has-children={card.hasChildren}
+							data-card-id={card.id}
+							style:animation-delay="{index * 50}ms"
+							style:--deck-color={card.iconColor}
+							onclick={(e) => handleCardClick(card, e)}
+							oncontextmenu={(e) => isEditMode && showContextMenu(card.id, e)}
+							onkeydown={(e) => e.key === 'Enter' && handleCardClick(card, e as unknown as MouseEvent)}
+							onpointerdown={(e) => handleCardPointerDown(e, card, index)}
+							onpointermove={handleCardPointerMove}
+							onpointerup={handleCardPointerUp}
+							onpointercancel={(e) => handleEditPointerCancel(e)}
+							role="option"
+							tabindex="0"
+							aria-selected="false"
+							animate:flip={{ duration: 200 }}
 						>
-							{#each displayCards as card, index (card.id)}
-								<button
-									class="mobile-card"
-									class:active={index === mobileCurrentIndex}
-									class:thread-card={card.type === 'thread'}
-									class:deck-card={card.type === 'deck'}
-									class:add-deck-card={card.type === 'add-deck'}
-									class:is-being-dragged={isPointerDragging && card.id === draggedCardId}
-									class:drop-into-deck={card.type === 'deck' && card.deckId === dragOverDeckId}
-									data-ai-active={card.isStreaming}
-									data-has-children={card.hasChildren}
-									data-card-id={card.id}
-									style:--deck-color={card.iconColor}
-									style:--card-index={index}
-									onclick={(e) => handleCardClick(card, e)}
-									oncontextmenu={(e) => isEditMode && showContextMenu(card.id, e)}
-									aria-current={index === mobileCurrentIndex ? 'true' : undefined}
-									aria-label="{card.title}: {card.subtitle}"
-								>
-									{#if isEditMode && card.type !== 'add-deck'}
-										<!-- svelte-ignore a11y_no_static_element_interactions -->
-										<div
-											class="mobile-drag-handle"
-											onpointerdown={(e) => handleDragHandlePointerDown(e, card, index)}
-										>
-											<GripVertical size={20} />
-										</div>
-									{/if}
-
-									{#if card.isStreaming}
-										<div class="mobile-card-status">
-											<span class="status-dot"></span>
-											Streaming
-										</div>
-									{/if}
-
-									<div class="mobile-card-icon" style:--icon-color={card.iconColor}>
-										<card.icon size={32} strokeWidth={1.5} />
+							<div class="card-inner">
+								{#if isEditMode && card.type !== 'add-deck'}
+									<div class="drag-handle">
+										<GripVertical size={16} />
 									</div>
+								{/if}
 
-									<span class="mobile-card-label">{card.title}</span>
+								{#if card.isStreaming}
+									<div class="card-status">Streaming</div>
+								{/if}
 
-									{#if card.type === 'thread'}
-										<div class="mobile-card-meta">
-											{#if card.lastActive}
-												<span class="meta-item">
-													<Clock size={14} />
-													{card.lastActive}
-												</span>
-											{/if}
-											{#if card.messageCount}
-												<span class="meta-item">
-													<MessageSquare size={14} />
-													{card.messageCount}
-												</span>
-											{/if}
-										</div>
-									{:else if card.subtitle}
-										<span class="mobile-card-description">{card.subtitle}</span>
-									{/if}
-
-									{#if card.hasChildren}
-										<div class="mobile-card-chevron">
-											<ChevronRight size={20} />
-										</div>
-									{/if}
-								</button>
-							{/each}
-
-							{#if currentCards.length === 0}
-								<div class="mobile-empty-state">
-									{#if currentView === 'deck'}
-										<p>This deck is empty</p>
-										<p class="empty-hint">Add cards from the main view</p>
-									{:else}
-										<p>No items to show</p>
-									{/if}
+								<div class="card-icon" style:--icon-color={card.iconColor}>
+									<card.icon size={20} strokeWidth={1.75} />
 								</div>
-							{/if}
-						</div>
 
-						<!-- Mobile Dot Indicators -->
-						{#if displayCards.filter(c => c.type !== 'add-deck' || isEditMode).length > 1}
-							<div class="mobile-dots" role="tablist" aria-label="Carousel navigation">
-								{#each displayCards.filter(c => c.type !== 'add-deck' || isEditMode) as card, i}
-									<button
-										class="mobile-dot"
-										class:active={i === mobileCurrentIndex}
-										onclick={() => goToMobileCard(i)}
-										role="tab"
-										aria-selected={i === mobileCurrentIndex}
-										aria-label="Go to {card.title}"
-									></button>
-								{/each}
-							</div>
-						{/if}
+								<h3 class="card-title">{card.title}</h3>
 
-						<!-- Swipe hint -->
-						{#if !isEditMode}
-							<p class="mobile-swipe-hint" aria-hidden="true">Swipe to explore</p>
-						{/if}
-					</div>
-				{/key}
-			{:else}
-				<!-- Desktop Card Carousel -->
-				{#key `${currentView}-${currentDeckId}`}
-					<div
-						class="carousel"
-						class:dragging={isDragging}
-						class:edit-mode={isEditMode}
-						bind:this={carouselRef}
-						onmousedown={handleMouseDown}
-						onmousemove={handleMouseMove}
-						onmouseup={handleMouseUp}
-						onmouseleave={handleMouseLeave}
-						ontouchstart={handleTouchStart}
-						ontouchmove={handleTouchMove}
-						ontouchend={handleTouchEnd}
-						onwheel={handleWheel}
-						onscroll={handleScroll}
-						role="listbox"
-						aria-label="Card navigator"
-						in:fly={{ x: 100, duration: 300, easing: cubicOut }}
-						out:fly={{ x: -100, duration: 200, easing: cubicOut }}
-					>
-						{#each displayCards as card, index (card.id)}
-							<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
-							<article
-								class="card"
-								class:thread-card={card.type === 'thread'}
-								class:deck-card={card.type === 'deck'}
-								class:add-deck-card={card.type === 'add-deck'}
-								class:is-being-dragged={isPointerDragging && card.id === draggedCardId}
-								class:drop-into-deck={card.type === 'deck' && card.deckId === dragOverDeckId}
-								data-ai-active={card.isStreaming}
-								data-has-children={card.hasChildren}
-								data-card-id={card.id}
-								style:animation-delay="{index * 50}ms"
-								style:--deck-color={card.iconColor}
-								onclick={(e) => handleCardClick(card, e)}
-								oncontextmenu={(e) => isEditMode && showContextMenu(card.id, e)}
-								onkeydown={(e) => e.key === 'Enter' && handleCardClick(card, e as unknown as MouseEvent)}
-								role="option"
-								tabindex="0"
-								aria-selected="false"
-								animate:flip={{ duration: 250, easing: cubicOut }}
-							>
-								<div class="card-inner">
-									{#if isEditMode && card.type !== 'add-deck'}
-										<!-- svelte-ignore a11y_no_static_element_interactions -->
-										<div
-											class="drag-handle"
-											onpointerdown={(e) => handleDragHandlePointerDown(e, card, index)}
-										>
-											<GripVertical size={16} />
-										</div>
-									{/if}
-
-									{#if card.isStreaming}
-										<div class="card-status">Streaming</div>
-									{/if}
-
-									<div class="card-icon" style:--icon-color={card.iconColor}>
-										<card.icon size={20} strokeWidth={1.75} />
+								{#if card.type === 'thread'}
+									<div class="card-meta">
+										{#if card.lastActive}
+											<span class="card-meta-item">
+												<Clock size={12} />
+												{card.lastActive}
+											</span>
+										{/if}
+										{#if card.messageCount}
+											<span class="card-meta-item">
+												<MessageSquare size={12} />
+												{card.messageCount}
+											</span>
+										{/if}
 									</div>
+								{:else if card.subtitle}
+									<p class="card-subtitle">{card.subtitle}</p>
+								{/if}
 
-									<h3 class="card-title">{card.title}</h3>
-
-									{#if card.type === 'thread'}
-										<div class="card-meta">
-											{#if card.lastActive}
-												<span class="card-meta-item">
-													<Clock size={12} />
-													{card.lastActive}
-												</span>
-											{/if}
-											{#if card.messageCount}
-												<span class="card-meta-item">
-													<MessageSquare size={12} />
-													{card.messageCount}
-												</span>
-											{/if}
-										</div>
-									{:else if card.subtitle}
-										<p class="card-subtitle">{card.subtitle}</p>
-									{/if}
-
-									{#if card.hasChildren}
-										<div class="card-chevron">
-											<ChevronRight size={16} />
-										</div>
-									{/if}
-								</div>
-							</article>
-						{/each}
-
-						{#if currentCards.length === 0}
-							<div class="empty-state">
-								{#if currentView === 'deck'}
-									<p>This deck is empty</p>
-									<p class="empty-hint">Add cards from the main view</p>
-								{:else}
-									<p>No items to show</p>
+								{#if card.hasChildren}
+									<div class="card-chevron">
+										<ChevronRight size={16} />
+									</div>
 								{/if}
 							</div>
-						{/if}
-					</div>
-				{/key}
+						</article>
+					{/each}
 
-				<!-- Scroll hint with dots (only for desktop card carousel) -->
-				{#if currentCards.length > 3 && !isEditMode}
-					<div class="scroll-hint">
-						<span class="scroll-hint-text">Scroll to browse</span>
-						<div class="scroll-dots">
-							{#each Array(dotCount) as _, i}
-								<span class="scroll-dot" class:active={i === activeDot}></span>
-							{/each}
+					{#if currentCards.length === 0}
+						<div class="empty-state">
+							{#if currentView === 'deck'}
+								<p>This deck is empty</p>
+								<p class="empty-hint">Add cards from the main view</p>
+							{:else}
+								<p>No items to show</p>
+							{/if}
 						</div>
+					{/if}
+				</div>
+			{/key}
+
+			<!-- Scroll hint with dots -->
+			{#if currentCards.length > 3 && !isEditMode}
+				<div class="scroll-hint">
+					<span class="scroll-hint-text">{isMobile ? 'Swipe' : 'Scroll'} to browse</span>
+					<div class="scroll-dots">
+						{#each Array(dotCount) as _, i}
+							<span class="scroll-dot" class:active={i === activeDot}></span>
+						{/each}
 					</div>
-				{/if}
+				</div>
 			{/if}
 		</div>
 
@@ -1692,41 +1143,22 @@
 		{#if isPointerDragging && draggedCardId}
 			{@const draggedCard = currentCards.find(c => c.id === draggedCardId)}
 			{#if draggedCard}
-				{#if isMobile}
-					<!-- Mobile floating drag card - larger, matches mobile-card style -->
-					<div
-						class="floating-drag-card mobile"
-						style:left="{pointerDragPosition.x}px"
-						style:top="{pointerDragPosition.y}px"
-						style:--deck-color={draggedCard.iconColor}
-					>
-						<div class="mobile-card-icon" style:--icon-color={draggedCard.iconColor}>
-							<draggedCard.icon size={32} strokeWidth={1.5} />
+				<div
+					class="floating-drag-card"
+					style:left="{pointerDragPosition.x}px"
+					style:top="{pointerDragPosition.y}px"
+					style:--deck-color={draggedCard.iconColor}
+				>
+					<div class="card-inner">
+						<div class="card-icon" style:--icon-color={draggedCard.iconColor}>
+							<draggedCard.icon size={20} strokeWidth={1.75} />
 						</div>
-						<span class="mobile-card-label">{draggedCard.title}</span>
+						<h3 class="card-title">{draggedCard.title}</h3>
 						{#if draggedCard.subtitle}
-							<span class="mobile-card-description">{draggedCard.subtitle}</span>
+							<p class="card-subtitle">{draggedCard.subtitle}</p>
 						{/if}
 					</div>
-				{:else}
-					<!-- Desktop floating drag card -->
-					<div
-						class="floating-drag-card"
-						style:left="{pointerDragPosition.x}px"
-						style:top="{pointerDragPosition.y}px"
-						style:--deck-color={draggedCard.iconColor}
-					>
-						<div class="card-inner">
-							<div class="card-icon" style:--icon-color={draggedCard.iconColor}>
-								<draggedCard.icon size={20} strokeWidth={1.75} />
-							</div>
-							<h3 class="card-title">{draggedCard.title}</h3>
-							{#if draggedCard.subtitle}
-								<p class="card-subtitle">{draggedCard.subtitle}</p>
-							{/if}
-						</div>
-					</div>
-				{/if}
+				</div>
 			{/if}
 		{/if}
 
@@ -1832,7 +1264,6 @@
 	   ======================================== */
 
 	.navigator {
-		/* Dark mode (default) */
 		--bg-deep: oklch(0.08 0.01 260);
 		--bg-base: oklch(0.10 0.01 260);
 		--bg-elevated: oklch(0.13 0.01 260);
@@ -1843,19 +1274,15 @@
 		--border-default: rgba(255, 255, 255, 0.1);
 		--border-strong: rgba(255, 255, 255, 0.15);
 
-		--text-primary: var(--foreground, #f4f4f5);
-		--text-secondary: var(--muted-foreground, #a1a1aa);
+		--text-primary: #f4f4f5;
+		--text-secondary: #a1a1aa;
 		--text-muted: #71717a;
 		--text-dim: #52525b;
 
-		--ai-primary: var(--primary);
-		--ai-secondary: var(--primary);
-		--ai-glow: color-mix(in srgb, var(--primary) 25%, transparent);
-		--ai-subtle: color-mix(in srgb, var(--primary) 8%, transparent);
-
-		--backdrop-bg: rgba(0, 0, 0, 0.85);
-		--shadow-color: rgba(0, 0, 0, 0.4);
-		--shadow-strong: rgba(0, 0, 0, 0.6);
+		--ai-primary: #22d3ee;
+		--ai-secondary: #06b6d4;
+		--ai-glow: rgba(34, 211, 238, 0.25);
+		--ai-subtle: rgba(34, 211, 238, 0.08);
 
 		--ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 		--ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -1863,37 +1290,9 @@
 		--card-width: 220px;
 		--card-height: 160px;
 		--card-gap: 16px;
-		/* Inherit from theme --radius, scale accordingly */
-		--radius-sm: calc(var(--radius, 0.75rem) * 0.67);
-		--radius-md: var(--radius, 0.75rem);
-		--radius-lg: calc(var(--radius, 0.75rem) * 1.33);
-	}
-
-	/* Light mode overrides */
-	:global(.light) .navigator {
-		--bg-deep: oklch(0.94 0.005 260);
-		--bg-base: oklch(0.96 0.005 260);
-		--bg-elevated: oklch(0.98 0.003 260);
-		--bg-card: oklch(1 0 0);
-		--bg-card-hover: oklch(0.97 0.005 260);
-
-		--border-subtle: rgba(0, 0, 0, 0.06);
-		--border-default: rgba(0, 0, 0, 0.1);
-		--border-strong: rgba(0, 0, 0, 0.15);
-
-		--text-primary: var(--foreground, #18181b);
-		--text-secondary: var(--muted-foreground, #52525b);
-		--text-muted: #71717a;
-		--text-dim: #a1a1aa;
-
-		--ai-primary: var(--primary);
-		--ai-secondary: var(--primary);
-		--ai-glow: color-mix(in srgb, var(--primary) 20%, transparent);
-		--ai-subtle: color-mix(in srgb, var(--primary) 8%, transparent);
-
-		--backdrop-bg: rgba(255, 255, 255, 0.85);
-		--shadow-color: rgba(0, 0, 0, 0.1);
-		--shadow-strong: rgba(0, 0, 0, 0.15);
+		--radius-sm: 8px;
+		--radius-md: 12px;
+		--radius-lg: 16px;
 	}
 
 	/* ========================================
@@ -1910,7 +1309,7 @@
 	.navigator-backdrop {
 		position: absolute;
 		inset: 0;
-		background: var(--backdrop-bg);
+		background: rgba(0, 0, 0, 0.85);
 		backdrop-filter: blur(20px);
 		-webkit-backdrop-filter: blur(20px);
 	}
@@ -2012,55 +1411,6 @@
 		background: var(--bg-card);
 		border-color: var(--border-strong);
 		color: var(--text-primary);
-	}
-
-	/* ========================================
-	   VIEW SWITCHER
-	   ======================================== */
-	.view-switcher {
-		display: flex;
-		align-items: center;
-		background: var(--bg-elevated);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-sm);
-		padding: 3px;
-		gap: 2px;
-	}
-
-	.view-switch-btn {
-		width: 32px;
-		height: 32px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: transparent;
-		border: none;
-		border-radius: calc(var(--radius-sm) * 0.75);
-		color: var(--text-muted);
-		cursor: pointer;
-		transition: all 0.15s ease;
-	}
-
-	.view-switch-btn:hover {
-		color: var(--text-primary);
-		background: var(--border-subtle);
-	}
-
-	.view-switch-btn.active {
-		background: var(--ai-subtle);
-		color: var(--ai-primary);
-	}
-
-	/* ========================================
-	   RECENT VIEW CONTAINER
-	   ======================================== */
-	.recent-view-container {
-		position: absolute;
-		inset: 0;
-		display: flex;
-		align-items: flex-start;
-		justify-content: center;
-		overflow: hidden;
 	}
 
 	/* ========================================
@@ -2167,8 +1517,8 @@
 		}
 	}
 
-	/* Edit mode shake animation - only when NOT dragging */
-	.navigator.edit-mode:not(.is-dragging) .card:not(.add-deck-card) {
+	/* Edit mode shake animation */
+	.navigator.edit-mode .card:not(.add-deck-card) {
 		animation: cardEnter 0.4s var(--ease-spring) forwards, cardShake 0.4s ease-in-out infinite;
 		animation-delay: calc(var(--index, 0) * 50ms), 0ms;
 	}
@@ -2179,36 +1529,23 @@
 		75% { transform: rotate(0.5deg); }
 	}
 
-	.card:hover {
+	.card:hover:not(.dragging) {
 		transform: translateY(-6px);
 	}
 
-	.card:active {
+	.card:active:not(.dragging) {
 		transform: translateY(-4px) scale(0.98);
 	}
 
-	/* In edit mode, don't apply hover transform - let cards stay in place */
-	.navigator.edit-mode .card:hover {
-		transform: none;
-	}
-
-	.navigator.edit-mode .card:active {
-		transform: none;
-	}
-
-	/* During drag, disable all transitions/animations so flip can work */
-	/* CRITICAL: Must also set opacity:1 and reset transform because base .card style
-	   has opacity:0 which relies on cardEnter animation to become visible */
-	.navigator.is-dragging .card {
+	.card.dragging {
+		opacity: 0.3;
+		transform: scale(0.95);
 		animation: none !important;
-		opacity: 1;
-		transform: none;
 	}
 
-	/* Hide the original card being dragged (it's shown as floating element) */
-	.card.is-being-dragged {
-		opacity: 0 !important;
-		pointer-events: none;
+	.card.drag-over {
+		transform: translateX(30px);
+		transition: transform 0.15s var(--ease-out);
 	}
 
 	/* Floating drag clone - physically picked up card */
@@ -2232,9 +1569,9 @@
 		display: flex;
 		flex-direction: column;
 		box-shadow:
-			0 20px 60px var(--shadow-strong),
+			0 20px 60px rgba(0, 0, 0, 0.6),
 			0 0 30px var(--ai-glow),
-			0 0 0 2px color-mix(in srgb, var(--ai-primary) 30%, transparent);
+			0 0 0 2px rgba(34, 211, 238, 0.3);
 	}
 
 	.floating-drag-card .card-icon {
@@ -2244,7 +1581,7 @@
 		align-items: center;
 		justify-content: center;
 		background: var(--ai-subtle);
-		border: 1px solid color-mix(in srgb, var(--ai-primary) 30%, transparent);
+		border: 1px solid rgba(34, 211, 238, 0.3);
 		border-radius: var(--radius-md);
 		margin-bottom: 16px;
 		color: var(--icon-color, var(--ai-primary));
@@ -2262,56 +1599,10 @@
 		color: var(--text-muted);
 	}
 
-	/* Mobile floating drag card */
-	.floating-drag-card.mobile {
-		width: min(75vw, 240px);
-		aspect-ratio: 3 / 4;
-		height: auto;
-		background: var(--bg-card);
-		border: 2px solid var(--ai-primary);
-		border-radius: calc(var(--radius-lg) * 1.25);
-		padding: 1.5rem 1rem;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		gap: 0.75rem;
-		box-shadow:
-			0 20px 60px var(--shadow-strong),
-			0 0 30px var(--ai-glow),
-			0 0 0 2px color-mix(in srgb, var(--ai-primary) 30%, transparent);
-	}
-
-	.floating-drag-card.mobile .mobile-card-icon {
-		width: 64px;
-		height: 64px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		border-radius: var(--radius-lg);
-		background: var(--ai-subtle);
-		border: 1px solid var(--ai-primary);
-		color: var(--icon-color, var(--ai-primary));
-	}
-
-	.floating-drag-card.mobile .mobile-card-label {
-		font-size: 0.9rem;
-		font-weight: 600;
-		letter-spacing: 0.05em;
-		color: var(--text-primary);
-		text-transform: uppercase;
-	}
-
-	.floating-drag-card.mobile .mobile-card-description {
-		font-size: 0.8rem;
-		color: var(--text-muted);
-		text-align: center;
-	}
-
 	@keyframes pickUp {
 		0% {
 			transform: rotate(0deg) scale(1);
-			box-shadow: 0 4px 16px var(--shadow-color);
+			box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
 		}
 		100% {
 			transform: rotate(3deg) scale(1.08);
@@ -2327,7 +1618,7 @@
 		border-color: var(--deck-color, var(--ai-primary));
 		box-shadow:
 			0 0 20px color-mix(in srgb, var(--deck-color, var(--ai-primary)) 40%, transparent),
-			0 8px 32px var(--shadow-color);
+			0 8px 32px rgba(0, 0, 0, 0.4);
 		background: color-mix(in srgb, var(--deck-color, var(--ai-primary)) 10%, var(--bg-card));
 	}
 
@@ -2349,16 +1640,16 @@
 		background: var(--bg-card-hover);
 		border-color: var(--border-strong);
 		box-shadow:
-			0 8px 32px var(--shadow-color),
+			0 8px 32px rgba(0, 0, 0, 0.4),
 			0 0 0 1px var(--border-subtle);
 	}
 
 	/* AI-active card glow */
 	.card[data-ai-active="true"] .card-inner {
-		border-color: color-mix(in srgb, var(--ai-primary) 30%, transparent);
+		border-color: rgba(34, 211, 238, 0.3);
 		box-shadow:
 			0 0 20px var(--ai-glow),
-			0 8px 32px var(--shadow-color);
+			0 8px 32px rgba(0, 0, 0, 0.3);
 	}
 
 	/* Drag handle */
@@ -2366,25 +1657,16 @@
 		position: absolute;
 		top: 8px;
 		right: 8px;
-		padding: 8px;
+		padding: 4px;
 		color: var(--text-dim);
-		opacity: 0.7;
+		opacity: 0.6;
 		cursor: grab;
 		transition: all 0.15s ease;
-		border-radius: var(--radius-sm);
-		touch-action: none; /* Prevent scroll interference on touch */
-		z-index: 5;
 	}
 
-	.drag-handle:hover {
+	.card:hover .drag-handle {
 		opacity: 1;
-		color: var(--ai-primary);
-		background: var(--ai-subtle);
-	}
-
-	.drag-handle:active {
-		cursor: grabbing;
-		transform: scale(0.95);
+		color: var(--text-secondary);
 	}
 
 	/* Card icon */
@@ -2404,7 +1686,7 @@
 
 	.card:hover .card-icon {
 		background: var(--ai-subtle);
-		border-color: color-mix(in srgb, var(--ai-primary) 20%, transparent);
+		border-color: rgba(34, 211, 238, 0.2);
 		color: var(--icon-color, var(--ai-primary));
 	}
 
@@ -2507,7 +1789,7 @@
 		padding: 3px 8px;
 		background: var(--ai-subtle);
 		border: 1px solid rgba(34, 211, 238, 0.2);
-		border-radius: calc(var(--radius-sm) * 0.5);
+		border-radius: 4px;
 		font-family: ui-monospace, monospace;
 		font-size: 0.625rem;
 		font-weight: 500;
@@ -2571,7 +1853,7 @@
 		padding: 10px 18px;
 		background: var(--bg-elevated);
 		border: 1px solid var(--border-subtle);
-		border-radius: calc(var(--radius-lg) * 1.67);
+		border-radius: 20px;
 		z-index: 20;
 	}
 
@@ -2596,7 +1878,7 @@
 
 	.scroll-dot.active {
 		width: 16px;
-		border-radius: calc(var(--radius-sm) * 0.375);
+		border-radius: 3px;
 		background: var(--ai-primary);
 	}
 
@@ -2651,12 +1933,12 @@
 	}
 
 	.context-menu-item.danger {
-		color: var(--destructive);
+		color: #f87171;
 	}
 
 	.context-menu-item.danger:hover {
-		background: color-mix(in srgb, var(--destructive) 10%, transparent);
-		color: var(--destructive);
+		background: rgba(248, 113, 113, 0.1);
+		color: #ef4444;
 	}
 
 	.context-menu-divider {
@@ -2834,370 +2116,6 @@
 	}
 
 	/* ========================================
-	   MOBILE CAROUSEL (MobileWelcome-style)
-	   ======================================== */
-
-	.mobile-carousel-container {
-		position: absolute;
-		inset: 0;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		padding: 1rem 0;
-		gap: 1rem;
-	}
-
-	.mobile-carousel {
-		display: flex;
-		gap: 16px;
-		width: 100%;
-		overflow-x: auto;
-		scroll-snap-type: x mandatory;
-		scrollbar-width: none;
-		-ms-overflow-style: none;
-		padding: 1rem 12.5%; /* Center first/last cards */
-		-webkit-overflow-scrolling: touch;
-	}
-
-	.mobile-carousel::-webkit-scrollbar {
-		display: none;
-	}
-
-	/* Disable scroll-snap during edit mode drag for smooth reordering */
-	.mobile-carousel.edit-mode.is-dragging {
-		scroll-snap-type: none;
-	}
-
-	/* Mobile Card - MobileWelcome style */
-	.mobile-card {
-		flex-shrink: 0;
-		width: 75%;
-		min-width: 200px;
-		max-width: 280px;
-		aspect-ratio: 3 / 4;
-		padding: 1.5rem 1rem;
-
-		background: var(--bg-card);
-		border: 1px solid var(--border-default);
-		border-radius: calc(var(--radius-lg) * 1.67);
-
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		gap: 0.75rem;
-		position: relative;
-
-		cursor: pointer;
-		scroll-snap-align: center;
-		scroll-snap-stop: always; /* Prevent momentum from skipping cards (disabled with many cards) */
-		transition: all 0.3s var(--ease-out);
-
-		/* When carousel has many cards, allow momentum scrolling for faster navigation */
-		.many-cards & {
-			scroll-snap-stop: normal;
-		}
-		-webkit-tap-highlight-color: transparent;
-
-		box-shadow:
-			0 8px 24px rgba(0, 0, 0, 0.4),
-			0 4px 8px rgba(0, 0, 0, 0.3);
-
-		opacity: 0;
-		animation: mobileCardEnter 0.5s var(--ease-out) forwards;
-		animation-delay: calc(0.1s + var(--card-index, 0) * 0.08s);
-	}
-
-	@keyframes mobileCardEnter {
-		from {
-			opacity: 0;
-			transform: scale(0.9);
-		}
-		to {
-			opacity: 1;
-			transform: scale(1);
-		}
-	}
-
-	.mobile-card.active {
-		border-color: var(--ai-primary);
-		box-shadow:
-			0 12px 32px rgba(0, 0, 0, 0.5),
-			0 0 24px var(--ai-glow);
-	}
-
-	.mobile-card:active {
-		transform: scale(0.97);
-	}
-
-	/* Deck card styling */
-	.mobile-card.deck-card {
-		border-color: color-mix(in srgb, var(--deck-color, var(--ai-primary)) 40%, transparent);
-	}
-
-	.mobile-card.deck-card.active {
-		border-color: var(--deck-color, var(--ai-primary));
-		box-shadow:
-			0 12px 32px rgba(0, 0, 0, 0.5),
-			0 0 24px color-mix(in srgb, var(--deck-color, var(--ai-primary)) 30%, transparent);
-	}
-
-	/* Add deck card styling */
-	.mobile-card.add-deck-card {
-		border-style: dashed;
-		border-color: var(--border-default);
-		background: transparent;
-	}
-
-	.mobile-card.add-deck-card.active {
-		border-color: var(--ai-primary);
-		background: var(--ai-subtle);
-	}
-
-	/* Hide card being dragged (shown as floating clone) */
-	.mobile-card.is-being-dragged {
-		opacity: 0 !important;
-		pointer-events: none;
-	}
-
-	/* Drop into deck feedback */
-	.mobile-card.drop-into-deck {
-		transform: scale(1.05);
-		border-color: var(--deck-color, var(--ai-primary));
-		box-shadow:
-			0 0 30px color-mix(in srgb, var(--deck-color, var(--ai-primary)) 40%, transparent);
-	}
-
-	/* Mobile Card Icon */
-	.mobile-card-icon {
-		width: 64px;
-		height: 64px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		border-radius: var(--radius-lg);
-		background: var(--bg-elevated);
-		border: 1px solid var(--border-subtle);
-		color: var(--icon-color, var(--text-secondary));
-		transition: all 0.25s ease-out;
-	}
-
-	.mobile-card.active .mobile-card-icon {
-		background: var(--ai-subtle);
-		border-color: var(--ai-primary);
-		color: var(--icon-color, var(--ai-primary));
-		box-shadow: 0 0 20px var(--ai-glow);
-	}
-
-	.mobile-card.deck-card .mobile-card-icon {
-		background: color-mix(in srgb, var(--deck-color, var(--ai-primary)) 15%, transparent);
-		border-color: color-mix(in srgb, var(--deck-color, var(--ai-primary)) 30%, transparent);
-		color: var(--deck-color, var(--ai-primary));
-	}
-
-	.mobile-card.add-deck-card .mobile-card-icon {
-		background: transparent;
-		border-style: dashed;
-	}
-
-	/* Streaming indicator */
-	.mobile-card[data-ai-active="true"] .mobile-card-icon {
-		background: var(--ai-subtle);
-		border-color: var(--ai-primary);
-		color: var(--ai-primary);
-	}
-
-	.mobile-card[data-ai-active="true"] .mobile-card-icon :global(svg) {
-		animation: pulse 2s ease-in-out infinite;
-	}
-
-	/* Mobile Card Label */
-	.mobile-card-label {
-		font-family: var(--font-sans, system-ui);
-		font-size: 0.9rem;
-		font-weight: 600;
-		letter-spacing: 0.05em;
-		color: var(--text-primary);
-		text-transform: uppercase;
-		text-align: center;
-	}
-
-	/* Mobile Card Description */
-	.mobile-card-description {
-		font-size: 0.8rem;
-		color: var(--text-muted);
-		text-align: center;
-		line-height: 1.4;
-	}
-
-	/* Mobile Card Meta (for threads) */
-	.mobile-card-meta {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		margin-top: auto;
-		font-size: 0.75rem;
-		color: var(--text-dim);
-	}
-
-	.mobile-card-meta .meta-item {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-	}
-
-	/* Mobile Card Status */
-	.mobile-card-status {
-		position: absolute;
-		top: 12px;
-		right: 12px;
-		padding: 4px 10px;
-		background: var(--ai-subtle);
-		border: 1px solid rgba(34, 211, 238, 0.2);
-		border-radius: calc(var(--radius-sm) * 0.75);
-		font-family: ui-monospace, monospace;
-		font-size: 0.65rem;
-		font-weight: 500;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		color: var(--ai-primary);
-		display: flex;
-		align-items: center;
-		gap: 5px;
-	}
-
-	.mobile-card-status .status-dot {
-		width: 6px;
-		height: 6px;
-		background: var(--ai-primary);
-		border-radius: 50%;
-		animation: blink 1.5s ease-in-out infinite;
-	}
-
-	/* Mobile Card Chevron */
-	.mobile-card-chevron {
-		position: absolute;
-		right: 12px;
-		top: 50%;
-		transform: translateY(-50%);
-		color: var(--text-dim);
-		opacity: 0.6;
-		transition: all 0.2s ease;
-	}
-
-	.mobile-card.active .mobile-card-chevron {
-		opacity: 1;
-		color: var(--ai-primary);
-		transform: translateY(-50%) translateX(2px);
-	}
-
-	/* Mobile Drag Handle */
-	.mobile-drag-handle {
-		position: absolute;
-		top: 10px;
-		left: 10px;
-		padding: 10px;
-		color: var(--text-dim);
-		opacity: 0.7;
-		cursor: grab;
-		transition: all 0.15s ease;
-		border-radius: var(--radius-md);
-		touch-action: none;
-		z-index: 5;
-		/* Larger touch target for mobile */
-		min-width: 44px;
-		min-height: 44px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-
-	.mobile-drag-handle:hover,
-	.mobile-drag-handle:active {
-		opacity: 1;
-		color: var(--ai-primary);
-		background: var(--ai-subtle);
-	}
-
-	.mobile-drag-handle:active {
-		cursor: grabbing;
-		transform: scale(0.95);
-	}
-
-	/* Mobile Dot Indicators */
-	.mobile-dots {
-		display: flex;
-		gap: 8px;
-		padding: 8px 0;
-	}
-
-	.mobile-dot {
-		width: 8px;
-		height: 8px;
-		border-radius: 50%;
-		background: var(--text-dim);
-		border: none;
-		padding: 0;
-		cursor: pointer;
-		transition: all 0.2s ease;
-		-webkit-tap-highlight-color: transparent;
-	}
-
-	.mobile-dot.active {
-		background: var(--ai-primary);
-		box-shadow: 0 0 8px var(--ai-glow);
-	}
-
-	.mobile-dot:not(.active):hover {
-		background: var(--text-muted);
-	}
-
-	/* Mobile Swipe Hint */
-	.mobile-swipe-hint {
-		font-size: 0.7rem;
-		color: var(--text-dim);
-		opacity: 0;
-		animation: fadeInHint 0.6s ease-out 0.8s forwards;
-	}
-
-	@keyframes fadeInHint {
-		from {
-			opacity: 0;
-			transform: translateY(10px);
-		}
-		to {
-			opacity: 0.6;
-			transform: translateY(0);
-		}
-	}
-
-	/* Mobile Empty State */
-	.mobile-empty-state {
-		width: 100%;
-		min-width: 200px;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		padding: 40px;
-		color: var(--text-muted);
-		font-size: 0.9375rem;
-		text-align: center;
-	}
-
-	.mobile-empty-state .empty-hint {
-		font-size: 0.8125rem;
-		color: var(--text-dim);
-		margin-top: 8px;
-	}
-
-	/* Thread card on mobile - taller for more content */
-	.mobile-card.thread-card {
-		aspect-ratio: 2.5 / 4;
-	}
-
-	/* ========================================
 	   REDUCED MOTION
 	   ======================================== */
 	@media (prefers-reduced-motion: reduce) {
@@ -3205,15 +2123,6 @@
 			animation-duration: 0.01ms !important;
 			animation-iteration-count: 1 !important;
 			transition-duration: 0.01ms !important;
-		}
-
-		.mobile-card {
-			opacity: 1;
-			transform: none;
-		}
-
-		.mobile-swipe-hint {
-			opacity: 0.6;
 		}
 	}
 </style>

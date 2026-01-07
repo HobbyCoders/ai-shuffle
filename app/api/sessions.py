@@ -1208,3 +1208,96 @@ async def fork_session(
         message_count=fork_entry_index + 1,
         status="success"
     )
+
+
+# ============================================================================
+# Worktree Session Endpoint
+# ============================================================================
+
+class CreateWorktreeSessionRequest(BaseModel):
+    """Request body for creating a session with a worktree"""
+    project_id: str
+    branch_name: str
+    base_branch: str = "main"
+    profile_id: Optional[str] = None
+
+
+class WorktreeSessionResponse(BaseModel):
+    """Response for worktree session creation"""
+    session_id: str
+    worktree_id: str
+    branch_name: str
+    base_branch: str
+    worktree_path: str
+    status: str
+
+
+@router.post("/with-worktree", response_model=WorktreeSessionResponse)
+async def create_session_with_worktree(
+    request: Request,
+    body: CreateWorktreeSessionRequest,
+    token: str = Depends(require_auth)
+):
+    """
+    Create a new session with an associated git worktree.
+
+    This endpoint creates both a git worktree (for isolated branch development)
+    and a linked chat session. The worktree allows parallel development on a
+    feature branch while keeping the main repository intact.
+
+    Args:
+        project_id: The project to create the worktree in
+        branch_name: Name for the new branch
+        base_branch: Branch to base the new branch on (default: main)
+        profile_id: Optional profile ID for the session
+
+    Returns:
+        Session and worktree information
+    """
+    import logging
+    from app.core.worktree_manager import worktree_manager
+
+    logger = logging.getLogger(__name__)
+
+    # Verify project exists and user has access
+    project = database.get_project(body.project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {body.project_id}"
+        )
+
+    # Check API user restrictions
+    api_user = get_api_user_from_request(request)
+    if api_user and api_user.get("project_id"):
+        if api_user["project_id"] != body.project_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this project"
+            )
+
+    # Create worktree and session
+    worktree, session = worktree_manager.create_worktree_session(
+        project_id=body.project_id,
+        branch_name=body.branch_name,
+        create_new_branch=True,
+        base_branch=body.base_branch,
+        profile_id=body.profile_id
+    )
+
+    if not worktree or not session:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create worktree session. Check if branch name is valid and doesn't already exist."
+        )
+
+    logger.info(f"Created worktree session: {session['id']} with worktree: {worktree['id']}")
+
+    return WorktreeSessionResponse(
+        session_id=session["id"],
+        worktree_id=worktree["id"],
+        branch_name=worktree["branch_name"],
+        base_branch=worktree.get("base_branch") or body.base_branch,
+        worktree_path=worktree["worktree_path"],
+        status="active"
+    )

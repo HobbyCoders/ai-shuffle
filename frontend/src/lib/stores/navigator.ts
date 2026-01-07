@@ -30,17 +30,11 @@ export interface CustomDeck {
 }
 
 /**
- * View mode for recent sessions display
- */
-export type RecentSessionsViewMode = 'list' | 'timeline';
-
-/**
  * Persisted navigator state
  */
 export interface NavigatorPersistedState {
 	cardOrder: string[]; // Card IDs in user's preferred order
 	decks: CustomDeck[];
-	recentSessionsView: RecentSessionsViewMode; // User's preferred view for recent sessions
 	lastModified: number;
 }
 
@@ -96,7 +90,6 @@ export const DECK_ICONS = [
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let serverSyncTimer: ReturnType<typeof setTimeout> | null = null;
 let isLoadingFromServer = false;
-let hasSyncedFromServer = false; // Prevents writing to server before initial sync completes
 
 function generateId(): string {
 	return `deck-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -135,13 +128,6 @@ function saveToStorage(state: NavigatorPersistedState) {
 
 async function saveToServer(state: NavigatorPersistedState) {
 	if (typeof window === 'undefined' || isLoadingFromServer) return;
-
-	// Don't write to server until we've completed initial sync
-	// This prevents empty local state from overwriting server data on first load
-	if (!hasSyncedFromServer) {
-		console.log('[Navigator] Skipping server save - initial sync not complete');
-		return;
-	}
 
 	if (serverSyncTimer) {
 		clearTimeout(serverSyncTimer);
@@ -187,7 +173,6 @@ function createNavigatorStore() {
 	const initialState: NavigatorState = {
 		cardOrder: persisted?.cardOrder || [],
 		decks: persisted?.decks || [],
-		recentSessionsView: persisted?.recentSessionsView || 'list',
 		lastModified: persisted?.lastModified || Date.now(),
 		editMode: false,
 		initialized: false,
@@ -202,7 +187,6 @@ function createNavigatorStore() {
 		return {
 			cardOrder: state.cardOrder,
 			decks: state.decks,
-			recentSessionsView: state.recentSessionsView,
 			lastModified: Date.now(),
 		};
 	}
@@ -229,76 +213,27 @@ function createNavigatorStore() {
 
 		/**
 		 * Initialize store and sync from server
-		 *
-		 * Merge strategy:
-		 * 1. If local is empty (no decks), always use server state
-		 * 2. If server is empty but local has data, keep local
-		 * 3. If both have data, merge: server decks win, add local-only decks
 		 */
 		async initialize(): Promise<void> {
 			const serverState = await loadFromServer();
 
 			update((state) => {
-				const localDecks = state.decks || [];
-				const serverDecks = serverState?.decks || [];
-				const localIsEmpty = localDecks.length === 0 && (state.cardOrder || []).length === 0;
-				const serverIsEmpty = serverDecks.length === 0 && (serverState?.cardOrder || []).length === 0;
+				if (serverState) {
+					// Merge server state - server wins for conflicts
+					const localModified = state.lastModified || 0;
+					const serverModified = serverState.lastModified || 0;
 
-				let mergedState: NavigatorState;
-
-				if (serverState && !serverIsEmpty) {
-					if (localIsEmpty) {
-						// Local is empty, use server state entirely
-						console.log('[Navigator] Local empty, using server state');
-						mergedState = {
+					if (serverModified > localModified) {
+						return {
 							...state,
 							...serverState,
-							editMode: false,
-							initialized: true,
-						};
-					} else {
-						// Both have data - merge them
-						// Server decks take precedence, but preserve local-only decks
-						const serverDeckIds = new Set(serverDecks.map(d => d.id));
-						const localOnlyDecks = localDecks.filter(d => !serverDeckIds.has(d.id));
-
-						// Merge card orders: server order first, then any local-only cards
-						const serverCardOrder = serverState.cardOrder || [];
-						const localCardOrder = state.cardOrder || [];
-						const serverCardOrderSet = new Set(serverCardOrder);
-						const localOnlyCards = localCardOrder.filter(id => !serverCardOrderSet.has(id));
-
-						console.log('[Navigator] Merging local and server state');
-						mergedState = {
-							...state,
-							...serverState,
-							decks: [...serverDecks, ...localOnlyDecks],
-							cardOrder: [...serverCardOrder, ...localOnlyCards],
 							editMode: false,
 							initialized: true,
 						};
 					}
-				} else {
-					// No server state or server is empty - keep local
-					console.log('[Navigator] No server state, keeping local');
-					mergedState = { ...state, initialized: true };
 				}
-
-				// Save merged state to localStorage
-				const persisted = {
-					cardOrder: mergedState.cardOrder,
-					decks: mergedState.decks,
-					recentSessionsView: mergedState.recentSessionsView,
-					lastModified: Date.now(),
-				};
-				saveToStorage(persisted);
-
-				return mergedState;
+				return { ...state, initialized: true };
 			});
-
-			// Mark sync as complete - now server writes are allowed
-			hasSyncedFromServer = true;
-			console.log('[Navigator] Initial sync complete, server writes enabled');
 		},
 
 		/**
@@ -350,34 +285,6 @@ function createNavigatorStore() {
 			} else {
 				this.enterEditMode();
 			}
-		},
-
-		// ========================================================================
-		// Recent Sessions View
-		// ========================================================================
-
-		/**
-		 * Set the view mode for recent sessions (list or timeline)
-		 */
-		setRecentSessionsView(view: RecentSessionsViewMode): void {
-			updateAndPersist((state) => ({
-				...state,
-				recentSessionsView: view,
-			}));
-		},
-
-		/**
-		 * Toggle between list and timeline views
-		 */
-		toggleRecentSessionsView(): void {
-			update((state) => {
-				const newView: RecentSessionsViewMode = state.recentSessionsView === 'list' ? 'timeline' : 'list';
-				const newState = { ...state, recentSessionsView: newView };
-				const persisted = getPersistedState(newState);
-				saveToStorage(persisted);
-				saveToServer(persisted);
-				return newState;
-			});
 		},
 
 		// ========================================================================
@@ -615,7 +522,6 @@ function createNavigatorStore() {
 			const freshState: NavigatorState = {
 				cardOrder: [],
 				decks: [],
-				recentSessionsView: 'list',
 				lastModified: Date.now(),
 				editMode: false,
 				initialized: true,
@@ -643,6 +549,3 @@ export const cardOrder = derived(navigator, ($nav) => $nav.cardOrder);
 
 // Initialization state
 export const navigatorInitialized = derived(navigator, ($nav) => $nav.initialized);
-
-// Recent sessions view mode
-export const recentSessionsView = derived(navigator, ($nav) => $nav.recentSessionsView);

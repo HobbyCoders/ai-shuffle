@@ -1048,7 +1048,12 @@ def _build_env_with_ai_tools(
     return env
 
 
-def generate_environment_details(working_dir: str, ai_tools_config: Optional[Dict[str, Any]] = None) -> str:
+def generate_environment_details(
+    working_dir: str,
+    ai_tools_config: Optional[Dict[str, Any]] = None,
+    execution_mode: str = "local",
+    worktree_info: Optional[Dict[str, str]] = None
+) -> str:
     """
     Generate environment details block for custom system prompts.
     Similar to Claude Code's dynamic environment injection.
@@ -1056,6 +1061,8 @@ def generate_environment_details(working_dir: str, ai_tools_config: Optional[Dic
     Args:
         working_dir: The working directory path
         ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
+        execution_mode: Either "local" or "worktree"
+        worktree_info: Dict with branch and base_branch info when in worktree mode
     """
     is_git = _is_git_repo(working_dir)
     os_version = _get_os_version()
@@ -1064,13 +1071,20 @@ def generate_environment_details(working_dir: str, ai_tools_config: Optional[Dic
     # Get AI tools section using helper function
     tools_section = _build_ai_tools_section(ai_tools_config)
 
+    # Build execution mode lines
+    execution_lines = f"\nExecution mode: {execution_mode}"
+    if execution_mode == "worktree" and worktree_info:
+        branch = worktree_info.get("branch", "unknown")
+        base_branch = worktree_info.get("base_branch", "main")
+        execution_lines += f"\nCurrent branch: {branch}\nBase branch: {base_branch}"
+
     return f"""Here is useful information about the environment you are running in:
 <env>
 Working directory: {working_dir}
 Is directory a git repo: {"Yes" if is_git else "No"}
 Platform: {sys.platform}
 OS Version: {os_version}
-Today's date: {today}
+Today's date: {today}{execution_lines}
 </env>{tools_section}"""
 
 
@@ -1107,20 +1121,32 @@ def build_options_from_profile(
     config = profile["config"]
     overrides = overrides or {}
 
-    # Determine working directory first (needed for env details injection)
+    # Determine working directory and execution mode (needed for env details injection)
     # Priority order:
     # 1. Override cwd (explicit worktree path from agent engine)
     # 2. Session worktree (for resumed sessions)
     # 3. Project path
     # 4. Profile config cwd
     # 5. Default workspace
+    execution_mode = "local"
+    worktree_info = None
+
     if overrides.get("cwd"):
         # Override takes highest priority - used by agent engine for worktrees
         working_dir = overrides.get("cwd")
+        # Check if override includes worktree info
+        if overrides.get("worktree_info"):
+            execution_mode = "worktree"
+            worktree_info = overrides.get("worktree_info")
     elif resume_session_id:
         worktree = database.get_worktree_by_session(resume_session_id)
         if worktree and worktree.get("status") == "active":
             working_dir = str(settings.workspace_dir / worktree["worktree_path"])
+            execution_mode = "worktree"
+            worktree_info = {
+                "branch": worktree.get("branch_name", "unknown"),
+                "base_branch": worktree.get("base_branch", "main")
+            }
         elif project:
             working_dir = str(settings.workspace_dir / project["path"])
         else:
@@ -1162,7 +1188,12 @@ def build_options_from_profile(
 
             # Add environment details if enabled (includes AI tools based on ai_tools_config)
             if inject_env:
-                prompt_parts.append(generate_environment_details(working_dir, ai_tools_config))
+                prompt_parts.append(generate_environment_details(
+                    working_dir,
+                    ai_tools_config,
+                    execution_mode=execution_mode,
+                    worktree_info=worktree_info
+                ))
             else:
                 # If env details not enabled, still add AI tools section if any are enabled
                 tools_section = _build_ai_tools_section(ai_tools_config, prefix="")
