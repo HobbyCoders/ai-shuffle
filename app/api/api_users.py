@@ -57,15 +57,14 @@ async def create_api_user(request: ApiUserCreate, token: str = Depends(require_a
                 detail="Project not found"
             )
 
-    # Validate all profiles exist if provided
-    if request.profile_ids:
-        for profile_id in request.profile_ids:
-            profile = db.get_profile(profile_id)
-            if not profile:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Profile not found: {profile_id}"
-                )
+    # Validate profile exists if provided
+    if request.profile_id:
+        profile = db.get_profile(request.profile_id)
+        if not profile:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Profile not found"
+            )
 
     # Generate ID and API key
     user_id = str(uuid.uuid4())[:8]
@@ -78,9 +77,8 @@ async def create_api_user(request: ApiUserCreate, token: str = Depends(require_a
         name=request.name,
         api_key_hash=api_key_hash,
         project_id=request.project_id,
-        profile_ids=request.profile_ids,
-        description=request.description,
-        web_login_allowed=request.web_login_allowed
+        profile_id=request.profile_id,
+        description=request.description
     )
 
     # Return with the plaintext API key (only time it's shown)
@@ -110,24 +108,22 @@ async def update_api_user(
                 detail="Project not found"
             )
 
-    # Validate all profiles exist if provided
-    if request.profile_ids:
-        for profile_id in request.profile_ids:
-            profile = db.get_profile(profile_id)
-            if not profile:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Profile not found: {profile_id}"
-                )
+    # Validate profile exists if provided
+    if request.profile_id:
+        profile = db.get_profile(request.profile_id)
+        if not profile:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Profile not found"
+            )
 
     user = db.update_api_user(
         user_id=user_id,
         name=request.name,
         project_id=request.project_id,
-        profile_ids=request.profile_ids,
+        profile_id=request.profile_id,
         description=request.description,
-        is_active=request.is_active,
-        web_login_allowed=request.web_login_allowed
+        is_active=request.is_active
     )
 
     return user

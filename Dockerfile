@@ -53,7 +53,7 @@ COPY app/ ./app/
 COPY .env.example .
 
 # Build frontend
-COPY frontend/package*.json ./frontend/
+COPY frontend/package.json ./frontend/
 WORKDIR /app/frontend
 RUN npm install
 

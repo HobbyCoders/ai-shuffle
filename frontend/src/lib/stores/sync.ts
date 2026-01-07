@@ -78,20 +78,13 @@ function createSyncStore() {
 		const deviceId = getDeviceIdSync();
 		const state = get({ subscribe });
 
-		// Already connected to this session - just request fresh state
+		// Already connected to this session
 		if (state.connected && state.sessionId === sessionId && websocket?.readyState === WebSocket.OPEN) {
-			console.log(`[Sync] Already connected to session ${sessionId}, requesting state update`);
-			requestState();
 			return true;
 		}
 
-		// Disconnect from previous session (only if different session)
-		if (state.sessionId && state.sessionId !== sessionId) {
-			disconnect();
-		} else if (websocket && websocket.readyState !== WebSocket.OPEN) {
-			// Clean up dead connection
-			websocket = null;
-		}
+		// Disconnect from previous session
+		disconnect();
 
 		// Get auth token from cookie
 		const token = authToken || getCookieToken();
@@ -180,11 +173,8 @@ function createSyncStore() {
 	function handleSyncEvent(event: SyncEvent) {
 		const deviceId = getDeviceIdSync();
 
-		console.log('[Sync] Received event:', event.event_type, 'source:', event.source_device_id, 'my device:', deviceId);
-
-		// Ignore events from our own device (but NOT events with null/undefined source - those are from background tasks)
-		if (event.source_device_id && event.source_device_id === deviceId) {
-			console.log('[Sync] Ignoring event from own device');
+		// Ignore events from our own device
+		if (event.source_device_id === deviceId) {
 			return;
 		}
 
@@ -333,7 +323,7 @@ function createSyncStore() {
 	 */
 	function getCookieToken(): string | null {
 		if (typeof document === 'undefined') return null;
-		const match = document.cookie.match(/session=([^;]+)/);
+		const match = document.cookie.match(/session_token=([^;]+)/);
 		return match ? match[1] : null;
 	}
 

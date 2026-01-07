@@ -23,12 +23,27 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class ApiKeyLoginRequest(BaseModel):
+    """API key login request for web UI"""
+    api_key: str
+
+
+class ApiUserInfo(BaseModel):
+    """API user info in auth responses"""
+    id: str
+    name: str
+    project_id: Optional[str] = None
+    profile_id: Optional[str] = None
+
+
 class AuthStatus(BaseModel):
     """Authentication status response"""
     authenticated: bool
+    is_admin: bool = True
     setup_required: bool
     claude_authenticated: bool
     username: Optional[str] = None
+    api_user: Optional[ApiUserInfo] = None
 
 
 # ============================================================================
@@ -44,14 +59,42 @@ class SystemPromptConfig(BaseModel):
 
 
 class ProfileConfig(BaseModel):
-    """Claude Agent configuration stored in profile"""
-    model: Optional[str] = "claude-sonnet-4"
+    """Claude Agent configuration stored in profile - maps to ClaudeAgentOptions"""
+    # Core settings
+    model: Optional[str] = "sonnet"
+    permission_mode: Optional[str] = "default"  # default, acceptEdits, plan, bypassPermissions
+    max_turns: Optional[int] = None
+
+    # Tool configuration
     allowed_tools: Optional[List[str]] = None
     disallowed_tools: Optional[List[str]] = None
-    permission_mode: Optional[str] = "default"
-    max_turns: Optional[int] = None
+
+    # System prompt
     system_prompt: Optional[SystemPromptConfig] = None
-    setting_sources: Optional[List[str]] = None
+
+    # Streaming behavior
+    include_partial_messages: bool = False  # Enable streaming partial messages
+
+    # Session behavior
+    continue_conversation: bool = False  # Continue most recent conversation
+    fork_session: bool = False  # Fork instead of continuing when resuming
+
+    # Working directory and paths
+    cwd: Optional[str] = None  # Override working directory
+    add_dirs: Optional[List[str]] = None  # Additional directories Claude can access
+
+    # Settings loading
+    setting_sources: Optional[List[str]] = None  # user, project, local
+
+    # Environment and arguments
+    env: Optional[Dict[str, str]] = None  # Environment variables
+    extra_args: Optional[Dict[str, Any]] = None  # Additional CLI arguments
+
+    # Buffer settings
+    max_buffer_size: Optional[int] = None  # Maximum bytes when buffering CLI stdout
+
+    # User identification
+    user: Optional[str] = None  # User identifier
 
 
 class ProfileBase(BaseModel):
@@ -190,6 +233,7 @@ class ConversationRequest(BaseModel):
     profile: Optional[str] = "claude-code"  # Used only for new sessions
     project: Optional[str] = None  # Used only for new sessions
     overrides: Optional[QueryOverrides] = None
+    device_id: Optional[str] = None  # Device identifier for cross-device sync
 
 
 class QueryMetadata(BaseModel):
@@ -273,3 +317,43 @@ class StatsResponse(BaseModel):
     total_cost_usd: float
     total_tokens_in: int
     total_tokens_out: int
+
+
+# ============================================================================
+# API User Models
+# ============================================================================
+
+class ApiUserBase(BaseModel):
+    """Base API user fields"""
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = None
+    project_id: Optional[str] = None
+    profile_id: Optional[str] = None
+
+
+class ApiUserCreate(ApiUserBase):
+    """API user creation request"""
+    pass
+
+
+class ApiUserUpdate(BaseModel):
+    """API user update request"""
+    name: Optional[str] = None
+    description: Optional[str] = None
+    project_id: Optional[str] = None
+    profile_id: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class ApiUser(ApiUserBase):
+    """Full API user response (without sensitive data)"""
+    id: str
+    is_active: bool = True
+    created_at: datetime
+    updated_at: datetime
+    last_used_at: Optional[datetime] = None
+
+
+class ApiUserWithKey(ApiUser):
+    """API user response with newly generated key (only on create)"""
+    api_key: str  # Only returned once on creation

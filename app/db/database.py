@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 # Schema version for migrations
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 4
 
 
 def get_connection() -> sqlite3.Connection:
@@ -119,6 +119,7 @@ def _create_schema(cursor: sqlite3.Cursor):
             id TEXT PRIMARY KEY,
             project_id TEXT,
             profile_id TEXT NOT NULL,
+            api_user_id TEXT,
             sdk_session_id TEXT,
             title TEXT,
             status TEXT DEFAULT 'active',
@@ -129,11 +130,12 @@ def _create_schema(cursor: sqlite3.Cursor):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
-            FOREIGN KEY (profile_id) REFERENCES profiles(id)
+            FOREIGN KEY (profile_id) REFERENCES profiles(id),
+            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL
         )
     """)
 
-    # Session messages
+    # Session messages (with sync support)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS session_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,6 +145,22 @@ def _create_schema(cursor: sqlite3.Cursor):
             tool_name TEXT,
             tool_input JSON,
             metadata JSON,
+            version INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Sync log for tracking changes (used for polling fallback)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sync_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT,
+            data JSON,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
         )
@@ -172,6 +190,58 @@ def _create_schema(cursor: sqlite3.Cursor):
         )
     """)
 
+    # API users (for programmatic access with isolated workspaces)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS api_users (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            api_key_hash TEXT NOT NULL,
+            project_id TEXT,
+            profile_id TEXT,
+            is_active BOOLEAN DEFAULT TRUE,
+            description TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_used_at TIMESTAMP,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
+            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL
+        )
+    """)
+
+    # Login attempts tracking for brute force protection
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS login_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip_address TEXT NOT NULL,
+            username TEXT,
+            success BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Account lockout tracking
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS account_lockouts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip_address TEXT,
+            username TEXT,
+            locked_until TIMESTAMP NOT NULL,
+            reason TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # API key web sessions (for API key users logging into web UI)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS api_key_sessions (
+            token TEXT PRIMARY KEY,
+            api_user_id TEXT NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE
+        )
+    """)
+
     # Create indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)")
@@ -179,6 +249,15 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_usage_log_created ON usage_log(created_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_users_active ON api_users(is_active)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_api_user ON sessions(api_user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_session ON sync_log(session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_created ON sync_log(created_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts(ip_address)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_created ON login_attempts(created_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_account_lockouts_ip ON account_lockouts(ip_address)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_account_lockouts_username ON account_lockouts(username)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_key_sessions_user ON api_key_sessions(api_user_id)")
 
 
 def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
@@ -473,6 +552,7 @@ def get_sessions(
     project_id: Optional[str] = None,
     profile_id: Optional[str] = None,
     status: Optional[str] = None,
+    api_user_id: Optional[str] = None,
     limit: int = 50,
     offset: int = 0
 ) -> List[Dict[str, Any]]:
@@ -489,6 +569,12 @@ def get_sessions(
     if status:
         query += " AND status = ?"
         params.append(status)
+    if api_user_id is not None:
+        if api_user_id:
+            query += " AND api_user_id = ?"
+            params.append(api_user_id)
+        else:
+            query += " AND api_user_id IS NULL"
 
     query += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
@@ -503,16 +589,17 @@ def create_session(
     session_id: str,
     profile_id: str,
     project_id: Optional[str] = None,
-    title: Optional[str] = None
+    title: Optional[str] = None,
+    api_user_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """Create a new session"""
     now = datetime.utcnow().isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO sessions (id, profile_id, project_id, title, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (session_id, profile_id, project_id, title, now, now)
+            """INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, profile_id, project_id, title, api_user_id, now, now)
         )
     return get_session(session_id)
 
@@ -673,3 +760,412 @@ def get_usage_stats() -> Dict[str, Any]:
             "total_tokens_out": row["total_tokens_out"],
             "total_cost_usd": row["total_cost_usd"]
         }
+
+
+# ============================================================================
+# API User Operations
+# ============================================================================
+
+def get_api_user(user_id: str) -> Optional[Dict[str, Any]]:
+    """Get an API user by ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM api_users WHERE id = ?", (user_id,))
+        return row_to_dict(cursor.fetchone())
+
+
+def get_api_user_by_key_hash(key_hash: str) -> Optional[Dict[str, Any]]:
+    """Get an API user by API key hash"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM api_users WHERE api_key_hash = ? AND is_active = TRUE",
+            (key_hash,)
+        )
+        return row_to_dict(cursor.fetchone())
+
+
+def get_all_api_users() -> List[Dict[str, Any]]:
+    """Get all API users"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM api_users ORDER BY created_at DESC")
+        return rows_to_list(cursor.fetchall())
+
+
+def create_api_user(
+    user_id: str,
+    name: str,
+    api_key_hash: str,
+    project_id: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    description: Optional[str] = None
+) -> Dict[str, Any]:
+    """Create a new API user"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO api_users (id, name, api_key_hash, project_id, profile_id, description, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user_id, name, api_key_hash, project_id, profile_id, description, now, now)
+        )
+    return get_api_user(user_id)
+
+
+def update_api_user(
+    user_id: str,
+    name: Optional[str] = None,
+    project_id: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    description: Optional[str] = None,
+    is_active: Optional[bool] = None
+) -> Optional[Dict[str, Any]]:
+    """Update an API user"""
+    existing = get_api_user(user_id)
+    if not existing:
+        return None
+
+    updates = []
+    values = []
+    if name is not None:
+        updates.append("name = ?")
+        values.append(name)
+    if project_id is not None:
+        updates.append("project_id = ?")
+        values.append(project_id if project_id else None)
+    if profile_id is not None:
+        updates.append("profile_id = ?")
+        values.append(profile_id if profile_id else None)
+    if description is not None:
+        updates.append("description = ?")
+        values.append(description)
+    if is_active is not None:
+        updates.append("is_active = ?")
+        values.append(is_active)
+
+    if updates:
+        updates.append("updated_at = ?")
+        values.append(datetime.utcnow().isoformat())
+        values.append(user_id)
+
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE api_users SET {', '.join(updates)} WHERE id = ?",
+                values
+            )
+
+    return get_api_user(user_id)
+
+
+def update_api_user_key(user_id: str, api_key_hash: str) -> Optional[Dict[str, Any]]:
+    """Update an API user's key"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE api_users SET api_key_hash = ?, updated_at = ? WHERE id = ?",
+            (api_key_hash, datetime.utcnow().isoformat(), user_id)
+        )
+    return get_api_user(user_id)
+
+
+def update_api_user_last_used(user_id: str):
+    """Update the last_used_at timestamp for an API user"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE api_users SET last_used_at = ? WHERE id = ?",
+            (datetime.utcnow().isoformat(), user_id)
+        )
+
+
+def delete_api_user(user_id: str) -> bool:
+    """Delete an API user"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM api_users WHERE id = ?", (user_id,))
+        return cursor.rowcount > 0
+
+
+# ============================================================================
+# Sync Log Operations (for cross-device synchronization)
+# ============================================================================
+
+def add_sync_log(
+    session_id: str,
+    event_type: str,
+    entity_type: str,
+    entity_id: Optional[str] = None,
+    data: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Add an entry to the sync log for polling fallback"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO sync_log (session_id, event_type, entity_type, entity_id, data, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (session_id, event_type, entity_type, entity_id,
+             json.dumps(data) if data else None, now)
+        )
+        return {
+            "id": cursor.lastrowid,
+            "session_id": session_id,
+            "event_type": event_type,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "data": data,
+            "created_at": now
+        }
+
+
+def get_sync_logs(
+    session_id: str,
+    since_id: int = 0,
+    limit: int = 100
+) -> List[Dict[str, Any]]:
+    """Get sync log entries for a session since a given ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT * FROM sync_log
+               WHERE session_id = ? AND id > ?
+               ORDER BY id ASC
+               LIMIT ?""",
+            (session_id, since_id, limit)
+        )
+        rows = rows_to_list(cursor.fetchall())
+        for row in rows:
+            if row.get("data"):
+                row["data"] = json.loads(row["data"]) if isinstance(row["data"], str) else row["data"]
+        return rows
+
+
+def get_latest_sync_id(session_id: str) -> int:
+    """Get the latest sync log ID for a session"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT MAX(id) as max_id FROM sync_log WHERE session_id = ?",
+            (session_id,)
+        )
+        row = cursor.fetchone()
+        return row["max_id"] or 0
+
+
+def cleanup_old_sync_logs(max_age_hours: int = 24):
+    """Remove sync log entries older than max_age_hours"""
+    from datetime import timedelta
+    cutoff = (datetime.utcnow() - timedelta(hours=max_age_hours)).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM sync_log WHERE created_at < ?",
+            (cutoff,)
+        )
+        return cursor.rowcount
+
+
+def update_message_content(
+    message_id: int,
+    content: str,
+    metadata: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, Any]]:
+    """Update message content (used during streaming)"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        updates = ["content = ?", "updated_at = ?", "version = version + 1"]
+        values = [content, now]
+
+        if metadata is not None:
+            updates.append("metadata = ?")
+            values.append(json.dumps(metadata))
+
+        values.append(message_id)
+
+        cursor.execute(
+            f"UPDATE session_messages SET {', '.join(updates)} WHERE id = ?",
+            values
+        )
+
+        if cursor.rowcount > 0:
+            cursor.execute("SELECT * FROM session_messages WHERE id = ?", (message_id,))
+            row = row_to_dict(cursor.fetchone())
+            if row and row.get("metadata"):
+                row["metadata"] = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]
+            return row
+
+    return None
+
+
+# ============================================================================
+# Login Attempts & Rate Limiting Operations
+# ============================================================================
+
+def record_login_attempt(ip_address: str, username: Optional[str], success: bool):
+    """Record a login attempt for rate limiting"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO login_attempts (ip_address, username, success, created_at)
+               VALUES (?, ?, ?, ?)""",
+            (ip_address, username, success, datetime.utcnow().isoformat())
+        )
+
+
+def get_failed_attempts_count(ip_address: str, window_minutes: int = 15) -> int:
+    """Get the number of failed login attempts from an IP in the time window"""
+    from datetime import timedelta
+    cutoff = (datetime.utcnow() - timedelta(minutes=window_minutes)).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT COUNT(*) as count FROM login_attempts
+               WHERE ip_address = ? AND success = FALSE AND created_at > ?""",
+            (ip_address, cutoff)
+        )
+        row = cursor.fetchone()
+        return row["count"]
+
+
+def get_failed_attempts_for_username(username: str, window_minutes: int = 15) -> int:
+    """Get the number of failed login attempts for a username in the time window"""
+    from datetime import timedelta
+    cutoff = (datetime.utcnow() - timedelta(minutes=window_minutes)).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT COUNT(*) as count FROM login_attempts
+               WHERE username = ? AND success = FALSE AND created_at > ?""",
+            (username, cutoff)
+        )
+        row = cursor.fetchone()
+        return row["count"]
+
+
+def cleanup_old_login_attempts(max_age_hours: int = 24):
+    """Remove old login attempt records"""
+    from datetime import timedelta
+    cutoff = (datetime.utcnow() - timedelta(hours=max_age_hours)).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM login_attempts WHERE created_at < ?",
+            (cutoff,)
+        )
+        return cursor.rowcount
+
+
+# ============================================================================
+# Account Lockout Operations
+# ============================================================================
+
+def create_lockout(ip_address: Optional[str], username: Optional[str],
+                   duration_minutes: int, reason: str):
+    """Create a lockout for an IP or username"""
+    from datetime import timedelta
+    locked_until = (datetime.utcnow() + timedelta(minutes=duration_minutes)).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO account_lockouts (ip_address, username, locked_until, reason, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (ip_address, username, locked_until, reason, datetime.utcnow().isoformat())
+        )
+
+
+def is_ip_locked(ip_address: str) -> Optional[Dict[str, Any]]:
+    """Check if an IP address is currently locked out"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT * FROM account_lockouts
+               WHERE ip_address = ? AND locked_until > ?
+               ORDER BY locked_until DESC LIMIT 1""",
+            (ip_address, now)
+        )
+        return row_to_dict(cursor.fetchone())
+
+
+def is_username_locked(username: str) -> Optional[Dict[str, Any]]:
+    """Check if a username is currently locked out"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT * FROM account_lockouts
+               WHERE username = ? AND locked_until > ?
+               ORDER BY locked_until DESC LIMIT 1""",
+            (username, now)
+        )
+        return row_to_dict(cursor.fetchone())
+
+
+def cleanup_expired_lockouts():
+    """Remove expired lockout records"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM account_lockouts WHERE locked_until < ?",
+            (now,)
+        )
+        return cursor.rowcount
+
+
+# ============================================================================
+# API Key Web Session Operations
+# ============================================================================
+
+def create_api_key_session(token: str, api_user_id: str, expires_at: datetime) -> Dict[str, Any]:
+    """Create a web session for an API key user"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO api_key_sessions (token, api_user_id, expires_at) VALUES (?, ?, ?)",
+            (token, api_user_id, expires_at.isoformat())
+        )
+        return {"token": token, "api_user_id": api_user_id, "expires_at": expires_at}
+
+
+def get_api_key_session(token: str) -> Optional[Dict[str, Any]]:
+    """Get an API key session by token"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT aks.*, au.name as user_name, au.project_id, au.profile_id, au.is_active
+               FROM api_key_sessions aks
+               JOIN api_users au ON aks.api_user_id = au.id
+               WHERE aks.token = ? AND aks.expires_at > ? AND au.is_active = TRUE""",
+            (token, datetime.utcnow().isoformat())
+        )
+        return row_to_dict(cursor.fetchone())
+
+
+def delete_api_key_session(token: str):
+    """Delete an API key session"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM api_key_sessions WHERE token = ?", (token,))
+
+
+def delete_api_key_sessions_for_user(api_user_id: str):
+    """Delete all sessions for an API user"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM api_key_sessions WHERE api_user_id = ?", (api_user_id,))
+
+
+def cleanup_expired_api_key_sessions():
+    """Remove expired API key sessions"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM api_key_sessions WHERE expires_at < ?",
+            (datetime.utcnow().isoformat(),)
+        )
+        return cursor.rowcount

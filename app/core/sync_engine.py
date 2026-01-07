@@ -7,9 +7,11 @@ watching the same session.
 
 import asyncio
 import logging
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Set, Any
+from typing import Dict, List, Optional, Set, Callable, Any
+from weakref import WeakSet
 
 from fastapi import WebSocket
 
@@ -61,12 +63,8 @@ class StreamingBuffer:
     session_id: str
     messages: List[Dict[str, Any]] = field(default_factory=list)
     started_at: datetime = field(default_factory=datetime.utcnow)
-    # Store usage data from stream_start for late-joining devices
-    usage: Optional[Dict[str, Any]] = None
 
-    def add_chunk(self, chunk_type: str, content: str, tool_name: str = None, tool_id: str = None, tool_input: Dict = None, subtype: str = None, data: Dict = None,
-                  agent_id: str = None, agent_type: str = None, description: str = None, prompt: str = None,
-                  tool_use_id: str = None, output: str = None, is_error: bool = False, result: str = None):
+    def add_chunk(self, chunk_type: str, content: str, tool_name: str = None, tool_id: str = None, tool_input: Dict = None):
         """Add a streaming chunk to the buffer"""
         # Find or create message for this chunk type
         if chunk_type == 'text':
@@ -97,112 +95,17 @@ class StreamingBuffer:
                 if m.get('type') == 'text':
                     m['streaming'] = False
         elif chunk_type == 'tool_result':
-            # Find the tool_use message and merge the result into it (for proper grouping)
-            # This ensures late-joining devices see tool_use with embedded result
-            found_tool_use = False
+            # Find the tool_use message and mark it complete, add result
             for m in self.messages:
-                if m.get('type') == 'tool_use' and m.get('tool_id') == tool_id:
+                if m.get('tool_id') == tool_id:
                     m['streaming'] = False
-                    m['tool_result'] = content
-                    m['tool_status'] = 'complete'
-                    found_tool_use = True
-                    break
-
-            # Only create separate tool_result if no matching tool_use found (shouldn't happen normally)
-            if not found_tool_use:
-                self.messages.append({
-                    'type': 'tool_result',
-                    'role': 'assistant',
-                    'content': content,
-                    'tool_id': tool_id,
-                    'streaming': False
-                })
-        elif chunk_type == 'system':
-            # System message (e.g., /context output, local commands)
-            # These need to be buffered so late-joining devices see them
             self.messages.append({
-                'type': 'system',
-                'role': 'system',
+                'type': 'tool_result',
+                'role': 'assistant',
                 'content': content,
-                'subtype': subtype,
-                'data': data,
+                'tool_id': tool_id,
                 'streaming': False
             })
-        elif chunk_type == 'subagent_start':
-            # Subagent task started - create a new subagent message group
-            self.messages.append({
-                'type': 'subagent',
-                'role': 'assistant',
-                'content': '',
-                'agent_id': agent_id,
-                'agent_type': agent_type,
-                'agent_description': description,
-                'agent_prompt': prompt,
-                'agent_status': 'running',
-                'tool_id': tool_id,
-                'agent_children': [],
-                'streaming': True
-            })
-        elif chunk_type == 'subagent_chunk':
-            # Text chunk from subagent - add to subagent's children
-            subagent = next((m for m in self.messages if m.get('type') == 'subagent' and m.get('agent_id') == agent_id), None)
-            if subagent:
-                children = subagent.get('agent_children', [])
-                # Find or create text child
-                text_child = next((c for c in children if c.get('type') == 'text' and c.get('streaming')), None)
-                if text_child:
-                    text_child['content'] = (text_child.get('content') or '') + content
-                else:
-                    children.append({
-                        'id': f'{agent_id}-text-{len(children)}',
-                        'type': 'text',
-                        'content': content,
-                        'streaming': True
-                    })
-                subagent['agent_children'] = children
-        elif chunk_type == 'subagent_tool_use':
-            # Tool use within subagent
-            subagent = next((m for m in self.messages if m.get('type') == 'subagent' and m.get('agent_id') == agent_id), None)
-            if subagent:
-                children = subagent.get('agent_children', [])
-                # Mark any previous text child as complete
-                for c in children:
-                    if c.get('type') == 'text':
-                        c['streaming'] = False
-                # Add tool use child
-                children.append({
-                    'id': f'{agent_id}-tool-{tool_id}',
-                    'type': 'tool_use',
-                    'toolName': tool_name,
-                    'toolId': tool_id,
-                    'toolInput': tool_input,
-                    'toolStatus': 'running',
-                    'streaming': True
-                })
-                subagent['agent_children'] = children
-        elif chunk_type == 'subagent_tool_result':
-            # Tool result within subagent - embed in matching tool_use
-            subagent = next((m for m in self.messages if m.get('type') == 'subagent' and m.get('agent_id') == agent_id), None)
-            if subagent:
-                children = subagent.get('agent_children', [])
-                # Find matching tool_use and embed result
-                for c in children:
-                    if c.get('type') == 'tool_use' and c.get('toolId') == tool_use_id:
-                        c['toolResult'] = output
-                        c['toolStatus'] = 'error' if is_error else 'complete'
-                        c['streaming'] = False
-                        break
-                subagent['agent_children'] = children
-        elif chunk_type == 'subagent_done':
-            # Subagent completed - update status
-            subagent = next((m for m in self.messages if m.get('type') == 'subagent' and m.get('agent_id') == agent_id), None)
-            if subagent:
-                subagent['agent_status'] = 'error' if is_error else 'completed'
-                subagent['content'] = result or ''
-                subagent['streaming'] = False
-                # Mark all children as not streaming
-                for c in subagent.get('agent_children', []):
-                    c['streaming'] = False
 
     def get_messages(self) -> List[Dict[str, Any]]:
         """Get all buffered messages"""
@@ -264,26 +167,11 @@ class SyncEngine:
             logger.info(f"Device {device_id} registered to watch session {session_id}")
             return connection
 
-    async def unregister_device(self, device_id: str, session_id: str, websocket: Optional[WebSocket] = None):
-        """Unregister a device from watching a session.
-
-        Args:
-            device_id: The device ID to unregister
-            session_id: The session ID to unregister from
-            websocket: Optional - if provided, only unregister if the current connection
-                      uses this exact websocket. This prevents race conditions where
-                      a new connection is established before cleanup of the old one.
-        """
+    async def unregister_device(self, device_id: str, session_id: str):
+        """Unregister a device from watching a session"""
         async with self._lock:
             if session_id in self._connections:
                 if device_id in self._connections[session_id]:
-                    # If websocket is provided, only unregister if it matches
-                    if websocket is not None:
-                        current_conn = self._connections[session_id][device_id]
-                        if current_conn.websocket is not websocket:
-                            logger.info(f"Device {device_id} has new connection, skipping unregister for old websocket")
-                            return
-
                     del self._connections[session_id][device_id]
                     logger.info(f"Device {device_id} unregistered from session {session_id}")
 
@@ -320,26 +208,20 @@ class SyncEngine:
         session_id = event.session_id
 
         if session_id not in self._connections:
-            logger.debug(f"No connections for session {session_id}, skipping broadcast")
             return
 
         # Get connections to broadcast to
         connections = list(self._connections[session_id].values())
-        logger.info(f"Broadcasting {event.event_type} to {len(connections)} devices for session {session_id[:8]}...")
 
         # Send to all devices except the excluded one
         failed_devices = []
         for conn in connections:
             if exclude_device_id and conn.device_id == exclude_device_id:
-                logger.debug(f"Skipping source device {conn.device_id[:8]}")
                 continue
 
-            logger.debug(f"Sending {event.event_type} to device {conn.device_id[:8]}")
             success = await conn.send_event(event)
             if not success:
                 failed_devices.append(conn.device_id)
-            else:
-                logger.debug(f"Successfully sent {event.event_type} to device {conn.device_id[:8]}")
 
         # Clean up failed connections
         if failed_devices:
@@ -352,65 +234,17 @@ class SyncEngine:
         self,
         session_id: str,
         message_id: str,
-        source_device_id: Optional[str] = None,
-        usage: Optional[Dict[str, Any]] = None
+        source_device_id: Optional[str] = None
     ):
-        """Notify all devices that streaming has started for a session.
-
-        This method is idempotent - calling it multiple times for the same session
-        is safe and won't clear the streaming buffer.
-
-        Args:
-            session_id: The session ID
-            message_id: The assistant message ID
-            source_device_id: Device that originated the event (will be excluded from broadcast)
-            usage: Token usage data from message_start event (input_tokens, cache_creation_input_tokens, cache_read_input_tokens)
-        """
-        # Only create buffer if not already streaming (idempotent)
-        if session_id not in self._streaming_sessions:
-            self._streaming_sessions.add(session_id)
-            self._streaming_buffers[session_id] = StreamingBuffer(session_id=session_id, usage=usage)
-        elif usage and session_id in self._streaming_buffers:
-            # Update usage if buffer already exists (e.g., reconnection during streaming)
-            self._streaming_buffers[session_id].usage = usage
-
-        data = {"message_id": message_id}
-        if usage:
-            data["usage"] = usage
+        """Notify all devices that streaming has started for a session"""
+        self._streaming_sessions.add(session_id)
+        # Create a new streaming buffer for this session
+        self._streaming_buffers[session_id] = StreamingBuffer(session_id=session_id)
 
         event = SyncEvent(
             event_type="stream_start",
             session_id=session_id,
-            data=data,
-            source_device_id=source_device_id
-        )
-        await self.broadcast_event(event, exclude_device_id=source_device_id)
-
-    async def broadcast_usage_update(
-        self,
-        session_id: str,
-        usage: Dict[str, Any],
-        source_device_id: Optional[str] = None
-    ):
-        """Broadcast a usage update during streaming (for agentic loops with multiple turns).
-
-        This is called when subsequent stream_start events occur during a single query,
-        such as when Claude uses tools and continues responding. Each new assistant turn
-        has updated token usage that synced devices and the buffer need to know about.
-
-        Args:
-            session_id: The session ID
-            usage: Token usage data (input_tokens, cache_creation_input_tokens, cache_read_input_tokens)
-            source_device_id: Device that originated the event (will be excluded from broadcast)
-        """
-        # Update the buffer's usage data for late-joining devices
-        if session_id in self._streaming_buffers:
-            self._streaming_buffers[session_id].usage = usage
-
-        event = SyncEvent(
-            event_type="usage_update",
-            session_id=session_id,
-            data={"usage": usage},
+            data={"message_id": message_id},
             source_device_id=source_device_id
         )
         await self.broadcast_event(event, exclude_device_id=source_device_id)
@@ -419,7 +253,7 @@ class SyncEngine:
         self,
         session_id: str,
         message_id: str,
-        chunk_type: str,  # 'text', 'tool_use', 'tool_result', 'subagent_*'
+        chunk_type: str,  # 'text', 'tool_use', 'tool_result'
         chunk_data: Dict[str, Any],
         source_device_id: Optional[str] = None
     ):
@@ -430,20 +264,9 @@ class SyncEngine:
             buffer.add_chunk(
                 chunk_type=chunk_type,
                 content=chunk_data.get('content', ''),
-                tool_name=chunk_data.get('tool_name') or chunk_data.get('name'),  # subagent uses 'name'
-                tool_id=chunk_data.get('tool_id') or chunk_data.get('id'),  # subagent uses 'id'
-                tool_input=chunk_data.get('tool_input') or chunk_data.get('input'),  # subagent uses 'input'
-                subtype=chunk_data.get('subtype'),
-                data=chunk_data.get('data'),
-                # Subagent-specific parameters
-                agent_id=chunk_data.get('agent_id'),
-                agent_type=chunk_data.get('agent_type'),
-                description=chunk_data.get('description'),
-                prompt=chunk_data.get('prompt'),
-                tool_use_id=chunk_data.get('tool_use_id'),
-                output=chunk_data.get('output'),
-                is_error=chunk_data.get('is_error', False),
-                result=chunk_data.get('result')
+                tool_name=chunk_data.get('tool_name'),
+                tool_id=chunk_data.get('tool_id'),
+                tool_input=chunk_data.get('tool_input')
             )
 
         event = SyncEvent(
@@ -464,17 +287,6 @@ class SyncEngine:
         if buffer:
             return buffer.get_messages()
         return None
-
-    def get_streaming_buffer_with_usage(self, session_id: str) -> tuple[Optional[List[Dict[str, Any]]], Optional[Dict[str, Any]]]:
-        """Get the current streaming buffer and usage data for a session (for late-joining devices).
-
-        Returns:
-            Tuple of (messages, usage) where usage contains token usage data from stream_start
-        """
-        buffer = self._streaming_buffers.get(session_id)
-        if buffer:
-            return buffer.get_messages(), buffer.usage
-        return None, None
 
     async def broadcast_stream_end(
         self,
@@ -530,62 +342,6 @@ class SyncEngine:
             source_device_id=source_device_id
         )
         await self.broadcast_event(event, exclude_device_id=source_device_id)
-
-    async def broadcast_session_rewound(
-        self,
-        session_id: str,
-        target_uuid: str,
-        messages_removed: int,
-        source_device_id: Optional[str] = None
-    ):
-        """Broadcast that a session was rewound (messages removed)"""
-        event = SyncEvent(
-            event_type="session_rewound",
-            session_id=session_id,
-            data={
-                "target_uuid": target_uuid,
-                "messages_removed": messages_removed
-            },
-            source_device_id=source_device_id
-        )
-        # Don't exclude any device - all devices need to know about rewind
-        await self.broadcast_event(event, exclude_device_id=None)
-
-    async def broadcast_session_opened(
-        self,
-        session_id: str,
-        device_id: str,
-        is_new: bool = False
-    ):
-        """Broadcast that a device opened/resumed a session"""
-        event = SyncEvent(
-            event_type="session_opened",
-            session_id=session_id,
-            data={
-                "device_id": device_id,
-                "is_new": is_new
-            },
-            source_device_id=device_id
-        )
-        # Notify all devices in session except the one that opened it
-        await self.broadcast_event(event, exclude_device_id=device_id)
-
-    async def broadcast_session_closed(
-        self,
-        session_id: str,
-        device_id: str
-    ):
-        """Broadcast that a device closed a session"""
-        event = SyncEvent(
-            event_type="session_closed",
-            session_id=session_id,
-            data={
-                "device_id": device_id
-            },
-            source_device_id=device_id
-        )
-        # Notify all devices in session except the one that closed it
-        await self.broadcast_event(event, exclude_device_id=device_id)
 
     async def get_session_state(self, session_id: str) -> Dict[str, Any]:
         """Get current state of a session for new device joining"""

@@ -4,7 +4,7 @@
 
 import { writable, derived } from 'svelte/store';
 import type { AuthStatus } from '$lib/api/client';
-import { getAuthStatus, login as apiLogin, logout as apiLogout, setup as apiSetup } from '$lib/api/auth';
+import { getAuthStatus, login as apiLogin, loginWithApiKey as apiLoginWithApiKey, logout as apiLogout, setup as apiSetup } from '$lib/api/auth';
 
 interface AuthState {
 	status: AuthStatus | null;
@@ -58,6 +58,18 @@ function createAuthStore() {
 			}
 		},
 
+		async loginWithApiKey(apiKey: string) {
+			update(s => ({ ...s, loading: true, error: null }));
+			try {
+				await apiLoginWithApiKey(apiKey);
+				const status = await getAuthStatus();
+				update(s => ({ ...s, status, loading: false }));
+			} catch (e: any) {
+				update(s => ({ ...s, loading: false, error: e.detail || 'API key login failed' }));
+				throw e;
+			}
+		},
+
 		async logout() {
 			update(s => ({ ...s, loading: true, error: null }));
 			try {
@@ -80,8 +92,10 @@ export const auth = createAuthStore();
 
 // Derived stores for convenience
 export const isAuthenticated = derived(auth, $auth => $auth.status?.authenticated ?? false);
+export const isAdmin = derived(auth, $auth => $auth.status?.is_admin ?? false);
 export const setupRequired = derived(auth, $auth => $auth.status?.setup_required ?? false);
 export const claudeAuthenticated = derived(auth, $auth => $auth.status?.claude_authenticated ?? false);
 export const username = derived(auth, $auth => $auth.status?.username ?? null);
+export const apiUser = derived(auth, $auth => $auth.status?.api_user ?? null);
 export const authLoading = derived(auth, $auth => $auth.loading);
 export const authError = derived(auth, $auth => $auth.error);

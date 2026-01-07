@@ -8,9 +8,10 @@ import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.core.config import settings, ensure_directories
 from app.db.database import init_database
@@ -18,7 +19,38 @@ from app.core.profiles import seed_builtin_profiles
 from app.core.auth import auth_service
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system
+from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers for reverse proxy deployments"""
+
+    async def dispatch(self, request: Request, call_next):
+        response: Response = await call_next(request)
+
+        # Security headers - essential for reverse proxy setups
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "SAMEORIGIN"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+
+        # Content Security Policy - adjust based on your needs
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; "
+            "connect-src 'self' ws: wss:; "
+            "font-src 'self'; "
+            "frame-ancestors 'self';"
+        )
+
+        # Prevent caching of sensitive pages
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+
+        return response
 
 # Configure logging
 logging.basicConfig(
@@ -74,6 +106,9 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
+# Security headers middleware (runs first on response)
+app.add_middleware(SecurityHeadersMiddleware)
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -90,6 +125,8 @@ app.include_router(profiles.router)
 app.include_router(projects.router)
 app.include_router(sessions.router)
 app.include_router(query.router)
+app.include_router(api_users.router)
+app.include_router(websocket.router)
 
 # Serve static files (Svelte build) if they exist
 static_dir = Path(__file__).parent / "static"
@@ -123,6 +160,10 @@ if static_dir.exists():
 
     @app.get("/chat/{path:path}")
     async def serve_spa_chat_path(path: str):
+        return FileResponse(static_dir / "index.html")
+
+    @app.get("/settings")
+    async def serve_spa_settings():
         return FileResponse(static_dir / "index.html")
 
     @app.get("/favicon.svg")

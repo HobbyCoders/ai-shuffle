@@ -51,19 +51,70 @@ export class ApiClient {
 		return this.request<T>('PATCH', path, body);
 	}
 
-	async delete<T>(path: string): Promise<T> {
-		return this.request<T>('DELETE', path);
+	async delete<T>(path: string): Promise<T | void> {
+		const response = await fetch(`${API_BASE}${path}`, {
+			method: 'DELETE',
+			headers: {
+				'Content-Type': 'application/json'
+			},
+			credentials: 'include'
+		});
+
+		if (!response.ok) {
+			const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+			throw {
+				detail: error.detail || 'Request failed',
+				status: response.status
+			} as ApiError;
+		}
+
+		// Handle 204 No Content
+		if (response.status === 204) {
+			return;
+		}
+
+		return response.json();
+	}
+
+	async uploadFile(path: string, file: File): Promise<FileUploadResponse> {
+		const formData = new FormData();
+		formData.append('file', file);
+
+		const response = await fetch(`${API_BASE}${path}`, {
+			method: 'POST',
+			credentials: 'include',
+			body: formData
+		});
+
+		if (!response.ok) {
+			const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+			throw {
+				detail: error.detail || 'Upload failed',
+				status: response.status
+			} as ApiError;
+		}
+
+		return response.json();
 	}
 }
 
 export const api = new ApiClient();
 
 // Auth types
+export interface ApiUserInfo {
+	id: string;
+	name: string;
+	project_id: string | null;
+	profile_id: string | null;
+}
+
 export interface AuthStatus {
 	authenticated: boolean;
+	is_admin: boolean;
 	setup_required: boolean;
 	claude_authenticated: boolean;
 	username: string | null;
+	api_user: ApiUserInfo | null;
 }
 
 // Profile types
@@ -158,4 +209,29 @@ export interface HealthResponse {
 	authenticated: boolean;
 	setup_required: boolean;
 	claude_authenticated: boolean;
+}
+
+// API User types
+export interface ApiUser {
+	id: string;
+	name: string;
+	description: string | null;
+	project_id: string | null;
+	profile_id: string | null;
+	is_active: boolean;
+	created_at: string;
+	updated_at: string;
+	last_used_at: string | null;
+}
+
+export interface ApiUserWithKey extends ApiUser {
+	api_key: string;
+}
+
+// File upload types
+export interface FileUploadResponse {
+	filename: string;
+	path: string;
+	full_path: string;
+	size: number;
 }

@@ -5,12 +5,12 @@ Project management API routes
 from typing import List
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File, Request
 
 from app.core.models import Project, ProjectCreate, ProjectUpdate
 from app.core.config import settings
 from app.db import database
-from app.api.auth import require_auth
+from app.api.auth import require_auth, require_admin, get_api_user_from_request, is_admin_request
 
 router = APIRouter(prefix="/api/v1/projects", tags=["Projects"])
 
@@ -32,16 +32,37 @@ def validate_project_path(path: str) -> Path:
     return full_path
 
 
+def check_project_access(request: Request, project_id: str) -> None:
+    """Check if the user has access to the project. Raises HTTPException if not."""
+    api_user = get_api_user_from_request(request)
+    if api_user and api_user.get("project_id"):
+        if api_user["project_id"] != project_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this project"
+            )
+
+
 @router.get("", response_model=List[Project])
-async def list_projects(token: str = Depends(require_auth)):
-    """List all projects"""
+async def list_projects(request: Request, token: str = Depends(require_auth)):
+    """List all projects. API users only see their assigned project."""
+    api_user = get_api_user_from_request(request)
+
+    if api_user and api_user.get("project_id"):
+        # API user with assigned project - only return that project
+        project = database.get_project(api_user["project_id"])
+        return [project] if project else []
+
+    # Admin or unrestricted API user - return all projects
     projects = database.get_all_projects()
     return projects
 
 
 @router.get("/{project_id}", response_model=Project)
-async def get_project(project_id: str, token: str = Depends(require_auth)):
-    """Get a specific project"""
+async def get_project(request: Request, project_id: str, token: str = Depends(require_auth)):
+    """Get a specific project. API users can only access their assigned project."""
+    check_project_access(request, project_id)
+
     project = database.get_project(project_id)
     if not project:
         raise HTTPException(
@@ -52,8 +73,8 @@ async def get_project(project_id: str, token: str = Depends(require_auth)):
 
 
 @router.post("", response_model=Project, status_code=status.HTTP_201_CREATED)
-async def create_project(request: ProjectCreate, token: str = Depends(require_auth)):
-    """Create a new project"""
+async def create_project(request: ProjectCreate, token: str = Depends(require_admin)):
+    """Create a new project - Admin only"""
     # Check if ID already exists
     existing = database.get_project(request.id)
     if existing:
@@ -86,9 +107,9 @@ async def create_project(request: ProjectCreate, token: str = Depends(require_au
 async def update_project(
     project_id: str,
     request: ProjectUpdate,
-    token: str = Depends(require_auth)
+    token: str = Depends(require_admin)
 ):
-    """Update a project"""
+    """Update a project - Admin only"""
     existing = database.get_project(project_id)
     if not existing:
         raise HTTPException(
@@ -111,8 +132,8 @@ async def update_project(
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_project(project_id: str, token: str = Depends(require_auth)):
-    """Delete a project (database record only, not files)"""
+async def delete_project(project_id: str, token: str = Depends(require_admin)):
+    """Delete a project (database record only, not files) - Admin only"""
     existing = database.get_project(project_id)
     if not existing:
         raise HTTPException(
@@ -125,11 +146,13 @@ async def delete_project(project_id: str, token: str = Depends(require_auth)):
 
 @router.get("/{project_id}/files")
 async def list_project_files(
+    request: Request,
     project_id: str,
     path: str = "",
     token: str = Depends(require_auth)
 ):
-    """List files in a project directory"""
+    """List files in a project directory. API users can only access their assigned project."""
+    check_project_access(request, project_id)
     project = database.get_project(project_id)
     if not project:
         raise HTTPException(
@@ -174,3 +197,65 @@ async def list_project_files(
     files.sort(key=lambda x: (x["type"] != "directory", x["name"].lower()))
 
     return {"files": files, "path": path}
+
+
+@router.post("/{project_id}/upload")
+async def upload_file(
+    request: Request,
+    project_id: str,
+    file: UploadFile = File(...),
+    token: str = Depends(require_auth)
+):
+    """Upload a file to the project's uploads directory. API users can only access their assigned project."""
+    check_project_access(request, project_id)
+    project = database.get_project(project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {project_id}"
+        )
+
+    # Create uploads directory within project
+    uploads_path = validate_project_path(f"{project['path']}/uploads")
+    uploads_path.mkdir(parents=True, exist_ok=True)
+
+    # Sanitize filename
+    safe_filename = Path(file.filename).name
+    if not safe_filename or safe_filename.startswith('.'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid filename"
+        )
+
+    # Full file path
+    file_path = uploads_path / safe_filename
+
+    # Handle duplicate filenames by adding counter
+    if file_path.exists():
+        stem = file_path.stem
+        suffix = file_path.suffix
+        counter = 1
+        while file_path.exists():
+            file_path = uploads_path / f"{stem}_{counter}{suffix}"
+            counter += 1
+
+    # Save the file
+    try:
+        content = await file.read()
+        file_path.write_bytes(content)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save file: {str(e)}"
+        )
+
+    # Return relative path for reference
+    base_path = settings.workspace_dir / project["path"]
+    relative_path = file_path.relative_to(base_path)
+
+    return {
+        "filename": file_path.name,
+        "path": str(relative_path),
+        "full_path": str(file_path),
+        "size": len(content)
+    }
