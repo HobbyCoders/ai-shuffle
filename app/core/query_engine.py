@@ -41,6 +41,60 @@ from app.core import encryption
 
 logger = logging.getLogger(__name__)
 
+# Maximum size for tool output before truncation (in characters)
+# Keep well under 1MB to avoid WebSocket JSON buffer overflow
+MAX_TOOL_OUTPUT_SIZE = 500_000  # ~500KB to leave room for JSON overhead
+MAX_DISPLAY_OUTPUT_SIZE = 2000  # What we show in the UI
+
+
+def truncate_large_payload(content: Any, max_size: int = MAX_TOOL_OUTPUT_SIZE) -> str:
+    """
+    Intelligently truncate large tool output payloads.
+
+    Handles:
+    - Base64 encoded images/files (detected by pattern)
+    - Very long text outputs
+    - List/dict content that serializes to large strings
+
+    Args:
+        content: The raw content from a ToolResultBlock
+        max_size: Maximum allowed size in characters
+
+    Returns:
+        Truncated string with informative message if content was too large
+    """
+    if content is None:
+        return ""
+
+    # Convert to string for size checking
+    content_str = str(content)
+    content_len = len(content_str)
+
+    # If it's small enough, return as-is (truncated for display)
+    if content_len <= max_size:
+        return content_str[:MAX_DISPLAY_OUTPUT_SIZE]
+
+    # Check if it looks like base64 image data
+    # Common patterns: data:image/..., very long alphanumeric strings, iVBOR (PNG), /9j/ (JPEG)
+    is_likely_base64 = (
+        'data:image/' in content_str[:100] or
+        content_str[:10].startswith('iVBOR') or  # PNG base64 signature
+        content_str[:10].startswith('/9j/') or   # JPEG base64 signature
+        content_str[:10].startswith('R0lGOD') or # GIF base64 signature
+        # Check for very high ratio of alphanumeric chars (typical of base64)
+        (content_len > 10000 and sum(c.isalnum() or c in '+/=' for c in content_str[:1000]) > 950)
+    )
+
+    if is_likely_base64:
+        # Calculate approximate original size
+        original_size_kb = int(content_len * 0.75 / 1024)  # base64 is ~33% larger
+        return f"[Image/binary content - {original_size_kb}KB - content processed by Claude but truncated for display]"
+
+    # For other large content, truncate with indicator
+    size_kb = content_len // 1024
+    truncated = content_str[:MAX_DISPLAY_OUTPUT_SIZE]
+    return f"{truncated}\n\n[... truncated - total size: {size_kb}KB]"
+
 
 def write_agents_to_filesystem(agents_dict: Dict[str, AgentDefinition], cwd: str) -> Optional[Path]:
     """
@@ -173,18 +227,6 @@ def _build_plugins_list(enabled_plugins: Optional[list]) -> Optional[list]:
 
 
 @dataclass
-class StreamingInputMessage:
-    """A message to be sent to Claude via streaming input.
-
-    Supports text messages and image attachments per the SDK documentation.
-    """
-    content: str  # Text content
-    images: list = field(default_factory=list)  # List of image attachments
-    # Each image should be: {"type": "base64", "media_type": "image/png", "data": "..."}
-    # Or: {"type": "url", "url": "https://..."}
-
-
-@dataclass
 class SessionState:
     """Track state for an active SDK session"""
     client: ClaudeSDKClient
@@ -209,11 +251,7 @@ def get_session_state(session_id: str) -> Optional[SessionState]:
     return _active_sessions.get(session_id)
 
 
-async def queue_user_message(
-    session_id: str,
-    message: str,
-    images: Optional[list] = None
-) -> bool:
+async def queue_user_message(session_id: str, message: str) -> bool:
     """
     Queue a user message to be sent to Claude while streaming.
 
@@ -223,10 +261,7 @@ async def queue_user_message(
 
     Args:
         session_id: The session ID to queue the message for
-        message: The text content of the user message
-        images: Optional list of image attachments. Each should be:
-            - {"type": "base64", "media_type": "image/png", "data": "..."}
-            - {"type": "url", "url": "https://..."}
+        message: The user message to queue
 
     Returns:
         True if the message was queued successfully, False if session not found or not streaming
@@ -240,15 +275,9 @@ async def queue_user_message(
         logger.warning(f"Cannot queue message - session {session_id} is not streaming")
         return False
 
-    # Create streaming input message with optional images
-    streaming_msg = StreamingInputMessage(
-        content=message,
-        images=images or []
-    )
-
     # Queue the message
-    await state.message_queue.put(streaming_msg)
-    logger.info(f"Queued streaming input for session {session_id}: {message[:50]}... (images: {len(streaming_msg.images)})")
+    await state.message_queue.put(message)
+    logger.info(f"Queued user message for session {session_id}: {message[:50]}...")
     return True
 
 
@@ -258,82 +287,6 @@ def get_queued_message_count(session_id: str) -> int:
     if not state:
         return 0
     return state.message_queue.qsize()
-
-
-def _build_message_content(streaming_msg: StreamingInputMessage) -> Any:
-    """Build the message content structure for the SDK.
-
-    Converts a StreamingInputMessage into the format expected by Claude SDK:
-    - Simple string if no images
-    - List of content blocks if images are attached
-    """
-    if not streaming_msg.images:
-        # Simple text-only message
-        return streaming_msg.content
-
-    # Build content blocks array with text and images
-    content_blocks = []
-
-    # Add text block first
-    if streaming_msg.content:
-        content_blocks.append({
-            "type": "text",
-            "text": streaming_msg.content
-        })
-
-    # Add image blocks
-    for img in streaming_msg.images:
-        if img.get("type") == "base64":
-            content_blocks.append({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": img.get("media_type", "image/png"),
-                    "data": img.get("data", "")
-                }
-            })
-        elif img.get("type") == "url":
-            content_blocks.append({
-                "type": "image",
-                "source": {
-                    "type": "url",
-                    "url": img.get("url", "")
-                }
-            })
-
-    return content_blocks
-
-
-def create_single_message_generator(
-    prompt: str,
-    images: Optional[list] = None
-) -> AsyncGenerator:
-    """
-    Create an AsyncGenerator that yields a single message to the Claude SDK.
-
-    This wraps the initial prompt (and optional images) in the generator format
-    required by the SDK for streaming input with image support.
-
-    Args:
-        prompt: The message text
-        images: Optional images to attach
-
-    Yields:
-        Single message dictionary in SDK format
-    """
-    async def generator():
-        msg = StreamingInputMessage(content=prompt, images=images or [])
-        content = _build_message_content(msg)
-
-        yield {
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": content
-            }
-        }
-
-    return generator()
 
 
 async def cleanup_stale_sessions(max_age_seconds: int = 3600):
@@ -423,214 +376,70 @@ def _get_os_version() -> str:
         return sys.platform
 
 
-def _get_available_tools(ai_tools_config: Optional[Dict[str, Any]] = None) -> list:
+def _get_available_providers() -> Dict[str, Any]:
     """
-    Check which AI Hub tools are configured and available.
-    Returns a list of tool descriptions based on individual tool toggles.
-
-    Args:
-        ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
+    Get all available AI providers based on configured API keys.
+    Returns a dict with image_providers and video_providers that have valid keys.
     """
-    tools = []
+    gemini_key = _get_decrypted_api_key("image_api_key")
+    openai_key = _get_decrypted_api_key("openai_api_key")
 
-    if not ai_tools_config:
-        return tools
+    # Image providers with their capabilities
+    image_providers = {}
+    if gemini_key:
+        image_providers["google-gemini"] = {
+            "name": "Nano Banana",
+            "models": ["gemini-2.5-flash-image", "gemini-3-pro-image-preview"],
+            "capabilities": ["text-to-image", "image-edit", "image-reference"],
+            "best_for": "Fast iteration, editing, reference images"
+        }
+        image_providers["google-imagen"] = {
+            "name": "Imagen 4",
+            "models": ["imagen-4.0-fast-generate-001", "imagen-4.0-generate-001", "imagen-4.0-ultra-generate-001"],
+            "capabilities": ["text-to-image"],
+            "best_for": "Highest quality, photo-realism"
+        }
+    if openai_key:
+        image_providers["openai-gpt-image"] = {
+            "name": "GPT Image",
+            "models": ["gpt-image-1"],
+            "capabilities": ["text-to-image", "image-edit"],
+            "best_for": "Accurate text in images, inpainting"
+        }
 
-    # Get the absolute path to tools directory
-    tools_dir = settings.effective_tools_dir
+    # Video providers with their capabilities
+    video_providers = {}
+    if gemini_key:
+        video_providers["google-veo"] = {
+            "name": "Veo",
+            "models": ["veo-3.1-fast-generate-preview", "veo-3.1-generate-preview", "veo-3-fast-generate-preview", "veo-3-generate-preview"],
+            "capabilities": ["text-to-video", "image-to-video", "video-extend", "frame-bridge", "video-with-audio"],
+            "best_for": "Video extension, frame bridging, native audio (Veo 3)",
+            "durations": "4, 6, or 8 seconds"
+        }
+    if openai_key:
+        video_providers["openai-sora"] = {
+            "name": "Sora",
+            "models": ["sora-2", "sora-2-pro"],
+            "capabilities": ["text-to-video", "image-to-video"],
+            "best_for": "Fast generation, good quality",
+            "durations": "4, 8, or 12 seconds"
+        }
 
-    # Provider display names for dynamic tool names
-    IMAGE_PROVIDER_NAMES = {
-        "google-gemini": "Nano Banana",
-        "openai-gpt-image": "GPT Image"
+    return {
+        "image_providers": image_providers,
+        "video_providers": video_providers,
+        "has_gemini": bool(gemini_key),
+        "has_openai": bool(openai_key)
     }
-    VIDEO_PROVIDER_NAMES = {
-        "google-veo": "Veo",
-        "openai-sora": "Sora"
-    }
-
-    # Helper to check if an image provider has API key configured AND decryptable
-    def _has_image_api_key(provider: str) -> bool:
-        if provider == "openai-gpt-image":
-            key = _get_decrypted_api_key("openai_api_key")
-        else:  # google-gemini
-            key = _get_decrypted_api_key("image_api_key")
-        return bool(key)
-
-    # Helper to check if a video provider has API key configured AND decryptable
-    def _has_video_api_key(provider: str) -> bool:
-        if provider == "openai-sora":
-            key = _get_decrypted_api_key("openai_api_key")
-        else:  # google-veo
-            key = _get_decrypted_api_key("image_api_key")
-        return bool(key)
-
-    # Check image generation - only if enabled in profile
-    if ai_tools_config.get("image_generation", False):
-        image_provider = database.get_system_setting("image_provider")
-        image_model = database.get_system_setting("image_model")
-
-        if image_provider and image_model and _has_image_api_key(image_provider):
-            # Use absolute path so scripts can run from any directory (e.g., /tmp/)
-            tool_path = f"{tools_dir}/dist/image-generation/generateImage.js"
-            provider_name = IMAGE_PROVIDER_NAMES.get(image_provider, "AI")
-            tools.append({
-                "name": f"Image Generation ({provider_name})",
-                "description": f"Generate AI images from text prompts using {provider_name}",
-                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
-import {{ generateImage }} from '{tool_path}';
-const result = await generateImage({{ prompt: 'your description here' }});
-// IMPORTANT: Output the result as JSON - the chat UI will display the image with download button
-// Do NOT save to file or try to read the base64 - just output the JSON result
-console.log(JSON.stringify(result));
-// DISPLAY: After success, show image as markdown: ![Description](result.image_url)"""
-            })
-
-    # Check image editing - only if enabled in profile
-    if ai_tools_config.get("image_editing", False):
-        image_provider = database.get_system_setting("image_provider")
-        image_model = database.get_system_setting("image_model")
-
-        if image_provider and image_model and _has_image_api_key(image_provider):
-            # Use absolute path so scripts can run from any directory (e.g., /tmp/)
-            tool_path = f"{tools_dir}/dist/image-generation/editImage.js"
-            provider_name = IMAGE_PROVIDER_NAMES.get(image_provider, "AI")
-            tools.append({
-                "name": f"Image Editing ({provider_name})",
-                "description": f"Edit existing images using {provider_name} - add elements, remove objects, change styles, and more",
-                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
-import {{ editImage }} from '{tool_path}';
-const result = await editImage({{
-  prompt: 'your editing instruction here',
-  image_path: '/path/to/existing/image.png'
-}});
-// IMPORTANT: Output the result as JSON - the chat UI will display the image with download button
-// Do NOT save to file or try to read the base64 - just output the JSON result
-console.log(JSON.stringify(result));
-// DISPLAY: After success, show image as markdown: ![Description](result.image_url)"""
-            })
-
-    # Check video generation - only if enabled in profile
-    if ai_tools_config.get("video_generation", False):
-        video_provider = database.get_system_setting("video_provider")
-        video_model = database.get_system_setting("video_model")
-
-        if video_provider and video_model and _has_video_api_key(video_provider):
-            tool_path = f"{tools_dir}/dist/video-generation/generateVideo.js"
-            provider_name = VIDEO_PROVIDER_NAMES.get(video_provider, "AI")
-            # Adjust duration info based on provider
-            if video_provider == "openai-sora":
-                duration_info = "4, 8, or 12 seconds"
-            else:
-                duration_info = "4, 6, or 8 seconds"
-            tools.append({
-                "name": f"Video Generation ({provider_name})",
-                "description": f"Generate AI videos from text prompts using {provider_name} ({duration_info}, 720p/1080p)",
-                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
-import {{ generateVideo }} from '{tool_path}';
-const result = await generateVideo({{
-  prompt: 'your video description here',
-  duration: 8,  // {duration_info}
-  aspect_ratio: '16:9'  // or '9:16' for vertical
-}});
-// IMPORTANT: Output the result as JSON - the chat UI will display the video
-// Video generation takes 1-6 minutes, please be patient
-console.log(JSON.stringify(result));
-// DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
-            })
-
-    # Check reference-based image generation - for character/style consistency
-    # Note: This feature is currently only supported by Nano Banana (Google Gemini)
-    if ai_tools_config.get("image_reference", False):
-        image_api_key = database.get_system_setting("image_api_key")
-
-        if image_api_key:
-            tool_path = f"{tools_dir}/dist/image-generation/generateWithReference.js"
-            tools.append({
-                "name": "Reference-Based Image Generation (Nano Banana)",
-                "description": "Generate images with character/style consistency using reference images (up to 14). Note: Only available with Nano Banana provider.",
-                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
-import {{ generateWithReference }} from '{tool_path}';
-const result = await generateWithReference({{
-  prompt: 'The character standing in a forest',
-  reference_images: ['/path/to/character.png']  // Up to 14 reference images
-}});
-// IMPORTANT: Output the result as JSON - the chat UI will display the image
-console.log(JSON.stringify(result));
-// DISPLAY: After success, show image as markdown: ![Description](result.image_url)"""
-            })
-
-    # Check image-to-video - animate still images
-    if ai_tools_config.get("image_to_video", False):
-        video_provider = database.get_system_setting("video_provider")
-        video_model = database.get_system_setting("video_model")
-
-        if video_provider and video_model and _has_video_api_key(video_provider):
-            tool_path = f"{tools_dir}/dist/video-generation/imageToVideo.js"
-            provider_name = VIDEO_PROVIDER_NAMES.get(video_provider, "AI")
-            tools.append({
-                "name": f"Image to Video ({provider_name})",
-                "description": f"Animate a still image into a video using {provider_name}",
-                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
-import {{ imageToVideo }} from '{tool_path}';
-const result = await imageToVideo({{
-  image_path: '/path/to/image.png',
-  prompt: 'The character starts walking forward'
-}});
-// IMPORTANT: Output the result as JSON - the chat UI will display the video
-console.log(JSON.stringify(result));
-// DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
-            })
-
-    # Check video extension - extend existing videos
-    # Note: This feature is currently only supported by Veo (Google)
-    if ai_tools_config.get("video_extend", False):
-        video_api_key = database.get_system_setting("image_api_key")
-
-        if video_api_key:
-            tool_path = f"{tools_dir}/dist/video-generation/extendVideo.js"
-            tools.append({
-                "name": "Video Extension (Veo)",
-                "description": "Extend existing Veo videos by approximately 7 seconds (up to 20 times). IMPORTANT: Can only extend videos generated by Veo - use the source_video_uri from a previous generateVideo/imageToVideo/bridgeFrames result.",
-                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
-import {{ extendVideo }} from '{tool_path}';
-const result = await extendVideo({{
-  video_uri: 'https://generativelanguage.googleapis.com/v1beta/files/...',  // URI from previous generation (source_video_uri)
-  prompt: 'Continue the action smoothly'  // Describe what should happen next
-}});
-// IMPORTANT: Output the result as JSON - the chat UI will display the video
-console.log(JSON.stringify(result));
-// DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
-            })
-
-    # Check frame bridging - smooth transitions between images
-    # Note: This feature is currently only supported by Veo (Google)
-    if ai_tools_config.get("video_bridge", False):
-        video_api_key = database.get_system_setting("image_api_key")
-
-        if video_api_key:
-            tool_path = f"{tools_dir}/dist/video-generation/bridgeFrames.js"
-            tools.append({
-                "name": "Frame Bridging (Veo)",
-                "description": "Generate a smooth video transition between two images (first and last frame). Note: Only available with Veo provider.",
-                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
-import {{ bridgeFrames }} from '{tool_path}';
-const result = await bridgeFrames({{
-  start_image: '/path/to/start.png',
-  end_image: '/path/to/end.png',
-  prompt: 'Smooth camera pan between scenes'  // Optional
-}});
-// IMPORTANT: Output the result as JSON - the chat UI will display the video
-console.log(JSON.stringify(result));
-// DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
-            })
-
-    return tools
 
 
 def _build_ai_tools_section(ai_tools_config: Optional[Dict[str, Any]] = None, prefix: str = "\n\n") -> str:
     """
-    Build the <ai-tools> section for system prompts based on enabled tools.
+    Build the <ai-tools> section for system prompts with multi-provider support.
+
+    This new design exposes ALL available providers to Claude, allowing dynamic
+    provider selection per-request instead of requiring settings changes.
 
     Args:
         ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
@@ -639,32 +448,293 @@ def _build_ai_tools_section(ai_tools_config: Optional[Dict[str, Any]] = None, pr
     Returns:
         The formatted <ai-tools> section, or empty string if no tools enabled
     """
-    available_tools = _get_available_tools(ai_tools_config)
-    if not available_tools:
+    if not ai_tools_config:
         return ""
 
-    tools_section = f"{prefix}<ai-tools>\nThe following AI tools are available via code execution:\n"
-    for tool in available_tools:
-        tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
-    tools_section += """
-To use these tools, write and execute TypeScript code that imports and calls them.
-IMPORTANT: Always delete the .mjs file after execution to keep the workspace clean.
+    providers = _get_available_providers()
+    tools_dir = settings.effective_tools_dir
 
+    # Check if any AI tools are enabled
+    any_image_tools = ai_tools_config.get("image_generation", False) or ai_tools_config.get("image_editing", False) or ai_tools_config.get("image_reference", False)
+    any_video_tools = ai_tools_config.get("video_generation", False) or ai_tools_config.get("image_to_video", False) or ai_tools_config.get("video_extend", False) or ai_tools_config.get("video_bridge", False) or ai_tools_config.get("video_with_audio", False) or ai_tools_config.get("video_understanding", False)
+
+    if not any_image_tools and not any_video_tools:
+        return ""
+
+    if not providers["image_providers"] and not providers["video_providers"]:
+        return ""
+
+    tools_section = f"{prefix}<ai-tools>\n"
+    tools_section += """## AI Content Generation Tools
+
+You have access to multiple AI providers for generating images and videos. You can dynamically choose which provider to use based on the task requirements - no settings changes needed!
+
+**IMPORTANT:** Always save scripts as `.mjs` files and run with `node script.mjs`. Delete scripts after execution.
+
+"""
+
+    # =========================================================================
+    # IMAGE TOOLS SECTION
+    # =========================================================================
+    if any_image_tools and providers["image_providers"]:
+        tools_section += """---
+## 🖼️ Image Tools
+
+"""
+        # Build provider comparison table
+        tools_section += """### Available Image Providers
+
+| Provider | ID | Supports Editing | Best For |
+|----------|-----|------------------|----------|
+"""
+        for pid, pinfo in providers["image_providers"].items():
+            supports_edit = "✅ Yes" if "image-edit" in pinfo["capabilities"] else "❌ No"
+            tools_section += f"| {pinfo['name']} | `{pid}` | {supports_edit} | {pinfo['best_for']} |\n"
+
+        tools_section += """
+### Provider Selection Guidelines
+
+- **Need to edit later?** → Use `google-gemini` or `openai-gpt-image` (they support editing)
+- **Need highest quality?** → Use `google-imagen` (Imagen 4)
+- **Need accurate text in image?** → Use `openai-gpt-image`
+- **Need character consistency?** → Use `google-gemini` with reference images
+
+"""
+        # Image Generation
+        if ai_tools_config.get("image_generation", False):
+            tool_path = f"{tools_dir}/dist/image-generation/generateImage.js"
+            tools_section += f"""### Generate Image
+
+Generate images from text prompts. Specify a provider or let the system use the default.
+
+```typescript
+import {{ generateImage }} from '{tool_path}';
+
+// Use default provider (from settings)
+const result = await generateImage({{ prompt: 'a sunset over mountains' }});
+
+// OR specify provider explicitly
+const result = await generateImage({{
+  prompt: 'a sunset over mountains',
+  provider: 'google-gemini',  // or 'google-imagen', 'openai-gpt-image'
+  model: 'gemini-2.5-flash-image'  // optional: specific model
+}});
+
+console.log(JSON.stringify(result));
+// DISPLAY: ![Description](result.image_url)
+```
+
+**Response includes:** `image_url`, `file_path`, `provider_used`, `model_used`
+
+"""
+
+        # Image Editing
+        if ai_tools_config.get("image_editing", False):
+            tool_path = f"{tools_dir}/dist/image-generation/editImage.js"
+            tools_section += f"""### Edit Image
+
+Edit existing images. **Only `google-gemini` and `openai-gpt-image` support editing.**
+
+```typescript
+import {{ editImage }} from '{tool_path}';
+
+const result = await editImage({{
+  prompt: 'Add a rainbow in the sky',
+  image_path: '/path/to/image.png',
+  provider: 'google-gemini'  // Must be a provider that supports editing
+}});
+
+console.log(JSON.stringify(result));
+// DISPLAY: ![Description](result.image_url)
+```
+
+**Tip:** Use the same provider that generated the original image for best results.
+
+"""
+
+        # Reference-based Generation
+        if ai_tools_config.get("image_reference", False) and providers["has_gemini"]:
+            tool_path = f"{tools_dir}/dist/image-generation/generateWithReference.js"
+            tools_section += f"""### Generate with Reference Images
+
+Create images with character/style consistency. **Only available with `google-gemini`.**
+
+```typescript
+import {{ generateWithReference }} from '{tool_path}';
+
+const result = await generateWithReference({{
+  prompt: 'The character standing in a forest',
+  reference_images: ['/path/to/character.png']  // Up to 14 reference images
+}});
+
+console.log(JSON.stringify(result));
+// DISPLAY: ![Description](result.image_url)
+```
+
+"""
+
+    # =========================================================================
+    # VIDEO TOOLS SECTION
+    # =========================================================================
+    if any_video_tools and providers["video_providers"]:
+        tools_section += """---
+## 🎬 Video Tools
+
+"""
+        # Build provider comparison table
+        tools_section += """### Available Video Providers
+
+| Provider | ID | Duration | Extend | Audio | Best For |
+|----------|-----|----------|--------|-------|----------|
+"""
+        for pid, pinfo in providers["video_providers"].items():
+            supports_extend = "✅" if "video-extend" in pinfo["capabilities"] else "❌"
+            supports_audio = "✅" if "video-with-audio" in pinfo["capabilities"] else "❌"
+            tools_section += f"| {pinfo['name']} | `{pid}` | {pinfo['durations']} | {supports_extend} | {supports_audio} | {pinfo['best_for']} |\n"
+
+        tools_section += """
+### Provider Selection Guidelines
+
+- **Need to extend video later?** → Use `google-veo` (Sora doesn't support extend)
+- **Need native audio (dialogue, effects)?** → Use `google-veo` with Veo 3 models
+- **Need frame bridging?** → Use `google-veo`
+- **Longer duration (12s)?** → Use `openai-sora`
+
+"""
+        # Video Generation
+        if ai_tools_config.get("video_generation", False) or ai_tools_config.get("video_with_audio", False):
+            tool_path = f"{tools_dir}/dist/video-generation/generateVideo.js"
+            tools_section += f"""### Generate Video
+
+Generate videos from text prompts. Video generation takes 1-6 minutes.
+
+```typescript
+import {{ generateVideo }} from '{tool_path}';
+
+// Use default provider
+const result = await generateVideo({{
+  prompt: 'A cat playing with a ball of yarn',
+  duration: 8,
+  aspect_ratio: '16:9'
+}});
+
+// OR specify provider explicitly
+const result = await generateVideo({{
+  prompt: 'A cat playing with a ball of yarn',
+  duration: 8,
+  aspect_ratio: '16:9',
+  provider: 'google-veo',  // or 'openai-sora'
+  model: 'veo-3-generate-preview'  // For native audio support
+}});
+
+console.log(JSON.stringify(result));
+// DISPLAY: [Video](result.video_url)
+```
+
+**Response includes:** `video_url`, `file_path`, `source_video_uri` (for extending), `provider_used`
+
+"""
+
+        # Image to Video
+        if ai_tools_config.get("image_to_video", False):
+            tool_path = f"{tools_dir}/dist/video-generation/imageToVideo.js"
+            tools_section += f"""### Image to Video
+
+Animate a still image into a video.
+
+```typescript
+import {{ imageToVideo }} from '{tool_path}';
+
+const result = await imageToVideo({{
+  image_path: '/path/to/image.png',
+  prompt: 'The character starts walking forward',
+  provider: 'google-veo'  // or 'openai-sora'
+}});
+
+console.log(JSON.stringify(result));
+// DISPLAY: [Video](result.video_url)
+```
+
+"""
+
+        # Video Extension (Veo only)
+        if ai_tools_config.get("video_extend", False) and providers["has_gemini"]:
+            tool_path = f"{tools_dir}/dist/video-generation/extendVideo.js"
+            tools_section += f"""### Extend Video (Veo Only)
+
+Extend Veo-generated videos by ~7 seconds. Uses `source_video_uri` from previous generation.
+
+```typescript
+import {{ extendVideo }} from '{tool_path}';
+
+const result = await extendVideo({{
+  video_uri: previousResult.source_video_uri,  // From generateVideo/imageToVideo
+  prompt: 'Continue the action smoothly'
+}});
+
+console.log(JSON.stringify(result));
+// DISPLAY: [Extended Video](result.video_url)
+```
+
+**Note:** Can only extend videos generated by Veo, not Sora.
+
+"""
+
+        # Frame Bridging (Veo only)
+        if ai_tools_config.get("video_bridge", False) and providers["has_gemini"]:
+            tool_path = f"{tools_dir}/dist/video-generation/bridgeFrames.js"
+            tools_section += f"""### Frame Bridging (Veo Only)
+
+Create smooth video transitions between two images.
+
+```typescript
+import {{ bridgeFrames }} from '{tool_path}';
+
+const result = await bridgeFrames({{
+  start_image: '/path/to/start.png',
+  end_image: '/path/to/end.png',
+  prompt: 'Smooth camera pan between scenes'
+}});
+
+console.log(JSON.stringify(result));
+// DISPLAY: [Transition Video](result.video_url)
+```
+
+"""
+
+        # Video Analysis/Understanding
+        if ai_tools_config.get("video_understanding", False) and providers["has_gemini"]:
+            tool_path = f"{tools_dir}/dist/video-analysis/analyzeVideo.js"
+            tools_section += f"""### Analyze Video
+
+Analyze video content using AI - understand scenes, extract information, get transcripts.
+
+```typescript
+import {{ analyzeVideo }} from '{tool_path}';
+
+const result = await analyzeVideo({{
+  video_path: '/path/to/video.mp4',
+  prompt: 'Describe what happens in this video'
+}});
+
+console.log(JSON.stringify(result));
+// Result includes: response, scenes, transcript, duration_seconds
+```
+
+"""
+
+    # =========================================================================
+    # FOOTER
+    # =========================================================================
+    tools_section += """---
 ## Displaying Generated Content
 
-After successfully generating content, you MUST display it properly in chat:
+After generating content, display it in chat:
 
-**Images:** Display as markdown image using the `image_url` from the result:
-```
-![Image Description](/api/generated-images/by-path?path=...)
-```
-The chat UI will render this with Download and Copy URL buttons in the message header.
+**Images:** `![Description](result.image_url)`
+**Videos:** `[Description](result.video_url)`
 
-**Videos:** Display as a markdown link using the `video_url` from the result:
-```
-[Video Description](/api/generated-videos/by-path?path=...)
-```
-The chat UI will render this as an embedded video player with Download and Copy URL buttons in the message header.
+The chat UI renders these with Download and Copy URL buttons.
 </ai-tools>"""
 
     return tools_section
@@ -710,6 +780,10 @@ def _build_env_with_ai_tools(
     This allows the Claude CLI to execute scripts that use AI tools
     with the necessary API keys, without exposing them in the prompt.
 
+    NEW DESIGN: Inject ALL available API keys so Claude can dynamically switch
+    between providers without needing settings changes. The default provider/model
+    is still set, but Claude can override per-request.
+
     Args:
         base_env: Base environment variables from profile config
         ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
@@ -722,78 +796,57 @@ def _build_env_with_ai_tools(
     if not ai_tools_config:
         return env
 
-    # Inject credentials for image generation/editing (supports multiple providers)
-    if ai_tools_config.get("image_generation", False) or ai_tools_config.get("image_editing", False):
+    # Check if any AI tools are enabled
+    any_image_tools = ai_tools_config.get("image_generation", False) or ai_tools_config.get("image_editing", False) or ai_tools_config.get("image_reference", False)
+    any_video_tools = ai_tools_config.get("video_generation", False) or ai_tools_config.get("image_to_video", False) or ai_tools_config.get("video_extend", False) or ai_tools_config.get("video_bridge", False) or ai_tools_config.get("video_with_audio", False) or ai_tools_config.get("video_understanding", False)
+
+    if not any_image_tools and not any_video_tools:
+        return env
+
+    # Get all available API keys
+    gemini_api_key = _get_decrypted_api_key("image_api_key")
+    openai_api_key = _get_decrypted_api_key("openai_api_key")
+
+    # Inject ALL available API keys so Claude can dynamically choose providers
+    # This is the key change - instead of only injecting the default provider's key,
+    # we inject all keys so any provider can be used per-request
+
+    if gemini_api_key:
+        env["GEMINI_API_KEY"] = gemini_api_key
+        env["IMAGE_API_KEY"] = gemini_api_key  # For backwards compatibility
+        env["VIDEO_API_KEY"] = gemini_api_key  # Veo uses same key
+        logger.debug("Injected GEMINI_API_KEY for Google AI tools (Nano Banana, Imagen, Veo)")
+
+    if openai_api_key:
+        env["OPENAI_API_KEY"] = openai_api_key
+        logger.debug("Injected OPENAI_API_KEY for OpenAI tools (GPT Image, Sora)")
+
+    # Set default provider/model from settings (Claude can override these per-request)
+    if any_image_tools:
         image_provider = database.get_system_setting("image_provider")
         image_model = database.get_system_setting("image_model")
 
-        # Set the provider
         if image_provider:
             env["IMAGE_PROVIDER"] = image_provider
-            logger.debug(f"Injected IMAGE_PROVIDER={image_provider} into execution environment")
+            logger.debug(f"Set default IMAGE_PROVIDER={image_provider}")
 
-        # Set the model
         if image_model:
             env["IMAGE_MODEL"] = image_model
-            # Also set legacy GEMINI_MODEL for backwards compatibility
-            env["GEMINI_MODEL"] = image_model
-            logger.debug(f"Injected IMAGE_MODEL={image_model} into execution environment")
+            env["GEMINI_MODEL"] = image_model  # Legacy compatibility
+            logger.debug(f"Set default IMAGE_MODEL={image_model}")
 
-        # Inject API key based on provider (using decryption helper)
-        if image_provider == "openai-gpt-image":
-            # GPT Image uses OpenAI API key
-            openai_api_key = _get_decrypted_api_key("openai_api_key")
-            if openai_api_key:
-                env["OPENAI_API_KEY"] = openai_api_key
-                env["IMAGE_API_KEY"] = openai_api_key
-                logger.debug("Injected OPENAI_API_KEY for GPT Image generation")
-        else:
-            # Default to Google Gemini - uses Gemini API key
-            image_api_key = _get_decrypted_api_key("image_api_key")
-            if image_api_key:
-                env["GEMINI_API_KEY"] = image_api_key
-                env["IMAGE_API_KEY"] = image_api_key
-                logger.debug("Injected GEMINI_API_KEY for Gemini image generation")
-
-    # Inject video generation credentials (supports multiple providers)
-    if ai_tools_config.get("video_generation", False):
+    if any_video_tools:
         video_provider = database.get_system_setting("video_provider")
         video_model = database.get_system_setting("video_model")
 
-        # Set the provider
         if video_provider:
             env["VIDEO_PROVIDER"] = video_provider
-            logger.debug(f"Injected VIDEO_PROVIDER={video_provider} into execution environment")
+            logger.debug(f"Set default VIDEO_PROVIDER={video_provider}")
 
-        # Set the model
         if video_model:
             env["VIDEO_MODEL"] = video_model
-            # Also set legacy VEO_MODEL for backwards compatibility
-            env["VEO_MODEL"] = video_model
-            logger.debug(f"Injected VIDEO_MODEL={video_model} into execution environment")
-
-        # Inject API key based on provider (using decryption helper)
-        if video_provider == "openai-sora":
-            # Sora uses OpenAI API key
-            openai_api_key = _get_decrypted_api_key("openai_api_key")
-            if openai_api_key:
-                env["OPENAI_API_KEY"] = openai_api_key
-                env["VIDEO_API_KEY"] = openai_api_key
-                logger.debug("Injected OPENAI_API_KEY for Sora video generation")
-        else:
-            # Default to Google Veo - uses Gemini API key
-            video_api_key = _get_decrypted_api_key("image_api_key")
-            if video_api_key:
-                if "GEMINI_API_KEY" not in env:
-                    env["GEMINI_API_KEY"] = video_api_key
-                env["VIDEO_API_KEY"] = video_api_key
-                logger.debug("Injected GEMINI_API_KEY for Veo video generation")
-
-    # Add more tool credentials here as they become available
-    # if ai_tools_config.get("text_to_speech", False):
-    #     tts_api_key = database.get_system_setting("tts_api_key")
-    #     if tts_api_key:
-    #         env["TTS_API_KEY"] = tts_api_key
+            env["VEO_MODEL"] = video_model  # Legacy compatibility
+            logger.debug(f"Set default VIDEO_MODEL={video_model}")
 
     return env
 
@@ -961,12 +1014,29 @@ def build_options_from_profile(
         # Log all stderr at INFO level for debugging subagent issues
         logger.info(f"[Claude CLI stderr] {line}")
 
+    # Process model selection - handle special 1M context models
+    # Models ending in "-1m" use the base model with 1M context beta header
+    raw_model = overrides.get("model") or config.get("model")
+    model_to_use = raw_model
+    betas_to_use = []
+
+    # Map special model names to base model + beta headers
+    MODEL_1M_MAPPING = {
+        "sonnet-1m": ("sonnet", ["context-1m-2025-08-07"]),
+        "claude-sonnet-4-5-1m": ("claude-sonnet-4-5-20250514", ["context-1m-2025-08-07"]),
+        "claude-sonnet-4-1m": ("claude-sonnet-4-20250514", ["context-1m-2025-08-07"]),
+    }
+
+    if raw_model in MODEL_1M_MAPPING:
+        model_to_use, betas_to_use = MODEL_1M_MAPPING[raw_model]
+        logger.info(f"1M context model selected: {raw_model} -> model={model_to_use}, betas={betas_to_use}")
+
     # Build options with all ClaudeAgentOptions fields
     # Note: We don't set cli_path - let the SDK use its bundled CLI or find system CLI automatically
     # The SDK handles finding Claude properly on all platforms
     options = ClaudeAgentOptions(
         # Core settings
-        model=overrides.get("model") or config.get("model"),
+        model=model_to_use,
         permission_mode=permission_mode,
         max_turns=overrides.get("max_turns") or config.get("max_turns"),
 
@@ -1013,10 +1083,13 @@ def build_options_from_profile(
         # Plugins - load from enabled_plugins in profile config
         # Each plugin path is resolved relative to workspace_dir if relative
         plugins=_build_plugins_list(config.get("enabled_plugins")),
+
+        # Beta features - e.g., 1M context window
+        betas=betas_to_use,
     )
 
     deployment_mode = detect_deployment_mode()
-    logger.info(f"Built options with permission_mode={permission_mode}, can_use_tool={options.can_use_tool is not None}, hooks={hooks is not None}, deployment_mode={deployment_mode}")
+    logger.info(f"Built options with model={model_to_use}, betas={betas_to_use}, permission_mode={permission_mode}, can_use_tool={options.can_use_tool is not None}, hooks={hooks is not None}, deployment_mode={deployment_mode}")
     if deployment_mode == DeploymentMode.LOCAL:
         logger.info(f"Windows local mode: Agents to write to filesystem: {list(agents_dict.keys()) if agents_dict else 'None'}")
     else:
@@ -1126,7 +1199,7 @@ async def execute_query(
                             "input": block.input
                         })
                     elif isinstance(block, ToolResultBlock):
-                        output = str(block.content)[:2000]
+                        output = truncate_large_payload(block.content)
                         tool_messages.append({
                             "type": "tool_result",
                             "name": getattr(block, 'name', 'unknown'),
@@ -1139,7 +1212,7 @@ async def execute_query(
                 # UserMessage contains tool results from Claude's tool executions
                 for block in message.content:
                     if isinstance(block, ToolResultBlock):
-                        output = str(block.content)[:2000] if block.content else ""
+                        output = truncate_large_payload(block.content) if block.content else ""
                         tool_messages.append({
                             "type": "tool_result",
                             "name": "unknown",
@@ -1450,7 +1523,7 @@ async def stream_query(
 
                     elif isinstance(block, ToolResultBlock):
                         # Truncate large outputs
-                        output = str(block.content)[:2000]
+                        output = truncate_large_payload(block.content)
                         yield {
                             "type": "tool_result",
                             "name": getattr(block, 'name', 'unknown'),
@@ -1480,7 +1553,7 @@ async def stream_query(
                 # UserMessage contains tool results from Claude's tool executions
                 for block in message.content:
                     if isinstance(block, ToolResultBlock):
-                        output = str(block.content)[:2000] if block.content else ""
+                        output = truncate_large_payload(block.content) if block.content else ""
                         logger.debug(f"UserMessage ToolResultBlock - tool_use_id: {block.tool_use_id}, content length: {len(str(block.content) if block.content else '')}")
 
                         yield {
@@ -1813,7 +1886,7 @@ async def _run_background_query(
                         )
 
                     elif isinstance(block, ToolResultBlock):
-                        output = str(block.content)[:2000]
+                        output = truncate_large_payload(block.content)
 
                         # Collect tool result for storage
                         tool_messages.append({
@@ -1841,7 +1914,7 @@ async def _run_background_query(
                 # UserMessage contains tool results from Claude's tool executions
                 for block in message.content:
                     if isinstance(block, ToolResultBlock):
-                        output = str(block.content)[:2000] if block.content else ""
+                        output = truncate_large_payload(block.content) if block.content else ""
                         logger.debug(f"[Background] UserMessage ToolResultBlock - tool_use_id: {block.tool_use_id}, content length: {len(str(block.content) if block.content else '')}")
 
                         # Collect tool result for storage
@@ -2139,25 +2212,13 @@ async def stream_to_websocket(
     profile_id: str,
     project_id: Optional[str] = None,
     overrides: Optional[Dict[str, Any]] = None,
-    broadcast_func: Optional[callable] = None,
-    images: Optional[list] = None
+    broadcast_func: Optional[callable] = None
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Stream Claude response directly to WebSocket.
 
     This is the simplified streaming function for the WebSocket-first architecture.
     No sync engine, no background tasks - just direct streaming.
-
-    Args:
-        prompt: The user's message text
-        session_id: The chat session ID
-        profile_id: The profile to use
-        project_id: Optional project ID
-        overrides: Optional overrides for model, permission_mode, etc.
-        broadcast_func: Async function to broadcast messages to the WebSocket
-        images: Optional list of image attachments in SDK format:
-            - {"type": "base64", "media_type": "image/png", "data": "..."}
-            - {"type": "url", "url": "https://..."}
 
     Yields events:
     - {"type": "chunk", "content": "..."}
@@ -2166,6 +2227,14 @@ async def stream_to_websocket(
     - {"type": "permission_request", ...} - When tool permission is needed
     - {"type": "done", "session_id": "...", "metadata": {...}}
     - {"type": "error", "message": "..."}
+
+    Args:
+        prompt: The user's message
+        session_id: The chat session ID
+        profile_id: The profile to use
+        project_id: Optional project ID
+        overrides: Optional overrides for model, permission_mode, etc.
+        broadcast_func: Async function to broadcast messages to the WebSocket
     """
     # Get profile
     profile = get_profile(profile_id)
@@ -2358,11 +2427,7 @@ async def stream_to_websocket(
     include_partial = options.include_partial_messages  # Track if streaming events are enabled
 
     try:
-        # Send the initial query to Claude using streaming input format
-        # This yields a single message with optional images
-        # Additional queued messages are processed sequentially after each response
-        message_gen = create_single_message_generator(prompt, images)
-        await state.client.query(message_gen)
+        await state.client.query(prompt)
 
         async for message in state.client.receive_response():
             # Check for interrupt request as a failsafe
@@ -2372,13 +2437,14 @@ async def stream_to_websocket(
                 break
 
             if isinstance(message, SystemMessage):
+                logger.info(f"[WS] SystemMessage received: subtype={message.subtype}, data_keys={list(message.data.keys()) if message.data else []}, data_preview={str(message.data)[:500] if message.data else 'None'}")
                 if message.subtype == "init" and "session_id" in message.data:
                     sdk_session_id = message.data["session_id"]
                     state.sdk_session_id = sdk_session_id
                     logger.info(f"[WS] Captured SDK session ID: {sdk_session_id}")
                 else:
                     # Forward other system messages (like /context output) to frontend
-                    logger.info(f"[WS] SystemMessage subtype={message.subtype}, data keys={list(message.data.keys()) if message.data else []}")
+                    logger.info(f"[WS] Forwarding SystemMessage to frontend: subtype={message.subtype}")
                     yield {
                         "type": "system",
                         "subtype": message.subtype,
@@ -2535,7 +2601,7 @@ async def stream_to_websocket(
                             }
 
                     elif isinstance(block, ToolResultBlock):
-                        output = str(block.content)[:2000]
+                        output = truncate_large_payload(block.content)
                         tool_use_id = getattr(block, 'tool_use_id', None)
                         tool_name = getattr(block, 'name', 'unknown')
 
@@ -2588,10 +2654,12 @@ async def stream_to_websocket(
                 # 2. Local command output like /context, /compact (TextBlock with <local-command-stdout>)
                 # Check if this message is from a subagent using parent_tool_use_id
                 parent_tool_id = message.parent_tool_use_id
+                logger.info(f"[WS] UserMessage received: content_type={type(message.content).__name__}, parent_tool_id={parent_tool_id}")
 
                 # Handle string content (rare but possible)
                 if isinstance(message.content, str):
                     content = message.content
+                    logger.info(f"[WS] UserMessage string content preview: {content[:200] if content else 'empty'}")
                     # Check for local command output
                     if "<local-command-stdout>" in content:
                         match = re.search(r'<local-command-stdout>(.*?)</local-command-stdout>', content, re.DOTALL)
@@ -2619,7 +2687,7 @@ async def stream_to_websocket(
                         # Don't yield regular text from UserMessage - it's usually meta/system info
 
                     elif isinstance(block, ToolResultBlock):
-                        output = str(block.content)[:2000] if block.content else ""
+                        output = truncate_large_payload(block.content) if block.content else ""
                         tool_use_id = block.tool_use_id
                         logger.debug(f"[WS] UserMessage ToolResultBlock - tool_use_id: {tool_use_id}, parent_tool_id: {parent_tool_id}, content length: {len(str(block.content) if block.content else '')}, is_error: {block.is_error}")
 
@@ -2680,26 +2748,17 @@ async def stream_to_websocket(
         # Messages queued via message_queue while Claude was responding
         while not state.message_queue.empty() and not interrupted and not state.interrupt_requested:
             try:
-                next_msg = state.message_queue.get_nowait()
-                # Handle both StreamingInputMessage and plain strings for backwards compatibility
-                if isinstance(next_msg, StreamingInputMessage):
-                    next_prompt = next_msg.content
-                    next_images = next_msg.images
-                else:
-                    next_prompt = str(next_msg)
-                    next_images = None
-                logger.info(f"[WS] Processing queued message for session {session_id}: {next_prompt[:50]}... (images: {len(next_images) if next_images else 0})")
+                next_prompt = state.message_queue.get_nowait()
+                logger.info(f"[WS] Processing queued message for session {session_id}: {next_prompt[:50]}...")
 
                 # Notify frontend that we're processing a queued message
                 yield {
                     "type": "queued_message_processing",
-                    "prompt": next_prompt,
-                    "has_images": bool(next_images)
+                    "prompt": next_prompt
                 }
 
-                # Send the queued message to Claude using generator format (supports images)
-                queued_gen = create_single_message_generator(next_prompt, next_images)
-                await state.client.query(queued_gen)
+                # Send the queued message to Claude and process the response
+                await state.client.query(next_prompt)
 
                 # Process the response for this queued message
                 async for queued_message in state.client.receive_response():
@@ -2732,7 +2791,7 @@ async def stream_to_websocket(
                                     "input": tool_input
                                 }
                             elif isinstance(block, ToolResultBlock):
-                                output = str(block.content)[:2000]
+                                output = truncate_large_payload(block.content)
                                 tool_use_id = getattr(block, 'tool_use_id', None)
                                 tool_messages.append({
                                     "type": "tool_result",

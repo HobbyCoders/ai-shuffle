@@ -25,7 +25,6 @@
 	import { api, type FileUploadResponse, searchSessions, type SessionSearchResult } from '$lib/api/client';
 	import { marked } from 'marked';
 	import TerminalModal from '$lib/components/TerminalModal.svelte';
-	import RewindModal from '$lib/components/RewindModal.svelte';
 	import SystemMessage from '$lib/components/SystemMessage.svelte';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
@@ -39,7 +38,7 @@
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import TodoList from '$lib/components/TodoList.svelte';
 	import { groups, organizeByGroups } from '$lib/stores/groups';
-	import { executeCommand, isSlashCommand, syncAfterRewind, listCommands, type Command } from '$lib/api/commands';
+	import { executeCommand, isSlashCommand, listCommands, type Command } from '$lib/api/commands';
 	import { groupSessionsByDate, type DateGroup } from '$lib/utils/dateGroups';
 
 	// Configure marked for better code highlighting
@@ -278,10 +277,6 @@
 	let showTerminalModal = false;
 	let terminalCommand = '/resume';
 	let terminalSessionId = '';
-
-	// Rewind modal state (V2 - direct JSONL manipulation)
-	let showRewindModal = false;
-	let rewindSessionId = '';
 
 	// Spotlight search state (Cmd+K)
 	let showSpotlight = false;
@@ -563,6 +558,7 @@
 		switch (model) {
 			case 'haiku': return 'Haiku';
 			case 'sonnet': return 'Sonnet';
+			case 'sonnet-1m': return 'Sonnet 1M';
 			case 'opus': return 'Opus';
 			default: return 'Inherit';
 		}
@@ -717,6 +713,13 @@
 		tabInputs[tabId] = '';
 		tabInputs = tabInputs; // Trigger Svelte reactivity
 		tabUploadedFiles[tabId] = [];
+
+		// Reset textarea height to original size after clearing input
+		const textarea = textareas[tabId];
+		if (textarea) {
+			textarea.style.height = '';
+		}
+
 		tabs.sendMessage(tabId, finalPrompt);
 	}
 
@@ -879,71 +882,6 @@
 		terminalSessionId = tab.sessionId;
 		terminalCommand = command;
 		showTerminalModal = true;
-	}
-
-	// Open the rewind modal (V2 - direct JSONL manipulation)
-	function openRewindModal(tabId: string) {
-		const tab = $allTabs.find(t => t.id === tabId);
-		if (!tab?.sessionId) {
-			alert('Please start a conversation first before using rewind.');
-			return;
-		}
-		rewindSessionId = tab.sessionId;
-		showRewindModal = true;
-	}
-
-	// Handle rewind completion from RewindModal V2
-	async function handleRewindCompleteV2(success: boolean, messagesRemoved: number, messageContent?: string) {
-		console.log('Rewind V2 complete:', { success, messagesRemoved, messageContent });
-
-		if (success && messagesRemoved > 0 && $activeTabId && rewindSessionId) {
-			// Reload the session to reflect changes
-			await tabs.loadSessionInTab($activeTabId, rewindSessionId);
-
-			// Populate the input field with the rewound message so user can edit and resend
-			if (messageContent) {
-				tabInputs[$activeTabId] = messageContent;
-				tabInputs = tabInputs; // Trigger Svelte reactivity
-
-				// Focus the textarea after a short delay
-				setTimeout(() => {
-					const textarea = textareas[$activeTabId];
-					if (textarea) {
-						textarea.focus();
-						// Move cursor to end
-						textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
-					}
-				}, 100);
-			}
-		}
-
-		rewindSessionId = '';
-	}
-
-	// Close the rewind modal
-	function closeRewindModal() {
-		showRewindModal = false;
-		rewindSessionId = '';
-	}
-
-	// Handle rewind completion from TerminalModal (legacy - for /resume)
-	async function handleRewindComplete(checkpointMessage: string | null, selectedOption: number | null) {
-		console.log('Rewind complete (legacy):', { checkpointMessage, selectedOption });
-
-		// Sync our chat if conversation was restored (options 1 or 2)
-		if (terminalSessionId && checkpointMessage && (selectedOption === 1 || selectedOption === 2)) {
-			try {
-				const result = await syncAfterRewind(terminalSessionId, checkpointMessage, selectedOption);
-				console.log('Chat sync result:', result);
-
-				// Reload the session to reflect changes
-				if ($activeTabId && result.success && result.deleted_count > 0) {
-					await tabs.loadSessionInTab($activeTabId, terminalSessionId);
-				}
-			} catch (error) {
-				console.error('Failed to sync chat after rewind:', error);
-			}
-		}
 	}
 
 	// Close the terminal modal
@@ -1573,9 +1511,12 @@
 		if (aiTools.image_reference) enabledAITools.push('image_reference');
 		// Video tools (Veo)
 		if (aiTools.video_generation) enabledAITools.push('video_generation');
+		if (aiTools.video_with_audio) enabledAITools.push('video_with_audio');
 		if (aiTools.image_to_video) enabledAITools.push('image_to_video');
 		if (aiTools.video_extend) enabledAITools.push('video_extend');
 		if (aiTools.video_bridge) enabledAITools.push('video_bridge');
+		// Analysis tools
+		if (aiTools.video_understanding) enabledAITools.push('video_understanding');
 
 		// Determine AI tool selection mode
 		const allAIToolIds = getAllAIToolIds();
@@ -1667,9 +1608,12 @@
 				image_reference: effectiveAITools.includes('image_reference'),
 				// Video tools (Veo)
 				video_generation: effectiveAITools.includes('video_generation'),
+				video_with_audio: effectiveAITools.includes('video_with_audio'),
 				image_to_video: effectiveAITools.includes('image_to_video'),
 				video_extend: effectiveAITools.includes('video_extend'),
-				video_bridge: effectiveAITools.includes('video_bridge')
+				video_bridge: effectiveAITools.includes('video_bridge'),
+				// Analysis tools
+				video_understanding: effectiveAITools.includes('video_understanding')
 			};
 		}
 
@@ -1960,35 +1904,35 @@
 </svelte:head>
 
 <div class="h-dvh flex bg-background text-foreground">
-	<!-- Icon Rail (Desktop) - 48px wide -->
-	<nav class="hidden lg:flex flex-col w-12 bg-card border-r border-border z-50 flex-shrink-0">
+	<!-- Floating Icon Rail (Desktop) - 48px wide -->
+	<nav class="hidden lg:flex fixed left-3 top-3 bottom-3 flex-col w-12 z-50 floating-panel rounded-2xl">
 		<div class="flex flex-col items-center pt-3 gap-1">
-			<button on:click={handleNewTab} class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors hover:bg-accent group" title="New Chat">
+			<button on:click={handleNewTab} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-white/10 group" title="New Chat">
 				<svg class="w-5 h-5 text-primary group-hover:scale-110 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
 				</svg>
 			</button>
-			<div class="w-6 h-px bg-border my-2"></div>
-			<button on:click={() => toggleSidebarSection('sessions')} class="relative w-10 h-10 rounded-lg flex items-center justify-center transition-colors {activeSidebarSection === 'sessions' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}" title="Sessions">
+			<div class="w-6 h-px bg-white/10 my-2"></div>
+			<button on:click={() => toggleSidebarSection('sessions')} class="relative w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'sessions' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-white/10 text-muted-foreground hover:text-foreground'}" title="Sessions">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
 				</svg>
 				{#if $allTabs.length > 1}
-					<span class="absolute -top-1 -right-1 w-4 h-4 bg-primary text-primary-foreground text-[10px] font-bold rounded-full flex items-center justify-center">{$allTabs.length}</span>
+					<span class="absolute -top-1 -right-1 w-4 h-4 bg-primary text-primary-foreground text-[10px] font-bold rounded-full flex items-center justify-center shadow-glow">{$allTabs.length}</span>
 				{/if}
 			</button>
 			{#if $isAdmin}
-				<button on:click={() => toggleSidebarSection('projects')} class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors {activeSidebarSection === 'projects' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}" title="Projects">
+				<button on:click={() => toggleSidebarSection('projects')} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'projects' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-white/10 text-muted-foreground hover:text-foreground'}" title="Projects">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 					</svg>
 				</button>
-				<button on:click={() => toggleSidebarSection('profiles')} class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors {activeSidebarSection === 'profiles' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}" title="Profiles">
+				<button on:click={() => toggleSidebarSection('profiles')} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'profiles' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-white/10 text-muted-foreground hover:text-foreground'}" title="Profiles">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
 					</svg>
 				</button>
-				<button on:click={() => toggleSidebarSection('subagents')} class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors {activeSidebarSection === 'subagents' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}" title="Subagents">
+				<button on:click={() => toggleSidebarSection('subagents')} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'subagents' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-white/10 text-muted-foreground hover:text-foreground'}" title="Subagents">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
 					</svg>
@@ -1997,48 +1941,26 @@
 		</div>
 		<div class="mt-auto flex flex-col items-center pb-3 gap-1">
 			{#if $isAdmin}
-				<a href="/settings" class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors hover:bg-accent text-muted-foreground hover:text-foreground" title="Settings">
+				<a href="/settings" class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-white/10 text-muted-foreground hover:text-foreground" title="Settings">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
 					</svg>
 				</a>
 			{/if}
-			<button on:click={handleLogout} class="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center hover:bg-primary/30 transition-colors" title="Logout ({$apiUser ? $apiUser.name : $username})">
+			<button on:click={handleLogout} class="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center hover:bg-primary/30 transition-all" title="Logout ({$apiUser ? $apiUser.name : $username})">
 				<span class="text-sm font-medium text-primary">{($apiUser?.name || $username)?.[0]?.toUpperCase() || 'U'}</span>
 			</button>
 		</div>
 	</nav>
 
-	<!-- Expandable Sidebar Panel (Desktop) -->
+	<!-- Floating Expandable Sidebar Panel (Desktop) -->
 	{#if activeSidebarSection !== 'none'}
-		<button class="hidden lg:block fixed inset-0 z-30 bg-black/20" on:click={closeSidebar} aria-label="Close sidebar"></button>
-		<aside class="hidden lg:flex fixed inset-y-0 left-12 z-40 w-72 bg-card border-r border-border flex-col shadow-l sidebar-slide-in">
-			<div class="p-4 border-b border-border flex items-center justify-between">
-				<span class="font-semibold text-foreground">{activeSidebarSection === 'sessions' ? 'Sessions' : activeSidebarSection === 'projects' ? 'Projects' : activeSidebarSection === 'profiles' ? 'Profiles' : 'Subagents'}</span>
-				<div class="flex items-center gap-1">
-					{#if activeSidebarSection === 'sessions'}
-						<button on:click={() => sessionSearchExpanded = !sessionSearchExpanded} class="p-1.5 rounded-md transition-colors {sessionSearchExpanded ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}" title="Search sessions">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-							</svg>
-						</button>
-					{/if}
-					<button on:click={toggleSidebarPin} class="p-1.5 rounded-md transition-colors {sidebarPinned ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}" title={sidebarPinned ? 'Unpin sidebar' : 'Pin sidebar open'}>
-						<svg class="w-4 h-4" fill={sidebarPinned ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
-						</svg>
-					</button>
-					<button on:click={() => { activeSidebarSection = 'none'; sidebarPinned = false; clearSearch(); }} class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors" title="Close">
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-						</svg>
-					</button>
-				</div>
-			</div>
-			<!-- Search Bar (Desktop) -->
-			{#if activeSidebarSection === 'sessions' && sessionSearchExpanded}
-				<div class="px-3 py-2 border-b border-border">
+		<button class="hidden lg:block fixed inset-0 z-30 bg-black/20 backdrop-blur-[2px]" on:click={closeSidebar} aria-label="Close sidebar"></button>
+		<aside class="hidden lg:flex fixed top-3 bottom-3 left-[4.5rem] z-40 w-[340px] floating-panel rounded-2xl flex-col panel-slide-in">
+			<!-- Search Bar (always visible for Sessions panel) -->
+			{#if activeSidebarSection === 'sessions'}
+				<div class="p-3">
 					<div class="relative">
 						<svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -2046,16 +1968,33 @@
 						<input
 							type="text"
 							bind:value={sessionSearchQuery}
-							placeholder="Search sessions..."
-							class="w-full pl-9 pr-8 py-1.5 text-sm bg-accent border border-border rounded-md text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+							placeholder="Search conversations..."
+							class="w-full pl-9 pr-8 py-2.5 text-sm bg-white/5 border border-white/10 rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 transition-all"
 						/>
 						{#if sessionSearchQuery}
-							<button on:click={clearSearch} class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-muted-foreground hover:text-foreground">
+							<button on:click={clearSearch} class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-muted-foreground hover:text-foreground transition-colors">
 								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 								</svg>
 							</button>
 						{/if}
+					</div>
+				</div>
+			{:else}
+				<!-- Header for non-Sessions panels -->
+				<div class="p-4 border-b border-white/5 flex items-center justify-between">
+					<span class="font-semibold text-foreground">{activeSidebarSection === 'projects' ? 'Projects' : activeSidebarSection === 'profiles' ? 'Profiles' : 'Subagents'}</span>
+					<div class="flex items-center gap-1">
+						<button on:click={toggleSidebarPin} class="p-1.5 rounded-lg transition-all {sidebarPinned ? 'bg-primary text-primary-foreground shadow-glow' : 'text-muted-foreground hover:text-foreground hover:bg-white/10'}" title={sidebarPinned ? 'Unpin sidebar' : 'Pin sidebar open'}>
+							<svg class="w-4 h-4" fill={sidebarPinned ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
+							</svg>
+						</button>
+						<button on:click={() => { activeSidebarSection = 'none'; sidebarPinned = false; clearSearch(); }} class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/10 transition-all" title="Close">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+							</svg>
+						</button>
 					</div>
 				</div>
 			{/if}
@@ -2064,9 +2003,9 @@
 			{#if activeSidebarSection === 'sessions'}
 				<div class="flex-1 overflow-hidden flex flex-col">
 					{#if $isAdmin}
-						<div class="px-3 pt-3 flex gap-1">
-							<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}">My Chats</button>
-							<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}">Admin</button>
+						<div class="px-3 flex gap-1">
+							<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-white/5'}">My Chats</button>
+							<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-white/5'}">Admin</button>
 						</div>
 					{/if}
 					{#if sidebarTab === 'my-chats'}
@@ -2470,6 +2409,24 @@
 					</div>
 				{/if}
 				</div>
+				<!-- User Profile Footer -->
+				<div class="mt-auto p-3 border-t border-white/5">
+					<div class="flex items-center gap-3">
+						<div class="w-10 h-10 rounded-full bg-gradient-to-br from-primary/80 to-primary flex items-center justify-center text-primary-foreground font-semibold shadow-glow">
+							{($apiUser?.name || $username)?.[0]?.toUpperCase() || 'U'}
+						</div>
+						<div class="flex-1 min-w-0">
+							<p class="text-sm font-medium text-foreground truncate">{$apiUser?.name || $username || 'User'}</p>
+							<p class="text-xs text-muted-foreground truncate">{$isAdmin ? 'Administrator' : 'User'}</p>
+						</div>
+						<a href="/settings" class="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/10 transition-all" title="Settings">
+							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+							</svg>
+						</a>
+					</div>
+				</div>
 			{/if}
 
 			<!-- Projects Panel Content -->
@@ -2728,64 +2685,56 @@
 		</aside>
 	{/if}
 
-	<!-- Mobile Sidebar (full width overlay) -->
-	<aside class="lg:hidden fixed inset-y-0 left-0 z-50 w-72 bg-card border-r border-border transform transition-transform duration-200 {sidebarOpen ? 'translate-x-0' : '-translate-x-full'}">
-		<div class="h-full flex flex-col">
-			<div class="p-4 border-b border-border flex items-center justify-between">
-				<div class="flex items-center gap-2">
-					<div class="w-8 h-8 rounded-lg bg-primary flex items-center justify-center shadow-s">
-						<svg class="w-5 h-5 text-primary-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-						</svg>
-					</div>
-					<span class="font-semibold text-foreground">AI Hub</span>
-				</div>
-				<button class="text-muted-foreground hover:text-foreground p-1" on:click={() => (sidebarOpen = false)}>
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+	<!-- Mobile Session Panel (fullscreen glassmorph overlay) -->
+	<aside class="lg:hidden fixed inset-x-3 top-3 bottom-[4.5rem] z-50 floating-panel rounded-2xl flex flex-col transform transition-all duration-300 {sidebarOpen ? 'opacity-100 scale-100' : 'opacity-0 scale-95 pointer-events-none'}">
+		<!-- Header -->
+		<div class="p-4 border-b border-white/10 flex items-center justify-between">
+			<div class="flex items-center gap-3">
+				<div class="w-8 h-8 rounded-xl bg-primary/20 flex items-center justify-center">
+					<svg class="w-4 h-4 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
 					</svg>
-				</button>
+				</div>
+				<span class="font-semibold text-foreground">Chats</span>
 			</div>
-			<div class="p-3 space-y-2">
-				<!-- Mobile Search (tap to expand) -->
-				{#if sessionSearchExpanded}
-					<div class="relative">
-						<svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-						</svg>
-						<input
-							type="text"
-							bind:value={sessionSearchQuery}
-							placeholder="Search sessions..."
-							class="w-full pl-9 pr-8 py-2 text-sm bg-accent border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-						/>
-						<button on:click={clearSearch} class="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-muted-foreground hover:text-foreground">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-							</svg>
-						</button>
-					</div>
-				{:else}
-					<button
-						on:click={() => sessionSearchExpanded = true}
-						class="w-full flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground bg-accent/50 hover:bg-accent rounded-lg transition-colors"
-					>
+			<button class="w-8 h-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-lg transition-colors" on:click={() => (sidebarOpen = false)}>
+				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+				</svg>
+			</button>
+		</div>
+
+		<!-- Search -->
+		<div class="p-3">
+			<div class="relative">
+				<svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+				</svg>
+				<input
+					type="text"
+					bind:value={sessionSearchQuery}
+					placeholder="Search sessions..."
+					class="w-full pl-9 pr-8 py-2.5 text-sm bg-white/5 border border-white/10 rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 transition-colors"
+				/>
+				{#if sessionSearchQuery}
+					<button on:click={clearSearch} class="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-muted-foreground hover:text-foreground">
 						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 						</svg>
-						<span>Search sessions...</span>
 					</button>
 				{/if}
 			</div>
-			<!-- Mobile Tab Toggle (My Chats / Admin) -->
-			{#if $isAdmin}
-				<div class="px-3 pb-2">
-					<div class="flex bg-muted rounded-lg p-0.5">
-						<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}">My Chats</button>
-						<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}">Admin</button>
-					</div>
+		</div>
+
+		<!-- Tab Toggle (My Chats / Admin) -->
+		{#if $isAdmin}
+			<div class="px-3 pb-2">
+				<div class="flex bg-white/5 rounded-xl p-1">
+					<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-2 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-white/5'}">My Chats</button>
+					<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-2 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-white/5'}">Admin</button>
 				</div>
-			{/if}
+			</div>
+		{/if}
 
 			<div class="flex-1 overflow-y-auto px-3 pb-3">
 				{#if sidebarTab === 'my-chats'}
@@ -2971,115 +2920,191 @@
 					</div>
 				{/if}
 			</div>
-			<div class="p-3 border-t border-border">
-				<div class="flex items-center justify-between">
-					<div class="flex items-center gap-2">
-						<div class="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center shadow-s">
-							<span class="text-sm text-primary">{$username?.[0]?.toUpperCase() || 'U'}</span>
-						</div>
-						<span class="text-sm text-muted-foreground">{$username}</span>
+
+		<!-- User Footer -->
+		<div class="p-3 border-t border-white/10">
+			<div class="flex items-center justify-between">
+				<div class="flex items-center gap-2">
+					<div class="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
+						<span class="text-sm text-primary">{$username?.[0]?.toUpperCase() || 'U'}</span>
 					</div>
-					<button on:click={handleLogout} class="text-muted-foreground hover:text-foreground text-sm">Logout</button>
+					<span class="text-sm text-muted-foreground">{$username}</span>
 				</div>
+				<button on:click={handleLogout} class="text-xs text-muted-foreground hover:text-foreground px-3 py-1.5 rounded-lg hover:bg-white/10 transition-colors">Logout</button>
 			</div>
 		</div>
 	</aside>
 
 	<!-- Mobile Sidebar Backdrop -->
 	{#if sidebarOpen}
-		<button class="lg:hidden fixed inset-0 z-40 bg-black/50" on:click={() => (sidebarOpen = false)} aria-label="Close sidebar"></button>
+		<button class="lg:hidden fixed inset-0 z-40 bg-black/40 backdrop-blur-sm" on:click={() => (sidebarOpen = false)} aria-label="Close sidebar"></button>
 	{/if}
 
 	<!-- Mobile Tools Menu Popup -->
 	{#if showToolsMenu}
-		<button class="lg:hidden fixed inset-0 z-50 bg-black/30" on:click={() => showToolsMenu = false} aria-label="Close tools menu"></button>
-		<div class="lg:hidden fixed bottom-16 left-1/2 -translate-x-1/2 z-50 bg-card border border-border rounded-xl shadow-lg p-2 min-w-[200px]">
-			<div class="flex flex-col gap-1">
+		<button class="lg:hidden fixed inset-0 z-50 bg-black/30 backdrop-blur-sm" on:click={() => showToolsMenu = false} aria-label="Close tools menu"></button>
+		<div class="lg:hidden fixed bottom-[4.5rem] left-1/2 -translate-x-1/2 z-50 floating-panel rounded-2xl p-2 min-w-[200px]">
+			<div class="flex flex-col gap-0.5">
 				<button
 					on:click={() => { showToolsMenu = false; showProjectModal = true; }}
-					class="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-accent transition-colors text-left"
+					class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-white/10 transition-colors text-left"
 				>
 					<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 					</svg>
-					<span class="text-sm font-medium">Projects</span>
+					<span class="text-sm font-medium text-foreground">Projects</span>
 				</button>
 				<button
 					on:click={() => { showToolsMenu = false; showProfileModal = true; }}
-					class="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-accent transition-colors text-left"
+					class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-white/10 transition-colors text-left"
 				>
 					<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
 					</svg>
-					<span class="text-sm font-medium">Profiles</span>
+					<span class="text-sm font-medium text-foreground">Profiles</span>
 				</button>
 				<button
 					on:click={() => { showToolsMenu = false; showSubagentManager = true; }}
-					class="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-accent transition-colors text-left"
+					class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-white/10 transition-colors text-left"
 				>
 					<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
 					</svg>
-					<span class="text-sm font-medium">Subagents</span>
+					<span class="text-sm font-medium text-foreground">Subagents</span>
 				</button>
 			</div>
 		</div>
 	{/if}
 
-	<!-- Mobile Bottom Navigation -->
-	<nav class="lg:hidden fixed bottom-0 left-0 right-0 z-50 bg-card border-t border-border safe-bottom">
-		<div class="flex items-center justify-around h-14">
-			<button on:click={handleNewTab} class="flex flex-col items-center justify-center w-16 h-full text-muted-foreground hover:text-foreground transition-colors">
+	<!-- Mobile Bottom Navigation - Floating Dock -->
+	<nav class="lg:hidden fixed bottom-3 left-3 right-3 z-50 floating-panel rounded-2xl safe-bottom">
+		<div class="flex items-center justify-around h-12">
+			<button on:click={() => { sidebarOpen = false; handleNewTab(); }} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="New Chat">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
 				</svg>
-				<span class="text-xs mt-0.5">New</span>
 			</button>
-			<button on:click={() => sidebarOpen = true} class="relative flex flex-col items-center justify-center w-16 h-full text-muted-foreground hover:text-foreground transition-colors">
+			<button on:click={() => sidebarOpen = !sidebarOpen} class="relative flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Chats">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
 				</svg>
-				<span class="text-xs mt-0.5">Chats</span>
 				{#if $allTabs.length > 1}
-					<span class="absolute top-1 right-2 w-4 h-4 bg-primary text-primary-foreground text-[10px] font-bold rounded-full flex items-center justify-center">{$allTabs.length}</span>
+					<span class="absolute -top-1 -right-1 w-4 h-4 bg-primary text-primary-foreground text-[10px] font-bold rounded-full flex items-center justify-center">{$allTabs.length}</span>
 				{/if}
 			</button>
 			{#if $isAdmin}
-				<button on:click={() => showToolsMenu = !showToolsMenu} class="relative flex flex-col items-center justify-center w-16 h-full text-muted-foreground hover:text-foreground transition-colors">
+				<button on:click={() => { sidebarOpen = false; showToolsMenu = !showToolsMenu; }} class="relative flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Tools">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
 					</svg>
-					<span class="text-xs mt-0.5">Tools</span>
 				</button>
-				<a href="/settings" class="flex flex-col items-center justify-center w-16 h-full text-muted-foreground hover:text-foreground transition-colors">
+				<a href="/settings" on:click={() => sidebarOpen = false} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Settings">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
 					</svg>
-					<span class="text-xs mt-0.5">Settings</span>
 				</a>
 			{/if}
 		</div>
 	</nav>
 
 	<!-- Main Content -->
-	<main class="flex-1 flex flex-col min-w-0 bg-background pb-14 lg:pb-0">
-		<!-- Context Bar -->
+	<main class="flex-1 flex flex-col min-w-0 bg-background pb-[4.5rem] lg:pb-0 lg:ml-[4.5rem]">
+		<!-- Context Bar - Floating Pills Design -->
 		{#if $activeTab}
 			{@const currentTab = $activeTab}
 			{@const tabId = currentTab.id}
-			<div class="bg-card border-b border-border h-12 flex items-center px-2 sm:px-4">
-				<!-- Mobile Menu Button -->
-				<button class="lg:hidden p-2 mr-2 text-muted-foreground hover:text-foreground rounded-md hover:bg-accent transition-colors" on:click={() => (sidebarOpen = true)}>
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
-					</svg>
-				</button>
+			<div class="h-14 flex items-center px-3 sm:px-4 gap-2 relative">
+				<!-- Left: Context Pill -->
+				<div class="flex items-center gap-2">
+					<!-- Context usage dropdown (always show) -->
+					{#if currentTab}
+						{@const autocompactBuffer = 45000}
+						{@const contextUsed = (currentTab.contextUsed ?? (currentTab.totalTokensIn + currentTab.totalCacheCreationTokens + currentTab.totalCacheReadTokens)) + autocompactBuffer}
+						{@const contextMax = 200000}
+						{@const contextPercent = Math.min((contextUsed / contextMax) * 100, 100)}
+						<div class="relative group">
+							<button
+								class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-white/10 transition-colors"
+								title="Context usage: {formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}"
+							>
+								<!-- Circular progress indicator -->
+								<svg class="w-4 h-4 -rotate-90" viewBox="0 0 20 20">
+									<circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="2" opacity="0.2" />
+									<circle
+										cx="10" cy="10" r="8" fill="none"
+										stroke={contextPercent > 80 ? '#ef4444' : contextPercent > 60 ? '#f59e0b' : '#22c55e'}
+										stroke-width="2"
+										stroke-dasharray={2 * Math.PI * 8}
+										stroke-dashoffset={2 * Math.PI * 8 * (1 - contextPercent / 100)}
+										stroke-linecap="round"
+									/>
+								</svg>
+								<span>{Math.round(contextPercent)}%</span>
+								<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+								</svg>
+							</button>
+							<!-- Token dropdown -->
+							<div class="absolute left-0 top-full mt-1 w-52 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+								<div class="py-2 px-3 space-y-2">
+									<!-- Context header -->
+									<div class="flex items-center justify-between text-xs pb-1 border-b border-border">
+										<span class="text-muted-foreground">Context</span>
+										<span class="text-foreground font-medium">{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}</span>
+									</div>
+									<div class="flex items-center justify-between text-xs">
+										<span class="flex items-center gap-1.5 text-muted-foreground">
+											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4" />
+											</svg>
+											Input
+										</span>
+										<span class="text-foreground font-medium">{formatTokenCount(currentTab.totalTokensIn)}</span>
+									</div>
+									<div class="flex items-center justify-between text-xs">
+										<span class="flex items-center gap-1.5 text-muted-foreground">
+											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8v12m0 0l4-4m-4 4l-4-4" />
+											</svg>
+											Output
+										</span>
+										<span class="text-foreground font-medium">{formatTokenCount(currentTab.totalTokensOut)}</span>
+									</div>
+									{#if currentTab.totalCacheCreationTokens > 0}
+										<div class="flex items-center justify-between text-xs">
+											<span class="flex items-center gap-1.5 text-muted-foreground">
+												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+												</svg>
+												Cache Creation
+											</span>
+											<span class="text-foreground font-medium">{formatTokenCount(currentTab.totalCacheCreationTokens)}</span>
+										</div>
+									{/if}
+									{#if currentTab.totalCacheReadTokens > 0}
+										<div class="flex items-center justify-between text-xs">
+											<span class="flex items-center gap-1.5 text-blue-400">
+												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+												</svg>
+												Cache Read
+											</span>
+											<span class="text-blue-400 font-medium">{formatTokenCount(currentTab.totalCacheReadTokens)}</span>
+										</div>
+									{/if}
+								</div>
+							</div>
+						</div>
+					{/if}
+				</div>
 
-				<!-- Profile Selector (clickable text style with dropdown) -->
+				<!-- Center: Profile and Project Pills -->
+				<div class="flex-1 flex items-center justify-center gap-2">
+				<!-- Profile Selector (floating pill style with dropdown) -->
 				{#if $apiUser?.profile_id}
 					<!-- API user with locked profile - show as locked indicator -->
-					<div class="flex items-center gap-1 px-2 py-1 text-sm text-foreground opacity-75">
+					<div class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-sm text-foreground">
 						<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
 						</svg>
@@ -3093,7 +3118,7 @@
 					{@const hasProfileGroups = headerProfilesOrganized.groupOrder.length > 0}
 					<div class="relative group">
 						<button
-							class="flex items-center gap-1 px-2 py-1 text-sm text-foreground hover:bg-accent rounded-md transition-colors"
+							class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-sm text-foreground hover:bg-white/10 transition-colors"
 						>
 							<svg class="w-4 h-4 {currentTab.profile ? 'text-muted-foreground' : 'text-amber-500'}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
@@ -3168,13 +3193,10 @@
 					</div>
 				{/if}
 
-				<!-- Breadcrumb separator -->
-				<span class="text-muted-foreground/50 mx-1 hidden sm:inline">/</span>
-
 				<!-- Project Selector (locked when session exists or for API users) -->
 				{#if $apiUser?.project_id}
 					<!-- API user with locked project - show as locked indicator -->
-					<div class="flex items-center gap-1 px-2 py-1 text-sm text-foreground opacity-75">
+					<div class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-sm text-foreground">
 						<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 						</svg>
@@ -3186,7 +3208,7 @@
 				{:else}
 					<div class="relative group">
 						<button
-							class="flex items-center gap-1 px-2 py-1 text-sm text-foreground {currentTab.sessionId ? 'cursor-default opacity-75' : 'hover:bg-accent'} rounded-md transition-colors"
+							class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-sm text-foreground {currentTab.sessionId ? 'cursor-default opacity-75' : 'hover:bg-white/10'} transition-colors"
 							title={currentTab.sessionId ? 'Project is locked for this chat' : 'Select project'}
 						>
 							<svg class="w-4 h-4 {currentTab.project ? 'text-muted-foreground' : 'text-amber-500'}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -3272,120 +3294,18 @@
 						{/if}
 					</div>
 				{/if}
+				</div>
 
-				<!-- Rewind Button (after breadcrumb, only when session is active) -->
-				{#if currentTab.sessionId}
-					<button
-						on:click={() => openRewindModal(tabId)}
-						class="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors disabled:opacity-50 ml-2"
-						title="Rewind conversation"
-						disabled={currentTab.isStreaming}
-					>
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0019 16V8a1 1 0 00-1.6-.8l-5.333 4zM4.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0011 16V8a1 1 0 00-1.6-.8l-5.334 4z" />
-						</svg>
-						<span class="hidden sm:inline">Rewind</span>
-					</button>
-				{/if}
-
-				<!-- Spacer -->
-				<div class="flex-1"></div>
-
-				<!-- Right side: Token counts, connection status -->
-				<div class="flex items-center gap-2 sm:gap-3">
-					<!-- Context usage dropdown (only show if any tokens > 0) -->
-					{#if currentTab.totalTokensIn > 0 || currentTab.totalTokensOut > 0 || currentTab.totalCacheCreationTokens > 0 || currentTab.totalCacheReadTokens > 0}
-						{@const autocompactBuffer = 45000}
-						{@const contextUsed = (currentTab.contextUsed ?? (currentTab.totalTokensIn + currentTab.totalCacheCreationTokens + currentTab.totalCacheReadTokens)) + autocompactBuffer}
-						{@const contextMax = 200000}
-						{@const contextPercent = Math.min((contextUsed / contextMax) * 100, 100)}
-						<div class="relative group">
-							<button
-								class="flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors"
-								title="Context usage: {formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}"
-							>
-								<!-- Circular progress indicator -->
-								<svg class="w-4 h-4 -rotate-90" viewBox="0 0 20 20">
-									<circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="2" opacity="0.2" />
-									<circle
-										cx="10" cy="10" r="8" fill="none"
-										stroke={contextPercent > 80 ? '#ef4444' : contextPercent > 60 ? '#f59e0b' : '#22c55e'}
-										stroke-width="2"
-										stroke-dasharray={2 * Math.PI * 8}
-										stroke-dashoffset={2 * Math.PI * 8 * (1 - contextPercent / 100)}
-										stroke-linecap="round"
-									/>
-								</svg>
-								<span>{Math.round(contextPercent)}%</span>
-								<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-								</svg>
-							</button>
-							<!-- Token dropdown -->
-							<div class="absolute right-0 top-full mt-1 w-52 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
-								<div class="py-2 px-3 space-y-2">
-									<!-- Context header -->
-									<div class="flex items-center justify-between text-xs pb-1 border-b border-border">
-										<span class="text-muted-foreground">Context</span>
-										<span class="text-foreground font-medium">{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}</span>
-									</div>
-									<div class="flex items-center justify-between text-xs">
-										<span class="flex items-center gap-1.5 text-muted-foreground">
-											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4" />
-											</svg>
-											Input
-										</span>
-										<span class="text-foreground font-medium">{formatTokenCount(currentTab.totalTokensIn)}</span>
-									</div>
-									<div class="flex items-center justify-between text-xs">
-										<span class="flex items-center gap-1.5 text-muted-foreground">
-											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8v12m0 0l4-4m-4 4l-4-4" />
-											</svg>
-											Output
-										</span>
-										<span class="text-foreground font-medium">{formatTokenCount(currentTab.totalTokensOut)}</span>
-									</div>
-									{#if currentTab.totalCacheCreationTokens > 0}
-										<div class="flex items-center justify-between text-xs">
-											<span class="flex items-center gap-1.5 text-muted-foreground">
-												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-												</svg>
-												Cache Creation
-											</span>
-											<span class="text-foreground font-medium">{formatTokenCount(currentTab.totalCacheCreationTokens)}</span>
-										</div>
-									{/if}
-									{#if currentTab.totalCacheReadTokens > 0}
-										<div class="flex items-center justify-between text-xs">
-											<span class="flex items-center gap-1.5 text-blue-400">
-												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-												</svg>
-												Cache Read
-											</span>
-											<span class="text-blue-400 font-medium">{formatTokenCount(currentTab.totalCacheReadTokens)}</span>
-										</div>
-									{/if}
-								</div>
-							</div>
-						</div>
-					{/if}
-
-					<!-- Connection Status (always far right) -->
-					<ConnectionStatus wsConnected={currentTab.wsConnected} />
+				<!-- Right: Connection Status -->
+				<div class="flex items-center gap-2">
+					<div class="floating-pill px-3 py-1.5">
+						<ConnectionStatus wsConnected={currentTab.wsConnected} />
+					</div>
 				</div>
 			</div>
 		{:else}
-			<!-- Empty state context bar (no active tab) - just show mobile menu button -->
-			<div class="bg-card border-b border-border h-12 flex items-center px-2 sm:px-4">
-				<button class="lg:hidden p-2 mr-2 text-muted-foreground hover:text-foreground rounded-md hover:bg-accent transition-colors" on:click={() => (sidebarOpen = true)}>
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
-					</svg>
-				</button>
+			<!-- Empty state context bar (no active tab) -->
+			<div class="h-14 flex items-center px-3 sm:px-4">
 			</div>
 		{/if}
 
@@ -3427,20 +3347,14 @@
 						{#each currentTab.messages as message}
 							{#if message.role === 'user'}
 								<!-- User Message - Anvil Style -->
-								<div class="flex gap-3 w-full">
-									<!-- Avatar -->
-									<div class="flex-shrink-0 w-8 h-8 rounded-full bg-primary flex items-center justify-center shadow-s">
-										<svg class="w-4 h-4 text-primary-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-										</svg>
-									</div>
+								<div class="w-full">
 									<!-- Content -->
-									<div class="flex-1 min-w-0">
+									<div class="min-w-0">
 										<div class="flex items-center gap-2 mb-1">
-											<span class="font-semibold text-sm text-foreground">You</span>
+											<span class="font-semibold text-sm text-blue-400">You</span>
 											<span class="text-xs text-muted-foreground">{formatTime()}</span>
 										</div>
-										<div class="bg-card border border-border rounded-lg p-4 shadow-s overflow-hidden">
+										<div class="overflow-hidden">
 											<p class="whitespace-pre-wrap break-words overflow-wrap-anywhere text-foreground">{message.content}</p>
 										</div>
 									</div>
@@ -3449,17 +3363,11 @@
 								<!-- Assistant Message - Anvil Style -->
 								{@const currentProfile = $profiles.find(p => p.id === currentTab.profile)}
 								{@const hasPartialMessages = currentProfile?.config?.include_partial_messages !== false}
-								<div class="flex gap-3 w-full">
-									<!-- Avatar -->
-									<div class="flex-shrink-0 w-8 h-8 rounded-full bg-accent flex items-center justify-center shadow-s">
-										<svg class="w-4 h-4 text-accent-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-										</svg>
-									</div>
+								<div class="w-full">
 									<!-- Content -->
-									<div class="flex-1 min-w-0">
+									<div class="min-w-0">
 										<div class="flex items-center gap-2 mb-1">
-											<span class="font-semibold text-sm text-foreground">Claude</span>
+											<span class="font-semibold text-sm text-orange-400">Claude</span>
 											<span class="text-xs text-muted-foreground">{formatTime()}</span>
 											{#if message.streaming}
 												<span class="flex gap-0.5">
@@ -3560,7 +3468,7 @@
 												</div>
 											{/if}
 										</div>
-										<div class="bg-card border border-border rounded-lg p-4 shadow-s overflow-hidden">
+										<div class="overflow-hidden">
 											<div class="prose prose-sm max-w-none break-words overflow-x-auto">
 												{#if message.content}
 													{@html renderMarkdown(message.content)}
@@ -3592,24 +3500,16 @@
 							{:else if message.type === 'tool_use' && message.toolName === 'TodoWrite'}
 								<!-- TodoWrite - Render as TodoList component -->
 								{#if message.toolInput?.todos && Array.isArray(message.toolInput.todos)}
-									<div class="flex gap-3 w-full">
-										<!-- Empty spacer to align with message content -->
-										<div class="flex-shrink-0 w-8"></div>
-										<div class="flex-1 min-w-0">
+									<div class="w-full">
+										<div class="min-w-0">
 											<TodoList todos={message.toolInput.todos} />
 										</div>
 									</div>
 								{/if}
 							{:else if message.type === 'tool_use'}
 								<!-- Tool Use with grouped Result - Expandable Card -->
-								<div class="flex gap-3 w-full">
-									<div class="flex-shrink-0 w-8 h-8 rounded-full bg-yellow-500/10 flex items-center justify-center shadow-s">
-										<svg class="w-4 h-4 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-										</svg>
-									</div>
-									<div class="flex-1 min-w-0">
+								<div class="w-full">
+									<div class="min-w-0">
 										<details class="w-full border border-border rounded-lg overflow-hidden shadow-s group">
 											<summary class="w-full px-4 py-2 bg-muted/30 hover:bg-muted/50 flex items-center gap-2 cursor-pointer list-none transition-colors">
 												{#if message.toolStatus === 'running' || message.streaming}
@@ -3675,13 +3575,8 @@
 								</div>
 							{:else if message.type === 'tool_result'}
 								<!-- Standalone Tool Result (fallback for ungrouped results) -->
-								<div class="flex gap-3 w-full">
-									<div class="flex-shrink-0 w-8 h-8 rounded-full bg-blue-500/10 flex items-center justify-center shadow-s">
-										<svg class="w-4 h-4 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-										</svg>
-									</div>
-									<div class="flex-1 min-w-0">
+								<div class="w-full">
+									<div class="min-w-0">
 										<details class="w-full border border-border rounded-lg overflow-hidden shadow-s group">
 											<summary class="w-full px-4 py-2 bg-muted/30 hover:bg-muted/50 flex items-center gap-2 cursor-pointer list-none transition-colors">
 												<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -3712,25 +3607,15 @@
 								</div>
 							{:else if message.type === 'system'}
 								<!-- System Message (e.g., /context output, status updates) -->
-								<div class="flex gap-3 w-full">
-									<div class="flex-shrink-0 w-8 h-8 rounded-full bg-purple-500/10 flex items-center justify-center shadow-s">
-										<svg class="w-4 h-4 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-										</svg>
-									</div>
-									<div class="flex-1 min-w-0">
+								<div class="w-full">
+									<div class="min-w-0">
 										<SystemMessage {message} />
 									</div>
 								</div>
 							{:else if message.type === 'subagent'}
 								<!-- Subagent Message - Collapsible container for all subagent work -->
-								<div class="flex gap-3 w-full">
-									<div class="flex-shrink-0 w-8 h-8 rounded-full bg-indigo-500/10 flex items-center justify-center shadow-s">
-										<svg class="w-4 h-4 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-										</svg>
-									</div>
-									<div class="flex-1 min-w-0">
+								<div class="w-full">
+									<div class="min-w-0">
 										<SubagentMessage {message} />
 									</div>
 								</div>
@@ -3774,23 +3659,23 @@
 				</div>
 			{/if}
 
-			<!-- Input Area -->
-			<div class="border-t border-border/50 bg-background/80 backdrop-blur-sm p-3 sm:p-4">
-				<div class="max-w-5xl mx-auto">
+			<!-- Input Area - Floating Island -->
+			<div class="p-3 sm:p-4">
+				<div class="max-w-4xl mx-auto">
 					<!-- Hidden file input -->
 					<input type="file" bind:this={fileInput} on:change={handleFileUpload} class="hidden" multiple accept="*/*" />
 
-					<!-- Cursor-Style Unified Input Container -->
 					<!-- Recording Error Message -->
-						{#if recordingError}
-							<div class="mb-2 px-3 py-2 bg-destructive/10 border border-destructive/30 rounded-lg text-sm text-destructive flex items-center justify-between">
-								<span>{recordingError}</span>
-								<button type="button" on:click={() => recordingError = ''} class="ml-2 hover:opacity-70">&times;</button>
-							</div>
-						{/if}
+					{#if recordingError}
+						<div class="mb-2 px-3 py-2 bg-destructive/10 border border-destructive/30 rounded-lg text-sm text-destructive flex items-center justify-between floating-panel">
+							<span>{recordingError}</span>
+							<button type="button" on:click={() => recordingError = ''} class="ml-2 hover:opacity-70">&times;</button>
+						</div>
+					{/if}
 
-						<form on:submit|preventDefault={() => handleSubmit(tabId)} class="relative">
-						<div class="bg-card/80 backdrop-blur border border-border/60 rounded-2xl shadow-lg transition-all duration-200 focus-within:border-primary/50 focus-within:shadow-primary/5 focus-within:shadow-xl">
+					<form on:submit|preventDefault={() => handleSubmit(tabId)} class="relative">
+						<!-- Floating Island Input Container -->
+						<div class="floating-island transition-all duration-200 focus-within:border-primary/40 focus-within:shadow-primary/10 focus-within:shadow-xl">
 
 							<!-- Uploaded Files (inside container) -->
 							{#if (tabUploadedFiles[tabId] || []).length > 0}
@@ -3926,7 +3811,7 @@
 								{@const profilePermissionMode = currentProfile?.config?.permission_mode || 'default'}
 								{@const effectiveModel = currentTab.modelOverride || profileModel}
 								{@const effectiveMode = currentTab.permissionModeOverride || profilePermissionMode}
-								{@const modelLabels = { sonnet: 'Sonnet', opus: 'Opus', haiku: 'Haiku' } as Record<string, string>}
+								{@const modelLabels = { sonnet: 'Sonnet', 'sonnet-1m': 'Sonnet 1M', opus: 'Opus', haiku: 'Haiku' } as Record<string, string>}
 								{@const modeLabels = { default: 'Ask', acceptEdits: 'Auto-Accept', plan: 'Plan', bypassPermissions: 'Bypass' } as Record<string, string>}
 								<!-- Model Selector Pill -->
 								<div class="relative">
@@ -3944,7 +3829,7 @@
 									{#if showModelPopup}
 										<div class="fixed inset-0 z-40" on:click={() => showModelPopup = false}></div>
 										<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[90px]">
-											{#each [['sonnet', 'Sonnet'], ['opus', 'Opus'], ['haiku', 'Haiku']] as [value, label]}
+											{#each [['sonnet', 'Sonnet'], ['sonnet-1m', 'Sonnet 1M'], ['opus', 'Opus'], ['haiku', 'Haiku']] as [value, label]}
 												<button
 													type="button"
 													on:click={() => {
@@ -4165,6 +4050,7 @@
 								<label class="block text-xs text-muted-foreground mb-1">Model</label>
 								<select bind:value={profileForm.model} class="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground">
 									<option value="sonnet">Sonnet</option>
+									<option value="sonnet-1m">Sonnet 1M</option>
 									<option value="opus">Opus</option>
 									<option value="haiku">Haiku</option>
 								</select>
@@ -4923,16 +4809,6 @@
 		sessionId={terminalSessionId}
 		command={terminalCommand}
 		onClose={closeTerminalModal}
-		onRewindComplete={handleRewindComplete}
-	/>
-{/if}
-
-<!-- Rewind Modal V2 - Direct JSONL manipulation (bulletproof) -->
-{#if showRewindModal && rewindSessionId}
-	<RewindModal
-		sessionId={rewindSessionId}
-		onClose={closeRewindModal}
-		onRewindComplete={handleRewindCompleteV2}
 	/>
 {/if}
 
@@ -4948,9 +4824,75 @@
 		-ms-overflow-style: none;
 		scrollbar-width: none;
 	}
+
+	/* Floating Panel Styles */
+	.floating-panel {
+		background: oklch(0.16 0.012 260 / 0.85);
+		backdrop-filter: blur(20px);
+		-webkit-backdrop-filter: blur(20px);
+		border: 1px solid oklch(1 0 0 / 0.08);
+		box-shadow:
+			0 0 0 1px oklch(0 0 0 / 0.3),
+			0 8px 32px oklch(0 0 0 / 0.4),
+			0 2px 8px oklch(0 0 0 / 0.2),
+			inset 0 1px 0 oklch(1 0 0 / 0.05);
+	}
+
+	/* Floating Pill Styles (for header elements) */
+	.floating-pill {
+		background: oklch(0.16 0.012 260 / 0.7);
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
+		border: 1px solid oklch(1 0 0 / 0.06);
+		border-radius: 9999px;
+		box-shadow:
+			0 0 0 1px oklch(0 0 0 / 0.2),
+			0 2px 8px oklch(0 0 0 / 0.15),
+			inset 0 1px 0 oklch(1 0 0 / 0.04);
+	}
+
+	/* Floating Island Styles (for input area) */
+	.floating-island {
+		background: oklch(0.16 0.012 260 / 0.85);
+		backdrop-filter: blur(20px);
+		-webkit-backdrop-filter: blur(20px);
+		border: 1px solid oklch(1 0 0 / 0.08);
+		border-radius: 1.5rem;
+		box-shadow:
+			0 0 0 1px oklch(0 0 0 / 0.25),
+			0 8px 32px oklch(0 0 0 / 0.35),
+			0 4px 16px oklch(0 0 0 / 0.2),
+			inset 0 1px 0 oklch(1 0 0 / 0.05);
+	}
+
+	/* Glow effect for active buttons */
+	.shadow-glow {
+		box-shadow:
+			0 0 12px oklch(0.72 0.14 180 / 0.4),
+			0 0 4px oklch(0.72 0.14 180 / 0.3);
+	}
+
+	/* Panel slide-in animation */
+	.panel-slide-in {
+		animation: panelSlideIn 0.25s cubic-bezier(0.32, 0.72, 0, 1);
+	}
+
+	@keyframes panelSlideIn {
+		from {
+			transform: translateX(-16px);
+			opacity: 0;
+		}
+		to {
+			transform: translateX(0);
+			opacity: 1;
+		}
+	}
+
+	/* Legacy sidebar animation - keep for mobile */
 	.sidebar-slide-in {
 		animation: slideInFromLeft 0.2s ease-out;
 	}
+
 	@keyframes slideInFromLeft {
 		from {
 			transform: translateX(-100%);

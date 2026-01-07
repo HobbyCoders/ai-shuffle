@@ -265,7 +265,7 @@ export async function generateVideo(input: GenerateVideoInput): Promise<Generate
   const credentials: ProviderCredentials = { apiKey };
 
   // Delegate to provider
-  return provider.generate(
+  const result = await provider.generate(
     {
       prompt: input.prompt,
       aspect_ratio: input.aspect_ratio,
@@ -278,6 +278,23 @@ export async function generateVideo(input: GenerateVideoInput): Promise<Generate
     credentials,
     modelId
   );
+
+  // Add provider metadata to the result
+  if (result.success) {
+    const capabilities = modelInfo.capabilities.map(c => c.toString());
+    const supportsExtend = capabilities.includes('video-extend');
+
+    result.provider_metadata = {
+      ...result.provider_metadata,
+      provider_used: providerId,
+      model_used: modelId,
+      capabilities: capabilities,
+      can_extend: supportsExtend,
+      extend_with: supportsExtend ? providerId : 'google-veo (Veo only supports extend)'
+    };
+  }
+
+  return result;
 }
 
 export default generateVideo;

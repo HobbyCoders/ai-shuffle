@@ -391,3 +391,38 @@ button, a, .clickable {
 	-webkit-overflow-scrolling: touch;
 	scroll-behavior: smooth;
 }
+
+/* Floating Panel System - Glass morphism sidebar */
+.floating-panel {
+	background: oklch(0.16 0.012 260 / 0.85);
+	backdrop-filter: blur(20px);
+	-webkit-backdrop-filter: blur(20px);
+	border: 1px solid oklch(0.4 0.01 260 / 0.15);
+	box-shadow:
+		0 0 0 1px oklch(0.95 0 0 / 0.03) inset,
+		0 8px 32px oklch(0 0 0 / 0.4),
+		0 2px 8px oklch(0 0 0 / 0.2);
+}
+
+/* Panel slide-in animation */
+.panel-slide-in {
+	animation: panelSlideIn 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes panelSlideIn {
+	from {
+		opacity: 0;
+		transform: translateX(-12px);
+	}
+	to {
+		opacity: 1;
+		transform: translateX(0);
+	}
+}
+
+/* Glow effect for active items */
+.shadow-glow {
+	box-shadow:
+		0 0 12px oklch(0.72 0.14 180 / 0.4),
+		0 0 4px oklch(0.72 0.14 180 / 0.3);
+}

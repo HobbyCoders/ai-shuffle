@@ -89,9 +89,11 @@ class AIToolsConfig(BaseModel):
     image_reference: bool = False  # Reference-based generation (character/style consistency)
     # Video tools (Veo)
     video_generation: bool = False  # Generate AI videos from text prompts
+    video_with_audio: bool = False  # Generate video with native audio (Veo 3)
     image_to_video: bool = False  # Animate a still image into a video
     video_extend: bool = False  # Extend existing Veo videos
     video_bridge: bool = False  # Generate smooth transitions between two images
+    video_understanding: bool = False  # Analyze videos and answer questions about content
 
 
 class SystemPromptConfig(BaseModel):

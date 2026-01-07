@@ -141,6 +141,12 @@ export interface EditImageResponse {
   /** All edited images when number_of_images > 1 */
   images?: EditedImage[];
 
+  /** Provider that was used for editing (e.g., "google-gemini", "openai-gpt-image") */
+  provider_used?: string;
+
+  /** Model that was used for editing */
+  model_used?: string;
+
   /** Error message if editing failed */
   error?: string;
 }
@@ -222,9 +228,13 @@ function getModelId(providerId: string, inputModel?: string): string {
 }
 
 /**
- * Convert provider result to our response format
+ * Convert provider result to our response format, including provider metadata
  */
-function toResponse(result: ImageResult): EditImageResponse {
+function toResponse(
+  result: ImageResult,
+  providerId: string,
+  modelId: string
+): EditImageResponse {
   if (!result.success) {
     return { success: false, error: result.error };
   }
@@ -235,7 +245,9 @@ function toResponse(result: ImageResult): EditImageResponse {
     file_path: result.file_path,
     filename: result.filename,
     mime_type: result.mime_type,
-    ...(result.images && { images: result.images as EditedImage[] })
+    ...(result.images && { images: result.images as EditedImage[] }),
+    provider_used: providerId,
+    model_used: modelId
   };
 }
 
@@ -343,7 +355,7 @@ export async function editImage(input: EditImageInput): Promise<EditImageRespons
     modelId
   );
 
-  return toResponse(result);
+  return toResponse(result, providerId, modelId);
 }
 
 export default editImage;

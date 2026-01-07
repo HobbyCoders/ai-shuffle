@@ -130,6 +130,18 @@ export interface GenerateImageResponse {
   /** All generated images when number_of_images > 1 */
   images?: GeneratedImage[];
 
+  /** Provider that was used for generation (e.g., "google-gemini", "google-imagen") */
+  provider_used?: string;
+
+  /** Model that was used for generation (e.g., "gemini-2.5-flash-image") */
+  model_used?: string;
+
+  /** Capabilities of the provider used (e.g., ["text-to-image", "image-edit"]) */
+  capabilities?: string[];
+
+  /** Hint for editing: which providers can edit this image */
+  edit_with?: string;
+
   /** Error message if generation failed */
   error?: string;
 }
@@ -211,12 +223,23 @@ function getModelId(providerId: string, inputModel?: string): string {
 }
 
 /**
- * Convert provider result to our response format
+ * Convert provider result to our response format, including provider metadata
  */
-function toResponse(result: ImageResult): GenerateImageResponse {
+function toResponse(
+  result: ImageResult,
+  providerId: string,
+  modelId: string,
+  capabilities: string[]
+): GenerateImageResponse {
   if (!result.success) {
     return { success: false, error: result.error };
   }
+
+  // Determine which providers can edit this image
+  const supportsEdit = capabilities.includes('image-edit');
+  const editWith = supportsEdit
+    ? providerId  // Same provider can edit
+    : 'google-gemini or openai-gpt-image';  // Suggest providers that support editing
 
   return {
     success: true,
@@ -224,7 +247,11 @@ function toResponse(result: ImageResult): GenerateImageResponse {
     file_path: result.file_path,
     filename: result.filename,
     mime_type: result.mime_type,
-    ...(result.images && { images: result.images as GeneratedImage[] })
+    ...(result.images && { images: result.images as GeneratedImage[] }),
+    provider_used: providerId,
+    model_used: modelId,
+    capabilities: capabilities,
+    edit_with: editWith
   };
 }
 
@@ -314,7 +341,10 @@ export async function generateImage(input: GenerateImageInput): Promise<Generate
     modelId
   );
 
-  return toResponse(result);
+  // Get capabilities from the model info
+  const capabilities = modelInfo.capabilities.map(c => c.toString());
+
+  return toResponse(result, providerId, modelId, capabilities);
 }
 
 export default generateImage;
