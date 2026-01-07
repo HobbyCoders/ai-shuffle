@@ -30,11 +30,17 @@ export interface CustomDeck {
 }
 
 /**
+ * View mode for recent sessions display
+ */
+export type RecentSessionsViewMode = 'list' | 'timeline';
+
+/**
  * Persisted navigator state
  */
 export interface NavigatorPersistedState {
 	cardOrder: string[]; // Card IDs in user's preferred order
 	decks: CustomDeck[];
+	recentSessionsView: RecentSessionsViewMode; // User's preferred view for recent sessions
 	lastModified: number;
 }
 
@@ -173,6 +179,7 @@ function createNavigatorStore() {
 	const initialState: NavigatorState = {
 		cardOrder: persisted?.cardOrder || [],
 		decks: persisted?.decks || [],
+		recentSessionsView: persisted?.recentSessionsView || 'list',
 		lastModified: persisted?.lastModified || Date.now(),
 		editMode: false,
 		initialized: false,
@@ -187,6 +194,7 @@ function createNavigatorStore() {
 		return {
 			cardOrder: state.cardOrder,
 			decks: state.decks,
+			recentSessionsView: state.recentSessionsView,
 			lastModified: Date.now(),
 		};
 	}
@@ -285,6 +293,34 @@ function createNavigatorStore() {
 			} else {
 				this.enterEditMode();
 			}
+		},
+
+		// ========================================================================
+		// Recent Sessions View
+		// ========================================================================
+
+		/**
+		 * Set the view mode for recent sessions (list or timeline)
+		 */
+		setRecentSessionsView(view: RecentSessionsViewMode): void {
+			updateAndPersist((state) => ({
+				...state,
+				recentSessionsView: view,
+			}));
+		},
+
+		/**
+		 * Toggle between list and timeline views
+		 */
+		toggleRecentSessionsView(): void {
+			update((state) => {
+				const newView: RecentSessionsViewMode = state.recentSessionsView === 'list' ? 'timeline' : 'list';
+				const newState = { ...state, recentSessionsView: newView };
+				const persisted = getPersistedState(newState);
+				saveToStorage(persisted);
+				saveToServer(persisted);
+				return newState;
+			});
 		},
 
 		// ========================================================================
@@ -549,3 +585,6 @@ export const cardOrder = derived(navigator, ($nav) => $nav.cardOrder);
 
 // Initialization state
 export const navigatorInitialized = derived(navigator, ($nav) => $nav.initialized);
+
+// Recent sessions view mode
+export const recentSessionsView = derived(navigator, ($nav) => $nav.recentSessionsView);

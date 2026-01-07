@@ -122,18 +122,24 @@ class PluginEnableStateResponse(BaseModel):
 @router.get("/marketplaces", response_model=List[MarketplaceResponse])
 async def list_marketplaces(token: str = Depends(require_auth)):
     """List all registered plugin marketplaces"""
-    service = get_plugin_service()
-    marketplaces = service.get_marketplaces()
-    return [
-        MarketplaceResponse(
-            id=mp.id,
-            source=mp.source,
-            url=mp.url,
-            install_location=mp.install_location,
-            last_updated=mp.last_updated
+    try:
+        service = get_plugin_service()
+        marketplaces = service.get_marketplaces()
+        return [
+            MarketplaceResponse(
+                id=mp.id,
+                source=mp.source,
+                url=mp.url,
+                install_location=mp.install_location,
+                last_updated=mp.last_updated
+            )
+            for mp in marketplaces
+        ]
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load marketplaces: {str(e)}"
         )
-        for mp in marketplaces
-    ]
 
 
 @router.post("/marketplaces", response_model=MarketplaceResponse, status_code=status.HTTP_201_CREATED)
@@ -207,24 +213,30 @@ async def list_available_plugins(
     token: str = Depends(require_auth)
 ):
     """List all available plugins from marketplaces"""
-    service = get_plugin_service()
-    plugins = service.get_available_plugins(marketplace)
-    return [
-        AvailablePluginResponse(
-            id=p.id,
-            name=p.name,
-            marketplace=p.marketplace,
-            marketplace_path=p.marketplace_path,
-            description=p.description,
-            has_commands=p.has_commands,
-            has_agents=p.has_agents,
-            has_skills=p.has_skills,
-            has_hooks=p.has_hooks,
-            installed=p.installed,
-            enabled=p.enabled
+    try:
+        service = get_plugin_service()
+        plugins = service.get_available_plugins(marketplace)
+        return [
+            AvailablePluginResponse(
+                id=p.id,
+                name=p.name,
+                marketplace=p.marketplace,
+                marketplace_path=p.marketplace_path,
+                description=p.description,
+                has_commands=p.has_commands,
+                has_agents=p.has_agents,
+                has_skills=p.has_skills,
+                has_hooks=p.has_hooks,
+                installed=p.installed,
+                enabled=p.enabled
+            )
+            for p in plugins
+        ]
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load available plugins: {str(e)}"
         )
-        for p in plugins
-    ]
 
 
 # ============================================================================
@@ -234,26 +246,32 @@ async def list_available_plugins(
 @router.get("/installed", response_model=List[PluginResponse])
 async def list_installed_plugins(token: str = Depends(require_auth)):
     """List all installed plugins"""
-    service = get_plugin_service()
-    plugins = service.get_installed_plugins()
-    return [
-        PluginResponse(
-            id=p.id,
-            name=p.name,
-            marketplace=p.marketplace,
-            description=p.description,
-            version=p.version,
-            scope=p.scope,
-            install_path=p.install_path,
-            installed_at=p.installed_at,
-            enabled=p.enabled,
-            has_commands=p.has_commands,
-            has_agents=p.has_agents,
-            has_skills=p.has_skills,
-            has_hooks=p.has_hooks
+    try:
+        service = get_plugin_service()
+        plugins = service.get_installed_plugins()
+        return [
+            PluginResponse(
+                id=p.id,
+                name=p.name,
+                marketplace=p.marketplace,
+                description=p.description,
+                version=p.version,
+                scope=p.scope,
+                install_path=p.install_path,
+                installed_at=p.installed_at,
+                enabled=p.enabled,
+                has_commands=p.has_commands,
+                has_agents=p.has_agents,
+                has_skills=p.has_skills,
+                has_hooks=p.has_hooks
+            )
+            for p in plugins
+        ]
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load installed plugins: {str(e)}"
         )
-        for p in plugins
-    ]
 
 
 # ============================================================================
@@ -264,21 +282,27 @@ async def list_installed_plugins(token: str = Depends(require_auth)):
 @router.get("/agents/file-based", response_model=List[FileAgentResponse])
 async def list_file_based_agents(token: str = Depends(require_auth)):
     """List all file-based agents from enabled plugins"""
-    service = get_plugin_service()
-    agents = service.get_file_based_agents()
-    return [
-        FileAgentResponse(
-            id=a["id"],
-            name=a["name"],
-            description=a.get("description", ""),
-            model=a.get("model"),
-            tools=a.get("tools"),
-            prompt=a.get("prompt", ""),
-            source_plugin=a["source_plugin"],
-            file_path=a["file_path"]
+    try:
+        service = get_plugin_service()
+        agents = service.get_file_based_agents()
+        return [
+            FileAgentResponse(
+                id=a["id"],
+                name=a["name"],
+                description=a.get("description", ""),
+                model=a.get("model"),
+                tools=a.get("tools"),
+                prompt=a.get("prompt", ""),
+                source_plugin=a["source_plugin"],
+                file_path=a["file_path"]
+            )
+            for a in agents
+        ]
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load file-based agents: {str(e)}"
         )
-        for a in agents
-    ]
 
 
 @router.get("/{plugin_id:path}", response_model=PluginDetailsResponse)

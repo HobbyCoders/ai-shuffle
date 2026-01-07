@@ -21,7 +21,6 @@
 		sessions,
 		sessionsTagFilter
 	} from '$lib/stores/tabs';
-	import { agents, activeAgents, allAgents, runningAgents, completedAgents, failedAgents } from '$lib/stores/agents';
 	import {
 		deck,
 		allCards,
@@ -41,7 +40,6 @@
 	import {
 		Workspace,
 		ChatCard,
-		AgentCard,
 		TerminalCard,
 		MobileWorkspace,
 		ProfileCard,
@@ -53,7 +51,8 @@
 		ImageStudioCard,
 		ModelStudioCard,
 		AudioStudioCard,
-		FileBrowserCard
+		FileBrowserCard,
+		PluginManagerCard
 	} from '$lib/components/deck/cards';
 	import type { CardType, DeckCard as CardsDeckCard } from '$lib/components/deck/cards/types';
 
@@ -62,14 +61,12 @@
 	import AnalyticsModal from '$lib/components/AnalyticsModal.svelte';
 	import TerminalModal from '$lib/components/TerminalModal.svelte';
 	import ImportSessionModal from '$lib/components/ImportSessionModal.svelte';
-	import AgentImportModal from '$lib/components/AgentImportModal.svelte';
 	import GitModal from '$lib/components/git/GitModal.svelte';
 	import TagManager from '$lib/components/TagManager.svelte';
 	import KnowledgeManager from '$lib/components/KnowledgeManager.svelte';
 	import Canvas from '$lib/components/canvas/Canvas.svelte';
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
-	import CreateMenu from '$lib/components/deck/CreateMenu.svelte';
 	import CardDeckNavigator from '$lib/components/deck/CardDeckNavigator.svelte';
 
 	// ============================================
@@ -107,14 +104,12 @@
 	let showAnalyticsModal = $state(false);
 	let showTerminalModal = $state(false);
 	let showImportModal = $state(false);
-	let showAgentImportModal = $state(false);
 	let showGitModal = $state(false);
 	let showTagManager = $state(false);
 	let showKnowledgeModal = $state(false);
 	let showCanvas = $state(false);
 	let showSpotlight = $state(false);
 	let showAdvancedSearch = $state(false);
-	let showCreateMenu = $state(false);
 	let showCardNavigator = $state(false);
 
 	// Terminal modal state
@@ -164,8 +159,6 @@
 		switch (type) {
 			case 'chat':
 				return 'chat';
-			case 'agent':
-				return 'agent';
 			case 'terminal':
 				return 'terminal';
 			case 'settings':
@@ -186,6 +179,8 @@
 				return 'audio-studio';
 			case 'file-browser':
 				return 'file-browser';
+			case 'plugins':
+				return 'plugins';
 			default:
 				return 'chat';
 		}
@@ -268,8 +263,7 @@
 			tabs.loadProfiles(),
 			tabs.loadSessions(),
 			tabs.loadProjects(),
-			loadAllTags(),
-			agents.init() // Initialize agents store for background agent tracking
+			loadAllTags()
 		]);
 
 		if ($isAdmin) {
@@ -320,17 +314,6 @@
 				cmdOrCtrl: true,
 				category: 'chat',
 				action: () => { handleCreateCard('chat'); }
-			}),
-
-			// Background agent (Cmd+Shift+B)
-			registerShortcut({
-				id: 'new-agent',
-				description: 'New background agent',
-				key: 'b',
-				cmdOrCtrl: true,
-				shift: true,
-				category: 'general',
-				action: () => { handleCreateCard('agent'); }
 			}),
 
 			// Terminal (Cmd+T)
@@ -388,8 +371,6 @@
 						showCanvas = false;
 					} else if (showAnalyticsModal) {
 						showAnalyticsModal = false;
-					} else if (showAgentImportModal) {
-						showAgentImportModal = false;
 					} else if (showTagManager) {
 						showTagManager = false;
 					}
@@ -600,10 +581,6 @@
 				meta = { tabId };
 				break;
 			}
-			case 'agent':
-				deckCardType = 'agent';
-				title = 'Agent';
-				break;
 			case 'terminal':
 				deckCardType = 'terminal';
 				title = 'Terminal';
@@ -677,6 +654,17 @@
 				title = 'Files';
 				break;
 			}
+			case 'plugins': {
+				// Singleton - only one plugins card at a time
+				const existingPlugins = $allCards.find(c => c.type === 'plugins');
+				if (existingPlugins) {
+					deck.focusCard(existingPlugins.id);
+					return;
+				}
+				deckCardType = 'plugins';
+				title = 'Plugins';
+				break;
+			}
 			default:
 				deckCardType = 'chat';
 				title = 'New Card';
@@ -686,22 +674,18 @@
 	}
 
 	function handleCardFocus(id: string) {
-		console.log('[CardFocus] Card focused:', id);
 		deck.focusCard(id);
 
 		// If this is a chat card, sync the active tab
 		// Note: deck.getCard returns the store's DeckCard type (meta at top level)
 		// which is different from CardsDeckCard (meta under data)
 		const storeCard = deck.getCard(id);
-		console.log('[CardFocus] Store card:', storeCard?.type, 'meta.tabId:', storeCard?.meta?.tabId, 'dataId:', storeCard?.dataId);
 		if (storeCard?.type === 'chat') {
 			// Get tabId from store card's meta (not data.meta)
 			const tabId = (storeCard.meta?.tabId as string) ||
 				(storeCard.dataId ? tabs.findTabBySessionId(storeCard.dataId) : null);
-			console.log('[CardFocus] Resolved tabId:', tabId);
 			if (tabId) {
 				tabs.setActiveTab(tabId);
-				console.log('[CardFocus] activeTab after set:', $activeTab?.id);
 			}
 		}
 	}
@@ -750,8 +734,8 @@
 		deck.setCardTitle(id, title);
 	}
 
-	function handleFork(cardId: string, sessionId: string, messageIndex: number, messageId: string) {
-		console.log('Fork requested:', { cardId, sessionId, messageIndex, messageId });
+	function handleFork(_cardId: string, _sessionId: string, _messageIndex: number, _messageId: string) {
+		// Fork functionality to be implemented
 	}
 
 	// ============================================
@@ -880,17 +864,6 @@
 									handleFork(card.id, sessionId, messageIndex, messageId)
 								}
 							/>
-						{:else if card.type === 'agent'}
-							<AgentCard
-								{card}
-								agentId={card.data?.dataId || card.data?.meta?.agentId as string}
-								mobile={true}
-								onClose={() => handleCardClose(card.id)}
-								onMaximize={() => handleCardMaximize(card.id)}
-								onFocus={() => handleCardFocus(card.id)}
-								onMove={(x, y) => handleCardMove(card.id, x, y)}
-								onResize={(w, h) => handleCardResize(card.id, w, h)}
-							/>
 						{:else if card.type === 'terminal'}
 							<TerminalCard
 								{card}
@@ -930,6 +903,7 @@
 								onFocus={() => handleCardFocus(card.id)}
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
+								onOpenPlugins={() => handleCreateCard('plugins')}
 							/>
 						{:else if card.type === 'subagent'}
 							<SubagentCard
@@ -983,6 +957,16 @@
 							/>
 						{:else if card.type === 'file-browser'}
 							<FileBrowserCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
+						{:else if card.type === 'plugins'}
+							<PluginManagerCard
 								{card}
 								mobile={true}
 								onClose={() => handleCardClose(card.id)}
@@ -1048,18 +1032,6 @@
 												<p>Initializing chat...</p>
 											</div>
 										{/if}
-									{:else if card.type === 'agent'}
-										<AgentCard
-											{card}
-											agentId={card.data?.dataId || card.data?.meta?.agentId as string}
-											onClose={() => handleCardClose(card.id)}
-											onMaximize={() => handleCardMaximize(card.id)}
-											onFocus={() => handleCardFocus(card.id)}
-											onMove={(x, y) => handleCardMove(card.id, x, y)}
-											onResize={(w, h) => handleCardResize(card.id, w, h)}
-											onDragEnd={() => handleCardDragEnd(card.id)}
-											onResizeEnd={() => handleCardResizeEnd(card.id)}
-										/>
 									{:else if card.type === 'terminal'}
 										<TerminalCard
 											{card}
@@ -1103,6 +1075,7 @@
 											onResize={(w, h) => handleCardResize(card.id, w, h)}
 											onDragEnd={() => handleCardDragEnd(card.id)}
 											onResizeEnd={() => handleCardResizeEnd(card.id)}
+											onOpenPlugins={() => handleCreateCard('plugins')}
 										/>
 									{:else if card.type === 'subagent'}
 										<SubagentCard
@@ -1170,6 +1143,17 @@
 											onDragEnd={() => handleCardDragEnd(card.id)}
 											onResizeEnd={() => handleCardResizeEnd(card.id)}
 										/>
+									{:else if card.type === 'plugins'}
+										<PluginManagerCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
+										/>
 									{:else}
 										<!-- Other card types -->
 										<div class="card-placeholder">
@@ -1194,7 +1178,6 @@
 		open={showCardNavigator}
 		onClose={() => showCardNavigator = false}
 		onCreateChat={() => handleCreateCard('chat')}
-		onCreateAgent={() => handleCreateCard('agent')}
 		onCreateTerminal={() => handleCreateCard('terminal')}
 		onOpenThread={handleNavigatorOpenThread}
 		onOpenImageStudio={() => handleCreateCard('image-studio')}
@@ -1203,30 +1186,13 @@
 		onOpenFileBrowser={() => handleCreateCard('file-browser')}
 		onOpenProjects={() => handleCreateCard('project')}
 		onOpenProfiles={() => handleCreateCard('profile')}
+		onOpenSubagents={() => handleCreateCard('subagent')}
 		onOpenSettings={() => handleCreateCard('settings')}
+		onOpenPlugins={() => handleCreateCard('plugins')}
 		isAdmin={$isAdmin}
 		{isMobile}
 	/>
 
-	<!-- Create Menu (legacy - kept for potential fallback) -->
-	<CreateMenu
-		open={showCreateMenu}
-		onClose={() => showCreateMenu = false}
-		onCreateChat={() => handleCreateCard('chat')}
-		onCreateAgent={() => handleCreateCard('agent')}
-		onCreateTerminal={() => handleCreateCard('terminal')}
-		onOpenProfiles={() => handleCreateCard('profile')}
-		onOpenProjects={() => handleCreateCard('project')}
-		onOpenSubagents={() => handleCreateCard('subagent')}
-		onOpenSettings={() => handleCreateCard('settings')}
-		onOpenUserSettings={() => handleCreateCard('user-settings')}
-		onOpenImageStudio={() => handleCreateCard('image-studio')}
-		onOpenModelStudio={() => handleCreateCard('model-studio')}
-		onOpenAudioStudio={() => handleCreateCard('audio-studio')}
-		onOpenFileBrowser={() => handleCreateCard('file-browser')}
-		isAdmin={$isAdmin}
-		{isMobile}
-	/>
 
 	<!-- Spotlight Search (Cmd+K) -->
 	<SpotlightSearch
@@ -1289,16 +1255,6 @@
 			on:tagsUpdated={() => loadAllTags()}
 		/>
 	{/if}
-
-	<!-- Agent Import Modal -->
-	<AgentImportModal
-		show={showAgentImportModal}
-		on:close={() => showAgentImportModal = false}
-		on:imported={async () => {
-			await tabs.loadProfiles();
-			showAgentImportModal = false;
-		}}
-	/>
 
 	<!-- Knowledge Base Modal -->
 	{#if showKnowledgeModal && $activeTab?.project}

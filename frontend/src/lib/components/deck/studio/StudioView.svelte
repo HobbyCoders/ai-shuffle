@@ -188,11 +188,8 @@
 		// Find the store generation
 		const storeGen = $recentGenerations.find(g => g.id === generation.id);
 		if (storeGen) {
-			const assetId = studio.saveAsset(storeGen);
-			if (assetId) {
-				// Could show a toast notification here
-				console.log('[Studio] Saved to library:', assetId);
-			}
+			studio.saveAsset(storeGen);
+			// Could show a toast notification here
 		}
 	}
 

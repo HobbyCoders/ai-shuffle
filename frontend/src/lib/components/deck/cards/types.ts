@@ -4,7 +4,6 @@
 
 export type CardType =
   | 'chat'
-  | 'agent'
   | 'terminal'
   | 'settings'
   | 'profile'
@@ -14,7 +13,8 @@ export type CardType =
   | 'image-studio'
   | 'model-studio'
   | 'audio-studio'
-  | 'file-browser';
+  | 'file-browser'
+  | 'plugins';
 
 export interface DeckCard {
   id: string;
@@ -36,7 +36,6 @@ export interface DeckCard {
 
 export const DEFAULT_CARD_SIZES: Record<CardType, { width: number; height: number }> = {
   chat: { width: 480, height: 640 },
-  agent: { width: 400, height: 500 },
   terminal: { width: 600, height: 400 },
   settings: { width: 700, height: 650 },
   profile: { width: 600, height: 620 },
@@ -47,11 +46,11 @@ export const DEFAULT_CARD_SIZES: Record<CardType, { width: number; height: numbe
   'model-studio': { width: 800, height: 600 },
   'audio-studio': { width: 700, height: 500 },
   'file-browser': { width: 600, height: 500 },
+  plugins: { width: 650, height: 550 },
 };
 
 export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }> = {
   chat: { width: 360, height: 400 },
-  agent: { width: 320, height: 300 },
   terminal: { width: 400, height: 200 },
   settings: { width: 500, height: 400 },
   profile: { width: 450, height: 400 },
@@ -62,6 +61,7 @@ export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }>
   'model-studio': { width: 500, height: 400 },
   'audio-studio': { width: 450, height: 350 },
   'file-browser': { width: 400, height: 350 },
+  plugins: { width: 500, height: 450 },
 };
 
 /**

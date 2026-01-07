@@ -236,7 +236,7 @@
 
 	function resetViewerCamera() {
 		// Reset 3D camera to default position
-		console.log('Resetting camera view');
+		// Implementation would reset camera to initial view
 	}
 
 	function toggleWireframe() {
@@ -267,7 +267,6 @@
 	onMount(() => {
 		// Three.js initialization would go here
 		// For now, this is a placeholder for the actual implementation
-		console.log('3D Viewer initialized');
 
 		return () => {
 			// Cleanup Three.js resources

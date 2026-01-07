@@ -13,7 +13,6 @@
 	import { groups as groupsStore } from '$lib/stores/groups';
 	import { plugins, installedPlugins, fileBasedAgents } from '$lib/stores/plugins';
 	import type { PluginInfo, FileBasedAgent } from '$lib/api/plugins';
-	import { PluginCard } from '$lib/components/plugins';
 	import './card-design-system.css';
 
 	// Types
@@ -61,6 +60,7 @@
 		onResize: (w: number, h: number) => void;
 		onDragEnd?: () => void;
 		onResizeEnd?: () => void;
+		onOpenPlugins?: () => void;
 		mobile?: boolean;
 	}
 
@@ -73,6 +73,7 @@
 		onResize,
 		onDragEnd,
 		onResizeEnd,
+		onOpenPlugins,
 		mobile = false
 	}: Props = $props();
 
@@ -148,8 +149,20 @@
 		cwd: '',
 		add_dirs: '',
 		user: '',
-		max_buffer_size: null as number | null
+		max_buffer_size: null as number | null,
+		env_vars: [] as { key: string; value: string }[]
 	});
+
+	// Common environment variable presets with valid ranges
+	const envVarPresets = [
+		{ key: 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', placeholder: '1 - 64000' },
+		{ key: 'MAX_THINKING_TOKENS', placeholder: '1024 - 128000' },
+		{ key: 'MAX_MCP_OUTPUT_TOKENS', placeholder: '1 - 25000 (default)' },
+		{ key: 'BASH_DEFAULT_TIMEOUT_MS', placeholder: 'ms (default: 120000)' },
+		{ key: 'BASH_MAX_TIMEOUT_MS', placeholder: 'ms (default: 600000)' },
+		{ key: 'MCP_TIMEOUT', placeholder: 'ms for server startup' },
+		{ key: 'MCP_TOOL_TIMEOUT', placeholder: 'ms for tool execution' }
+	];
 
 	// Tool selection mode
 	let toolSelectionMode = $state<'all' | 'allow' | 'disallow'>('all');
@@ -164,7 +177,6 @@
 	let profileImporting = $state(false);
 
 	// Plugin management
-	let showPluginManager = $state(false);
 	let pluginAgents = $derived($fileBasedAgents);
 	let installedPluginsList = $derived($installedPlugins);
 
@@ -251,7 +263,8 @@
 			cwd: '',
 			add_dirs: '',
 			user: '',
-			max_buffer_size: null
+			max_buffer_size: null,
+			env_vars: []
 		};
 		toolSelectionMode = 'all';
 		aiToolSelectionMode = 'custom';
@@ -329,7 +342,8 @@
 			cwd: (config as any).cwd || '',
 			add_dirs: ((config as any).add_dirs || []).join(', '),
 			user: (config as any).user || '',
-			max_buffer_size: (config as any).max_buffer_size || null
+			max_buffer_size: (config as any).max_buffer_size || null,
+			env_vars: Object.entries((config as any).env || {}).map(([key, value]) => ({ key, value: value as string }))
 		};
 
 		viewMode = 'form';
@@ -519,6 +533,15 @@
 		if (profileForm.user.trim()) config.user = profileForm.user;
 		if (profileForm.max_buffer_size) config.max_buffer_size = profileForm.max_buffer_size;
 
+		// Environment variables - convert array to dict
+		const validEnvVars = profileForm.env_vars.filter(v => v.key.trim());
+		if (validEnvVars.length > 0) {
+			config.env = validEnvVars.reduce((acc, { key, value }) => {
+				acc[key.trim()] = value;
+				return acc;
+			}, {} as Record<string, string>);
+		}
+
 		// AI tools
 		const effectiveAITools =
 			aiToolSelectionMode === 'all' ? getAllAIToolIds() : profileForm.enabled_ai_tools;
@@ -642,7 +665,7 @@
 </script>
 
 {#snippet content()}
-	<div class="card-system profile-card">
+	<div class="card-system profile-card" class:maximized={card.maximized}>
 		{#if viewMode === 'form'}
 			<!-- Form View with Tabs -->
 			<!-- Tab Navigation -->
@@ -712,6 +735,7 @@
 
 			<!-- Tab Content -->
 			<div class="card-content">
+				<div class="centered-content">
 				{#if activeTab === 'general'}
 					<!-- General Tab -->
 					<div class="card-form-section">
@@ -1092,7 +1116,7 @@
 							<button
 								type="button"
 								class="text-btn primary"
-								onclick={() => (showPluginManager = true)}
+								onclick={() => onOpenPlugins?.()}
 							>
 								Manage Plugins
 							</button>
@@ -1150,7 +1174,7 @@
 								<button
 									type="button"
 									class="card-btn-secondary small"
-									onclick={() => (showPluginManager = true)}
+									onclick={() => onOpenPlugins?.()}
 								>
 									Browse Plugins
 								</button>
@@ -1182,7 +1206,7 @@
 									<button
 										type="button"
 										class="show-more-btn"
-										onclick={() => (showPluginManager = true)}
+										onclick={() => onOpenPlugins?.()}
 									>
 										+{installedPluginsList.length - 6} more plugins
 									</button>
@@ -1192,7 +1216,7 @@
 								<button
 									type="button"
 									class="card-btn-secondary small"
-									onclick={() => (showPluginManager = true)}
+									onclick={() => onOpenPlugins?.()}
 								>
 									Open Plugin Manager
 								</button>
@@ -1327,7 +1351,75 @@
 							/>
 						</div>
 					</div>
+
+					<div class="card-form-section">
+						<h3 class="card-form-title">Environment Variables</h3>
+						<p class="card-form-description">Set environment variables for Claude Code sessions using this profile.</p>
+
+						<!-- Add Variable Dropdown -->
+						<div class="env-var-add">
+							<select
+								class="card-form-input"
+								onchange={(e) => {
+									const target = e.target as HTMLSelectElement;
+									const key = target.value;
+									if (key === '__custom__') {
+										profileForm.env_vars = [...profileForm.env_vars, { key: '', value: '' }];
+									} else if (key && !profileForm.env_vars.some(v => v.key === key)) {
+										profileForm.env_vars = [...profileForm.env_vars, { key, value: '' }];
+									}
+									target.value = '';
+								}}
+							>
+								<option value="">+ Add variable...</option>
+								{#each envVarPresets as preset}
+									{#if !profileForm.env_vars.some(v => v.key === preset.key)}
+										<option value={preset.key}>{preset.key}</option>
+									{/if}
+								{/each}
+								<option value="__custom__">Custom variable...</option>
+							</select>
+						</div>
+
+						<!-- Environment Variable Rows -->
+						{#if profileForm.env_vars.length > 0}
+							<div class="env-var-list">
+								{#each profileForm.env_vars as envVar, index}
+									{@const preset = envVarPresets.find(p => p.key === envVar.key)}
+									<div class="env-var-row">
+										<input
+											type="text"
+											bind:value={envVar.key}
+											class="card-form-input card-form-input--mono env-var-key"
+											placeholder="VARIABLE_NAME"
+										/>
+										<input
+											type="text"
+											bind:value={envVar.value}
+											class="card-form-input card-form-input--mono env-var-value"
+											placeholder={preset?.placeholder || 'value'}
+										/>
+										<button
+											type="button"
+											class="env-var-remove"
+											title="Remove variable"
+											onclick={() => {
+												profileForm.env_vars = profileForm.env_vars.filter((_, i) => i !== index);
+											}}
+										>
+											<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+											</svg>
+										</button>
+									</div>
+								{/each}
+							</div>
+						{:else}
+							<p class="env-var-empty">No environment variables configured.</p>
+						{/if}
+					</div>
 				{/if}
+				</div>
 			</div>
 
 			<!-- Form Footer -->
@@ -1386,6 +1478,7 @@
 
 			<!-- Profile List -->
 			<div class="card-content">
+				<div class="centered-content">
 				{#if filteredProfiles.length === 0}
 					<div class="card-empty-state">
 						{#if searchQuery}
@@ -1518,6 +1611,7 @@
 						</div>
 					{/each}
 				{/if}
+				</div>
 			</div>
 
 			<!-- List Footer -->
@@ -1569,25 +1663,6 @@
 	</BaseCard>
 {/if}
 
-<!-- Plugin Manager Modal -->
-{#if showPluginManager}
-	<div class="plugin-modal-overlay" onclick={() => (showPluginManager = false)}>
-		<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-		<div class="plugin-modal-container" onclick={(e) => e.stopPropagation()}>
-			<div class="plugin-modal-header">
-				<h2>Plugin Manager</h2>
-				<button class="close-btn" onclick={() => (showPluginManager = false)}>
-					<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-					</svg>
-				</button>
-			</div>
-			<div class="plugin-modal-content">
-				<PluginCard />
-			</div>
-		</div>
-	</div>
-{/if}
 
 <style>
 	/* Profile Card Container */
@@ -1599,6 +1674,25 @@
 		overflow: hidden;
 	}
 
+	/* Maximized state - constrain width and center content */
+	.profile-card.maximized {
+		--card-max-width: 900px;
+	}
+
+	.profile-card.maximized :global(.card-tabs),
+	.profile-card.maximized :global(.card-header),
+	.profile-card.maximized .card-search-wrapper,
+	.profile-card.maximized :global(.card-footer) {
+		max-width: var(--card-max-width);
+		margin-left: auto;
+		margin-right: auto;
+		width: 100%;
+	}
+
+	.profile-card.maximized .centered-content {
+		max-width: var(--card-max-width);
+	}
+
 	.profile-card-mobile {
 		height: 100%;
 		display: flex;
@@ -1607,6 +1701,13 @@
 
 	.hidden {
 		display: none;
+	}
+
+	/* Centered content wrapper - prevents content from stretching too wide on large screens */
+	.centered-content {
+		width: 100%;
+		max-width: 900px;
+		margin: 0 auto;
 	}
 
 	/* Search Wrapper - for padding around search */
@@ -2348,79 +2449,6 @@
 	/* Required indicator */
 	.required {
 		color: var(--destructive);
-	}
-
-	/* Plugin Modal */
-	.plugin-modal-overlay {
-		position: fixed;
-		inset: 0;
-		background: rgba(0, 0, 0, 0.6);
-		backdrop-filter: blur(4px);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		z-index: 1000;
-		padding: 24px;
-	}
-
-	.plugin-modal-container {
-		width: 100%;
-		max-width: 900px;
-		max-height: 85vh;
-		background: var(--surface-0);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-xl, 18px);
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-		box-shadow: var(--shadow-lg), 0 20px 60px rgba(0, 0, 0, 0.4);
-	}
-
-	.plugin-modal-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: var(--space-4, 16px) var(--space-5, 20px);
-		border-bottom: 1px solid var(--border-subtle);
-		flex-shrink: 0;
-	}
-
-	.plugin-modal-header h2 {
-		font-size: var(--text-xl, 1.125rem);
-		font-weight: 600;
-		color: var(--text-primary);
-		margin: 0;
-	}
-
-	.close-btn {
-		width: 32px;
-		height: 32px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: transparent;
-		border: none;
-		border-radius: var(--radius-sm, 6px);
-		color: var(--text-secondary);
-		cursor: pointer;
-		transition: all var(--transition-fast, 100ms);
-	}
-
-	.close-btn:hover {
-		background: var(--surface-1);
-		color: var(--text-primary);
-	}
-
-	.close-btn svg {
-		width: 18px;
-		height: 18px;
-	}
-
-	.plugin-modal-content {
-		flex: 1;
-		overflow: hidden;
-		display: flex;
-		flex-direction: column;
 	}
 
 	/* Scrollbar styling */

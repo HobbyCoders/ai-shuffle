@@ -466,7 +466,7 @@ class PluginService:
                 readme_path = plugin_dir / "README.md"
                 if readme_path.exists():
                     try:
-                        content = readme_path.read_text()
+                        content = readme_path.read_text(encoding='utf-8')
                         # Extract first paragraph as description
                         lines = content.strip().split("\n")
                         for line in lines:
@@ -474,7 +474,7 @@ class PluginService:
                             if line and not line.startswith("#"):
                                 description = line[:200]
                                 break
-                    except IOError:
+                    except (IOError, UnicodeDecodeError):
                         pass
 
                 # Check what components the plugin has
@@ -510,13 +510,21 @@ class PluginService:
         enabled_plugins = settings.get("enabledPlugins", {})
 
         plugins = []
+        file_version = installed_data.get("version", 1)
 
-        for plugin_id, installations in installed_data.get("plugins", {}).items():
-            if not installations:
+        for plugin_id, installation_data in installed_data.get("plugins", {}).items():
+            if not installation_data:
                 continue
 
-            # Use the first (usually only) installation
-            install = installations[0]
+            # Handle both version 1 (single object) and version 2 (array) formats
+            if file_version == 1 or isinstance(installation_data, dict):
+                # Version 1: plugins are single objects
+                install = installation_data
+            else:
+                # Version 2: plugins are arrays
+                install = installation_data[0] if installation_data else None
+                if not install:
+                    continue
             parts = plugin_id.rsplit("@", 1)
             name = parts[0]
             marketplace = parts[1] if len(parts) > 1 else "local"
@@ -545,14 +553,14 @@ class PluginService:
             readme_path = install_path / "README.md"
             if readme_path.exists():
                 try:
-                    content = readme_path.read_text()
+                    content = readme_path.read_text(encoding='utf-8')
                     lines = content.strip().split("\n")
                     for line in lines:
                         line = line.strip()
                         if line and not line.startswith("#"):
                             description = line[:200]
                             break
-                except IOError:
+                except (IOError, UnicodeDecodeError):
                     pass
 
             plugins.append(PluginInfo(
@@ -578,12 +586,19 @@ class PluginService:
         installed_data = self._read_json_file(self.INSTALLED_FILE, {"version": 2, "plugins": {}})
         settings = self._read_json_file(self.SETTINGS_FILE, {})
         enabled_plugins = settings.get("enabledPlugins", {})
+        file_version = installed_data.get("version", 1)
 
-        installations = installed_data.get("plugins", {}).get(plugin_id, [])
-        if not installations:
+        installation_data = installed_data.get("plugins", {}).get(plugin_id)
+        if not installation_data:
             return None
 
-        install = installations[0]
+        # Handle both version 1 (single object) and version 2 (array) formats
+        if file_version == 1 or isinstance(installation_data, dict):
+            install = installation_data
+        else:
+            install = installation_data[0] if installation_data else None
+            if not install:
+                return None
         parts = plugin_id.rsplit("@", 1)
         name = parts[0]
         marketplace = parts[1] if len(parts) > 1 else "local"
@@ -632,8 +647,8 @@ class PluginService:
         readme_path = install_path / "README.md"
         if readme_path.exists():
             try:
-                readme = readme_path.read_text()
-            except IOError:
+                readme = readme_path.read_text(encoding='utf-8')
+            except (IOError, UnicodeDecodeError):
                 pass
 
         # Extract description from README
@@ -774,11 +789,18 @@ class PluginService:
             True if successful
         """
         installed = self._read_json_file(self.INSTALLED_FILE, {"version": 2, "plugins": {}})
+        file_version = installed.get("version", 1)
 
         if plugin_id not in installed.get("plugins", {}):
             raise ValueError(f"Plugin not installed: {plugin_id}")
 
-        installations = installed["plugins"][plugin_id]
+        installation_data = installed["plugins"][plugin_id]
+
+        # Handle both version 1 (single object) and version 2 (array) formats
+        if file_version == 1 or isinstance(installation_data, dict):
+            installations = [installation_data]
+        else:
+            installations = installation_data if installation_data else []
 
         # Remove from filesystem
         for install in installations:
@@ -851,7 +873,7 @@ class PluginService:
 
             for agent_file in agents_dir.glob("**/*.md"):
                 try:
-                    content = agent_file.read_text()
+                    content = agent_file.read_text(encoding='utf-8')
 
                     # Parse YAML frontmatter
                     agent_data = self._parse_agent_frontmatter(content)

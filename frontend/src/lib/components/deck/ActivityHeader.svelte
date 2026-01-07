@@ -5,7 +5,7 @@
 	 * Always visible at the top of the Activity Panel
 	 */
 
-	import { MessageSquare, Bot, Loader2, AlertCircle } from 'lucide-svelte';
+	import { MessageSquare, Loader2, AlertCircle } from 'lucide-svelte';
 	import type { ActiveSession } from './ActivityPanel.svelte';
 
 	interface Props {
@@ -18,9 +18,8 @@
 		onSessionClick
 	}: Props = $props();
 
-	// Separate chats and agents for display
+	// Filter chat sessions for display
 	const chats = $derived(sessions.filter(s => s.type === 'chat'));
-	const agents = $derived(sessions.filter(s => s.type === 'agent'));
 
 	function getStatusColor(status: ActiveSession['status']): string {
 		switch (status) {
@@ -40,7 +39,7 @@
 	function getStatusIcon(session: ActiveSession) {
 		if (session.status === 'error') return AlertCircle;
 		if (session.status === 'streaming' || session.status === 'running') return Loader2;
-		return session.type === 'agent' ? Bot : MessageSquare;
+		return MessageSquare;
 	}
 
 	function isAnimating(status: ActiveSession['status']): boolean {
@@ -72,9 +71,6 @@
 					</div>
 					<div class="session-info">
 						<span class="session-title">{session.title}</span>
-						{#if session.type === 'agent' && session.progress !== undefined}
-							<span class="session-progress">{session.progress}%</span>
-						{/if}
 					</div>
 					{#if session.unread}
 						<div class="unread-dot"></div>
@@ -171,13 +167,6 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-	}
-
-	.session-progress {
-		font-size: 0.625rem;
-		font-weight: 600;
-		color: var(--success);
-		flex-shrink: 0;
 	}
 
 	.unread-dot {

@@ -12,7 +12,7 @@
 	 * - Glassmorphism styling
 	 */
 
-	import { MessageSquare, Bot, Terminal, Square, X, Maximize2, Copy, Settings, User, Users, FolderKanban } from 'lucide-svelte';
+	import { MessageSquare, Bot, Terminal, Square, X, Maximize2, Copy, Settings, User, Users, FolderKanban, Puzzle, Image, Box, AudioLines, FolderOpen } from 'lucide-svelte';
 	import type { DeckCard, CardType } from './types';
 	import type { Snippet } from 'svelte';
 	import { layoutMode } from '$lib/stores/deck';
@@ -66,6 +66,12 @@
 		profile: User,
 		subagent: Users,
 		project: FolderKanban,
+		plugins: Puzzle,
+		'user-settings': Settings,
+		'image-studio': Image,
+		'model-studio': Box,
+		'audio-studio': AudioLines,
+		'file-browser': FolderOpen,
 	};
 
 	const CardIcon = $derived(cardIcons[card.type]);

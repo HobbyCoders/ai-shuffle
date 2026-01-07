@@ -137,6 +137,126 @@ The chat UI automatically converts these links into embedded video players with 
 - `veo-3.1-fast-generate-preview` - Fast generation, lower latency (~$0.15/sec)
 - `veo-3.1-generate-preview` - High quality generation (~$0.40/sec)
 
+---
+
+### 3D Model Generation (Meshy)
+
+Generate AI 3D models using Meshy's API. Supports text-to-3D, image-to-3D, retexturing, rigging, and animation.
+
+**Setup:** Configure your Meshy API key in Settings > Integrations > Meshy (get key from https://app.meshy.ai/settings/api)
+
+#### Text to 3D
+
+```typescript
+// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
+import { textTo3D } from '/opt/ai-tools/dist/model3d-generation/textTo3D.js';
+
+// Generate a 3D model from text
+const result = await textTo3D({
+  prompt: 'A medieval sword with ornate handle',
+  art_style: 'realistic',  // 'realistic', 'cartoon', 'low-poly', 'sculpture'
+  topology: 'quad'  // 'quad' or 'triangle'
+});
+
+// Generation takes 2-5 minutes. Poll for completion using getTask3D
+console.log(JSON.stringify(result));
+```
+
+**Parameters:**
+- `prompt` (required): Text description of the 3D model to generate
+- `art_style` (optional): Style of the model - `realistic`, `cartoon`, `low-poly`, `sculpture`
+- `topology` (optional): Mesh topology - `quad` or `triangle`
+- `target_polycount` (optional): Target polygon count for the mesh
+
+**Returns:**
+- `task_id`: ID for polling task status
+- `status`: Task status (PENDING, IN_PROGRESS, SUCCEEDED, FAILED)
+- `model_urls`: Download URLs for GLB, FBX, OBJ, USDZ formats (when complete)
+- `thumbnail_url`: Preview thumbnail URL
+- `video_url`: 360° preview video URL
+- `error`: Error message if failed
+
+#### Image to 3D
+
+```typescript
+import { imageTo3D } from '/opt/ai-tools/dist/model3d-generation/imageTo3D.js';
+
+// Convert an image to a 3D model
+const result = await imageTo3D({
+  image_path: '/path/to/reference.png',
+  topology: 'quad'
+});
+
+console.log(JSON.stringify(result));
+```
+
+**Parameters:**
+- `image_path` (required): Path to the reference image
+- `topology` (optional): Mesh topology - `quad` or `triangle`
+
+#### Retexture 3D
+
+```typescript
+import { retexture3D } from '/opt/ai-tools/dist/model3d-generation/retexture3D.js';
+
+// Apply new AI textures to an existing model
+const result = await retexture3D({
+  model_path: '/path/to/model.glb',  // or URL
+  prompt: 'Worn leather texture with scratches',
+  art_style: 'realistic'
+});
+
+console.log(JSON.stringify(result));
+```
+
+#### Rig 3D (Auto-Rigging)
+
+```typescript
+import { rig3D } from '/opt/ai-tools/dist/model3d-generation/rig3D.js';
+
+// Add animation skeleton to a humanoid model
+const result = await rig3D({
+  model_path: '/path/to/humanoid.glb'
+});
+
+console.log(JSON.stringify(result));
+```
+
+**Note:** Only works with humanoid models with proper proportions.
+
+#### Animate 3D
+
+```typescript
+import { animate3D } from '/opt/ai-tools/dist/model3d-generation/animate3D.js';
+
+// Apply preset animation to a rigged model
+const result = await animate3D({
+  model_path: '/path/to/rigged_model.glb',
+  animation: 'walk'  // 'walk', 'run', 'jump', 'idle', 'wave', etc.
+});
+
+console.log(JSON.stringify(result));
+```
+
+**Note:** Model must be rigged first using rig3D.
+
+#### Check Task Status
+
+```typescript
+import { getTask3D } from '/opt/ai-tools/dist/model3d-generation/getTask3D.js';
+
+// Poll for task completion
+const result = await getTask3D({
+  task_id: 'your-task-id'
+});
+
+console.log(JSON.stringify(result));
+```
+
+**Returns:** Status, model URLs, thumbnail URL, video URL when complete.
+
+---
+
 ## Architecture
 
 ```
@@ -195,10 +315,14 @@ export async function myTool(input: MyToolInput): Promise<MyToolResponse> {
 |------|----------|------|
 | Image Generation | Google Gemini (Nano Banana) | ~$0.039/image |
 | Image Editing | Google Gemini (Nano Banana) | ~$0.039/image |
+| Video Generation | Google Veo | ~$0.15-$0.40/sec |
+| Text to 3D | Meshy | ~5-20 credits |
+| Image to 3D | Meshy | ~5-20 credits |
+| Retexture 3D | Meshy | ~5-10 credits |
+| Rig 3D | Meshy | ~5 credits |
+| Animate 3D | Meshy | ~5-10 credits |
 
 ## Future Tools
 
 - **Voice Synthesis**: Text-to-speech using ElevenLabs or similar
-- **Video Generation**: AI video creation
 - **Music Generation**: AI music/audio creation
-- **3D Generation**: 3D model creation

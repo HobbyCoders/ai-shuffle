@@ -142,7 +142,6 @@
 
 	function handleBulkDownload() {
 		// Placeholder for bulk download
-		console.log('Bulk download:', selectedIds);
 	}
 
 	function handleView(asset: DeckGeneration, event: MouseEvent) {
@@ -150,9 +149,9 @@
 		onSelect?.(asset);
 	}
 
-	function handleEdit(asset: DeckGeneration, event: MouseEvent) {
+	function handleEdit(_asset: DeckGeneration, event: MouseEvent) {
 		event.stopPropagation();
-		console.log('Edit asset:', asset.id);
+		// Placeholder for edit functionality
 	}
 
 	function handleDelete(asset: DeckGeneration, event: MouseEvent) {
@@ -160,9 +159,9 @@
 		studio.deleteAsset(asset.id);
 	}
 
-	function handleDownload(asset: DeckGeneration, event: MouseEvent) {
+	function handleDownload(_asset: DeckGeneration, event: MouseEvent) {
 		event.stopPropagation();
-		console.log('Download asset:', asset.id);
+		// Placeholder for download functionality
 	}
 
 	function truncatePrompt(prompt: string, maxLength: number = 50): string {
