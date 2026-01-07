@@ -7,7 +7,7 @@
 	 * - Card layout mode selector
 	 * - All navigation via the card deck navigator overlay
 	 *
-	 * On mobile (<640px), dealer button moves to bottom center.
+	 * On mobile (<640px), dealer button moves to bottom left.
 	 */
 
 	import { onMount } from 'svelte';
@@ -496,14 +496,13 @@
 	}
 
 	/* ===================================
-	   MOBILE DEALER BUTTON - Bottom center
+	   MOBILE DEALER BUTTON - Bottom left
 	   =================================== */
 
 	.dealer-button-mobile {
 		position: absolute;
 		bottom: max(20px, env(safe-area-inset-bottom, 20px));
-		left: 50%;
-		transform: translateX(-50%);
+		left: max(16px, env(safe-area-inset-left, 16px));
 		z-index: 9999;
 		width: 52px;
 		height: 52px;
@@ -521,12 +520,12 @@
 
 	.dealer-button-mobile:hover {
 		background: var(--accent);
-		transform: translateX(-50%) translateY(-2px);
+		transform: translateY(-2px);
 		box-shadow: var(--shadow-l);
 	}
 
 	.dealer-button-mobile:active {
-		transform: translateX(-50%) scale(0.96);
+		transform: scale(0.96);
 	}
 
 	.dealer-button-mobile :global(.dealer-icon) {
