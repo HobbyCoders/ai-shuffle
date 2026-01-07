@@ -82,6 +82,9 @@ export interface ChatTab {
 	totalTokensOut: number;
 	totalCacheCreationTokens: number;
 	totalCacheReadTokens: number;
+	// Actual context window usage from /context command (source of truth)
+	contextUsed: number | null;
+	contextMax: number;
 }
 
 interface TabsState {
@@ -219,7 +222,9 @@ function createTabsStore() {
 			totalTokensIn: 0,
 			totalTokensOut: 0,
 			totalCacheCreationTokens: 0,
-			totalCacheReadTokens: 0
+			totalCacheReadTokens: 0,
+			contextUsed: null,
+			contextMax: 200000
 		}],
 		activeTabId: initialTabId,
 		profiles: [],
@@ -405,6 +410,20 @@ function createTabsStore() {
 						msgType = 'text';
 					} else if (!msgType && (m.role === 'tool_use' || m.role === 'tool_result')) {
 						msgType = m.role as MessageType;
+					}
+
+					// Handle system messages (e.g., /context, /compact output)
+					if (msgType === 'system' || m.role === 'system') {
+						return {
+							id: String(m.id || `msg-${i}`),
+							role: 'system' as const,
+							content: m.content as string,
+							type: 'system' as const,
+							systemSubtype: m.subtype as string | undefined,
+							systemData: { content: m.content } as Record<string, unknown>,
+							metadata: m.metadata as Record<string, unknown>,
+							streaming: false
+						};
 					}
 
 					// Build the chat message with all fields
@@ -606,11 +625,7 @@ function createTabsStore() {
 
 			case 'done': {
 				const metadata = data.metadata as Record<string, unknown>;
-				// Extract token counts from metadata
-				const tokensIn = (metadata?.tokens_in as number) || 0;
-				const tokensOut = (metadata?.tokens_out as number) || 0;
-				const cacheCreationTokens = (metadata?.cache_creation_tokens as number) || 0;
-				const cacheReadTokens = (metadata?.cache_read_tokens as number) || 0;
+				const sessionId = data.session_id as string;
 
 				update(s => ({
 					...s,
@@ -647,17 +662,35 @@ function createTabsStore() {
 							...tab,
 							messages,
 							isStreaming: false,
-							sessionId: data.session_id as string || tab.sessionId,
-							title,
-							// Accumulate input/output tokens (add to existing totals)
-							totalTokensIn: tab.totalTokensIn + tokensIn,
-							totalTokensOut: tab.totalTokensOut + tokensOut,
-							// Cache tokens represent current state, not incremental - use latest values
-							totalCacheCreationTokens: cacheCreationTokens,
-							totalCacheReadTokens: cacheReadTokens
+							sessionId: sessionId || tab.sessionId,
+							title
 						};
 					})
 				}));
+
+				// Load token counts from session history - single source of truth
+				// This is more reliable than tracking incremental tokens during streaming
+				if (sessionId) {
+					api.get<Session>(`/sessions/${sessionId}`).then(session => {
+						console.log('[Tab] Loaded session token counts:', {
+							sessionId,
+							total_tokens_in: session.total_tokens_in,
+							total_tokens_out: session.total_tokens_out,
+							cache_creation_tokens: session.cache_creation_tokens,
+							cache_read_tokens: session.cache_read_tokens,
+							context_tokens: session.context_tokens
+						});
+						updateTab(tabId, {
+							totalTokensIn: session.total_tokens_in || 0,
+							totalTokensOut: session.total_tokens_out || 0,
+							totalCacheCreationTokens: session.cache_creation_tokens || 0,
+							totalCacheReadTokens: session.cache_read_tokens || 0,
+							contextUsed: session.context_tokens || 0
+						});
+					}).catch(err => {
+						console.error('[Tab] Failed to load session token counts:', err);
+					});
+				}
 
 				// Refresh sessions list
 				loadSessionsInternal();
@@ -739,6 +772,14 @@ function createTabsStore() {
 
 				console.log('[WS] System message received:', subtype, systemData);
 
+				// Extract content for display - for local_command, the content is in data.content
+				let displayContent = '';
+				if (systemData?.content && typeof systemData.content === 'string') {
+					displayContent = systemData.content;
+				} else if (typeof systemData === 'object') {
+					displayContent = JSON.stringify(systemData, null, 2);
+				}
+
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
@@ -757,7 +798,7 @@ function createTabsStore() {
 						messages.push({
 							id: `system-${Date.now()}`,
 							role: 'system' as const,
-							content: JSON.stringify(systemData, null, 2),
+							content: displayContent,
 							type: 'system' as const,
 							systemSubtype: subtype,
 							systemData: systemData,
@@ -1071,7 +1112,9 @@ function createTabsStore() {
 						totalTokensIn: 0,
 						totalTokensOut: 0,
 						totalCacheCreationTokens: 0,
-						totalCacheReadTokens: 0
+						totalCacheReadTokens: 0,
+						contextUsed: null,
+						contextMax: 200000
 					}));
 
 					update(s => ({
@@ -1139,7 +1182,9 @@ function createTabsStore() {
 				totalTokensIn: 0,
 				totalTokensOut: 0,
 				totalCacheCreationTokens: 0,
-				totalCacheReadTokens: 0
+				totalCacheReadTokens: 0,
+				contextUsed: null,
+				contextMax: 200000
 			};
 
 			update(s => ({
@@ -1325,6 +1370,20 @@ function createTabsStore() {
 						msgType = m.role as MessageType;
 					}
 
+					// Handle system messages (e.g., /context, /compact output)
+					if (msgType === 'system' || m.role === 'system') {
+						return {
+							id: String(m.id || `msg-${i}`),
+							role: 'system' as const,
+							content: m.content as string,
+							type: 'system' as const,
+							systemSubtype: m.subtype as string | undefined,
+							systemData: { content: m.content } as Record<string, unknown>,
+							metadata: m.metadata as Record<string, unknown>,
+							streaming: false
+						};
+					}
+
 					// Build the chat message with all fields
 					const chatMessage: ChatMessage = {
 						id: String(m.id || `msg-${i}`),
@@ -1359,6 +1418,7 @@ function createTabsStore() {
 					title = firstUserMsg.content.substring(0, 30) + (firstUserMsg.content.length > 30 ? '...' : '');
 				}
 
+				// Load token totals from session history - single source of truth
 				updateTab(tabId, {
 					sessionId: session.id,
 					messages,
@@ -1366,7 +1426,6 @@ function createTabsStore() {
 					error: null,
 					totalTokensIn: session.total_tokens_in || 0,
 					totalTokensOut: session.total_tokens_out || 0,
-					// Cache tokens from JSONL file (if available)
 					totalCacheCreationTokens: session.cache_creation_tokens || 0,
 					totalCacheReadTokens: session.cache_read_tokens || 0
 				});
@@ -1438,7 +1497,9 @@ function createTabsStore() {
 				totalTokensIn: 0,
 				totalTokensOut: 0,
 				totalCacheCreationTokens: 0,
-				totalCacheReadTokens: 0
+				totalCacheReadTokens: 0,
+				contextUsed: null,
+				contextMax: 200000
 			});
 			connectTab(tabId);
 			// Save tabs state (debounced)

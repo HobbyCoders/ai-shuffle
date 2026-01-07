@@ -8,6 +8,7 @@ Based on patterns from Anvil's SessionManager:
 """
 
 import logging
+import re
 import uuid
 import asyncio
 from typing import Optional, Dict, Any, AsyncGenerator
@@ -1330,40 +1331,15 @@ async def stream_to_websocket(
     state.is_streaming = True
     state.last_activity = datetime.now()
 
-    # Handle /context command specially - SDK outputs to terminal, not as SystemMessage
-    if prompt.strip().lower() == "/context":
-        # Generate our own context summary
-        context_info = {
-            "session_id": session_id,
-            "sdk_session_id": sdk_session_id,
-            "profile": profile.get("name", profile_id) if isinstance(profile, dict) else profile_id,
-            "project": project.get("name") if project else None,
-            "working_directory": options.working_directory if options else None,
-            "model": options.model if options else None,
-            "tools_available": len(options.allowed_tools) if options and options.allowed_tools else "all",
-            "system_prompt_preview": (options.system_prompt[:500] + "...") if options and options.system_prompt and len(options.system_prompt) > 500 else (options.system_prompt if options else None),
-        }
-        yield {
-            "type": "system",
-            "subtype": "context",
-            "data": context_info
-        }
-        yield {
-            "type": "done",
-            "session_id": session_id,
-            "sdk_session_id": sdk_session_id,
-            "metadata": {"handled_locally": True}
-        }
-        # Clean up
-        state.is_streaming = False
-        return
+    # Initialize sdk_session_id - use resume_id if resuming, otherwise None until we get it from SDK
+    sdk_session_id = resume_id
 
     # Execute query
+    # Note: SDK built-in commands like /context and /compact are passed directly to the SDK
     response_text = []
     tool_messages = []  # Collect tool use/result messages for storage
     task_tool_uses = {}  # Track Task (subagent) tool uses by tool_id
     metadata = {}
-    sdk_session_id = resume_id
     interrupted = False
 
     try:
@@ -1508,13 +1484,42 @@ async def stream_to_websocket(
                 metadata["model"] = message.model
 
             elif isinstance(message, UserMessage):
-                # UserMessage contains tool results from Claude's tool executions
-                # The SDK sends tool results back as UserMessage with ToolResultBlock content
+                # UserMessage can contain:
+                # 1. Tool results from Claude's tool executions (ToolResultBlock)
+                # 2. Local command output like /context, /compact (TextBlock with <local-command-stdout>)
                 # Check if this message is from a subagent using parent_tool_use_id
                 parent_tool_id = message.parent_tool_use_id
 
+                # Handle string content (rare but possible)
+                if isinstance(message.content, str):
+                    content = message.content
+                    # Check for local command output
+                    if "<local-command-stdout>" in content:
+                        match = re.search(r'<local-command-stdout>(.*?)</local-command-stdout>', content, re.DOTALL)
+                        if match:
+                            yield {
+                                "type": "system",
+                                "subtype": "local_command",
+                                "data": {"content": match.group(1).strip()}
+                            }
+                    continue
+
                 for block in message.content:
-                    if isinstance(block, ToolResultBlock):
+                    # Handle TextBlock - may contain local command output
+                    if isinstance(block, TextBlock):
+                        text = block.text
+                        # Check for local command output (e.g., /context, /compact)
+                        if "<local-command-stdout>" in text:
+                            match = re.search(r'<local-command-stdout>(.*?)</local-command-stdout>', text, re.DOTALL)
+                            if match:
+                                yield {
+                                    "type": "system",
+                                    "subtype": "local_command",
+                                    "data": {"content": match.group(1).strip()}
+                                }
+                        # Don't yield regular text from UserMessage - it's usually meta/system info
+
+                    elif isinstance(block, ToolResultBlock):
                         output = str(block.content)[:2000] if block.content else ""
                         tool_use_id = block.tool_use_id
                         logger.debug(f"[WS] UserMessage ToolResultBlock - tool_use_id: {tool_use_id}, parent_tool_id: {parent_tool_id}, content length: {len(str(block.content) if block.content else '')}, is_error: {block.is_error}")

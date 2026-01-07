@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount, onDestroy, afterUpdate, tick } from 'svelte';
+	import { onMount, onDestroy, tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { auth, username, claudeAuthenticated, isAuthenticated, isAdmin } from '$lib/stores/auth';
 	import {
@@ -30,6 +30,7 @@
 	import RewindModal from '$lib/components/RewindModal.svelte';
 	import SystemMessage from '$lib/components/SystemMessage.svelte';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
+	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import SubagentMessage from '$lib/components/SubagentMessage.svelte';
 	import { executeCommand, isSlashCommand, syncAfterRewind, listCommands, type Command } from '$lib/api/commands';
@@ -44,7 +45,6 @@
 	let tabInputs: Record<string, string> = {};
 	let tabUploadedFiles: Record<string, FileUploadResponse[]> = {};
 
-	let messagesContainers: Record<string, HTMLElement> = {};
 	let sidebarOpen = false;
 	let sidebarTab: 'my-chats' | 'admin' = 'my-chats';
 
@@ -73,8 +73,58 @@
 		sidebarPinned = !sidebarPinned;
 	}
 
-	// Auto-scroll: ALWAYS scroll to bottom. No exceptions. No pausing.
-	// User can scroll up to read, but it will keep scrolling on new content.
+	// Auto-scroll: Simple logic
+	// - Always scroll to bottom UNLESS user scrolls up to read
+	// - Re-enable auto-scroll when user scrolls back to bottom
+	// Using a Svelte action for reliable DOM access
+
+	function autoScroll(node: HTMLElement, tabId: string) {
+		let userScrolledUp = false;
+
+		function isNearBottom(): boolean {
+			const threshold = 100;
+			return node.scrollHeight - node.scrollTop - node.clientHeight < threshold;
+		}
+
+		function scrollToBottom() {
+			node.scrollTop = node.scrollHeight;
+		}
+
+		function handleScroll() {
+			userScrolledUp = !isNearBottom();
+		}
+
+		// Create a MutationObserver to watch for content changes
+		const observer = new MutationObserver(() => {
+			if (!userScrolledUp) {
+				scrollToBottom();
+			}
+		});
+
+		observer.observe(node, {
+			childList: true,
+			subtree: true,
+			characterData: true
+		});
+
+		node.addEventListener('scroll', handleScroll);
+
+		// Initial scroll to bottom
+		scrollToBottom();
+
+		return {
+			update(newTabId: string) {
+				// When tab changes, reset and scroll
+				userScrolledUp = false;
+				scrollToBottom();
+			},
+			destroy() {
+				observer.disconnect();
+				node.removeEventListener('scroll', handleScroll);
+			}
+		};
+	}
+
 	let showProfileModal = false;
 	let showProjectModal = false;
 	let showNewProfileForm = false;
@@ -99,6 +149,10 @@
 	// Command autocomplete state
 	let showCommandAutocomplete: Record<string, boolean> = {};
 	let commandAutocompleteRefs: Record<string, CommandAutocomplete> = {};
+
+	// File autocomplete state (@ mentions)
+	let showFileAutocomplete: Record<string, boolean> = {};
+	let fileAutocompleteRefs: Record<string, FileAutocomplete> = {};
 
 	// Accordion states for profile form sections
 	let expandedSections: Record<string, boolean> = {
@@ -222,44 +276,6 @@
 		}
 	}
 
-	// Scroll to bottom - aggressive approach with multiple fallbacks
-	function scrollToBottom(tabId: string) {
-		const container = messagesContainers[tabId];
-		if (!container) return;
-		container.scrollTop = container.scrollHeight;
-	}
-
-	// Force scroll after DOM updates - using tick() for proper timing
-	async function forceScrollToBottom() {
-		if (!$activeTabId) return;
-		await tick(); // Wait for Svelte to update DOM
-		scrollToBottom($activeTabId);
-		// Double-tap with RAF for layout-dependent updates
-		requestAnimationFrame(() => {
-			if ($activeTabId) scrollToBottom($activeTabId);
-		});
-	}
-
-	// Scroll after every DOM update
-	afterUpdate(() => {
-		forceScrollToBottom();
-	});
-
-	// Scroll when messages change (reactive to the actual data)
-	$: if ($activeTab?.messages) {
-		forceScrollToBottom();
-	}
-
-	// Scroll when switching tabs
-	let previousTabId: string | null = null;
-	$: if ($activeTabId && $activeTabId !== previousTabId) {
-		previousTabId = $activeTabId;
-		// Multiple attempts to catch the container binding
-		forceScrollToBottom();
-		setTimeout(forceScrollToBottom, 50);
-		setTimeout(forceScrollToBottom, 150);
-	}
-
 	async function handleSubmit(tabId: string) {
 		const prompt = tabInputs[tabId] || '';
 		if (!prompt.trim() || !$activeTab || $activeTab.isStreaming) return;
@@ -272,27 +288,51 @@
 
 	function handleKeyDown(e: KeyboardEvent, tabId: string) {
 		// Let the command autocomplete handle the event first if visible
-		const autocomplete = commandAutocompleteRefs[tabId];
-		if (autocomplete && showCommandAutocomplete[tabId]) {
-			const handled = autocomplete.handleKeyDown(e);
+		const commandAutocomplete = commandAutocompleteRefs[tabId];
+		if (commandAutocomplete && showCommandAutocomplete[tabId]) {
+			const handled = commandAutocomplete.handleKeyDown(e);
 			if (handled) {
-				return; // Autocomplete handled the event
+				return; // Command autocomplete handled the event
 			}
 		}
 
-		// Normal textarea behavior
-		if (e.key === 'Enter' && !e.shiftKey) {
+		// Let file autocomplete handle the event if visible
+		const fileAutocomplete = fileAutocompleteRefs[tabId];
+		if (fileAutocomplete && showFileAutocomplete[tabId]) {
+			const handled = fileAutocomplete.handleKeyDown(e);
+			if (handled) {
+				return; // File autocomplete handled the event
+			}
+		}
+
+		// Normal textarea behavior - on desktop, Enter sends; on mobile, let Enter create newlines
+		// Mobile detection: touch device with narrow screen
+		const isMobile = window.matchMedia('(max-width: 640px)').matches && ('ontouchstart' in window);
+
+		if (e.key === 'Enter' && !e.shiftKey && !isMobile) {
 			e.preventDefault();
 			handleSubmit(tabId);
 		}
 	}
 
-	// Handle input changes for command autocomplete
+	// Check if input contains an active @ mention (at start or after whitespace)
+	function hasActiveAtMention(input: string): boolean {
+		// Look for @ that's either at start or preceded by whitespace, and not yet completed
+		const match = input.match(/(?:^|[\s])@([^\s]*)$/);
+		return match !== null;
+	}
+
+	// Handle input changes for command and file autocomplete
 	function handleInputChange(tabId: string) {
 		const input = tabInputs[tabId] || '';
-		// Show autocomplete when input starts with /
+
+		// Show command autocomplete when input starts with /
 		showCommandAutocomplete[tabId] = input.startsWith('/') && input.length > 0;
 		showCommandAutocomplete = showCommandAutocomplete;
+
+		// Show file autocomplete when there's an active @ mention
+		showFileAutocomplete[tabId] = hasActiveAtMention(input) && !!$activeTab?.project;
+		showFileAutocomplete = showFileAutocomplete;
 	}
 
 	// Handle command selection from autocomplete
@@ -316,6 +356,67 @@
 				}
 			}, 0);
 		}
+	}
+
+	// Handle file selection from @ autocomplete
+	function handleFileSelect(tabId: string, file: FileItem) {
+		const input = tabInputs[tabId] || '';
+
+		// Find the last @ mention to replace
+		const match = input.match(/(?:^|[\s])@([^\s]*)$/);
+		if (!match) {
+			showFileAutocomplete[tabId] = false;
+			showFileAutocomplete = showFileAutocomplete;
+			return;
+		}
+
+		// Calculate where the @ starts
+		const atStartIndex = match.index! + (match[0].startsWith('@') ? 0 : 1);
+
+		// For directories, replace with path and keep autocomplete open
+		if (file.type === 'directory') {
+			const newInput = input.substring(0, atStartIndex) + '@' + file.path;
+			tabInputs[tabId] = newInput;
+			tabInputs = tabInputs;
+			// Keep autocomplete open for directory navigation
+			setTimeout(() => {
+				const textarea = textareas[tabId];
+				if (textarea) {
+					textarea.focus();
+					textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+				}
+			}, 0);
+			return;
+		}
+
+		// For files, add to the uploaded files list and replace @ mention with chip reference
+		const fileRef: FileUploadResponse = {
+			filename: file.name,
+			path: file.path,
+			full_path: file.path,
+			size: file.size || 0
+		};
+
+		// Add to tracked files
+		if (!tabUploadedFiles[tabId]) tabUploadedFiles[tabId] = [];
+		tabUploadedFiles[tabId] = [...tabUploadedFiles[tabId], fileRef];
+
+		// Replace @query with the file reference format
+		const newInput = input.substring(0, atStartIndex) + `@${file.path} `;
+		tabInputs[tabId] = newInput;
+		tabInputs = tabInputs;
+
+		// Close autocomplete and focus
+		showFileAutocomplete[tabId] = false;
+		showFileAutocomplete = showFileAutocomplete;
+
+		setTimeout(() => {
+			const textarea = textareas[tabId];
+			if (textarea) {
+				textarea.focus();
+				textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+			}
+		}, 0);
 	}
 
 	// Open the terminal modal for interactive commands (like /resume)
@@ -505,19 +606,9 @@
 			console.log('[Page] Ignoring session click while loading');
 			return;
 		}
-		const tabId = tabs.openSession(sessionId);
+		tabs.openSession(sessionId);
 		sidebarOpen = false;
-
-		// Ensure auto-scroll is enabled and scroll after session loads
-		if (tabId) {
-			userScrolledAway = false;
-			isUserInteracting = false;
-			// Try scrolling multiple times as messages load async from API
-			setTimeout(() => scrollToBottom(tabId), 50);
-			setTimeout(() => scrollToBottom(tabId), 200);
-			setTimeout(() => scrollToBottom(tabId), 500);
-			setTimeout(() => scrollToBottom(tabId), 1000);
-		}
+		// Auto-scroll is handled by the autoScroll action on the messages container
 	}
 
 	async function deleteSession(e: Event, sessionId: string) {
@@ -715,7 +806,7 @@
 		fileInput?.click();
 	}
 
-	async function handleFileSelect(event: Event) {
+	async function handleFileUpload(event: Event) {
 		const input = event.target as HTMLInputElement;
 		const files = input.files;
 		if (!files || files.length === 0 || !$activeTab?.project || !$activeTabId) return;
@@ -728,10 +819,11 @@
 				if (!tabUploadedFiles[tabId]) tabUploadedFiles[tabId] = [];
 				tabUploadedFiles[tabId] = [...tabUploadedFiles[tabId], result];
 
-				const fileRef = `[File: ${result.path}]`;
+				// Use @ format for file references
+				const fileRef = `@${result.path}`;
 				const currentPrompt = tabInputs[tabId] || '';
 				if (currentPrompt.trim()) {
-					tabInputs[tabId] = currentPrompt + '\n' + fileRef;
+					tabInputs[tabId] = currentPrompt + ' ' + fileRef;
 				} else {
 					tabInputs[tabId] = fileRef;
 				}
@@ -751,9 +843,13 @@
 		const file = files[index];
 		if (!file) return;
 
-		const fileRef = `[File: ${file.path}]`;
+		// Remove both @ format and legacy [File: path] format
+		const atRef = `@${file.path}`;
+		const legacyRef = `[File: ${file.path}]`;
 		let prompt = tabInputs[tabId] || '';
-		prompt = prompt.replace(fileRef, '').replace(/\n\n+/g, '\n').trim();
+		prompt = prompt.replace(atRef, '').replace(legacyRef, '');
+		// Clean up extra spaces and newlines
+		prompt = prompt.replace(/\s+/g, ' ').trim();
 		tabInputs[tabId] = prompt;
 		tabInputs = tabInputs; // Trigger Svelte reactivity
 		tabUploadedFiles[tabId] = files.filter((_, i) => i !== index);
@@ -1360,14 +1456,30 @@
 					</div>
 				</div>
 
+				<!-- Rewind Button (after breadcrumb, only when session is active) -->
+				{#if currentTab.sessionId}
+					<button
+						on:click={() => openRewindModal(tabId)}
+						class="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors disabled:opacity-50 ml-2"
+						title="Rewind conversation"
+						disabled={currentTab.isStreaming}
+					>
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0019 16V8a1 1 0 00-1.6-.8l-5.333 4zM4.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0011 16V8a1 1 0 00-1.6-.8l-5.334 4z" />
+						</svg>
+						<span class="hidden sm:inline">Rewind</span>
+					</button>
+				{/if}
+
 				<!-- Spacer -->
 				<div class="flex-1"></div>
 
-				<!-- Right side: Token counts, rewind, connection status -->
+				<!-- Right side: Token counts, connection status -->
 				<div class="flex items-center gap-2 sm:gap-3">
 					<!-- Context usage dropdown (only show if any tokens > 0) -->
-					{#if currentTab.totalTokensIn > 0 || currentTab.totalTokensOut > 0}
-						{@const contextUsed = currentTab.totalTokensIn + currentTab.totalTokensOut + currentTab.totalCacheCreationTokens}
+					{#if currentTab.totalTokensIn > 0 || currentTab.totalTokensOut > 0 || currentTab.totalCacheCreationTokens > 0 || currentTab.totalCacheReadTokens > 0}
+						{@const autocompactBuffer = 45000}
+						{@const contextUsed = (currentTab.contextUsed ?? (currentTab.totalTokensIn + currentTab.totalCacheCreationTokens + currentTab.totalCacheReadTokens)) + autocompactBuffer}
 						{@const contextMax = 200000}
 						{@const contextPercent = Math.min((contextUsed / contextMax) * 100, 100)}
 						<div class="relative group">
@@ -1445,21 +1557,6 @@
 						</div>
 					{/if}
 
-					<!-- Rewind Button (only when session is active) -->
-					{#if currentTab.sessionId}
-						<button
-							on:click={() => openRewindModal(tabId)}
-							class="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors disabled:opacity-50"
-							title="Rewind conversation"
-							disabled={currentTab.isStreaming}
-						>
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0019 16V8a1 1 0 00-1.6-.8l-5.333 4zM4.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0011 16V8a1 1 0 00-1.6-.8l-5.334 4z" />
-							</svg>
-							<span class="hidden sm:inline">Rewind</span>
-						</button>
-					{/if}
-
 					<!-- Connection Status (always far right) -->
 					{#if currentTab.wsConnected}
 						<span class="flex items-center gap-1.5 text-xs text-green-500" title="Connected">
@@ -1493,7 +1590,7 @@
 
 			<!-- Messages Area -->
 			<div
-				bind:this={messagesContainers[tabId]}
+				use:autoScroll={tabId}
 				class="flex-1 overflow-y-auto"
 			>
 				{#if currentTab.messages.length === 0}
@@ -1537,8 +1634,8 @@
 											<span class="font-semibold text-sm text-foreground">You</span>
 											<span class="text-xs text-muted-foreground">{formatTime()}</span>
 										</div>
-										<div class="bg-card border border-border rounded-lg p-4 shadow-s">
-											<p class="whitespace-pre-wrap text-foreground">{message.content}</p>
+										<div class="bg-card border border-border rounded-lg p-4 shadow-s overflow-hidden">
+											<p class="whitespace-pre-wrap break-words overflow-wrap-anywhere text-foreground">{message.content}</p>
 										</div>
 									</div>
 								</div>
@@ -1740,7 +1837,7 @@
 					{/if}
 
 					<!-- Hidden file input -->
-					<input type="file" bind:this={fileInput} on:change={handleFileSelect} class="hidden" multiple />
+					<input type="file" bind:this={fileInput} on:change={handleFileUpload} class="hidden" multiple />
 
 					<!-- Input Form -->
 					<form on:submit|preventDefault={() => handleSubmit(tabId)} class="flex items-center gap-2">
@@ -1764,7 +1861,7 @@
 							{/if}
 						</button>
 
-						<!-- Textarea with Command Autocomplete -->
+						<!-- Textarea with Command and File Autocomplete -->
 						<div class="flex-1 relative">
 							<!-- Command Autocomplete -->
 							<CommandAutocomplete
@@ -1779,12 +1876,25 @@
 								}}
 							/>
 
+							<!-- File Autocomplete (@ mentions) -->
+							<FileAutocomplete
+								bind:this={fileAutocompleteRefs[tabId]}
+								inputValue={tabInputs[tabId] || ''}
+								projectId={currentTab.project}
+								visible={showFileAutocomplete[tabId] || false}
+								onSelect={(file) => handleFileSelect(tabId, file)}
+								onClose={() => {
+									showFileAutocomplete[tabId] = false;
+									showFileAutocomplete = showFileAutocomplete;
+								}}
+							/>
+
 							<textarea
 								bind:this={textareas[tabId]}
 								bind:value={tabInputs[tabId]}
 								on:input={() => handleInputChange(tabId)}
 								on:keydown={(e) => handleKeyDown(e, tabId)}
-								placeholder="Message Claude... (type / for commands)"
+								placeholder="Message Claude... (/ commands, @ files)"
 								class="w-full bg-card border border-border rounded-lg px-4 py-3 sm:py-2.5 text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:ring-2 focus:ring-ring h-[80px] sm:h-[44px] leading-normal shadow-s overflow-y-auto"
 								rows="1"
 								disabled={currentTab.isStreaming || !$claudeAuthenticated}
@@ -2211,6 +2321,10 @@
 {/if}
 
 <style>
+	.overflow-wrap-anywhere {
+		overflow-wrap: anywhere;
+		word-break: break-word;
+	}
 	.scrollbar-hide::-webkit-scrollbar {
 		display: none;
 	}

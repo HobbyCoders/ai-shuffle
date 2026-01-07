@@ -184,7 +184,8 @@ class SessionMessage(BaseModel):
     id: Any  # Can be int from DB or string from JSONL
     role: str  # user, assistant, system, tool
     content: str
-    type: Optional[str] = None  # text, tool_use, tool_result, subagent - critical for rendering
+    type: Optional[str] = None  # text, tool_use, tool_result, subagent, system - critical for rendering
+    subtype: Optional[str] = None  # For system messages (e.g., local_command, compact_boundary)
     tool_name: Optional[str] = None  # snake_case for DB compatibility
     tool_input: Optional[Dict[str, Any]] = None  # snake_case for DB compatibility
     toolName: Optional[str] = None  # camelCase for frontend compatibility
@@ -224,6 +225,8 @@ class Session(SessionBase):
     total_tokens_out: int = 0
     cache_creation_tokens: int = 0  # Tokens used to create cache (counts toward context)
     cache_read_tokens: int = 0  # Tokens read from cache (doesn't count toward context)
+    # Context window tokens = last_input + cache_creation + cache_read (current context size)
+    context_tokens: int = 0
     turn_count: int = 0
     created_at: datetime
     updated_at: datetime

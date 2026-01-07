@@ -297,6 +297,10 @@ SDK_BUILTIN_COMMANDS = {
     "context": {
         "description": "View current context including system prompt and files",
         "type": "sdk_builtin"
+    },
+    "compact": {
+        "description": "Compact conversation history to free up context space",
+        "type": "sdk_builtin"
     }
 }
 

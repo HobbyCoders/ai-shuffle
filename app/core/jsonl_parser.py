@@ -126,17 +126,21 @@ def _is_system_content(content: str) -> bool:
 
     These include:
     - Command-related tags like <command-name>, <command-message>, etc.
-    - Local command stdout markers
     - Interrupt messages
     - Empty XML tags
+
+    NOTE: <local-command-stdout> is NOT filtered - it contains actual command output
+    like /context and /compact results that should be displayed.
     """
     if not content:
         return True
 
     # Check for system/meta content patterns
+    # NOTE: <local-command-stdout> is intentionally NOT in this list
     system_patterns = [
-        "<command-",
-        "<local-command-stdout>",
+        "<command-name>",
+        "<command-message>",
+        "<command-args>",
         "[Request interrupted by user]",
         "Caveat: The messages below were generated",
     ]
@@ -147,6 +151,19 @@ def _is_system_content(content: str) -> bool:
             return True
 
     return False
+
+
+def _extract_local_command_output(content: str) -> Optional[str]:
+    """
+    Extract content from <local-command-stdout> tags if present.
+
+    Returns the extracted content, or None if no tags found.
+    """
+    import re
+    match = re.search(r'<local-command-stdout>(.*?)</local-command-stdout>', content, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return None
 
 
 def get_agent_jsonl_paths(sdk_session_id: str, working_dir: str = "/workspace") -> Dict[str, Path]:
@@ -360,11 +377,44 @@ def parse_session_history(
         timestamp = entry.get("timestamp")
         uuid = entry.get("uuid", f"msg-{msg_counter}")
 
+        # Handle system messages (e.g., compact_boundary)
+        if entry_type == "system":
+            subtype = entry.get("subtype")
+            system_content = entry.get("content", "")
+            msg_counter += 1
+
+            messages.append({
+                "id": uuid,
+                "role": "system",
+                "content": system_content,
+                "type": "system",
+                "subtype": subtype,
+                "metadata": {
+                    "timestamp": timestamp,
+                    "compactMetadata": entry.get("compactMetadata")
+                },
+                "streaming": False
+            })
+            continue
+
         if entry_type == "user" and role == "user":
             # User message - can be plain text, tool results, or array with text blocks
             if isinstance(content, str):
+                # Check for local command output (e.g., /context, /compact)
+                local_output = _extract_local_command_output(content)
+                if local_output is not None:
+                    msg_counter += 1
+                    messages.append({
+                        "id": uuid,
+                        "role": "system",
+                        "content": local_output,
+                        "type": "system",
+                        "subtype": "local_command",
+                        "metadata": {"timestamp": timestamp},
+                        "streaming": False
+                    })
                 # Plain user message - skip empty content and system/command-related messages
-                if content and not _is_system_content(content):
+                elif content and not _is_system_content(content):
                     msg_counter += 1
                     messages.append({
                         "id": uuid,
@@ -648,11 +698,14 @@ def get_session_cost_from_jsonl(
     # Cache tokens from final message represent current cache state
     # - cache_creation_input_tokens: take from last message (represents final cache size)
     # - cache_read_input_tokens: take from last message (represents what was read last)
+    # For context window calculation, we need last turn's input tokens (not cumulative)
     return {
         "total_tokens_in": total_input_tokens,
         "total_tokens_out": total_output_tokens,
         "cache_creation_tokens": last_usage.get("cache_creation_input_tokens", 0),
         "cache_read_tokens": last_usage.get("cache_read_input_tokens", 0),
+        # Last turn's input tokens for context calculation
+        "last_input_tokens": last_usage.get("input_tokens", 0),
         "model": model
     }
 

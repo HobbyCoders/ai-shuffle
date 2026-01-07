@@ -55,6 +55,8 @@ class FullRewindResult:
     code_rewound: bool = False
     messages_removed: int = 0
     files_restored: int = 0
+    commits_reverted: int = 0
+    revert_method: Optional[str] = None  # 'reset', 'revert', 'batch_revert', 'file_restore', 'none'
     error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -279,66 +281,302 @@ class GitSnapshotService:
             logger.error(f"Failed to create git snapshot: {e}")
             return None
 
-    def restore_snapshot(self, working_dir: str, git_ref: str) -> bool:
+    def restore_snapshot(self, working_dir: str, git_ref: str) -> dict:
         """
         Restore the working directory to a previous git snapshot.
 
-        This restores all files from the snapshot commit without changing
-        the current branch's HEAD. It's like doing a selective checkout
-        of all files from the snapshot.
+        This actually reverts commits to restore to the checkpoint state:
+        - For unpushed commits: uses git reset --hard (cleanly removes commits)
+        - For pushed commits: uses git revert (creates inverse commits)
 
         WARNING: This will discard all uncommitted changes!
 
         Returns:
-            True if successful, False otherwise
+            dict with 'success', 'method' ('reset'/'revert'/'file_restore'),
+            'commits_reverted' count, and optional 'error'
         """
+        result_info = {
+            'success': False,
+            'method': None,
+            'commits_reverted': 0,
+            'error': None
+        }
+
         if not self.is_git_repo(working_dir):
-            return False
+            result_info['error'] = "Not a git repository"
+            return result_info
 
         try:
-            # First, verify the ref exists and is a valid commit/tree
+            # First, verify the ref exists and is a valid commit
             result = self._run_git(working_dir, ["cat-file", "-t", git_ref])
             if result.returncode != 0:
                 logger.error(f"Git ref {git_ref} does not exist")
-                return False
+                result_info['error'] = f"Git ref {git_ref} does not exist"
+                return result_info
 
             obj_type = result.stdout.strip()
-            if obj_type not in ("commit", "tree"):
-                logger.error(f"Git ref {git_ref} is not a commit or tree (is {obj_type})")
-                return False
 
-            # Get the tree SHA if this is a commit
-            if obj_type == "commit":
-                result = self._run_git(working_dir, ["rev-parse", f"{git_ref}^{{tree}}"])
-                if result.returncode != 0:
-                    logger.error(f"Could not get tree for commit {git_ref}")
-                    return False
-                tree_sha = result.stdout.strip()
+            # If it's a tree (from checkpoint branch), fall back to file restore
+            if obj_type == "tree":
+                return self._restore_files_only(working_dir, git_ref, result_info)
+
+            if obj_type != "commit":
+                logger.error(f"Git ref {git_ref} is not a commit (is {obj_type})")
+                result_info['error'] = f"Git ref is not a commit (is {obj_type})"
+                return result_info
+
+            # Get current HEAD
+            head_result = self._run_git(working_dir, ["rev-parse", "HEAD"])
+            if head_result.returncode != 0:
+                result_info['error'] = "Could not get current HEAD"
+                return result_info
+            current_head = head_result.stdout.strip()
+
+            # If we're already at the target, nothing to do
+            if current_head == git_ref:
+                logger.info(f"Already at target commit {git_ref[:8]}")
+                result_info['success'] = True
+                result_info['method'] = 'none'
+                return result_info
+
+            # Count commits between target and HEAD
+            count_result = self._run_git(working_dir, ["rev-list", "--count", f"{git_ref}..HEAD"])
+            commits_to_revert = int(count_result.stdout.strip()) if count_result.returncode == 0 else 0
+
+            # Get current branch name
+            branch_result = self._run_git(working_dir, ["rev-parse", "--abbrev-ref", "HEAD"])
+            current_branch = branch_result.stdout.strip() if branch_result.returncode == 0 else "HEAD"
+
+            # Check if commits are pushed to remote
+            is_pushed = self._are_commits_pushed(working_dir, current_branch, git_ref)
+
+            if is_pushed:
+                # Commits are pushed - use git revert to create inverse commits
+                return self._revert_pushed_commits(working_dir, git_ref, current_head, commits_to_revert, result_info)
             else:
-                tree_sha = git_ref
-
-            # Step 1: Clean working directory (remove untracked files)
-            self._run_git(working_dir, ["clean", "-fd"])
-
-            # Step 2: Reset index to match the snapshot tree
-            result = self._run_git(working_dir, ["read-tree", "--reset", "-u", tree_sha])
-            if result.returncode != 0:
-                logger.error(f"Failed to read-tree: {result.stderr}")
-                # Fallback: try checkout approach
-                result = self._run_git(working_dir, ["checkout", git_ref, "--", "."], timeout=120)
-                if result.returncode != 0:
-                    logger.error(f"Fallback checkout also failed: {result.stderr}")
-                    return False
-
-            logger.info(f"Restored working directory to snapshot {git_ref[:8]}")
-            return True
+                # Commits are local only - use git reset --hard
+                return self._reset_local_commits(working_dir, git_ref, commits_to_revert, result_info)
 
         except subprocess.TimeoutExpired:
             logger.warning("Git restore timed out")
-            return False
+            result_info['error'] = "Git operation timed out"
+            return result_info
         except Exception as e:
             logger.error(f"Failed to restore git snapshot: {e}")
-            return False
+            result_info['error'] = str(e)
+            return result_info
+
+    def _are_commits_pushed(self, working_dir: str, branch: str, target_ref: str) -> bool:
+        """
+        Check if commits between target_ref and HEAD have been pushed to remote.
+
+        Returns True if any commits are on the remote (meaning we need git revert).
+        Returns False if all commits are local only (safe to git reset).
+        """
+        try:
+            # Check if remote tracking branch exists
+            remote_result = self._run_git(working_dir, ["rev-parse", f"origin/{branch}"])
+            if remote_result.returncode != 0:
+                # No remote tracking branch - commits are local only
+                return False
+
+            remote_head = remote_result.stdout.strip()
+
+            # Check if HEAD is ahead of remote
+            # If remote contains our current HEAD, commits are pushed
+            merge_base_result = self._run_git(working_dir, ["merge-base", remote_head, "HEAD"])
+            if merge_base_result.returncode != 0:
+                # Can't determine - assume pushed to be safe
+                return True
+
+            merge_base = merge_base_result.stdout.strip()
+
+            # Get current HEAD
+            head_result = self._run_git(working_dir, ["rev-parse", "HEAD"])
+            current_head = head_result.stdout.strip()
+
+            # If merge-base equals HEAD, all commits are pushed
+            # If merge-base equals remote, HEAD has unpushed commits
+            if merge_base == current_head:
+                return True  # All commits are on remote
+
+            # Check if target_ref is reachable from remote
+            # If target is on remote, we need to revert (can't reset past pushed commits)
+            contains_result = self._run_git(working_dir, ["merge-base", "--is-ancestor", target_ref, remote_head])
+            if contains_result.returncode == 0:
+                # Target is already on remote, all commits since target are pushed
+                return True
+
+            # Check if any commits between target and HEAD are on remote
+            # Get list of commits we want to remove
+            commits_result = self._run_git(working_dir, ["rev-list", f"{target_ref}..HEAD"])
+            if commits_result.returncode != 0:
+                return True  # Assume pushed to be safe
+
+            for commit in commits_result.stdout.strip().split('\n'):
+                if not commit:
+                    continue
+                # Check if this commit is reachable from remote
+                is_ancestor = self._run_git(working_dir, ["merge-base", "--is-ancestor", commit, remote_head])
+                if is_ancestor.returncode == 0:
+                    return True  # At least one commit is pushed
+
+            return False  # All commits are local
+
+        except Exception as e:
+            logger.warning(f"Could not determine if commits are pushed: {e}")
+            return True  # Assume pushed to be safe
+
+    def _reset_local_commits(self, working_dir: str, target_ref: str, commits_count: int, result_info: dict) -> dict:
+        """
+        Reset to target commit (for unpushed commits only).
+        This removes commits from history entirely.
+        """
+        try:
+            # Clean working directory first
+            self._run_git(working_dir, ["clean", "-fd"])
+
+            # Hard reset to target
+            result = self._run_git(working_dir, ["reset", "--hard", target_ref])
+            if result.returncode != 0:
+                logger.error(f"Git reset failed: {result.stderr}")
+                result_info['error'] = f"Git reset failed: {result.stderr}"
+                return result_info
+
+            logger.info(f"Reset {commits_count} local commits to {target_ref[:8]}")
+            result_info['success'] = True
+            result_info['method'] = 'reset'
+            result_info['commits_reverted'] = commits_count
+            return result_info
+
+        except Exception as e:
+            logger.error(f"Failed to reset commits: {e}")
+            result_info['error'] = str(e)
+            return result_info
+
+    def _revert_pushed_commits(self, working_dir: str, target_ref: str, current_head: str, commits_count: int, result_info: dict) -> dict:
+        """
+        Revert pushed commits by creating inverse commits.
+        This is safe for shared branches as it doesn't rewrite history.
+        """
+        try:
+            # Clean working directory first
+            self._run_git(working_dir, ["clean", "-fd"])
+
+            # Stash any uncommitted changes (shouldn't be any but just in case)
+            self._run_git(working_dir, ["stash", "push", "-m", "claude-rewind-temp"])
+
+            # Get the list of commits to revert (in reverse order - oldest first for revert)
+            commits_result = self._run_git(working_dir, ["rev-list", "--reverse", f"{target_ref}..HEAD"])
+            if commits_result.returncode != 0:
+                result_info['error'] = "Could not list commits to revert"
+                return result_info
+
+            commits_to_revert = [c for c in commits_result.stdout.strip().split('\n') if c]
+
+            if not commits_to_revert:
+                result_info['success'] = True
+                result_info['method'] = 'none'
+                return result_info
+
+            # Revert commits one by one (newest to oldest for proper revert order)
+            # Actually we need to revert in reverse chronological order
+            commits_to_revert.reverse()
+
+            reverted_count = 0
+            for commit in commits_to_revert:
+                revert_result = self._run_git(working_dir, ["revert", "--no-edit", commit])
+                if revert_result.returncode != 0:
+                    # Try with -m 1 for merge commits
+                    revert_result = self._run_git(working_dir, ["revert", "--no-edit", "-m", "1", commit])
+                    if revert_result.returncode != 0:
+                        logger.error(f"Failed to revert commit {commit[:8]}: {revert_result.stderr}")
+                        # Abort and try the batch revert approach
+                        self._run_git(working_dir, ["revert", "--abort"])
+                        return self._batch_revert_commits(working_dir, target_ref, commits_count, result_info)
+                reverted_count += 1
+
+            logger.info(f"Reverted {reverted_count} pushed commits back to {target_ref[:8]}")
+            result_info['success'] = True
+            result_info['method'] = 'revert'
+            result_info['commits_reverted'] = reverted_count
+            return result_info
+
+        except Exception as e:
+            logger.error(f"Failed to revert commits: {e}")
+            result_info['error'] = str(e)
+            return result_info
+
+    def _batch_revert_commits(self, working_dir: str, target_ref: str, commits_count: int, result_info: dict) -> dict:
+        """
+        Batch revert as fallback - reverts all changes in one commit.
+        Used when individual reverts fail (e.g., due to conflicts).
+        """
+        try:
+            # Reset working directory to target state without changing HEAD
+            tree_result = self._run_git(working_dir, ["rev-parse", f"{target_ref}^{{tree}}"])
+            if tree_result.returncode != 0:
+                result_info['error'] = "Could not get tree for target ref"
+                return result_info
+
+            tree_sha = tree_result.stdout.strip()
+
+            # Checkout files from target
+            self._run_git(working_dir, ["read-tree", "--reset", "-u", tree_sha])
+
+            # Stage all changes
+            self._run_git(working_dir, ["add", "-A"])
+
+            # Create a single revert commit
+            commit_msg = f"Revert to checkpoint (reverts {commits_count} commits)\n\n🤖 Generated with Claude Code"
+            commit_result = self._run_git(working_dir, ["commit", "-m", commit_msg])
+
+            if commit_result.returncode != 0:
+                # Check if there's nothing to commit (already at target state)
+                status = self._run_git(working_dir, ["status", "--porcelain"])
+                if not status.stdout.strip():
+                    result_info['success'] = True
+                    result_info['method'] = 'none'
+                    return result_info
+                result_info['error'] = f"Failed to create revert commit: {commit_result.stderr}"
+                return result_info
+
+            logger.info(f"Batch reverted {commits_count} commits to {target_ref[:8]}")
+            result_info['success'] = True
+            result_info['method'] = 'batch_revert'
+            result_info['commits_reverted'] = commits_count
+            return result_info
+
+        except Exception as e:
+            logger.error(f"Failed batch revert: {e}")
+            result_info['error'] = str(e)
+            return result_info
+
+    def _restore_files_only(self, working_dir: str, tree_ref: str, result_info: dict) -> dict:
+        """
+        Fallback: restore files only without touching commits.
+        Used when we have a tree ref from checkpoint branch.
+        """
+        try:
+            # Clean working directory
+            self._run_git(working_dir, ["clean", "-fd"])
+
+            # Reset index to match the snapshot tree
+            result = self._run_git(working_dir, ["read-tree", "--reset", "-u", tree_ref])
+            if result.returncode != 0:
+                logger.error(f"Failed to read-tree: {result.stderr}")
+                result_info['error'] = f"Failed to restore files: {result.stderr}"
+                return result_info
+
+            logger.info(f"Restored files from tree {tree_ref[:8]}")
+            result_info['success'] = True
+            result_info['method'] = 'file_restore'
+            return result_info
+
+        except Exception as e:
+            logger.error(f"Failed to restore files: {e}")
+            result_info['error'] = str(e)
+            return result_info
 
     def list_snapshots(self, working_dir: str, limit: int = 20) -> List[Dict[str, Any]]:
         """List recent git snapshots from the checkpoint branch."""
@@ -670,18 +908,24 @@ class CheckpointManager:
             else:
                 errors.append(f"Chat rewind failed: {result.error}")
 
-        # Rewind code (restore git snapshot)
+        # Rewind code (restore git snapshot / revert commits)
+        commits_reverted = 0
+        revert_method = None
         if restore_code:
             # Find git_ref for this checkpoint
             git_ref = self._find_git_ref_for_checkpoint(session_id, target_uuid)
 
             if git_ref:
-                if self.git_service.restore_snapshot(working_dir, git_ref):
+                restore_result = self.git_service.restore_snapshot(working_dir, git_ref)
+                if restore_result['success']:
                     code_rewound = True
-                    # Count restored files (approximate)
-                    files_restored = self._count_changed_files(working_dir, git_ref)
+                    commits_reverted = restore_result.get('commits_reverted', 0)
+                    revert_method = restore_result.get('method')
+                    # Count restored files (approximate) - only if we actually changed something
+                    if revert_method not in ('none', None):
+                        files_restored = self._count_changed_files(working_dir, git_ref)
                 else:
-                    errors.append("Git restore failed")
+                    errors.append(f"Git restore failed: {restore_result.get('error', 'Unknown error')}")
             else:
                 errors.append("No git snapshot found for this checkpoint")
 
@@ -689,11 +933,13 @@ class CheckpointManager:
 
         return FullRewindResult(
             success=success,
-            message=self._build_result_message(chat_rewound, code_rewound, messages_removed),
+            message=self._build_result_message(chat_rewound, code_rewound, messages_removed, commits_reverted, revert_method),
             chat_rewound=chat_rewound,
             code_rewound=code_rewound,
             messages_removed=messages_removed,
             files_restored=files_restored,
+            commits_reverted=commits_reverted,
+            revert_method=revert_method,
             error='; '.join(errors) if errors else None
         )
 
@@ -879,14 +1125,30 @@ class CheckpointManager:
         self,
         chat_rewound: bool,
         code_rewound: bool,
-        messages_removed: int
+        messages_removed: int,
+        commits_reverted: int = 0,
+        revert_method: Optional[str] = None
     ) -> str:
         """Build a human-readable result message."""
         parts = []
         if chat_rewound:
             parts.append(f"Conversation rewound ({messages_removed} messages removed)")
         if code_rewound:
-            parts.append("Code restored to checkpoint")
+            if commits_reverted > 0:
+                if revert_method == 'reset':
+                    parts.append(f"Reset {commits_reverted} local commit(s)")
+                elif revert_method == 'revert':
+                    parts.append(f"Reverted {commits_reverted} pushed commit(s)")
+                elif revert_method == 'batch_revert':
+                    parts.append(f"Batch reverted {commits_reverted} commit(s)")
+                else:
+                    parts.append(f"Reverted {commits_reverted} commit(s)")
+            elif revert_method == 'file_restore':
+                parts.append("Files restored to checkpoint")
+            elif revert_method == 'none':
+                parts.append("Code already at checkpoint state")
+            else:
+                parts.append("Code restored to checkpoint")
 
         if parts:
             return ". ".join(parts)
