@@ -23,6 +23,7 @@
 		hasPartialMessages?: boolean;
 		metadata?: Record<string, unknown>;
 		onCopy?: (content: string, messageId: string) => void;
+		onRewindComplete?: () => void;
 	}
 
 	let {
@@ -34,7 +35,8 @@
 		streaming = false,
 		hasPartialMessages = true,
 		metadata,
-		onCopy
+		onCopy,
+		onRewindComplete
 	}: Props = $props();
 
 	// Show Read button on any non-streaming assistant message with content
@@ -344,6 +346,7 @@
 						isStreaming={streaming}
 						onRead={handleRead}
 						{isReading}
+						{onRewindComplete}
 					/>
 				</div>
 			{/if}

@@ -112,16 +112,39 @@
 			// Find the checkpoint that matches this message content and role
 			let targetCheckpoint: RewindCheckpoint | null = null;
 
+			// Normalize text for comparison (collapse whitespace, trim)
+			const normalize = (text: string) => text.trim().replace(/\s+/g, ' ');
+			const normalizedContent = normalize(messageContent);
+			const contentFirst100 = normalizedContent.substring(0, 100);
+
 			// Find checkpoint matching this message (either user or assistant)
-			targetCheckpoint = checkpointsResponse.checkpoints.find(cp =>
-				cp.role === messageRole && (
-					cp.full_message === messageContent ||
-					messageContent.startsWith(cp.full_message.substring(0, 100)) ||
-					cp.full_message.startsWith(messageContent.substring(0, 100))
-				)
-			) || null;
+			// The checkpoint full_message may contain multiple text blocks joined together,
+			// while the UI message content may be just one of those blocks.
+			for (const cp of checkpointsResponse.checkpoints) {
+				if (cp.role !== messageRole) continue;
+
+				const normalizedCp = normalize(cp.full_message);
+				const cpFirst100 = normalizedCp.substring(0, 100);
+
+				// Try multiple matching strategies:
+				// 1. Exact match after normalization
+				const exactMatch = normalizedCp === normalizedContent;
+				// 2. UI content starts with checkpoint content (checkpoint is substring of UI)
+				const uiStartsWithCp = normalizedContent.startsWith(cpFirst100);
+				// 3. Checkpoint contains UI content (UI is substring of checkpoint)
+				const cpContainsUi = normalizedCp.includes(contentFirst100);
+				// 4. Checkpoint starts with UI content
+				const cpStartsWithUi = normalizedCp.startsWith(contentFirst100);
+
+				if (exactMatch || uiStartsWithCp || cpContainsUi || cpStartsWithUi) {
+					targetCheckpoint = cp;
+					break;
+				}
+			}
 
 			if (!targetCheckpoint) {
+				console.warn('[Rewind] No matching checkpoint found for', messageRole, 'message. Available checkpoints:',
+					checkpointsResponse.checkpoints.map(cp => cp.role));
 				rewindError = 'Could not find matching checkpoint for this message';
 				isRewinding = false;
 				return;
@@ -134,6 +157,7 @@
 			const result = await executeRewind(sessionId, targetCheckpoint.uuid, includeResponse, messageRole);
 
 			if (result.success) {
+				console.log('[Rewind] Success - removed', result.messages_removed, 'messages');
 				showRewindDialog = false;
 				onRewindComplete?.();
 			} else {

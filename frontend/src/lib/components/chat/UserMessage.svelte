@@ -9,9 +9,10 @@
 		timestamp?: Date;
 		sessionId?: string | null;
 		streaming?: boolean;
+		onRewindComplete?: () => void;
 	}
 
-	let { content, timestamp, sessionId = null, streaming = false }: Props = $props();
+	let { content, timestamp, sessionId = null, streaming = false, onRewindComplete }: Props = $props();
 
 	let isHovered = $state(false);
 	let isTouchDevice = $state(false);
@@ -57,6 +58,7 @@
 						{sessionId}
 						messageContent={content}
 						messageRole="user"
+						{onRewindComplete}
 					/>
 				</div>
 			{/if}

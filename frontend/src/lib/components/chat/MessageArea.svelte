@@ -34,6 +34,17 @@
 
 	let { tab }: Props = $props();
 
+	/**
+	 * Reload the session after a rewind completes.
+	 * This is a backup mechanism in case the WebSocket event doesn't trigger a refresh.
+	 */
+	function handleRewindComplete() {
+		console.log('[MessageArea] Rewind complete, reloading session');
+		if (tab.sessionId) {
+			tabs.loadSessionInTab(tab.id, tab.sessionId);
+		}
+	}
+
 	let containerRef = $state<HTMLDivElement | null>(null);
 	let shouldAutoScroll = $state(true); // Start with auto-scroll enabled
 	let isScrollingProgrammatically = $state(false);
@@ -269,7 +280,7 @@
 		<div class="max-w-5xl mx-auto px-4 sm:px-8 py-4 space-y-4">
 			{#each tab.messages as message, messageIndex (message.id)}
 				{#if message.role === 'user'}
-					<UserMessage content={message.content} sessionId={tab.sessionId} />
+					<UserMessage content={message.content} sessionId={tab.sessionId} onRewindComplete={handleRewindComplete} />
 				{:else if message.type === 'text' || !message.type}
 					<AssistantMessage
 						content={message.content}
@@ -279,6 +290,7 @@
 						streaming={message.streaming && messageIndex === lastStreamingMessageIndex()}
 						{hasPartialMessages}
 						metadata={message.metadata}
+						onRewindComplete={handleRewindComplete}
 					/>
 				{:else if message.type === 'tool_use' && message.toolName === 'TodoWrite'}
 					<!-- TodoWrite - Render as TodoList component (also handles streaming partial input) -->
