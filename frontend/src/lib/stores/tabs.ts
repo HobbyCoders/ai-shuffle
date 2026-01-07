@@ -6,7 +6,7 @@
  */
 
 import { writable, derived, get } from 'svelte/store';
-import type { Session, Profile } from '$lib/api/client';
+import type { Session, Profile, PermissionRequest as PermissionRequestType, UserQuestionRequest } from '$lib/api/client';
 import { api } from '$lib/api/client';
 
 export interface ApiUser {
@@ -34,6 +34,13 @@ export interface SubagentChildMessage {
 	toolResult?: string; // Result content for tool_use (grouped with tool call)
 	toolStatus?: 'running' | 'complete' | 'error'; // Status of tool execution
 	timestamp?: string;
+}
+
+// Todo item for task tracking
+export interface TodoItem {
+	content: string;
+	status: 'pending' | 'in_progress' | 'completed';
+	activeForm: string; // Present continuous form shown when in_progress
 }
 
 export interface ChatMessage {
@@ -90,6 +97,12 @@ export interface ChatTab {
 	// Session overrides (override profile settings for this session)
 	modelOverride: string | null;  // null = use profile default
 	permissionModeOverride: string | null;  // null = use profile default
+	// Permission requests queue
+	pendingPermissions: PermissionRequestType[];
+	// User questions queue (for AskUserQuestion tool)
+	pendingQuestions: UserQuestionRequest[];
+	// Todo list for task tracking
+	todos: TodoItem[];
 }
 
 interface TabsState {
@@ -114,6 +127,8 @@ interface TabsState {
 const tabConnections: Map<string, WebSocket> = new Map();
 const tabPingTimers: Map<string, ReturnType<typeof setInterval>> = new Map();
 const tabReconnectTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+// Track tabs waiting for history response - queue sync events until history arrives
+const tabsWaitingForHistory: Map<string, Array<Record<string, unknown>>> = new Map();
 
 // Interface for persisted tab state (only what we need to restore tabs)
 interface PersistedTab {
@@ -122,6 +137,8 @@ interface PersistedTab {
 	sessionId: string | null;
 	profile: string;
 	project: string;
+	modelOverride: string | null;
+	permissionModeOverride: string | null;
 }
 
 interface PersistedTabsState {
@@ -173,7 +190,9 @@ async function saveTabsToServer(state: TabsState) {
 					title: tab.title,
 					sessionId: tab.sessionId,
 					profile: tab.profile,
-					project: tab.project
+					project: tab.project,
+					modelOverride: tab.modelOverride,
+					permissionModeOverride: tab.permissionModeOverride
 				})),
 				activeTabId: state.activeTabId
 			};
@@ -245,7 +264,10 @@ function createTabsStore() {
 			contextUsed: null,
 			contextMax: 200000,
 			modelOverride: null,
-			permissionModeOverride: null
+			permissionModeOverride: null,
+			pendingPermissions: [],
+			pendingQuestions: [],
+			todos: []
 		}],
 		activeTabId: initialTabId,
 		profiles: [],
@@ -338,6 +360,11 @@ function createTabsStore() {
 			const tab = getTab(tabId);
 			if (tab?.sessionId) {
 				console.log(`[Tab ${tabId}] Registering with session via load_session:`, tab.sessionId);
+
+				// Mark tab as waiting for history - queue sync events until history arrives
+				// This prevents race conditions where sync events arrive before history
+				tabsWaitingForHistory.set(tabId, []);
+
 				// Use the WebSocket to register with SyncEngine and get latest messages
 				// The backend will return isStreaming=true with buffer if still active,
 				// or isStreaming=false with complete history if finished
@@ -417,6 +444,9 @@ function createTabsStore() {
 			tabPingTimers.delete(tabId);
 		}
 
+		// Clear any waiting for history state
+		tabsWaitingForHistory.delete(tabId);
+
 		const ws = tabConnections.get(tabId);
 		if (ws) {
 			ws.close(1000);
@@ -437,6 +467,15 @@ function createTabsStore() {
 		// Only process events for tabs that have this session loaded
 		const tab = getTab(tabId);
 		if (!tab || tab.sessionId !== sessionId) {
+			return;
+		}
+
+		// If tab is waiting for history, queue the event to process after history loads
+		// This prevents race conditions where sync events arrive before history
+		const queuedEvents = tabsWaitingForHistory.get(tabId);
+		if (queuedEvents !== undefined) {
+			console.log(`[Tab ${tabId}] Queueing sync event (waiting for history):`, eventType);
+			queuedEvents.push(data);
 			return;
 		}
 
@@ -538,6 +577,7 @@ function createTabsStore() {
 							if (t.id !== tabId) return t;
 
 							const messages = [...t.messages];
+							let todos = t.todos;
 							const toolIdx = messages.findLastIndex(
 								m => m.type === 'tool_use' && m.streaming
 							);
@@ -550,6 +590,15 @@ function createTabsStore() {
 								let parsedInput = current.toolInput || {};
 								try {
 									parsedInput = JSON.parse(partialInput);
+
+									// Handle TodoWrite tool - update todos as they stream in
+									if (current.toolName === 'TodoWrite' && parsedInput?.todos && Array.isArray(parsedInput.todos)) {
+										todos = (parsedInput.todos as TodoItem[]).map(todo => ({
+											content: todo.content || '',
+											status: todo.status || 'pending',
+											activeForm: todo.activeForm || todo.content || ''
+										}));
+									}
 								} catch {
 									// Not valid JSON yet, keep accumulating
 								}
@@ -561,7 +610,7 @@ function createTabsStore() {
 								};
 							}
 
-							return { ...t, messages };
+							return { ...t, messages, todos };
 						})
 					}));
 				} else if (chunkType === 'tool_use') {
@@ -578,6 +627,34 @@ function createTabsStore() {
 							if (t.id !== tabId) return t;
 
 							let messages = [...t.messages];
+							let todos = t.todos;
+
+							// Handle TodoWrite tool - extract todos from input
+							if (toolName === 'TodoWrite' && toolInput?.todos && Array.isArray(toolInput.todos)) {
+								todos = (toolInput.todos as TodoItem[]).map(todo => ({
+									content: todo.content || '',
+									status: todo.status || 'pending',
+									activeForm: todo.activeForm || todo.content || ''
+								}));
+								console.log(`[Tab ${tabId}] TodoWrite: Updated todos`, todos);
+							}
+
+							// Check if this tool_use already exists (from history or buffer)
+							const existingToolIdx = messages.findIndex(
+								m => m.type === 'tool_use' && m.toolId === toolId
+							);
+							if (existingToolIdx !== -1) {
+								// Tool already exists - just update it if needed
+								console.log(`[Tab ${tabId}] tool_use already exists, updating:`, toolId);
+								messages[existingToolIdx] = {
+									...messages[existingToolIdx],
+									toolName: toolName || messages[existingToolIdx].toolName,
+									toolInput: toolInput || messages[existingToolIdx].toolInput,
+									toolStatus: messages[existingToolIdx].toolStatus || 'running',
+									streaming: messages[existingToolIdx].toolStatus !== 'complete'
+								};
+								return { ...t, messages, todos };
+							}
 
 							// Handle current streaming text message - finalize it
 							const streamingIdx = messages.findLastIndex(
@@ -604,14 +681,14 @@ function createTabsStore() {
 								streaming: true
 							});
 
-							return { ...t, messages };
+							return { ...t, messages, todos };
 						})
 					}));
 				} else if (chunkType === 'tool_result') {
+					const toolId = eventData.tool_id as string;
 					console.log(`[Tab ${tabId}] tool_result sync:`, {
-						tool_id: eventData.tool_id,
-						content: content?.substring(0, 100),
-						full_eventData: eventData
+						tool_id: toolId,
+						content: content?.substring(0, 100)
 					});
 					update(s => ({
 						...s,
@@ -620,18 +697,33 @@ function createTabsStore() {
 
 							const messages = [...t.messages];
 
-							// Mark the matching tool_use as complete
-							const toolId = eventData.tool_id as string;
-							const toolUseIdx = messages.findLastIndex(
-								m => m.type === 'tool_use' && (m.toolId === toolId || m.streaming)
+							// Find the matching tool_use - first try exact match by toolId
+							let toolUseIdx = messages.findIndex(
+								m => m.type === 'tool_use' && m.toolId === toolId
 							);
+
+							// Fallback: find last tool_use without a result
+							if (toolUseIdx === -1) {
+								toolUseIdx = messages.findLastIndex(
+									m => m.type === 'tool_use' && !m.toolResult && (m.streaming || m.toolStatus === 'running')
+								);
+							}
+
 							if (toolUseIdx !== -1) {
-								messages[toolUseIdx] = {
-									...messages[toolUseIdx],
-									toolResult: content,
-									toolStatus: 'complete' as const,
-									streaming: false
-								};
+								// Only update if tool doesn't already have this result
+								if (!messages[toolUseIdx].toolResult) {
+									console.log(`[Tab ${tabId}] Attaching result to tool at index ${toolUseIdx}`);
+									messages[toolUseIdx] = {
+										...messages[toolUseIdx],
+										toolResult: content,
+										toolStatus: 'complete' as const,
+										streaming: false
+									};
+								} else {
+									console.log(`[Tab ${tabId}] Tool already has result, skipping duplicate`);
+								}
+							} else {
+								console.log(`[Tab ${tabId}] No matching tool_use found for result, toolId:`, toolId);
 							}
 
 							return { ...t, messages };
@@ -968,7 +1060,48 @@ function createTabsStore() {
 		switch (msgType) {
 			case 'history': {
 				// Handle both JSONL format (with explicit type) and legacy DB format
-				const messages = (data.messages as Array<Record<string, unknown>>)?.map((m, i) => {
+				const rawMessages = (data.messages as Array<Record<string, unknown>>) || [];
+
+				// First pass: convert raw messages to ChatMessage format
+				// Also build a map of tool_results by tool_use_id for grouping
+				const toolResultMap: Map<string, { content: string; toolStatus: 'complete' | 'error' }> = new Map();
+
+				// Track latest todos from TodoWrite tool calls in history
+				let latestTodos: TodoItem[] = [];
+
+				// Pre-scan for tool_results to group them with tool_use
+				// Also extract todos from TodoWrite tool calls
+				for (const m of rawMessages) {
+					const msgType = m.type as MessageType | undefined;
+					const role = m.role as string;
+					const toolName = (m.toolName || m.tool_name) as string | undefined;
+					const toolInput = (m.toolInput || m.tool_input) as Record<string, unknown> | undefined;
+
+					// Extract todos from TodoWrite tool calls
+					if ((msgType === 'tool_use' || role === 'tool_use') && toolName === 'TodoWrite' && toolInput?.todos && Array.isArray(toolInput.todos)) {
+						latestTodos = (toolInput.todos as TodoItem[]).map(todo => ({
+							content: todo.content || '',
+							status: todo.status || 'pending',
+							activeForm: todo.activeForm || todo.content || ''
+						}));
+					}
+
+					if (msgType === 'tool_result' || role === 'tool_result') {
+						const toolUseId = m.toolId || m.tool_use_id;
+						if (toolUseId) {
+							toolResultMap.set(toolUseId as string, {
+								content: m.content as string || '',
+								toolStatus: 'complete'
+							});
+						}
+					}
+				}
+
+				const messages: ChatMessage[] = [];
+				const seenToolResults = new Set<string>(); // Track which tool_results we've merged
+
+				for (let i = 0; i < rawMessages.length; i++) {
+					const m = rawMessages[i];
 					// Determine message type - JSONL messages have explicit 'type' field
 					let msgType: MessageType | undefined = m.type as MessageType | undefined;
 
@@ -981,7 +1114,7 @@ function createTabsStore() {
 
 					// Handle system messages (e.g., /context, /compact output)
 					if (msgType === 'system' || m.role === 'system') {
-						return {
+						messages.push({
 							id: String(m.id || `msg-${i}`),
 							role: 'system' as const,
 							content: m.content as string,
@@ -990,7 +1123,18 @@ function createTabsStore() {
 							systemData: { content: m.content } as Record<string, unknown>,
 							metadata: m.metadata as Record<string, unknown>,
 							streaming: false
-						};
+						});
+						continue;
+					}
+
+					// Skip standalone tool_result messages - they should be grouped with tool_use
+					if (msgType === 'tool_result') {
+						const toolUseId = m.toolId || m.tool_use_id;
+						if (toolUseId) {
+							seenToolResults.add(toolUseId as string);
+						}
+						// Skip - will be merged into tool_use message
+						continue;
 					}
 
 					// Build the chat message with all fields
@@ -1008,6 +1152,20 @@ function createTabsStore() {
 						streaming: false
 					};
 
+					// For tool_use messages, try to merge the corresponding tool_result
+					if (msgType === 'tool_use' && chatMessage.toolId) {
+						const result = toolResultMap.get(chatMessage.toolId);
+						if (result && !chatMessage.toolResult) {
+							chatMessage.toolResult = result.content;
+							chatMessage.toolStatus = result.toolStatus;
+							seenToolResults.add(chatMessage.toolId);
+						}
+						// If no result yet, mark as complete anyway (history = finished operations)
+						if (!chatMessage.toolStatus) {
+							chatMessage.toolStatus = 'complete';
+						}
+					}
+
 					// Add subagent-specific fields if present
 					if (msgType === 'subagent') {
 						chatMessage.agentId = m.agentId as string | undefined;
@@ -1017,36 +1175,61 @@ function createTabsStore() {
 						chatMessage.agentChildren = m.agentChildren as SubagentChildMessage[] | undefined;
 					}
 
-					return chatMessage;
-				}) || [];
+					messages.push(chatMessage);
+				}
 
 				// Handle streaming state from backend
 				const isStreaming = data.isStreaming as boolean || false;
 				const streamingBuffer = data.streamingBuffer as Array<Record<string, unknown>> | undefined;
 				console.log(`[Tab ${tabId}] History response - isStreaming:`, isStreaming, 'bufferLen:', streamingBuffer?.length || 0);
 
-				// If session is actively streaming and has buffered content, merge it
+				// If session is actively streaming and has buffered content, merge it intelligently
 				let finalMessages = messages;
 				if (isStreaming && streamingBuffer && streamingBuffer.length > 0) {
 					console.log(`[Tab ${tabId}] Late-joining streaming session, merging buffer:`, streamingBuffer.length, 'messages');
-					const bufferMessages: ChatMessage[] = streamingBuffer.map((m) => ({
-						id: `buffer-${Date.now()}-${Math.random()}`,
-						role: 'assistant' as const,
-						content: (m.content as string) || '',
-						type: (m.type || m.chunk_type) as MessageType,
-						toolName: m.tool_name as string | undefined,
-						toolId: m.tool_id as string | undefined,
-						toolInput: m.tool_input as Record<string, unknown> | undefined,
-						streaming: (m.streaming as boolean) ?? true
-					}));
-					finalMessages = [...messages, ...bufferMessages];
+
+					// Create a set of existing message content hashes for deduplication
+					const existingContentHashes = new Set<string>();
+					for (const msg of messages) {
+						// Create a simple hash based on content and type
+						const hash = `${msg.type || 'text'}:${msg.toolId || ''}:${(msg.content || '').substring(0, 100)}`;
+						existingContentHashes.add(hash);
+					}
+
+					// Process buffer messages and only add non-duplicates
+					for (const m of streamingBuffer) {
+						const bufferType = (m.type || m.chunk_type || 'text') as MessageType;
+						const bufferToolId = (m.tool_id || '') as string;
+						const bufferContent = (m.content || '') as string;
+						const hash = `${bufferType}:${bufferToolId}:${bufferContent.substring(0, 100)}`;
+
+						// Skip if we already have similar content in history
+						if (existingContentHashes.has(hash)) {
+							console.log(`[Tab ${tabId}] Skipping duplicate buffer message:`, hash.substring(0, 50));
+							continue;
+						}
+
+						const bufferMsg: ChatMessage = {
+							id: `buffer-${Date.now()}-${Math.random()}`,
+							role: 'assistant' as const,
+							content: bufferContent,
+							type: bufferType,
+							toolName: m.tool_name as string | undefined,
+							toolId: bufferToolId || undefined,
+							toolInput: m.tool_input as Record<string, unknown> | undefined,
+							streaming: (m.streaming as boolean) ?? true
+						};
+						finalMessages.push(bufferMsg);
+						existingContentHashes.add(hash);
+					}
 				}
 
-				console.log(`[Tab ${tabId}] Updating tab state - isStreaming:`, isStreaming, 'messageCount:', finalMessages.length);
+				console.log(`[Tab ${tabId}] Updating tab state - isStreaming:`, isStreaming, 'messageCount:', finalMessages.length, 'todoCount:', latestTodos.length);
 				updateTab(tabId, {
 					sessionId: data.session_id as string,
 					messages: finalMessages,
 					isStreaming: isStreaming,
+					todos: latestTodos,
 					error: null  // Clear any previous error
 				});
 
@@ -1054,6 +1237,21 @@ function createTabsStore() {
 				if (finalMessages.length > 0 && finalMessages[0].role === 'user') {
 					const title = finalMessages[0].content.substring(0, 30) + (finalMessages[0].content.length > 30 ? '...' : '');
 					updateTab(tabId, { title });
+				}
+
+				// Process any queued sync events that arrived while waiting for history
+				const queuedEvents = tabsWaitingForHistory.get(tabId);
+				if (queuedEvents && queuedEvents.length > 0) {
+					console.log(`[Tab ${tabId}] Processing ${queuedEvents.length} queued sync events`);
+					// Remove from waiting map first to prevent re-queueing
+					tabsWaitingForHistory.delete(tabId);
+					// Process each queued event
+					for (const queuedData of queuedEvents) {
+						handleSyncEvent(tabId, queuedData);
+					}
+				} else {
+					// No queued events, just clear the waiting state
+					tabsWaitingForHistory.delete(tabId);
 				}
 				break;
 			}
@@ -1360,6 +1558,7 @@ function createTabsStore() {
 				// Group tool result with its corresponding tool_use message
 				const toolUseId = data.tool_use_id as string;
 				const output = data.output as string;
+				const isError = data.is_error as boolean;
 
 				update(s => ({
 					...s,
@@ -1376,7 +1575,7 @@ function createTabsStore() {
 								messages[i] = {
 									...m,
 									toolResult: output,
-									toolStatus: 'complete',
+									toolStatus: isError ? 'error' : 'complete',
 									streaming: false
 								};
 								found = true;
@@ -1392,7 +1591,7 @@ function createTabsStore() {
 									messages[i] = {
 										...m,
 										toolResult: output,
-										toolStatus: 'complete',
+										toolStatus: isError ? 'error' : 'complete',
 										streaming: false
 									};
 									break;
@@ -1745,6 +1944,7 @@ function createTabsStore() {
 				const agentId = data.agent_id as string;
 				const toolUseId = data.tool_use_id as string;
 				const output = data.output as string;
+				const isError = data.is_error as boolean;
 
 				update(s => ({
 					...s,
@@ -1761,7 +1961,7 @@ function createTabsStore() {
 										children[i] = {
 											...children[i],
 											toolResult: output,
-											toolStatus: 'complete'
+											toolStatus: isError ? 'error' : 'complete'
 										};
 										found = true;
 										break;
@@ -1774,7 +1974,7 @@ function createTabsStore() {
 											children[i] = {
 												...children[i],
 												toolResult: output,
-												toolStatus: 'complete'
+												toolStatus: isError ? 'error' : 'complete'
 											};
 											break;
 										}
@@ -1878,6 +2078,147 @@ function createTabsStore() {
 				}));
 				break;
 			}
+
+			case 'permission_request': {
+				// Tool permission request from backend - add to queue
+				const request: PermissionRequestType = {
+					request_id: data.request_id as string,
+					tool_name: data.tool_name as string,
+					tool_input: data.tool_input as Record<string, unknown>,
+					queue_position: data.queue_position as number | undefined,
+					queue_total: data.queue_total as number | undefined
+				};
+
+				console.log('[WS] Permission request:', request.tool_name, request.request_id);
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+						// Add to pending permissions queue
+						const pendingPermissions = [...tab.pendingPermissions, request];
+						return { ...tab, pendingPermissions };
+					})
+				}));
+				break;
+			}
+
+			case 'permission_queue_update': {
+				// Some permissions were auto-resolved (e.g., by "Allow Always")
+				const resolvedIds = data.resolved_ids as string[];
+				const remainingCount = data.remaining_count as number;
+
+				console.log('[WS] Permission queue update:', resolvedIds.length, 'resolved,', remainingCount, 'remaining');
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+						// Remove resolved permissions from queue
+						const pendingPermissions = tab.pendingPermissions.filter(
+							p => !resolvedIds.includes(p.request_id)
+						);
+						return { ...tab, pendingPermissions };
+					})
+				}));
+				break;
+			}
+
+			case 'permission_response_ack': {
+				// Acknowledgement that permission response was processed
+				const requestId = data.request_id as string;
+				const result = data.result as Record<string, unknown>;
+
+				console.log('[WS] Permission response acknowledged:', requestId, result);
+
+				// Remove this permission from the queue
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+						const pendingPermissions = tab.pendingPermissions.filter(
+							p => p.request_id !== requestId
+						);
+						return { ...tab, pendingPermissions };
+					})
+				}));
+				break;
+			}
+
+			case 'pending_permissions': {
+				// Response to get_pending_permissions request - sync queue state
+				const requests = data.requests as PermissionRequestType[];
+
+				console.log('[WS] Pending permissions sync:', requests.length, 'requests');
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+						return { ...tab, pendingPermissions: requests };
+					})
+				}));
+				break;
+			}
+
+			case 'user_question': {
+				// User question request from backend (AskUserQuestion tool) - add to queue
+				const request: UserQuestionRequest = {
+					request_id: data.request_id as string,
+					tool_use_id: data.tool_use_id as string,
+					questions: data.questions as UserQuestionRequest['questions']
+				};
+
+				console.log('[WS] User question request:', request.request_id, request.questions.length, 'questions');
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+						// Add to pending questions queue
+						const pendingQuestions = [...tab.pendingQuestions, request];
+						return { ...tab, pendingQuestions };
+					})
+				}));
+				break;
+			}
+
+			case 'user_question_response_ack': {
+				// Acknowledgement that user question response was processed
+				const requestId = data.request_id as string;
+				const success = data.success as boolean;
+
+				console.log('[WS] User question response acknowledged:', requestId, success);
+
+				// Remove this question from the queue
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+						const pendingQuestions = tab.pendingQuestions.filter(
+							q => q.request_id !== requestId
+						);
+						return { ...tab, pendingQuestions };
+					})
+				}));
+				break;
+			}
+
+			case 'pending_questions': {
+				// Response to get_pending_questions request - sync queue state
+				const questions = data.questions as UserQuestionRequest[];
+
+				console.log('[WS] Pending questions sync:', questions.length, 'questions');
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+						return { ...tab, pendingQuestions: questions };
+					})
+				}));
+				break;
+			}
 		}
 	}
 
@@ -1962,8 +2303,11 @@ function createTabsStore() {
 						totalCacheReadTokens: 0,
 						contextUsed: null,
 						contextMax: 200000,
-						modelOverride: null,
-						permissionModeOverride: null
+						modelOverride: pt.modelOverride ?? null,
+						permissionModeOverride: pt.permissionModeOverride ?? null,
+						pendingPermissions: [],
+						pendingQuestions: [],
+						todos: []
 					}));
 
 					update(s => ({
@@ -2033,7 +2377,10 @@ function createTabsStore() {
 				contextUsed: null,
 				contextMax: 200000,
 				modelOverride: null,
-				permissionModeOverride: null
+				permissionModeOverride: null,
+				pendingPermissions: [],
+				pendingQuestions: [],
+				todos: []
 			};
 
 			update(s => ({
@@ -2331,6 +2678,8 @@ function createTabsStore() {
 		 */
 		setTabModelOverride(tabId: string, model: string | null) {
 			updateTab(tabId, { modelOverride: model });
+			// Save tabs state (debounced) to persist the override
+			saveTabsToServer(get({ subscribe }));
 		},
 
 		/**
@@ -2338,6 +2687,15 @@ function createTabsStore() {
 		 */
 		setTabPermissionModeOverride(tabId: string, permissionMode: string | null) {
 			updateTab(tabId, { permissionModeOverride: permissionMode });
+			// Save tabs state (debounced) to persist the override
+			saveTabsToServer(get({ subscribe }));
+		},
+
+		/**
+		 * Update a tab's state (exposed for direct updates like todos)
+		 */
+		updateTab(tabId: string, updates: Partial<ChatTab>) {
+			updateTab(tabId, updates);
 		},
 
 		/**
@@ -2373,7 +2731,10 @@ function createTabsStore() {
 				contextUsed: null,
 				contextMax: 200000,
 				modelOverride: null,
-				permissionModeOverride: null
+				permissionModeOverride: null,
+				pendingPermissions: [],
+				pendingQuestions: [],
+				todos: []
 			});
 			connectTab(tabId);
 			// Save tabs state (debounced)
@@ -2564,6 +2925,92 @@ function createTabsStore() {
 				selectedSessionIds: isAdmin ? s.selectedSessionIds : new Set<string>(),
 				selectedAdminSessionIds: isAdmin ? new Set<string>() : s.selectedAdminSessionIds
 			}));
+		},
+
+		/**
+		 * Send permission response for a tool request
+		 */
+		sendPermissionResponse(
+			tabId: string,
+			requestId: string,
+			decision: 'allow' | 'deny',
+			remember?: 'none' | 'session' | 'profile',
+			pattern?: string
+		) {
+			const ws = tabConnections.get(tabId);
+			if (ws?.readyState === WebSocket.OPEN) {
+				ws.send(JSON.stringify({
+					type: 'permission_response',
+					request_id: requestId,
+					decision,
+					remember: remember || 'none',
+					pattern
+				}));
+				console.log(`[Tab ${tabId}] Sent permission response: ${decision} for ${requestId}`);
+			} else {
+				console.error(`[Tab ${tabId}] Cannot send permission response: WebSocket not connected`);
+			}
+		},
+
+		/**
+		 * Get pending permissions for a tab
+		 */
+		getPendingPermissions(tabId: string): PermissionRequestType[] {
+			const state = get({ subscribe });
+			const tab = state.tabs.find(t => t.id === tabId);
+			return tab?.pendingPermissions || [];
+		},
+
+		/**
+		 * Request sync of pending permissions from server
+		 */
+		syncPendingPermissions(tabId: string) {
+			const ws = tabConnections.get(tabId);
+			if (ws?.readyState === WebSocket.OPEN) {
+				ws.send(JSON.stringify({ type: 'get_pending_permissions' }));
+			}
+		},
+
+		/**
+		 * Send user question response for an AskUserQuestion tool call
+		 */
+		sendUserQuestionResponse(
+			tabId: string,
+			requestId: string,
+			toolUseId: string,
+			answers: Record<string, string | string[]>
+		) {
+			const ws = tabConnections.get(tabId);
+			if (ws?.readyState === WebSocket.OPEN) {
+				ws.send(JSON.stringify({
+					type: 'user_question_response',
+					request_id: requestId,
+					tool_use_id: toolUseId,
+					answers
+				}));
+				console.log(`[Tab ${tabId}] Sent user question response for ${requestId}`);
+			} else {
+				console.error(`[Tab ${tabId}] Cannot send user question response: WebSocket not connected`);
+			}
+		},
+
+		/**
+		 * Get pending user questions for a tab
+		 */
+		getPendingQuestions(tabId: string): UserQuestionRequest[] {
+			const state = get({ subscribe });
+			const tab = state.tabs.find(t => t.id === tabId);
+			return tab?.pendingQuestions || [];
+		},
+
+		/**
+		 * Request sync of pending questions from server
+		 */
+		syncPendingQuestions(tabId: string) {
+			const ws = tabConnections.get(tabId);
+			if (ws?.readyState === WebSocket.OPEN) {
+				ws.send(JSON.stringify({ type: 'get_pending_questions' }));
+			}
 		}
 	};
 }

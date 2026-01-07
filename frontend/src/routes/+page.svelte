@@ -35,6 +35,9 @@
 	import SubagentManager from '$lib/components/SubagentManager.svelte';
 	import SessionCard from '$lib/components/SessionCard.svelte';
 	import ConnectionStatus from '$lib/components/ConnectionStatus.svelte';
+	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
+	import UserQuestion from '$lib/components/UserQuestion.svelte';
+	import TodoList from '$lib/components/TodoList.svelte';
 	import { executeCommand, isSlashCommand, syncAfterRewind, listCommands, type Command } from '$lib/api/commands';
 	import { groupSessionsByDate, type DateGroup } from '$lib/utils/dateGroups';
 
@@ -378,9 +381,30 @@
 		}
 	}
 
+	// Handle permission response from PermissionQueue component
+	function handlePermissionRespond(tabId: string, event: CustomEvent<{
+		request_id: string;
+		decision: 'allow' | 'deny';
+		remember?: 'none' | 'session' | 'profile';
+		pattern?: string;
+	}>) {
+		const { request_id, decision, remember, pattern } = event.detail;
+		tabs.sendPermissionResponse(tabId, request_id, decision, remember, pattern);
+	}
+
+	// Handle user question response from UserQuestion component
+	function handleUserQuestionRespond(tabId: string, event: CustomEvent<{
+		request_id: string;
+		tool_use_id: string;
+		answers: Record<string, string | string[]>;
+	}>) {
+		const { request_id, tool_use_id, answers } = event.detail;
+		tabs.sendUserQuestionResponse(tabId, request_id, tool_use_id, answers);
+	}
+
 	async function handleSubmit(tabId: string) {
 		const prompt = tabInputs[tabId] || '';
-		if (!prompt.trim() || !$activeTab || $activeTab.isStreaming) return;
+		if (!prompt.trim() || !$activeTab || $activeTab.isStreaming || isUploading) return;
 
 		// API users use their API key restrictions - skip profile/project validation if they have restrictions
 		const isApiUserWithRestrictions = $apiUser && ($apiUser.profile_id || $apiUser.project_id);
@@ -395,10 +419,18 @@
 			return;
 		}
 
+		// Append file references to the end of the message
+		const files = tabUploadedFiles[tabId] || [];
+		let finalPrompt = prompt;
+		if (files.length > 0) {
+			const fileRefs = files.map(f => `@${f.path}`).join(' ');
+			finalPrompt = prompt.trim() + '\n\n' + fileRefs;
+		}
+
 		tabInputs[tabId] = '';
 		tabInputs = tabInputs; // Trigger Svelte reactivity
 		tabUploadedFiles[tabId] = [];
-		tabs.sendMessage(tabId, prompt);
+		tabs.sendMessage(tabId, finalPrompt);
 	}
 
 	function handleKeyDown(e: KeyboardEvent, tabId: string) {
@@ -686,6 +718,20 @@
 		return marked(content, { breaks: true }) as string;
 	}
 
+	// Copy text to clipboard with feedback
+	let copiedMessageId: string | null = null;
+	async function copyToClipboard(text: string, messageId: string) {
+		try {
+			await navigator.clipboard.writeText(text);
+			copiedMessageId = messageId;
+			setTimeout(() => {
+				copiedMessageId = null;
+			}, 2000);
+		} catch (e) {
+			console.error('Failed to copy to clipboard:', e);
+		}
+	}
+
 	function formatTime(date?: Date): string {
 		const d = date || new Date();
 		return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
@@ -954,16 +1000,7 @@
 				const result = await api.uploadFile(`/projects/${$activeTab.project}/upload`, file);
 				if (!tabUploadedFiles[tabId]) tabUploadedFiles[tabId] = [];
 				tabUploadedFiles[tabId] = [...tabUploadedFiles[tabId], result];
-
-				// Use @ format for file references
-				const fileRef = `@${result.path}`;
-				const currentPrompt = tabInputs[tabId] || '';
-				if (currentPrompt.trim()) {
-					tabInputs[tabId] = currentPrompt + ' ' + fileRef;
-				} else {
-					tabInputs[tabId] = fileRef;
-				}
-				tabInputs = tabInputs; // Trigger Svelte reactivity
+				// File references are shown as chips only, @FilePath appended when message is sent
 			}
 		} catch (error: any) {
 			console.error('Upload failed:', error);
@@ -976,18 +1013,8 @@
 
 	function removeUploadedFile(tabId: string, index: number) {
 		const files = tabUploadedFiles[tabId] || [];
-		const file = files[index];
-		if (!file) return;
-
-		// Remove both @ format and legacy [File: path] format
-		const atRef = `@${file.path}`;
-		const legacyRef = `[File: ${file.path}]`;
-		let prompt = tabInputs[tabId] || '';
-		prompt = prompt.replace(atRef, '').replace(legacyRef, '');
-		// Clean up extra spaces and newlines
-		prompt = prompt.replace(/\s+/g, ' ').trim();
-		tabInputs[tabId] = prompt;
-		tabInputs = tabInputs; // Trigger Svelte reactivity
+		if (!files[index]) return;
+		// File references are shown as chips only, just remove from the array
 		tabUploadedFiles[tabId] = files.filter((_, i) => i !== index);
 	}
 
@@ -1012,7 +1039,7 @@
 	<title>AI Hub</title>
 </svelte:head>
 
-<div class="h-screen flex bg-background text-foreground">
+<div class="h-dvh flex bg-background text-foreground">
 	<!-- Icon Rail (Desktop) - 48px wide -->
 	<nav class="hidden lg:flex flex-col w-12 bg-card border-r border-border z-50 flex-shrink-0">
 		<div class="flex flex-col items-center pt-3 gap-1">
@@ -1847,7 +1874,7 @@
 	</nav>
 
 	<!-- Main Content -->
-	<main class="flex-1 flex flex-col min-w-0 bg-background">
+	<main class="flex-1 flex flex-col min-w-0 bg-background pb-14 lg:pb-0">
 		<!-- Context Bar -->
 		{#if $activeTab}
 			{@const currentTab = $activeTab}
@@ -2106,7 +2133,7 @@
 			>
 				{#if currentTab.messages.length === 0}
 					<!-- Empty State -->
-					<div class="h-full flex items-center justify-center pb-14 lg:pb-0">
+					<div class="h-full flex items-center justify-center">
 						<div class="text-center max-w-md px-6">
 							<div class="w-16 h-16 mx-auto mb-6 rounded-2xl bg-primary/10 flex items-center justify-center shadow-s">
 								<svg class="w-8 h-8 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2173,6 +2200,25 @@
 													<span class="w-1.5 h-1.5 bg-primary rounded-full animate-bounce" style="animation-delay: 300ms"></span>
 												</span>
 											{/if}
+											{#if message.content && !message.streaming}
+												<button
+													class="ml-auto flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
+													on:click={() => copyToClipboard(message.content, message.id)}
+													title="Copy response"
+												>
+													{#if copiedMessageId === message.id}
+														<svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+														</svg>
+														<span class="text-green-500">Copied</span>
+													{:else}
+														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+														</svg>
+														<span>Copy</span>
+													{/if}
+												</button>
+											{/if}
 										</div>
 										<div class="bg-card border border-border rounded-lg p-4 shadow-s overflow-hidden">
 											<div class="prose prose-sm max-w-none break-words overflow-x-auto">
@@ -2203,6 +2249,17 @@
 										{/if}
 									</div>
 								</div>
+							{:else if message.type === 'tool_use' && message.toolName === 'TodoWrite'}
+								<!-- TodoWrite - Render as TodoList component -->
+								{#if message.toolInput?.todos && Array.isArray(message.toolInput.todos)}
+									<div class="flex gap-3 w-full">
+										<!-- Empty spacer to align with message content -->
+										<div class="flex-shrink-0 w-8"></div>
+										<div class="flex-1 min-w-0">
+											<TodoList todos={message.toolInput.todos} />
+										</div>
+									</div>
+								{/if}
 							{:else if message.type === 'tool_use'}
 								<!-- Tool Use with grouped Result - Expandable Card -->
 								<div class="flex gap-3 w-full">
@@ -2218,6 +2275,10 @@
 												{#if message.toolStatus === 'running' || message.streaming}
 													<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+													</svg>
+												{:else if message.toolStatus === 'error'}
+													<svg class="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 													</svg>
 												{:else}
 													<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2337,15 +2398,41 @@
 				{/if}
 			</div>
 
+			<!-- Permission Queue (shown when there are pending permissions) -->
+			{#if currentTab.pendingPermissions && currentTab.pendingPermissions.length > 0}
+				<div class="border-t border-amber-500/30 bg-amber-900/5 p-3 sm:p-4">
+					<div class="max-w-5xl mx-auto">
+						<PermissionQueue
+							requests={currentTab.pendingPermissions}
+							on:respond={(e) => handlePermissionRespond(tabId, e)}
+						/>
+					</div>
+				</div>
+			{/if}
+
+			<!-- User Question Queue (shown when there are pending questions from AskUserQuestion tool) -->
+			{#if currentTab.pendingQuestions && currentTab.pendingQuestions.length > 0}
+				<div class="border-t border-blue-500/30 bg-blue-900/5 p-3 sm:p-4">
+					<div class="max-w-5xl mx-auto">
+						{#each currentTab.pendingQuestions as question (question.request_id)}
+							<UserQuestion
+								data={question}
+								on:respond={(e) => handleUserQuestionRespond(tabId, e)}
+							/>
+						{/each}
+					</div>
+				</div>
+			{/if}
+
 			<!-- Input Area -->
-			<div class="border-t border-border/50 bg-background/80 backdrop-blur-sm p-3 sm:p-4 pb-[4.5rem] lg:pb-4">
+			<div class="border-t border-border/50 bg-background/80 backdrop-blur-sm p-3 sm:p-4">
 				<div class="max-w-5xl mx-auto">
 					<!-- Hidden file input -->
 					<input type="file" bind:this={fileInput} on:change={handleFileUpload} class="hidden" multiple />
 
 					<!-- Cursor-Style Unified Input Container -->
 					<form on:submit|preventDefault={() => handleSubmit(tabId)} class="relative">
-						<div class="bg-card/80 backdrop-blur border border-border/60 rounded-2xl shadow-lg overflow-hidden transition-all duration-200 focus-within:border-primary/50 focus-within:shadow-primary/5 focus-within:shadow-xl">
+						<div class="bg-card/80 backdrop-blur border border-border/60 rounded-2xl shadow-lg transition-all duration-200 focus-within:border-primary/50 focus-within:shadow-primary/5 focus-within:shadow-xl">
 
 							<!-- Uploaded Files (inside container) -->
 							{#if (tabUploadedFiles[tabId] || []).length > 0}
@@ -2429,8 +2516,8 @@
 										<button
 											type="submit"
 											class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-primary hover:bg-primary/90 text-primary-foreground rounded-xl transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-											disabled={!(tabInputs[tabId] || '').trim() || !$claudeAuthenticated}
-											title="Send message"
+											disabled={!(tabInputs[tabId] || '').trim() || !$claudeAuthenticated || isUploading}
+											title={isUploading ? "Uploading files..." : "Send message"}
 										>
 											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
@@ -2658,6 +2745,7 @@
 								<label class="block text-xs text-muted-foreground mb-1">Permission Mode</label>
 								<select bind:value={profileForm.permission_mode} class="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground">
 									<option value="default">Default</option>
+									<option value="acceptEdits">Accept Edits</option>
 									<option value="plan">Plan</option>
 									<option value="bypassPermissions">Bypass</option>
 								</select>

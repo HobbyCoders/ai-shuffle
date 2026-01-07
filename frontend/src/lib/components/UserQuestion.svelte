@@ -33,22 +33,16 @@
 		};
 	}>();
 
-	// Wizard state
-	let currentStep = $state(0);
-	let isReviewStep = $state(false);
-	let slideDirection = $state<'forward' | 'backward'>('forward');
-
 	// Track selected answers for each question
 	// Key is question index, value is selected option label(s) or custom text
 	let answers = $state<Record<number, string | string[]>>({});
 	let showOther = $state<Record<number, boolean>>({});
 	let otherText = $state<Record<number, string>>({});
 
-	// Initialize answers when data changes
+	// Initialize answers
 	$effect(() => {
-		const questions = data.questions ?? [];
 		const initial: Record<number, string | string[]> = {};
-		questions.forEach((q, idx) => {
+		data.questions.forEach((q, idx) => {
 			if (q.multiSelect) {
 				initial[idx] = [];
 			} else {
@@ -56,23 +50,10 @@
 			}
 		});
 		answers = initial;
-		showOther = {};
-		otherText = {};
-		currentStep = 0;
-		isReviewStep = false;
 	});
 
-	// Computed values
-	const totalSteps = $derived(data.questions?.length ?? 0);
-	const isSingleQuestion = $derived(totalSteps === 1);
-	const currentQuestion = $derived(data.questions?.[currentStep] ?? { question: '', header: '', options: [], multiSelect: false });
-	const currentOptions = $derived(currentQuestion.options ?? []);
-	const isLastQuestion = $derived(currentStep === totalSteps - 1);
-	const isFirstQuestion = $derived(currentStep === 0);
-
 	function toggleOption(questionIdx: number, optionLabel: string) {
-		const question = data.questions?.[questionIdx];
-		if (!question) return;
+		const question = data.questions[questionIdx];
 
 		if (question.multiSelect) {
 			const current = answers[questionIdx] as string[];
@@ -94,11 +75,11 @@
 	}
 
 	function selectOther(questionIdx: number) {
-		const question = data.questions?.[questionIdx];
-		if (!question) return;
+		const question = data.questions[questionIdx];
 		showOther[questionIdx] = true;
 
 		if (question.multiSelect) {
+			// In multi-select, "Other" clears other selections
 			answers[questionIdx] = [];
 		} else {
 			answers[questionIdx] = '';
@@ -106,87 +87,37 @@
 	}
 
 	function isSelected(questionIdx: number, optionLabel: string): boolean {
-		const question = data.questions?.[questionIdx];
-		if (!question) return false;
+		const question = data.questions[questionIdx];
 		const answer = answers[questionIdx];
 
 		if (question.multiSelect) {
-			return Array.isArray(answer) && answer.includes(optionLabel);
+			return (answer as string[]).includes(optionLabel);
 		} else {
 			return answer === optionLabel;
 		}
 	}
 
-	function canProceed(questionIdx: number): boolean {
-		if (showOther[questionIdx]) {
-			return (otherText[questionIdx] || '').trim().length > 0;
-		}
-		const question = data.questions?.[questionIdx];
-		if (!question) return false;
-		if (question.multiSelect) {
-			const answer = answers[questionIdx];
-			return Array.isArray(answer) && answer.length > 0;
-		}
-		return ((answers[questionIdx] as string) || '').length > 0;
-	}
-
 	function canSubmit(): boolean {
-		const questions = data.questions ?? [];
-		return questions.length > 0 && questions.every((_, idx) => canProceed(idx));
-	}
-
-	function goNext() {
-		if (!canProceed(currentStep)) return;
-
-		slideDirection = 'forward';
-		if (isLastQuestion) {
-			// Go to review step (if multi-question)
-			if (!isSingleQuestion) {
-				isReviewStep = true;
-			} else {
-				handleSubmit();
+		return data.questions.every((q, idx) => {
+			if (showOther[idx]) {
+				return (otherText[idx] || '').trim().length > 0;
 			}
-		} else {
-			currentStep++;
-		}
-	}
-
-	function goBack() {
-		slideDirection = 'backward';
-		if (isReviewStep) {
-			isReviewStep = false;
-		} else if (currentStep > 0) {
-			currentStep--;
-		}
-	}
-
-	function goToQuestion(idx: number) {
-		slideDirection = idx > currentStep ? 'forward' : 'backward';
-		isReviewStep = false;
-		currentStep = idx;
-	}
-
-	function getAnswerDisplay(questionIdx: number): string {
-		if (showOther[questionIdx]) {
-			return otherText[questionIdx];
-		}
-		const answer = answers[questionIdx];
-		if (Array.isArray(answer)) {
-			return answer.join(', ');
-		}
-		return answer || '';
+			if (q.multiSelect) {
+				return (answers[idx] as string[]).length > 0;
+			}
+			return (answers[idx] as string).length > 0;
+		});
 	}
 
 	function handleSubmit() {
-		const questions = data.questions ?? [];
 		const finalAnswers: Record<string, string | string[]> = {};
 
-		questions.forEach((q, idx) => {
+		data.questions.forEach((q, idx) => {
 			const key = q.header || `question_${idx}`;
 			if (showOther[idx]) {
-				finalAnswers[key] = (otherText[idx] || '').trim();
+				finalAnswers[key] = otherText[idx].trim();
 			} else {
-				finalAnswers[key] = answers[idx] ?? '';
+				finalAnswers[key] = answers[idx];
 			}
 		});
 
@@ -196,180 +127,92 @@
 			answers: finalAnswers
 		});
 	}
-
-	// Keyboard navigation
-	function handleKeydown(e: KeyboardEvent) {
-		if (e.key === 'Enter' && !e.shiftKey) {
-			e.preventDefault();
-			if (isReviewStep && canSubmit()) {
-				handleSubmit();
-			} else if (canProceed(currentStep)) {
-				goNext();
-			}
-		} else if (e.key === 'Escape' && !isFirstQuestion) {
-			e.preventDefault();
-			goBack();
-		}
-	}
 </script>
 
-<svelte:window on:keydown={handleKeydown} />
-
-<!-- User Question Panel -->
-<div
-	class="question-panel rounded-2xl border border-border/60 bg-gradient-to-b from-info/10 to-info/5 shadow-lg overflow-hidden backdrop-blur-sm"
-	role="dialog"
-	aria-labelledby="question-title"
->
+<!-- User Question Card -->
+<div class="user-question-card rounded-xl border-2 border-blue-500/40 bg-gradient-to-b from-blue-500/5 to-transparent shadow-lg shadow-blue-500/5 overflow-hidden">
 	<!-- Header -->
-	<div class="flex items-center gap-3 px-4 py-3 border-b border-border/40">
-		<!-- Icon -->
-		<div class="flex-shrink-0 w-9 h-9 rounded-xl bg-info/15 border border-info/25 flex items-center justify-center">
-			<svg class="w-4.5 h-4.5 text-info" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+	<div class="flex items-center gap-3 px-4 py-3 bg-blue-500/10 border-b border-blue-500/20">
+		<div class="flex-shrink-0 w-10 h-10 rounded-lg bg-blue-500/10 border border-blue-500/30 flex items-center justify-center">
+			<svg class="w-5 h-5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
 			</svg>
 		</div>
-
-		<!-- Title -->
 		<div class="flex-1 min-w-0">
-			<h3 id="question-title" class="text-sm font-semibold text-foreground flex items-center gap-2">
-				Claude has a question
-				<span class="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded-md bg-info/15 text-info border border-info/20">
+			<div class="flex items-center gap-2 flex-wrap">
+				<span class="font-semibold text-foreground">Claude has a question</span>
+				<span class="px-2 py-0.5 text-xs rounded-full bg-blue-500/20 text-blue-400 font-medium">
 					Input Required
 				</span>
-			</h3>
-			<p class="text-xs text-muted-foreground">
-				{#if isSingleQuestion}
-					Please answer to continue
-				{:else if isReviewStep}
-					Review your answers
-				{:else}
-					Step {currentStep + 1} of {totalSteps}
-				{/if}
-			</p>
-		</div>
-
-		<!-- Progress Indicator (for multi-question) -->
-		{#if !isSingleQuestion}
-			<div class="flex-shrink-0 flex items-center gap-1">
-				{#each data.questions as _, idx}
-					<button
-						type="button"
-						onclick={() => goToQuestion(idx)}
-						disabled={!canProceed(idx) && idx > currentStep}
-						class="w-2 h-2 rounded-full transition-all duration-200 {
-							isReviewStep ? 'bg-info' :
-							idx === currentStep ? 'bg-info scale-125' :
-							idx < currentStep ? 'bg-info/60 hover:bg-info/80' :
-							'bg-muted-foreground/30'
-						}"
-						aria-label="Go to question {idx + 1}"
-					></button>
-				{/each}
-				{#if !isSingleQuestion}
-					<button
-						type="button"
-						onclick={() => { if (canSubmit()) isReviewStep = true; }}
-						disabled={!canSubmit()}
-						class="w-2 h-2 rounded-full transition-all duration-200 ml-1 {
-							isReviewStep ? 'bg-success scale-125' :
-							canSubmit() ? 'bg-success/60 hover:bg-success/80' :
-							'bg-muted-foreground/30'
-						}"
-						aria-label="Review answers"
-					></button>
-				{/if}
 			</div>
-		{/if}
+			<div class="text-xs text-muted-foreground mt-0.5">
+				Please answer to continue
+			</div>
+		</div>
 	</div>
 
-	<!-- Content Area with Slide Animation -->
-	<div class="question-content-wrapper overflow-hidden">
-		{#if isReviewStep}
-			<!-- Review Step -->
-			<div class="p-4 space-y-3 animate-slide-{slideDirection}">
-				<p class="text-sm text-muted-foreground mb-4">
-					Review and confirm your answers before submitting:
-				</p>
-
-				{#each data.questions as question, idx}
-					<div class="review-item group">
-						<div class="flex items-start justify-between gap-3">
-							<div class="flex-1 min-w-0">
-								{#if question.header}
-									<span class="inline-block px-2 py-0.5 text-[10px] font-medium rounded-md bg-info/15 text-info mb-1.5">
-										{question.header}
-									</span>
-								{/if}
-								<p class="text-xs text-muted-foreground">{question.question}</p>
-								<p class="text-sm font-medium text-foreground mt-1 break-words">
-									{getAnswerDisplay(idx) || '—'}
-								</p>
-							</div>
-							<button
-								type="button"
-								onclick={() => goToQuestion(idx)}
-								class="flex-shrink-0 p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors opacity-0 group-hover:opacity-100"
-								aria-label="Edit answer"
-							>
-								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-								</svg>
-							</button>
-						</div>
-					</div>
-				{/each}
-			</div>
-		{:else}
-			<!-- Question Step -->
-			{#key currentStep}
-			<div class="p-4 animate-slide-{slideDirection}">
+	<!-- Questions -->
+	<div class="p-4 space-y-6">
+		{#each data.questions as question, qIdx}
+			<div class="space-y-3">
 				<!-- Question Header & Text -->
-				<div class="mb-4">
-					{#if currentQuestion.header}
-						<span class="inline-block px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded-md bg-info/15 text-info mb-2">
-							{currentQuestion.header}
+				<div>
+					{#if question.header}
+						<span class="inline-block px-2 py-0.5 text-xs font-medium rounded bg-blue-500/20 text-blue-400 mb-2">
+							{question.header}
 						</span>
 					{/if}
-					<p class="text-sm font-medium text-foreground leading-relaxed">
-						{currentQuestion.question}
+					<p class="text-sm font-medium text-foreground">
+						{question.question}
 					</p>
-					{#if currentQuestion.multiSelect}
+					{#if question.multiSelect}
 						<p class="text-xs text-muted-foreground mt-1">Select all that apply</p>
 					{/if}
 				</div>
 
-				<!-- Options -->
-				<div class="space-y-2">
-					{#each currentOptions as option}
+				<!-- Options Grid -->
+				<div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+					{#each question.options as option}
 						<button
 							type="button"
-							onclick={() => toggleOption(currentStep, option.label)}
-							class="option-card {isSelected(currentStep, option.label) ? 'selected' : ''}"
+							onclick={() => toggleOption(qIdx, option.label)}
+							class="text-left p-3 rounded-lg border transition-all duration-150
+								{isSelected(qIdx, option.label)
+									? 'bg-blue-500/20 border-blue-500/50 ring-1 ring-blue-500/30'
+									: 'bg-muted/30 border-border/50 hover:bg-muted/50 hover:border-border'
+								}"
 						>
-							<div class="flex items-start gap-3">
+							<div class="flex items-start gap-2">
 								<!-- Checkbox/Radio indicator -->
 								<div class="flex-shrink-0 mt-0.5">
-									{#if currentQuestion.multiSelect}
-										<div class="checkbox-indicator {isSelected(currentStep, option.label) ? 'checked' : ''}">
-											{#if isSelected(currentStep, option.label)}
+									{#if question.multiSelect}
+										<div class="w-4 h-4 rounded border-2 flex items-center justify-center
+											{isSelected(qIdx, option.label)
+												? 'bg-blue-500 border-blue-500'
+												: 'border-muted-foreground/50'
+											}">
+											{#if isSelected(qIdx, option.label)}
 												<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
 												</svg>
 											{/if}
 										</div>
 									{:else}
-										<div class="radio-indicator {isSelected(currentStep, option.label) ? 'checked' : ''}">
-											{#if isSelected(currentStep, option.label)}
-												<div class="radio-dot"></div>
+										<div class="w-4 h-4 rounded-full border-2 flex items-center justify-center
+											{isSelected(qIdx, option.label)
+												? 'border-blue-500'
+												: 'border-muted-foreground/50'
+											}">
+											{#if isSelected(qIdx, option.label)}
+												<div class="w-2 h-2 rounded-full bg-blue-500"></div>
 											{/if}
 										</div>
 									{/if}
 								</div>
-								<div class="flex-1 min-w-0 text-left">
+								<div class="flex-1 min-w-0">
 									<div class="text-sm font-medium text-foreground">{option.label}</div>
 									{#if option.description}
-										<div class="text-xs text-muted-foreground mt-0.5 leading-relaxed">{option.description}</div>
+										<div class="text-xs text-muted-foreground mt-0.5">{option.description}</div>
 									{/if}
 								</div>
 							</div>
@@ -379,199 +222,95 @@
 					<!-- Other Option -->
 					<button
 						type="button"
-						onclick={() => selectOther(currentStep)}
-						class="option-card {showOther[currentStep] ? 'selected' : ''}"
+						onclick={() => selectOther(qIdx)}
+						class="text-left p-3 rounded-lg border transition-all duration-150
+							{showOther[qIdx]
+								? 'bg-blue-500/20 border-blue-500/50 ring-1 ring-blue-500/30'
+								: 'bg-muted/30 border-border/50 hover:bg-muted/50 hover:border-border'
+							}"
 					>
-						<div class="flex items-start gap-3">
+						<div class="flex items-start gap-2">
 							<div class="flex-shrink-0 mt-0.5">
-								{#if currentQuestion.multiSelect}
-									<div class="checkbox-indicator {showOther[currentStep] ? 'checked' : ''}">
-										{#if showOther[currentStep]}
+								{#if question.multiSelect}
+									<div class="w-4 h-4 rounded border-2 flex items-center justify-center
+										{showOther[qIdx]
+											? 'bg-blue-500 border-blue-500'
+											: 'border-muted-foreground/50'
+										}">
+										{#if showOther[qIdx]}
 											<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
 											</svg>
 										{/if}
 									</div>
 								{:else}
-									<div class="radio-indicator {showOther[currentStep] ? 'checked' : ''}">
-										{#if showOther[currentStep]}
-											<div class="radio-dot"></div>
+									<div class="w-4 h-4 rounded-full border-2 flex items-center justify-center
+										{showOther[qIdx]
+											? 'border-blue-500'
+											: 'border-muted-foreground/50'
+										}">
+										{#if showOther[qIdx]}
+											<div class="w-2 h-2 rounded-full bg-blue-500"></div>
 										{/if}
 									</div>
 								{/if}
 							</div>
-							<div class="flex-1 min-w-0 text-left">
+							<div class="flex-1 min-w-0">
 								<div class="text-sm font-medium text-foreground">Other</div>
 								<div class="text-xs text-muted-foreground mt-0.5">Provide custom input</div>
 							</div>
 						</div>
 					</button>
-
-					<!-- Custom Text Input (when "Other" is selected) -->
-					{#if showOther[currentStep]}
-						<div class="mt-3 animate-expand">
-							<textarea
-								bind:value={otherText[currentStep]}
-								placeholder="Enter your answer..."
-								rows="2"
-								class="w-full px-3 py-2.5 text-sm bg-input border border-border rounded-xl
-									focus:outline-none focus:ring-2 focus:ring-info/40 focus:border-info/40
-									resize-none transition-all"
-							></textarea>
-						</div>
-					{/if}
 				</div>
+
+				<!-- Custom Text Input (when "Other" is selected) -->
+				{#if showOther[qIdx]}
+					<div class="animate-in slide-in-from-top-2">
+						<textarea
+							bind:value={otherText[qIdx]}
+							placeholder="Enter your answer..."
+							rows="2"
+							class="w-full px-3 py-2 text-sm bg-input border border-border rounded-lg
+								focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500/50
+								resize-none"
+						></textarea>
+					</div>
+				{/if}
 			</div>
-			{/key}
-		{/if}
+
+			<!-- Divider between questions -->
+			{#if qIdx < data.questions.length - 1}
+				<hr class="border-border/50" />
+			{/if}
+		{/each}
 	</div>
 
-	<!-- Footer / Actions -->
-	<div class="px-4 py-3 border-t border-border/40 bg-card/20">
-		<div class="flex items-center justify-between gap-3">
-			<!-- Back Button -->
-			<div class="flex-shrink-0">
-				{#if !isFirstQuestion || isReviewStep}
-					<button
-						type="button"
-						onclick={goBack}
-						class="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
-					>
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
-						</svg>
-						Back
-					</button>
-				{:else}
-					<div></div>
-				{/if}
-			</div>
-
-			<!-- Next/Submit Button -->
-			<div class="flex-shrink-0">
-				{#if isReviewStep}
-					<button
-						type="button"
-						onclick={handleSubmit}
-						disabled={!canSubmit()}
-						class="flex items-center gap-2 px-5 py-2.5 text-sm font-medium rounded-xl transition-all duration-150
-							{canSubmit()
-								? 'bg-info text-white hover:bg-info/90 active:scale-[0.98]'
-								: 'bg-muted text-muted-foreground cursor-not-allowed'
-							}"
-					>
-						Submit
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-						</svg>
-					</button>
-				{:else if isSingleQuestion}
-					<button
-						type="button"
-						onclick={handleSubmit}
-						disabled={!canProceed(currentStep)}
-						class="flex items-center gap-2 px-5 py-2.5 text-sm font-medium rounded-xl transition-all duration-150
-							{canProceed(currentStep)
-								? 'bg-info text-white hover:bg-info/90 active:scale-[0.98]'
-								: 'bg-muted text-muted-foreground cursor-not-allowed'
-							}"
-					>
-						Submit
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-						</svg>
-					</button>
-				{:else}
-					<button
-						type="button"
-						onclick={goNext}
-						disabled={!canProceed(currentStep)}
-						class="flex items-center gap-2 px-5 py-2.5 text-sm font-medium rounded-xl transition-all duration-150
-							{canProceed(currentStep)
-								? 'bg-info text-white hover:bg-info/90 active:scale-[0.98]'
-								: 'bg-muted text-muted-foreground cursor-not-allowed'
-							}"
-					>
-						{isLastQuestion ? 'Review' : 'Next'}
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-						</svg>
-					</button>
-				{/if}
-			</div>
-		</div>
-
-		<!-- Keyboard Hints -->
-		<div class="mt-2 flex items-center justify-center gap-3 text-[10px] text-muted-foreground">
-			<span class="flex items-center gap-1">
-				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded text-[9px] font-mono">Enter</kbd>
-				<span>{isReviewStep ? 'Submit' : isSingleQuestion ? 'Submit' : isLastQuestion ? 'Review' : 'Next'}</span>
-			</span>
-			{#if !isFirstQuestion || isReviewStep}
-				<span class="flex items-center gap-1">
-					<kbd class="px-1.5 py-0.5 bg-muted/50 rounded text-[9px] font-mono">Esc</kbd>
-					<span>Back</span>
-				</span>
-			{/if}
-		</div>
+	<!-- Submit Button -->
+	<div class="px-4 py-3 border-t border-border/50 bg-muted/5">
+		<button
+			type="button"
+			onclick={handleSubmit}
+			disabled={!canSubmit()}
+			class="w-full sm:w-auto px-6 py-2.5 text-sm font-medium rounded-lg transition-all duration-150
+				{canSubmit()
+					? 'bg-blue-500 text-white hover:bg-blue-600 active:bg-blue-700'
+					: 'bg-muted text-muted-foreground cursor-not-allowed'
+				}"
+		>
+			Submit Answer{data.questions.length > 1 ? 's' : ''}
+		</button>
 	</div>
 </div>
 
 <style>
-	.question-panel {
-		animation: panel-enter 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+	.user-question-card {
+		animation: slide-up 0.3s ease-out;
 	}
 
-	@keyframes panel-enter {
+	@keyframes slide-up {
 		from {
 			opacity: 0;
-			transform: translateY(8px) scale(0.98);
-		}
-		to {
-			opacity: 1;
-			transform: translateY(0) scale(1);
-		}
-	}
-
-	/* Slide animations for wizard steps */
-	.animate-slide-forward {
-		animation: slide-forward 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-	}
-
-	.animate-slide-backward {
-		animation: slide-backward 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-	}
-
-	@keyframes slide-forward {
-		from {
-			opacity: 0;
-			transform: translateX(20px);
-		}
-		to {
-			opacity: 1;
-			transform: translateX(0);
-		}
-	}
-
-	@keyframes slide-backward {
-		from {
-			opacity: 0;
-			transform: translateX(-20px);
-		}
-		to {
-			opacity: 1;
-			transform: translateX(0);
-		}
-	}
-
-	.animate-expand {
-		animation: expand 0.2s ease-out;
-	}
-
-	@keyframes expand {
-		from {
-			opacity: 0;
-			transform: translateY(-8px);
+			transform: translateY(10px);
 		}
 		to {
 			opacity: 1;
@@ -579,102 +318,22 @@
 		}
 	}
 
-	/* Option Card Styling */
-	.option-card {
-		display: block;
-		width: 100%;
-		padding: 0.75rem;
-		border-radius: var(--radius, 0.75rem);
-		border: 1px solid var(--border);
-		background: var(--card);
-		cursor: pointer;
-		transition: all 0.15s ease;
-		text-align: left;
+	.animate-in {
+		animation: animate-in 0.2s ease-out;
 	}
 
-	.option-card:hover {
-		border-color: color-mix(in oklch, var(--border) 60%, var(--foreground));
-		background: color-mix(in oklch, var(--card) 95%, var(--foreground));
+	.slide-in-from-top-2 {
+		--tw-enter-translate-y: -0.5rem;
 	}
 
-	.option-card.selected {
-		border-color: var(--info);
-		background: color-mix(in oklch, var(--info) 8%, var(--card));
-	}
-
-	/* Checkbox Indicator */
-	.checkbox-indicator {
-		width: 1.125rem;
-		height: 1.125rem;
-		border-radius: 0.375rem;
-		border: 2px solid var(--muted-foreground);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		transition: all 0.15s ease;
-	}
-
-	.checkbox-indicator.checked {
-		background: var(--info);
-		border-color: var(--info);
-	}
-
-	/* Radio Indicator */
-	.radio-indicator {
-		width: 1.125rem;
-		height: 1.125rem;
-		border-radius: 50%;
-		border: 2px solid var(--muted-foreground);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		transition: all 0.15s ease;
-	}
-
-	.radio-indicator.checked {
-		border-color: var(--info);
-	}
-
-	.radio-dot {
-		width: 0.5rem;
-		height: 0.5rem;
-		border-radius: 50%;
-		background: var(--info);
-		animation: dot-pop 0.15s ease;
-	}
-
-	@keyframes dot-pop {
+	@keyframes animate-in {
 		from {
-			transform: scale(0);
+			opacity: 0;
+			transform: translateY(var(--tw-enter-translate-y, 0));
 		}
 		to {
-			transform: scale(1);
-		}
-	}
-
-	/* Review Item */
-	.review-item {
-		padding: 0.75rem;
-		border-radius: 0.875rem;
-		border: 1px solid var(--border);
-		background: var(--card);
-		transition: all 0.15s ease;
-	}
-
-	.review-item:hover {
-		border-color: color-mix(in oklch, var(--border) 60%, var(--foreground));
-		background: color-mix(in oklch, var(--card) 95%, var(--foreground));
-	}
-
-	/* Mobile optimizations */
-	@media (max-width: 639px) {
-		.question-panel {
-			border-radius: 1.25rem 1.25rem 0 0;
-			border-bottom: none;
-		}
-
-		.option-card {
-			padding: 1rem;
+			opacity: 1;
+			transform: translateY(0);
 		}
 	}
 </style>

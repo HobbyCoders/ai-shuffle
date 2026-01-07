@@ -28,94 +28,100 @@
 	}>();
 
 	let showDetails = $state(false);
+	let showRememberOptions = $state(false);
 	let rememberChoice = $state<'none' | 'session' | 'profile'>('none');
 	let customPattern = $state('');
-	let isEditingPattern = $state(false);
 
-	// Tool display configuration
-	const toolConfig: Record<string, {
-		icon: string;
-		gradient: string;
-		label: string;
-		accentClass: string;
-	}> = {
+	// Tool display info with better icons and colors
+	const toolInfo: Record<string, { icon: string; bgColor: string; textColor: string; borderColor: string; label: string }> = {
 		Bash: {
-			icon: 'M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z',
-			gradient: 'from-emerald-500/20 to-emerald-600/5',
-			label: 'Run Command',
-			accentClass: 'text-emerald-400'
+			icon: 'terminal',
+			bgColor: 'bg-emerald-500/10',
+			textColor: 'text-emerald-400',
+			borderColor: 'border-emerald-500/30',
+			label: 'Run Command'
 		},
 		Read: {
-			icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z',
-			gradient: 'from-blue-500/20 to-blue-600/5',
-			label: 'Read File',
-			accentClass: 'text-blue-400'
+			icon: 'file-text',
+			bgColor: 'bg-blue-500/10',
+			textColor: 'text-blue-400',
+			borderColor: 'border-blue-500/30',
+			label: 'Read File'
 		},
 		Write: {
-			icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z',
-			gradient: 'from-amber-500/20 to-amber-600/5',
-			label: 'Write File',
-			accentClass: 'text-amber-400'
+			icon: 'file-plus',
+			bgColor: 'bg-amber-500/10',
+			textColor: 'text-amber-400',
+			borderColor: 'border-amber-500/30',
+			label: 'Write File'
 		},
 		Edit: {
-			icon: 'M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z',
-			gradient: 'from-orange-500/20 to-orange-600/5',
-			label: 'Edit File',
-			accentClass: 'text-orange-400'
+			icon: 'edit-3',
+			bgColor: 'bg-orange-500/10',
+			textColor: 'text-orange-400',
+			borderColor: 'border-orange-500/30',
+			label: 'Edit File'
 		},
 		Glob: {
-			icon: 'M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z',
-			gradient: 'from-purple-500/20 to-purple-600/5',
-			label: 'Find Files',
-			accentClass: 'text-purple-400'
+			icon: 'search',
+			bgColor: 'bg-purple-500/10',
+			textColor: 'text-purple-400',
+			borderColor: 'border-purple-500/30',
+			label: 'Find Files'
 		},
 		Grep: {
-			icon: 'M10 21h7a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v11m0 5l4.879-4.879m0 0a3 3 0 104.243-4.242 3 3 0 00-4.243 4.242z',
-			gradient: 'from-violet-500/20 to-violet-600/5',
-			label: 'Search Content',
-			accentClass: 'text-violet-400'
+			icon: 'file-search',
+			bgColor: 'bg-violet-500/10',
+			textColor: 'text-violet-400',
+			borderColor: 'border-violet-500/30',
+			label: 'Search Content'
 		},
 		WebFetch: {
-			icon: 'M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9',
-			gradient: 'from-cyan-500/20 to-cyan-600/5',
-			label: 'Fetch URL',
-			accentClass: 'text-cyan-400'
+			icon: 'globe',
+			bgColor: 'bg-cyan-500/10',
+			textColor: 'text-cyan-400',
+			borderColor: 'border-cyan-500/30',
+			label: 'Fetch URL'
 		},
 		WebSearch: {
-			icon: 'M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z',
-			gradient: 'from-sky-500/20 to-sky-600/5',
-			label: 'Web Search',
-			accentClass: 'text-sky-400'
+			icon: 'search',
+			bgColor: 'bg-sky-500/10',
+			textColor: 'text-sky-400',
+			borderColor: 'border-sky-500/30',
+			label: 'Web Search'
 		},
 		Task: {
-			icon: 'M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z',
-			gradient: 'from-indigo-500/20 to-indigo-600/5',
-			label: 'Run Agent',
-			accentClass: 'text-indigo-400'
+			icon: 'cpu',
+			bgColor: 'bg-indigo-500/10',
+			textColor: 'text-indigo-400',
+			borderColor: 'border-indigo-500/30',
+			label: 'Run Agent'
 		},
 		NotebookEdit: {
-			icon: 'M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253',
-			gradient: 'from-rose-500/20 to-rose-600/5',
-			label: 'Edit Notebook',
-			accentClass: 'text-rose-400'
+			icon: 'book-open',
+			bgColor: 'bg-rose-500/10',
+			textColor: 'text-rose-400',
+			borderColor: 'border-rose-500/30',
+			label: 'Edit Notebook'
 		}
 	};
 
-	function getToolConfig(name: string) {
-		return toolConfig[name] || {
-			icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z',
-			gradient: 'from-gray-500/20 to-gray-600/5',
-			label: name,
-			accentClass: 'text-gray-400'
+	function getToolInfo(name: string) {
+		return toolInfo[name] || {
+			icon: 'tool',
+			bgColor: 'bg-gray-500/10',
+			textColor: 'text-gray-400',
+			borderColor: 'border-gray-500/30',
+			label: name
 		};
 	}
 
-	// Get tool summary for display
+	// Get a brief summary of what the tool will do
 	function getToolSummary(): string {
 		const input = request.tool_input;
 		switch (request.tool_name) {
 			case 'Bash':
-				return String(input.command || '');
+				return String(input.command || '').substring(0, 100);
 			case 'Read':
 			case 'Write':
 			case 'Edit':
@@ -128,9 +134,9 @@
 			case 'WebSearch':
 				return String(input.query || '');
 			case 'Task':
-				return String(input.description || input.prompt || '').substring(0, 100);
+				return String(input.description || input.prompt || '').substring(0, 80);
 			default:
-				return JSON.stringify(input).substring(0, 100);
+				return JSON.stringify(input).substring(0, 80);
 		}
 	}
 
@@ -204,17 +210,12 @@
 		}
 	}
 
-	// Get the pattern to use (custom or suggested)
-	function getActivePattern(): string {
-		return customPattern || getSuggestedPattern();
-	}
-
 	function handleAllow() {
 		dispatch('respond', {
 			request_id: request.request_id,
 			decision: 'allow',
 			remember: rememberChoice,
-			pattern: rememberChoice !== 'none' ? getActivePattern() : undefined
+			pattern: rememberChoice !== 'none' ? (customPattern || getSuggestedPattern()) : undefined
 		});
 	}
 
@@ -223,416 +224,300 @@
 			request_id: request.request_id,
 			decision: 'deny',
 			remember: rememberChoice,
-			pattern: rememberChoice !== 'none' ? getActivePattern() : undefined
+			pattern: rememberChoice !== 'none' ? (customPattern || getSuggestedPattern()) : undefined
 		});
 	}
 
-	// Keyboard shortcuts
-	function handleKeydown(e: KeyboardEvent) {
-		if (e.key === 'Enter' && !e.shiftKey && !isEditingPattern) {
-			e.preventDefault();
-			handleAllow();
-		} else if (e.key === 'Escape') {
-			e.preventDefault();
-			handleDeny();
-		}
+	function handleAllowAlways() {
+		dispatch('respond', {
+			request_id: request.request_id,
+			decision: 'allow',
+			remember: 'profile',
+			pattern: getSuggestedPattern()
+		});
 	}
 
-	const config = $derived(getToolConfig(request.tool_name));
+	const info = $derived(getToolInfo(request.tool_name));
 	const summary = $derived(getToolSummary());
 	const formattedInput = $derived(formatToolInput(request.tool_input));
 	const suggestedPattern = $derived(getSuggestedPattern());
 </script>
 
-<svelte:window on:keydown={handleKeydown} />
-
-<!-- Permission Request Panel -->
-<div
-	class="permission-panel rounded-2xl border border-border/60 bg-gradient-to-b {config.gradient} shadow-lg overflow-hidden backdrop-blur-sm"
-	role="dialog"
-	aria-labelledby="permission-title"
->
-	<!-- Compact Header -->
-	<div class="flex items-center gap-3 px-4 py-3 border-b border-border/40">
+<!-- Main Permission Card -->
+<div class="permission-card rounded-xl border-2 border-amber-500/40 bg-gradient-to-b from-amber-500/5 to-transparent shadow-lg shadow-amber-500/5 overflow-hidden">
+	<!-- Header Bar -->
+	<div class="flex items-center gap-3 px-4 py-3 bg-amber-500/10 border-b border-amber-500/20">
 		<!-- Tool Icon -->
-		<div class="flex-shrink-0 w-9 h-9 rounded-xl bg-card/80 border border-border/50 flex items-center justify-center shadow-sm">
-			<svg class="w-4.5 h-4.5 {config.accentClass}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d={config.icon} />
-			</svg>
+		<div class="flex-shrink-0 w-10 h-10 rounded-lg {info.bgColor} {info.borderColor} border flex items-center justify-center">
+			{#if info.icon === 'terminal'}
+				<svg class="w-5 h-5 {info.textColor}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+				</svg>
+			{:else if info.icon === 'file-text' || info.icon === 'file-plus'}
+				<svg class="w-5 h-5 {info.textColor}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+				</svg>
+			{:else if info.icon === 'edit-3'}
+				<svg class="w-5 h-5 {info.textColor}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+				</svg>
+			{:else if info.icon === 'search' || info.icon === 'file-search'}
+				<svg class="w-5 h-5 {info.textColor}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+				</svg>
+			{:else if info.icon === 'globe'}
+				<svg class="w-5 h-5 {info.textColor}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
+				</svg>
+			{:else if info.icon === 'cpu'}
+				<svg class="w-5 h-5 {info.textColor}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
+				</svg>
+			{:else if info.icon === 'book-open'}
+				<svg class="w-5 h-5 {info.textColor}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+				</svg>
+			{:else}
+				<svg class="w-5 h-5 {info.textColor}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+				</svg>
+			{/if}
 		</div>
 
-		<!-- Title -->
+		<!-- Title & Badge -->
 		<div class="flex-1 min-w-0">
-			<h3 id="permission-title" class="text-sm font-semibold text-foreground flex items-center gap-2">
-				{config.label}
-				<span class="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded-md bg-warning/15 text-warning border border-warning/20">
-					Permission
+			<div class="flex items-center gap-2 flex-wrap">
+				<span class="font-semibold text-foreground">{info.label}</span>
+				<span class="px-2 py-0.5 text-xs rounded-full bg-amber-500/20 text-amber-400 font-medium">
+					Permission Required
 				</span>
-			</h3>
-			<p class="text-xs text-muted-foreground truncate">{request.tool_name}</p>
+			</div>
+			<div class="text-xs text-muted-foreground mt-0.5 truncate">
+				{request.tool_name}
+			</div>
 		</div>
 
-		<!-- Queue Badge -->
+		<!-- Queue Badge (mobile-friendly) -->
 		{#if queueCount > 1}
-			<div class="flex-shrink-0 flex items-center gap-1.5 px-2 py-1 rounded-lg bg-warning/10 border border-warning/20">
-				<span class="relative flex h-2 w-2">
-					<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-warning/60 opacity-75"></span>
-					<span class="relative inline-flex rounded-full h-2 w-2 bg-warning"></span>
-				</span>
-				<span class="text-xs font-medium text-warning">{queueCount}</span>
+			<div class="flex-shrink-0 px-2.5 py-1 rounded-full bg-amber-500/20 text-amber-300 text-xs font-medium">
+				{queueCount}
 			</div>
 		{/if}
 	</div>
 
-	<!-- Command/Action Summary -->
+	<!-- Summary -->
 	<div class="px-4 py-3">
-		<div class="relative group">
-			<div class="text-sm text-foreground font-mono bg-card/60 rounded-xl px-3 py-2.5 border border-border/40 break-all leading-relaxed">
-				{#if request.tool_name === 'Bash'}
-					<span class="text-muted-foreground select-none">$ </span>
-				{/if}
-				{summary || 'No details available'}
-			</div>
+		<div class="text-sm text-foreground/90 font-mono bg-muted/30 rounded-lg px-3 py-2 break-all">
+			{summary || 'No details available'}
 		</div>
 
-		<!-- Expand Details Toggle -->
+		<!-- Expand/Collapse Details Button -->
 		<button
 			type="button"
 			onclick={() => showDetails = !showDetails}
 			class="mt-2 text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors"
 		>
-			<svg
-				class="w-3.5 h-3.5 transition-transform duration-200 {showDetails ? 'rotate-90' : ''}"
-				fill="none"
-				stroke="currentColor"
-				viewBox="0 0 24 24"
-			>
+			<svg class="w-3.5 h-3.5 transition-transform {showDetails ? 'rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
 			</svg>
-			{showDetails ? 'Hide details' : 'Show details'}
+			{showDetails ? 'Hide' : 'Show'} full details
 		</button>
 
 		<!-- Expanded Details -->
 		{#if showDetails}
-			<div class="mt-3 space-y-2 animate-expand">
+			<div class="mt-3 space-y-2 animate-in slide-in-from-top-2 duration-200">
 				{#each formattedInput as { key, value, truncated }}
 					<div class="text-sm">
-						<span class="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">{key}</span>
-						<pre class="mt-1 p-2.5 bg-card/80 rounded-lg text-xs text-foreground overflow-x-auto whitespace-pre-wrap break-all font-mono border border-border/40 max-h-32 overflow-y-auto">{value}{#if truncated}<span class="text-muted-foreground">… (truncated)</span>{/if}</pre>
+						<span class="text-muted-foreground text-xs uppercase tracking-wide">{key}</span>
+						<pre class="mt-1 p-2.5 bg-muted/40 rounded-lg text-xs text-foreground overflow-x-auto whitespace-pre-wrap break-all font-mono border border-border/50">{value}{#if truncated}<span class="text-muted-foreground">... (truncated)</span>{/if}</pre>
 					</div>
 				{/each}
 			</div>
 		{/if}
 	</div>
 
-	<!-- Remember Options - Always Visible -->
-	<div class="px-4 py-3 border-t border-border/40 bg-card/30">
-		<div class="space-y-2">
-			<!-- Just Once -->
-			<label class="remember-option {rememberChoice === 'none' ? 'selected' : ''}">
-				<input
-					type="radio"
-					name="remember-{request.request_id}"
-					value="none"
-					bind:group={rememberChoice}
-					class="sr-only"
-				/>
-				<div class="flex items-center gap-3">
-					<div class="radio-indicator">
-						{#if rememberChoice === 'none'}
-							<div class="radio-dot"></div>
-						{/if}
+	<!-- Remember Options -->
+	{#if showRememberOptions}
+		<div class="px-4 py-3 border-t border-border/50 bg-muted/10 animate-in slide-in-from-top-2 duration-200">
+			<div class="text-xs font-medium text-muted-foreground mb-2">Remember this choice:</div>
+			<div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+				<label class="flex items-center gap-2 p-2 rounded-lg bg-muted/30 border border-border/50 cursor-pointer hover:bg-muted/50 transition-colors {rememberChoice === 'none' ? 'ring-1 ring-primary' : ''}">
+					<input
+						type="radio"
+						name="remember-{request.request_id}"
+						value="none"
+						bind:group={rememberChoice}
+						class="w-4 h-4 text-primary"
+					/>
+					<div>
+						<div class="text-sm font-medium">Just once</div>
+						<div class="text-xs text-muted-foreground">Ask again next time</div>
 					</div>
-					<div class="flex-1">
-						<span class="text-sm font-medium text-foreground">Just this once</span>
+				</label>
+				<label class="flex items-center gap-2 p-2 rounded-lg bg-muted/30 border border-border/50 cursor-pointer hover:bg-muted/50 transition-colors {rememberChoice === 'session' ? 'ring-1 ring-primary' : ''}">
+					<input
+						type="radio"
+						name="remember-{request.request_id}"
+						value="session"
+						bind:group={rememberChoice}
+						class="w-4 h-4 text-primary"
+					/>
+					<div>
+						<div class="text-sm font-medium">This session</div>
+						<div class="text-xs text-muted-foreground">Until chat ends</div>
 					</div>
-				</div>
-			</label>
+				</label>
+				<label class="flex items-center gap-2 p-2 rounded-lg bg-muted/30 border border-border/50 cursor-pointer hover:bg-muted/50 transition-colors {rememberChoice === 'profile' ? 'ring-1 ring-primary' : ''}">
+					<input
+						type="radio"
+						name="remember-{request.request_id}"
+						value="profile"
+						bind:group={rememberChoice}
+						class="w-4 h-4 text-primary"
+					/>
+					<div>
+						<div class="text-sm font-medium">Always</div>
+						<div class="text-xs text-muted-foreground">Save to profile</div>
+					</div>
+				</label>
+			</div>
 
-			<!-- This Session -->
-			<label class="remember-option {rememberChoice === 'session' ? 'selected' : ''}">
-				<input
-					type="radio"
-					name="remember-{request.request_id}"
-					value="session"
-					bind:group={rememberChoice}
-					class="sr-only"
-				/>
-				<div class="flex items-center gap-3">
-					<div class="radio-indicator">
-						{#if rememberChoice === 'session'}
-							<div class="radio-dot"></div>
-						{/if}
+			{#if rememberChoice !== 'none'}
+				<div class="mt-3">
+					<label class="text-xs text-muted-foreground">Pattern to match:</label>
+					<div class="flex gap-2 mt-1">
+						<input
+							type="text"
+							bind:value={customPattern}
+							placeholder={suggestedPattern}
+							class="flex-1 px-3 py-2 text-sm bg-input border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/50 font-mono"
+						/>
 					</div>
-					<div class="flex-1 flex items-center justify-between gap-2">
-						<span class="text-sm font-medium text-foreground">This session</span>
-						{#if rememberChoice === 'session'}
-							<div class="pattern-display">
-								{#if isEditingPattern}
-									<input
-										type="text"
-										bind:value={customPattern}
-										placeholder={suggestedPattern}
-										onfocus={() => isEditingPattern = true}
-										onblur={() => isEditingPattern = false}
-										onkeydown={(e) => e.key === 'Enter' && (isEditingPattern = false)}
-										class="pattern-input"
-									/>
-								{:else}
-									<button
-										type="button"
-										onclick={() => isEditingPattern = true}
-										class="pattern-badge"
-									>
-										<code>{customPattern || suggestedPattern}</code>
-										<svg class="w-3 h-3 ml-1 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-										</svg>
-									</button>
-								{/if}
-							</div>
-						{/if}
+					<div class="text-xs text-muted-foreground mt-1">
+						Use <code class="px-1 py-0.5 bg-muted rounded">*</code> as wildcard
 					</div>
 				</div>
-			</label>
-
-			<!-- Always -->
-			<label class="remember-option {rememberChoice === 'profile' ? 'selected' : ''}">
-				<input
-					type="radio"
-					name="remember-{request.request_id}"
-					value="profile"
-					bind:group={rememberChoice}
-					class="sr-only"
-				/>
-				<div class="flex items-center gap-3">
-					<div class="radio-indicator">
-						{#if rememberChoice === 'profile'}
-							<div class="radio-dot"></div>
-						{/if}
-					</div>
-					<div class="flex-1 flex items-center justify-between gap-2">
-						<span class="text-sm font-medium text-foreground">Always allow</span>
-						{#if rememberChoice === 'profile'}
-							<div class="pattern-display">
-								{#if isEditingPattern}
-									<input
-										type="text"
-										bind:value={customPattern}
-										placeholder={suggestedPattern}
-										onfocus={() => isEditingPattern = true}
-										onblur={() => isEditingPattern = false}
-										onkeydown={(e) => e.key === 'Enter' && (isEditingPattern = false)}
-										class="pattern-input"
-									/>
-								{:else}
-									<button
-										type="button"
-										onclick={() => isEditingPattern = true}
-										class="pattern-badge"
-									>
-										<code>{customPattern || suggestedPattern}</code>
-										<svg class="w-3 h-3 ml-1 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-										</svg>
-									</button>
-								{/if}
-							</div>
-						{/if}
-					</div>
-				</div>
-			</label>
+			{/if}
 		</div>
-
-		<!-- Pattern Help Text -->
-		{#if rememberChoice !== 'none'}
-			<p class="mt-2 text-[11px] text-muted-foreground">
-				Use <code class="px-1 py-0.5 bg-muted/50 rounded text-[10px]">*</code> as wildcard to match multiple inputs
-			</p>
-		{/if}
-	</div>
+	{/if}
 
 	<!-- Action Buttons -->
-	<div class="px-4 py-3 border-t border-border/40 bg-card/20">
-		<div class="flex gap-2">
-			<!-- Deny Button -->
+	<div class="px-4 py-3 border-t border-border/50 bg-muted/5">
+		<!-- Mobile: Stack buttons vertically, Desktop: Horizontal -->
+		<div class="flex flex-col sm:flex-row gap-2 sm:items-center sm:justify-between">
+			<!-- Options Toggle -->
 			<button
 				type="button"
-				onclick={handleDeny}
-				class="flex-1 sm:flex-none px-4 py-2.5 text-sm font-medium rounded-xl
-					bg-destructive/10 text-destructive border border-destructive/20
-					hover:bg-destructive/20 hover:border-destructive/30
-					active:scale-[0.98] transition-all duration-150
-					focus:outline-none focus:ring-2 focus:ring-destructive/30"
+				onclick={() => showRememberOptions = !showRememberOptions}
+				class="text-sm text-muted-foreground hover:text-foreground flex items-center gap-1.5 transition-colors order-2 sm:order-1"
 			>
-				Deny
+				<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
+				</svg>
+				{showRememberOptions ? 'Hide options' : 'Options'}
 			</button>
 
-			<!-- Allow Button -->
+			<!-- Primary Action Buttons -->
+			<div class="flex gap-2 order-1 sm:order-2">
+				<!-- Deny Button -->
+				<button
+					type="button"
+					onclick={handleDeny}
+					class="flex-1 sm:flex-none px-4 py-2.5 sm:py-2 text-sm font-medium rounded-lg
+						bg-red-500/10 text-red-400 border border-red-500/30
+						hover:bg-red-500/20 hover:border-red-500/50
+						active:bg-red-500/30
+						transition-all duration-150"
+				>
+					Deny
+				</button>
+
+				<!-- Allow Button -->
+				<button
+					type="button"
+					onclick={handleAllow}
+					class="flex-1 sm:flex-none px-5 py-2.5 sm:py-2 text-sm font-medium rounded-lg
+						bg-emerald-500/10 text-emerald-400 border border-emerald-500/30
+						hover:bg-emerald-500/20 hover:border-emerald-500/50
+						active:bg-emerald-500/30
+						transition-all duration-150"
+				>
+					Allow
+				</button>
+
+				<!-- Allow Always (shown when queue > 1) -->
+				{#if queueCount > 1 && isFirst}
+					<button
+						type="button"
+						onclick={handleAllowAlways}
+						class="hidden sm:flex px-4 py-2 text-sm font-medium rounded-lg
+							bg-emerald-600/20 text-emerald-300 border border-emerald-500/40
+							hover:bg-emerald-600/30 hover:border-emerald-500/60
+							active:bg-emerald-600/40
+							transition-all duration-150 items-center gap-1.5"
+					>
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+						</svg>
+						Allow All Similar
+					</button>
+				{/if}
+			</div>
+		</div>
+
+		<!-- Mobile: Allow All Similar as full-width button -->
+		{#if queueCount > 1 && isFirst}
 			<button
 				type="button"
-				onclick={handleAllow}
-				class="flex-1 px-5 py-2.5 text-sm font-medium rounded-xl
-					bg-success/15 text-success border border-success/25
-					hover:bg-success/25 hover:border-success/35
-					active:scale-[0.98] transition-all duration-150
-					focus:outline-none focus:ring-2 focus:ring-success/30"
+				onclick={handleAllowAlways}
+				class="sm:hidden mt-2 w-full px-4 py-2.5 text-sm font-medium rounded-lg
+					bg-emerald-600/20 text-emerald-300 border border-emerald-500/40
+					hover:bg-emerald-600/30 hover:border-emerald-500/60
+					active:bg-emerald-600/40
+					transition-all duration-150 flex items-center justify-center gap-1.5"
 			>
-				{rememberChoice === 'none' ? 'Allow' : rememberChoice === 'session' ? 'Allow (Session)' : 'Allow Always'}
+				<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+				</svg>
+				Allow All Similar ({queueCount})
 			</button>
-		</div>
-
-		<!-- Keyboard Hints -->
-		<div class="mt-2 flex items-center justify-center gap-3 text-[10px] text-muted-foreground">
-			<span class="flex items-center gap-1">
-				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded text-[9px] font-mono">Enter</kbd>
-				<span>Allow</span>
-			</span>
-			<span class="flex items-center gap-1">
-				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded text-[9px] font-mono">Esc</kbd>
-				<span>Deny</span>
-			</span>
-		</div>
+		{/if}
 	</div>
 </div>
 
 <style>
-	.permission-panel {
-		animation: panel-enter 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+	.permission-card {
+		animation: pulse-glow 2s ease-in-out infinite;
 	}
 
-	@keyframes panel-enter {
+	@keyframes pulse-glow {
+		0%, 100% {
+			box-shadow: 0 0 0 0 rgba(245, 158, 11, 0),
+						0 4px 6px -1px rgba(245, 158, 11, 0.05);
+		}
+		50% {
+			box-shadow: 0 0 20px 0 rgba(245, 158, 11, 0.15),
+						0 4px 6px -1px rgba(245, 158, 11, 0.1);
+		}
+	}
+
+	.animate-in {
+		animation: animate-in 0.2s ease-out;
+	}
+
+	.slide-in-from-top-2 {
+		--tw-enter-translate-y: -0.5rem;
+	}
+
+	@keyframes animate-in {
 		from {
 			opacity: 0;
-			transform: translateY(8px) scale(0.98);
-		}
-		to {
-			opacity: 1;
-			transform: translateY(0) scale(1);
-		}
-	}
-
-	.animate-expand {
-		animation: expand 0.2s ease-out;
-	}
-
-	@keyframes expand {
-		from {
-			opacity: 0;
-			transform: translateY(-8px);
+			transform: translateY(var(--tw-enter-translate-y, 0));
 		}
 		to {
 			opacity: 1;
 			transform: translateY(0);
-		}
-	}
-
-	/* Remember Option Styling */
-	.remember-option {
-		display: block;
-		padding: 0.625rem 0.75rem;
-		border-radius: var(--radius, 0.75rem);
-		border: 1px solid var(--border);
-		background: var(--card);
-		cursor: pointer;
-		transition: all 0.15s ease;
-	}
-
-	.remember-option:hover {
-		border-color: color-mix(in oklch, var(--border) 60%, var(--foreground));
-		background: color-mix(in oklch, var(--card) 95%, var(--foreground));
-	}
-
-	.remember-option.selected {
-		border-color: var(--primary);
-		background: color-mix(in oklch, var(--primary) 8%, var(--card));
-	}
-
-	.radio-indicator {
-		width: 1rem;
-		height: 1rem;
-		border-radius: 50%;
-		border: 2px solid var(--muted-foreground);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		transition: all 0.15s ease;
-		flex-shrink: 0;
-	}
-
-	.remember-option.selected .radio-indicator {
-		border-color: var(--primary);
-	}
-
-	.radio-dot {
-		width: 0.5rem;
-		height: 0.5rem;
-		border-radius: 50%;
-		background: var(--primary);
-		animation: dot-pop 0.15s ease;
-	}
-
-	@keyframes dot-pop {
-		from {
-			transform: scale(0);
-		}
-		to {
-			transform: scale(1);
-		}
-	}
-
-	/* Pattern Display */
-	.pattern-display {
-		flex-shrink: 0;
-	}
-
-	.pattern-badge {
-		display: inline-flex;
-		align-items: center;
-		padding: 0.25rem 0.5rem;
-		font-size: 0.7rem;
-		background: var(--muted);
-		border: 1px solid var(--border);
-		border-radius: 0.5rem;
-		color: var(--foreground);
-		cursor: pointer;
-		transition: all 0.15s ease;
-	}
-
-	.pattern-badge:hover {
-		background: color-mix(in oklch, var(--muted) 80%, var(--foreground));
-		border-color: var(--primary);
-	}
-
-	.pattern-badge code {
-		font-family: ui-monospace, 'Monaco', 'Menlo', monospace;
-	}
-
-	.pattern-input {
-		width: 120px;
-		padding: 0.25rem 0.5rem;
-		font-size: 0.7rem;
-		font-family: ui-monospace, 'Monaco', 'Menlo', monospace;
-		background: var(--input);
-		border: 1px solid var(--primary);
-		border-radius: 0.5rem;
-		color: var(--foreground);
-		outline: none;
-	}
-
-	.pattern-input::placeholder {
-		color: var(--muted-foreground);
-	}
-
-	/* Mobile optimizations */
-	@media (max-width: 639px) {
-		.permission-panel {
-			border-radius: 1.25rem 1.25rem 0 0;
-			border-bottom: none;
-		}
-
-		.pattern-input {
-			width: 100px;
 		}
 	}
 </style>

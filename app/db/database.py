@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 # Schema version for migrations
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def get_connection() -> sqlite3.Connection:
@@ -286,6 +286,19 @@ def _create_schema(cursor: sqlite3.Cursor):
         )
     """)
 
+    # Permission rules for tool access control
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS permission_rules (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT,
+            tool_name TEXT NOT NULL,
+            tool_pattern TEXT,
+            decision TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+        )
+    """)
+
     # Create indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)")
@@ -306,6 +319,8 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_checkpoints_message_uuid ON checkpoints(message_uuid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_preferences_user ON user_preferences(user_type, user_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_subagents_name ON subagents(name)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_permission_rules_profile ON permission_rules(profile_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_permission_rules_tool ON permission_rules(tool_name)")
 
 
 def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
@@ -1546,3 +1561,74 @@ def set_subagent_builtin(subagent_id: str, is_builtin: bool) -> bool:
             (is_builtin, datetime.utcnow().isoformat(), subagent_id)
         )
         return cursor.rowcount > 0
+
+
+# ============================================================================
+# Permission Rules Operations
+# ============================================================================
+
+def add_permission_rule(
+    profile_id: str,
+    tool_name: str,
+    tool_pattern: Optional[str],
+    decision: str
+) -> Dict[str, Any]:
+    """Add a permission rule for a profile"""
+    import uuid
+    rule_id = f"rule-{uuid.uuid4().hex[:8]}"
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO permission_rules (id, profile_id, tool_name, tool_pattern, decision, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (rule_id, profile_id, tool_name, tool_pattern, decision, now)
+        )
+    return get_permission_rule(rule_id)
+
+
+def get_permission_rule(rule_id: str) -> Optional[Dict[str, Any]]:
+    """Get a permission rule by ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM permission_rules WHERE id = ?", (rule_id,))
+        return row_to_dict(cursor.fetchone())
+
+
+def get_permission_rules(
+    profile_id: Optional[str] = None,
+    tool_name: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Get permission rules with optional filters"""
+    query = "SELECT * FROM permission_rules WHERE 1=1"
+    params = []
+
+    if profile_id:
+        query += " AND profile_id = ?"
+        params.append(profile_id)
+    if tool_name:
+        query += " AND tool_name = ?"
+        params.append(tool_name)
+
+    query += " ORDER BY created_at DESC"
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        return rows_to_list(cursor.fetchall())
+
+
+def delete_permission_rule(rule_id: str) -> bool:
+    """Delete a permission rule"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM permission_rules WHERE id = ?", (rule_id,))
+        return cursor.rowcount > 0
+
+
+def delete_profile_permission_rules(profile_id: str) -> int:
+    """Delete all permission rules for a profile"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM permission_rules WHERE profile_id = ?", (profile_id,))
+        return cursor.rowcount

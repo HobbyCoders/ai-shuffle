@@ -10,19 +10,11 @@ A full-featured web interface and API server for Claude Code, providing a Claude
 
 **This software is provided for personal, educational, and development purposes only.**
 
-This application uses Claude Code CLI with OAuth authentication, which is governed by [Anthropic's Consumer Terms of Service](https://www.anthropic.com/legal/consumer-terms). Please be aware of the following:
+This application can use Claude Code CLI with OAuth authentication, which is governed by [Anthropic's Consumer Terms of Service](https://www.anthropic.com/legal/consumer-terms). Please be aware of the following:
 
-1. **Personal Use Only**: Anthropic's Consumer Terms prohibit accessing Claude "through automated or non-human means, whether through a bot, script, or otherwise" except via official API keys. Using this application may fall into a gray area under these terms.
+1. **Personal Use Only**: Anthropic's Consumer Terms prohibit accessing Claude "through automated or non-human means, whether through a bot, script, or otherwise" except via official API keys.
 
 2. **No Production Deployment**: Do NOT deploy this application as a production service, commercial product, or multi-user platform using OAuth authentication. This would violate Anthropic's Terms of Service.
-
-3. **For Production Use**: If you want to build a production application, you MUST use [Anthropic's API](https://www.anthropic.com/api) with proper API keys under their [Commercial Terms](https://www.anthropic.com/legal/commercial-terms).
-
-4. **No Warranty**: This software is provided "as is" without warranty. The authors are not responsible for any ToS violations, account suspensions, or other consequences from using this software.
-
-5. **Your Responsibility**: By using this software, you acknowledge that you have read and understood Anthropic's terms and accept full responsibility for your usage.
-
-**This project is NOT affiliated with, endorsed by, or sponsored by Anthropic.**
 
 ---
 
@@ -32,24 +24,42 @@ This application uses Claude Code CLI with OAuth authentication, which is govern
 
 - **Expect Bugs**: This software is in early development and will have bugs. Please report issues, but understand they may not be fixed immediately.
 - **Solo Developer**: This is a personal project maintained by a single developer in my spare time. There is no team or organization behind it.
-- **No Guarantees**: Don't expect regular updates, quick bug fixes, or timely feature requests. Updates happen when I have time and motivation.
-- **Breaking Changes**: The application may update frequently with breaking changes as development continues. Database schemas, APIs, and configurations may change without migration paths.
 - **Use at Your Own Risk**: This software is provided as-is for educational and experimental purposes.
-
-If you need a stable, production-ready solution, consider using [Anthropic's official API](https://www.anthropic.com/api) directly.
 
 ---
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/images/chat-desktop.png" alt="Chat Interface - Desktop" width="800"/>
+</p>
+<p align="center"><em>Main chat interface with tool use visualization and todo tracking</em></p>
+
+<p align="center">
+  <img src="docs/images/sessions-sidebar.png" alt="Sessions Sidebar" width="800"/>
+</p>
+<p align="center"><em>Sessions sidebar with chat history and cost tracking</em></p>
+
+<p align="center">
+  <img src="docs/images/chat-mobile.png" alt="Chat Interface - Mobile" width="400"/>
+</p>
+<p align="center"><em>Responsive mobile view</em></p>
+
+<p align="center">
+  <img src="docs/images/profile-modal.png" alt="Profile Configuration" width="400"/>
+</p>
+<p align="center"><em>Profile configuration with model selection and tool settings</em></p>
+
 ## Overview
 
-AI Hub lets you self-host a Claude Code web interface and access Claude's capabilities without the cost of API keys. It acts as a bridge between Claude Code CLI (using OAuth authentication) and your applications, exposing Claude through:
+AI Hub lets you self-host a Claude Code web interface and access Claude's capabilities without the cost of API keys. It acts as a bridge between Claude Code CLI and your applications, exposing Claude through:
 
 - **Web UI** - Modern chat interface similar to Claude.ai
 - **REST API** - OpenAI-compatible endpoints for programmatic access
 - **WebSocket** - Real-time streaming and multi-device sync
 - **Agent Profiles** - Customizable tool sets and system prompts
 
-No API keys required - uses Claude Code's OAuth authentication.
+No API keys required (Can be used though *requires login from cli inside container*) - uses Claude Code's OAuth authentication.
 
 ## Features
 
@@ -254,7 +264,7 @@ ai-hub/
 3. Configure `PUID=99`, `PGID=100`
 4. Map port `8000`
 5. Add volumes for persistence
-6. Run `docker exec -it ai-hub claude login` after starting
+6. Login on settings page after starting
 
 ## Troubleshooting
 

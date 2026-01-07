@@ -243,3 +243,61 @@ export interface FileUploadResponse {
 	full_path: string;
 	size: number;
 }
+
+// Permission types
+export interface PermissionRequest {
+	request_id: string;
+	tool_name: string;
+	tool_input: Record<string, unknown>;
+	queue_position?: number;
+	queue_total?: number;
+	created_at?: string;
+}
+
+export interface PermissionResponse {
+	request_id: string;
+	decision: 'allow' | 'deny';
+	remember?: 'none' | 'session' | 'profile';
+	pattern?: string;
+}
+
+export interface PermissionRule {
+	id: string;
+	profile_id: string | null;
+	tool_name: string;
+	tool_pattern: string | null;
+	decision: 'allow' | 'deny';
+	created_at: string;
+}
+
+export interface PermissionQueueUpdate {
+	resolved_ids: string[];
+	remaining_count: number;
+}
+
+// User Question types (for AskUserQuestion tool)
+export interface UserQuestionOption {
+	label: string;
+	description: string;
+}
+
+export interface UserQuestion {
+	question: string;
+	header: string;
+	options: UserQuestionOption[];
+	multiSelect: boolean;
+}
+
+export interface UserQuestionRequest {
+	request_id: string;
+	tool_use_id: string;
+	questions: UserQuestion[];
+	created_at?: string;
+}
+
+export interface UserQuestionResponse {
+	request_id: string;
+	tool_use_id: string;
+	answers: Record<string, string | string[]>;
+	remaining_count: number;
+}

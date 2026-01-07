@@ -29,6 +29,8 @@ from app.core.slash_commands import (
     discover_commands, get_command_by_name, is_slash_command,
     parse_command_input, is_interactive_command, get_all_commands
 )
+from app.core.permission_handler import permission_handler
+from app.core.user_question_handler import user_question_handler
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +194,8 @@ async def chat_websocket(
                 session_id=session_id,
                 profile_id=profile_id,
                 project_id=project_id,
-                overrides=overrides
+                overrides=overrides,
+                broadcast_func=send_json  # Pass send_json for permission requests
             ):
                 event_type = event.get('type')
                 logger.debug(f"Streaming event for session {session_id}: {event_type}")
@@ -278,7 +281,8 @@ async def chat_websocket(
                     # Tool result event
                     chunk_data = {
                         'content': event.get('output', ''),
-                        'tool_id': event.get('tool_use_id')
+                        'tool_id': event.get('tool_use_id'),
+                        'is_error': event.get('is_error', False)
                     }
                     await sync_engine.broadcast_stream_chunk(
                         session_id=session_id,
@@ -350,7 +354,8 @@ async def chat_websocket(
                     chunk_data = {
                         'agent_id': event.get('agent_id'),
                         'tool_use_id': event.get('tool_use_id'),
-                        'output': event.get('output', '')
+                        'output': event.get('output', ''),
+                        'is_error': event.get('is_error', False)
                     }
                     await sync_engine.broadcast_stream_chunk(
                         session_id=session_id,
@@ -439,6 +444,20 @@ async def chat_websocket(
                 )
 
         finally:
+            # ALWAYS ensure streaming state is cleared, even if stream_started was never set
+            # This prevents stuck streaming state after errors or early termination
+            if sync_engine.is_session_streaming(session_id):
+                if not stream_started:
+                    # Stream was marked but never actually started - clean up silently
+                    logger.info(f"Cleaning up streaming state for session {session_id} (never started)")
+                    await sync_engine.broadcast_stream_end(
+                        session_id=session_id,
+                        message_id=message_id,
+                        metadata={},
+                        interrupted=True,
+                        source_device_id=None
+                    )
+
             # Re-register device with SyncEngine now that streaming is complete,
             # but ONLY if the websocket is still connected.
             # If the user disconnected during streaming (phone locked, etc.),
@@ -530,17 +549,9 @@ async def chat_websocket(
                             except asyncio.CancelledError:
                                 pass
 
-                        # Pre-mark session as streaming so other devices know immediately
-                        # This prevents race conditions where a device loads the session
-                        # before broadcast_stream_start is called inside run_query
-                        message_id = str(uuid.uuid4())
-                        await sync_engine.broadcast_stream_start(
-                            session_id=session_id,
-                            message_id=message_id,
-                            source_device_id=device_id  # Exclude sender - they get direct events
-                        )
-
                         # Start new query task
+                        # Note: broadcast_stream_start is called inside run_query when actual
+                        # streaming begins. This prevents stuck streaming state if query fails early.
                         query_task = asyncio.create_task(
                             run_query(prompt, session_id, profile_id, project_id, overrides)
                         )
@@ -631,9 +642,24 @@ async def chat_websocket(
                                 is_streaming = sync_engine.is_session_streaming(session_id)
                                 streaming_buffer = None
                                 logger.info(f"Session {session_id} streaming status: {is_streaming}")
+
+                                # Validate streaming state - if marked streaming but no active task, it's stale
                                 if is_streaming:
-                                    streaming_buffer = sync_engine.get_streaming_buffer(session_id)
-                                    logger.info(f"Session {session_id} is streaming, sending buffer with {len(streaming_buffer) if streaming_buffer else 0} messages")
+                                    active_task = _active_chat_sessions.get(session_id)
+                                    if active_task is None or active_task.done():
+                                        # Stale streaming state - clean it up
+                                        logger.warning(f"Session {session_id} marked as streaming but no active task - clearing stale state")
+                                        await sync_engine.broadcast_stream_end(
+                                            session_id=session_id,
+                                            message_id="stale-cleanup",
+                                            metadata={},
+                                            interrupted=True,
+                                            source_device_id=None
+                                        )
+                                        is_streaming = False
+                                    else:
+                                        streaming_buffer = sync_engine.get_streaming_buffer(session_id)
+                                        logger.info(f"Session {session_id} is streaming, sending buffer with {len(streaming_buffer) if streaming_buffer else 0} messages")
 
                                 await send_json({
                                     "type": "history",
@@ -666,6 +692,80 @@ async def chat_websocket(
                             current_session_id = None
                             logger.info(f"Device {device_id} closed session {old_session_id}")
                             await send_json({"type": "session_closed", "session_id": old_session_id})
+
+                    elif msg_type == "permission_response":
+                        # Handle permission response from frontend
+                        request_id = data.get("request_id")
+                        decision = data.get("decision")  # "allow" or "deny"
+                        remember = data.get("remember")  # "none", "session", or "profile"
+                        pattern = data.get("pattern")  # Optional pattern for the rule
+
+                        if request_id and decision and current_session_id:
+                            result = await permission_handler.respond(
+                                request_id=request_id,
+                                session_id=current_session_id,
+                                decision=decision,
+                                remember=remember,
+                                pattern=pattern,
+                                broadcast_func=send_json
+                            )
+                            logger.info(f"Permission response processed: {result}")
+
+                            # Send confirmation back
+                            await send_json({
+                                "type": "permission_response_ack",
+                                "request_id": request_id,
+                                "result": result
+                            })
+                        else:
+                            await send_json({
+                                "type": "error",
+                                "message": "Invalid permission response"
+                            })
+
+                    elif msg_type == "get_pending_permissions":
+                        # Get pending permission requests for current session
+                        if current_session_id:
+                            pending = permission_handler.get_pending_requests(current_session_id)
+                            await send_json({
+                                "type": "pending_permissions",
+                                "session_id": current_session_id,
+                                "requests": pending
+                            })
+
+                    elif msg_type == "user_question_response":
+                        # Handle user question response from frontend
+                        request_id = data.get("request_id")
+                        answers = data.get("answers", {})
+
+                        if current_session_id and request_id and answers:
+                            result = await user_question_handler.respond(
+                                request_id=request_id,
+                                session_id=current_session_id,
+                                answers=answers
+                            )
+                            logger.info(f"User question response processed: {request_id} -> {result}")
+
+                            await send_json({
+                                "type": "user_question_response_ack",
+                                "request_id": request_id,
+                                "success": result
+                            })
+                        else:
+                            await send_json({
+                                "type": "error",
+                                "message": "Invalid user question response"
+                            })
+
+                    elif msg_type == "get_pending_questions":
+                        # Get pending user questions for current session
+                        if current_session_id:
+                            pending = user_question_handler.get_pending_questions(current_session_id)
+                            await send_json({
+                                "type": "pending_questions",
+                                "session_id": current_session_id,
+                                "questions": pending
+                            })
 
                     elif msg_type == "pong":
                         pass  # Keep-alive response

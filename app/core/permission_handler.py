@@ -10,6 +10,7 @@ Manages tool permission requests with a queue system that supports:
 
 import asyncio
 import logging
+import re
 import fnmatch
 from typing import Optional, Dict, Any, List, Literal, Union
 from dataclasses import dataclass, field

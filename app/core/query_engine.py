@@ -20,13 +20,15 @@ from claude_agent_sdk import (
     AssistantMessage, UserMessage, TextBlock, ToolUseBlock, ToolResultBlock,
     ResultMessage, SystemMessage
 )
-from claude_agent_sdk.types import StreamEvent
+from claude_agent_sdk.types import StreamEvent, HookMatcher, HookContext, HookInput
 
 from app.db import database
 from app.core.config import settings
 from app.core.profiles import get_profile
 from app.core.sync_engine import sync_engine
 from app.core.checkpoint_manager import checkpoint_manager
+from app.core.permission_handler import permission_handler
+from app.core.user_question_handler import user_question_handler
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +110,9 @@ def build_options_from_profile(
     profile: Dict[str, Any],
     project: Optional[Dict[str, Any]] = None,
     overrides: Optional[Dict[str, Any]] = None,
-    resume_session_id: Optional[str] = None
+    resume_session_id: Optional[str] = None,
+    can_use_tool: Optional[callable] = None,
+    hooks: Optional[Dict[str, list]] = None
 ) -> ClaudeAgentOptions:
     """Convert a profile to ClaudeAgentOptions with all available options"""
     config = profile["config"]
@@ -172,11 +176,14 @@ def build_options_from_profile(
             else:
                 logger.warning(f"Subagent not found: {agent_id}")
 
+    # Determine permission mode
+    permission_mode = overrides.get("permission_mode") or config.get("permission_mode", "default")
+
     # Build options with all ClaudeAgentOptions fields
     options = ClaudeAgentOptions(
         # Core settings
         model=overrides.get("model") or config.get("model"),
-        permission_mode=overrides.get("permission_mode") or config.get("permission_mode", "default"),
+        permission_mode=permission_mode,
         max_turns=overrides.get("max_turns") or config.get("max_turns"),
 
         # Tool configuration
@@ -208,7 +215,15 @@ def build_options_from_profile(
 
         # Subagents
         agents=agents_dict,
+
+        # Permission callback - only set if permission_mode is 'default' and callback provided
+        can_use_tool=can_use_tool if permission_mode == "default" and can_use_tool else None,
+
+        # Hooks - for interactive tool handling like AskUserQuestion
+        hooks=hooks,
     )
+
+    logger.info(f"Built options with permission_mode={permission_mode}, can_use_tool={options.can_use_tool is not None}, hooks={hooks is not None}")
 
     # Apply working directory - project overrides profile cwd
     if project:
@@ -1291,7 +1306,8 @@ async def stream_to_websocket(
     session_id: str,
     profile_id: str,
     project_id: Optional[str] = None,
-    overrides: Optional[Dict[str, Any]] = None
+    overrides: Optional[Dict[str, Any]] = None,
+    broadcast_func: Optional[callable] = None
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Stream Claude response directly to WebSocket.
@@ -1303,8 +1319,17 @@ async def stream_to_websocket(
     - {"type": "chunk", "content": "..."}
     - {"type": "tool_use", "name": "...", "input": {...}}
     - {"type": "tool_result", "name": "...", "output": "..."}
+    - {"type": "permission_request", ...} - When tool permission is needed
     - {"type": "done", "session_id": "...", "metadata": {...}}
     - {"type": "error", "message": "..."}
+
+    Args:
+        prompt: The user's message
+        session_id: The chat session ID
+        profile_id: The profile to use
+        project_id: Optional project ID
+        overrides: Optional overrides for model, permission_mode, etc.
+        broadcast_func: Async function to broadcast messages to the WebSocket
     """
     # Get profile
     profile = get_profile(profile_id)
@@ -1324,12 +1349,111 @@ async def stream_to_websocket(
     session = database.get_session(session_id)
     resume_id = session.get("sdk_session_id") if session else None
 
-    # Build options
+    # Determine permission mode
+    config = profile.get("config", {})
+    permission_mode = overrides.get("permission_mode") if overrides else None
+    if not permission_mode:
+        permission_mode = config.get("permission_mode", "default")
+
+    logger.info(f"[WS] Permission mode for session {session_id}: {permission_mode} (profile config: {config.get('permission_mode')}, override: {overrides.get('permission_mode') if overrides else None})")
+    logger.info(f"[WS] broadcast_func provided: {broadcast_func is not None}")
+
+    # Create canUseTool callback if permission mode is 'default' and we have broadcast_func
+    can_use_tool_callback = None
+    if permission_mode == "default" and broadcast_func:
+        logger.info(f"[WS] Creating canUseTool callback for session {session_id}")
+
+        async def can_use_tool_callback(tool_name: str, tool_input: dict, context):
+            """
+            Permission callback that routes tool requests through the permission handler.
+            This integrates with the frontend UI for user approval.
+
+            Args:
+                tool_name: Name of the tool being requested
+                tool_input: Tool input parameters
+                context: ToolPermissionContext with signal and suggestions
+            """
+            request_id = f"perm-{session_id}-{uuid.uuid4().hex[:8]}"
+            logger.info(f"[WS] Permission request for {tool_name}: {request_id}")
+
+            # Request permission through the handler
+            # The handler will broadcast to WebSocket and wait for response
+            result = await permission_handler.request_permission(
+                request_id=request_id,
+                session_id=session_id,
+                profile_id=profile_id,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                broadcast_func=broadcast_func
+            )
+
+            return result
+
+    # Create AskUserQuestion hook if we have broadcast_func
+    hooks_config = None
+    if broadcast_func:
+        async def ask_user_question_hook(
+            input_data: HookInput,
+            tool_use_id: str | None,
+            context: HookContext
+        ) -> dict:
+            """
+            PreToolUse hook for AskUserQuestion tool.
+            Intercepts the tool call, sends questions to frontend, waits for answers,
+            and returns the answers to be injected into the tool input.
+            """
+            # Extract tool input from hook input
+            tool_input = input_data.get("tool_input", {})
+            questions = tool_input.get("questions", [])
+
+            if not questions:
+                # No questions, let it proceed normally
+                return {}
+
+            request_id = f"question-{session_id}-{uuid.uuid4().hex[:8]}"
+            logger.info(f"[WS] AskUserQuestion hook triggered: {request_id} with {len(questions)} questions")
+
+            # Get answers from user via WebSocket
+            answers = await user_question_handler.request_answers(
+                request_id=request_id,
+                tool_use_id=tool_use_id or "",
+                session_id=session_id,
+                questions=questions,
+                broadcast_func=broadcast_func
+            )
+
+            logger.info(f"[WS] Got answers for {request_id}: {list(answers.keys())}")
+
+            # Return updated input with answers filled in
+            updated_input = {**tool_input, "answers": answers}
+
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "updatedInput": updated_input
+                }
+            }
+
+        hooks_config = {
+            "PreToolUse": [
+                HookMatcher(
+                    matcher="AskUserQuestion",
+                    hooks=[ask_user_question_hook],
+                    timeout=600.0  # 10 minute timeout for user input
+                )
+            ]
+        }
+        logger.info(f"[WS] Created AskUserQuestion hook for session {session_id}")
+
+    # Build options with the callback and hooks
     options = build_options_from_profile(
         profile=profile,
         project=project,
         overrides=overrides,
-        resume_session_id=resume_id
+        resume_session_id=resume_id,
+        can_use_tool=can_use_tool_callback,
+        hooks=hooks_config
     )
 
     # Clean up any existing state for this session
@@ -1585,14 +1709,16 @@ async def stream_to_websocket(
                                 "agent_id": parent_tool_id,
                                 "name": tool_name,
                                 "tool_use_id": tool_use_id,
-                                "output": output
+                                "output": output,
+                                "is_error": getattr(block, 'is_error', False)
                             }
                         else:
                             yield {
                                 "type": "tool_result",
                                 "name": tool_name,
                                 "tool_use_id": tool_use_id,
-                                "output": output
+                                "output": output,
+                                "is_error": getattr(block, 'is_error', False)
                             }
 
                 metadata["model"] = message.model
@@ -1667,14 +1793,16 @@ async def stream_to_websocket(
                                 "agent_id": parent_tool_id,
                                 "name": "unknown",
                                 "tool_use_id": tool_use_id,
-                                "output": output
+                                "output": output,
+                                "is_error": block.is_error
                             }
                         else:
                             yield {
                                 "type": "tool_result",
                                 "name": "unknown",
                                 "tool_use_id": tool_use_id,
-                                "output": output
+                                "output": output,
+                                "is_error": block.is_error
                             }
 
             elif isinstance(message, ResultMessage):
