@@ -10,6 +10,7 @@ working directories. The API validates that requested files are within
 allowed workspace paths.
 """
 
+import os
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, status, Query
 from fastapi.responses import FileResponse

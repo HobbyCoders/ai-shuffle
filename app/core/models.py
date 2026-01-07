@@ -62,6 +62,19 @@ class SubagentDefinition(BaseModel):
 # Profile Models
 # ============================================================================
 
+class AIToolsConfig(BaseModel):
+    """Configuration for individual AI tools - each tool can be enabled/disabled"""
+    # Image tools (Nano Banana)
+    image_generation: bool = False  # Generate AI images from text prompts
+    image_editing: bool = False  # Edit existing images
+    image_reference: bool = False  # Reference-based generation (character/style consistency)
+    # Video tools (Veo)
+    video_generation: bool = False  # Generate AI videos from text prompts
+    image_to_video: bool = False  # Animate a still image into a video
+    video_extend: bool = False  # Extend existing Veo videos
+    video_bridge: bool = False  # Generate smooth transitions between two images
+
+
 class SystemPromptConfig(BaseModel):
     """System prompt configuration"""
     type: str = "preset"  # "preset" or "custom"
@@ -69,7 +82,6 @@ class SystemPromptConfig(BaseModel):
     content: Optional[str] = None
     append: Optional[str] = None
     inject_env_details: bool = False  # Inject environment info (working dir, platform, date, etc.)
-    enable_ai_tools: bool = False  # Enable AI tools (image generation, etc.) when configured in Settings
 
 
 class ProfileConfig(BaseModel):
@@ -82,6 +94,9 @@ class ProfileConfig(BaseModel):
     # Tool configuration
     allowed_tools: Optional[List[str]] = None
     disallowed_tools: Optional[List[str]] = None
+
+    # AI tools configuration - individual toggles for each AI tool
+    ai_tools: Optional[AIToolsConfig] = None
 
     # System prompt
     system_prompt: Optional[SystemPromptConfig] = None

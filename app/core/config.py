@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     data_dir: Optional[Path] = None
     workspace_dir: Optional[Path] = None
     claude_projects_dir: Optional[Path] = None  # Override for Claude SDK projects dir (defaults to ~/.claude/projects)
+    tools_dir: Optional[Path] = None  # Path to AI tools directory (defaults to /workspace/ai-hub/tools in Docker)
 
     # Database
     database_url: Optional[str] = None
@@ -119,6 +120,17 @@ class Settings(BaseSettings):
         if self.claude_projects_dir:
             return self.claude_projects_dir
         return Path.home() / ".claude" / "projects"
+
+    @property
+    def effective_tools_dir(self) -> Path:
+        """Get the effective AI tools directory"""
+        if self.tools_dir is not None:
+            return self.tools_dir
+        # Default to /workspace/ai-hub/tools in Docker mode
+        if not self.is_local_mode():
+            return Path("/workspace/ai-hub/tools")
+        # In local mode, tools would be relative to install location
+        return Path(__file__).parent.parent.parent / "tools"
 
     def get_database_url(self) -> str:
         """Get database URL, defaulting to SQLite"""

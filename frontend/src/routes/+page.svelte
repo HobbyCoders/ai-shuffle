@@ -307,6 +307,7 @@
 	// Accordion states for profile form sections
 	let expandedSections: Record<string, boolean> = {
 		toolConfig: false,
+		aiTools: false,
 		behavior: false,
 		enabledAgents: false,
 		systemPrompt: false,
@@ -338,7 +339,8 @@
 		system_prompt_append: '',
 		system_prompt_content: '',
 		system_prompt_inject_env: false,
-		system_prompt_enable_ai_tools: false,
+		// AI tools - array of enabled tool IDs
+		enabled_ai_tools: [] as string[],
 		setting_sources: [] as string[],
 		cwd: '',
 		add_dirs: '',
@@ -348,6 +350,103 @@
 
 	// Tool selection mode: 'all' = all tools allowed, 'allow' = whitelist mode, 'disallow' = blacklist mode
 	let toolSelectionMode: 'all' | 'allow' | 'disallow' = 'all';
+
+	// AI Tool selection mode: 'all' = all enabled, 'custom' = individually selected
+	let aiToolSelectionMode: 'all' | 'custom' = 'custom';
+
+	// AI Tool categories - structured like regular tools
+	interface AITool {
+		id: string;
+		name: string;
+		description: string;
+		provider: string;
+	}
+
+	interface AIToolCategory {
+		id: string;
+		name: string;
+		tools: AITool[];
+	}
+
+	const aiToolCategories: AIToolCategory[] = [
+		{
+			id: 'image',
+			name: 'Image Tools',
+			tools: [
+				{ id: 'image_generation', name: 'Image Generation', description: 'Generate AI images from text prompts (supports 1K-4K, multiple images)', provider: 'Nano Banana' },
+				{ id: 'image_editing', name: 'Image Editing', description: 'Edit existing images - add, remove, or modify elements', provider: 'Nano Banana' },
+				{ id: 'image_reference', name: 'Reference-Based Generation', description: 'Generate images with character/style consistency using reference images', provider: 'Nano Banana' }
+			]
+		},
+		{
+			id: 'video',
+			name: 'Video Tools',
+			tools: [
+				{ id: 'video_generation', name: 'Video Generation', description: 'Generate AI videos from text prompts (4-8 sec)', provider: 'Veo' },
+				{ id: 'image_to_video', name: 'Image to Video', description: 'Animate a still image into a video', provider: 'Veo' },
+				{ id: 'video_extend', name: 'Video Extension', description: 'Extend existing Veo videos by ~7 seconds', provider: 'Veo' },
+				{ id: 'video_bridge', name: 'Frame Bridging', description: 'Generate smooth transitions between two images', provider: 'Veo' }
+			]
+		},
+		{
+			id: 'audio',
+			name: 'Audio Tools',
+			tools: [
+				// Future: { id: 'text_to_speech', name: 'Text to Speech', description: 'Convert text to natural speech', provider: 'ElevenLabs' }
+			]
+		}
+	];
+
+	// Track expanded state for AI tool categories
+	let aiToolCategoriesExpanded: Record<string, boolean> = {};
+
+	// Toggle AI tool category expansion
+	function toggleAIToolCategoryExpansion(categoryId: string) {
+		aiToolCategoriesExpanded[categoryId] = !aiToolCategoriesExpanded[categoryId];
+		aiToolCategoriesExpanded = aiToolCategoriesExpanded;
+	}
+
+	// Toggle individual AI tool
+	function toggleAITool(toolId: string) {
+		if (profileForm.enabled_ai_tools.includes(toolId)) {
+			profileForm.enabled_ai_tools = profileForm.enabled_ai_tools.filter(t => t !== toolId);
+		} else {
+			profileForm.enabled_ai_tools = [...profileForm.enabled_ai_tools, toolId];
+		}
+	}
+
+	// Toggle all AI tools in a category
+	function toggleAIToolCategory(category: AIToolCategory) {
+		const categoryToolIds = category.tools.map(t => t.id);
+		const allSelected = categoryToolIds.every(id => profileForm.enabled_ai_tools.includes(id));
+
+		if (allSelected) {
+			// Deselect all in category
+			profileForm.enabled_ai_tools = profileForm.enabled_ai_tools.filter(t => !categoryToolIds.includes(t));
+		} else {
+			// Select all in category
+			const newTools = categoryToolIds.filter(id => !profileForm.enabled_ai_tools.includes(id));
+			profileForm.enabled_ai_tools = [...profileForm.enabled_ai_tools, ...newTools];
+		}
+	}
+
+	// Check if all AI tools in a category are selected
+	function isAIToolCategoryFullySelected(category: AIToolCategory): boolean {
+		const categoryToolIds = category.tools.map(t => t.id);
+		return categoryToolIds.length > 0 && categoryToolIds.every(id => profileForm.enabled_ai_tools.includes(id));
+	}
+
+	// Check if some (but not all) AI tools in a category are selected
+	function isAIToolCategoryPartiallySelected(category: AIToolCategory): boolean {
+		const categoryToolIds = category.tools.map(t => t.id);
+		const selectedCount = categoryToolIds.filter(id => profileForm.enabled_ai_tools.includes(id)).length;
+		return selectedCount > 0 && selectedCount < categoryToolIds.length;
+	}
+
+	// Get all available AI tool IDs
+	function getAllAIToolIds(): string[] {
+		return aiToolCategories.flatMap(cat => cat.tools.map(t => t.id));
+	}
 
 	// Toggle agent selection
 	function toggleAgent(agentId: string) {
@@ -949,6 +1048,24 @@
 			return match;
 		});
 
+		// Render generated-images markdown as clean image display (buttons are in message header)
+		const generatedImagePattern = /!\[([^\]]*)\]\((\/api\/generated-images\/[^)]+)\)/g;
+		processedContent = processedContent.replace(generatedImagePattern, (match, alt, imageUrl) => {
+			return `<div class="generated-image-container my-4">
+				<img src="${imageUrl}" alt="${alt || 'Generated image'}" class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border" />
+			</div>`;
+		});
+
+		// Render generated-videos markdown links as video player (buttons are in message header)
+		const generatedVideoPattern = /\[([^\]]*)\]\((\/api\/generated-videos\/[^)]+)\)/g;
+		processedContent = processedContent.replace(generatedVideoPattern, (match, text, videoUrl) => {
+			return `<div class="generated-video-container my-4">
+				<video src="${videoUrl}" controls class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border">
+					Your browser does not support the video tag.
+				</video>
+			</div>`;
+		});
+
 		return marked(processedContent, { breaks: true }) as string;
 	}
 
@@ -957,6 +1074,36 @@
 		try {
 			// Try to parse as JSON to detect image data
 			const data = JSON.parse(content);
+
+			// Handle URL-based image results (new format - saves to disk)
+			if (data.success && data.image_url) {
+				const imageUrl = data.image_url;
+				const filename = data.filename || 'generated-image.png';
+				return `<div class="generated-image-result">
+					<div class="mb-2 text-xs text-green-500">✓ Image generated successfully</div>
+					<img src="${imageUrl}" alt="Generated image" class="max-w-full max-h-96 rounded-lg shadow-md border border-border" />
+					<div class="flex gap-2 mt-3">
+						<a href="${imageUrl}" download="${filename}" class="text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 flex items-center gap-1.5 font-medium no-underline">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+							</svg>
+							Download Image
+						</a>
+						<button onclick="(function(){
+							navigator.clipboard.writeText(window.location.origin + '${imageUrl}');
+							this.textContent = 'Copied!';
+							setTimeout(() => this.textContent = 'Copy URL', 2000);
+						}).call(this)" class="text-xs px-3 py-1.5 bg-muted text-foreground rounded-md hover:bg-accent flex items-center gap-1.5">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+							</svg>
+							Copy URL
+						</button>
+					</div>
+				</div>`;
+			}
+
+			// Handle base64 image results (legacy format)
 			if (data.success && data.image_base64 && data.mime_type) {
 				// This is an image generation result!
 				const mimeType = data.mime_type || 'image/png';
@@ -989,6 +1136,37 @@
 					</div>
 				</div>`;
 			}
+
+			// Handle video generation results
+			if (data.success && data.video_url) {
+				const videoUrl = data.video_url;
+				const filename = data.filename || 'generated-video.mp4';
+				const duration = data.duration_seconds ? `${data.duration_seconds}s` : '';
+				return `<div class="generated-video-result">
+					<div class="mb-2 text-xs text-green-500">✓ Video generated successfully${duration ? ` (${duration})` : ''}</div>
+					<video src="${videoUrl}" controls class="max-w-full max-h-96 rounded-lg shadow-md border border-border">
+						Your browser does not support the video tag.
+					</video>
+					<div class="flex gap-2 mt-3">
+						<a href="${videoUrl}" download="${filename}" class="text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 flex items-center gap-1.5 font-medium no-underline">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+							</svg>
+							Download Video
+						</a>
+						<button onclick="(function(){
+							navigator.clipboard.writeText(window.location.origin + '${videoUrl}');
+							this.textContent = 'Copied!';
+							setTimeout(() => this.textContent = 'Copy URL', 2000);
+						}).call(this)" class="text-xs px-3 py-1.5 bg-muted text-foreground rounded-md hover:bg-accent flex items-center gap-1.5">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+							</svg>
+							Copy URL
+						</button>
+					</div>
+				</div>`;
+			}
 		} catch {
 			// Not JSON, continue with default rendering
 		}
@@ -1000,14 +1178,194 @@
 	function toolResultHasImage(content: string): boolean {
 		try {
 			const data = JSON.parse(content);
-			return data.success && data.image_base64 && data.mime_type;
+			// Check for both URL-based (new) and base64 (legacy) formats
+			return data.success && (data.image_url || (data.image_base64 && data.mime_type));
 		} catch {
 			return false;
 		}
 	}
 
+	// Check if tool result contains a video
+	function toolResultHasVideo(content: string): boolean {
+		try {
+			const data = JSON.parse(content);
+			return data.success && data.video_url;
+		} catch {
+			return false;
+		}
+	}
+
+	// Check if tool result contains media (image or video)
+	function toolResultHasMedia(content: string): boolean {
+		return toolResultHasImage(content) || toolResultHasVideo(content);
+	}
+
+	// Render standalone image display (for main chat, outside tool groups)
+	function renderStandaloneImage(content: string): string {
+		try {
+			const data = JSON.parse(content);
+
+			// Handle URL-based image results (new format)
+			if (data.success && data.image_url) {
+				const imageUrl = data.image_url;
+				const filename = data.filename || 'generated-image.png';
+				return `<div class="generated-image-standalone mt-3">
+					<img src="${imageUrl}" alt="Generated image" class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border" />
+					<div class="flex items-center gap-2 mt-2">
+						<a href="${imageUrl}" download="${filename}" class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors no-underline" title="Download image">
+							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+							</svg>
+							<span>Download</span>
+						</a>
+						<button onclick="(function(btn){
+							navigator.clipboard.writeText(window.location.origin + '${imageUrl}');
+							var iconSpan = btn.querySelector('.copy-icon');
+							var checkSpan = btn.querySelector('.check-icon');
+							var textSpan = btn.querySelector('.btn-text');
+							iconSpan.style.display = 'none';
+							checkSpan.style.display = 'block';
+							textSpan.textContent = 'Copied';
+							textSpan.classList.add('text-green-500');
+							setTimeout(function() {
+								iconSpan.style.display = 'block';
+								checkSpan.style.display = 'none';
+								textSpan.textContent = 'Copy URL';
+								textSpan.classList.remove('text-green-500');
+							}, 2000);
+						})(this)" class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors" title="Copy image URL">
+							<svg class="w-3.5 h-3.5 copy-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+							</svg>
+							<svg class="w-3.5 h-3.5 check-icon text-green-500" style="display:none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+							</svg>
+							<span class="btn-text">Copy URL</span>
+						</button>
+					</div>
+				</div>`;
+			}
+
+			// Handle base64 image results (legacy format)
+			if (data.success && data.image_base64 && data.mime_type) {
+				const mimeType = data.mime_type || 'image/png';
+				const dataUrl = `data:${mimeType};base64,${data.image_base64}`;
+				return `<div class="generated-image-standalone mt-3">
+					<img src="${dataUrl}" alt="Generated image" class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border" />
+					<div class="flex items-center gap-2 mt-2">
+						<button onclick="(function(){
+							const link = document.createElement('a');
+							link.href = '${dataUrl}';
+							link.download = 'generated-image.png';
+							link.click();
+						})()" class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors" title="Download image">
+							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+							</svg>
+							<span>Download</span>
+						</button>
+						<button onclick="(function(btn){
+							navigator.clipboard.writeText('${dataUrl}');
+							var iconSpan = btn.querySelector('.copy-icon');
+							var checkSpan = btn.querySelector('.check-icon');
+							var textSpan = btn.querySelector('.btn-text');
+							iconSpan.style.display = 'none';
+							checkSpan.style.display = 'block';
+							textSpan.textContent = 'Copied';
+							textSpan.classList.add('text-green-500');
+							setTimeout(function() {
+								iconSpan.style.display = 'block';
+								checkSpan.style.display = 'none';
+								textSpan.textContent = 'Copy URL';
+								textSpan.classList.remove('text-green-500');
+							}, 2000);
+						})(this)" class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors" title="Copy image URL">
+							<svg class="w-3.5 h-3.5 copy-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+							</svg>
+							<svg class="w-3.5 h-3.5 check-icon text-green-500" style="display:none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+							</svg>
+							<span class="btn-text">Copy URL</span>
+						</button>
+					</div>
+				</div>`;
+			}
+		} catch {
+			// Not valid JSON
+		}
+		return '';
+	}
+
+	// Render standalone video display (for main chat, outside tool groups)
+	function renderStandaloneVideo(content: string): string {
+		try {
+			const data = JSON.parse(content);
+
+			if (data.success && data.video_url) {
+				const videoUrl = data.video_url;
+				const filename = data.filename || 'generated-video.mp4';
+				const duration = data.duration_seconds ? `${data.duration_seconds}s` : '';
+				return `<div class="generated-video-standalone mt-3">
+					<video src="${videoUrl}" controls class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border">
+						Your browser does not support the video tag.
+					</video>
+					<div class="flex items-center gap-2 mt-2">
+						${duration ? `<span class="text-xs text-muted-foreground">${duration}</span>` : ''}
+						<a href="${videoUrl}" download="${filename}" class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors no-underline" title="Download video">
+							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+							</svg>
+							<span>Download</span>
+						</a>
+						<button onclick="(function(btn){
+							navigator.clipboard.writeText(window.location.origin + '${videoUrl}');
+							var iconSpan = btn.querySelector('.copy-icon');
+							var checkSpan = btn.querySelector('.check-icon');
+							var textSpan = btn.querySelector('.btn-text');
+							iconSpan.style.display = 'none';
+							checkSpan.style.display = 'block';
+							textSpan.textContent = 'Copied';
+							textSpan.classList.add('text-green-500');
+							setTimeout(function() {
+								iconSpan.style.display = 'block';
+								checkSpan.style.display = 'none';
+								textSpan.textContent = 'Copy URL';
+								textSpan.classList.remove('text-green-500');
+							}, 2000);
+						})(this)" class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors" title="Copy video URL">
+							<svg class="w-3.5 h-3.5 copy-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+							</svg>
+							<svg class="w-3.5 h-3.5 check-icon text-green-500" style="display:none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+							</svg>
+							<span class="btn-text">Copy URL</span>
+						</button>
+					</div>
+				</div>`;
+			}
+		} catch {
+			// Not valid JSON
+		}
+		return '';
+	}
+
+	// Render standalone media (image or video)
+	function renderStandaloneMedia(content: string): string {
+		if (toolResultHasImage(content)) {
+			return renderStandaloneImage(content);
+		}
+		if (toolResultHasVideo(content)) {
+			return renderStandaloneVideo(content);
+		}
+		return '';
+	}
+
 	// Copy text to clipboard with feedback
 	let copiedMessageId: string | null = null;
+	let copiedUrlMessageId: string | null = null;
+
 	async function copyToClipboard(text: string, messageId: string) {
 		try {
 			await navigator.clipboard.writeText(text);
@@ -1018,6 +1376,51 @@
 		} catch (e) {
 			console.error('Failed to copy to clipboard:', e);
 		}
+	}
+
+	async function copyUrlToClipboard(url: string, messageId: string) {
+		try {
+			const fullUrl = window.location.origin + url;
+			await navigator.clipboard.writeText(fullUrl);
+			copiedUrlMessageId = messageId;
+			setTimeout(() => {
+				copiedUrlMessageId = null;
+			}, 2000);
+		} catch (e) {
+			console.error('Failed to copy URL to clipboard:', e);
+		}
+	}
+
+	// Extract generated image URL from message content
+	function extractGeneratedImageUrl(content: string): string | null {
+		const match = content.match(/!\[[^\]]*\]\((\/api\/generated-images\/[^)]+)\)/);
+		return match ? match[1] : null;
+	}
+
+	// Extract generated video URL from message content
+	function extractGeneratedVideoUrl(content: string): string | null {
+		const match = content.match(/\[[^\]]*\]\((\/api\/generated-videos\/[^)]+)\)/);
+		return match ? match[1] : null;
+	}
+
+	// Get filename from generated image URL
+	function getFilenameFromUrl(url: string): string {
+		const pathMatch = url.match(/path=([^&]+)/);
+		if (pathMatch) {
+			const path = decodeURIComponent(pathMatch[1]);
+			return path.split('/').pop() || 'generated-image.png';
+		}
+		return url.split('/').pop() || 'generated-image.png';
+	}
+
+	// Get filename from generated video URL
+	function getVideoFilenameFromUrl(url: string): string {
+		const pathMatch = url.match(/path=([^&]+)/);
+		if (pathMatch) {
+			const path = decodeURIComponent(pathMatch[1]);
+			return path.split('/').pop() || 'generated-video.mp4';
+		}
+		return url.split('/').pop() || 'generated-video.mp4';
 	}
 
 	function formatTime(date?: Date): string {
@@ -1132,7 +1535,7 @@
 			system_prompt_append: '',
 			system_prompt_content: '',
 			system_prompt_inject_env: false,
-			system_prompt_enable_ai_tools: false,
+			enabled_ai_tools: [],
 			setting_sources: [],
 			cwd: '',
 			add_dirs: '',
@@ -1140,6 +1543,7 @@
 			max_buffer_size: null
 		};
 		toolSelectionMode = 'all';
+		aiToolSelectionMode = 'custom';
 		editingProfile = null;
 	}
 
@@ -1152,9 +1556,30 @@
 		editingProfile = profile;
 		const config = profile.config || {};
 		const sp = config.system_prompt || {};
+		const aiTools = config.ai_tools || {};
 
 		const allowedTools = config.allowed_tools || [];
 		const disallowedTools = config.disallowed_tools || [];
+
+		// Build enabled AI tools array from config
+		const enabledAITools: string[] = [];
+		// Image tools (Nano Banana)
+		if (aiTools.image_generation || sp.enable_ai_tools) enabledAITools.push('image_generation');
+		if (aiTools.image_editing) enabledAITools.push('image_editing');
+		if (aiTools.image_reference) enabledAITools.push('image_reference');
+		// Video tools (Veo)
+		if (aiTools.video_generation) enabledAITools.push('video_generation');
+		if (aiTools.image_to_video) enabledAITools.push('image_to_video');
+		if (aiTools.video_extend) enabledAITools.push('video_extend');
+		if (aiTools.video_bridge) enabledAITools.push('video_bridge');
+
+		// Determine AI tool selection mode
+		const allAIToolIds = getAllAIToolIds();
+		if (enabledAITools.length === allAIToolIds.length && allAIToolIds.every(id => enabledAITools.includes(id))) {
+			aiToolSelectionMode = 'all';
+		} else {
+			aiToolSelectionMode = 'custom';
+		}
 
 		// Determine tool selection mode based on what's configured
 		if (allowedTools.length > 0) {
@@ -1183,7 +1608,8 @@
 			system_prompt_append: sp.append || '',
 			system_prompt_content: sp.content || '',
 			system_prompt_inject_env: sp.inject_env_details || false,
-			system_prompt_enable_ai_tools: sp.enable_ai_tools || false,
+			// AI tools - array of enabled tool IDs
+			enabled_ai_tools: enabledAITools,
 			setting_sources: config.setting_sources || [],
 			cwd: config.cwd || '',
 			add_dirs: (config.add_dirs || []).join(', '),
@@ -1226,11 +1652,27 @@
 		if (profileForm.user.trim()) config.user = profileForm.user;
 		if (profileForm.max_buffer_size) config.max_buffer_size = profileForm.max_buffer_size;
 
+		// AI tools configuration - convert array to individual toggles
+		// If 'all' mode, enable all available tools; otherwise use the selected ones
+		const effectiveAITools = aiToolSelectionMode === 'all' ? getAllAIToolIds() : profileForm.enabled_ai_tools;
+		if (effectiveAITools.length > 0) {
+			config.ai_tools = {
+				// Image tools (Nano Banana)
+				image_generation: effectiveAITools.includes('image_generation'),
+				image_editing: effectiveAITools.includes('image_editing'),
+				image_reference: effectiveAITools.includes('image_reference'),
+				// Video tools (Veo)
+				video_generation: effectiveAITools.includes('video_generation'),
+				image_to_video: effectiveAITools.includes('image_to_video'),
+				video_extend: effectiveAITools.includes('video_extend'),
+				video_bridge: effectiveAITools.includes('video_bridge')
+			};
+		}
+
 		if (profileForm.system_prompt_type === 'preset') {
 			config.system_prompt = {
 				type: 'preset',
-				preset: profileForm.system_prompt_preset,
-				enable_ai_tools: profileForm.system_prompt_enable_ai_tools
+				preset: 'claude_code'  // Always use claude_code preset
 			};
 			if (profileForm.system_prompt_append.trim()) {
 				config.system_prompt.append = profileForm.system_prompt_append;
@@ -1240,8 +1682,7 @@
 			config.system_prompt = {
 				type: 'custom',
 				content: profileForm.system_prompt_content,
-				inject_env_details: profileForm.system_prompt_inject_env,
-				enable_ai_tools: profileForm.system_prompt_enable_ai_tools
+				inject_env_details: profileForm.system_prompt_inject_env
 			};
 		}
 
@@ -3024,23 +3465,95 @@
 												</span>
 											{/if}
 											{#if message.content && !message.streaming}
-												<button
-													class="ml-auto flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
-													on:click={() => copyToClipboard(message.content, message.id)}
-													title="Copy response"
-												>
-													{#if copiedMessageId === message.id}
-														<svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-														</svg>
-														<span class="text-green-500">Copied</span>
-													{:else}
-														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-														</svg>
-														<span>Copy</span>
+												<!-- Action buttons container -->
+												<div class="ml-auto flex items-center gap-1">
+													<!-- Download and Copy URL buttons for generated images -->
+													{#if extractGeneratedImageUrl(message.content)}
+														{@const imageUrl = extractGeneratedImageUrl(message.content)}
+														{@const filename = getFilenameFromUrl(imageUrl || '')}
+														<a
+															href={imageUrl}
+															download={filename}
+															class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors no-underline"
+															title="Download image"
+														>
+															<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+															</svg>
+															<span>Download</span>
+														</a>
+														<button
+															class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
+															on:click={() => copyUrlToClipboard(imageUrl || '', message.id)}
+															title="Copy image URL"
+														>
+															{#if copiedUrlMessageId === message.id}
+																<svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+																</svg>
+																<span class="text-green-500">Copied</span>
+															{:else}
+																<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+																</svg>
+																<span>Copy URL</span>
+															{/if}
+														</button>
+														<span class="w-px h-4 bg-border"></span>
 													{/if}
-												</button>
+													<!-- Download and Copy URL buttons for generated videos -->
+													{#if extractGeneratedVideoUrl(message.content)}
+														{@const videoUrl = extractGeneratedVideoUrl(message.content)}
+														{@const filename = getVideoFilenameFromUrl(videoUrl || '')}
+														<a
+															href={videoUrl}
+															download={filename}
+															class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors no-underline"
+															title="Download video"
+														>
+															<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+															</svg>
+															<span>Download</span>
+														</a>
+														<button
+															class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
+															on:click={() => copyUrlToClipboard(videoUrl || '', message.id)}
+															title="Copy video URL"
+														>
+															{#if copiedUrlMessageId === message.id}
+																<svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+																</svg>
+																<span class="text-green-500">Copied</span>
+															{:else}
+																<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+																</svg>
+																<span>Copy URL</span>
+															{/if}
+														</button>
+														<span class="w-px h-4 bg-border"></span>
+													{/if}
+													<!-- Copy response button -->
+													<button
+														class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
+														on:click={() => copyToClipboard(message.content, message.id)}
+														title="Copy response"
+													>
+														{#if copiedMessageId === message.id}
+															<svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+															</svg>
+															<span class="text-green-500">Copied</span>
+														{:else}
+															<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+															</svg>
+															<span>Copy</span>
+														{/if}
+													</button>
+												</div>
 											{/if}
 										</div>
 										<div class="bg-card border border-border rounded-lg p-4 shadow-s overflow-hidden">
@@ -3144,8 +3657,9 @@
 												{#if message.toolResult}
 													<div class="px-4 py-3">
 														<div class="text-xs text-muted-foreground mb-1 font-medium">Result</div>
-														{#if toolResultHasImage(message.toolResult)}
-															{@html renderToolResult(message.toolResult)}
+														{#if toolResultHasMedia(message.toolResult)}
+															<!-- Show compact message for media - full media displayed outside tool group -->
+															<span class="text-xs text-green-500">✓ {toolResultHasVideo(message.toolResult) ? 'Video' : 'Image'} generated successfully (see below)</span>
 														{:else}
 															<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.toolResult}</pre>
 														{/if}
@@ -3182,8 +3696,9 @@
 												</svg>
 											</summary>
 											<div class="px-4 py-3 bg-card border-t border-border">
-												{#if toolResultHasImage(message.content)}
-													{@html renderToolResult(message.content)}
+												{#if toolResultHasMedia(message.content)}
+													<!-- Show compact message for media - full media displayed outside tool group -->
+													<span class="text-xs text-green-500">✓ {toolResultHasVideo(message.content) ? 'Video' : 'Image'} generated successfully (see below)</span>
 												{:else}
 													<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.content}</pre>
 												{/if}
@@ -3800,6 +4315,145 @@
 											{/if}
 										</div>
 									{/if}
+
+								</div>
+							{/if}
+						</div>
+
+						<!-- AI Tools Accordion -->
+						<div class="border border-border rounded-lg overflow-hidden">
+							<button
+								type="button"
+								on:click={() => toggleSection('aiTools')}
+								class="w-full px-3 py-2 bg-accent flex items-center justify-between text-sm text-foreground hover:bg-muted"
+							>
+								<div class="flex items-center gap-2">
+									<span>AI Tools</span>
+									{#if aiToolSelectionMode === 'all' || profileForm.enabled_ai_tools.length > 0}
+										<span class="text-xs px-1.5 py-0.5 bg-primary/20 text-primary rounded">
+											{aiToolSelectionMode === 'all' ? getAllAIToolIds().length : profileForm.enabled_ai_tools.length}
+										</span>
+									{/if}
+								</div>
+								<svg class="w-4 h-4 transition-transform {expandedSections.aiTools ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+								</svg>
+							</button>
+							{#if expandedSections.aiTools}
+								<div class="p-3 space-y-3 bg-card">
+									<!-- AI Tool selection mode -->
+									<div>
+										<label class="block text-xs text-muted-foreground mb-2">AI Tool Access Mode</label>
+										<div class="flex gap-2">
+											<button
+												type="button"
+												on:click={() => { aiToolSelectionMode = 'all'; }}
+												class="px-3 py-1.5 text-xs rounded-lg transition-colors {aiToolSelectionMode === 'all' ? 'bg-violet-600 text-white' : 'bg-muted text-foreground hover:bg-muted/80'}"
+											>
+												All Tools
+											</button>
+											<button
+												type="button"
+												on:click={() => { aiToolSelectionMode = 'custom'; }}
+												class="px-3 py-1.5 text-xs rounded-lg transition-colors {aiToolSelectionMode === 'custom' ? 'bg-violet-600 text-white' : 'bg-muted text-foreground hover:bg-muted/80'}"
+											>
+												Custom
+											</button>
+										</div>
+										<p class="text-xs text-muted-foreground mt-1">
+											{#if aiToolSelectionMode === 'all'}
+												All AI tools are enabled. Configure API keys in Settings → Integrations.
+											{:else}
+												Select which AI tools to enable for this profile.
+											{/if}
+										</p>
+									</div>
+
+									<!-- AI Tool categories and individual tools -->
+									{#if aiToolSelectionMode === 'custom'}
+										<div class="border-t border-border pt-3 space-y-2">
+											{#each aiToolCategories as category}
+												{#if category.tools.length > 0}
+													{@const categoryToolIds = category.tools.map(t => t.id)}
+													{@const selectedInCategory = categoryToolIds.filter(id => profileForm.enabled_ai_tools.includes(id)).length}
+													{@const isFullySelected = selectedInCategory === categoryToolIds.length}
+													{@const isPartiallySelected = selectedInCategory > 0 && selectedInCategory < categoryToolIds.length}
+													<div class="border border-border rounded-lg overflow-hidden">
+														<!-- Category header -->
+														<div class="w-full px-3 py-2 bg-muted/50 flex items-center gap-2 text-sm text-foreground">
+															<!-- Custom checkbox with indeterminate state -->
+															<button
+																type="button"
+																on:click|stopPropagation={() => toggleAIToolCategory(category)}
+																class="w-4 h-4 rounded flex items-center justify-center transition-colors {isFullySelected ? 'bg-violet-600' : isPartiallySelected ? 'bg-violet-600' : 'bg-muted border border-border'}"
+															>
+																{#if isFullySelected}
+																	<!-- Checkmark icon -->
+																	<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																		<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
+																	</svg>
+																{:else if isPartiallySelected}
+																	<!-- Minus/dash icon for partial selection -->
+																	<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																		<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" />
+																	</svg>
+																{/if}
+															</button>
+															<button
+																type="button"
+																on:click={() => toggleAIToolCategoryExpansion(category.id)}
+																class="flex-1 flex items-center gap-2 text-left hover:text-foreground/80"
+															>
+																<span class="flex-1">{category.name}</span>
+																<span class="text-xs text-muted-foreground">({category.tools.length} tools)</span>
+																<svg class="w-4 h-4 transition-transform {aiToolCategoriesExpanded[category.id] ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+																</svg>
+															</button>
+														</div>
+														<!-- Individual tools -->
+														{#if aiToolCategoriesExpanded[category.id]}
+															<div class="p-2 space-y-1 bg-card">
+																{#each category.tools as tool}
+																	{@const isSelected = profileForm.enabled_ai_tools.includes(tool.id)}
+																	<label class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted/50 cursor-pointer">
+																		<input
+																			type="checkbox"
+																			checked={isSelected}
+																			on:change={() => toggleAITool(tool.id)}
+																			class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring"
+																		/>
+																		<div class="flex-1">
+																			<div class="flex items-center gap-2">
+																				<span class="text-sm text-foreground">{tool.name}</span>
+																				<span class="text-xs text-muted-foreground">({tool.provider})</span>
+																			</div>
+																			<p class="text-xs text-muted-foreground">{tool.description}</p>
+																		</div>
+																	</label>
+																{/each}
+															</div>
+														{/if}
+													</div>
+												{/if}
+											{/each}
+										</div>
+
+										<!-- Summary of selected AI tools -->
+										<div class="text-xs text-muted-foreground pt-2 border-t border-border">
+											{profileForm.enabled_ai_tools.length} AI tool{profileForm.enabled_ai_tools.length !== 1 ? 's' : ''} enabled
+											{#if profileForm.enabled_ai_tools.length > 0}
+												{@const toolNames = profileForm.enabled_ai_tools.map(id => {
+													for (const cat of aiToolCategories) {
+														const tool = cat.tools.find(t => t.id === id);
+														if (tool) return tool.name;
+													}
+													return id;
+												})}
+												<span class="text-foreground">: {toolNames.join(', ')}</span>
+											{/if}
+										</div>
+									{/if}
 								</div>
 							{/if}
 						</div>
@@ -3914,21 +4568,15 @@
 									<div>
 										<label class="block text-xs text-muted-foreground mb-1">Prompt Type</label>
 										<select bind:value={profileForm.system_prompt_type} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground">
-											<option value="preset">Use Claude Code Preset</option>
-											<option value="custom">Custom Prompt</option>
+											<option value="preset">Claude Code + Appended Instructions</option>
+											<option value="custom">Custom System Prompt</option>
 										</select>
 									</div>
 									{#if profileForm.system_prompt_type === 'preset'}
 										<div>
-											<label class="block text-xs text-muted-foreground mb-1">Preset</label>
-											<select bind:value={profileForm.system_prompt_preset} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground">
-												<option value="claude_code">Claude Code</option>
-												<option value="default">Default</option>
-											</select>
-										</div>
-										<div>
 											<label class="block text-xs text-muted-foreground mb-1">Append Instructions</label>
-											<textarea bind:value={profileForm.system_prompt_append} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-y" rows="3" placeholder="Additional instructions to append to the system prompt..."></textarea>
+											<textarea bind:value={profileForm.system_prompt_append} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-y" rows="3" placeholder="Additional instructions to append to Claude Code's system prompt..."></textarea>
+											<p class="text-xs text-muted-foreground mt-1">These instructions will be added after Claude Code's built-in system prompt.</p>
 										</div>
 									{:else}
 										<div>
@@ -3941,15 +4589,6 @@
 										</label>
 										<p class="text-xs text-muted-foreground">Adds working directory, platform, git status, and today's date to the system prompt.</p>
 									{/if}
-
-									<!-- AI Tools toggle - shown for both preset and custom -->
-									<div class="pt-3 border-t border-border">
-										<label class="flex items-center gap-2 cursor-pointer">
-											<input type="checkbox" bind:checked={profileForm.system_prompt_enable_ai_tools} class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring" />
-											<span class="text-sm text-foreground">Enable AI Tools</span>
-										</label>
-										<p class="text-xs text-muted-foreground mt-1">Allow Claude to use AI tools like image generation (Nano Banana). Configure tools in Settings → Integrations.</p>
-									</div>
 								</div>
 							{/if}
 						</div>

@@ -9,7 +9,7 @@
  *   VEO_MODEL - Model to use (optional, defaults to veo-3.1-fast-generate-preview)
  *
  * Usage:
- *   import { imageToVideo } from '/opt/ai-tools/dist/video-generation/imageToVideo.js';
+ *   import { imageToVideo } from '/workspace/ai-hub/tools/dist/video-generation/imageToVideo.js';
  *
  *   const result = await imageToVideo({
  *     image_path: '/path/to/image.png',
@@ -230,8 +230,8 @@ export async function imageToVideo(input: ImageToVideoInput): Promise<ImageToVid
       return { success: false, error: videoBuffer.error };
     }
 
-    // Save and return (include source_video_uri for use with extendVideo)
-    return saveVideo(videoBuffer, 'i2v', duration, pollResult.videoUri);
+    // Save and return
+    return saveVideo(videoBuffer, 'i2v', duration);
 
   } catch (error) {
     return {

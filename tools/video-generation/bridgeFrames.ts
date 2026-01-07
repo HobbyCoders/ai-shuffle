@@ -9,7 +9,7 @@
  *   VEO_MODEL - Model to use (optional, defaults to veo-3.1-fast-generate-preview)
  *
  * Usage:
- *   import { bridgeFrames } from '/opt/ai-tools/dist/video-generation/bridgeFrames.js';
+ *   import { bridgeFrames } from '/workspace/ai-hub/tools/dist/video-generation/bridgeFrames.js';
  *
  *   const result = await bridgeFrames({
  *     start_image: '/path/to/start.png',
@@ -257,8 +257,8 @@ export async function bridgeFrames(input: BridgeFramesInput): Promise<BridgeFram
       return { success: false, error: videoBuffer.error };
     }
 
-    // Save and return (include source_video_uri for use with extendVideo)
-    return saveVideo(videoBuffer, 'bridge', duration, pollResult.videoUri);
+    // Save and return
+    return saveVideo(videoBuffer, 'bridge', duration);
 
   } catch (error) {
     return {

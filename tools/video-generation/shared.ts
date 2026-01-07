@@ -63,19 +63,13 @@ export interface VideoResponse {
   filename?: string;
   mime_type?: string;
   duration_seconds?: number;
-  /** The source video URI from Veo - use this with extendVideo to extend the video */
-  source_video_uri?: string;
   error?: string;
 }
 
 /**
  * Save video buffer to disk and return response
- * @param videoBuffer - The video data to save
- * @param prefix - Filename prefix (e.g., 'video', 'i2v', 'extended', 'bridge')
- * @param duration - Video duration in seconds
- * @param sourceVideoUri - Optional: The Veo video URI for use with extendVideo
  */
-export function saveVideo(videoBuffer: Buffer, prefix: string, duration: number, sourceVideoUri?: string): VideoResponse {
+export function saveVideo(videoBuffer: Buffer, prefix: string, duration: number): VideoResponse {
   const timestamp = Date.now();
   const randomSuffix = Math.random().toString(36).substring(2, 8);
   const filename = `${prefix}-${timestamp}-${randomSuffix}.mp4`;
@@ -96,8 +90,7 @@ export function saveVideo(videoBuffer: Buffer, prefix: string, duration: number,
     file_path: filePath,
     filename: filename,
     mime_type: 'video/mp4',
-    duration_seconds: duration,
-    ...(sourceVideoUri && { source_video_uri: sourceVideoUri })
+    duration_seconds: duration
   };
 }
 

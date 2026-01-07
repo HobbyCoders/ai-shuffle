@@ -321,61 +321,288 @@ def _get_os_version() -> str:
         return sys.platform
 
 
-def _get_available_tools(enable_ai_tools: bool = False) -> list:
+def _get_available_tools(ai_tools_config: Optional[Dict[str, Any]] = None) -> list:
     """
     Check which AI Hub tools are configured and available.
-    Returns a list of tool descriptions.
+    Returns a list of tool descriptions based on individual tool toggles.
 
     Args:
-        enable_ai_tools: Whether AI tools are enabled for this profile
+        ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
     """
     tools = []
 
-    # Only return tools if AI tools are enabled in the profile
-    if not enable_ai_tools:
+    if not ai_tools_config:
         return tools
 
-    # Check image generation (Nano Banana)
-    image_provider = database.get_system_setting("image_provider")
-    image_model = database.get_system_setting("image_model")
-    image_api_key = database.get_system_setting("image_api_key")
+    # Get the absolute path to tools directory
+    tools_dir = settings.effective_tools_dir
 
-    if all([image_provider, image_model, image_api_key]):
-        tools.append({
-            "name": "Image Generation (Nano Banana)",
-            "description": "Generate AI images from text prompts",
-            "usage": """import { generateImage } from './tools/image-generation/generateImage.js';
-const result = await generateImage({ prompt: 'your description here' });
-if (result.success) { /* result.image_base64 contains the image */ }"""
-        })
+    # Check image generation (Nano Banana) - only if enabled in profile
+    if ai_tools_config.get("image_generation", False):
+        image_provider = database.get_system_setting("image_provider")
+        image_model = database.get_system_setting("image_model")
+        image_api_key = database.get_system_setting("image_api_key")
 
-    # Add more tools here as they become available
-    # e.g., text-to-speech, video generation, etc.
+        if all([image_provider, image_model, image_api_key]):
+            # Use absolute path so scripts can run from any directory (e.g., /tmp/)
+            tool_path = f"{tools_dir}/dist/image-generation/generateImage.js"
+            tools.append({
+                "name": "Image Generation (Nano Banana)",
+                "description": "Generate AI images from text prompts",
+                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
+import {{ generateImage }} from '{tool_path}';
+const result = await generateImage({{ prompt: 'your description here' }});
+// IMPORTANT: Output the result as JSON - the chat UI will display the image with download button
+// Do NOT save to file or try to read the base64 - just output the JSON result
+console.log(JSON.stringify(result));
+// DISPLAY: After success, show image as markdown: ![Description](result.image_url)"""
+            })
+
+    # Check image editing (Nano Banana) - only if enabled in profile
+    if ai_tools_config.get("image_editing", False):
+        image_provider = database.get_system_setting("image_provider")
+        image_model = database.get_system_setting("image_model")
+        image_api_key = database.get_system_setting("image_api_key")
+
+        if all([image_provider, image_model, image_api_key]):
+            # Use absolute path so scripts can run from any directory (e.g., /tmp/)
+            tool_path = f"{tools_dir}/dist/image-generation/editImage.js"
+            tools.append({
+                "name": "Image Editing (Nano Banana)",
+                "description": "Edit existing images using AI - add elements, remove objects, change styles, and more",
+                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
+import {{ editImage }} from '{tool_path}';
+const result = await editImage({{
+  prompt: 'your editing instruction here',
+  image_path: '/path/to/existing/image.png'
+}});
+// IMPORTANT: Output the result as JSON - the chat UI will display the image with download button
+// Do NOT save to file or try to read the base64 - just output the JSON result
+console.log(JSON.stringify(result));
+// DISPLAY: After success, show image as markdown: ![Description](result.image_url)"""
+            })
+
+    # Check video generation (Veo) - only if enabled in profile
+    if ai_tools_config.get("video_generation", False):
+        # Video uses the same API key as images (Gemini API)
+        video_api_key = database.get_system_setting("image_api_key")
+
+        if video_api_key:
+            tool_path = f"{tools_dir}/dist/video-generation/generateVideo.js"
+            tools.append({
+                "name": "Video Generation (Veo)",
+                "description": "Generate AI videos from text prompts (4-8 seconds, 720p/1080p)",
+                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
+import {{ generateVideo }} from '{tool_path}';
+const result = await generateVideo({{
+  prompt: 'your video description here',
+  duration: 8,  // 4, 6, or 8 seconds
+  aspect_ratio: '16:9'  // or '9:16' for vertical
+}});
+// IMPORTANT: Output the result as JSON - the chat UI will display the video
+// Video generation takes 1-6 minutes, please be patient
+console.log(JSON.stringify(result));
+// DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
+            })
+
+    # Check reference-based image generation (Nano Banana) - for character/style consistency
+    if ai_tools_config.get("image_reference", False):
+        image_api_key = database.get_system_setting("image_api_key")
+
+        if image_api_key:
+            tool_path = f"{tools_dir}/dist/image-generation/generateWithReference.js"
+            tools.append({
+                "name": "Reference-Based Image Generation (Nano Banana)",
+                "description": "Generate images with character/style consistency using reference images (up to 14)",
+                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
+import {{ generateWithReference }} from '{tool_path}';
+const result = await generateWithReference({{
+  prompt: 'The character standing in a forest',
+  reference_images: ['/path/to/character.png']  // Up to 14 reference images
+}});
+// IMPORTANT: Output the result as JSON - the chat UI will display the image
+console.log(JSON.stringify(result));
+// DISPLAY: After success, show image as markdown: ![Description](result.image_url)"""
+            })
+
+    # Check image-to-video (Veo) - animate still images
+    if ai_tools_config.get("image_to_video", False):
+        video_api_key = database.get_system_setting("image_api_key")
+
+        if video_api_key:
+            tool_path = f"{tools_dir}/dist/video-generation/imageToVideo.js"
+            tools.append({
+                "name": "Image to Video (Veo)",
+                "description": "Animate a still image into a video",
+                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
+import {{ imageToVideo }} from '{tool_path}';
+const result = await imageToVideo({{
+  image_path: '/path/to/image.png',
+  prompt: 'The character starts walking forward'
+}});
+// IMPORTANT: Output the result as JSON - the chat UI will display the video
+console.log(JSON.stringify(result));
+// DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
+            })
+
+    # Check video extension (Veo) - extend existing videos
+    if ai_tools_config.get("video_extend", False):
+        video_api_key = database.get_system_setting("image_api_key")
+
+        if video_api_key:
+            tool_path = f"{tools_dir}/dist/video-generation/extendVideo.js"
+            tools.append({
+                "name": "Video Extension (Veo)",
+                "description": "Extend existing Veo videos by approximately 7 seconds (up to 20 times)",
+                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
+import {{ extendVideo }} from '{tool_path}';
+const result = await extendVideo({{
+  video_path: '/path/to/video.mp4',
+  prompt: 'Continue the action smoothly'  // Optional
+}});
+// IMPORTANT: Output the result as JSON - the chat UI will display the video
+console.log(JSON.stringify(result));
+// DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
+            })
+
+    # Check frame bridging (Veo) - smooth transitions between images
+    if ai_tools_config.get("video_bridge", False):
+        video_api_key = database.get_system_setting("image_api_key")
+
+        if video_api_key:
+            tool_path = f"{tools_dir}/dist/video-generation/bridgeFrames.js"
+            tools.append({
+                "name": "Frame Bridging (Veo)",
+                "description": "Generate a smooth video transition between two images (first and last frame)",
+                "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
+import {{ bridgeFrames }} from '{tool_path}';
+const result = await bridgeFrames({{
+  start_image: '/path/to/start.png',
+  end_image: '/path/to/end.png',
+  prompt: 'Smooth camera pan between scenes'  // Optional
+}});
+// IMPORTANT: Output the result as JSON - the chat UI will display the video
+console.log(JSON.stringify(result));
+// DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
+            })
 
     return tools
 
 
-def generate_environment_details(working_dir: str, enable_ai_tools: bool = False) -> str:
+def _build_ai_tools_section(ai_tools_config: Optional[Dict[str, Any]] = None, prefix: str = "\n\n") -> str:
+    """
+    Build the <ai-tools> section for system prompts based on enabled tools.
+
+    Args:
+        ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
+        prefix: String to prepend before the section (default: "\n\n")
+
+    Returns:
+        The formatted <ai-tools> section, or empty string if no tools enabled
+    """
+    available_tools = _get_available_tools(ai_tools_config)
+    if not available_tools:
+        return ""
+
+    tools_section = f"{prefix}<ai-tools>\nThe following AI tools are available via code execution:\n"
+    for tool in available_tools:
+        tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
+    tools_section += """
+To use these tools, write and execute TypeScript code that imports and calls them.
+IMPORTANT: Always delete the .mjs file after execution to keep the workspace clean.
+
+## Displaying Generated Content
+
+After successfully generating content, you MUST display it properly in chat:
+
+**Images:** Display as markdown image using the `image_url` from the result:
+```
+![Image Description](/api/generated-images/by-path?path=...)
+```
+The chat UI will render this with Download and Copy URL buttons in the message header.
+
+**Videos:** Display as a markdown link using the `video_url` from the result:
+```
+[Video Description](/api/generated-videos/by-path?path=...)
+```
+The chat UI will render this as an embedded video player with Download and Copy URL buttons in the message header.
+</ai-tools>"""
+
+    return tools_section
+
+
+def _build_env_with_ai_tools(
+    base_env: Optional[Dict[str, str]],
+    ai_tools_config: Optional[Dict[str, Any]]
+) -> Dict[str, str]:
+    """
+    Build environment variables dict, injecting AI tool credentials when enabled.
+
+    This allows the Claude CLI to execute scripts that use AI tools
+    with the necessary API keys, without exposing them in the prompt.
+
+    Args:
+        base_env: Base environment variables from profile config
+        ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
+
+    Returns:
+        Dict of environment variables to pass to Claude CLI
+    """
+    env = dict(base_env) if base_env else {}
+
+    if not ai_tools_config:
+        return env
+
+    # Inject Gemini API key for image generation/editing
+    if ai_tools_config.get("image_generation", False) or ai_tools_config.get("image_editing", False):
+        image_api_key = database.get_system_setting("image_api_key")
+        image_model = database.get_system_setting("image_model")
+
+        if image_api_key:
+            env["GEMINI_API_KEY"] = image_api_key
+            logger.debug("Injected GEMINI_API_KEY into execution environment")
+
+        if image_model:
+            env["GEMINI_MODEL"] = image_model
+            logger.debug(f"Injected GEMINI_MODEL={image_model} into execution environment")
+
+    # Inject Veo model for video generation (uses same API key as images)
+    if ai_tools_config.get("video_generation", False):
+        video_api_key = database.get_system_setting("image_api_key")
+        video_model = database.get_system_setting("video_model")
+
+        if video_api_key and "GEMINI_API_KEY" not in env:
+            env["GEMINI_API_KEY"] = video_api_key
+            logger.debug("Injected GEMINI_API_KEY for video generation")
+
+        if video_model:
+            env["VEO_MODEL"] = video_model
+            logger.debug(f"Injected VEO_MODEL={video_model} into execution environment")
+
+    # Add more tool credentials here as they become available
+    # if ai_tools_config.get("text_to_speech", False):
+    #     tts_api_key = database.get_system_setting("tts_api_key")
+    #     if tts_api_key:
+    #         env["TTS_API_KEY"] = tts_api_key
+
+    return env
+
+
+def generate_environment_details(working_dir: str, ai_tools_config: Optional[Dict[str, Any]] = None) -> str:
     """
     Generate environment details block for custom system prompts.
     Similar to Claude Code's dynamic environment injection.
 
     Args:
         working_dir: The working directory path
-        enable_ai_tools: Whether AI tools are enabled for this profile
+        ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
     """
     is_git = _is_git_repo(working_dir)
     os_version = _get_os_version()
     today = datetime.now().strftime("%Y-%m-%d")
 
-    # Check for available AI tools (only if enabled in profile)
-    available_tools = _get_available_tools(enable_ai_tools)
-    tools_section = ""
-    if available_tools:
-        tools_section = "\n\n<ai-tools>\nThe following AI tools are available via code execution:\n"
-        for tool in available_tools:
-            tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
-        tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\n</ai-tools>"
+    # Get AI tools section using helper function
+    tools_section = _build_ai_tools_section(ai_tools_config)
 
     return f"""Here is useful information about the environment you are running in:
 <env>
@@ -422,14 +649,20 @@ def build_options_from_profile(
     system_prompt = config.get("system_prompt")
     override_append = overrides.get("system_prompt_append", "")
 
+    # Get AI tools config from profile config (not system_prompt)
+    ai_tools_config = config.get("ai_tools")
+
     if system_prompt is None:
         # No preset - just security instructions as plain text
         final_system_prompt = SECURITY_INSTRUCTIONS
+
+        # Add AI tools section if any are enabled
+        final_system_prompt += _build_ai_tools_section(ai_tools_config)
+
         if override_append:
             final_system_prompt += "\n\n" + override_append
     elif isinstance(system_prompt, dict):
         prompt_type = system_prompt.get("type", "preset")
-        enable_ai_tools = system_prompt.get("enable_ai_tools", False)
 
         if prompt_type == "custom":
             # Custom system prompt - use content directly with security instructions
@@ -440,17 +673,13 @@ def build_options_from_profile(
             # Start building the prompt
             prompt_parts = [SECURITY_INSTRUCTIONS]
 
-            # Add environment details if enabled (includes AI tools if enable_ai_tools is true)
+            # Add environment details if enabled (includes AI tools based on ai_tools_config)
             if inject_env:
-                prompt_parts.append(generate_environment_details(working_dir, enable_ai_tools))
-            elif enable_ai_tools:
-                # If env details not enabled but AI tools are, just add the AI tools section
-                available_tools = _get_available_tools(True)
-                if available_tools:
-                    tools_section = "<ai-tools>\nThe following AI tools are available via code execution:\n"
-                    for tool in available_tools:
-                        tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
-                    tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\n</ai-tools>"
+                prompt_parts.append(generate_environment_details(working_dir, ai_tools_config))
+            else:
+                # If env details not enabled, still add AI tools section if any are enabled
+                tools_section = _build_ai_tools_section(ai_tools_config, prefix="")
+                if tools_section:
                     prompt_parts.append(tools_section)
 
             # Add custom content if provided
@@ -471,15 +700,8 @@ def build_options_from_profile(
             if override_append:
                 full_append += "\n\n" + override_append
 
-            # Add AI tools section if enabled
-            if enable_ai_tools:
-                available_tools = _get_available_tools(True)
-                if available_tools:
-                    tools_section = "\n\n<ai-tools>\nThe following AI tools are available via code execution:\n"
-                    for tool in available_tools:
-                        tools_section += f"\n## {tool['name']}\n{tool['description']}\n\nUsage:\n```typescript\n{tool['usage']}\n```\n"
-                    tools_section += "\nTo use these tools, write and execute TypeScript code that imports and calls them.\n</ai-tools>"
-                    full_append += tools_section
+            # Add AI tools section if any are enabled
+            full_append += _build_ai_tools_section(ai_tools_config)
 
             final_system_prompt = {
                 "type": "preset",
@@ -489,6 +711,10 @@ def build_options_from_profile(
     else:
         # String system prompt - use it directly with security instructions
         final_system_prompt = SECURITY_INSTRUCTIONS + "\n\n" + str(system_prompt)
+
+        # Add AI tools section if any are enabled
+        final_system_prompt += _build_ai_tools_section(ai_tools_config)
+
         if override_append:
             final_system_prompt += "\n\n" + override_append
 
@@ -551,8 +777,8 @@ def build_options_from_profile(
         # Settings loading
         setting_sources=config.get("setting_sources"),
 
-        # Environment and arguments
-        env=config.get("env") or {},
+        # Environment and arguments - inject AI tool credentials if enabled
+        env=_build_env_with_ai_tools(config.get("env"), ai_tools_config),
         extra_args=config.get("extra_args") or {},
 
         # Buffer settings
