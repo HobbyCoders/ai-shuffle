@@ -36,7 +36,7 @@
 	let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 	// Local storage key
-	const HISTORY_KEY = 'ai-shuffle-search-history';
+	const HISTORY_KEY = 'ai-hub-search-history';
 	const MAX_HISTORY = 10;
 
 	// Load profiles and search history on mount
@@ -210,7 +210,7 @@
 {#if visible}
 	<!-- Backdrop with blur -->
 	<div
-		class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-start justify-center pt-[10vh] bg-black/60 backdrop-blur-sm"
+		class="fixed inset-0 z-50 flex items-start justify-center pt-[10vh] bg-black/60 backdrop-blur-sm"
 		onclick={handleBackdropClick}
 		role="dialog"
 		aria-modal="true"
@@ -228,7 +228,6 @@
 					type="button"
 					onclick={onClose}
 					class="p-1.5 text-muted-foreground hover:text-foreground rounded-md hover:bg-muted transition-colors"
-					aria-label="Close"
 				>
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
@@ -309,7 +308,7 @@
 					<div class="mt-4 pt-4 border-t border-border space-y-4">
 						<!-- Date Range -->
 						<div class="flex items-center gap-4">
-							<span class="text-sm text-muted-foreground w-24">Date Range</span>
+							<label class="text-sm text-muted-foreground w-24">Date Range</label>
 							<div class="flex items-center gap-2 flex-1">
 								<input
 									type="date"
@@ -327,9 +326,8 @@
 
 						<!-- Profile Filter -->
 						<div class="flex items-center gap-4">
-							<label for="profile-filter" class="text-sm text-muted-foreground w-24">Profile</label>
+							<label class="text-sm text-muted-foreground w-24">Profile</label>
 							<select
-						id="profile-filter"
 								bind:value={profileId}
 								class="flex-1 px-3 py-1.5 text-sm bg-muted border border-border rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
 							>

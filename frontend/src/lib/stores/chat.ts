@@ -14,6 +14,7 @@
 import { writable, derived, get } from 'svelte/store';
 import type { Session, Profile } from '$lib/api/client';
 import { api } from '$lib/api/client';
+import { isNotificationsEnabled, notifySessionComplete } from '$lib/services/notifications';
 
 export type MessageType = 'text' | 'tool_use' | 'tool_result';
 
@@ -53,9 +54,11 @@ interface ChatState {
 	connectionState: 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
 	deviceId: string;
 	connectedDevices: number;
+	streamStartTime: number | null; // Track when streaming started for notifications
 }
 
 // Load persisted values from localStorage - empty string means no selection
+// Note: These are also synced to backend for cross-device persistence
 function getPersistedProfile(): string {
 	if (typeof window !== 'undefined') {
 		return localStorage.getItem('aihub_selectedProfile') || '';
@@ -68,6 +71,102 @@ function getPersistedProject(): string {
 		return localStorage.getItem('aihub_selectedProject') || '';
 	}
 	return '';
+}
+
+// Sync selected profile/project to backend for cross-device persistence
+let selectionSyncTimeout: ReturnType<typeof setTimeout> | null = null;
+const SELECTION_SYNC_DEBOUNCE_MS = 300;
+
+// Track pending selection for flush on unload
+let pendingSelection: { profile: string; project: string } | null = null;
+
+/**
+ * Immediately flush any pending selection save to backend (sync, for beforeunload)
+ */
+function flushPendingSelectionSave() {
+	if (!pendingSelection) return;
+
+	// Cancel the debounce timer
+	if (selectionSyncTimeout) {
+		clearTimeout(selectionSyncTimeout);
+		selectionSyncTimeout = null;
+	}
+
+	// Use sendBeacon for reliable delivery during page unload
+	const data = JSON.stringify({
+		key: 'selection',
+		value: { selectedProfile: pendingSelection.profile, selectedProject: pendingSelection.project }
+	});
+	navigator.sendBeacon('/api/v1/preferences/selection', new Blob([data], { type: 'application/json' }));
+
+	pendingSelection = null;
+}
+
+// Register beforeunload handler to flush pending saves when browser closes
+if (typeof window !== 'undefined') {
+	window.addEventListener('beforeunload', flushPendingSelectionSave);
+	document.addEventListener('visibilitychange', () => {
+		if (document.visibilityState === 'hidden') {
+			flushPendingSelectionSave();
+		}
+	});
+}
+
+async function syncSelectionToBackend(profile: string, project: string) {
+	// Store pending selection for flush on unload
+	pendingSelection = { profile, project };
+
+	// Clear existing timer
+	if (selectionSyncTimeout) {
+		clearTimeout(selectionSyncTimeout);
+	}
+
+	// Debounce the sync to avoid excessive API calls
+	selectionSyncTimeout = setTimeout(async () => {
+		if (!pendingSelection) return;
+
+		try {
+			await fetch('/api/v1/preferences/selection', {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				credentials: 'include',
+				body: JSON.stringify({
+					key: 'selection',
+					value: { selectedProfile: pendingSelection.profile, selectedProject: pendingSelection.project }
+				})
+			});
+		} catch (e) {
+			console.error('[Chat] Failed to sync selection to backend:', e);
+		}
+
+		pendingSelection = null;
+		selectionSyncTimeout = null;
+	}, SELECTION_SYNC_DEBOUNCE_MS);
+}
+
+// Load selection from backend (called on init)
+async function loadSelectionFromBackend(): Promise<{ selectedProfile: string; selectedProject: string } | null> {
+	if (typeof window === 'undefined') return null;
+
+	try {
+		const response = await fetch('/api/v1/preferences/selection', {
+			credentials: 'include'
+		});
+
+		if (response.ok) {
+			const data = await response.json();
+			if (data && data.value) {
+				return {
+					selectedProfile: data.value.selectedProfile || '',
+					selectedProject: data.value.selectedProject || ''
+				};
+			}
+		}
+	} catch (e) {
+		console.error('[Chat] Failed to load selection from backend:', e);
+	}
+
+	return null;
 }
 
 /**
@@ -100,7 +199,8 @@ function createChatStore() {
 		wsConnected: false,
 		connectionState: 'disconnected',
 		deviceId: getOrCreateDeviceId(),
-		connectedDevices: 0
+		connectedDevices: 0,
+		streamStartTime: null
 	});
 
 	let ws: WebSocket | null = null;
@@ -514,6 +614,7 @@ function createChatStore() {
 					...s,
 					sessionId,
 					isStreaming: true,
+					streamStartTime: Date.now(),
 					messages: [...s.messages, {
 						id: assistantMsgId,
 						role: 'assistant',
@@ -640,6 +741,7 @@ function createChatStore() {
 			case 'done': {
 				// Query complete
 				const metadata = data.metadata as Record<string, unknown>;
+				const currentState = get({ subscribe });
 
 				update(s => {
 					// Mark all streaming messages as complete
@@ -667,9 +769,24 @@ function createChatStore() {
 						...s,
 						messages,
 						isStreaming: false,
+						streamStartTime: null,
 						sessionId: data.session_id as string || s.sessionId
 					};
 				});
+
+				// Trigger browser notification if enabled and session took > 10 seconds
+				if (isNotificationsEnabled() && currentState.streamStartTime) {
+					const duration = (Date.now() - currentState.streamStartTime) / 1000;
+					if (duration > 10) {
+						// Find session title from sessions list
+						const session = currentState.sessions.find(s => s.id === currentState.sessionId);
+						notifySessionComplete(
+							session?.title || null,
+							currentState.sessionId || '',
+							duration
+						);
+					}
+				}
 
 				// Refresh sessions list
 				loadSessionsInternal();
@@ -698,7 +815,7 @@ function createChatStore() {
 						}
 					}
 
-					return { ...s, messages, isStreaming: false };
+					return { ...s, messages, isStreaming: false, streamStartTime: null };
 				});
 				break;
 			}
@@ -718,6 +835,7 @@ function createChatStore() {
 						...s,
 						messages,
 						isStreaming: false,
+						streamStartTime: null,
 						error: data.message as string
 					};
 				});
@@ -819,6 +937,27 @@ function createChatStore() {
 		 */
 		init() {
 			connect();
+			// Load selection from backend and sync to localStorage
+			loadSelectionFromBackend().then((backendSelection) => {
+				if (backendSelection) {
+					// Backend has data - use it as authoritative source
+					if (backendSelection.selectedProfile) {
+						localStorage.setItem('aihub_selectedProfile', backendSelection.selectedProfile);
+						update(s => ({ ...s, selectedProfile: backendSelection.selectedProfile }));
+					}
+					if (backendSelection.selectedProject) {
+						localStorage.setItem('aihub_selectedProject', backendSelection.selectedProject);
+						update(s => ({ ...s, selectedProject: backendSelection.selectedProject }));
+					}
+				} else {
+					// No backend data - sync localStorage to backend
+					const profile = getPersistedProfile();
+					const project = getPersistedProject();
+					if (profile || project) {
+						syncSelectionToBackend(profile, project);
+					}
+				}
+			});
 		},
 
 		/**
@@ -882,14 +1021,22 @@ function createChatStore() {
 			if (typeof window !== 'undefined') {
 				localStorage.setItem('aihub_selectedProfile', profileId);
 			}
-			update(s => ({ ...s, selectedProfile: profileId }));
+			update(s => {
+				// Sync to backend for persistence
+				syncSelectionToBackend(profileId, s.selectedProject);
+				return { ...s, selectedProfile: profileId };
+			});
 		},
 
 		setProject(projectId: string) {
 			if (typeof window !== 'undefined') {
 				localStorage.setItem('aihub_selectedProject', projectId);
 			}
-			update(s => ({ ...s, selectedProject: projectId }));
+			update(s => {
+				// Sync to backend for persistence
+				syncSelectionToBackend(s.selectedProfile, projectId);
+				return { ...s, selectedProject: projectId };
+			});
 		},
 
 		startNewChat() {

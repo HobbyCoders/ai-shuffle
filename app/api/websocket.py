@@ -23,6 +23,7 @@ from fastapi.websockets import WebSocketState
 from app.core.sync_engine import sync_engine, SyncEvent
 from app.db import database
 from app.core.auth import auth_service
+from app.core.webhook_service import dispatch_session_complete, dispatch_session_error
 from app.core.profiles import get_profile
 from app.core.cli_bridge import CLIBridge, RewindParser, is_pty_available
 from app.core.slash_commands import (
@@ -174,10 +175,13 @@ async def chat_websocket(
         nonlocal current_session_id
 
         from app.core.query_engine import stream_to_websocket
+        import time
 
         # Generate a message ID for this streaming session
         message_id = str(uuid.uuid4())
         stream_started = False
+        query_start_time = time.time()  # Track duration for webhooks
+        final_metadata: Dict[str, Any] = {}  # Store metadata from done event
 
         # Unregister this device from SyncEngine while streaming
         # This prevents duplicate events (we get direct events via send_json)
@@ -406,17 +410,37 @@ async def chat_websocket(
                         source_device_id=None
                     )
                 elif event_type == 'done':
+                    # Store metadata for webhook dispatch
+                    final_metadata = event.get('metadata', {})
+
                     # Stream completed - broadcast end
                     if stream_started:
                         await sync_engine.broadcast_stream_end(
                             session_id=session_id,
                             message_id=message_id,
-                            metadata=event.get('metadata', {}),
+                            metadata=final_metadata,
                             interrupted=False,
                             source_device_id=None
                         )
 
             logger.info(f"Query completed for session {session_id}")
+
+            # Dispatch webhook for session completion (non-blocking)
+            import time as time_module
+            duration = time_module.time() - query_start_time
+            session_data = database.get_session(session_id)
+            try:
+                asyncio.create_task(dispatch_session_complete(
+                    session_id=session_id,
+                    title=session_data.get("title") if session_data else None,
+                    profile_id=profile_id,
+                    total_cost=final_metadata.get("total_cost_usd", 0.0),
+                    input_tokens=final_metadata.get("tokens_in", 0),
+                    output_tokens=final_metadata.get("tokens_out", 0),
+                    duration_seconds=duration
+                ))
+            except Exception as webhook_error:
+                logger.warning(f"Failed to dispatch session.complete webhook: {webhook_error}")
 
         except asyncio.CancelledError:
             await send_json({"type": "stopped", "session_id": session_id})
@@ -443,6 +467,18 @@ async def chat_websocket(
                     interrupted=True,
                     source_device_id=None
                 )
+
+            # Dispatch webhook for session error (non-blocking)
+            session_data = database.get_session(session_id)
+            try:
+                asyncio.create_task(dispatch_session_error(
+                    session_id=session_id,
+                    title=session_data.get("title") if session_data else None,
+                    profile_id=profile_id,
+                    error_message=str(e)
+                ))
+            except Exception as webhook_error:
+                logger.warning(f"Failed to dispatch session.error webhook: {webhook_error}")
 
         finally:
             # ALWAYS ensure streaming state is cleared, even if stream_started was never set

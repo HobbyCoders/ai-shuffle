@@ -11,7 +11,7 @@ Provides endpoints for git repository operations including:
 
 import uuid
 import logging
-from typing import List, Optional
+from typing import List, Optional, Any
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 from pydantic import BaseModel, Field
@@ -41,9 +41,6 @@ class BranchInfo(BaseModel):
     upstream: Optional[str] = None
     ahead: int = 0
     behind: int = 0
-    # Worktree association
-    has_worktree: bool = False
-    worktree_id: Optional[str] = None
 
 
 class BranchListResponse(BaseModel):
@@ -130,10 +127,6 @@ class WorktreeCreate(BaseModel):
     create_new_branch: bool = False
     base_branch: Optional[str] = None
     profile_id: Optional[str] = None
-    copy_uncommitted: bool = Field(
-        default=False,
-        description="Copy uncommitted files (modified and untracked) from main repo to worktree"
-    )
 
 
 class SessionInfo(BaseModel):
@@ -157,20 +150,15 @@ class WorktreeInfo(BaseModel):
     """Worktree information"""
     id: str
     repository_id: str
-    session_id: Optional[str] = None  # Deprecated - use sessions list
+    session_id: Optional[str] = None
     branch_name: str
     worktree_path: str
     base_branch: Optional[str] = None
     status: str
     created_at: str
-    # New session relationship model
-    sessions: List[SessionInfo] = []  # All sessions that have used this worktree
-    session_count: int = 0
-    active_session: Optional[SessionInfo] = None  # Currently active session
-    exists: Optional[bool] = None  # Whether worktree folder exists on disk
-    git_status: Optional[WorktreeGitStatus] = None
-    # Legacy - deprecated
     session: Optional[SessionInfo] = None
+    exists: Optional[bool] = None
+    git_status: Optional[WorktreeGitStatus] = None
 
 
 class WorktreeListResponse(BaseModel):
@@ -185,7 +173,6 @@ class WorktreeCreateResponse(BaseModel):
     message: str
     worktree: Optional[WorktreeInfo] = None
     session: Optional[dict] = None
-    errors: Optional[List[str]] = None  # Errors from copy_uncommitted operation
 
 
 class WorktreeSyncResponse(BaseModel):
@@ -344,15 +331,6 @@ async def list_branches(
     branches = git_service.list_branches(working_dir, include_remote=include_remote)
     current_branch = git_service.get_current_branch(working_dir)
 
-    # Get worktrees for this project to check branch associations
-    repo = database.get_git_repository_by_project(project_id)
-    worktree_branch_map: dict[str, str] = {}  # branch_name -> worktree_id
-    if repo:
-        worktrees = database.get_worktrees_for_repository(repo["id"])
-        for wt in worktrees:
-            if wt.get("branch_name"):
-                worktree_branch_map[wt["branch_name"]] = wt["id"]
-
     branch_infos = [
         BranchInfo(
             name=b["name"],
@@ -362,9 +340,7 @@ async def list_branches(
             commit_message=b["commit_message"],
             upstream=b["upstream"],
             ahead=b["ahead"],
-            behind=b["behind"],
-            has_worktree=b["name"] in worktree_branch_map,
-            worktree_id=worktree_branch_map.get(b["name"])
+            behind=b["behind"]
         )
         for b in branches
     ]
@@ -615,37 +591,10 @@ async def fetch_from_remote(
 # =============================================================================
 
 def _convert_worktree_to_info(wt: dict) -> WorktreeInfo:
-    """Convert worktree dict to WorktreeInfo model.
-
-    Supports both new session relationship model (sessions list) and
-    legacy single session model for backward compatibility.
-    """
-    # Convert sessions list (new model)
-    sessions_list = []
-    if wt.get("sessions"):
-        for s in wt["sessions"]:
-            sessions_list.append(SessionInfo(
-                id=s["id"],
-                title=s.get("title"),
-                status=s["status"],
-                updated_at=s.get("updated_at")
-            ))
-
-    # Active session (new model)
-    active_session_info = None
-    if wt.get("active_session"):
-        as_data = wt["active_session"]
-        active_session_info = SessionInfo(
-            id=as_data["id"],
-            title=as_data.get("title"),
-            status=as_data["status"],
-            updated_at=as_data.get("updated_at")
-        )
-
-    # Legacy single session (deprecated, for backward compat)
-    legacy_session_info = None
+    """Convert worktree dict to WorktreeInfo model"""
+    session_info = None
     if wt.get("session"):
-        legacy_session_info = SessionInfo(
+        session_info = SessionInfo(
             id=wt["session"]["id"],
             title=wt["session"].get("title"),
             status=wt["session"]["status"],
@@ -670,20 +619,15 @@ def _convert_worktree_to_info(wt: dict) -> WorktreeInfo:
     return WorktreeInfo(
         id=wt["id"],
         repository_id=wt["repository_id"],
-        session_id=wt.get("session_id"),  # Deprecated
+        session_id=wt.get("session_id"),
         branch_name=wt["branch_name"],
         worktree_path=wt["worktree_path"],
         base_branch=wt.get("base_branch"),
         status=wt["status"],
         created_at=wt["created_at"],
-        # New model fields
-        sessions=sessions_list,
-        session_count=wt.get("session_count", len(sessions_list)),
-        active_session=active_session_info,
+        session=session_info,
         exists=wt.get("exists"),
-        git_status=git_status_info,
-        # Legacy field
-        session=legacy_session_info
+        git_status=git_status_info
     )
 
 
@@ -717,102 +661,6 @@ async def list_worktrees(
     )
 
 
-class WorktreeCreateStandalone(BaseModel):
-    """Request to create a standalone worktree (no session)"""
-    branch_name: str = Field(..., min_length=1, max_length=255)
-    create_new_branch: bool = False
-    base_branch: Optional[str] = None
-
-
-def _copy_uncommitted_files(main_dir: str, worktree_path: str) -> dict:
-    """
-    Copy uncommitted files (modified and untracked) from main repo to worktree.
-
-    This allows users to continue working on uncommitted changes in a worktree
-    without having to commit or stash first.
-
-    Args:
-        main_dir: Path to the main repository
-        worktree_path: Path to the worktree
-
-    Returns:
-        Dict with copied file counts and any errors
-    """
-    import shutil
-    from pathlib import Path
-
-    result = {
-        "modified_copied": 0,
-        "untracked_copied": 0,
-        "errors": []
-    }
-
-    try:
-        # Get git status to find uncommitted files
-        status = git_service.get_status(main_dir)
-
-        main_path = Path(main_dir)
-        worktree_abs_path = Path(worktree_path)
-
-        # Copy modified files (staged and unstaged)
-        modified_files = status.get("modified", [])
-        # Also include staged files that might be renamed or added
-        staged_files = [s.get("file") for s in status.get("staged", []) if s.get("file")]
-        all_modified = set(modified_files + staged_files)
-
-        for file_path in all_modified:
-            try:
-                src = main_path / file_path
-                dest = worktree_abs_path / file_path
-
-                if src.exists():
-                    # Ensure parent directory exists
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-
-                    if src.is_file():
-                        shutil.copy2(src, dest)
-                        result["modified_copied"] += 1
-                    elif src.is_dir():
-                        if dest.exists():
-                            shutil.rmtree(dest)
-                        shutil.copytree(src, dest)
-                        result["modified_copied"] += 1
-            except Exception as e:
-                result["errors"].append(f"Failed to copy modified file {file_path}: {str(e)}")
-
-        # Copy untracked files
-        untracked_files = status.get("untracked", [])
-        for file_path in untracked_files:
-            try:
-                src = main_path / file_path
-                dest = worktree_abs_path / file_path
-
-                if src.exists():
-                    # Ensure parent directory exists
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-
-                    if src.is_file():
-                        shutil.copy2(src, dest)
-                        result["untracked_copied"] += 1
-                    elif src.is_dir():
-                        if dest.exists():
-                            shutil.rmtree(dest)
-                        shutil.copytree(src, dest)
-                        result["untracked_copied"] += 1
-            except Exception as e:
-                result["errors"].append(f"Failed to copy untracked file {file_path}: {str(e)}")
-
-        logger.info(
-            f"Copied uncommitted files to worktree: "
-            f"{result['modified_copied']} modified, {result['untracked_copied']} untracked"
-        )
-
-    except Exception as e:
-        result["errors"].append(f"Failed to get git status: {str(e)}")
-
-    return result
-
-
 @router.post("/worktrees", response_model=WorktreeCreateResponse)
 async def create_worktree(
     request: Request,
@@ -821,14 +669,10 @@ async def create_worktree(
     token: str = Depends(require_auth)
 ):
     """
-    Create a new worktree.
+    Create a new worktree and associated chat session.
 
-    If profile_id is provided, also creates an associated chat session (legacy mode).
-    If profile_id is not provided, creates a standalone worktree that can be used
-    with any session later.
-
-    The new model allows worktrees to exist independently from sessions. Sessions
-    can be linked to worktrees via the sessions.worktree_id field.
+    This creates a git worktree for the specified branch and a new
+    chat session that will work in that worktree directory.
 
     Args:
         project_id: Project ID
@@ -852,63 +696,29 @@ async def create_worktree(
                 detail=f"Invalid branch name: contains '{char}'"
             )
 
-    session = None
+    # Create worktree and session
+    worktree, session = worktree_manager.create_worktree_session(
+        project_id=project_id,
+        branch_name=body.branch_name,
+        create_new_branch=body.create_new_branch,
+        base_branch=body.base_branch,
+        profile_id=body.profile_id
+    )
 
-    if body.profile_id:
-        # Legacy mode: Create worktree and session together
-        worktree, session = worktree_manager.create_worktree_session(
-            project_id=project_id,
-            branch_name=body.branch_name,
-            create_new_branch=body.create_new_branch,
-            base_branch=body.base_branch,
-            profile_id=body.profile_id
+    if not worktree or not session:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to create worktree. Branch may already be in use or doesn't exist."
         )
-
-        if not worktree:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to create worktree. Branch may already be in use or doesn't exist."
-            )
-    else:
-        # New mode: Create standalone worktree (no session)
-        worktree = worktree_manager.create_worktree(
-            project_id=project_id,
-            branch_name=body.branch_name,
-            create_new_branch=body.create_new_branch,
-            base_branch=body.base_branch
-        )
-
-        if not worktree:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to create worktree. Branch may already be in use or doesn't exist."
-            )
-
-    # Copy uncommitted files if requested
-    copy_result = None
-    if body.copy_uncommitted and worktree:
-        worktree_abs_path = str(settings.workspace_dir / worktree["worktree_path"])
-        copy_result = _copy_uncommitted_files(working_dir, worktree_abs_path)
 
     # Get full worktree details for response
     worktree_details = worktree_manager.get_worktree_details(worktree["id"])
 
-    # Build message
-    message = f"Created worktree for branch '{body.branch_name}'"
-    if copy_result:
-        total_copied = copy_result["modified_copied"] + copy_result["untracked_copied"]
-        if total_copied > 0:
-            message += f" with {total_copied} uncommitted file(s) copied"
-
-    # Surface any copy errors to the user
-    copy_errors = copy_result.get("errors") if copy_result else None
-
     return WorktreeCreateResponse(
         success=True,
-        message=message,
+        message=f"Created worktree for branch '{body.branch_name}'",
         worktree=_convert_worktree_to_info(worktree_details) if worktree_details else None,
-        session=session,
-        errors=copy_errors if copy_errors else None
+        session=session
     )
 
 
@@ -1020,163 +830,4 @@ async def sync_worktrees(
         orphaned=result.get("orphaned", 0),
         cleaned_up=result.get("cleaned_up", 0),
         errors=result.get("errors", [])
-    )
-
-
-# =============================================================================
-# Worktree File Browsing
-# =============================================================================
-
-class WorktreeFileInfo(BaseModel):
-    """File information within a worktree"""
-    name: str
-    type: str  # 'file' or 'directory'
-    size: Optional[int] = None
-    sizeFormatted: Optional[str] = None
-    path: str
-    extension: Optional[str] = None
-    modifiedAt: str
-    createdAt: str
-
-
-class WorktreeFilesResponse(BaseModel):
-    """Response for worktree file listing"""
-    files: List[WorktreeFileInfo]
-    path: str
-    worktreeId: str
-    worktreePath: str
-
-
-def _get_file_extension(name: str) -> str:
-    """Get lowercase file extension without the dot"""
-    from pathlib import Path as PathLib
-    ext = PathLib(name).suffix.lower()
-    return ext[1:] if ext else ""
-
-
-def _format_file_size(size_bytes: int) -> str:
-    """Format file size in human-readable format."""
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    elif size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.1f} KB"
-    elif size_bytes < 1024 * 1024 * 1024:
-        return f"{size_bytes / (1024 * 1024):.1f} MB"
-    else:
-        return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
-
-
-@router.get("/worktrees/{worktree_id}/files", response_model=WorktreeFilesResponse)
-async def list_worktree_files(
-    request: Request,
-    project_id: str,
-    worktree_id: str,
-    path: str = "",
-    show_hidden: bool = False,
-    token: str = Depends(require_auth)
-):
-    """
-    List files within a worktree directory.
-
-    This allows browsing files in a worktree's working directory,
-    which is separate from the main project directory.
-
-    Args:
-        project_id: Project ID
-        worktree_id: Worktree ID to browse files in
-        path: Relative path within the worktree (empty for root)
-        show_hidden: Whether to show hidden files (starting with .)
-
-    Returns:
-        List of files in the specified directory within the worktree
-    """
-    from datetime import datetime
-
-    check_project_access(request, project_id)
-
-    # Get worktree details
-    worktree = database.get_worktree(worktree_id)
-    if not worktree:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Worktree not found: {worktree_id}"
-        )
-
-    # Verify worktree belongs to this project
-    repo = database.get_git_repository_by_project(project_id)
-    if not repo or worktree["repository_id"] != repo["id"]:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Worktree not found in this project: {worktree_id}"
-        )
-
-    # Build full path to worktree directory
-    worktree_base = settings.workspace_dir / worktree["worktree_path"]
-
-    if not worktree_base.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Worktree directory not found on disk"
-        )
-
-    # Build target path within worktree
-    if path:
-        # Validate path doesn't escape worktree boundary
-        target_path = (worktree_base / path).resolve()
-        try:
-            target_path.relative_to(worktree_base.resolve())
-        except ValueError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Path escapes worktree boundary"
-            )
-    else:
-        target_path = worktree_base
-
-    if not target_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Directory not found"
-        )
-
-    if not target_path.is_dir():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Path is not a directory"
-        )
-
-    # List directory contents
-    files = []
-    for item in target_path.iterdir():
-        # Skip hidden files unless requested
-        if item.name.startswith('.') and not show_hidden:
-            continue
-
-        try:
-            stat_info = item.stat()
-            is_dir = item.is_dir()
-
-            file_info = WorktreeFileInfo(
-                name=item.name,
-                type="directory" if is_dir else "file",
-                size=stat_info.st_size if not is_dir else None,
-                sizeFormatted=_format_file_size(stat_info.st_size) if not is_dir else None,
-                path=str(item.relative_to(worktree_base)),
-                extension=_get_file_extension(item.name) if not is_dir else None,
-                modifiedAt=datetime.fromtimestamp(stat_info.st_mtime).isoformat(),
-                createdAt=datetime.fromtimestamp(stat_info.st_ctime).isoformat(),
-            )
-            files.append(file_info)
-        except (OSError, PermissionError):
-            # Skip files we can't access
-            continue
-
-    # Sort: directories first, then files alphabetically
-    files.sort(key=lambda x: (x.type != "directory", x.name.lower()))
-
-    return WorktreeFilesResponse(
-        files=files,
-        path=path,
-        worktreeId=worktree_id,
-        worktreePath=worktree["worktree_path"]
     )

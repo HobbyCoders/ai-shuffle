@@ -228,22 +228,22 @@
 
 <div class="space-y-4">
 	{#if loading}
-		<div class="text-center py-4 text-muted-foreground">Loading webhooks...</div>
+		<div class="text-center py-4 text-zinc-400">Loading webhooks...</div>
 	{:else if error}
-		<div class="bg-status-error border border-status-error rounded-lg p-3 text-destructive text-sm">
+		<div class="bg-red-500/10 border border-red-500/20 rounded-lg p-3 text-red-400 text-sm">
 			{error}
 		</div>
 	{:else}
 		<!-- Header -->
 		<div class="flex items-center justify-between">
 			<div>
-				<h3 class="text-sm font-medium text-foreground">Webhooks</h3>
-				<p class="text-xs text-muted-foreground mt-0.5">Send events to external services when sessions complete</p>
+				<h3 class="text-sm font-medium text-zinc-200">Webhooks</h3>
+				<p class="text-xs text-zinc-500 mt-0.5">Send events to external services when sessions complete</p>
 			</div>
 			{#if !showCreateForm}
 				<button
 					onclick={() => { showCreateForm = true; }}
-					class="px-3 py-1.5 bg-primary hover:bg-primary/90 text-white text-sm rounded-md transition-colors"
+					class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm rounded-md transition-colors"
 				>
 					Add Webhook
 				</button>
@@ -252,13 +252,13 @@
 
 		<!-- Create/Edit Form -->
 		{#if showCreateForm}
-			<div class="bg-muted/50 rounded-lg p-4 border border-border">
-				<h4 class="text-sm font-medium text-foreground mb-3">
+			<div class="bg-zinc-800/50 rounded-lg p-4 border border-zinc-700/50">
+				<h4 class="text-sm font-medium text-zinc-200 mb-3">
 					{editingWebhook ? 'Edit Webhook' : 'New Webhook'}
 				</h4>
 
 				{#if formError}
-					<div class="bg-status-error border border-status-error rounded-md p-2 text-destructive text-xs mb-3">
+					<div class="bg-red-500/10 border border-red-500/20 rounded-md p-2 text-red-400 text-xs mb-3">
 						{formError}
 					</div>
 				{/if}
@@ -266,30 +266,30 @@
 				<div class="space-y-3">
 					<!-- URL -->
 					<div>
-						<label class="block text-xs text-muted-foreground mb-1">Webhook URL</label>
+						<label class="block text-xs text-zinc-400 mb-1">Webhook URL</label>
 						<input
 							type="url"
 							bind:value={formUrl}
 							placeholder="https://example.com/webhook"
-							class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-white placeholder:text-muted-foreground focus:outline-none focus:border-primary"
+							class="w-full px-3 py-2 bg-zinc-900 border border-zinc-700 rounded-md text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-indigo-500"
 						/>
 					</div>
 
 					<!-- Secret -->
 					<div>
-						<label class="block text-xs text-muted-foreground mb-1">Secret (optional)</label>
+						<label class="block text-xs text-zinc-400 mb-1">Secret (optional)</label>
 						<input
 							type="password"
 							bind:value={formSecret}
 							placeholder="For HMAC signature verification"
-							class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-white placeholder:text-muted-foreground focus:outline-none focus:border-primary"
+							class="w-full px-3 py-2 bg-zinc-900 border border-zinc-700 rounded-md text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-indigo-500"
 						/>
-						<p class="text-xs text-muted-foreground mt-1">Used to sign webhook payloads with HMAC-SHA256</p>
+						<p class="text-xs text-zinc-500 mt-1">Used to sign webhook payloads with HMAC-SHA256</p>
 					</div>
 
 					<!-- Events -->
 					<div>
-						<label class="block text-xs text-muted-foreground mb-2">Events</label>
+						<label class="block text-xs text-zinc-400 mb-2">Events</label>
 						<div class="space-y-2">
 							{#each eventTypes as event}
 								<label class="flex items-center gap-2 cursor-pointer">
@@ -297,9 +297,9 @@
 										type="checkbox"
 										checked={formEvents.includes(event)}
 										onchange={() => toggleEvent(event)}
-										class="w-4 h-4 rounded border-border bg-input text-primary focus:ring-primary focus:ring-offset-background"
+										class="w-4 h-4 rounded border-zinc-600 bg-zinc-800 text-indigo-600 focus:ring-indigo-500 focus:ring-offset-zinc-900"
 									/>
-									<span class="text-sm text-foreground">{event}</span>
+									<span class="text-sm text-zinc-300">{event}</span>
 								</label>
 							{/each}
 						</div>
@@ -312,9 +312,9 @@
 								<input
 									type="checkbox"
 									bind:checked={formIsActive}
-									class="w-4 h-4 rounded border-border bg-input text-primary focus:ring-primary focus:ring-offset-background"
+									class="w-4 h-4 rounded border-zinc-600 bg-zinc-800 text-indigo-600 focus:ring-indigo-500 focus:ring-offset-zinc-900"
 								/>
-								<span class="text-sm text-foreground">Active</span>
+								<span class="text-sm text-zinc-300">Active</span>
 							</label>
 						</div>
 					{/if}
@@ -324,13 +324,13 @@
 						<button
 							onclick={editingWebhook ? updateWebhook : createWebhook}
 							disabled={saving}
-							class="px-3 py-1.5 bg-primary hover:bg-primary/90 disabled:bg-primary/50 text-white text-sm rounded-md transition-colors"
+							class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-600/50 text-white text-sm rounded-md transition-colors"
 						>
 							{saving ? 'Saving...' : (editingWebhook ? 'Update' : 'Create')}
 						</button>
 						<button
 							onclick={resetForm}
-							class="px-3 py-1.5 bg-secondary hover:bg-secondary/80 text-foreground text-sm rounded-md transition-colors"
+							class="px-3 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-200 text-sm rounded-md transition-colors"
 						>
 							Cancel
 						</button>
@@ -341,7 +341,7 @@
 
 		<!-- Test Result -->
 		{#if testResult}
-			<div class={`rounded-lg p-3 text-sm ${testResult.success ? 'bg-status-success border border-status-success text-success' : 'bg-status-error border border-status-error text-destructive'}`}>
+			<div class={`rounded-lg p-3 text-sm ${testResult.success ? 'bg-green-500/10 border border-green-500/20 text-green-400' : 'bg-red-500/10 border border-red-500/20 text-red-400'}`}>
 				{#if testResult.success}
 					Test successful! Status: {testResult.status_code}, Response time: {testResult.response_time_ms}ms
 				{:else}
@@ -361,30 +361,30 @@
 
 		<!-- Webhooks List -->
 		{#if webhooks.length === 0}
-			<div class="text-center py-8 text-muted-foreground text-sm">
+			<div class="text-center py-8 text-zinc-500 text-sm">
 				No webhooks configured. Add one to receive notifications when sessions complete.
 			</div>
 		{:else}
 			<div class="space-y-2">
 				{#each webhooks as webhook}
-					<div class="bg-card/30 rounded-lg p-3 border border-border">
+					<div class="bg-zinc-800/30 rounded-lg p-3 border border-zinc-700/30">
 						<div class="flex items-start justify-between gap-4">
 							<div class="flex-1 min-w-0">
 								<div class="flex items-center gap-2">
-									<span class={`w-2 h-2 rounded-full ${webhook.is_active ? 'bg-success' : 'bg-muted-foreground'}`}></span>
-									<code class="text-sm text-foreground truncate">{webhook.url}</code>
+									<span class={`w-2 h-2 rounded-full ${webhook.is_active ? 'bg-green-500' : 'bg-zinc-500'}`}></span>
+									<code class="text-sm text-zinc-200 truncate">{webhook.url}</code>
 								</div>
 								<div class="flex flex-wrap items-center gap-2 mt-1.5">
 									{#each webhook.events as event}
-										<span class="px-1.5 py-0.5 bg-primary/20 text-primary text-xs rounded">
+										<span class="px-1.5 py-0.5 bg-indigo-500/20 text-indigo-300 text-xs rounded">
 											{event}
 										</span>
 									{/each}
 								</div>
-								<div class="flex items-center gap-4 mt-2 text-xs text-muted-foreground">
+								<div class="flex items-center gap-4 mt-2 text-xs text-zinc-500">
 									<span>Last triggered: {formatDate(webhook.last_triggered_at)}</span>
 									{#if webhook.failure_count > 0}
-										<span class="text-warning">Failures: {webhook.failure_count}</span>
+										<span class="text-amber-400">Failures: {webhook.failure_count}</span>
 									{/if}
 								</div>
 							</div>
@@ -392,7 +392,7 @@
 								<button
 									onclick={() => testWebhook(webhook.id)}
 									disabled={testingWebhookId === webhook.id}
-									class="p-1.5 text-muted-foreground hover:text-primary hover:bg-muted rounded transition-colors disabled:opacity-50"
+									class="p-1.5 text-zinc-400 hover:text-indigo-400 hover:bg-zinc-700/50 rounded transition-colors disabled:opacity-50"
 									title="Test webhook"
 								>
 									{#if testingWebhookId === webhook.id}
@@ -409,7 +409,7 @@
 								</button>
 								<button
 									onclick={() => startEdit(webhook)}
-									class="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
+									class="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/50 rounded transition-colors"
 									title="Edit webhook"
 								>
 									<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -418,7 +418,7 @@
 								</button>
 								<button
 									onclick={() => deleteWebhook(webhook.id)}
-									class="p-1.5 text-muted-foreground hover:text-destructive hover:bg-muted rounded transition-colors"
+									class="p-1.5 text-zinc-400 hover:text-red-400 hover:bg-zinc-700/50 rounded transition-colors"
 									title="Delete webhook"
 								>
 									<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

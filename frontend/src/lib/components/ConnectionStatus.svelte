@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { connectionState, deviceId, connectedDevices } from '$lib/stores/chat';
+	import { claudeAuthenticated } from '$lib/stores/auth';
 
 	interface Props {
 		wsConnected?: boolean; // Per-tab connection status (for tabs-based UI)
@@ -8,9 +9,14 @@
 	let { wsConnected }: Props = $props();
 
 	// Determine connection status:
-	// 1. If wsConnected prop is explicitly provided (tabs-based UI), use it
-	// 2. Otherwise fall back to global connectionState from chat store
+	// 1. If Claude is not authenticated, show 'unauthorized'
+	// 2. If wsConnected prop is explicitly provided (tabs-based UI), use it
+	// 3. Otherwise fall back to global connectionState from chat store
 	let connectionStatus = $derived.by(() => {
+		// Check Claude authentication first
+		if (!$claudeAuthenticated) {
+			return 'unauthorized';
+		}
 		// If wsConnected prop is provided, derive status from it
 		if (wsConnected !== undefined) {
 			return wsConnected ? 'connected' : 'disconnected';
@@ -37,40 +43,48 @@
 		switch (connectionStatus) {
 			case 'connected':
 				return {
-					color: 'text-green-500',
-					bgColor: 'bg-green-500',
+					color: 'text-success',
+					bgColor: 'bg-success',
 					label: 'Connected',
 					icon: 'dot',
 					pulse: false
 				};
 			case 'connecting':
 				return {
-					color: 'text-yellow-500',
-					bgColor: 'bg-yellow-500',
+					color: 'text-warning',
+					bgColor: 'bg-warning',
 					label: 'Connecting...',
 					icon: 'spinner',
 					pulse: true
 				};
 			case 'reconnecting':
 				return {
-					color: 'text-orange-500',
-					bgColor: 'bg-orange-500',
+					color: 'text-warning',
+					bgColor: 'bg-warning',
 					label: 'Reconnecting...',
 					icon: 'spinner',
 					pulse: true
 				};
 			case 'disconnected':
 				return {
-					color: 'text-red-500',
-					bgColor: 'bg-red-500',
+					color: 'text-destructive',
+					bgColor: 'bg-destructive',
 					label: 'Disconnected',
 					icon: 'dot',
 					pulse: false
 				};
+			case 'unauthorized':
+				return {
+					color: 'text-warning',
+					bgColor: 'bg-warning',
+					label: 'Unauthorized',
+					icon: 'lock',
+					pulse: false
+				};
 			default:
 				return {
-					color: 'text-gray-500',
-					bgColor: 'bg-gray-500',
+					color: 'text-muted-foreground',
+					bgColor: 'bg-muted-foreground',
 					label: 'Unknown',
 					icon: 'dot',
 					pulse: false
@@ -84,7 +98,7 @@
 	<!-- Desktop: hover to show, Mobile: tap to show -->
 	<button
 		onclick={toggleMobilePanel}
-		class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-xs {statusConfig.color} hover:bg-white/10 transition-colors"
+		class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-xs {statusConfig.color} hover:bg-hover-overlay transition-colors"
 		title={statusConfig.label}
 	>
 		{#if statusConfig.icon === 'spinner'}
@@ -92,6 +106,11 @@
 			<svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
 				<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
 				<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+			</svg>
+		{:else if statusConfig.icon === 'lock'}
+			<!-- Lock icon for unauthorized -->
+			<svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+				<path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
 			</svg>
 		{:else}
 			<!-- Dot for connected/disconnected -->
@@ -110,6 +129,10 @@
 						<svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
 							<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
 							<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+						</svg>
+					{:else if statusConfig.icon === 'lock'}
+						<svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
 						</svg>
 					{:else}
 						<span class="w-2 h-2 {statusConfig.bgColor} rounded-full"></span>
@@ -134,7 +157,9 @@
 
 			<!-- Info text -->
 			<div class="text-xs text-muted-foreground pt-1 border-t border-border">
-				{#if connectionStatus === 'connected'}
+				{#if connectionStatus === 'unauthorized'}
+					Claude Code not connected. Go to Settings to authenticate.
+				{:else if connectionStatus === 'connected'}
 					Real-time sync enabled
 				{:else if connectionStatus === 'reconnecting'}
 					Attempting to reconnect...
@@ -169,6 +194,10 @@
 							<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
 							<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
 						</svg>
+					{:else if statusConfig.icon === 'lock'}
+						<svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+						</svg>
 					{:else}
 						<span class="w-2.5 h-2.5 {statusConfig.bgColor} rounded-full"></span>
 					{/if}
@@ -192,7 +221,9 @@
 
 			<!-- Info text -->
 			<div class="text-sm text-muted-foreground pt-2 border-t border-border">
-				{#if connectionStatus === 'connected'}
+				{#if connectionStatus === 'unauthorized'}
+					Claude Code not connected. Go to Settings to authenticate.
+				{:else if connectionStatus === 'connected'}
 					Real-time sync enabled
 				{:else if connectionStatus === 'reconnecting'}
 					Attempting to reconnect...

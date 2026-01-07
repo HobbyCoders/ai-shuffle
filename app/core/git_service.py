@@ -11,7 +11,9 @@ for the API layer to interact with git repositories.
 import logging
 import subprocess
 import os
-from typing import List, Dict, Any, Optional, Tuple
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -209,8 +211,8 @@ class GitService:
                 upstream = parts[4] if len(parts) > 4 else ""
                 track_info = parts[5] if len(parts) > 5 else ""
 
-                # Skip HEAD reference and bare remote names
-                if name == "origin/HEAD" or name == "origin":
+                # Skip HEAD reference
+                if name == "origin/HEAD":
                     continue
 
                 is_remote = name.startswith("origin/") or "/" in name
@@ -422,7 +424,7 @@ class GitService:
         branch: str,
         new_branch: bool = False,
         base_branch: Optional[str] = None
-    ) -> Tuple[bool, Optional[str]]:
+    ) -> bool:
         """
         Add a new worktree.
 
@@ -434,7 +436,7 @@ class GitService:
             base_branch: Base branch for new branch (only if new_branch=True)
 
         Returns:
-            Tuple of (success: bool, error_message: Optional[str])
+            True if successful, False otherwise
         """
         try:
             args = ["worktree", "add"]
@@ -449,14 +451,13 @@ class GitService:
             result = self._run_git(main_dir, args, timeout=30)
             if result.returncode == 0:
                 logger.info(f"Added worktree at {path} for branch {branch}")
-                return True, None
+                return True
 
-            error_msg = result.stderr.strip() if result.stderr else "Unknown git error"
-            logger.warning(f"Failed to add worktree: {error_msg}")
-            return False, error_msg
+            logger.warning(f"Failed to add worktree: {result.stderr}")
+            return False
         except Exception as e:
             logger.error(f"Error adding worktree: {e}")
-            return False, str(e)
+            return False
 
     def remove_worktree(
         self,

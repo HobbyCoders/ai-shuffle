@@ -145,6 +145,21 @@ export interface Profile {
 	updated_at: string;
 }
 
+// Tag types
+export interface Tag {
+	id: string;
+	name: string;
+	color: string;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface SessionTag {
+	id: string;
+	name: string;
+	color: string;
+}
+
 // Session types
 export interface Session {
 	id: string;
@@ -152,6 +167,7 @@ export interface Session {
 	project_id: string | null;
 	title: string | null;
 	status: string;
+	is_favorite: boolean;
 	total_cost_usd: number;
 	total_tokens_in: number;
 	total_tokens_out: number;
@@ -159,6 +175,11 @@ export interface Session {
 	cache_read_tokens: number;  // Tokens read from cache (doesn't count toward context)
 	context_tokens: number;  // Current context window size (input + cache_creation + cache_read)
 	turn_count: number;
+	tags: SessionTag[];  // Tags attached to this session
+	// Fork/branch fields
+	parent_session_id: string | null;  // ID of parent session if this is a fork
+	fork_point_message_index: number | null;  // Message index where fork occurred
+	has_forks: boolean;  // True if this session has forked children
 	created_at: string;
 	updated_at: string;
 }
@@ -347,4 +368,604 @@ export interface WorkspaceValidation {
 	path: string;
 	exists: boolean;
 	writable: boolean;
+}
+
+/**
+ * Toggle the favorite status of a session
+ */
+export async function toggleSessionFavorite(sessionId: string): Promise<Session> {
+	return api.patch<Session>(`/sessions/${sessionId}/favorite`);
+}
+
+/**
+ * Export a session in the specified format and trigger download
+ */
+export async function exportSession(
+	sessionId: string,
+	format: 'markdown' | 'json' = 'markdown'
+): Promise<void> {
+	const response = await fetch(`${API_BASE}/sessions/${sessionId}/export?format=${format}`, {
+		method: 'GET',
+		credentials: 'include'
+	});
+
+	if (!response.ok) {
+		const error = await response.json().catch(() => ({ detail: 'Export failed' }));
+		throw {
+			detail: error.detail || 'Export failed',
+			status: response.status
+		} as ApiError;
+	}
+
+	// Get filename from Content-Disposition header
+	const contentDisposition = response.headers.get('Content-Disposition');
+	let filename = `session-export.${format === 'json' ? 'json' : 'md'}`;
+	if (contentDisposition) {
+		const match = contentDisposition.match(/filename="?([^"]+)"?/);
+		if (match) {
+			filename = match[1];
+		}
+	}
+
+	// Create blob and trigger download
+	const blob = await response.blob();
+	const url = URL.createObjectURL(blob);
+	const a = document.createElement('a');
+	a.href = url;
+	a.download = filename;
+	document.body.appendChild(a);
+	a.click();
+	document.body.removeChild(a);
+	URL.revokeObjectURL(url);
+}
+
+// ============================================================================
+// Tag API Functions
+// ============================================================================
+
+/**
+ * Get all tags
+ */
+export async function getTags(): Promise<Tag[]> {
+	return api.get<Tag[]>('/tags');
+}
+
+/**
+ * Create a new tag
+ */
+export async function createTag(name: string, color: string): Promise<Tag> {
+	return api.post<Tag>('/tags', { name, color });
+}
+
+/**
+ * Update a tag
+ */
+export async function updateTag(tagId: string, data: { name?: string; color?: string }): Promise<Tag> {
+	return api.patch<Tag>(`/tags/${tagId}`, data);
+}
+
+/**
+ * Delete a tag
+ */
+export async function deleteTag(tagId: string): Promise<void> {
+	await api.delete(`/tags/${tagId}`);
+}
+
+/**
+ * Get tags for a session
+ */
+export async function getSessionTags(sessionId: string): Promise<Tag[]> {
+	return api.get<Tag[]>(`/tags/session/${sessionId}`);
+}
+
+/**
+ * Set all tags for a session (replaces existing)
+ */
+export async function setSessionTags(sessionId: string, tagIds: string[]): Promise<Tag[]> {
+	return api.put<Tag[]>(`/tags/session/${sessionId}`, { tag_ids: tagIds });
+}
+
+/**
+ * Add a tag to a session
+ */
+export async function addSessionTag(sessionId: string, tagId: string): Promise<void> {
+	await api.post(`/tags/session/${sessionId}/${tagId}`);
+}
+
+/**
+ * Remove a tag from a session
+ */
+export async function removeSessionTag(sessionId: string, tagId: string): Promise<void> {
+	await api.delete(`/tags/session/${sessionId}/${tagId}`);
+}
+
+// ============================================================================
+// Session Fork API Functions
+// ============================================================================
+
+export interface ForkSessionResponse {
+	session_id: string;
+	title: string | null;
+	parent_session_id: string;
+	fork_point_message_index: number;
+	message_count: number;
+	status: string;
+}
+
+/**
+ * Fork a session from a specific message index
+ * @param sessionId The session to fork from
+ * @param messageIndex The 0-based message index to fork after
+ */
+export async function forkSession(sessionId: string, messageIndex: number): Promise<ForkSessionResponse> {
+	return api.post<ForkSessionResponse>(`/sessions/${sessionId}/fork`, { message_index: messageIndex });
+}
+
+// ============================================================================
+// Analytics API Types and Functions
+// ============================================================================
+
+export interface AnalyticsSummary {
+	total_input_tokens: number;
+	total_output_tokens: number;
+	total_cost: number;
+	session_count: number;
+	average_cost_per_session: number;
+}
+
+export interface CostBreakdownItem {
+	name: string;
+	cost: number;
+	tokens: number;
+	percentage: number;
+}
+
+export interface TrendDataPoint {
+	date: string;
+	input_tokens: number;
+	output_tokens: number;
+	cost: number;
+}
+
+export interface TopSession {
+	id: string;
+	title: string | null;
+	profile_id: string;
+	total_cost_usd: number;
+	total_tokens_in: number;
+	total_tokens_out: number;
+	created_at: string;
+	updated_at: string;
+}
+
+/**
+ * Get analytics summary for a date range
+ */
+export async function getAnalyticsSummary(startDate: string, endDate: string): Promise<AnalyticsSummary> {
+	const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
+	return api.get<AnalyticsSummary>(`/analytics/summary?${params.toString()}`);
+}
+
+/**
+ * Get cost breakdown grouped by profile or user
+ */
+export async function getCostBreakdown(startDate: string, endDate: string, groupBy: 'profile' | 'user' = 'profile'): Promise<CostBreakdownItem[]> {
+	const params = new URLSearchParams({ start_date: startDate, end_date: endDate, group_by: groupBy });
+	return api.get<CostBreakdownItem[]>(`/analytics/costs?${params.toString()}`);
+}
+
+/**
+ * Get usage trends over time
+ */
+export async function getUsageTrends(startDate: string, endDate: string): Promise<TrendDataPoint[]> {
+	const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
+	return api.get<TrendDataPoint[]>(`/analytics/trends?${params.toString()}`);
+}
+
+/**
+ * Get top sessions by cost
+ */
+export async function getTopSessions(startDate: string, endDate: string, limit: number = 10): Promise<TopSession[]> {
+	const params = new URLSearchParams({ start_date: startDate, end_date: endDate, limit: limit.toString() });
+	return api.get<TopSession[]>(`/analytics/top-sessions?${params.toString()}`);
+}
+
+/**
+ * Export analytics data as CSV
+ */
+export async function exportAnalyticsCSV(startDate: string, endDate: string): Promise<void> {
+	const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
+	const response = await fetch(`${API_BASE}/analytics/export?${params.toString()}`, {
+		method: 'GET',
+		credentials: 'include'
+	});
+
+	if (!response.ok) {
+		const error = await response.json().catch(() => ({ detail: 'Export failed' }));
+		throw {
+			detail: error.detail || 'Export failed',
+			status: response.status
+		} as ApiError;
+	}
+
+	// Get filename from Content-Disposition header
+	const contentDisposition = response.headers.get('Content-Disposition');
+	let filename = `analytics-${startDate}-to-${endDate}.csv`;
+	if (contentDisposition) {
+		const match = contentDisposition.match(/filename="?([^"]+)"?/);
+		if (match) {
+			filename = match[1];
+		}
+	}
+
+	// Create blob and trigger download
+	const blob = await response.blob();
+	const url = URL.createObjectURL(blob);
+	const a = document.createElement('a');
+	a.href = url;
+	a.download = filename;
+	document.body.appendChild(a);
+	a.click();
+	document.body.removeChild(a);
+	URL.revokeObjectURL(url);
+}
+
+// ============================================================================
+// Advanced Search API Types and Functions
+// ============================================================================
+
+export interface SearchMatch {
+	message_index: number;
+	snippet: string;
+	role: string;
+	timestamp: string | null;
+}
+
+export interface AdvancedSearchResult {
+	session_id: string;
+	session_title: string | null;
+	created_at: string;
+	updated_at: string;
+	profile_id: string | null;
+	profile_name: string | null;
+	project_id: string | null;
+	matches: SearchMatch[];
+	match_count: number;
+}
+
+export interface AdvancedSearchParams {
+	q: string;
+	start_date?: string;
+	end_date?: string;
+	profile_id?: string;
+	project_id?: string;
+	in_code_only?: boolean;
+	regex?: boolean;
+	limit?: number;
+	offset?: number;
+}
+
+/**
+ * Advanced search across all sessions with filters
+ */
+export async function advancedSearch(params: AdvancedSearchParams): Promise<AdvancedSearchResult[]> {
+	const searchParams = new URLSearchParams({ q: params.q });
+	if (params.start_date) searchParams.set('start_date', params.start_date);
+	if (params.end_date) searchParams.set('end_date', params.end_date);
+	if (params.profile_id) searchParams.set('profile_id', params.profile_id);
+	if (params.project_id) searchParams.set('project_id', params.project_id);
+	if (params.in_code_only) searchParams.set('in_code_only', 'true');
+	if (params.regex) searchParams.set('regex', 'true');
+	if (params.limit) searchParams.set('limit', params.limit.toString());
+	if (params.offset) searchParams.set('offset', params.offset.toString());
+
+	return api.get<AdvancedSearchResult[]>(`/search?${searchParams.toString()}`);
+}
+
+/**
+ * Get search suggestions based on session titles
+ */
+export async function getSearchSuggestions(query: string, limit: number = 10): Promise<{ suggestions: string[] }> {
+	const params = new URLSearchParams({ q: query, limit: limit.toString() });
+	return api.get<{ suggestions: string[] }>(`/search/suggestions?${params.toString()}`);
+}
+
+// ============================================================================
+// Template API Types and Functions
+// ============================================================================
+
+export interface Template {
+	id: string;
+	name: string;
+	description: string | null;
+	prompt: string;
+	profile_id: string | null;
+	icon: string | null;
+	category: string | null;
+	is_builtin: boolean;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface TemplateCreate {
+	name: string;
+	description?: string | null;
+	prompt: string;
+	profile_id?: string | null;
+	icon?: string | null;
+	category?: string | null;
+}
+
+export interface TemplateUpdate {
+	name?: string;
+	description?: string | null;
+	prompt?: string;
+	profile_id?: string | null;
+	icon?: string | null;
+	category?: string | null;
+}
+
+/**
+ * Get all templates, optionally filtered by profile or category
+ */
+export async function getTemplates(options: {
+	profileId?: string;
+	category?: string;
+} = {}): Promise<Template[]> {
+	const params = new URLSearchParams();
+	if (options.profileId) params.set('profile_id', options.profileId);
+	if (options.category) params.set('category', options.category);
+	const qs = params.toString();
+	return api.get<Template[]>(`/templates${qs ? '?' + qs : ''}`);
+}
+
+/**
+ * Get a single template by ID
+ */
+export async function getTemplate(templateId: string): Promise<Template> {
+	return api.get<Template>(`/templates/${templateId}`);
+}
+
+/**
+ * Get all template categories
+ */
+export async function getTemplateCategories(): Promise<string[]> {
+	return api.get<string[]>('/templates/categories');
+}
+
+/**
+ * Create a new template
+ */
+export async function createTemplate(data: TemplateCreate): Promise<Template> {
+	return api.post<Template>('/templates', data);
+}
+
+/**
+ * Update an existing template
+ */
+export async function updateTemplate(templateId: string, data: TemplateUpdate): Promise<Template> {
+	return api.patch<Template>(`/templates/${templateId}`, data);
+}
+
+/**
+ * Delete a template
+ */
+export async function deleteTemplate(templateId: string): Promise<void> {
+	await api.delete(`/templates/${templateId}`);
+}
+
+// ============================================================================
+// Agent Export/Import API Types and Functions
+// ============================================================================
+
+export interface AgentExportData {
+	name: string;
+	description: string | null;
+	model: string | null;
+	permission_mode: string | null;
+	system_prompt_type: string | null;
+	system_prompt_preset: string | null;
+	system_prompt_content: string | null;
+	system_prompt_append: string | null;
+	system_prompt_inject_env: boolean | null;
+	allowed_tools: string[] | null;
+	disallowed_tools: string[] | null;
+	enabled_agents: string[] | null;
+	ai_tools: Record<string, boolean> | null;
+	max_turns: number | null;
+	max_buffer_size: number | null;
+	include_partial_messages: boolean | null;
+	continue_conversation: boolean | null;
+	fork_session: boolean | null;
+	setting_sources: string[] | null;
+}
+
+export interface AgentExport {
+	version: string;
+	type: string;
+	exported_at: string;
+	agent: AgentExportData;
+}
+
+export interface AgentImportRequest extends AgentExport {
+	new_id?: string;
+	new_name?: string;
+}
+
+/**
+ * Export an agent/profile as JSON and trigger download
+ */
+export async function exportAgent(profileId: string): Promise<void> {
+	const response = await fetch(`${API_BASE}/profiles/${profileId}/export`, {
+		method: 'GET',
+		credentials: 'include'
+	});
+
+	if (!response.ok) {
+		const error = await response.json().catch(() => ({ detail: 'Export failed' }));
+		throw {
+			detail: error.detail || 'Export failed',
+			status: response.status
+		} as ApiError;
+	}
+
+	// Get filename from Content-Disposition header
+	const contentDisposition = response.headers.get('Content-Disposition');
+	let filename = `${profileId}-agent.json`;
+	if (contentDisposition) {
+		const match = contentDisposition.match(/filename="?([^"]+)"?/);
+		if (match) {
+			filename = match[1];
+		}
+	}
+
+	// Create blob and trigger download
+	const blob = await response.blob();
+	const url = URL.createObjectURL(blob);
+	const a = document.createElement('a');
+	a.href = url;
+	a.download = filename;
+	document.body.appendChild(a);
+	a.click();
+	document.body.removeChild(a);
+	URL.revokeObjectURL(url);
+}
+
+/**
+ * Get agent export data without downloading (for preview)
+ */
+export async function getAgentExportData(profileId: string): Promise<AgentExport> {
+	return api.get<AgentExport>(`/profiles/${profileId}/export`);
+}
+
+/**
+ * Import an agent from JSON data
+ */
+export async function importAgent(data: AgentImportRequest): Promise<Profile> {
+	return api.post<Profile>('/profiles/import', data);
+}
+
+/**
+ * Parse and validate agent export file
+ */
+export function parseAgentExportFile(content: string): AgentExport {
+	const parsed = JSON.parse(content);
+
+	// Basic validation
+	if (typeof parsed !== 'object' || parsed === null) {
+		throw new Error('Invalid JSON structure');
+	}
+
+	if (parsed.type !== 'ai-hub-agent') {
+		throw new Error(`Invalid file type: ${parsed.type}. Expected 'ai-hub-agent'`);
+	}
+
+	if (!parsed.version) {
+		throw new Error('Missing version field');
+	}
+
+	if (!parsed.agent || typeof parsed.agent !== 'object') {
+		throw new Error('Missing or invalid agent data');
+	}
+
+	if (!parsed.agent.name) {
+		throw new Error('Agent name is required');
+	}
+
+	return parsed as AgentExport;
+}
+
+// ============================================================================
+// Knowledge Base Types
+// ============================================================================
+
+export interface KnowledgeDocumentSummary {
+	id: string;
+	project_id: string;
+	filename: string;
+	content_type: string;
+	file_size: number;
+	chunk_count: number;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface KnowledgeDocument extends KnowledgeDocumentSummary {
+	content: string;
+}
+
+export interface KnowledgeSearchResult {
+	id: string;
+	document_id: string;
+	filename: string;
+	chunk_index: number;
+	content: string;
+	relevance_score: number;
+	metadata?: Record<string, unknown>;
+}
+
+export interface KnowledgeStats {
+	document_count: number;
+	total_size: number;
+	total_chunks: number;
+}
+
+// ============================================================================
+// Knowledge Base API Functions
+// ============================================================================
+
+/**
+ * Get all knowledge documents for a project
+ */
+export async function getKnowledgeDocuments(projectId: string): Promise<KnowledgeDocumentSummary[]> {
+	return api.get<KnowledgeDocumentSummary[]>(`/projects/${projectId}/knowledge`);
+}
+
+/**
+ * Get knowledge base statistics for a project
+ */
+export async function getKnowledgeStats(projectId: string): Promise<KnowledgeStats> {
+	return api.get<KnowledgeStats>(`/projects/${projectId}/knowledge/stats`);
+}
+
+/**
+ * Upload a document to the knowledge base
+ */
+export async function uploadKnowledgeDocument(projectId: string, file: File): Promise<KnowledgeDocumentSummary> {
+	return api.uploadFile(`/projects/${projectId}/knowledge`, file);
+}
+
+/**
+ * Get a specific knowledge document with full content
+ */
+export async function getKnowledgeDocument(projectId: string, documentId: string): Promise<KnowledgeDocument> {
+	return api.get<KnowledgeDocument>(`/projects/${projectId}/knowledge/${documentId}`);
+}
+
+/**
+ * Delete a knowledge document
+ */
+export async function deleteKnowledgeDocument(projectId: string, documentId: string): Promise<void> {
+	await api.delete(`/projects/${projectId}/knowledge/${documentId}`);
+}
+
+/**
+ * Search the knowledge base
+ */
+export async function searchKnowledge(projectId: string, query: string, limit?: number): Promise<KnowledgeSearchResult[]> {
+	const params = new URLSearchParams({ q: query });
+	if (limit) params.append('limit', limit.toString());
+	return api.get<KnowledgeSearchResult[]>(`/projects/${projectId}/knowledge/search?${params}`);
+}
+
+/**
+ * Get a preview of a document's content
+ */
+export async function getKnowledgeDocumentPreview(
+	projectId: string,
+	documentId: string,
+	maxLength?: number
+): Promise<{ id: string; filename: string; preview: string; total_length: number; truncated: boolean }> {
+	const params = maxLength ? `?max_length=${maxLength}` : '';
+	return api.get(`/projects/${projectId}/knowledge/${documentId}/preview${params}`);
 }

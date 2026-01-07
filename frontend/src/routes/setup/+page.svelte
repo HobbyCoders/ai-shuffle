@@ -133,28 +133,28 @@
 			<!-- Loading state while fetching workspace config -->
 			<div class="text-center py-8">
 				<div class="text-4xl mb-4 animate-pulse">🚀</div>
-				<p class="text-gray-400">Loading...</p>
+				<p class="text-muted-foreground">Loading...</p>
 			</div>
 		{:else}
 			<div class="text-center mb-6 sm:mb-8">
 				<div class="text-4xl mb-3">🚀</div>
-				<h1 class="text-xl sm:text-2xl font-bold text-white mb-2">Welcome to AI Hub</h1>
+				<h1 class="text-xl sm:text-2xl font-bold text-foreground mb-2">Welcome to AI Hub</h1>
 				{#if totalSteps > 1}
-					<p class="text-gray-400 text-sm sm:text-base">Step {currentStep} of {totalSteps}</p>
+					<p class="text-muted-foreground text-sm sm:text-base">Step {currentStep} of {totalSteps}</p>
 				{:else}
-					<p class="text-gray-400 text-sm sm:text-base">Create your admin account to get started</p>
+					<p class="text-muted-foreground text-sm sm:text-base">Create your admin account to get started</p>
 				{/if}
 			</div>
 
 			{#if showWorkspaceStep}
 				<!-- Step 1: Workspace Configuration (Local Mode Only) -->
 				<div class="space-y-4">
-					<div class="bg-blue-900/30 border border-blue-500/50 rounded-lg p-4 mb-4">
+					<div class="bg-primary/10 border border-primary/30 rounded-lg p-4 mb-4">
 						<div class="flex items-start gap-3">
-							<span class="text-blue-400 text-xl">💻</span>
+							<span class="text-primary text-xl">💻</span>
 							<div>
-								<h3 class="text-blue-300 font-medium mb-1">Local Mode Detected</h3>
-								<p class="text-blue-200/70 text-sm">
+								<h3 class="text-foreground font-medium mb-1">Local Mode Detected</h3>
+								<p class="text-muted-foreground text-sm">
 									Choose where to store your projects. This folder will contain all your code and files.
 								</p>
 							</div>
@@ -162,7 +162,7 @@
 					</div>
 
 					<div>
-						<label for="workspacePath" class="block text-sm font-medium text-gray-300 mb-1">
+						<label for="workspacePath" class="block text-sm font-medium text-muted-foreground mb-1">
 							Workspace Folder
 						</label>
 						<input
@@ -174,34 +174,34 @@
 							placeholder="Enter workspace path"
 						/>
 						{#if workspaceConfig?.default_path}
-							<p class="text-gray-500 text-xs mt-1">
+							<p class="text-muted-foreground text-xs mt-1">
 								Default: {workspaceConfig.default_path}
 							</p>
 						{/if}
 					</div>
 
 					{#if validatingWorkspace}
-						<div class="text-gray-400 text-sm flex items-center gap-2">
+						<div class="text-muted-foreground text-sm flex items-center gap-2">
 							<span class="inline-block animate-spin">&#9696;</span>
 							Validating path...
 						</div>
 					{:else if workspaceValidation}
 						{#if workspaceValidation.valid}
-							<div class="bg-green-900/30 border border-green-500/50 text-green-300 px-3 py-2 rounded-lg text-sm flex items-center gap-2">
+							<div class="bg-success/10 border border-success/30 text-success px-3 py-2 rounded-lg text-sm flex items-center gap-2">
 								<span>✓</span>
 								<span>
 									{workspaceValidation.exists ? 'Directory exists and is writable' : 'Directory will be created'}
 								</span>
 							</div>
 						{:else}
-							<div class="bg-red-900/50 border border-red-500 text-red-300 px-3 py-2 rounded-lg text-sm">
+							<div class="bg-destructive/10 border border-destructive text-destructive px-3 py-2 rounded-lg text-sm">
 								{workspaceError || 'Invalid path'}
 							</div>
 						{/if}
 					{/if}
 
 					{#if workspaceError && !workspaceValidation}
-						<div class="bg-red-900/50 border border-red-500 text-red-300 px-3 py-2 rounded-lg text-sm">
+						<div class="bg-destructive/10 border border-destructive text-destructive px-3 py-2 rounded-lg text-sm">
 							{workspaceError}
 						</div>
 					{/if}
@@ -219,11 +219,11 @@
 				<!-- Step 2 (or Step 1 in Docker mode): Admin Account Setup -->
 				<form on:submit|preventDefault={handleSubmit} class="space-y-4">
 					{#if totalSteps > 1}
-						<p class="text-gray-400 text-sm mb-4">Create your admin account to get started</p>
+						<p class="text-muted-foreground text-sm mb-4">Create your admin account to get started</p>
 					{/if}
 
 					<div>
-						<label for="username" class="block text-sm font-medium text-gray-300 mb-1">
+						<label for="username" class="block text-sm font-medium text-muted-foreground mb-1">
 							Username
 						</label>
 						<input
@@ -239,7 +239,7 @@
 					</div>
 
 					<div>
-						<label for="password" class="block text-sm font-medium text-gray-300 mb-1">
+						<label for="password" class="block text-sm font-medium text-muted-foreground mb-1">
 							Password
 						</label>
 						<input
@@ -255,7 +255,7 @@
 					</div>
 
 					<div>
-						<label for="confirmPassword" class="block text-sm font-medium text-gray-300 mb-1">
+						<label for="confirmPassword" class="block text-sm font-medium text-muted-foreground mb-1">
 							Confirm Password
 						</label>
 						<input
@@ -270,7 +270,7 @@
 					</div>
 
 					{#if localError || $authError}
-						<div class="bg-red-900/50 border border-red-500 text-red-300 px-3 sm:px-4 py-3 rounded-lg text-sm">
+						<div class="bg-destructive/10 border border-destructive text-destructive px-3 sm:px-4 py-3 rounded-lg text-sm">
 							{localError || $authError}
 						</div>
 					{/if}

@@ -254,33 +254,59 @@
 			</button>
 		</div>
 
-		<!-- Tab Navigation -->
-		<div class="flex border-b border-border bg-muted/30">
-			{#each tabs as tab}
-				<button
-					onclick={() => activeTab = tab.id}
-					class="flex-1 flex items-center justify-center gap-2 px-4 py-3 text-sm font-medium transition-all relative
-						{activeTab === tab.id
-							? 'text-primary'
-							: 'text-muted-foreground hover:text-foreground'}"
-				>
-					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d={tab.icon} />
-					</svg>
-					<span class="hidden sm:inline">{tab.label}</span>
+		<!-- Tab Navigation - Horizontal on mobile, Vertical on desktop -->
+		<div class="flex flex-col md:flex-row flex-1 overflow-hidden">
+			<nav class="shrink-0 border-b md:border-b-0 md:border-r border-border bg-muted/30">
+				<!-- Mobile: Horizontal tabs -->
+				<div class="flex md:hidden">
+					{#each tabs as tab}
+						<button
+							onclick={() => activeTab = tab.id}
+							class="flex-1 flex items-center justify-center gap-2 px-4 py-3 text-sm font-medium transition-all relative
+								{activeTab === tab.id
+									? 'text-primary'
+									: 'text-muted-foreground hover:text-foreground'}"
+						>
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d={tab.icon} />
+							</svg>
+							<span class="hidden sm:inline">{tab.label}</span>
 
-					<!-- Validation indicator -->
-					{#if !tabStatus()[tab.id]}
-						<span class="absolute top-2 right-2 sm:relative sm:top-0 sm:right-0 w-2 h-2 rounded-full bg-amber-500"></span>
-					{/if}
+							<!-- Validation indicator -->
+							{#if !tabStatus()[tab.id]}
+								<span class="absolute top-2 right-2 sm:relative sm:top-0 sm:right-0 w-2 h-2 rounded-full bg-amber-500"></span>
+							{/if}
 
-					<!-- Active indicator -->
-					{#if activeTab === tab.id}
-						<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-primary"></div>
-					{/if}
-				</button>
-			{/each}
-		</div>
+							<!-- Active indicator -->
+							{#if activeTab === tab.id}
+								<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-primary"></div>
+							{/if}
+						</button>
+					{/each}
+				</div>
+				<!-- Desktop: Vertical tabs -->
+				<div class="hidden md:flex flex-col w-36 p-3 space-y-1">
+					{#each tabs as tab}
+						<button
+							onclick={() => activeTab = tab.id}
+							class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all relative
+								{activeTab === tab.id
+									? 'bg-primary/10 text-primary'
+									: 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}"
+						>
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d={tab.icon} />
+							</svg>
+							<span>{tab.label}</span>
+
+							<!-- Validation indicator -->
+							{#if !tabStatus()[tab.id]}
+								<span class="absolute top-1 right-1 w-2 h-2 rounded-full bg-amber-500"></span>
+							{/if}
+						</button>
+					{/each}
+				</div>
+			</nav>
 
 		<!-- Tab Content -->
 		<div class="flex-1 overflow-y-auto">
@@ -538,6 +564,7 @@
 					</div>
 				</div>
 			{/if}
+		</div>
 		</div>
 
 		<!-- Footer -->

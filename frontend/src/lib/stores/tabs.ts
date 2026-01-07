@@ -123,6 +123,9 @@ interface TabsState {
 	adminSelectionMode: boolean;
 	// Loading state to prevent race conditions
 	sessionsLoading: boolean;
+	// Tag filter state
+	sessionsTagFilter: string | null; // null = all, 'tag_id' = filter by tag
+	adminSessionsTagFilter: string | null;
 }
 
 // WebSocket connections per tab
@@ -173,12 +176,61 @@ function getOrCreateDeviceId(): string {
 	return deviceId;
 }
 
+// Track pending tabs state for flush on unload
+let pendingTabsState: TabsState | null = null;
+
+/**
+ * Immediately flush any pending tabs save to backend (sync, for beforeunload)
+ */
+function flushPendingTabsSave() {
+	if (!pendingTabsState || isInitializing) return;
+
+	// Cancel the debounce timer
+	if (saveTabsTimer) {
+		clearTimeout(saveTabsTimer);
+		saveTabsTimer = null;
+	}
+
+	// Build the persisted state
+	const persistedState: PersistedTabsState = {
+		tabs: pendingTabsState.tabs.map(tab => ({
+			id: tab.id,
+			title: tab.title,
+			sessionId: tab.sessionId,
+			profile: tab.profile,
+			project: tab.project,
+			modelOverride: tab.modelOverride,
+			permissionModeOverride: tab.permissionModeOverride
+		})),
+		activeTabId: pendingTabsState.activeTabId
+	};
+
+	// Use sendBeacon for reliable delivery during page unload
+	const data = JSON.stringify({ key: 'open_tabs', value: persistedState });
+	navigator.sendBeacon('/api/v1/preferences/open_tabs', new Blob([data], { type: 'application/json' }));
+
+	pendingTabsState = null;
+}
+
+// Register beforeunload handler to flush pending saves when browser closes
+if (typeof window !== 'undefined') {
+	window.addEventListener('beforeunload', flushPendingTabsSave);
+	document.addEventListener('visibilitychange', () => {
+		if (document.visibilityState === 'hidden') {
+			flushPendingTabsSave();
+		}
+	});
+}
+
 /**
  * Save tabs state to backend (debounced)
  */
 async function saveTabsToServer(state: TabsState) {
 	// Don't save during initialization
 	if (isInitializing) return;
+
+	// Store pending state for flush on unload
+	pendingTabsState = state;
 
 	// Clear existing timer
 	if (saveTabsTimer) {
@@ -187,9 +239,11 @@ async function saveTabsToServer(state: TabsState) {
 
 	// Debounce the save
 	saveTabsTimer = setTimeout(async () => {
+		if (!pendingTabsState) return;
+
 		try {
 			const persistedState: PersistedTabsState = {
-				tabs: state.tabs.map(tab => ({
+				tabs: pendingTabsState.tabs.map(tab => ({
 					id: tab.id,
 					title: tab.title,
 					sessionId: tab.sessionId,
@@ -198,7 +252,7 @@ async function saveTabsToServer(state: TabsState) {
 					modelOverride: tab.modelOverride,
 					permissionModeOverride: tab.permissionModeOverride
 				})),
-				activeTabId: state.activeTabId
+				activeTabId: pendingTabsState.activeTabId
 			};
 
 			await api.put('/preferences/open_tabs', {
@@ -209,6 +263,9 @@ async function saveTabsToServer(state: TabsState) {
 		} catch (error) {
 			console.error('[Tabs] Failed to save tabs state:', error);
 		}
+
+		pendingTabsState = null;
+		saveTabsTimer = null;
 	}, SAVE_DEBOUNCE_MS);
 }
 
@@ -229,6 +286,7 @@ async function loadTabsFromServer(): Promise<PersistedTabsState | null> {
 }
 
 // Load persisted values - empty string means no selection (user must choose)
+// These also check backend for cross-device persistence
 function getPersistedProfile(): string {
 	if (typeof window !== 'undefined') {
 		return localStorage.getItem('aihub_selectedProfile') || '';
@@ -241,6 +299,38 @@ function getPersistedProject(): string {
 		return localStorage.getItem('aihub_selectedProject') || '';
 	}
 	return '';
+}
+
+// Load selection from backend (used during init to sync with backend)
+async function loadSelectionFromBackend(): Promise<{ selectedProfile: string; selectedProject: string } | null> {
+	if (typeof window === 'undefined') return null;
+
+	try {
+		const response = await fetch('/api/v1/preferences/selection', {
+			credentials: 'include'
+		});
+
+		if (response.ok) {
+			const data = await response.json();
+			if (data && data.value) {
+				// Update localStorage with backend values
+				if (data.value.selectedProfile) {
+					localStorage.setItem('aihub_selectedProfile', data.value.selectedProfile);
+				}
+				if (data.value.selectedProject) {
+					localStorage.setItem('aihub_selectedProject', data.value.selectedProject);
+				}
+				return {
+					selectedProfile: data.value.selectedProfile || '',
+					selectedProject: data.value.selectedProject || ''
+				};
+			}
+		}
+	} catch (e) {
+		console.error('[Tabs] Failed to load selection from backend:', e);
+	}
+
+	return null;
 }
 
 function generateTabId(): string {
@@ -264,7 +354,10 @@ function createTabsStore() {
 		selectionMode: false,
 		adminSelectionMode: false,
 		// Initialize loading state
-		sessionsLoading: false
+		sessionsLoading: false,
+		// Initialize tag filter state
+		sessionsTagFilter: null,
+		adminSessionsTagFilter: null
 	});
 
 	/**
@@ -2353,12 +2446,16 @@ function createTabsStore() {
 	 * For admins: loads sessions where api_user_id IS NULL (their own chats)
 	 * For API users: the backend automatically filters to their sessions
 	 */
-	async function loadSessionsInternal() {
+	async function loadSessionsInternal(tagId?: string | null) {
 		update(s => ({ ...s, sessionsLoading: true }));
 		try {
 			// Load user's own sessions (admin_only=true for admins gets sessions without api_user_id)
-			const sessions = await api.get<Session[]>('/sessions?limit=50&admin_only=true');
-			update(s => ({ ...s, sessions, sessionsLoading: false }));
+			let url = '/sessions?limit=50&admin_only=true';
+			if (tagId) {
+				url += `&tag_id=${encodeURIComponent(tagId)}`;
+			}
+			const sessions = await api.get<Session[]>(url);
+			update(s => ({ ...s, sessions, sessionsLoading: false, sessionsTagFilter: tagId ?? null }));
 		} catch (e) {
 			console.error('Failed to load sessions:', e);
 			update(s => ({ ...s, sessionsLoading: false }));
@@ -2368,7 +2465,7 @@ function createTabsStore() {
 	/**
 	 * Load admin sessions (all API user sessions for admin view)
 	 */
-	async function loadAdminSessionsInternal(apiUserId?: string | null) {
+	async function loadAdminSessionsInternal(apiUserId?: string | null, tagId?: string | null) {
 		try {
 			let url = '/sessions?limit=50';
 			if (apiUserId) {
@@ -2378,8 +2475,11 @@ function createTabsStore() {
 				// Show all API user sessions (exclude admin's own sessions)
 				url += '&api_users_only=true';
 			}
+			if (tagId) {
+				url += `&tag_id=${encodeURIComponent(tagId)}`;
+			}
 			const adminSessions = await api.get<Session[]>(url);
-			update(s => ({ ...s, adminSessions, adminSessionsFilter: apiUserId ?? null }));
+			update(s => ({ ...s, adminSessions, adminSessionsFilter: apiUserId ?? null, adminSessionsTagFilter: tagId ?? null }));
 		} catch (e) {
 			console.error('Failed to load admin sessions:', e);
 		}
@@ -2408,14 +2508,17 @@ function createTabsStore() {
 			isInitializing = true;
 
 			try {
+				// First, load selection from backend to sync localStorage
+				// This ensures we have the latest profile/project selection before restoring tabs
+				const backendSelection = await loadSelectionFromBackend();
+
 				// Try to load persisted tabs from server
 				const persistedState = await loadTabsFromServer();
 
 				if (persistedState && persistedState.tabs) {
-					// Get localStorage defaults for profile/project
-					// This ensures tabs without saved selections fall back to last-used values
-					const defaultProfile = getPersistedProfile();
-					const defaultProject = getPersistedProject();
+					// Get defaults for profile/project - prefer backend, fallback to localStorage
+					const defaultProfile = backendSelection?.selectedProfile || getPersistedProfile();
+					const defaultProject = backendSelection?.selectedProject || getPersistedProject();
 
 					// Restore tabs from server (could be empty array)
 					const restoredTabs: ChatTab[] = persistedState.tabs.map(pt => ({
@@ -2935,12 +3038,12 @@ function createTabsStore() {
 			}
 		},
 
-		async loadSessions() {
-			await loadSessionsInternal();
+		async loadSessions(tagId?: string | null) {
+			await loadSessionsInternal(tagId);
 		},
 
-		async loadAdminSessions(apiUserId?: string | null) {
-			await loadAdminSessionsInternal(apiUserId);
+		async loadAdminSessions(apiUserId?: string | null, tagId?: string | null) {
+			await loadAdminSessionsInternal(apiUserId, tagId);
 		},
 
 		async loadApiUsers() {
@@ -2950,6 +3053,16 @@ function createTabsStore() {
 		setAdminSessionsFilter(apiUserId: string | null) {
 			update(s => ({ ...s, adminSessionsFilter: apiUserId }));
 			loadAdminSessionsInternal(apiUserId);
+		},
+
+		setSessionsTagFilter(tagId: string | null) {
+			update(s => ({ ...s, sessionsTagFilter: tagId }));
+			loadSessionsInternal(tagId);
+		},
+
+		setAdminSessionsTagFilter(tagId: string | null, apiUserId?: string | null) {
+			update(s => ({ ...s, adminSessionsTagFilter: tagId }));
+			loadAdminSessionsInternal(apiUserId, tagId);
 		},
 
 		// Profile/Project CRUD operations
@@ -3209,3 +3322,6 @@ export const selectionMode = derived(tabs, $tabs => $tabs.selectionMode);
 export const adminSelectionMode = derived(tabs, $tabs => $tabs.adminSelectionMode);
 // Loading state
 export const sessionsLoading = derived(tabs, $tabs => $tabs.sessionsLoading);
+// Tag filter state
+export const sessionsTagFilter = derived(tabs, $tabs => $tabs.sessionsTagFilter);
+export const adminSessionsTagFilter = derived(tabs, $tabs => $tabs.adminSessionsTagFilter);

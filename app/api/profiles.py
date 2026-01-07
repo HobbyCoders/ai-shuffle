@@ -4,11 +4,16 @@ Profile management API routes
 
 from typing import List, Optional
 from datetime import datetime
+import re
 
 from fastapi import APIRouter, HTTPException, Depends, status, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from app.core.models import Profile, ProfileCreate, ProfileUpdate
+from app.core.models import (
+    Profile, ProfileCreate, ProfileUpdate,
+    AgentExport, AgentExportData, AgentImportRequest
+)
 from app.db import database
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
 
@@ -488,3 +493,199 @@ async def disable_subagent(
         database.update_profile(profile_id=profile_id, config=config, allow_builtin=True)
 
     return {"enabled": False, "subagent_id": subagent_id}
+
+
+# ============================================================================
+# Agent Export/Import Endpoints
+# ============================================================================
+
+@router.get("/{profile_id}/export", response_model=AgentExport)
+async def export_profile(
+    request: Request,
+    profile_id: str,
+    token: str = Depends(require_auth)
+):
+    """
+    Export a profile/agent as JSON for sharing.
+
+    Returns a downloadable JSON file containing the agent's configuration.
+    Sensitive data like paths and secrets are sanitized.
+    """
+    api_user = get_api_user_from_request(request)
+
+    # Check if API user is restricted to a specific profile
+    if api_user and api_user.get("profile_id"):
+        if api_user["profile_id"] != profile_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this profile"
+            )
+
+    profile = database.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Profile not found: {profile_id}"
+        )
+
+    config = profile.get("config", {})
+    system_prompt = config.get("system_prompt", {}) or {}
+    ai_tools = config.get("ai_tools")
+
+    # Build export data - sanitize sensitive paths
+    agent_data = AgentExportData(
+        name=profile.get("name", profile_id),
+        description=profile.get("description"),
+        model=config.get("model", "sonnet"),
+        permission_mode=config.get("permission_mode", "default"),
+        system_prompt_type=system_prompt.get("type", "preset"),
+        system_prompt_preset=system_prompt.get("preset", "claude_code"),
+        system_prompt_content=system_prompt.get("content"),
+        system_prompt_append=system_prompt.get("append"),
+        system_prompt_inject_env=system_prompt.get("inject_env_details", False),
+        allowed_tools=config.get("allowed_tools"),
+        disallowed_tools=config.get("disallowed_tools"),
+        enabled_agents=config.get("enabled_agents"),
+        ai_tools=ai_tools,
+        max_turns=config.get("max_turns"),
+        max_buffer_size=config.get("max_buffer_size"),
+        include_partial_messages=config.get("include_partial_messages", True),
+        continue_conversation=config.get("continue_conversation", False),
+        fork_session=config.get("fork_session", False),
+        setting_sources=config.get("setting_sources"),
+        # Note: We intentionally exclude sensitive data:
+        # - cwd (working directory path)
+        # - add_dirs (additional directory paths)
+        # - user (user identifier)
+        # - env (environment variables)
+        # - extra_args (may contain sensitive data)
+        # - enabled_plugins (plugin paths are system-specific)
+    )
+
+    export_data = AgentExport(
+        version="1.0",
+        type="ai-hub-agent",
+        exported_at=datetime.utcnow().isoformat() + "Z",
+        agent=agent_data
+    )
+
+    # Return with headers suggesting download
+    filename = f"{profile_id}-agent.json"
+    response = JSONResponse(
+        content=export_data.model_dump(),
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        }
+    )
+    return response
+
+
+@router.post("/import", response_model=Profile, status_code=status.HTTP_201_CREATED)
+async def import_profile(
+    import_request: AgentImportRequest,
+    token: str = Depends(require_admin)
+):
+    """
+    Import an agent from JSON data.
+
+    Creates a new profile with the imported configuration.
+    A new unique ID is generated to avoid conflicts.
+    """
+    # Validate type
+    if import_request.type != "ai-hub-agent":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid export type: {import_request.type}. Expected 'ai-hub-agent'"
+        )
+
+    # Validate version
+    supported_versions = ["1.0"]
+    if import_request.version not in supported_versions:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported export version: {import_request.version}. Supported: {', '.join(supported_versions)}"
+        )
+
+    agent_data = import_request.agent
+
+    # Determine profile name
+    profile_name = import_request.new_name or agent_data.name
+    if not profile_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Agent name is required"
+        )
+
+    # Determine profile ID
+    if import_request.new_id:
+        profile_id = import_request.new_id
+    else:
+        # Generate ID from name
+        profile_id = re.sub(r'[^a-z0-9-]', '-', profile_name.lower())
+        profile_id = re.sub(r'-+', '-', profile_id).strip('-')
+        if not profile_id:
+            profile_id = "imported-agent"
+
+    # Ensure unique ID by appending number if exists
+    base_id = profile_id
+    counter = 1
+    while database.get_profile(profile_id):
+        profile_id = f"{base_id}-{counter}"
+        counter += 1
+        if counter > 100:  # Safety limit
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Too many profiles with similar ID: {base_id}"
+            )
+
+    # Build config from agent data
+    config = {
+        "model": agent_data.model or "sonnet",
+        "permission_mode": agent_data.permission_mode or "default",
+        "include_partial_messages": agent_data.include_partial_messages if agent_data.include_partial_messages is not None else True,
+        "continue_conversation": agent_data.continue_conversation or False,
+        "fork_session": agent_data.fork_session or False,
+    }
+
+    # System prompt
+    if agent_data.system_prompt_type == "custom" and agent_data.system_prompt_content:
+        config["system_prompt"] = {
+            "type": "custom",
+            "content": agent_data.system_prompt_content,
+            "inject_env_details": agent_data.system_prompt_inject_env or False
+        }
+    else:
+        config["system_prompt"] = {
+            "type": "preset",
+            "preset": agent_data.system_prompt_preset or "claude_code"
+        }
+        if agent_data.system_prompt_append:
+            config["system_prompt"]["append"] = agent_data.system_prompt_append
+
+    # Optional fields
+    if agent_data.allowed_tools:
+        config["allowed_tools"] = agent_data.allowed_tools
+    if agent_data.disallowed_tools:
+        config["disallowed_tools"] = agent_data.disallowed_tools
+    if agent_data.enabled_agents:
+        # Note: Subagent IDs are preserved but may not exist in target system
+        config["enabled_agents"] = agent_data.enabled_agents
+    if agent_data.ai_tools:
+        config["ai_tools"] = agent_data.ai_tools.model_dump()
+    if agent_data.max_turns:
+        config["max_turns"] = agent_data.max_turns
+    if agent_data.max_buffer_size:
+        config["max_buffer_size"] = agent_data.max_buffer_size
+    if agent_data.setting_sources:
+        config["setting_sources"] = agent_data.setting_sources
+
+    # Create the profile
+    profile = database.create_profile(
+        profile_id=profile_id,
+        name=profile_name,
+        description=agent_data.description,
+        config=config,
+        is_builtin=False
+    )
+
+    return profile

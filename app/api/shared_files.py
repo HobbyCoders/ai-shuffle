@@ -1,13 +1,15 @@
 """
-API endpoint for serving downloadable files.
+API endpoint for serving shared/downloadable files.
 
-This endpoint serves files from the workspace that the agent makes
-available for download, displaying them in the chat UI with download cards.
+This endpoint serves files that Claude creates for users to download,
+allowing them to be displayed in the chat UI with download cards.
 
-Security: Files must be within the workspace directory. The API validates
-that requested file paths don't escape the workspace boundary.
+Files are stored in 'shared-files' subdirectories within project
+working directories. The API validates that requested files are within
+allowed workspace paths.
 """
 
+import os
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, status, Query
 from fastapi.responses import FileResponse
@@ -131,10 +133,10 @@ def get_file_icon(filename: str) -> str:
 @router.get("/by-path")
 async def get_file_by_path(path: str = Query(..., description="Full path to the file")):
     """
-    Serve a file by its full path.
+    Serve a shared file by its full path.
 
-    Security: Only serves files from within the workspace directory.
-    Any file in the workspace can be made downloadable by the agent.
+    Security: Only serves files from within the workspace directory
+    and specifically from 'shared-files' directories.
     """
     file_path = Path(path)
 
@@ -144,6 +146,13 @@ async def get_file_by_path(path: str = Query(..., description="Full path to the 
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied: file is outside workspace"
+        )
+
+    # Additional check: must be in a 'shared-files' directory
+    if 'shared-files' not in file_path.parts:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: not a shared file"
         )
 
     # Check file exists
@@ -166,7 +175,7 @@ async def get_file_by_path(path: str = Query(..., description="Full path to the 
 @router.get("/info")
 async def get_file_info(path: str = Query(..., description="Full path to the file")):
     """
-    Get metadata about a file without downloading it.
+    Get metadata about a shared file without downloading it.
 
     Returns file name, size, type, and icon information.
     """
@@ -178,6 +187,13 @@ async def get_file_info(path: str = Query(..., description="Full path to the fil
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied: file is outside workspace"
+        )
+
+    # Additional check: must be in a 'shared-files' directory
+    if 'shared-files' not in file_path.parts:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: not a shared file"
         )
 
     # Check file exists

@@ -108,14 +108,13 @@
 	loadTags();
 </script>
 
-<div class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-	<div class="bg-background border border-border rounded-2xl shadow-2xl w-full max-w-md max-h-[80vh] max-sm:max-h-full flex flex-col">
+<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+	<div class="bg-background border border-border rounded-2xl shadow-2xl w-full max-w-md max-h-[80vh] flex flex-col">
 		<!-- Header -->
 		<div class="flex items-center justify-between px-5 py-4 border-b border-border">
 			<h2 class="text-lg font-semibold text-foreground">Manage Tags</h2>
 			<button
 				on:click={() => dispatch('close')}
-				aria-label="Close"
 				class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
 			>
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -134,10 +133,9 @@
 
 			<!-- Create new tag -->
 			<div class="space-y-3">
-				<label for="new-tag-name" class="text-sm font-medium text-muted-foreground">Create New Tag</label>
+				<label class="text-sm font-medium text-muted-foreground">Create New Tag</label>
 				<div class="flex items-center gap-2">
 					<input
-						id="new-tag-name"
 						type="text"
 						bind:value={newTagName}
 						placeholder="Tag name..."
@@ -166,7 +164,7 @@
 
 			<!-- Tag list -->
 			<div class="space-y-2">
-				<span class="text-sm font-medium text-muted-foreground">Your Tags</span>
+				<label class="text-sm font-medium text-muted-foreground">Your Tags</label>
 				{#if loading}
 					<div class="flex items-center justify-center py-8">
 						<div class="animate-spin rounded-full h-6 w-6 border-2 border-primary border-t-transparent"></div>

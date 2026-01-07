@@ -151,18 +151,18 @@
 	// Badge color classes
 	function getBadgeClasses(color: string): string {
 		switch (color) {
-			case 'amber': return 'bg-amber-900/50 text-amber-300';
-			case 'green': return 'bg-green-900/50 text-green-300';
-			case 'blue': return 'bg-blue-900/50 text-blue-300';
-			case 'purple': return 'bg-purple-900/50 text-purple-300';
-			default: return 'bg-gray-900/50 text-gray-300';
+			case 'amber': return 'bg-warning/20 text-warning';
+			case 'green': return 'bg-success/20 text-success';
+			case 'blue': return 'bg-info/20 text-info';
+			case 'purple': return 'bg-primary/20 text-primary';
+			default: return 'bg-muted text-muted-foreground';
 		}
 	}
 </script>
 
 <div class="w-full border border-border rounded-lg overflow-hidden shadow-s bg-card">
 	<div class="px-4 py-2 bg-muted/30 flex items-center gap-2">
-		<svg class="w-4 h-4 text-purple-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+		<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
 		</svg>
 		<span class="text-sm font-medium text-foreground">{formatted.title}</span>

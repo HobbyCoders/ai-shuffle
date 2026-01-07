@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 # Schema version for migrations
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 19
 
 
 def get_connection() -> sqlite3.Connection:
@@ -132,6 +132,7 @@ def _create_schema(cursor: sqlite3.Cursor):
             sdk_session_id TEXT,
             title TEXT,
             status TEXT DEFAULT 'active',
+            is_favorite BOOLEAN DEFAULT FALSE,
             total_cost_usd REAL DEFAULT 0,
             total_tokens_in INTEGER DEFAULT 0,
             total_tokens_out INTEGER DEFAULT 0,
@@ -236,6 +237,22 @@ def _create_schema(cursor: sqlite3.Cursor):
     except sqlite3.OperationalError:
         pass  # Column already exists
 
+    # Add is_favorite column to sessions (migration for existing DBs)
+    try:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN is_favorite BOOLEAN DEFAULT FALSE")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
+    # Add fork columns to sessions (migration for existing DBs)
+    try:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN fork_point_message_index INTEGER")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
     # Login attempts tracking for brute force protection
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS login_attempts (
@@ -327,10 +344,138 @@ def _create_schema(cursor: sqlite3.Cursor):
         )
     """)
 
+    # Tags for organizing sessions
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tags (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            color TEXT NOT NULL DEFAULT '#6366f1',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Junction table for session-tag relationships
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_tags (
+            session_id TEXT NOT NULL,
+            tag_id TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (session_id, tag_id),
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Session templates for starter prompts
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS templates (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            prompt TEXT NOT NULL,
+            profile_id TEXT,
+            icon TEXT,
+            category TEXT,
+            is_builtin BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL
+        )
+    """)
+
+    # Webhooks for external integrations
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS webhooks (
+            id TEXT PRIMARY KEY,
+            url TEXT NOT NULL,
+            secret TEXT,
+            events JSON NOT NULL DEFAULT '[]',
+            is_active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_triggered_at TIMESTAMP,
+            failure_count INTEGER DEFAULT 0
+        )
+    """)
+
+    # Audit log for security events
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id TEXT PRIMARY KEY,
+            user_id TEXT,
+            user_type TEXT DEFAULT 'admin',
+            event_type TEXT NOT NULL,
+            ip_address TEXT,
+            user_agent TEXT,
+            details JSON,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Knowledge base documents for per-project context injection
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS knowledge_documents (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            content TEXT NOT NULL,
+            content_type TEXT DEFAULT 'text/plain',
+            file_size INTEGER DEFAULT 0,
+            chunk_count INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Knowledge base chunks for chunked content (enables future vector search)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS knowledge_chunks (
+            id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            metadata JSON DEFAULT '{}',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (document_id) REFERENCES knowledge_documents(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Pending 2FA sessions (for login flow)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pending_2fa_sessions (
+            token TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Add 2FA columns to admin table (migration for existing DBs)
+    try:
+        cursor.execute("ALTER TABLE admin ADD COLUMN totp_secret TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        cursor.execute("ALTER TABLE admin ADD COLUMN totp_enabled BOOLEAN DEFAULT FALSE")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        cursor.execute("ALTER TABLE admin ADD COLUMN recovery_codes TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        cursor.execute("ALTER TABLE admin ADD COLUMN totp_verified_at TIMESTAMP")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
     # Create indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_templates_category ON templates(category)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_templates_profile ON templates(profile_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_profile ON sessions(profile_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_favorite ON sessions(is_favorite)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_usage_log_created ON usage_log(created_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at)")
@@ -350,6 +495,91 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_subagents_name ON subagents(name)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_permission_rules_profile ON permission_rules(profile_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_permission_rules_tool ON permission_rules(tool_name)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags(session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_tag ON session_tags(tag_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_webhooks_active ON webhooks(is_active)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_documents_project ON knowledge_documents(project_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_document ON knowledge_chunks(document_id)")
+
+    # Rate limit configurations
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS rate_limits (
+            id TEXT PRIMARY KEY,
+            user_id TEXT,
+            api_key_id TEXT,
+            requests_per_minute INTEGER DEFAULT 20,
+            requests_per_hour INTEGER DEFAULT 200,
+            requests_per_day INTEGER DEFAULT 1000,
+            concurrent_requests INTEGER DEFAULT 3,
+            priority INTEGER DEFAULT 0,
+            is_unlimited BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (api_key_id) REFERENCES api_users(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Request log for rate limit tracking
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS request_log (
+            id TEXT PRIMARY KEY,
+            user_id TEXT,
+            api_key_id TEXT,
+            endpoint TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            duration_ms INTEGER,
+            status TEXT DEFAULT 'success'
+        )
+    """)
+
+    # Create rate limit indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rate_limits_user ON rate_limits(user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rate_limits_api_key ON rate_limits(api_key_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_request_log_user ON request_log(user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_request_log_api_key ON request_log(api_key_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_request_log_timestamp ON request_log(timestamp)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_user ON audit_log(user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_event ON audit_log(event_type)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at)")
+
+    # Git repositories (tracks git state per project)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS git_repositories (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL UNIQUE,
+            remote_url TEXT,
+            default_branch TEXT DEFAULT 'main',
+            github_repo_name TEXT,
+            last_synced_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Worktrees (for parallel session work on branches)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS worktrees (
+            id TEXT PRIMARY KEY,
+            repository_id TEXT NOT NULL,
+            session_id TEXT UNIQUE,
+            branch_name TEXT NOT NULL,
+            worktree_path TEXT NOT NULL,
+            base_branch TEXT,
+            status TEXT DEFAULT 'active',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (repository_id) REFERENCES git_repositories(id) ON DELETE CASCADE,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+        )
+    """)
+
+    # Create git indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_git_repositories_project ON git_repositories(project_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_repository ON worktrees(repository_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_session ON worktrees(session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_branch ON worktrees(branch_name)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_status ON worktrees(status)")
 
 
 def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
@@ -405,6 +635,171 @@ def update_admin_password(password_hash: str) -> bool:
             (password_hash,)
         )
         return cursor.rowcount > 0
+
+
+def update_admin_totp(totp_secret: Optional[str], totp_enabled: bool, recovery_codes: Optional[str] = None) -> bool:
+    """Update admin 2FA settings"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if totp_enabled:
+            cursor.execute(
+                """UPDATE admin SET totp_secret = ?, totp_enabled = ?, recovery_codes = ?,
+                   totp_verified_at = ? WHERE id = 1""",
+                (totp_secret, totp_enabled, recovery_codes, datetime.utcnow().isoformat())
+            )
+        else:
+            cursor.execute(
+                "UPDATE admin SET totp_secret = NULL, totp_enabled = FALSE, recovery_codes = NULL, totp_verified_at = NULL WHERE id = 1",
+                ()
+            )
+        return cursor.rowcount > 0
+
+
+def get_admin_2fa_status() -> Dict[str, Any]:
+    """Get admin 2FA status (without revealing secret)"""
+    admin = get_admin()
+    if not admin:
+        return {"enabled": False, "has_recovery_codes": False}
+    return {
+        "enabled": bool(admin.get("totp_enabled")),
+        "has_recovery_codes": bool(admin.get("recovery_codes")),
+        "verified_at": admin.get("totp_verified_at")
+    }
+
+
+def update_admin_recovery_codes(recovery_codes: str) -> bool:
+    """Update admin recovery codes"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE admin SET recovery_codes = ? WHERE id = 1",
+            (recovery_codes,)
+        )
+        return cursor.rowcount > 0
+
+
+# ============================================================================
+# Audit Log Operations
+# ============================================================================
+
+def create_audit_log(
+    event_id: str,
+    event_type: str,
+    user_id: Optional[str] = None,
+    user_type: str = "admin",
+    ip_address: Optional[str] = None,
+    user_agent: Optional[str] = None,
+    details: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Create an audit log entry"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO audit_log (id, user_id, user_type, event_type, ip_address, user_agent, details)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (event_id, user_id, user_type, event_type, ip_address, user_agent, json.dumps(details) if details else None)
+        )
+        return {
+            "id": event_id,
+            "user_id": user_id,
+            "user_type": user_type,
+            "event_type": event_type,
+            "ip_address": ip_address,
+            "user_agent": user_agent,
+            "details": details
+        }
+
+
+def get_audit_logs(
+    user_id: Optional[str] = None,
+    event_type: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0
+) -> List[Dict[str, Any]]:
+    """Get audit logs with optional filters"""
+    query = "SELECT * FROM audit_log WHERE 1=1"
+    params = []
+
+    if user_id:
+        query += " AND user_id = ?"
+        params.append(user_id)
+    if event_type:
+        query += " AND event_type = ?"
+        params.append(event_type)
+
+    query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        rows = rows_to_list(cursor.fetchall())
+        for row in rows:
+            if row.get("details"):
+                row["details"] = json.loads(row["details"]) if isinstance(row["details"], str) else row["details"]
+        return rows
+
+
+def get_audit_log_count(user_id: Optional[str] = None, event_type: Optional[str] = None) -> int:
+    """Get total count of audit logs"""
+    query = "SELECT COUNT(*) as count FROM audit_log WHERE 1=1"
+    params = []
+
+    if user_id:
+        query += " AND user_id = ?"
+        params.append(user_id)
+    if event_type:
+        query += " AND event_type = ?"
+        params.append(event_type)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+        return row["count"]
+
+
+# ============================================================================
+# Pending 2FA Session Operations
+# ============================================================================
+
+def create_pending_2fa_session(token: str, username: str, expires_at: datetime) -> Dict[str, Any]:
+    """Create a pending 2FA session token"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO pending_2fa_sessions (token, username, expires_at) VALUES (?, ?, ?)",
+            (token, username, expires_at.isoformat())
+        )
+        return {"token": token, "username": username, "expires_at": expires_at}
+
+
+def get_pending_2fa_session(token: str) -> Optional[Dict[str, Any]]:
+    """Get a pending 2FA session by token"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM pending_2fa_sessions WHERE token = ? AND expires_at > ?",
+            (token, datetime.utcnow().isoformat())
+        )
+        return row_to_dict(cursor.fetchone())
+
+
+def delete_pending_2fa_session(token: str):
+    """Delete a pending 2FA session"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM pending_2fa_sessions WHERE token = ?", (token,))
+
+
+def cleanup_expired_2fa_sessions():
+    """Remove expired pending 2FA sessions"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM pending_2fa_sessions WHERE expires_at < ?",
+            (datetime.utcnow().isoformat(),)
+        )
 
 
 # ============================================================================
@@ -704,33 +1099,44 @@ def get_sessions(
     status: Optional[str] = None,
     api_user_id: Optional[str] = None,
     api_users_only: bool = False,
+    favorites_only: bool = False,
+    tag_id: Optional[str] = None,
     limit: int = 50,
     offset: int = 0
 ) -> List[Dict[str, Any]]:
     """Get sessions with optional filters"""
-    query = "SELECT * FROM sessions WHERE 1=1"
-    params = []
+    if tag_id:
+        # Join with session_tags when filtering by tag
+        query = """SELECT DISTINCT s.* FROM sessions s
+                   INNER JOIN session_tags st ON s.id = st.session_id
+                   WHERE st.tag_id = ?"""
+        params = [tag_id]
+    else:
+        query = "SELECT * FROM sessions WHERE 1=1"
+        params = []
 
     if project_id:
-        query += " AND project_id = ?"
+        query += " AND s.project_id = ?" if tag_id else " AND project_id = ?"
         params.append(project_id)
     if profile_id:
-        query += " AND profile_id = ?"
+        query += " AND s.profile_id = ?" if tag_id else " AND profile_id = ?"
         params.append(profile_id)
     if status:
-        query += " AND status = ?"
+        query += " AND s.status = ?" if tag_id else " AND status = ?"
         params.append(status)
+    if favorites_only:
+        query += " AND s.is_favorite = TRUE" if tag_id else " AND is_favorite = TRUE"
     if api_users_only:
         # Filter for sessions that have an API user (exclude admin sessions)
-        query += " AND api_user_id IS NOT NULL"
+        query += " AND s.api_user_id IS NOT NULL" if tag_id else " AND api_user_id IS NOT NULL"
     elif api_user_id is not None:
         if api_user_id:
-            query += " AND api_user_id = ?"
+            query += " AND s.api_user_id = ?" if tag_id else " AND api_user_id = ?"
             params.append(api_user_id)
         else:
-            query += " AND api_user_id IS NULL"
+            query += " AND s.api_user_id IS NULL" if tag_id else " AND api_user_id IS NULL"
 
-    query += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+    query += " ORDER BY s.updated_at DESC LIMIT ? OFFSET ?" if tag_id else " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
 
     with get_db() as conn:
@@ -744,16 +1150,18 @@ def create_session(
     profile_id: str,
     project_id: Optional[str] = None,
     title: Optional[str] = None,
-    api_user_id: Optional[str] = None
+    api_user_id: Optional[str] = None,
+    parent_session_id: Optional[str] = None,
+    fork_point_message_index: Optional[int] = None
 ) -> Dict[str, Any]:
     """Create a new session"""
     now = datetime.utcnow().isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (session_id, profile_id, project_id, title, api_user_id, now, now)
+            """INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, now, now)
         )
     return get_session(session_id)
 
@@ -812,6 +1220,59 @@ def delete_session(session_id: str) -> bool:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         return cursor.rowcount > 0
+
+
+def toggle_session_favorite(session_id: str) -> Optional[Dict[str, Any]]:
+    """Toggle the is_favorite flag for a session and return the updated session"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Toggle the favorite status
+        cursor.execute(
+            """UPDATE sessions SET is_favorite = NOT is_favorite, updated_at = ?
+               WHERE id = ?""",
+            (datetime.utcnow().isoformat(), session_id)
+        )
+        if cursor.rowcount == 0:
+            return None
+    return get_session(session_id)
+
+
+def set_session_favorite(session_id: str, is_favorite: bool) -> Optional[Dict[str, Any]]:
+    """Set the is_favorite flag for a session and return the updated session"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """UPDATE sessions SET is_favorite = ?, updated_at = ?
+               WHERE id = ?""",
+            (is_favorite, datetime.utcnow().isoformat(), session_id)
+        )
+        if cursor.rowcount == 0:
+            return None
+    return get_session(session_id)
+
+
+def session_has_forks(session_id: str) -> bool:
+    """Check if a session has any forked children"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) as count FROM sessions WHERE parent_session_id = ?",
+            (session_id,)
+        )
+        row = cursor.fetchone()
+        return row["count"] > 0 if row else False
+
+
+def get_session_forks(session_id: str) -> List[Dict[str, Any]]:
+    """Get all forked children of a session"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT * FROM sessions WHERE parent_session_id = ?
+               ORDER BY created_at DESC""",
+            (session_id,)
+        )
+        return rows_to_list(cursor.fetchall())
 
 
 # ============================================================================
@@ -1957,3 +2418,1349 @@ def get_all_system_settings() -> Dict[str, str]:
         cursor.execute("SELECT key, value FROM system_settings")
         rows = cursor.fetchall()
         return {row["key"]: row["value"] for row in rows}
+
+
+# ============================================================================
+# Tag Operations
+# ============================================================================
+
+def get_tag(tag_id: str) -> Optional[Dict[str, Any]]:
+    """Get a tag by ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM tags WHERE id = ?", (tag_id,))
+        return row_to_dict(cursor.fetchone())
+
+
+def get_all_tags() -> List[Dict[str, Any]]:
+    """Get all tags ordered by name"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM tags ORDER BY name ASC")
+        return rows_to_list(cursor.fetchall())
+
+
+def create_tag(
+    tag_id: str,
+    name: str,
+    color: str = "#6366f1"
+) -> Dict[str, Any]:
+    """Create a new tag"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO tags (id, name, color, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (tag_id, name, color, now, now)
+        )
+    return get_tag(tag_id)
+
+
+def update_tag(
+    tag_id: str,
+    name: Optional[str] = None,
+    color: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Update a tag"""
+    existing = get_tag(tag_id)
+    if not existing:
+        return None
+
+    updates = []
+    values = []
+    if name is not None:
+        updates.append("name = ?")
+        values.append(name)
+    if color is not None:
+        updates.append("color = ?")
+        values.append(color)
+
+    if updates:
+        updates.append("updated_at = ?")
+        values.append(datetime.utcnow().isoformat())
+        values.append(tag_id)
+
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE tags SET {', '.join(updates)} WHERE id = ?",
+                values
+            )
+
+    return get_tag(tag_id)
+
+
+def delete_tag(tag_id: str) -> bool:
+    """Delete a tag (session_tags will cascade delete)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
+        return cursor.rowcount > 0
+
+
+# ============================================================================
+# Session Tag Operations
+# ============================================================================
+
+def get_session_tags(session_id: str) -> List[Dict[str, Any]]:
+    """Get all tags for a session"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT t.* FROM tags t
+               INNER JOIN session_tags st ON t.id = st.tag_id
+               WHERE st.session_id = ?
+               ORDER BY t.name ASC""",
+            (session_id,)
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def add_session_tag(session_id: str, tag_id: str) -> bool:
+    """Add a tag to a session"""
+    try:
+        now = datetime.utcnow().isoformat()
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """INSERT OR IGNORE INTO session_tags (session_id, tag_id, created_at)
+                   VALUES (?, ?, ?)""",
+                (session_id, tag_id, now)
+            )
+            return cursor.rowcount > 0
+    except Exception:
+        return False
+
+
+def remove_session_tag(session_id: str, tag_id: str) -> bool:
+    """Remove a tag from a session"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM session_tags WHERE session_id = ? AND tag_id = ?",
+            (session_id, tag_id)
+        )
+        return cursor.rowcount > 0
+
+
+def set_session_tags(session_id: str, tag_ids: List[str]) -> List[Dict[str, Any]]:
+    """Set all tags for a session (replaces existing)"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Remove existing tags
+        cursor.execute("DELETE FROM session_tags WHERE session_id = ?", (session_id,))
+        # Add new tags
+        for tag_id in tag_ids:
+            cursor.execute(
+                """INSERT OR IGNORE INTO session_tags (session_id, tag_id, created_at)
+                   VALUES (?, ?, ?)""",
+                (session_id, tag_id, now)
+            )
+    return get_session_tags(session_id)
+
+
+def get_sessions_by_tag(tag_id: str, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+    """Get all sessions with a specific tag"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT s.* FROM sessions s
+               INNER JOIN session_tags st ON s.id = st.session_id
+               WHERE st.tag_id = ?
+               ORDER BY s.updated_at DESC
+               LIMIT ? OFFSET ?""",
+            (tag_id, limit, offset)
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+# ============================================================================
+# Analytics Operations
+# ============================================================================
+
+def get_analytics_usage_stats(start_date: Optional[str] = None, end_date: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Get aggregate usage statistics for a date range.
+
+    Args:
+        start_date: Start date (ISO format YYYY-MM-DD), inclusive
+        end_date: End date (ISO format YYYY-MM-DD), inclusive
+
+    Returns:
+        Dictionary with total_tokens_in, total_tokens_out, total_cost_usd, session_count, query_count
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # Build date filter clause
+        date_filter = ""
+        params = []
+        if start_date:
+            date_filter += " AND DATE(created_at) >= ?"
+            params.append(start_date)
+        if end_date:
+            date_filter += " AND DATE(created_at) <= ?"
+            params.append(end_date)
+
+        # Get usage log aggregates
+        cursor.execute(f"""
+            SELECT
+                COALESCE(SUM(tokens_in), 0) as total_tokens_in,
+                COALESCE(SUM(tokens_out), 0) as total_tokens_out,
+                COALESCE(SUM(cost_usd), 0) as total_cost_usd,
+                COUNT(*) as query_count
+            FROM usage_log
+            WHERE 1=1 {date_filter}
+        """, params)
+        usage_row = cursor.fetchone()
+
+        # Get session count for the same period
+        cursor.execute(f"""
+            SELECT COUNT(DISTINCT session_id) as session_count
+            FROM usage_log
+            WHERE session_id IS NOT NULL {date_filter}
+        """, params)
+        session_row = cursor.fetchone()
+
+        return {
+            "total_tokens_in": usage_row["total_tokens_in"],
+            "total_tokens_out": usage_row["total_tokens_out"],
+            "total_cost_usd": round(usage_row["total_cost_usd"], 6),
+            "query_count": usage_row["query_count"],
+            "session_count": session_row["session_count"]
+        }
+
+
+def get_analytics_cost_breakdown(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    group_by: str = "profile"
+) -> List[Dict[str, Any]]:
+    """
+    Get cost breakdown grouped by profile, user, or date.
+
+    Args:
+        start_date: Start date (ISO format YYYY-MM-DD), inclusive
+        end_date: End date (ISO format YYYY-MM-DD), inclusive
+        group_by: Grouping - 'profile', 'user', or 'date'
+
+    Returns:
+        List of dictionaries with key, name, total_cost_usd, total_tokens_in, total_tokens_out, query_count
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # Build date filter clause
+        date_filter = ""
+        params = []
+        if start_date:
+            date_filter += " AND DATE(ul.created_at) >= ?"
+            params.append(start_date)
+        if end_date:
+            date_filter += " AND DATE(ul.created_at) <= ?"
+            params.append(end_date)
+
+        if group_by == "profile":
+            cursor.execute(f"""
+                SELECT
+                    COALESCE(ul.profile_id, 'unknown') as key,
+                    p.name as name,
+                    COALESCE(SUM(ul.tokens_in), 0) as total_tokens_in,
+                    COALESCE(SUM(ul.tokens_out), 0) as total_tokens_out,
+                    COALESCE(SUM(ul.cost_usd), 0) as total_cost_usd,
+                    COUNT(*) as query_count
+                FROM usage_log ul
+                LEFT JOIN profiles p ON ul.profile_id = p.id
+                WHERE 1=1 {date_filter}
+                GROUP BY ul.profile_id, p.name
+                ORDER BY total_cost_usd DESC
+            """, params)
+
+        elif group_by == "user":
+            # Join with sessions to get api_user_id, then with api_users for name
+            cursor.execute(f"""
+                SELECT
+                    COALESCE(s.api_user_id, 'admin') as key,
+                    CASE
+                        WHEN s.api_user_id IS NULL THEN 'Admin'
+                        ELSE COALESCE(au.name, 'Unknown User')
+                    END as name,
+                    COALESCE(SUM(ul.tokens_in), 0) as total_tokens_in,
+                    COALESCE(SUM(ul.tokens_out), 0) as total_tokens_out,
+                    COALESCE(SUM(ul.cost_usd), 0) as total_cost_usd,
+                    COUNT(*) as query_count
+                FROM usage_log ul
+                LEFT JOIN sessions s ON ul.session_id = s.id
+                LEFT JOIN api_users au ON s.api_user_id = au.id
+                WHERE 1=1 {date_filter}
+                GROUP BY s.api_user_id, au.name
+                ORDER BY total_cost_usd DESC
+            """, params)
+
+        elif group_by == "date":
+            cursor.execute(f"""
+                SELECT
+                    DATE(ul.created_at) as key,
+                    DATE(ul.created_at) as name,
+                    COALESCE(SUM(ul.tokens_in), 0) as total_tokens_in,
+                    COALESCE(SUM(ul.tokens_out), 0) as total_tokens_out,
+                    COALESCE(SUM(ul.cost_usd), 0) as total_cost_usd,
+                    COUNT(*) as query_count
+                FROM usage_log ul
+                WHERE 1=1 {date_filter}
+                GROUP BY DATE(ul.created_at)
+                ORDER BY DATE(ul.created_at) DESC
+            """, params)
+
+        else:
+            return []
+
+        rows = cursor.fetchall()
+        result = []
+        for row in rows:
+            result.append({
+                "key": str(row["key"]) if row["key"] else "unknown",
+                "name": row["name"],
+                "total_tokens_in": row["total_tokens_in"],
+                "total_tokens_out": row["total_tokens_out"],
+                "total_cost_usd": round(row["total_cost_usd"], 6),
+                "query_count": row["query_count"]
+            })
+        return result
+
+
+def get_analytics_usage_trends(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    interval: str = "day"
+) -> List[Dict[str, Any]]:
+    """
+    Get usage trends over time.
+
+    Args:
+        start_date: Start date (ISO format YYYY-MM-DD), inclusive
+        end_date: End date (ISO format YYYY-MM-DD), inclusive
+        interval: Time interval - 'day', 'week', or 'month'
+
+    Returns:
+        List of dictionaries with date, tokens_in, tokens_out, cost_usd, query_count
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # Build date filter clause
+        date_filter = ""
+        params = []
+        if start_date:
+            date_filter += " AND DATE(created_at) >= ?"
+            params.append(start_date)
+        if end_date:
+            date_filter += " AND DATE(created_at) <= ?"
+            params.append(end_date)
+
+        # Choose date grouping based on interval
+        if interval == "week":
+            # SQLite strftime: %Y-W%W gives year and week number
+            date_expr = "strftime('%Y-W%W', created_at)"
+        elif interval == "month":
+            date_expr = "strftime('%Y-%m', created_at)"
+        else:  # day
+            date_expr = "DATE(created_at)"
+
+        cursor.execute(f"""
+            SELECT
+                {date_expr} as date,
+                COALESCE(SUM(tokens_in), 0) as tokens_in,
+                COALESCE(SUM(tokens_out), 0) as tokens_out,
+                COALESCE(SUM(cost_usd), 0) as cost_usd,
+                COUNT(*) as query_count
+            FROM usage_log
+            WHERE 1=1 {date_filter}
+            GROUP BY {date_expr}
+            ORDER BY date ASC
+        """, params)
+
+        rows = cursor.fetchall()
+        result = []
+        for row in rows:
+            result.append({
+                "date": row["date"],
+                "tokens_in": row["tokens_in"],
+                "tokens_out": row["tokens_out"],
+                "cost_usd": round(row["cost_usd"], 6),
+                "query_count": row["query_count"]
+            })
+        return result
+
+
+def get_analytics_top_sessions(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 10
+) -> List[Dict[str, Any]]:
+    """
+    Get top sessions by cost.
+
+    Args:
+        start_date: Start date (ISO format YYYY-MM-DD), inclusive
+        end_date: End date (ISO format YYYY-MM-DD), inclusive
+        limit: Maximum number of sessions to return
+
+    Returns:
+        List of dictionaries with session_id, title, profile_id, profile_name, total_cost_usd, etc.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # Build date filter clause
+        date_filter = ""
+        params = []
+        if start_date:
+            date_filter += " AND DATE(s.created_at) >= ?"
+            params.append(start_date)
+        if end_date:
+            date_filter += " AND DATE(s.created_at) <= ?"
+            params.append(end_date)
+
+        params.append(limit)
+
+        cursor.execute(f"""
+            SELECT
+                s.id as session_id,
+                s.title,
+                s.profile_id,
+                p.name as profile_name,
+                s.total_cost_usd,
+                s.total_tokens_in,
+                s.total_tokens_out,
+                s.created_at
+            FROM sessions s
+            LEFT JOIN profiles p ON s.profile_id = p.id
+            WHERE s.total_cost_usd > 0 {date_filter}
+            ORDER BY s.total_cost_usd DESC
+            LIMIT ?
+        """, params)
+
+        rows = cursor.fetchall()
+        result = []
+        for row in rows:
+            result.append({
+                "session_id": row["session_id"],
+                "title": row["title"],
+                "profile_id": row["profile_id"],
+                "profile_name": row["profile_name"],
+                "total_cost_usd": round(row["total_cost_usd"], 6) if row["total_cost_usd"] else 0,
+                "total_tokens_in": row["total_tokens_in"] or 0,
+                "total_tokens_out": row["total_tokens_out"] or 0,
+                "created_at": row["created_at"]
+            })
+        return result
+
+
+# ============================================================================
+# Template Operations
+# ============================================================================
+
+def get_template(template_id: str) -> Optional[Dict[str, Any]]:
+    """Get a template by ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM templates WHERE id = ?", (template_id,))
+        return row_to_dict(cursor.fetchone())
+
+
+def get_all_templates(
+    profile_id: Optional[str] = None,
+    category: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Get all templates with optional filters"""
+    query = "SELECT * FROM templates WHERE 1=1"
+    params = []
+
+    if profile_id:
+        # Return templates for this profile OR templates with no profile (global)
+        query += " AND (profile_id = ? OR profile_id IS NULL)"
+        params.append(profile_id)
+
+    if category:
+        query += " AND category = ?"
+        params.append(category)
+
+    query += " ORDER BY is_builtin DESC, category ASC, name ASC"
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        return rows_to_list(cursor.fetchall())
+
+
+def create_template(
+    template_id: str,
+    name: str,
+    prompt: str,
+    description: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    icon: Optional[str] = None,
+    category: Optional[str] = None,
+    is_builtin: bool = False
+) -> Dict[str, Any]:
+    """Create a new template"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO templates (id, name, description, prompt, profile_id, icon, category, is_builtin, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (template_id, name, description, prompt, profile_id, icon, category, is_builtin, now, now)
+        )
+    return get_template(template_id)
+
+
+def update_template(
+    template_id: str,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    prompt: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    icon: Optional[str] = None,
+    category: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Update a template"""
+    existing = get_template(template_id)
+    if not existing:
+        return None
+
+    # Don't allow updating builtin templates
+    if existing.get("is_builtin"):
+        return None
+
+    updates = []
+    values = []
+
+    if name is not None:
+        updates.append("name = ?")
+        values.append(name)
+    if description is not None:
+        updates.append("description = ?")
+        values.append(description if description else None)
+    if prompt is not None:
+        updates.append("prompt = ?")
+        values.append(prompt)
+    if profile_id is not None:
+        updates.append("profile_id = ?")
+        values.append(profile_id if profile_id else None)
+    if icon is not None:
+        updates.append("icon = ?")
+        values.append(icon if icon else None)
+    if category is not None:
+        updates.append("category = ?")
+        values.append(category if category else None)
+
+    if updates:
+        updates.append("updated_at = ?")
+        values.append(datetime.utcnow().isoformat())
+        values.append(template_id)
+
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE templates SET {', '.join(updates)} WHERE id = ?",
+                values
+            )
+
+    return get_template(template_id)
+
+
+def delete_template(template_id: str) -> bool:
+    """Delete a template"""
+    existing = get_template(template_id)
+    if not existing:
+        return False
+
+    # Don't allow deleting builtin templates
+    if existing.get("is_builtin"):
+        return False
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM templates WHERE id = ?", (template_id,))
+        return cursor.rowcount > 0
+
+
+def get_template_categories() -> List[str]:
+    """Get all unique template categories"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT DISTINCT category FROM templates WHERE category IS NOT NULL ORDER BY category ASC"
+        )
+        return [row["category"] for row in cursor.fetchall()]
+
+
+def set_template_builtin(template_id: str, is_builtin: bool) -> bool:
+    """Set the is_builtin flag for a template"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE templates SET is_builtin = ?, updated_at = ? WHERE id = ?",
+            (is_builtin, datetime.utcnow().isoformat(), template_id)
+        )
+        return cursor.rowcount > 0
+
+
+# ============================================================================
+# Webhook Operations
+# ============================================================================
+
+def get_all_webhooks() -> List[Dict[str, Any]]:
+    """Get all webhooks"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM webhooks ORDER BY created_at DESC")
+        rows = rows_to_list(cursor.fetchall())
+        for row in rows:
+            if row.get("events"):
+                row["events"] = json.loads(row["events"]) if isinstance(row["events"], str) else row["events"]
+        return rows
+
+
+def get_active_webhooks() -> List[Dict[str, Any]]:
+    """Get all active webhooks"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM webhooks WHERE is_active = TRUE ORDER BY created_at DESC")
+        rows = rows_to_list(cursor.fetchall())
+        for row in rows:
+            if row.get("events"):
+                row["events"] = json.loads(row["events"]) if isinstance(row["events"], str) else row["events"]
+        return rows
+
+
+def get_webhook(webhook_id: str) -> Optional[Dict[str, Any]]:
+    """Get a webhook by ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM webhooks WHERE id = ?", (webhook_id,))
+        row = row_to_dict(cursor.fetchone())
+        if row and row.get("events"):
+            row["events"] = json.loads(row["events"]) if isinstance(row["events"], str) else row["events"]
+        return row
+
+
+def create_webhook(
+    webhook_id: str,
+    url: str,
+    events: List[str],
+    secret: Optional[str] = None,
+    is_active: bool = True
+) -> Optional[Dict[str, Any]]:
+    """Create a new webhook"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO webhooks (id, url, secret, events, is_active, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (webhook_id, url, secret, json.dumps(events), is_active, now)
+        )
+    return get_webhook(webhook_id)
+
+
+def update_webhook(
+    webhook_id: str,
+    url: Optional[str] = None,
+    events: Optional[List[str]] = None,
+    secret: Optional[str] = None,
+    is_active: Optional[bool] = None
+) -> Optional[Dict[str, Any]]:
+    """Update a webhook"""
+    existing = get_webhook(webhook_id)
+    if not existing:
+        return None
+
+    updates = []
+    values = []
+
+    if url is not None:
+        updates.append("url = ?")
+        values.append(url)
+    if events is not None:
+        updates.append("events = ?")
+        values.append(json.dumps(events))
+    if secret is not None:
+        updates.append("secret = ?")
+        values.append(secret if secret else None)
+    if is_active is not None:
+        updates.append("is_active = ?")
+        values.append(is_active)
+
+    if updates:
+        values.append(webhook_id)
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE webhooks SET {', '.join(updates)} WHERE id = ?",
+                values
+            )
+
+    return get_webhook(webhook_id)
+
+
+def delete_webhook(webhook_id: str) -> bool:
+    """Delete a webhook"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM webhooks WHERE id = ?", (webhook_id,))
+        return cursor.rowcount > 0
+
+
+def update_webhook_triggered(webhook_id: str, success: bool) -> None:
+    """Update the last_triggered_at timestamp and failure_count for a webhook"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if success:
+            # Reset failure count on success
+            cursor.execute(
+                "UPDATE webhooks SET last_triggered_at = ?, failure_count = 0 WHERE id = ?",
+                (now, webhook_id)
+            )
+        else:
+            # Increment failure count
+            cursor.execute(
+                "UPDATE webhooks SET last_triggered_at = ?, failure_count = failure_count + 1 WHERE id = ?",
+                (now, webhook_id)
+            )
+
+
+def get_webhooks_for_event(event_type: str) -> List[Dict[str, Any]]:
+    """Get all active webhooks subscribed to a specific event type"""
+    webhooks = get_active_webhooks()
+    return [w for w in webhooks if event_type in w.get("events", [])]
+
+
+# ============================================================================
+# Rate Limit Operations
+# ============================================================================
+
+def get_rate_limit(rate_limit_id: str) -> Optional[Dict[str, Any]]:
+    """Get a rate limit configuration by ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM rate_limits WHERE id = ?", (rate_limit_id,))
+        return row_to_dict(cursor.fetchone())
+
+
+def get_rate_limit_for_user(user_id: Optional[str], api_key_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """
+    Get the most specific rate limit configuration for a user.
+    Priority: api_key_id specific > user_id specific > default (null/null)
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # Try API key specific first
+        if api_key_id:
+            cursor.execute("SELECT * FROM rate_limits WHERE api_key_id = ?", (api_key_id,))
+            result = cursor.fetchone()
+            if result:
+                return row_to_dict(result)
+
+        # Try user specific
+        if user_id:
+            cursor.execute("SELECT * FROM rate_limits WHERE user_id = ? AND api_key_id IS NULL", (user_id,))
+            result = cursor.fetchone()
+            if result:
+                return row_to_dict(result)
+
+        # Fall back to default (user_id and api_key_id both NULL)
+        cursor.execute("SELECT * FROM rate_limits WHERE user_id IS NULL AND api_key_id IS NULL")
+        result = cursor.fetchone()
+        return row_to_dict(result) if result else None
+
+
+def get_all_rate_limits() -> List[Dict[str, Any]]:
+    """Get all rate limit configurations"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM rate_limits ORDER BY priority DESC, created_at ASC")
+        return rows_to_list(cursor.fetchall())
+
+
+def create_rate_limit(
+    rate_limit_id: str,
+    user_id: Optional[str] = None,
+    api_key_id: Optional[str] = None,
+    requests_per_minute: int = 20,
+    requests_per_hour: int = 200,
+    requests_per_day: int = 1000,
+    concurrent_requests: int = 3,
+    priority: int = 0,
+    is_unlimited: bool = False
+) -> Dict[str, Any]:
+    """Create a new rate limit configuration"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO rate_limits
+               (id, user_id, api_key_id, requests_per_minute, requests_per_hour,
+                requests_per_day, concurrent_requests, priority, is_unlimited, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (rate_limit_id, user_id, api_key_id, requests_per_minute, requests_per_hour,
+             requests_per_day, concurrent_requests, priority, is_unlimited, now, now)
+        )
+    return get_rate_limit(rate_limit_id)
+
+
+def update_rate_limit(
+    rate_limit_id: str,
+    requests_per_minute: Optional[int] = None,
+    requests_per_hour: Optional[int] = None,
+    requests_per_day: Optional[int] = None,
+    concurrent_requests: Optional[int] = None,
+    priority: Optional[int] = None,
+    is_unlimited: Optional[bool] = None
+) -> Optional[Dict[str, Any]]:
+    """Update a rate limit configuration"""
+    existing = get_rate_limit(rate_limit_id)
+    if not existing:
+        return None
+
+    updates = ["updated_at = ?"]
+    values = [datetime.utcnow().isoformat()]
+
+    if requests_per_minute is not None:
+        updates.append("requests_per_minute = ?")
+        values.append(requests_per_minute)
+    if requests_per_hour is not None:
+        updates.append("requests_per_hour = ?")
+        values.append(requests_per_hour)
+    if requests_per_day is not None:
+        updates.append("requests_per_day = ?")
+        values.append(requests_per_day)
+    if concurrent_requests is not None:
+        updates.append("concurrent_requests = ?")
+        values.append(concurrent_requests)
+    if priority is not None:
+        updates.append("priority = ?")
+        values.append(priority)
+    if is_unlimited is not None:
+        updates.append("is_unlimited = ?")
+        values.append(is_unlimited)
+
+    values.append(rate_limit_id)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"UPDATE rate_limits SET {', '.join(updates)} WHERE id = ?",
+            values
+        )
+
+    return get_rate_limit(rate_limit_id)
+
+
+def delete_rate_limit(rate_limit_id: str) -> bool:
+    """Delete a rate limit configuration"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM rate_limits WHERE id = ?", (rate_limit_id,))
+        return cursor.rowcount > 0
+
+
+# ============================================================================
+# Request Log Operations
+# ============================================================================
+
+def log_request(
+    request_id: str,
+    user_id: Optional[str],
+    api_key_id: Optional[str],
+    endpoint: str,
+    status: str = "success",
+    duration_ms: Optional[int] = None
+) -> Dict[str, Any]:
+    """Log a request for rate limit tracking"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO request_log (id, user_id, api_key_id, endpoint, timestamp, duration_ms, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (request_id, user_id, api_key_id, endpoint, now, duration_ms, status)
+        )
+    return {
+        "id": request_id,
+        "user_id": user_id,
+        "api_key_id": api_key_id,
+        "endpoint": endpoint,
+        "timestamp": now,
+        "duration_ms": duration_ms,
+        "status": status
+    }
+
+
+def get_request_count(
+    user_id: Optional[str],
+    api_key_id: Optional[str],
+    since: datetime,
+    endpoint: Optional[str] = None
+) -> int:
+    """Get the count of requests since a given time"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        query = "SELECT COUNT(*) as count FROM request_log WHERE timestamp >= ?"
+        params = [since.isoformat()]
+
+        if api_key_id:
+            query += " AND api_key_id = ?"
+            params.append(api_key_id)
+        elif user_id:
+            query += " AND (user_id = ? OR api_key_id IN (SELECT id FROM api_users WHERE name = ?))"
+            params.extend([user_id, user_id])
+
+        if endpoint:
+            query += " AND endpoint = ?"
+            params.append(endpoint)
+
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+        return row["count"] if row else 0
+
+
+def cleanup_old_request_logs(older_than: datetime) -> int:
+    """Remove request logs older than a given time"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM request_log WHERE timestamp < ?",
+            (older_than.isoformat(),)
+        )
+        return cursor.rowcount
+
+
+# ============================================================================
+# Knowledge Base Operations
+# ============================================================================
+
+def get_knowledge_documents(project_id: str) -> List[Dict[str, Any]]:
+    """Get all knowledge documents for a project"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM knowledge_documents WHERE project_id = ? ORDER BY created_at DESC",
+            (project_id,)
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def get_knowledge_document(document_id: str) -> Optional[Dict[str, Any]]:
+    """Get a knowledge document by ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM knowledge_documents WHERE id = ?", (document_id,))
+        return row_to_dict(cursor.fetchone())
+
+
+def create_knowledge_document(
+    document_id: str,
+    project_id: str,
+    filename: str,
+    content: str,
+    content_type: str = "text/plain",
+    file_size: int = 0,
+    chunk_count: int = 0
+) -> Optional[Dict[str, Any]]:
+    """Create a new knowledge document"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO knowledge_documents
+               (id, project_id, filename, content, content_type, file_size, chunk_count, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (document_id, project_id, filename, content, content_type, file_size, chunk_count, now, now)
+        )
+    return get_knowledge_document(document_id)
+
+
+def update_knowledge_document(
+    document_id: str,
+    content: Optional[str] = None,
+    chunk_count: Optional[int] = None
+) -> Optional[Dict[str, Any]]:
+    """Update a knowledge document"""
+    existing = get_knowledge_document(document_id)
+    if not existing:
+        return None
+
+    updates = ["updated_at = ?"]
+    values = [datetime.utcnow().isoformat()]
+
+    if content is not None:
+        updates.append("content = ?")
+        values.append(content)
+        updates.append("file_size = ?")
+        values.append(len(content))
+    if chunk_count is not None:
+        updates.append("chunk_count = ?")
+        values.append(chunk_count)
+
+    values.append(document_id)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"UPDATE knowledge_documents SET {', '.join(updates)} WHERE id = ?",
+            values
+        )
+
+    return get_knowledge_document(document_id)
+
+
+def delete_knowledge_document(document_id: str) -> bool:
+    """Delete a knowledge document (chunks will be cascade deleted)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM knowledge_documents WHERE id = ?", (document_id,))
+        return cursor.rowcount > 0
+
+
+def get_knowledge_chunks(document_id: str) -> List[Dict[str, Any]]:
+    """Get all chunks for a document"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM knowledge_chunks WHERE document_id = ? ORDER BY chunk_index",
+            (document_id,)
+        )
+        rows = rows_to_list(cursor.fetchall())
+        for row in rows:
+            if row.get("metadata"):
+                row["metadata"] = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]
+        return rows
+
+
+def get_all_knowledge_chunks_for_project(project_id: str) -> List[Dict[str, Any]]:
+    """Get all chunks for all documents in a project"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT kc.*, kd.filename
+               FROM knowledge_chunks kc
+               JOIN knowledge_documents kd ON kc.document_id = kd.id
+               WHERE kd.project_id = ?
+               ORDER BY kd.created_at, kc.chunk_index""",
+            (project_id,)
+        )
+        rows = rows_to_list(cursor.fetchall())
+        for row in rows:
+            if row.get("metadata"):
+                row["metadata"] = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]
+        return rows
+
+
+def create_knowledge_chunk(
+    chunk_id: str,
+    document_id: str,
+    chunk_index: int,
+    content: str,
+    metadata: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, Any]]:
+    """Create a new knowledge chunk"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO knowledge_chunks (id, document_id, chunk_index, content, metadata, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (chunk_id, document_id, chunk_index, content, json.dumps(metadata or {}), now)
+        )
+        cursor.execute("SELECT * FROM knowledge_chunks WHERE id = ?", (chunk_id,))
+        row = row_to_dict(cursor.fetchone())
+        if row and row.get("metadata"):
+            row["metadata"] = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]
+        return row
+
+
+def delete_knowledge_chunks_for_document(document_id: str) -> int:
+    """Delete all chunks for a document. Returns count of deleted chunks."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM knowledge_chunks WHERE document_id = ?", (document_id,))
+        return cursor.rowcount
+
+
+def search_knowledge_chunks(project_id: str, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Simple keyword-based search for relevant knowledge chunks.
+    Returns chunks that contain the query terms (case-insensitive).
+
+    For future: This can be enhanced with vector embeddings for semantic search.
+    """
+    query_lower = query.lower()
+    query_terms = query_lower.split()
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT kc.*, kd.filename
+               FROM knowledge_chunks kc
+               JOIN knowledge_documents kd ON kc.document_id = kd.id
+               WHERE kd.project_id = ?""",
+            (project_id,)
+        )
+        rows = rows_to_list(cursor.fetchall())
+
+        scored_chunks = []
+        for row in rows:
+            content_lower = row["content"].lower()
+            score = sum(1 for term in query_terms if term in content_lower)
+            if score > 0:
+                row["relevance_score"] = score
+                if row.get("metadata"):
+                    row["metadata"] = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]
+                scored_chunks.append(row)
+
+        scored_chunks.sort(key=lambda x: x["relevance_score"], reverse=True)
+        return scored_chunks[:limit]
+
+
+def get_knowledge_stats_for_project(project_id: str) -> Dict[str, Any]:
+    """Get knowledge base statistics for a project"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT COUNT(*) as document_count,
+                      COALESCE(SUM(file_size), 0) as total_size,
+                      COALESCE(SUM(chunk_count), 0) as total_chunks
+               FROM knowledge_documents WHERE project_id = ?""",
+            (project_id,)
+        )
+        row = cursor.fetchone()
+        return {
+            "document_count": row["document_count"] if row else 0,
+            "total_size": row["total_size"] if row else 0,
+            "total_chunks": row["total_chunks"] if row else 0
+        }
+
+
+# ============================================================================
+# Git Repository Operations
+# ============================================================================
+
+def get_git_repository(repository_id: str) -> Optional[Dict[str, Any]]:
+    """Get a git repository by ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM git_repositories WHERE id = ?", (repository_id,))
+        return row_to_dict(cursor.fetchone())
+
+
+def get_git_repository_by_project(project_id: str) -> Optional[Dict[str, Any]]:
+    """Get a git repository by project ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM git_repositories WHERE project_id = ?", (project_id,))
+        return row_to_dict(cursor.fetchone())
+
+
+def get_all_git_repositories() -> List[Dict[str, Any]]:
+    """Get all git repositories"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM git_repositories ORDER BY created_at DESC")
+        return rows_to_list(cursor.fetchall())
+
+
+def create_git_repository(
+    repository_id: str,
+    project_id: str,
+    remote_url: Optional[str] = None,
+    default_branch: str = "main",
+    github_repo_name: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Create a new git repository record"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO git_repositories (id, project_id, remote_url, default_branch, github_repo_name, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (repository_id, project_id, remote_url, default_branch, github_repo_name, now)
+        )
+    return get_git_repository(repository_id)
+
+
+def update_git_repository(
+    repository_id: str,
+    remote_url: Optional[str] = None,
+    default_branch: Optional[str] = None,
+    github_repo_name: Optional[str] = None,
+    last_synced_at: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Update a git repository"""
+    existing = get_git_repository(repository_id)
+    if not existing:
+        return None
+
+    updates = []
+    values = []
+
+    if remote_url is not None:
+        updates.append("remote_url = ?")
+        values.append(remote_url if remote_url else None)
+    if default_branch is not None:
+        updates.append("default_branch = ?")
+        values.append(default_branch)
+    if github_repo_name is not None:
+        updates.append("github_repo_name = ?")
+        values.append(github_repo_name if github_repo_name else None)
+    if last_synced_at is not None:
+        updates.append("last_synced_at = ?")
+        values.append(last_synced_at)
+
+    if updates:
+        values.append(repository_id)
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE git_repositories SET {', '.join(updates)} WHERE id = ?",
+                values
+            )
+
+    return get_git_repository(repository_id)
+
+
+def update_git_repository_synced(repository_id: str) -> Optional[Dict[str, Any]]:
+    """Update the last_synced_at timestamp for a git repository"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE git_repositories SET last_synced_at = ? WHERE id = ?",
+            (now, repository_id)
+        )
+    return get_git_repository(repository_id)
+
+
+def delete_git_repository(repository_id: str) -> bool:
+    """Delete a git repository (worktrees will be cascade deleted)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM git_repositories WHERE id = ?", (repository_id,))
+        return cursor.rowcount > 0
+
+
+# ============================================================================
+# Worktree Operations
+# ============================================================================
+
+def get_worktree(worktree_id: str) -> Optional[Dict[str, Any]]:
+    """Get a worktree by ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM worktrees WHERE id = ?", (worktree_id,))
+        return row_to_dict(cursor.fetchone())
+
+
+def get_worktree_by_session(session_id: str) -> Optional[Dict[str, Any]]:
+    """Get a worktree by session ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM worktrees WHERE session_id = ?", (session_id,))
+        return row_to_dict(cursor.fetchone())
+
+
+def get_worktrees_for_repository(repository_id: str) -> List[Dict[str, Any]]:
+    """Get all worktrees for a repository"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM worktrees WHERE repository_id = ? ORDER BY created_at DESC",
+            (repository_id,)
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def get_active_worktrees_for_repository(repository_id: str) -> List[Dict[str, Any]]:
+    """Get all active worktrees for a repository"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM worktrees WHERE repository_id = ? AND status = 'active' ORDER BY created_at DESC",
+            (repository_id,)
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def create_worktree(
+    worktree_id: str,
+    repository_id: str,
+    branch_name: str,
+    worktree_path: str,
+    session_id: Optional[str] = None,
+    base_branch: Optional[str] = None,
+    status: str = "active"
+) -> Optional[Dict[str, Any]]:
+    """Create a new worktree record"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO worktrees (id, repository_id, session_id, branch_name, worktree_path, base_branch, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (worktree_id, repository_id, session_id, branch_name, worktree_path, base_branch, status, now)
+        )
+    return get_worktree(worktree_id)
+
+
+def update_worktree(
+    worktree_id: str,
+    session_id: Optional[str] = None,
+    status: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Update a worktree"""
+    existing = get_worktree(worktree_id)
+    if not existing:
+        return None
+
+    updates = []
+    values = []
+
+    if session_id is not None:
+        updates.append("session_id = ?")
+        values.append(session_id if session_id else None)
+    if status is not None:
+        updates.append("status = ?")
+        values.append(status)
+
+    if updates:
+        values.append(worktree_id)
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE worktrees SET {', '.join(updates)} WHERE id = ?",
+                values
+            )
+
+    return get_worktree(worktree_id)
+
+
+def delete_worktree(worktree_id: str) -> bool:
+    """Delete a worktree record"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM worktrees WHERE id = ?", (worktree_id,))
+        return cursor.rowcount > 0
+
+
+def delete_worktrees_for_repository(repository_id: str) -> int:
+    """Delete all worktrees for a repository. Returns count of deleted worktrees."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM worktrees WHERE repository_id = ?", (repository_id,))
+        return cursor.rowcount

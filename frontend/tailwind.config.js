@@ -1,5 +1,6 @@
 /** @type {import('tailwindcss').Config} */
 export default {
+	darkMode: 'class',
 	content: ['./src/**/*.{html,js,svelte,ts}'],
 	theme: {
 		extend: {
@@ -22,10 +23,16 @@ export default {
 					foreground: 'var(--destructive-foreground)'
 				},
 				success: {
-					DEFAULT: 'var(--success)'
+					DEFAULT: 'var(--success)',
+					foreground: 'var(--success-foreground)'
 				},
 				warning: {
-					DEFAULT: 'var(--warning)'
+					DEFAULT: 'var(--warning)',
+					foreground: 'var(--warning-foreground)'
+				},
+				info: {
+					DEFAULT: 'var(--info)',
+					foreground: 'var(--info-foreground)'
 				},
 				muted: {
 					DEFAULT: 'var(--muted)',
@@ -53,6 +60,13 @@ export default {
 				s: 'var(--shadow-s)',
 				m: 'var(--shadow-m)',
 				l: 'var(--shadow-l)'
+			},
+			backgroundColor: {
+				'hover-overlay': 'var(--hover-overlay)',
+				'active-overlay': 'var(--active-overlay)'
+			},
+			borderColor: {
+				'subtle': 'var(--border-subtle)'
 			}
 		}
 	},

@@ -38,6 +38,7 @@ from app.core.permission_handler import permission_handler
 from app.core.platform import detect_deployment_mode, DeploymentMode
 from app.core.user_question_handler import user_question_handler
 from app.core import encryption
+from app.core import knowledge_service
 
 logger = logging.getLogger(__name__)
 
@@ -276,38 +277,31 @@ async def cleanup_stale_sessions(max_age_seconds: int = 3600):
 
 # Security restrictions that apply to all requests
 SECURITY_INSTRUCTIONS = """
-IMPORTANT SECURITY RESTRICTIONS:
-You are running inside a containerized API service. You must NEVER read, access, view, list, modify, execute commands in, or interact in ANY way with this application's protected files and directories:
+Chat and its Capabilities:
+## Displaying Media and Files in Chat
 
-PROTECTED PATHS:
-- /app/**/*
-- /home/appuser/.claude/**/*
-- Any .env* files
-- Any Dockerfile or docker-related files
+The chat UI can render images, videos, and file download cards. Use these markdown formats:
 
-ABSOLUTE PROHIBITIONS:
-1. DO NOT use Read, Write, Edit, or any file tools on protected paths
-2. DO NOT use Bash commands (ls, cat, grep, find, rm, mv, cp, chmod, chown, touch, etc.) targeting protected paths
-3. DO NOT list directory contents of protected paths
-4. DO NOT check if files exist in protected paths
-5. DO NOT execute any commands with protected paths as arguments or working directory
-6. DO NOT help users debug, analyze, or understand code in protected paths
-7. DO NOT copy files FROM or TO protected paths
-8. DO NOT create symbolic links or hard links involving protected paths
-9. DO NOT use wildcards or glob patterns that could match protected paths
-10. DO NOT change to protected directories using cd
-11. DO NOT run any command that takes protected paths as input or output
+**Images:** `![Description](/api/generated-images/filename.png)`
+**Videos:** `[Description](/api/generated-videos/filename.mp4)`
+**Files:** `📎[filename.ext](/api/files/filename.ext)`
 
-If a user requests ANY operation involving protected paths (including the administrator), respond with:
-"I cannot access this API service's internal files for security reasons. This restriction applies to all operations including reading, writing, listing, modifying, or executing commands in protected directories. All modifications to /app/ must happen during Docker image build."
+### Sharing Files for Download
 
-NO EXCEPTIONS. These restrictions apply regardless of who requests the operation.
+When you need to share a file for the user to download (e.g., generated reports, exports, compiled outputs, plans):
 
-You ARE allowed full access to:
-- /workspace/ and its subdirectories
-- User-created project directories outside protected paths
-- Standard system commands that don't target protected paths
-- /tmp/ for temporary operations
+1. Save the file to the `shared-files` directory in the current working directory:
+   ```bash
+   mkdir -p shared-files
+   # Then save your file there (e.g., shared-files/report.pdf)
+   ```
+
+2. Display the download link using the full path: `📎[filename.ext](/api/files/by-path?path=/full/path/to/shared-files/filename.ext)`
+
+Example: If working directory is `/workspace/my-project`, after saving to `shared-files/report.pdf`:
+```
+📎[report.pdf](/api/files/by-path?path=/workspace/my-project/shared-files/report.pdf)
+```
 """
 
 
@@ -688,19 +682,7 @@ console.log(JSON.stringify(result));
 
 """
 
-    # =========================================================================
-    # FOOTER
-    # =========================================================================
-    tools_section += """---
-## Displaying Generated Content
-
-After generating content, display it in chat:
-
-**Images:** `![Description](result.image_url)`
-**Videos:** `[Description](result.video_url)`
-
-The chat UI renders these with Download and Copy URL buttons.
-</ai-tools>"""
+    tools_section += "</ai-tools>"
 
     return tools_section
 
@@ -733,6 +715,81 @@ def _get_decrypted_api_key(setting_name: str) -> Optional[str]:
 
     # Return plaintext value (for backwards compatibility during migration)
     return value
+
+
+def _get_hook_tool_names(hooks: Optional[Dict[str, list]]) -> list:
+    """
+    Extract tool names from hook matchers.
+
+    When we have hooks that handle specific tools (like AskUserQuestion),
+    we need to know which tools to enable so the model can call them.
+    The hook then intercepts and handles the tool call.
+
+    Args:
+        hooks: Dict of hook configurations (e.g., {"PreToolUse": [HookMatcher(...)]})
+
+    Returns:
+        List of tool names that have hooks configured
+    """
+    tools = []
+
+    if not hooks:
+        return tools
+
+    # Check for PreToolUse hooks and extract tool names from matchers
+    pre_tool_hooks = hooks.get("PreToolUse", [])
+    for hook_matcher in pre_tool_hooks:
+        if hasattr(hook_matcher, "matcher") and hook_matcher.matcher:
+            # The matcher can be a tool name like "AskUserQuestion"
+            # or a pattern like "Bash|Edit" - we add all parts
+            tool_names = hook_matcher.matcher.split("|")
+            for tool_name in tool_names:
+                tool_name = tool_name.strip()
+                if tool_name and tool_name not in tools:
+                    tools.append(tool_name)
+                    logger.info(f"Found hooked tool: '{tool_name}'")
+
+    return tools
+
+
+def _build_extra_args(
+    base_extra_args: Dict[str, str],
+    hooks: Optional[Dict[str, list]]
+) -> Dict[str, str]:
+    """
+    Build extra_args dict, adding --allowed-tools for any hooked tools.
+
+    When we have hooks that handle specific tools (like AskUserQuestion),
+    we must pass them via --allowed-tools CLI flag so the model can call them.
+    The SDK's allowed_tools option only filters existing tools, it doesn't add new ones.
+
+    Args:
+        base_extra_args: Base extra args from profile config
+        hooks: Dict of hook configurations (e.g., {"PreToolUse": [HookMatcher(...)]})
+
+    Returns:
+        Dict of extra args to pass to CLI
+    """
+    extra_args = dict(base_extra_args) if base_extra_args else {}
+
+    # Get tool names from hooks
+    hook_tools = _get_hook_tool_names(hooks)
+
+    if hook_tools:
+        # Merge with any existing allowed-tools
+        existing = extra_args.get("allowed-tools", "")
+        existing_tools = [t.strip() for t in existing.split(",") if t.strip()] if existing else []
+
+        # Add hook tools that aren't already in the list
+        for tool in hook_tools:
+            if tool not in existing_tools:
+                existing_tools.append(tool)
+                logger.info(f"Adding '{tool}' to --allowed-tools (required for hook handler)")
+
+        if existing_tools:
+            extra_args["allowed-tools"] = ",".join(existing_tools)
+
+    return extra_args
 
 
 def _build_env_with_ai_tools(
@@ -866,7 +923,16 @@ def build_options_from_profile(
     overrides = overrides or {}
 
     # Determine working directory first (needed for env details injection)
-    if project:
+    # Check if session has associated worktree - worktree takes priority
+    if resume_session_id:
+        worktree = database.get_worktree_by_session(resume_session_id)
+        if worktree and worktree.get("status") == "active":
+            working_dir = str(settings.workspace_dir / worktree["worktree_path"])
+        elif project:
+            working_dir = str(settings.workspace_dir / project["path"])
+        else:
+            working_dir = str(settings.workspace_dir)
+    elif project:
         working_dir = str(settings.workspace_dir / project["path"])
     elif config.get("cwd"):
         working_dir = config.get("cwd")
@@ -1024,7 +1090,7 @@ def build_options_from_profile(
 
         # Environment and arguments - inject AI tool credentials if enabled
         env=_build_env_with_ai_tools(config.get("env"), ai_tools_config),
-        extra_args=config.get("extra_args") or {},
+        extra_args=_build_extra_args(config.get("extra_args") or {}, hooks),
 
         # Buffer settings - Default to 50MB to handle large file reads (images, PDFs)
         # The SDK's default is 1MB which causes "JSON message exceeded maximum buffer size" errors
@@ -2393,8 +2459,27 @@ async def stream_to_websocket(
     interrupted = False
     include_partial = options.include_partial_messages  # Track if streaming events are enabled
 
+    # Inject knowledge base context if project has knowledge documents
+    # This prepends relevant context to the user's prompt based on keyword matching
+    enhanced_prompt = prompt
+    if project_id:
+        try:
+            relevant_context = knowledge_service.get_relevant_context(
+                project_id=project_id,
+                query=prompt,
+                max_chunks=5,
+                max_chars=4000
+            )
+            if relevant_context:
+                formatted_context = knowledge_service.format_context_for_prompt(relevant_context)
+                enhanced_prompt = formatted_context + "\n\n" + prompt
+                logger.info(f"[WS] Injected knowledge base context ({len(relevant_context)} chars) for session {session_id}")
+        except Exception as e:
+            logger.warning(f"[WS] Failed to retrieve knowledge context: {e}")
+            # Continue without knowledge context
+
     try:
-        await state.client.query(prompt)
+        await state.client.query(enhanced_prompt)
 
         async for message in state.client.receive_response():
             # Check for interrupt request as a failsafe

@@ -18,11 +18,13 @@
 		selectionMode,
 		adminSelectionMode,
 		sessionsLoading,
+		sessionsTagFilter,
+		adminSessionsTagFilter,
 		type ChatMessage,
 		type ChatTab,
 		type ApiUser
 	} from '$lib/stores/tabs';
-	import { api, type FileUploadResponse, searchSessions, type SessionSearchResult } from '$lib/api/client';
+	import { api, type FileUploadResponse, searchSessions, type SessionSearchResult, exportSession, toggleSessionFavorite, getTags, forkSession, type Tag, type SessionTag, type ForkSessionResponse } from '$lib/api/client';
 	import { marked } from 'marked';
 	import TerminalModal from '$lib/components/TerminalModal.svelte';
 	import SystemMessage from '$lib/components/SystemMessage.svelte';
@@ -39,9 +41,20 @@
 	import TodoList from '$lib/components/TodoList.svelte';
 	import SettingsModal from '$lib/components/SettingsModal.svelte';
 	import ProfileModal from '$lib/components/ProfileModal.svelte';
+	import AgentImportModal from '$lib/components/AgentImportModal.svelte';
+	import { exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
+	import KeyboardShortcutsModal from '$lib/components/KeyboardShortcutsModal.svelte';
+	import AnalyticsModal from '$lib/components/AnalyticsModal.svelte';
+	import ImportSessionModal from '$lib/components/ImportSessionModal.svelte';
+	import TagManager from '$lib/components/TagManager.svelte';
+	import SessionTagPicker from '$lib/components/SessionTagPicker.svelte';
+	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
+	import KnowledgeManager from '$lib/components/KnowledgeManager.svelte';
+	import GitModal from '$lib/components/git/GitModal.svelte';
 	import { groups, organizeByGroups } from '$lib/stores/groups';
 	import { executeCommand, isSlashCommand, listCommands, type Command } from '$lib/api/commands';
 	import { groupSessionsByDate, type DateGroup } from '$lib/utils/dateGroups';
+	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
 
 	// Configure marked for better code highlighting
 	marked.setOptions({
@@ -119,7 +132,25 @@
 	// Session sidebar state
 	let sessionSearchQuery = '';
 	let sessionSearchExpanded = false;
+	let showFavoritesOnly = false;
 	let collapsedGroups: Set<string> = new Set(['yesterday', 'week', 'month', 'older']); // Only 'today' expanded by default
+
+	// Tag management state
+	let showTagManager = false;
+	let showTagPicker = false;
+	let tagPickerSessionId: string | null = null;
+	let tagPickerPosition = { x: 0, y: 0 };
+	let tagPickerCurrentTags: SessionTag[] = [];
+	let allTags: Tag[] = [];
+
+	// Load all tags when component mounts
+	async function loadAllTags() {
+		try {
+			allTags = await getTags();
+		} catch (e) {
+			console.error('Failed to load tags:', e);
+		}
+	}
 
 	// Search state
 	let searchResults: SessionSearchResult[] = [];
@@ -160,7 +191,7 @@
 	$: debouncedSearch(sessionSearchQuery);
 
 	// Computed: filtered and grouped sessions (when not searching)
-	$: filteredSessions = $sessions;
+	$: filteredSessions = showFavoritesOnly ? $sessions.filter(s => s.is_favorite) : $sessions;
 	$: groupedSessions = groupSessionsByDate(filteredSessions);
 
 	// Admin sessions grouped (when not searching)
@@ -262,6 +293,8 @@
 	let showProfileModal = false;
 	let showProjectModal = false;
 	let showNewProjectForm = false;
+	let showKnowledgeModal = false;
+	let showGitModal = false;
 	let editingProfile: any = null;
 	let fileInput: HTMLInputElement;
 	let isUploading = false;
@@ -287,6 +320,21 @@
 
 	// Settings modal state
 	let showSettingsModal = false;
+
+	// Keyboard shortcuts modal state
+	let showKeyboardShortcuts = false;
+
+	// Analytics modal state
+	let showAnalyticsModal = false;
+
+	// Import session modal state
+	let showImportModal = false;
+
+	// Advanced search modal state (Cmd+Shift+F)
+	let showAdvancedSearch = false;
+
+	// Shortcut registrations (for cleanup)
+	let shortcutRegistrations: ShortcutRegistration[] = [];
 
 	// Mobile tools menu state
 	let showToolsMenu = false;
@@ -328,6 +376,7 @@
 		tabs.loadProfiles();
 		tabs.loadSessions();
 		tabs.loadProjects();
+		loadAllTags();
 		// Load admin-specific data if user is admin
 		if ($isAdmin) {
 			tabs.loadApiUsers();
@@ -347,7 +396,8 @@
 				tabs.loadProjects(),
 				loadSubagents(),
 				loadTools(),
-				loadAvailableAITools()
+				loadAvailableAITools(),
+				loadAllTags()
 			];
 			// Load admin-specific data if user is admin
 			if ($isAdmin) {
@@ -371,24 +421,162 @@
 
 		window.addEventListener('pageshow', handlePageShow);
 
-		// Spotlight search keyboard shortcut (Cmd+K / Ctrl+K)
-		const handleSpotlightKeydown = (event: KeyboardEvent) => {
-			if ((event.metaKey || event.ctrlKey) && event.key === 'k') {
-				event.preventDefault();
-				showSpotlight = !showSpotlight;
-			}
-		};
+		// Register keyboard shortcuts
+		shortcutRegistrations = [
+			// Spotlight search (Cmd+K)
+			registerShortcut({
+				id: 'spotlight',
+				description: 'Open spotlight search',
+				key: 'k',
+				cmdOrCtrl: true,
+				category: 'navigation',
+				action: () => { showSpotlight = !showSpotlight; }
+			}),
 
-		window.addEventListener('keydown', handleSpotlightKeydown);
+			// New chat (Cmd+N)
+			registerShortcut({
+				id: 'new-chat',
+				description: 'Start new chat',
+				key: 'n',
+				cmdOrCtrl: true,
+				category: 'chat',
+				action: () => { handleNewTab(); }
+			}),
+
+			// Send message (Cmd+Enter)
+			registerShortcut({
+				id: 'send-message',
+				description: 'Send message',
+				key: 'Enter',
+				cmdOrCtrl: true,
+				category: 'chat',
+				allowInInput: true,
+				action: () => {
+					if ($activeTabId) {
+						handleSubmit($activeTabId);
+					}
+				}
+			}),
+
+			// Stop generation (Cmd+Shift+S)
+			registerShortcut({
+				id: 'stop-generation',
+				description: 'Stop generation',
+				key: 's',
+				cmdOrCtrl: true,
+				shift: true,
+				category: 'chat',
+				action: () => {
+					if ($activeTabId && $activeTab?.isStreaming) {
+						tabs.stopGeneration($activeTabId);
+					}
+				}
+			}),
+
+			// Show keyboard shortcuts (Cmd+/)
+			registerShortcut({
+				id: 'show-shortcuts',
+				description: 'Show keyboard shortcuts',
+				key: '/',
+				cmdOrCtrl: true,
+				category: 'general',
+				action: () => { showKeyboardShortcuts = !showKeyboardShortcuts; }
+			}),
+
+			// Show keyboard shortcuts (? key)
+			registerShortcut({
+				id: 'show-shortcuts-question',
+				description: 'Show keyboard shortcuts',
+				key: '?',
+				category: 'general',
+				action: () => { showKeyboardShortcuts = true; }
+			}),
+
+			// Close modals (Escape)
+			registerShortcut({
+				id: 'close-modal',
+				description: 'Close modal / cancel',
+				key: 'Escape',
+				category: 'general',
+				allowInInput: true,
+				action: () => {
+					// Close modals in priority order
+					if (showKeyboardShortcuts) {
+						showKeyboardShortcuts = false;
+					} else if (showAdvancedSearch) {
+						showAdvancedSearch = false;
+					} else if (showSpotlight) {
+						showSpotlight = false;
+					} else if (showSettingsModal) {
+						showSettingsModal = false;
+					} else if (showImportModal) {
+						showImportModal = false;
+					} else if (showProfileModal) {
+						showProfileModal = false;
+					} else if (showSubagentManager) {
+						showSubagentManager = false;
+					} else if (showProjectModal) {
+						showProjectModal = false;
+					} else if (showTerminalModal) {
+						showTerminalModal = false;
+					} else if (showGitModal) {
+						showGitModal = false;
+					} else if (showKnowledgeModal) {
+						showKnowledgeModal = false;
+					}
+				}
+			}),
+
+			// Open settings (Cmd+,)
+			registerShortcut({
+				id: 'open-settings',
+				description: 'Open settings',
+				key: ',',
+				cmdOrCtrl: true,
+				category: 'navigation',
+				action: () => { showSettingsModal = true; }
+			}),
+
+			// Advanced search (Cmd+Shift+F)
+			registerShortcut({
+				id: 'advanced-search',
+				description: 'Advanced search',
+				key: 'f',
+				cmdOrCtrl: true,
+				shift: true,
+				category: 'navigation',
+				action: () => { showAdvancedSearch = !showAdvancedSearch; }
+			}),
+
+			// Git modal (Cmd+Shift+G)
+			registerShortcut({
+				id: 'git-modal',
+				description: 'Open Git & GitHub',
+				key: 'g',
+				cmdOrCtrl: true,
+				shift: true,
+				category: 'navigation',
+				action: () => {
+					if ($activeTab?.project) {
+						showGitModal = !showGitModal;
+					}
+				}
+			})
+		];
 
 		return () => {
 			window.removeEventListener('pageshow', handlePageShow);
-			window.removeEventListener('keydown', handleSpotlightKeydown);
+			// Unregister all shortcuts
+			shortcutRegistrations.forEach(reg => reg.unregister());
+			shortcutRegistrations = [];
 		};
 	});
 
 	onDestroy(() => {
 		tabs.destroy();
+		// Also clean up shortcuts on destroy
+		shortcutRegistrations.forEach(reg => reg.unregister());
+		shortcutRegistrations = [];
 	});
 
 	// Initialize tabInputs for all tabs to ensure proper binding
@@ -703,6 +891,9 @@
 				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">Video loading...</div>');
 			processedContent = processedContent.replace(/"image_base64"\s*:\s*"([A-Za-z0-9+/=]{100,})"/g,
 				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">Image loading...</div>');
+			// Replace file download links with placeholder
+			processedContent = processedContent.replace(/📎\[([^\]]+)\]\((\/api\/files\/[^)]+)\)/g,
+				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">File preparing...</div>');
 			return marked(processedContent, { breaks: true }) as string;
 		}
 
@@ -831,6 +1022,65 @@
 			</div>`;
 		});
 
+		// Render file download cards for shared files
+		// Syntax: 📎[filename.ext](/api/files/filename.ext) or 📎[filename.ext](/api/files/by-path?path=...)
+		const fileDownloadPattern = /📎\[([^\]]+)\]\((\/api\/files\/[^)]+)\)/g;
+		processedContent = processedContent.replace(fileDownloadPattern, (match, displayName, fileUrl) => {
+			// Use the display name from markdown, fallback to extracting from URL
+			let filename = displayName;
+			if (!filename) {
+				// Try to extract from by-path URL or simple URL
+				const pathMatch = fileUrl.match(/[?&]path=([^&]+)/);
+				if (pathMatch) {
+					filename = decodeURIComponent(pathMatch[1]).split('/').pop() || 'file';
+				} else {
+					filename = fileUrl.split('/').pop() || 'file';
+				}
+			}
+			const ext = filename.split('.').pop()?.toLowerCase() || '';
+
+			// File type icons mapping
+			const iconMap: Record<string, string> = {
+				'pdf': '📄', 'doc': '📝', 'docx': '📝', 'odt': '📝', 'rtf': '📝',
+				'xls': '📊', 'xlsx': '📊', 'ods': '📊', 'csv': '📊',
+				'ppt': '📽️', 'pptx': '📽️', 'odp': '📽️',
+				'txt': '📃', 'md': '📃', 'log': '📃',
+				'json': '🔧', 'xml': '🔧', 'yaml': '🔧', 'yml': '🔧', 'toml': '🔧',
+				'py': '🐍', 'js': '💛', 'ts': '💙', 'mjs': '💛',
+				'sh': '⚙️', 'bash': '⚙️', 'bat': '⚙️', 'ps1': '⚙️',
+				'html': '🌐', 'css': '🎨', 'sql': '🗃️', 'sqlite': '🗃️', 'db': '🗃️',
+				'zip': '📦', 'tar': '📦', 'gz': '📦', 'tgz': '📦', '7z': '📦', 'rar': '📦',
+				'exe': '⚡', 'dmg': '💿', 'deb': '📦', 'rpm': '📦', 'apk': '📱'
+			};
+			const icon = iconMap[ext] || '📁';
+
+			return `<div class="file-download-card my-4 inline-flex items-center gap-3 p-3 bg-muted/50 hover:bg-muted/70 rounded-lg border border-border transition-colors max-w-md">
+				<div class="file-icon text-2xl flex-shrink-0">${icon}</div>
+				<div class="file-info flex-grow min-w-0">
+					<div class="file-name font-medium text-sm truncate" title="${filename}">${filename}</div>
+					<div class="file-type text-xs text-muted-foreground uppercase">${ext || 'file'}</div>
+				</div>
+				<div class="file-actions flex gap-1 flex-shrink-0">
+					<a href="${fileUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download file">
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+						</svg>
+					</a>
+					<button onclick="(function(btn){
+						navigator.clipboard.writeText(window.location.origin + '${fileUrl}');
+						btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
+						setTimeout(function() {
+							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
+						}, 2000);
+					})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+						</svg>
+					</button>
+				</div>
+			</div>`;
+		});
+
 		return marked(processedContent, { breaks: true }) as string;
 	}
 
@@ -938,6 +1188,60 @@
 					</div>
 				</div>`;
 			}
+
+			// Handle file download results
+			if (data.success && data.file_url) {
+				const fileUrl = data.file_url;
+				const filename = data.filename || 'file';
+				const fileSize = data.size_formatted || '';
+				const ext = filename.split('.').pop()?.toLowerCase() || '';
+
+				// File type icons
+				const iconMap: Record<string, string> = {
+					'pdf': '📄', 'doc': '📝', 'docx': '📝', 'odt': '📝', 'rtf': '📝',
+					'xls': '📊', 'xlsx': '📊', 'ods': '📊', 'csv': '📊',
+					'ppt': '📽️', 'pptx': '📽️', 'odp': '📽️',
+					'txt': '📃', 'md': '📃', 'log': '📃',
+					'json': '🔧', 'xml': '🔧', 'yaml': '🔧', 'yml': '🔧', 'toml': '🔧',
+					'py': '🐍', 'js': '💛', 'ts': '💙', 'mjs': '💛',
+					'sh': '⚙️', 'bash': '⚙️', 'bat': '⚙️', 'ps1': '⚙️',
+					'html': '🌐', 'css': '🎨', 'sql': '🗃️', 'sqlite': '🗃️', 'db': '🗃️',
+					'zip': '📦', 'tar': '📦', 'gz': '📦', 'tgz': '📦', '7z': '📦', 'rar': '📦',
+					'exe': '⚡', 'dmg': '💿', 'deb': '📦', 'rpm': '📦', 'apk': '📱'
+				};
+				const icon = iconMap[ext] || '📁';
+
+				return `<div class="generated-file-result">
+					<div class="mb-2 text-xs text-green-500">✓ File ready for download</div>
+					<div class="file-download-card inline-flex items-center gap-3 p-3 bg-muted/50 hover:bg-muted/70 rounded-lg border border-border transition-colors max-w-md">
+						<div class="file-icon text-2xl flex-shrink-0">${icon}</div>
+						<div class="file-info flex-grow min-w-0">
+							<div class="file-name font-medium text-sm truncate" title="${filename}">${filename}</div>
+							<div class="file-meta text-xs text-muted-foreground">
+								<span class="uppercase">${ext || 'file'}</span>${fileSize ? ` • ${fileSize}` : ''}
+							</div>
+						</div>
+						<div class="file-actions flex gap-1 flex-shrink-0">
+							<a href="${fileUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download file">
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+								</svg>
+							</a>
+							<button onclick="(function(btn){
+								navigator.clipboard.writeText(window.location.origin + '${fileUrl}');
+								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
+								setTimeout(function() {
+									btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
+								}, 2000);
+							})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy URL">
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+								</svg>
+							</button>
+						</div>
+					</div>
+				</div>`;
+			}
 		} catch {
 			// Not JSON, continue with default rendering
 		}
@@ -966,9 +1270,19 @@
 		}
 	}
 
-	// Check if tool result contains media (image or video)
+	// Check if tool result contains a downloadable file
+	function toolResultHasFile(content: string): boolean {
+		try {
+			const data = JSON.parse(content);
+			return data.success && data.file_url;
+		} catch {
+			return false;
+		}
+	}
+
+	// Check if tool result contains media (image, video, or file)
 	function toolResultHasMedia(content: string): boolean {
-		return toolResultHasImage(content) || toolResultHasVideo(content);
+		return toolResultHasImage(content) || toolResultHasVideo(content) || toolResultHasFile(content);
 	}
 
 	// Render standalone image display (for main chat, outside tool groups)
@@ -1104,6 +1418,37 @@
 		}
 	}
 
+	// Fork session from a specific message
+	let forkingMessageId: string | null = null;
+
+	async function handleForkSession(sessionId: string | undefined, messageIndex: number, messageId: string) {
+		if (!sessionId) {
+			alert('Cannot fork: no session ID');
+			return;
+		}
+		if (forkingMessageId) return; // Prevent double-clicks
+
+		forkingMessageId = messageId;
+		try {
+			const result = await forkSession(sessionId, messageIndex);
+			if (result.status === 'success') {
+				// Refresh sessions list
+				await tabs.loadSessions();
+				// Open the new forked session
+				await tabs.openSession(result.session_id);
+				alert(`Session forked successfully! New session: "${result.title}"`);
+			} else {
+				alert('Fork failed: ' + result.status);
+			}
+		} catch (e: unknown) {
+			const error = e as { detail?: string };
+			console.error('Failed to fork session:', e);
+			alert('Failed to fork session: ' + (error.detail || 'Unknown error'));
+		} finally {
+			forkingMessageId = null;
+		}
+	}
+
 	function formatTime(date?: Date): string {
 		const d = date || new Date();
 		return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
@@ -1167,6 +1512,70 @@
 		}
 	}
 
+	async function handleToggleFavorite(sessionId: string) {
+		try {
+			await toggleSessionFavorite(sessionId);
+			// Refresh the sessions list to get updated favorite status
+			await tabs.loadSessions();
+		} catch (e: any) {
+			console.error('Failed to toggle favorite:', e);
+		}
+	}
+
+	// Tag picker handlers
+	function openTagPicker(sessionId: string, tags: SessionTag[], position: { x: number; y: number }) {
+		tagPickerSessionId = sessionId;
+		tagPickerCurrentTags = tags || [];
+		// Adjust position to stay within viewport
+		const viewportWidth = window.innerWidth;
+		const viewportHeight = window.innerHeight;
+		tagPickerPosition = {
+			x: Math.min(position.x, viewportWidth - 240), // 240px is roughly picker width
+			y: Math.min(position.y, viewportHeight - 300) // 300px is roughly picker height
+		};
+		showTagPicker = true;
+	}
+
+	function closeTagPicker() {
+		showTagPicker = false;
+		tagPickerSessionId = null;
+	}
+
+	async function handleTagsUpdated(event: CustomEvent<SessionTag[]>) {
+		// Update the session in the local sessions list with new tags
+		const updatedTags = event.detail;
+		if (tagPickerSessionId) {
+			// Reload sessions to get the updated tags
+			await tabs.loadSessions($sessionsTagFilter);
+		}
+	}
+
+	function handleOpenTagManager() {
+		showTagPicker = false;
+		showTagManager = true;
+	}
+
+	async function handleTagManagerClose() {
+		showTagManager = false;
+		// Reload tags list
+		await loadAllTags();
+		// Reload sessions to reflect any tag changes
+		await tabs.loadSessions($sessionsTagFilter);
+	}
+
+	async function handleImportSuccess(event: CustomEvent<{ sessionId: string; title: string; messageCount: number }>) {
+		const { sessionId, title } = event.detail;
+
+		// Refresh the sessions list
+		await tabs.loadSessions();
+
+		// Close the sidebar
+		closeSidebar();
+
+		// Open the imported session
+		openSession(sessionId);
+	}
+
 	async function handleBatchDelete(isAdmin: boolean = false) {
 		const count = isAdmin ? $selectedAdminSessionIds.size : $selectedSessionIds.size;
 		if (count === 0) return;
@@ -1202,22 +1611,23 @@
 		}
 	}
 
-	// Profile export
-	async function exportProfile(profileId: string) {
+	// Profile/Agent export
+	async function handleExportProfile(profileId: string) {
 		try {
-			const data = await api.get<any>(`/export-import/profiles/${profileId}`);
-			const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-			const url = URL.createObjectURL(blob);
-			const a = document.createElement('a');
-			a.href = url;
-			a.download = `profile-${profileId}-${new Date().toISOString().split('T')[0]}.json`;
-			document.body.appendChild(a);
-			a.click();
-			document.body.removeChild(a);
-			URL.revokeObjectURL(url);
+			await exportAgent(profileId);
 		} catch (e: any) {
 			alert('Export failed: ' + (e.detail || 'Unknown error'));
 		}
+	}
+
+	// Agent import modal state
+	let showAgentImportModal = false;
+
+	// Handle agent import success
+	async function handleAgentImported(e: CustomEvent) {
+		await tabs.loadProfiles();
+		showAgentImportModal = false;
+		showProfileModal = false;  // Close profile modal too if open
 	}
 
 	async function createProject() {
@@ -1402,13 +1812,13 @@
 	<!-- Floating Icon Rail (Desktop) - 48px wide -->
 	<nav class="hidden lg:flex fixed left-3 top-3 bottom-3 flex-col w-12 z-50 floating-panel rounded-2xl">
 		<div class="flex flex-col items-center pt-3 gap-1">
-			<button on:click={handleNewTab} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-white/10 group" title="New Chat">
+			<button on:click={handleNewTab} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-hover-overlay group" title="New Chat">
 				<svg class="w-5 h-5 text-primary group-hover:scale-110 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
 				</svg>
 			</button>
-			<div class="w-6 h-px bg-white/10 my-2"></div>
-			<button on:click={() => toggleSidebarSection('sessions')} class="relative w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'sessions' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-white/10 text-muted-foreground hover:text-foreground'}" title="Sessions">
+			<div class="w-6 h-px bg-border-subtle my-2"></div>
+			<button on:click={() => toggleSidebarSection('sessions')} class="relative w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'sessions' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-hover-overlay text-muted-foreground hover:text-foreground'}" title="Sessions">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
 				</svg>
@@ -1417,17 +1827,17 @@
 				{/if}
 			</button>
 			{#if $isAdmin}
-				<button on:click={() => toggleSidebarSection('projects')} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'projects' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-white/10 text-muted-foreground hover:text-foreground'}" title="Projects">
+				<button on:click={() => toggleSidebarSection('projects')} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'projects' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-hover-overlay text-muted-foreground hover:text-foreground'}" title="Projects">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 					</svg>
 				</button>
-				<button on:click={() => toggleSidebarSection('profiles')} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'profiles' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-white/10 text-muted-foreground hover:text-foreground'}" title="Profiles">
+				<button on:click={() => toggleSidebarSection('profiles')} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'profiles' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-hover-overlay text-muted-foreground hover:text-foreground'}" title="Profiles">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
 					</svg>
 				</button>
-				<button on:click={() => toggleSidebarSection('subagents')} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'subagents' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-white/10 text-muted-foreground hover:text-foreground'}" title="Subagents">
+				<button on:click={() => toggleSidebarSection('subagents')} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all {activeSidebarSection === 'subagents' ? 'bg-primary text-primary-foreground shadow-glow' : 'hover:bg-hover-overlay text-muted-foreground hover:text-foreground'}" title="Subagents">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
 					</svg>
@@ -1435,8 +1845,22 @@
 			{/if}
 		</div>
 		<div class="mt-auto flex flex-col items-center pb-3 gap-1">
+			<!-- Analytics (Admin only) -->
 			{#if $isAdmin}
-				<button on:click={() => showSettingsModal = true} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-white/10 text-muted-foreground hover:text-foreground" title="Settings">
+				<button on:click={() => showAnalyticsModal = true} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-hover-overlay text-muted-foreground hover:text-foreground" title="Analytics">
+					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+					</svg>
+				</button>
+			{/if}
+			<!-- Keyboard Shortcuts -->
+			<button on:click={() => showKeyboardShortcuts = true} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-hover-overlay text-muted-foreground hover:text-foreground" title="Keyboard Shortcuts (?)">
+				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+				</svg>
+			</button>
+			{#if $isAdmin}
+				<button on:click={() => showSettingsModal = true} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-hover-overlay text-muted-foreground hover:text-foreground" title="Settings">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -1464,7 +1888,7 @@
 							type="text"
 							bind:value={sessionSearchQuery}
 							placeholder="Search conversations..."
-							class="w-full pl-9 pr-8 py-2.5 text-sm bg-white/5 border border-white/10 rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 transition-all"
+							class="w-full pl-9 pr-8 py-2.5 text-sm bg-muted/50 border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 transition-all"
 						/>
 						{#if sessionSearchQuery}
 							<button on:click={clearSearch} class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-muted-foreground hover:text-foreground transition-colors">
@@ -1477,15 +1901,15 @@
 				</div>
 			{:else}
 				<!-- Header for non-Sessions panels -->
-				<div class="p-4 border-b border-white/5 flex items-center justify-between">
+				<div class="p-4 border-b border-border/50 flex items-center justify-between">
 					<span class="font-semibold text-foreground">{activeSidebarSection === 'projects' ? 'Projects' : activeSidebarSection === 'profiles' ? 'Profiles' : 'Subagents'}</span>
 					<div class="flex items-center gap-1">
-						<button on:click={toggleSidebarPin} class="p-1.5 rounded-lg transition-all {sidebarPinned ? 'bg-primary text-primary-foreground shadow-glow' : 'text-muted-foreground hover:text-foreground hover:bg-white/10'}" title={sidebarPinned ? 'Unpin sidebar' : 'Pin sidebar open'}>
+						<button on:click={toggleSidebarPin} class="p-1.5 rounded-lg transition-all {sidebarPinned ? 'bg-primary text-primary-foreground shadow-glow' : 'text-muted-foreground hover:text-foreground hover:bg-hover-overlay'}" title={sidebarPinned ? 'Unpin sidebar' : 'Pin sidebar open'}>
 							<svg class="w-4 h-4" fill={sidebarPinned ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
 							</svg>
 						</button>
-						<button on:click={() => { activeSidebarSection = 'none'; sidebarPinned = false; clearSearch(); }} class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/10 transition-all" title="Close">
+						<button on:click={() => { activeSidebarSection = 'none'; sidebarPinned = false; clearSearch(); }} class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-all" title="Close">
 							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 							</svg>
@@ -1499,8 +1923,8 @@
 				<div class="flex-1 overflow-hidden flex flex-col">
 					{#if $isAdmin}
 						<div class="px-3 flex gap-1">
-							<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-white/5'}">My Chats</button>
-							<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-white/5'}">Admin</button>
+							<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}">My Chats</button>
+							<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}">Admin</button>
 						</div>
 					{/if}
 					{#if sidebarTab === 'my-chats'}
@@ -1514,7 +1938,7 @@
 								<div class="space-y-1">
 									{#each $allTabs as tab}
 										{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
-										{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
+										{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', is_favorite: false, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, tags: [], profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
 										<SessionCard
 											session={tabSession}
 											isOpen={true}
@@ -1523,6 +1947,7 @@
 											showCloseButton={true}
 											on:click={() => { tabs.setActiveTab(tab.id); closeSidebar(); }}
 											on:close={(e) => handleCloseTab(e, tab.id)}
+											on:openTagPicker={(e) => openTagPicker(tabSession.id, tabSession.tags, e.detail)}
 										/>
 									{/each}
 								</div>
@@ -1620,8 +2045,59 @@
 						{:else}
 							<!-- History Header (when not searching) -->
 							<div class="flex items-center justify-between px-2 mb-2">
-								<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">History</div>
 								<div class="flex items-center gap-2">
+									<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">
+										{showFavoritesOnly ? 'Favorites' : 'History'}
+									</div>
+									<!-- Favorites filter toggle -->
+									<button
+										on:click={() => showFavoritesOnly = !showFavoritesOnly}
+										class="p-0.5 rounded transition-colors {showFavoritesOnly ? 'text-yellow-400 hover:text-yellow-500' : 'text-muted-foreground/50 hover:text-yellow-400'}"
+										title={showFavoritesOnly ? 'Show all sessions' : 'Show favorites only'}
+									>
+										<svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill={showFavoritesOnly ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="2">
+											<path stroke-linecap="round" stroke-linejoin="round" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+										</svg>
+									</button>
+									<!-- Tag filter dropdown -->
+									{#if allTags.length > 0}
+										<select
+											class="text-xs bg-transparent border-none text-muted-foreground hover:text-foreground cursor-pointer focus:outline-none max-w-[80px]"
+											value={$sessionsTagFilter || ''}
+											on:change={(e) => tabs.setSessionsTagFilter(e.currentTarget.value || null)}
+										>
+											<option value="">All tags</option>
+											{#each allTags as tag}
+												<option value={tag.id}>{tag.name}</option>
+											{/each}
+										</select>
+									{/if}
+									<!-- Manage tags button -->
+									<button
+										on:click={() => showTagManager = true}
+										class="p-0.5 rounded transition-colors text-muted-foreground/50 hover:text-foreground"
+										title="Manage tags"
+									>
+										<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+										</svg>
+									</button>
+								</div>
+								<div class="flex items-center gap-2">
+									<button
+										on:click={() => showImportModal = true}
+										class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+										title="Import session"
+									>
+										<svg
+											class="w-3.5 h-3.5"
+											fill="none"
+											stroke="currentColor"
+											viewBox="0 0 24 24"
+										>
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+										</svg>
+									</button>
 									<button
 										on:click={() => tabs.loadSessions()}
 										class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
@@ -1681,6 +2157,8 @@
 														on:click={() => { openSession(session.id); closeSidebar(); }}
 														on:delete={() => deleteSession(null, session.id)}
 														on:select={() => tabs.toggleSessionSelection(session.id, false)}
+														on:favorite={() => handleToggleFavorite(session.id)}
+														on:openTagPicker={(e) => openTagPicker(session.id, session.tags, e.detail)}
 													/>
 												{/each}
 											</div>
@@ -1690,7 +2168,9 @@
 								{#if $sessionsLoading}
 									<p class="text-xs text-muted-foreground px-2 animate-pulse">Loading sessions...</p>
 								{:else if filteredSessions.length === 0}
-									<p class="text-xs text-muted-foreground px-2">No chat history yet</p>
+									<p class="text-xs text-muted-foreground px-2">
+										{showFavoritesOnly ? 'No favorites yet. Click the star on any session to add it to favorites.' : 'No chat history yet'}
+									</p>
 								{/if}
 							</div>
 						{/if}
@@ -1709,7 +2189,7 @@
 								<div class="space-y-1">
 									{#each $allTabs as tab}
 										{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
-										{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
+										{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', is_favorite: false, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, tags: [], profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
 										<SessionCard
 											session={tabSession}
 											isOpen={true}
@@ -1905,7 +2385,7 @@
 				{/if}
 				</div>
 				<!-- User Profile Footer -->
-				<div class="mt-auto p-3 border-t border-white/5">
+				<div class="mt-auto p-3 border-t border-border/50">
 					<div class="flex items-center gap-3">
 						<div class="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center font-semibold">
 							<span class="text-sm text-primary">{($apiUser?.name || $username)?.[0]?.toUpperCase() || 'U'}</span>
@@ -1915,7 +2395,7 @@
 							<p class="text-xs text-muted-foreground truncate">{$isAdmin ? 'Administrator' : 'User'}</p>
 						</div>
 						{#if $isAdmin}
-							<button on:click={() => showSettingsModal = true} class="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/10 transition-all" title="Settings">
+							<button on:click={() => showSettingsModal = true} class="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-all" title="Settings">
 								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -2329,7 +2809,7 @@
 	<!-- Mobile Session Panel (fullscreen glassmorph overlay) -->
 	<aside class="lg:hidden fixed inset-x-3 top-3 bottom-[4.5rem] z-50 floating-panel rounded-2xl flex flex-col transform transition-all duration-300 {sidebarOpen ? 'opacity-100 scale-100' : 'opacity-0 scale-95 pointer-events-none'}">
 		<!-- Header -->
-		<div class="p-4 border-b border-white/10 flex items-center justify-between">
+		<div class="p-4 border-b border-border flex items-center justify-between">
 			<div class="flex items-center gap-3">
 				<div class="w-8 h-8 rounded-xl bg-primary/20 flex items-center justify-center">
 					<svg class="w-4 h-4 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2338,7 +2818,7 @@
 				</div>
 				<span class="font-semibold text-foreground">Chats</span>
 			</div>
-			<button class="w-8 h-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-lg transition-colors" on:click={() => (sidebarOpen = false)}>
+			<button class="w-8 h-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-hover-overlay rounded-lg transition-colors" on:click={() => (sidebarOpen = false)}>
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 				</svg>
@@ -2355,7 +2835,7 @@
 					type="text"
 					bind:value={sessionSearchQuery}
 					placeholder="Search sessions..."
-					class="w-full pl-9 pr-8 py-2.5 text-sm bg-white/5 border border-white/10 rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 transition-colors"
+					class="w-full pl-9 pr-8 py-2.5 text-sm bg-muted/50 border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 transition-colors"
 				/>
 				{#if sessionSearchQuery}
 					<button on:click={clearSearch} class="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-muted-foreground hover:text-foreground">
@@ -2370,9 +2850,9 @@
 		<!-- Tab Toggle (My Chats / Admin) -->
 		{#if $isAdmin}
 			<div class="px-3 pb-2">
-				<div class="flex bg-white/5 rounded-xl p-1">
-					<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-2 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-white/5'}">My Chats</button>
-					<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-2 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-white/5'}">Admin</button>
+				<div class="flex bg-muted/50 rounded-xl p-1">
+					<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-2 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}">My Chats</button>
+					<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-2 text-xs font-medium rounded-lg transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}">Admin</button>
 				</div>
 			</div>
 		{/if}
@@ -2386,7 +2866,7 @@
 							<div class="space-y-1">
 								{#each $allTabs as tab}
 									{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
-									{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
+									{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', is_favorite: false, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, tags: [], profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
 									<SessionCard
 										session={tabSession}
 										isOpen={true}
@@ -2465,21 +2945,37 @@
 						<!-- History Header (Mobile) -->
 						<div class="flex items-center justify-between px-2 mb-2">
 							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">History</div>
-							<button
-								on:click={() => tabs.loadSessions()}
-								class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
-								title="Refresh sessions"
-								disabled={$sessionsLoading}
-							>
-								<svg
-									class="w-3.5 h-3.5 {$sessionsLoading ? 'animate-spin' : ''}"
-									fill="none"
-									stroke="currentColor"
-									viewBox="0 0 24 24"
+							<div class="flex items-center gap-2">
+								<button
+									on:click={() => { sidebarOpen = false; showImportModal = true; }}
+									class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+									title="Import session"
 								>
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-								</svg>
-							</button>
+									<svg
+										class="w-3.5 h-3.5"
+										fill="none"
+										stroke="currentColor"
+										viewBox="0 0 24 24"
+									>
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+									</svg>
+								</button>
+								<button
+									on:click={() => tabs.loadSessions()}
+									class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+									title="Refresh sessions"
+									disabled={$sessionsLoading}
+								>
+									<svg
+										class="w-3.5 h-3.5 {$sessionsLoading ? 'animate-spin' : ''}"
+										fill="none"
+										stroke="currentColor"
+										viewBox="0 0 24 24"
+									>
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+									</svg>
+								</button>
+							</div>
 						</div>
 
 						<!-- Grouped Sessions (Mobile) -->
@@ -2532,7 +3028,7 @@
 							<div class="space-y-1">
 								{#each $allTabs as tab}
 									{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
-									{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
+									{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', is_favorite: false, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, tags: [], profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
 									<SessionCard
 										session={tabSession}
 										isOpen={true}
@@ -2685,7 +3181,7 @@
 			</div>
 
 		<!-- User Footer -->
-		<div class="p-3 border-t border-white/10">
+		<div class="p-3 border-t border-border">
 			<div class="flex items-center justify-between">
 				<div class="flex items-center gap-2">
 					<div class="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
@@ -2693,7 +3189,7 @@
 					</div>
 					<span class="text-sm text-foreground">{$apiUser?.name || $username}</span>
 				</div>
-				<button on:click={handleLogout} class="text-xs text-muted-foreground hover:text-foreground px-3 py-1.5 rounded-lg hover:bg-white/10 transition-colors">Logout</button>
+				<button on:click={handleLogout} class="text-xs text-muted-foreground hover:text-foreground px-3 py-1.5 rounded-lg hover:bg-hover-overlay transition-colors">Logout</button>
 			</div>
 		</div>
 	</aside>
@@ -2710,7 +3206,7 @@
 			<div class="flex flex-col gap-0.5">
 				<button
 					on:click={() => { showToolsMenu = false; showProjectModal = true; }}
-					class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-white/10 transition-colors text-left"
+					class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-hover-overlay transition-colors text-left"
 				>
 					<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
@@ -2719,7 +3215,7 @@
 				</button>
 				<button
 					on:click={() => { showToolsMenu = false; showProfileModal = true; }}
-					class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-white/10 transition-colors text-left"
+					class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-hover-overlay transition-colors text-left"
 				>
 					<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
@@ -2728,7 +3224,7 @@
 				</button>
 				<button
 					on:click={() => { showToolsMenu = false; showSubagentManager = true; }}
-					class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-white/10 transition-colors text-left"
+					class="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-hover-overlay transition-colors text-left"
 				>
 					<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
@@ -2742,12 +3238,12 @@
 	<!-- Mobile Bottom Navigation - Floating Dock -->
 	<nav class="lg:hidden fixed bottom-3 left-3 right-3 z-50 floating-panel rounded-2xl safe-bottom">
 		<div class="flex items-center justify-around h-12">
-			<button on:click={() => { sidebarOpen = false; showToolsMenu = false; handleNewTab(); }} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="New Chat">
+			<button on:click={() => { sidebarOpen = false; showToolsMenu = false; handleNewTab(); }} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-hover-overlay rounded-xl transition-colors" title="New Chat">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
 				</svg>
 			</button>
-			<button on:click={() => { showToolsMenu = false; sidebarOpen = !sidebarOpen; }} class="relative flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Chats">
+			<button on:click={() => { showToolsMenu = false; sidebarOpen = !sidebarOpen; }} class="relative flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-hover-overlay rounded-xl transition-colors" title="Chats">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
 				</svg>
@@ -2756,12 +3252,17 @@
 				{/if}
 			</button>
 			{#if $isAdmin}
-				<button on:click={() => { sidebarOpen = false; showToolsMenu = !showToolsMenu; }} class="relative flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Tools">
+				<button on:click={() => { sidebarOpen = false; showToolsMenu = !showToolsMenu; }} class="relative flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-hover-overlay rounded-xl transition-colors" title="Tools">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
 					</svg>
 				</button>
-				<button on:click={() => { sidebarOpen = false; showToolsMenu = false; showSettingsModal = true; }} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Settings">
+				<button on:click={() => showAnalyticsModal = true} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-hover-overlay rounded-xl transition-colors" title="Analytics">
+					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+					</svg>
+				</button>
+				<button on:click={() => { sidebarOpen = false; showToolsMenu = false; showSettingsModal = true; }} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-hover-overlay rounded-xl transition-colors" title="Settings">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -2789,7 +3290,7 @@
 						{@const contextPercent = Math.min((contextUsed / contextMax) * 100, 100)}
 						<div class="relative group">
 							<button
-								class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-white/10 transition-colors"
+								class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
 								title="Context usage: {formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}"
 							>
 								<!-- Circular progress indicator -->
@@ -2879,7 +3380,7 @@
 					{@const hasProfileGroups = headerProfilesOrganized.groupOrder.length > 0}
 					<div class="relative group">
 						<button
-							class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-sm text-foreground hover:bg-white/10 transition-colors"
+							class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-sm text-foreground hover:bg-hover-overlay transition-colors"
 						>
 							<svg class="w-4 h-4 {currentTab.profile ? 'text-muted-foreground' : 'text-amber-500'}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
@@ -2969,7 +3470,7 @@
 				{:else}
 					<div class="relative group">
 						<button
-							class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-sm text-foreground {currentTab.sessionId ? 'cursor-default opacity-75' : 'hover:bg-white/10'} transition-colors"
+							class="floating-pill flex items-center gap-1.5 px-3 py-1.5 text-sm text-foreground {currentTab.sessionId ? 'cursor-default opacity-75' : 'hover:bg-hover-overlay'} transition-colors"
 							title={currentTab.sessionId ? 'Project is locked for this chat' : 'Select project'}
 						>
 							<svg class="w-4 h-4 {currentTab.project ? 'text-muted-foreground' : 'text-amber-500'}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -3057,8 +3558,68 @@
 				{/if}
 				</div>
 
-				<!-- Right: Connection Status -->
+				<!-- Right: Knowledge Base, Export, Theme Toggle and Connection Status -->
 				<div class="flex items-center gap-2">
+					<!-- Knowledge Base Button (only show when project is selected) -->
+					{#if currentTab.project}
+						<button
+							on:click={() => showKnowledgeModal = true}
+							class="w-8 h-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-all"
+							title="Knowledge Base"
+						>
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+							</svg>
+						</button>
+					{/if}
+					<!-- Git Button (only show when project is selected) -->
+					{#if currentTab.project}
+						<button
+							on:click={() => showGitModal = true}
+							class="w-8 h-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-all"
+							title="Git & GitHub (Cmd+Shift+G)"
+						>
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 3v12m0 0c0 2.5 2 3 3.5 3s3.5-.5 3.5-3m-7 0c0-2.5 2-3 3.5-3s3.5.5 3.5 3m0 0v-6m0 0c0-2.5-2-3-3.5-3S6 6.5 6 9" />
+							</svg>
+						</button>
+					{/if}
+					<!-- Export Button (only show when session is saved) -->
+					{#if currentTab.sessionId}
+						<div class="relative group">
+							<button
+								class="w-8 h-8 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-all"
+								title="Export session"
+							>
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+								</svg>
+							</button>
+							<!-- Export dropdown -->
+							<div class="absolute right-0 top-full mt-1 w-40 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+								<div class="py-1">
+									<button
+										on:click={() => currentTab.sessionId && exportSession(currentTab.sessionId, 'markdown')}
+										class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
+									>
+										<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+										</svg>
+										Export Markdown
+									</button>
+									<button
+										on:click={() => currentTab.sessionId && exportSession(currentTab.sessionId, 'json')}
+										class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
+									>
+										<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+										</svg>
+										Export JSON
+									</button>
+								</div>
+							</div>
+						</div>
+					{/if}
 					<ConnectionStatus wsConnected={currentTab.wsConnected} />
 				</div>
 				</div>
@@ -3106,7 +3667,7 @@
 				{:else}
 					<!-- Messages -->
 					<div class="max-w-5xl mx-auto px-4 sm:px-8 py-4 space-y-4">
-						{#each currentTab.messages as message}
+						{#each currentTab.messages as message, messageIndex}
 							{#if message.role === 'user'}
 								<!-- User Message - Anvil Style -->
 								<div class="w-full">
@@ -3159,6 +3720,27 @@
 															<span>Copy</span>
 														{/if}
 													</button>
+													<!-- Fork from here button -->
+													{#if currentTab.sessionId}
+														<button
+															class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
+															on:click={() => handleForkSession(currentTab.sessionId, messageIndex, message.id)}
+															title="Fork conversation from this point"
+															disabled={forkingMessageId === message.id}
+														>
+															{#if forkingMessageId === message.id}
+																<svg class="w-3.5 h-3.5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+																</svg>
+																<span>Forking...</span>
+															{:else}
+																<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2" />
+																</svg>
+																<span>Fork</span>
+															{/if}
+														</button>
+													{/if}
 												</div>
 											{/if}
 										</div>
@@ -3329,7 +3911,7 @@
 
 			<!-- Permission Queue (shown when there are pending permissions) -->
 			{#if currentTab.pendingPermissions && currentTab.pendingPermissions.length > 0}
-				<div class="border-t border-amber-500/30 bg-amber-900/5 p-3 sm:p-4">
+				<div class="border-t border-warning/30 bg-warning/5 p-3 sm:p-4">
 					<div class="max-w-5xl mx-auto">
 						<PermissionQueue
 							requests={currentTab.pendingPermissions}
@@ -3341,7 +3923,7 @@
 
 			<!-- User Question Queue (shown when there are pending questions from AskUserQuestion tool) -->
 			{#if currentTab.pendingQuestions && currentTab.pendingQuestions.length > 0}
-				<div class="border-t border-blue-500/30 bg-blue-900/5 p-3 sm:p-4">
+				<div class="border-t border-info/30 bg-info/5 p-3 sm:p-4">
 					<div class="max-w-5xl mx-auto">
 						{#each currentTab.pendingQuestions as question (question.request_id)}
 							<UserQuestion
@@ -3697,6 +4279,56 @@
 <!-- Settings Modal -->
 <SettingsModal open={showSettingsModal} onClose={() => showSettingsModal = false} />
 
+<!-- Keyboard Shortcuts Modal -->
+<KeyboardShortcutsModal open={showKeyboardShortcuts} onClose={() => showKeyboardShortcuts = false} />
+
+<!-- Analytics Modal -->
+<AnalyticsModal
+	open={showAnalyticsModal}
+	onClose={() => showAnalyticsModal = false}
+	onSessionClick={(sessionId) => {
+		tabs.openSession(sessionId);
+		showAnalyticsModal = false;
+	}}
+/>
+
+<!-- Advanced Search Modal (Cmd+Shift+F) -->
+<AdvancedSearch
+	visible={showAdvancedSearch}
+	onClose={() => showAdvancedSearch = false}
+	onSelectSession={(sessionId) => {
+		tabs.openSession(sessionId);
+		showAdvancedSearch = false;
+	}}
+/>
+
+<!-- Import Session Modal -->
+<ImportSessionModal
+	show={showImportModal}
+	on:close={() => showImportModal = false}
+	on:imported={handleImportSuccess}
+/>
+
+<!-- Tag Manager Modal -->
+{#if showTagManager}
+	<TagManager
+		on:close={handleTagManagerClose}
+		on:tagsUpdated={() => loadAllTags()}
+	/>
+{/if}
+
+<!-- Session Tag Picker -->
+{#if showTagPicker && tagPickerSessionId}
+	<SessionTagPicker
+		sessionId={tagPickerSessionId}
+		currentTags={tagPickerCurrentTags}
+		position={tagPickerPosition}
+		on:close={closeTagPicker}
+		on:tagsUpdated={handleTagsUpdated}
+		on:openTagManager={handleOpenTagManager}
+	/>
+{/if}
+
 <!-- Profile Modal -->
 <ProfileModal
 	show={showProfileModal}
@@ -3727,27 +4359,18 @@
 			await tabs.deleteProfile(profileId);
 		}
 	}}
-	on:export={(e) => exportProfile(e.detail)}
+	on:export={(e) => handleExportProfile(e.detail)}
 	on:import={async (e) => {
+		// Handle file-based import - parse the file and use our new API
 		const file = e.detail;
 		try {
 			const content = await file.text();
-			const data = JSON.parse(content);
-			if (!data.profiles || data.profiles.length === 0) {
-				alert('No profiles found in file');
-				return;
-			}
-			const result = await api.post<any>('/export-import/import/json?overwrite_existing=false', data);
-			if (result.profiles_imported > 0) {
-				alert(`Imported ${result.profiles_imported} profile(s)`);
-				await tabs.loadProfiles();
-			} else if (result.profiles_skipped > 0) {
-				alert('Profile already exists. Use a different ID or delete the existing one first.');
-			} else if (result.errors?.length > 0) {
-				alert('Import failed: ' + result.errors.join(', '));
-			}
+			const parsed = parseAgentExportFile(content);
+			const profile = await importAgent(parsed);
+			await tabs.loadProfiles();
+			alert(`Successfully imported agent: ${profile.name}`);
 		} catch (err: any) {
-			alert('Import failed: ' + (err.detail || err.message || 'Invalid JSON file'));
+			alert('Import failed: ' + (err.detail || err.message || 'Invalid file format'));
 		}
 	}}
 	on:assignGroup={(e) => groups.assignToGroup('profiles', e.detail.profileId, e.detail.groupName)}
@@ -3757,6 +4380,34 @@
 		groups.assignToGroup('profiles', e.detail.profileId, e.detail.groupName);
 	}}
 />
+
+<!-- Agent Import Modal -->
+<AgentImportModal
+	show={showAgentImportModal}
+	on:close={() => showAgentImportModal = false}
+	on:imported={handleAgentImported}
+/>
+
+<!-- Knowledge Base Modal -->
+{#if showKnowledgeModal && $activeTab?.project}
+	<KnowledgeManager
+		projectId={$activeTab.project}
+		on:close={() => showKnowledgeModal = false}
+	/>
+{/if}
+
+<!-- Git Modal -->
+{#if showGitModal && $activeTab?.project}
+	<GitModal
+		open={showGitModal}
+		projectId={$activeTab.project}
+		onClose={() => showGitModal = false}
+		onOpenSession={(sessionId) => {
+			tabs.openSession(sessionId);
+			showGitModal = false;
+		}}
+	/>
+{/if}
 
 <!-- Project Modal -->
 {#if showProjectModal}
@@ -3903,42 +4554,38 @@
 
 	/* Floating Panel Styles */
 	.floating-panel {
-		background: oklch(0.16 0.012 260 / 0.85);
+		background: var(--panel-bg);
 		backdrop-filter: blur(20px);
 		-webkit-backdrop-filter: blur(20px);
-		border: 1px solid oklch(1 0 0 / 0.08);
+		border: 1px solid var(--panel-border);
 		box-shadow:
-			0 0 0 1px oklch(0 0 0 / 0.3),
-			0 8px 32px oklch(0 0 0 / 0.4),
-			0 2px 8px oklch(0 0 0 / 0.2),
-			inset 0 1px 0 oklch(1 0 0 / 0.05);
+			0 0 0 1px var(--panel-shadow-inset) inset,
+			0 8px 32px var(--panel-shadow-outer),
+			0 2px 8px var(--panel-shadow-inner);
 	}
 
 	/* Floating Pill Styles (for header elements) */
 	.floating-pill {
-		background: oklch(0.16 0.012 260 / 0.7);
+		background: var(--panel-bg);
 		backdrop-filter: blur(16px);
 		-webkit-backdrop-filter: blur(16px);
-		border: 1px solid oklch(1 0 0 / 0.06);
+		border: 1px solid var(--panel-border);
 		border-radius: 9999px;
 		box-shadow:
-			0 0 0 1px oklch(0 0 0 / 0.2),
-			0 2px 8px oklch(0 0 0 / 0.15),
-			inset 0 1px 0 oklch(1 0 0 / 0.04);
+			0 2px 8px var(--panel-shadow-inner);
 	}
 
 	/* Floating Island Styles (for input area) */
 	.floating-island {
-		background: oklch(0.16 0.012 260 / 0.85);
+		background: var(--panel-bg);
 		backdrop-filter: blur(20px);
 		-webkit-backdrop-filter: blur(20px);
-		border: 1px solid oklch(1 0 0 / 0.08);
+		border: 1px solid var(--panel-border);
 		border-radius: 1.5rem;
 		box-shadow:
-			0 0 0 1px oklch(0 0 0 / 0.25),
-			0 8px 32px oklch(0 0 0 / 0.35),
-			0 4px 16px oklch(0 0 0 / 0.2),
-			inset 0 1px 0 oklch(1 0 0 / 0.05);
+			0 0 0 1px var(--panel-shadow-inset) inset,
+			0 8px 32px var(--panel-shadow-outer),
+			0 4px 16px var(--panel-shadow-inner);
 	}
 
 	/* Glow effect for active buttons */
