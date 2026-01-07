@@ -275,6 +275,15 @@ async def chat_websocket(
                         message_data = event.get('message', {})
                         if isinstance(message_data, dict):
                             usage_data = message_data.get('usage')
+                            # Update live session store with usage for polling clients
+                            if usage_data:
+                                await live_session_store.update_usage(
+                                    session_id,
+                                    input_tokens=usage_data.get('input_tokens', 0),
+                                    output_tokens=usage_data.get('output_tokens', 0),
+                                    cache_creation_tokens=usage_data.get('cache_creation_input_tokens', 0),
+                                    cache_read_tokens=usage_data.get('cache_read_input_tokens', 0)
+                                )
 
                     await sync_engine.broadcast_stream_start(
                         session_id=session_id,
@@ -290,6 +299,14 @@ async def chat_websocket(
                     if isinstance(message_data, dict):
                         usage_data = message_data.get('usage')
                         if usage_data:
+                            # Update live session store with latest usage for polling clients
+                            await live_session_store.update_usage(
+                                session_id,
+                                input_tokens=usage_data.get('input_tokens', 0),
+                                output_tokens=usage_data.get('output_tokens', 0),
+                                cache_creation_tokens=usage_data.get('cache_creation_input_tokens', 0),
+                                cache_read_tokens=usage_data.get('cache_read_input_tokens', 0)
+                            )
                             # Broadcast usage update to synced devices
                             await sync_engine.broadcast_usage_update(
                                 session_id=session_id,

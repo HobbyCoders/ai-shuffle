@@ -384,16 +384,9 @@ class LiveSessionStore:
                     msg.streaming = False
                     self._increment_update_id(session)
                     logger.debug(f"Added tool result to {tool_id} in session {session_id}")
-
-                    # Add a new streaming text message for continuation
-                    continuation = LiveMessage(
-                        id=f"text-{datetime.utcnow().timestamp()}",
-                        role="assistant",
-                        type="text",
-                        content="",
-                        streaming=True,
-                    )
-                    session.messages.append(continuation)
+                    # Note: We don't create a continuation text message here.
+                    # Empty text messages cause UI flickering (showing "Claude [time]" header
+                    # with no content). The next text chunk will create a message if needed.
                     return
 
     async def add_system_message(
@@ -588,16 +581,9 @@ class LiveSessionStore:
                             child.streaming = False
 
                     self._increment_update_id(session)
-
-                    # Add continuation text message
-                    continuation = LiveMessage(
-                        id=f"text-{datetime.utcnow().timestamp()}",
-                        role="assistant",
-                        type="text",
-                        content="",
-                        streaming=True,
-                    )
-                    session.messages.append(continuation)
+                    # Note: We don't create a continuation text message here.
+                    # Empty text messages cause UI flickering (showing "Claude [time]" header
+                    # with no content). The next text chunk will create a message if needed.
                     return
 
     async def update_usage(
