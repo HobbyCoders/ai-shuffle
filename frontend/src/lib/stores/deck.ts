@@ -129,6 +129,7 @@ interface PersistedDeckState {
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let serverSyncTimer: ReturnType<typeof setTimeout> | null = null;
 let isLoadingFromServer = false;
+let hasSyncedFromServer = false; // Prevents writing to server before initial sync completes
 let lastServerSync = 0;
 
 function parsePersistedState(parsed: PersistedDeckState): Partial<DeckState> {
@@ -198,6 +199,13 @@ function saveToStorage(state: DeckState) {
  */
 async function saveToServer(state: DeckState) {
 	if (typeof window === 'undefined' || isLoadingFromServer) return;
+
+	// Don't write to server until we've completed initial sync
+	// This prevents empty local state from overwriting server data on first load
+	if (!hasSyncedFromServer) {
+		console.log('[Deck] Skipping server save - initial sync not complete');
+		return;
+	}
 
 	if (serverSyncTimer) {
 		clearTimeout(serverSyncTimer);
@@ -376,31 +384,63 @@ function createDeckStore() {
 
 		/**
 		 * Sync state from server (call on page load/focus)
+		 *
+		 * Merge strategy:
+		 * 1. If local is empty (no cards), always use server state
+		 * 2. If server is empty but local has data, keep local
+		 * 3. If both have data, merge: server cards + local-only cards
 		 */
 		async syncFromServer(): Promise<void> {
 			const serverState = await loadFromServer();
-			if (serverState) {
-				update((state) => {
-					const merged = mergeStates(
-						{ ...state },
-						serverState
-					);
-					if (merged) {
-						const newState = {
+
+			update((state) => {
+				const localCards = state.cards || [];
+				const serverCards = serverState?.cards || [];
+				const localIsEmpty = localCards.length === 0;
+				const serverIsEmpty = serverCards.length === 0;
+
+				let newState: DeckState;
+
+				if (serverState && !serverIsEmpty) {
+					if (localIsEmpty) {
+						// Local is empty, use server state entirely
+						console.log('[Deck] Local empty, using server state');
+						newState = {
 							...state,
-							...merged,
+							...serverState,
 							// Recalculate nextZIndex
-							nextZIndex: merged.cards
-								? Math.max(...merged.cards.map((c) => c.zIndex), state.nextZIndex) + 1
-								: state.nextZIndex
-						};
-						// Save merged state back to localStorage
-						saveToStorage(newState);
-						return newState;
+							nextZIndex: Math.max(...serverCards.map((c) => c.zIndex), state.nextZIndex) + 1
+						} as DeckState;
+					} else {
+						// Both have data - merge them
+						const merged = mergeStates({ ...state }, serverState);
+						if (merged) {
+							console.log('[Deck] Merging local and server state');
+							newState = {
+								...state,
+								...merged,
+								nextZIndex: merged.cards
+									? Math.max(...merged.cards.map((c) => c.zIndex), state.nextZIndex) + 1
+									: state.nextZIndex
+							};
+						} else {
+							newState = state;
+						}
 					}
-					return state;
-				});
-			}
+				} else {
+					// No server state or server is empty - keep local
+					console.log('[Deck] No server state, keeping local');
+					newState = state;
+				}
+
+				// Save merged state to localStorage
+				saveToStorage(newState);
+				return newState;
+			});
+
+			// Mark sync as complete - now server writes are allowed
+			hasSyncedFromServer = true;
+			console.log('[Deck] Initial sync complete, server writes enabled');
 		},
 
 		/**
@@ -1227,29 +1267,32 @@ function createDeckStore() {
 			if (state.cards.length === 0) return state;
 
 			const { width: boundsW, height: boundsH } = state.workspaceBounds;
-			const padding = 8; // Padding between cards
+			// Symmetric padding - menu moved to bottom left
+			const paddingX = 8;    // Left/right padding between cards
+			const paddingY = 8;    // Bottom padding
+			const paddingTop = 8;  // Top padding - minimal, no UI at top anymore
 
 			let updatedCards: DeckCard[];
 
 			switch (mode) {
 				case 'sidebyside':
 					// Cards arranged side-by-side in vertical columns
-					updatedCards = this.applySideBySideLayout(state.cards, boundsW, boundsH, padding);
+					updatedCards = this.applySideBySideLayout(state.cards, boundsW, boundsH, paddingX, paddingY, paddingTop);
 					break;
 
 				case 'tile':
 					// Cards tiled in a grid pattern
-					updatedCards = this.applyTileLayout(state.cards, boundsW, boundsH, padding);
+					updatedCards = this.applyTileLayout(state.cards, boundsW, boundsH, paddingX, paddingY, paddingTop);
 					break;
 
 				case 'stack':
 					// Cards in left-side deck with main focused card
-					updatedCards = this.applyStackLayout(state.cards, boundsW, boundsH, state.focusedCardId);
+					updatedCards = this.applyStackLayout(state.cards, boundsW, boundsH, paddingX, paddingY, paddingTop, state.focusedCardId);
 					break;
 
 				case 'focus':
 					// One main card takes most space, others in sidebar
-					updatedCards = this.applyFocusLayout(state.cards, boundsW, boundsH, padding, state.focusedCardId);
+					updatedCards = this.applyFocusLayout(state.cards, boundsW, boundsH, paddingX, state.focusedCardId);
 					break;
 
 				default:
@@ -1263,21 +1306,21 @@ function createDeckStore() {
 		/**
 		 * Side-by-side layout: Cards arranged in equal-width vertical columns
 		 */
-		applySideBySideLayout(cards: DeckCard[], boundsW: number, boundsH: number, padding: number): DeckCard[] {
+		applySideBySideLayout(cards: DeckCard[], boundsW: number, boundsH: number, paddingX: number, paddingY: number, paddingTop: number): DeckCard[] {
 			const count = cards.length;
 			if (count === 0) return cards;
 
 			// Calculate column width - max 4 columns, then start scrolling
 			const maxCols = Math.min(count, 4);
-			const cardWidth = (boundsW - (maxCols + 1) * padding) / maxCols;
-			const cardHeight = boundsH - padding * 2;
+			const cardWidth = (boundsW - (maxCols + 1) * paddingX) / maxCols;
+			const cardHeight = boundsH - paddingTop - paddingY;
 
 			return cards.map((card, index) => {
-				const x = padding + index * (cardWidth + padding);
+				const x = paddingX + index * (cardWidth + paddingX);
 
 				return {
 					...card,
-					position: { x, y: padding },
+					position: { x, y: paddingTop },
 					size: { width: cardWidth, height: cardHeight },
 					maximized: false,
 					snappedTo: null as SnapZone,
@@ -1290,7 +1333,7 @@ function createDeckStore() {
 		/**
 		 * Tile layout: Cards tiled in a grid pattern with equal sizes
 		 */
-		applyTileLayout(cards: DeckCard[], boundsW: number, boundsH: number, padding: number): DeckCard[] {
+		applyTileLayout(cards: DeckCard[], boundsW: number, boundsH: number, paddingX: number, paddingY: number, paddingTop: number): DeckCard[] {
 			const count = cards.length;
 			if (count === 0) return cards;
 
@@ -1298,8 +1341,8 @@ function createDeckStore() {
 			const cols = Math.ceil(Math.sqrt(count));
 			const rows = Math.ceil(count / cols);
 
-			const cardWidth = (boundsW - (cols + 1) * padding) / cols;
-			const cardHeight = (boundsH - (rows + 1) * padding) / rows;
+			const cardWidth = (boundsW - (cols + 1) * paddingX) / cols;
+			const cardHeight = (boundsH - paddingTop - (rows) * paddingY) / rows;
 
 			return cards.map((card, idx) => {
 				const col = idx % cols;
@@ -1308,8 +1351,8 @@ function createDeckStore() {
 				return {
 					...card,
 					position: {
-						x: padding + col * (cardWidth + padding),
-						y: padding + row * (cardHeight + padding)
+						x: paddingX + col * (cardWidth + paddingX),
+						y: paddingTop + row * (cardHeight + paddingY)
 					},
 					size: { width: cardWidth, height: cardHeight },
 					maximized: false,
@@ -1324,7 +1367,7 @@ function createDeckStore() {
 		 * Stack layout: Left-side deck of card thumbnails + one main focused card
 		 * Like a hand of cards fanned down on the left, with one card "in play" on the right
 		 */
-		applyStackLayout(cards: DeckCard[], boundsW: number, boundsH: number, focusedCardId?: string | null): DeckCard[] {
+		applyStackLayout(cards: DeckCard[], boundsW: number, boundsH: number, paddingX: number, paddingY: number, paddingTop: number, focusedCardId?: string | null): DeckCard[] {
 			if (cards.length === 0) return cards;
 
 			// Stack panel width for the card deck on the left
@@ -1334,8 +1377,8 @@ function createDeckStore() {
 
 			// Main card dimensions (takes up rest of workspace)
 			const mainCardX = stackPanelWidth + stackPadding;
-			const mainCardWidth = boundsW - mainCardX - stackPadding;
-			const mainCardHeight = boundsH - stackPadding * 2;
+			const mainCardWidth = boundsW - mainCardX - paddingX;
+			const mainCardHeight = boundsH - paddingTop - paddingY;
 
 			// Find the focused card - use the highest z-index card or the last one
 			let focusedCard = focusedCardId
@@ -1359,7 +1402,7 @@ function createDeckStore() {
 					// Main card: positioned on the right, nearly full screen
 					return {
 						...card,
-						position: { x: mainCardX, y: stackPadding },
+						position: { x: mainCardX, y: paddingTop },
 						size: { width: mainCardWidth, height: mainCardHeight },
 						zIndex: nextZ + cards.length + 1,
 						maximized: false,
@@ -1370,8 +1413,8 @@ function createDeckStore() {
 				} else {
 					// Stack cards: positioned in a fanned deck on the left
 					const stackIndex = stackCards.findIndex(c => c.id === card.id);
-					const yOffset = stackPadding + stackIndex * cardOverlap;
-					const cardHeight = Math.min(280, (boundsH - stackPadding * 2 - (stackCards.length - 1) * cardOverlap));
+					const yOffset = paddingTop + stackIndex * cardOverlap;
+					const cardHeight = Math.min(280, (boundsH - paddingTop - paddingY - (stackCards.length - 1) * cardOverlap));
 
 					return {
 						...card,
@@ -1392,7 +1435,7 @@ function createDeckStore() {
 		 * Only the focused card is visible (has highest z-index)
 		 * Navigation buttons switch which card is on top
 		 */
-		applyFocusLayout(cards: DeckCard[], boundsW: number, boundsH: number, padding: number, focusedCardId: string | null): DeckCard[] {
+		applyFocusLayout(cards: DeckCard[], _boundsW: number, _boundsH: number, _padding: number, focusedCardId: string | null): DeckCard[] {
 			if (cards.length === 0) return cards;
 
 			// Find the focused card, or use the first card

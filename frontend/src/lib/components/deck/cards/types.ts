@@ -69,7 +69,7 @@ export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }>
  * Now with floating dealer button in bottom-left corner
  */
 export const WORKSPACE_PADDING = {
-  top: 10,       // Small top padding
+  top: 4,        // Minimal top padding (hover indicator is compact)
   bottom: 90,    // Space for floating dealer button (56px + 24px + some margin)
   left: 10,      // Small left padding (no more sidebar)
   right: 10,     // Small right padding

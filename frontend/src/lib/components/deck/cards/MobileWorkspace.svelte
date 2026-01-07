@@ -10,9 +10,10 @@
 	 * - Empty state with create buttons
 	 */
 
-	import { ChevronLeft, X, MessageSquare, Bot, Terminal, Plus, Settings, User, Users, FolderKanban } from 'lucide-svelte';
+	import { ChevronLeft, X, MessageSquare, Terminal, Plus, Settings, User, Users, FolderKanban, Image, Box, AudioLines, FolderOpen, Puzzle } from 'lucide-svelte';
 	import type { DeckCard, CardType } from './types';
 	import type { Snippet } from 'svelte';
+	import { MobileWelcome } from '../welcome';
 
 	interface Props {
 		cards: DeckCard[];
@@ -20,6 +21,7 @@
 		onCardChange: (index: number) => void;
 		onCloseCard: (id: string) => void;
 		onCreateCard: (type: CardType) => void;
+		onOpenNavigator?: () => void;
 		children?: Snippet<[DeckCard]>;
 	}
 
@@ -29,6 +31,7 @@
 		onCardChange,
 		onCloseCard,
 		onCreateCard,
+		onOpenNavigator,
 		children
 	}: Props = $props();
 
@@ -39,28 +42,28 @@
 	let touchStartTime = $state(0);
 	let isSwiping = $state(false);
 	let swipeDirection = $state<'horizontal' | 'vertical' | null>(null);
+	let isAnimating = $state(false);
 
-	const SWIPE_THRESHOLD = 50;
-	const VELOCITY_THRESHOLD = 0.3;
+	const SWIPE_THRESHOLD = 80; // Minimum distance to trigger swipe
+	const VELOCITY_THRESHOLD = 0.5; // Require more intentional swipes (px/ms)
 	const DIRECTION_LOCK_THRESHOLD = 10;
+	const ANIMATION_DURATION = 300; // Match CSS transition duration
 
-	// Icon mapping
+	// Icon mapping - all 12 card types
 	const cardIcons: Record<CardType, typeof MessageSquare> = {
 		chat: MessageSquare,
-		agent: Bot,
 		terminal: Terminal,
 		settings: Settings,
 		profile: User,
 		subagent: Users,
 		project: FolderKanban,
+		'user-settings': Settings,
+		'image-studio': Image,
+		'model-studio': Box,
+		'audio-studio': AudioLines,
+		'file-browser': FolderOpen,
+		plugins: Puzzle,
 	};
-
-	// Card type config for create buttons
-	const cardTypes: { type: CardType; label: string; icon: typeof MessageSquare }[] = [
-		{ type: 'chat', label: 'Chat', icon: MessageSquare },
-		{ type: 'agent', label: 'Agent', icon: Bot },
-		{ type: 'terminal', label: 'Terminal', icon: Terminal },
-	];
 
 	// Current card
 	const activeCard = $derived(cards[activeCardIndex]);
@@ -90,6 +93,9 @@
 	// Touch handlers
 	function handleTouchStart(e: TouchEvent) {
 		if (cards.length <= 1) return;
+
+		// Block new swipes during animation
+		if (isAnimating) return;
 
 		// Don't initiate swipe if touching an interactive element
 		if (isInteractiveElement(e.target)) return;
@@ -154,7 +160,13 @@
 			if (document.activeElement instanceof HTMLElement) {
 				document.activeElement.blur();
 			}
+
+			// Lock animation to prevent rapid successive swipes
+			isAnimating = true;
 			onCardChange(newIndex);
+			setTimeout(() => {
+				isAnimating = false;
+			}, ANIMATION_DURATION);
 		}
 
 		resetSwipeState();
@@ -167,17 +179,6 @@
 		touchCurrentX = 0;
 		touchStartTime = 0;
 		swipeDirection = null;
-	}
-
-	// Navigate to specific card via dot indicator
-	function navigateToCard(index: number) {
-		if (index !== activeCardIndex && index >= 0 && index < cards.length) {
-			// Blur any focused element before switching to prevent focus jumping issues
-			if (document.activeElement instanceof HTMLElement) {
-				document.activeElement.blur();
-			}
-			onCardChange(index);
-		}
 	}
 
 	// Close current card
@@ -198,27 +199,8 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="mobile-workspace">
 	{#if cards.length === 0}
-		<!-- Empty State -->
-		<div class="empty-state">
-			<div class="empty-content">
-				<div class="empty-icon">
-					<Plus size={32} />
-				</div>
-				<h2 class="empty-title">No cards open</h2>
-				<p class="empty-text">Create a card to get started</p>
-				<div class="create-grid">
-					{#each cardTypes as { type, label, icon: Icon }}
-						<button
-							class="create-card"
-							onclick={() => onCreateCard(type)}
-						>
-							<Icon size={24} />
-							<span>{label}</span>
-						</button>
-					{/each}
-				</div>
-			</div>
-		</div>
+		<!-- Mobile Welcome Screen with Carousel -->
+		<MobileWelcome {onCreateCard} />
 	{:else}
 		<!-- Mobile Header -->
 		<header class="mobile-header">
@@ -240,6 +222,15 @@
 			</div>
 
 			<div class="header-actions">
+				{#if onOpenNavigator}
+					<button
+						class="header-btn add"
+						onclick={onOpenNavigator}
+						aria-label="Open card navigator"
+					>
+						<Plus size={20} />
+					</button>
+				{/if}
 				<button
 					class="header-btn close"
 					onclick={handleClose}
@@ -289,22 +280,6 @@
 				{/if}
 			</div>
 		</div>
-
-		<!-- Dot Indicators -->
-		{#if cards.length > 1}
-			<div class="dot-indicators">
-				{#each cards as card, index}
-					<button
-						class="dot"
-						class:active={index === activeCardIndex}
-						onclick={() => navigateToCard(index)}
-						aria-label="Go to card {index + 1}"
-					>
-						<span class="dot-inner"></span>
-					</button>
-				{/each}
-			</div>
-		{/if}
 	{/if}
 </div>
 
@@ -368,6 +343,16 @@
 
 	.header-btn:disabled:active {
 		transform: none;
+	}
+
+	.header-btn.add:hover {
+		background: hsl(var(--primary) / 0.1);
+		color: hsl(var(--primary));
+	}
+
+	.header-btn.add:active {
+		background: hsl(var(--primary) / 0.15);
+		color: hsl(var(--primary));
 	}
 
 	.header-btn.close:hover {
@@ -436,6 +421,7 @@
 	/* Card Container */
 	.card-container {
 		flex: 1;
+		min-height: 0; /* Critical: allows flex child to shrink below content size */
 		overflow: hidden;
 		position: relative;
 		/* Allow normal touch behavior for inputs - swipe is controlled by JS */
@@ -476,6 +462,9 @@
 
 	.card-wrapper {
 		height: 100%;
+		min-height: 0; /* Allow shrinking in flex context */
+		display: flex;
+		flex-direction: column;
 		transition: transform 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94),
 					opacity 0.15s ease;
 	}
@@ -484,166 +473,7 @@
 		transition: none;
 	}
 
-	/* Dot Indicators - improved touch targets */
-	.dot-indicators {
-		display: flex;
-		justify-content: center;
-		gap: 4px;
-		padding: 8px 16px;
-		padding-bottom: max(12px, env(safe-area-inset-bottom, 12px));
-		background: hsl(var(--card));
-		border-top: 1px solid hsl(var(--border) / 0.6);
-	}
-
-	.dot {
-		/* Apple HIG: 44x44px touch target */
-		width: 44px;
-		height: 44px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: transparent;
-		border: none;
-		padding: 0;
-		cursor: pointer;
-		-webkit-tap-highlight-color: transparent;
-		transition: transform 0.15s ease;
-	}
-
-	.dot:active {
-		transform: scale(0.9);
-	}
-
-	.dot-inner {
-		width: 8px;
-		height: 8px;
-		border-radius: 50%;
-		background: hsl(var(--muted-foreground) / 0.3);
-		transition: all 0.2s ease;
-	}
-
-	.dot.active .dot-inner {
-		width: 10px;
-		height: 10px;
-		background: hsl(var(--primary));
-		/* Subtle glow for active state */
-		box-shadow: 0 0 6px hsl(var(--primary) / 0.4);
-	}
-
-	.dot:hover .dot-inner {
-		background: hsl(var(--muted-foreground) / 0.5);
-	}
-
-	.dot.active:hover .dot-inner {
-		background: hsl(var(--primary));
-	}
-
-	/* Empty State - properly centered */
-	.empty-state {
-		flex: 1;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		padding: 24px;
-		/* Ensure safe area is respected */
-		padding-bottom: max(24px, env(safe-area-inset-bottom, 24px));
-		/* Center in available space */
-		min-height: 0;
-	}
-
-	.empty-content {
-		text-align: center;
-		max-width: 320px;
-		width: 100%;
-		/* Slight offset to visually center */
-		margin-top: -5vh;
-	}
-
-	.empty-icon {
-		width: 72px;
-		height: 72px;
-		margin: 0 auto 20px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: hsl(var(--muted));
-		border-radius: 50%;
-		color: hsl(var(--muted-foreground));
-		/* Subtle animation on mount */
-		animation: empty-icon-appear 0.4s ease-out;
-	}
-
-	@keyframes empty-icon-appear {
-		from {
-			opacity: 0;
-			transform: scale(0.8);
-		}
-		to {
-			opacity: 1;
-			transform: scale(1);
-		}
-	}
-
-	.empty-title {
-		font-size: 1.25rem;
-		font-weight: 600;
-		color: hsl(var(--foreground));
-		margin-bottom: 8px;
-	}
-
-	.empty-text {
-		font-size: 0.9375rem;
-		color: hsl(var(--muted-foreground));
-		margin-bottom: 28px;
-	}
-
-	.create-grid {
-		display: grid;
-		grid-template-columns: repeat(2, 1fr);
-		gap: 12px;
-	}
-
-	.create-card {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 10px;
-		/* Ensure minimum touch target height */
-		padding: 24px 16px;
-		min-height: 88px;
-		background: hsl(var(--card));
-		border: 1px solid hsl(var(--border));
-		border-radius: 14px;
-		color: hsl(var(--foreground));
-		font-size: 0.9375rem;
-		font-weight: 500;
-		cursor: pointer;
-		transition: all 0.15s ease;
-		-webkit-tap-highlight-color: transparent;
-	}
-
-	.create-card:hover {
-		background: hsl(var(--accent));
-		border-color: hsl(var(--primary) / 0.3);
-	}
-
-	.create-card:active {
-		transform: scale(0.97);
-		background: hsl(var(--accent));
-	}
-
-	/* Tablet adjustments - landscape orientation */
-	@media (min-width: 600px) and (orientation: landscape) {
-		.create-grid {
-			grid-template-columns: repeat(4, 1fr);
-			max-width: 480px;
-			margin: 0 auto;
-		}
-
-		.empty-content {
-			max-width: 500px;
-		}
-	}
+	/* Empty state now uses MobileWelcome component */
 
 	/* Large phone / small tablet portrait */
 	@media (min-width: 414px) {

@@ -76,8 +76,9 @@
 
 	const CardIcon = $derived(cardIcons[card.type]);
 
-	// In focus mode, cards are always fullscreen and cannot be un-maximized
-	const isFocusMode = $derived($layoutMode === 'focus');
+	// In managed layout modes, cards are positioned by the layout system
+	// Only freeflow allows free dragging, resizing, and maximize toggle
+	const isManagedLayout = $derived($layoutMode !== 'freeflow');
 
 	// Title editing
 	function handleTitleDoubleClick() {
@@ -210,10 +211,10 @@
 		}
 	}
 
-	// Double-click header to maximize/restore (disabled in focus mode)
+	// Double-click header to maximize/restore (disabled in managed layouts)
 	function handleHeaderDoubleClick() {
-		// In focus mode, don't allow toggling maximize - cards are always fullscreen
-		if (!isEditingTitle && !isFocusMode) {
+		// In managed layouts, don't allow toggling maximize - layout controls positioning
+		if (!isEditingTitle && !isManagedLayout) {
 			onMaximize();
 		}
 	}
@@ -268,8 +269,8 @@
 		</div>
 
 		<div class="window-controls">
-			<!-- Hide maximize button in focus mode since cards are always fullscreen -->
-			{#if !isFocusMode}
+			<!-- Hide maximize button in managed layouts since layout controls positioning -->
+			{#if !isManagedLayout}
 				<button
 					class="control-btn maximize"
 					onclick={(e) => { e.stopPropagation(); onMaximize(); }}
@@ -301,8 +302,8 @@
 		{/if}
 	</div>
 
-	<!-- Resize Handles (hidden when maximized) -->
-	{#if !card.maximized}
+	<!-- Resize Handles (hidden when maximized or in managed layouts) -->
+	{#if !card.maximized && !isManagedLayout}
 		<div
 			class="resize-handle n"
 			onpointerdown={(e) => handleResizeStart(e, 'n')}
