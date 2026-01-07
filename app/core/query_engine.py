@@ -1445,8 +1445,7 @@ def build_options_from_profile(
     can_use_tool: Optional[callable] = None,
     hooks: Optional[Dict[str, list]] = None,
     api_user_id: Optional[str] = None,
-    session_id: Optional[str] = None,
-    stderr_queue: Optional[asyncio.Queue] = None
+    session_id: Optional[str] = None
 ) -> tuple[ClaudeAgentOptions, Optional[Dict[str, AgentDefinition]]]:
     """
     Convert a profile to ClaudeAgentOptions with all available options.
@@ -1465,7 +1464,6 @@ def build_options_from_profile(
         hooks: Optional hooks configuration
         api_user_id: Optional API user ID for user-specific credential resolution
         session_id: Optional our session ID (for worktree lookup)
-        stderr_queue: Optional asyncio.Queue for capturing stderr lines to forward to frontend
 
     Note: On Windows local mode, --agents CLI flag has a bug where agents are not discovered.
     Callers should use write_agents_to_filesystem() on Windows only. On Docker/Linux, agents
@@ -1631,29 +1629,12 @@ def build_options_from_profile(
     # Determine permission mode
     permission_mode = overrides.get("permission_mode") or config.get("permission_mode", "default")
 
-    # Create stderr callback to capture CLI output
+    # Create stderr callback to log CLI output
+    # Note: We only log stderr, don't forward to frontend. The SDK sends proper
+    # typed messages for important events (compact_boundary, api errors via
+    # synthetic AssistantMessage with isApiErrorMessage, etc.)
     def stderr_callback(line: str):
-        # Log all stderr at INFO level for debugging subagent issues
         logger.info(f"[Claude CLI stderr] {line}")
-        # If a queue is provided, put the line for forwarding to frontend
-        # Include a tag to help frontend distinguish errors from info
-        if stderr_queue is not None:
-            line_lower = line.lower()
-            is_error = (
-                "error" in line_lower or
-                "failed" in line_lower or
-                "exception" in line_lower or
-                "traceback" in line_lower or
-                "fatal" in line_lower or
-                "panic" in line_lower or
-                line.startswith("Error:") or
-                line.startswith("error:")
-            )
-            is_compact = "compact" in line_lower or "summary" in line_lower
-            try:
-                stderr_queue.put_nowait({"line": line, "is_error": is_error, "is_compact": is_compact})
-            except asyncio.QueueFull:
-                logger.warning(f"[Claude CLI stderr] Queue full, dropping: {line}")
 
     # Process model selection - handle special 1M context models
     # Models ending in "-1m" use the base model with 1M context beta header
@@ -2962,9 +2943,6 @@ async def stream_to_websocket(
     # No longer using hooks for AskUserQuestion - it's handled in canUseTool
     hooks_config = None
 
-    # Create a queue to capture stderr lines for forwarding to frontend
-    stderr_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
-
     # Build options with the callback, hooks, and user-scoped credential resolution
     options, agents_dict = build_options_from_profile(
         profile=profile,
@@ -2974,8 +2952,7 @@ async def stream_to_websocket(
         can_use_tool=can_use_tool_callback,
         hooks=hooks_config,
         api_user_id=api_user_id,
-        session_id=session_id,
-        stderr_queue=stderr_queue
+        session_id=session_id
     )
 
     # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
@@ -3043,38 +3020,6 @@ async def stream_to_websocket(
     interrupted = False
     include_partial = options.include_partial_messages  # Track if streaming events are enabled
 
-    # Helper to drain stderr queue and yield system messages
-    def drain_stderr_queue():
-        """Drain all messages from stderr queue and return as system message dicts."""
-        messages = []
-        while True:
-            try:
-                item = stderr_queue.get_nowait()
-                # Item is a dict with line, is_error, is_compact
-                line = item["line"]
-                is_error = item["is_error"]
-                is_compact = item["is_compact"]
-
-                # Skip compact-related stderr - the SDK already sends proper compact_boundary
-                # system messages, so we don't need to duplicate that info from stderr
-                if is_compact:
-                    logger.debug(f"[stderr] Skipping compact-related output: {line[:100]}...")
-                    continue
-
-                # Only forward actual errors, skip general informational output
-                if not is_error:
-                    logger.debug(f"[stderr] Skipping non-error output: {line[:100]}...")
-                    continue
-
-                messages.append({
-                    "type": "system",
-                    "subtype": "stderr",
-                    "data": {"content": line}
-                })
-            except asyncio.QueueEmpty:
-                break
-        return messages
-
     # Inject knowledge base context if project has knowledge documents
     # This prepends relevant context to the user's prompt based on keyword matching
     enhanced_prompt = prompt
@@ -3098,10 +3043,6 @@ async def stream_to_websocket(
         await state.client.query(enhanced_prompt)
 
         async for message in state.client.receive_response():
-            # Drain any stderr messages that accumulated and yield them
-            for stderr_msg in drain_stderr_queue():
-                yield stderr_msg
-
             # Check for interrupt request as a failsafe
             if state.interrupt_requested:
                 logger.info(f"[WS] Interrupt flag detected for session {session_id}, breaking out of loop")
@@ -3442,9 +3383,6 @@ async def stream_to_websocket(
     except Exception as e:
         logger.error(f"[WS] Query error for session {session_id}: {e}")
         state.is_connected = False
-        # Drain any final stderr messages before yielding error
-        for stderr_msg in drain_stderr_queue():
-            yield stderr_msg
         yield {"type": "error", "message": str(e)}
         return
 
@@ -3515,10 +3453,6 @@ async def stream_to_websocket(
             cost_usd=metadata.get("total_cost_usd", 0),
             duration_ms=metadata.get("duration_ms", 0)
         )
-
-    # Drain any final stderr messages before yielding done/interrupted
-    for stderr_msg in drain_stderr_queue():
-        yield stderr_msg
 
     # Yield done or interrupted event
     if interrupted:

@@ -154,17 +154,6 @@
 				};
 			}
 
-			case 'stderr': {
-				// CLI stderr output - actual errors from the Claude SDK process
-				const stderrContent = (data.content as string) || message.content || 'Unknown error';
-				return {
-					title: 'CLI Error',
-					content: stderrContent,
-					badge: 'error',
-					badgeColor: 'red'
-				};
-			}
-
 			case 'api_error': {
 				// API error messages from Claude SDK (e.g., max output tokens exceeded)
 				// These are synthetic messages with isApiErrorMessage: true

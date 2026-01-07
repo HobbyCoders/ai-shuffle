@@ -203,31 +203,6 @@ def _extract_local_command_output(content: str) -> Optional[str]:
     return None
 
 
-def _extract_cli_stderr(content: str) -> Optional[str]:
-    """
-    Extract content from CLI stderr tags if present.
-
-    The SDK may output stderr in various formats:
-    - <cli-stderr>...</cli-stderr>
-    - <stderr>...</stderr>
-    - <local-command-stderr>...</local-command-stderr>
-
-    Returns the extracted content, or None if no tags found.
-    """
-    import re
-    # Try various possible stderr tag formats
-    patterns = [
-        r'<cli-stderr>(.*?)</cli-stderr>',
-        r'<stderr>(.*?)</stderr>',
-        r'<local-command-stderr>(.*?)</local-command-stderr>',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, content, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-    return None
-
-
 def get_agent_jsonl_paths(sdk_session_id: str, working_dir: str = "/workspace") -> Dict[str, Path]:
     """
     Find all agent JSONL files for a session.
@@ -472,21 +447,6 @@ def parse_session_history(
                         "content": local_output,
                         "type": "system",
                         "subtype": "local_command",
-                        "metadata": {"timestamp": timestamp},
-                        "streaming": False
-                    })
-                    continue
-
-                # Check for CLI stderr output (SDK process errors like max output tokens exceeded)
-                stderr_output = _extract_cli_stderr(content)
-                if stderr_output is not None:
-                    msg_counter += 1
-                    messages.append({
-                        "id": uuid,
-                        "role": "system",
-                        "content": stderr_output,
-                        "type": "system",
-                        "subtype": "stderr",
                         "metadata": {"timestamp": timestamp},
                         "streaming": False
                     })
