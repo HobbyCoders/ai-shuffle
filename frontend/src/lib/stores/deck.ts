@@ -3,42 +3,29 @@
  *
  * "The Deck" is a card-based UI paradigm for AI Hub, managing:
  * - Multiple card types (chat, agents, studio, files, settings)
- * - Window-like card behaviors (drag, resize, maximize)
+ * - Window-like card behaviors (drag, resize, minimize, maximize, snap)
  * - Workspace persistence across sessions
  * - Mobile-responsive card navigation
  */
 
 import { writable, derived, get } from 'svelte/store';
-import { getPreference, setPreference } from '$lib/api/client';
 
 // ============================================================================
 // Types
 // ============================================================================
 
-export type DeckMode = 'workspace' | 'studio' | 'files';
-
-/**
- * Layout modes for card arrangement in the workspace
- * - freeflow: Default mode - cards can be freely positioned and resized
- * - sidebyside: Cards arranged side-by-side in vertical columns
- * - tile: Cards tiled in a grid pattern
- * - stack: Cards stacked in a cascade pattern (like a card deck)
- * - focus: One main card takes most of the space, others in a sidebar
- */
-export type LayoutMode = 'freeflow' | 'sidebyside' | 'tile' | 'stack' | 'focus';
+export type DeckMode = 'workspace' | 'agents' | 'studio' | 'files';
 
 export type DeckCardType =
 	| 'chat'
+	| 'agent-monitor'
+	| 'agent-launcher'
+	| 'studio-image'
+	| 'studio-video'
 	| 'file-browser'
 	| 'settings'
-	| 'user-settings'
 	| 'profile'
-	| 'terminal'
-	| 'subagent'
-	| 'project'
-	| 'plugins'
-	| 'hooks'
-	| 'notes';
+	| 'terminal';
 
 export type SnapZone =
 	| 'left'
@@ -66,6 +53,7 @@ export interface DeckCard {
 	type: DeckCardType;
 	title: string;
 	// State
+	minimized: boolean;
 	maximized: boolean;
 	// Position and size
 	position: DeckCardPosition;
@@ -96,10 +84,6 @@ export interface DeckState {
 	gridSnapEnabled: boolean;
 	isMobile: boolean;
 	mobileActiveCardIndex: number;
-	layoutMode: LayoutMode;
-	// Shuffle animation state for stack layout
-	isShuffling: boolean;
-	shufflingCards: { outgoingId: string | null; incomingId: string | null };
 }
 
 // ============================================================================
@@ -107,9 +91,7 @@ export interface DeckState {
 // ============================================================================
 
 const STORAGE_KEY = 'deck_state';
-const SERVER_PREFERENCE_KEY = 'deck_state';
 const SAVE_DEBOUNCE_MS = 500;
-const SERVER_SYNC_DEBOUNCE_MS = 1000; // Slightly longer debounce for server sync
 const CASCADE_OFFSET = 30;
 const DEFAULT_CARD_SIZE: DeckCardSize = { width: 600, height: 500 };
 const MIN_CARD_SIZE: DeckCardSize = { width: 320, height: 200 };
@@ -124,91 +106,9 @@ interface PersistedDeckState {
 	contextPanelCollapsed: boolean;
 	snapEnabled: boolean;
 	gridSnapEnabled: boolean;
-	layoutMode?: LayoutMode;
-	lastModified?: number; // Timestamp for conflict resolution
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
-let serverSyncTimer: ReturnType<typeof setTimeout> | null = null;
-let isLoadingFromServer = false;
-let hasSyncedFromServer = false; // Prevents writing to server before initial sync completes
-let lastServerSync = 0;
-
-// Track pending deck state for flush on page unload
-let pendingDeckState: DeckState | null = null;
-
-/**
- * Immediately flush any pending deck save to backend (sync, for beforeunload)
- * Uses sendBeacon for reliable delivery during page unload
- */
-function flushPendingDeckSave() {
-	if (!pendingDeckState || !hasSyncedFromServer) return;
-
-	// Cancel the debounce timers
-	if (serverSyncTimer) {
-		clearTimeout(serverSyncTimer);
-		serverSyncTimer = null;
-	}
-	if (saveTimer) {
-		clearTimeout(saveTimer);
-		saveTimer = null;
-	}
-
-	// Save to localStorage synchronously
-	try {
-		const persisted = createPersistedState(pendingDeckState);
-		localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
-	} catch (e) {
-		console.error('[Deck] Failed to flush state to localStorage:', e);
-	}
-
-	// Use sendBeacon for reliable delivery to server during page unload
-	const persisted = createPersistedState(pendingDeckState);
-	const data = JSON.stringify({ key: SERVER_PREFERENCE_KEY, value: persisted });
-	navigator.sendBeacon('/api/v1/preferences/' + SERVER_PREFERENCE_KEY, new Blob([data], { type: 'application/json' }));
-
-	console.log('[Deck] Flushed pending state on unload');
-	pendingDeckState = null;
-}
-
-// Register beforeunload handler to flush pending saves when browser closes
-if (typeof window !== 'undefined') {
-	window.addEventListener('beforeunload', flushPendingDeckSave);
-	document.addEventListener('visibilitychange', () => {
-		if (document.visibilityState === 'hidden') {
-			flushPendingDeckSave();
-		}
-	});
-}
-
-function parsePersistedState(parsed: PersistedDeckState): Partial<DeckState> {
-	return {
-		activeMode: parsed.activeMode,
-		cards: parsed.cards.map((c) => ({
-			...c,
-			createdAt: new Date(c.createdAt)
-		})),
-		contextPanelCollapsed: parsed.contextPanelCollapsed,
-		snapEnabled: parsed.snapEnabled,
-		gridSnapEnabled: parsed.gridSnapEnabled,
-		layoutMode: parsed.layoutMode || 'freeflow'
-	};
-}
-
-function createPersistedState(state: DeckState): PersistedDeckState {
-	return {
-		activeMode: state.activeMode,
-		cards: state.cards.map((c) => ({
-			...c,
-			createdAt: c.createdAt.toISOString()
-		})),
-		contextPanelCollapsed: state.contextPanelCollapsed,
-		snapEnabled: state.snapEnabled,
-		gridSnapEnabled: state.gridSnapEnabled,
-		layoutMode: state.layoutMode,
-		lastModified: Date.now()
-	};
-}
 
 function loadFromStorage(): Partial<DeckState> | null {
 	if (typeof window === 'undefined') return null;
@@ -217,7 +117,16 @@ function loadFromStorage(): Partial<DeckState> | null {
 		const stored = localStorage.getItem(STORAGE_KEY);
 		if (stored) {
 			const parsed: PersistedDeckState = JSON.parse(stored);
-			return parsePersistedState(parsed);
+			return {
+				activeMode: parsed.activeMode,
+				cards: parsed.cards.map((c) => ({
+					...c,
+					createdAt: new Date(c.createdAt)
+				})),
+				contextPanelCollapsed: parsed.contextPanelCollapsed,
+				snapEnabled: parsed.snapEnabled,
+				gridSnapEnabled: parsed.gridSnapEnabled
+			};
 		}
 	} catch (e) {
 		console.error('[Deck] Failed to load state from localStorage:', e);
@@ -228,127 +137,28 @@ function loadFromStorage(): Partial<DeckState> | null {
 function saveToStorage(state: DeckState) {
 	if (typeof window === 'undefined') return;
 
-	// Track pending state for flush on unload
-	pendingDeckState = state;
-
 	if (saveTimer) {
 		clearTimeout(saveTimer);
 	}
 
 	saveTimer = setTimeout(() => {
 		try {
-			const persisted = createPersistedState(state);
+			const persisted: PersistedDeckState = {
+				activeMode: state.activeMode,
+				cards: state.cards.map((c) => ({
+					...c,
+					createdAt: c.createdAt.toISOString()
+				})),
+				contextPanelCollapsed: state.contextPanelCollapsed,
+				snapEnabled: state.snapEnabled,
+				gridSnapEnabled: state.gridSnapEnabled
+			};
 			localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
 		} catch (e) {
 			console.error('[Deck] Failed to save state to localStorage:', e);
 		}
 		saveTimer = null;
-		// Clear pending state after successful save
-		if (pendingDeckState === state) {
-			pendingDeckState = null;
-		}
 	}, SAVE_DEBOUNCE_MS);
-}
-
-/**
- * Save deck state to server for cross-device sync
- */
-async function saveToServer(state: DeckState) {
-	if (typeof window === 'undefined' || isLoadingFromServer) return;
-
-	// Don't write to server until we've completed initial sync
-	// This prevents empty local state from overwriting server data on first load
-	if (!hasSyncedFromServer) {
-		console.log('[Deck] Skipping server save - initial sync not complete');
-		return;
-	}
-
-	// Track pending state for flush on unload
-	pendingDeckState = state;
-
-	if (serverSyncTimer) {
-		clearTimeout(serverSyncTimer);
-	}
-
-	serverSyncTimer = setTimeout(async () => {
-		try {
-			const persisted = createPersistedState(state);
-			await setPreference(SERVER_PREFERENCE_KEY, persisted);
-			lastServerSync = Date.now();
-			console.log('[Deck] Synced state to server');
-		} catch (e) {
-			console.error('[Deck] Failed to sync state to server:', e);
-		}
-		serverSyncTimer = null;
-		// Clear pending state after successful save
-		if (pendingDeckState === state) {
-			pendingDeckState = null;
-		}
-	}, SERVER_SYNC_DEBOUNCE_MS);
-}
-
-/**
- * Load deck state from server
- * Returns the server state if newer than local, otherwise null
- */
-async function loadFromServer(): Promise<Partial<DeckState> | null> {
-	if (typeof window === 'undefined') return null;
-
-	try {
-		isLoadingFromServer = true;
-		const response = await getPreference<PersistedDeckState>(SERVER_PREFERENCE_KEY);
-
-		if (response && response.value) {
-			const serverState = response.value as PersistedDeckState;
-			console.log('[Deck] Loaded state from server');
-			return parsePersistedState(serverState);
-		}
-	} catch (e) {
-		console.error('[Deck] Failed to load state from server:', e);
-	} finally {
-		isLoadingFromServer = false;
-	}
-	return null;
-}
-
-/**
- * Merge server state with local state
- * - Server cards take precedence for positions/sizes
- * - Local-only cards are preserved
- * - Server-only cards are added
- */
-function mergeStates(local: Partial<DeckState> | null, server: Partial<DeckState> | null): Partial<DeckState> | null {
-	if (!server) return local;
-	if (!local) return server;
-
-	const localCards = local.cards || [];
-	const serverCards = server.cards || [];
-
-	// Create a map of server cards by ID
-	const serverCardMap = new Map(serverCards.map(c => [c.id, c]));
-	const localCardMap = new Map(localCards.map(c => [c.id, c]));
-
-	// Merged cards: start with server cards, add local-only cards
-	const mergedCards: DeckCard[] = [];
-
-	// Add all server cards (they have the latest positions from other devices)
-	for (const serverCard of serverCards) {
-		mergedCards.push(serverCard);
-	}
-
-	// Add local-only cards (created on this device but not yet synced to server)
-	for (const localCard of localCards) {
-		if (!serverCardMap.has(localCard.id)) {
-			mergedCards.push(localCard);
-		}
-	}
-
-	return {
-		...server,
-		cards: mergedCards,
-		// Preserve local-only runtime state
-		focusedCardId: local.focusedCardId
-	};
 }
 
 // ============================================================================
@@ -364,8 +174,13 @@ function calculateCascadePosition(existingCards: DeckCard[], bounds: { width: nu
 		return { x: 50, y: 50 };
 	}
 
-	// Find the topmost (highest zIndex) card
-	const topCard = existingCards.reduce((a, b) => (a.zIndex > b.zIndex ? a : b));
+	// Find the topmost (highest zIndex) non-minimized card
+	const visibleCards = existingCards.filter((c) => !c.minimized);
+	if (visibleCards.length === 0) {
+		return { x: 50, y: 50 };
+	}
+
+	const topCard = visibleCards.reduce((a, b) => (a.zIndex > b.zIndex ? a : b));
 	let x = topCard.position.x + CASCADE_OFFSET;
 	let y = topCard.position.y + CASCADE_OFFSET;
 
@@ -384,6 +199,14 @@ function getDefaultTitle(type: DeckCardType): string {
 	switch (type) {
 		case 'chat':
 			return 'New Chat';
+		case 'agent-monitor':
+			return 'Agent Monitor';
+		case 'agent-launcher':
+			return 'Launch Agent';
+		case 'studio-image':
+			return 'Image Studio';
+		case 'studio-video':
+			return 'Video Studio';
 		case 'file-browser':
 			return 'Files';
 		case 'settings':
@@ -392,16 +215,6 @@ function getDefaultTitle(type: DeckCardType): string {
 			return 'Profile';
 		case 'terminal':
 			return 'Terminal';
-		case 'subagent':
-			return 'Subagents';
-		case 'project':
-			return 'Projects';
-		case 'plugins':
-			return 'Plugins';
-		case 'hooks':
-			return 'Hooks';
-		case 'notes':
-			return 'Notes';
 		default:
 			return 'Card';
 	}
@@ -424,107 +237,24 @@ function createDeckStore() {
 		snapEnabled: persisted?.snapEnabled ?? true,
 		gridSnapEnabled: persisted?.gridSnapEnabled ?? false,
 		isMobile: false,
-		mobileActiveCardIndex: 0,
-		layoutMode: persisted?.layoutMode || 'freeflow',
-		isShuffling: false,
-		shufflingCards: { outgoingId: null, incomingId: null }
+		mobileActiveCardIndex: 0
 	};
 
 	const { subscribe, set, update } = writable<DeckState>(initialState);
 
 	/**
-	 * Helper to update state and persist (local + server)
+	 * Helper to update state and persist
 	 */
 	function updateAndPersist(updater: (state: DeckState) => DeckState): void {
 		update((state) => {
 			const newState = updater(state);
 			saveToStorage(newState);
-			saveToServer(newState); // Sync to server for cross-device access
 			return newState;
 		});
 	}
 
 	return {
 		subscribe,
-
-		// ========================================================================
-		// Server Sync
-		// ========================================================================
-
-		/**
-		 * Sync state from server (call on page load/focus)
-		 *
-		 * Merge strategy:
-		 * 1. If local is empty (no cards), always use server state
-		 * 2. If server is empty but local has data, keep local
-		 * 3. If both have data, merge: server cards + local-only cards
-		 */
-		async syncFromServer(): Promise<void> {
-			const serverState = await loadFromServer();
-
-			update((state) => {
-				const localCards = state.cards || [];
-				const serverCards = serverState?.cards || [];
-				const localIsEmpty = localCards.length === 0;
-				const serverIsEmpty = serverCards.length === 0;
-
-				let newState: DeckState;
-
-				if (serverState && !serverIsEmpty) {
-					if (localIsEmpty) {
-						// Local is empty, use server state entirely
-						console.log('[Deck] Local empty, using server state');
-						newState = {
-							...state,
-							...serverState,
-							// Recalculate nextZIndex
-							nextZIndex: Math.max(...serverCards.map((c) => c.zIndex), state.nextZIndex) + 1
-						} as DeckState;
-					} else {
-						// Both have data - merge them
-						const merged = mergeStates({ ...state }, serverState);
-						if (merged) {
-							console.log('[Deck] Merging local and server state');
-							newState = {
-								...state,
-								...merged,
-								nextZIndex: merged.cards
-									? Math.max(...merged.cards.map((c) => c.zIndex), state.nextZIndex) + 1
-									: state.nextZIndex
-							};
-						} else {
-							newState = state;
-						}
-					}
-				} else {
-					// No server state or server is empty - keep local
-					console.log('[Deck] No server state, keeping local');
-					newState = state;
-				}
-
-				// Save merged state to localStorage
-				saveToStorage(newState);
-				return newState;
-			});
-
-			// Mark sync as complete - now server writes are allowed
-			hasSyncedFromServer = true;
-			console.log('[Deck] Initial sync complete, server writes enabled');
-		},
-
-		/**
-		 * Force sync current state to server
-		 */
-		async forceServerSync(): Promise<void> {
-			const state = get({ subscribe });
-			const persisted = createPersistedState(state);
-			try {
-				await setPreference(SERVER_PREFERENCE_KEY, persisted);
-				console.log('[Deck] Force synced state to server');
-			} catch (e) {
-				console.error('[Deck] Failed to force sync to server:', e);
-			}
-		},
 
 		// ========================================================================
 		// Mode Management
@@ -548,8 +278,6 @@ function createDeckStore() {
 		/**
 		 * Add a new card to the deck
 		 * Returns the new card's ID
-		 * In focus mode: minimizes current maximized card and maximizes the new card
-		 * In other modes: automatically reapplies the current layout mode
 		 */
 		addCard(
 			type: DeckCardType,
@@ -567,65 +295,29 @@ function createDeckStore() {
 				const position =
 					data?.position || calculateCascadePosition(state.cards, state.workspaceBounds);
 
-				// Ensure new card gets the highest zIndex (safeguard against sync issues)
-				const maxExistingZ = state.cards.length > 0
-					? Math.max(...state.cards.map(c => c.zIndex))
-					: 0;
-				const newZIndex = Math.max(state.nextZIndex, maxExistingZ + 1);
-
-				// In focus mode, new card starts maximized
-				const isFocusMode = state.layoutMode === 'focus';
-
 				const newCard: DeckCard = {
 					id: cardId,
 					type,
 					title: data?.title || getDefaultTitle(type),
-					maximized: isFocusMode, // Maximize in focus mode
+					minimized: false,
+					maximized: false,
 					position,
 					size: data?.size || { ...DEFAULT_CARD_SIZE },
-					zIndex: newZIndex,
+					zIndex: state.nextZIndex,
 					snappedTo: null,
 					dataId: data?.dataId ?? null,
 					meta: data?.meta,
-					createdAt: new Date(),
-					// Save position/size for when we exit focus mode
-					savedPosition: isFocusMode ? position : undefined,
-					savedSize: isFocusMode ? (data?.size || { ...DEFAULT_CARD_SIZE }) : undefined
+					createdAt: new Date()
 				};
 
-				let updatedCards: DeckCard[];
-
-				if (isFocusMode) {
-					// In focus mode: unmaximize currently maximized card, then add new maximized card
-					updatedCards = state.cards.map((c) => {
-						if (c.maximized) {
-							return { ...c, maximized: false };
-						}
-						return c;
-					});
-					updatedCards.push(newCard);
-				} else {
-					updatedCards = [...state.cards, newCard];
-				}
-
-				let newState: DeckState = {
+				const newState = {
 					...state,
-					cards: updatedCards,
+					cards: [...state.cards, newCard],
 					focusedCardId: cardId,
-					nextZIndex: newZIndex + 1,
-					// On mobile, navigate to the newly added card
-					mobileActiveCardIndex: state.isMobile
-						? updatedCards.length - 1
-						: state.mobileActiveCardIndex
+					nextZIndex: state.nextZIndex + 1
 				};
-
-				// Auto-reapply layout mode if not freeflow (skip for focus, already handled)
-				if (state.layoutMode !== 'freeflow' && state.layoutMode !== 'focus') {
-					newState = this.applyLayout(newState, state.layoutMode);
-				}
 
 				saveToStorage(newState);
-				saveToServer(newState);
 				return newState;
 			});
 
@@ -634,78 +326,13 @@ function createDeckStore() {
 
 		/**
 		 * Remove a card from the deck
-		 * Automatically reapplies the current layout mode if not freeflow
-		 * On mobile, adjusts the active card index to show the previous card
-		 * In focus mode, if removing the maximized card, automatically maximizes the first remaining card
 		 */
 		removeCard(id: string): void {
-			update((state) => {
-				const removedCardIndex = state.cards.findIndex((c) => c.id === id);
-				const removedCard = state.cards.find((c) => c.id === id);
-
-				// Filter out the removed card
-				let newCards = state.cards.filter((c) => c.id !== id);
-
-				// In focus mode, if we're removing the maximized card, maximize the first remaining card
-				if (state.layoutMode === 'focus' && removedCard?.maximized && newCards.length > 0) {
-					// Find the first card (by creation time for consistency)
-					const firstCard = [...newCards].sort(
-						(a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-					)[0];
-
-					const highestZ = Math.max(...newCards.map((c) => c.zIndex), 0);
-					newCards = newCards.map((c) => {
-						if (c.id === firstCard.id) {
-							return { ...c, maximized: true, zIndex: highestZ + 1 };
-						}
-						return c;
-					});
-				}
-
-				// Calculate new mobile active card index
-				let newMobileActiveCardIndex = state.mobileActiveCardIndex;
-				if (state.isMobile && newCards.length > 0) {
-					// If we removed the active card, show the previous card (or first if at start)
-					if (removedCardIndex === state.mobileActiveCardIndex) {
-						newMobileActiveCardIndex = Math.max(0, removedCardIndex - 1);
-					} else if (removedCardIndex < state.mobileActiveCardIndex) {
-						// If we removed a card before the active one, adjust index
-						newMobileActiveCardIndex = state.mobileActiveCardIndex - 1;
-					}
-					// Ensure index is within bounds
-					newMobileActiveCardIndex = Math.min(newMobileActiveCardIndex, newCards.length - 1);
-					newMobileActiveCardIndex = Math.max(0, newMobileActiveCardIndex);
-				} else if (newCards.length === 0) {
-					newMobileActiveCardIndex = 0;
-				}
-
-				// Determine new focused card ID
-				let newFocusedCardId = state.focusedCardId === id ? null : state.focusedCardId;
-
-				// In focus mode, set focusedCardId to the newly maximized card
-				if (state.layoutMode === 'focus') {
-					const maximizedCard = newCards.find((c) => c.maximized);
-					if (maximizedCard) {
-						newFocusedCardId = maximizedCard.id;
-					}
-				}
-
-				let newState: DeckState = {
-					...state,
-					cards: newCards,
-					focusedCardId: newFocusedCardId,
-					mobileActiveCardIndex: newMobileActiveCardIndex
-				};
-
-				// Auto-reapply layout mode if not freeflow (skip for focus mode as we handled it above)
-				if (state.layoutMode !== 'freeflow' && state.layoutMode !== 'focus') {
-					newState = this.applyLayout(newState, state.layoutMode);
-				}
-
-				saveToStorage(newState);
-				saveToServer(newState);
-				return newState;
-			});
+			updateAndPersist((state) => ({
+				...state,
+				cards: state.cards.filter((c) => c.id !== id),
+				focusedCardId: state.focusedCardId === id ? null : state.focusedCardId
+			}));
 		},
 
 		// ========================================================================
@@ -714,52 +341,22 @@ function createDeckStore() {
 
 		/**
 		 * Focus a card (bring to front)
-		 * Note: This only updates focusedCardId and zIndex, does NOT persist to server
-		 * to avoid position sync issues during frequent focus changes
-		 *
-		 * IMPORTANT: On mobile, this does NOT change mobileActiveCardIndex.
-		 * Mobile card navigation should only happen through explicit user actions
-		 * (swipe, dot navigation, etc.) via setMobileActiveCardIndex().
-		 * This prevents unwanted card switching when focus events fire from
-		 * typing in input fields or textareas.
-		 *
-		 * In stack mode, focusing a card also reapplies the layout to make it the main card.
 		 */
 		focusCard(id: string): void {
-			update((state) => {
+			updateAndPersist((state) => {
 				const card = state.cards.find((c) => c.id === id);
-				if (!card) {
+				if (!card || card.minimized) {
 					return state;
 				}
 
-				// Ensure focused card gets the highest zIndex
-				const maxExistingZ = state.cards.length > 0
-					? Math.max(...state.cards.map(c => c.zIndex))
-					: 0;
-				const newZIndex = Math.max(state.nextZIndex, maxExistingZ + 1);
-
-				// On mobile, do NOT update mobileActiveCardIndex here
-				// This prevents focus events from typing in inputs from
-				// triggering unwanted card switches
-
-				let newState: DeckState = {
+				return {
 					...state,
 					cards: state.cards.map((c) =>
-						c.id === id ? { ...c, zIndex: newZIndex } : c
+						c.id === id ? { ...c, zIndex: state.nextZIndex } : c
 					),
 					focusedCardId: id,
-					nextZIndex: newZIndex + 1
-					// Note: mobileActiveCardIndex is NOT updated here
+					nextZIndex: state.nextZIndex + 1
 				};
-
-				// In stack mode, reapply layout to make the focused card the main card
-				if (state.layoutMode === 'stack') {
-					newState = this.applyLayout(newState, 'stack');
-				}
-
-				// Only save to localStorage, not server (avoid position sync issues)
-				saveToStorage(newState);
-				return newState;
 			});
 		},
 
@@ -813,6 +410,49 @@ function createDeckStore() {
 		},
 
 		// ========================================================================
+		// Minimize/Restore
+		// ========================================================================
+
+		/**
+		 * Minimize a card
+		 */
+		minimizeCard(id: string): void {
+			updateAndPersist((state) => ({
+				...state,
+				cards: state.cards.map((c) =>
+					c.id === id
+						? {
+								...c,
+								minimized: true,
+								maximized: false
+							}
+						: c
+				),
+				focusedCardId: state.focusedCardId === id ? null : state.focusedCardId
+			}));
+		},
+
+		/**
+		 * Restore a card from minimized state
+		 */
+		restoreCard(id: string): void {
+			updateAndPersist((state) => ({
+				...state,
+				cards: state.cards.map((c) =>
+					c.id === id
+						? {
+								...c,
+								minimized: false,
+								zIndex: state.nextZIndex
+							}
+						: c
+				),
+				focusedCardId: id,
+				nextZIndex: state.nextZIndex + 1
+			}));
+		},
+
+		// ========================================================================
 		// Maximize/Unmaximize
 		// ========================================================================
 
@@ -820,45 +460,30 @@ function createDeckStore() {
 		 * Maximize a card to fill the workspace
 		 */
 		maximizeCard(id: string): void {
-			updateAndPersist((state) => {
-				// Ensure maximized card gets the highest zIndex
-				const maxExistingZ = state.cards.length > 0
-					? Math.max(...state.cards.map(c => c.zIndex))
-					: 0;
-				const newZIndex = Math.max(state.nextZIndex, maxExistingZ + 1);
-
-				return {
-					...state,
-					cards: state.cards.map((c) =>
-						c.id === id
-							? {
-									...c,
-									maximized: true,
-									// Save current position/size for restore
-									savedPosition: c.savedPosition || { ...c.position },
-									savedSize: c.savedSize || { ...c.size },
-									zIndex: newZIndex
-								}
-							: c
-					),
-					focusedCardId: id,
-					nextZIndex: newZIndex + 1
-				};
-			});
+			updateAndPersist((state) => ({
+				...state,
+				cards: state.cards.map((c) =>
+					c.id === id
+						? {
+								...c,
+								maximized: true,
+								minimized: false,
+								// Save current position/size for restore
+								savedPosition: c.savedPosition || { ...c.position },
+								savedSize: c.savedSize || { ...c.size },
+								zIndex: state.nextZIndex
+							}
+						: c
+				),
+				focusedCardId: id,
+				nextZIndex: state.nextZIndex + 1
+			}));
 		},
 
 		/**
 		 * Restore a card from maximized state
-		 * In focus mode, cards cannot be unmaximized - they are always fullscreen
 		 */
 		unmaximizeCard(id: string): void {
-			const state = get({ subscribe });
-
-			// In focus mode, don't allow unmaximizing - cards must stay fullscreen
-			if (state.layoutMode === 'focus') {
-				return;
-			}
-
 			updateAndPersist((state) => ({
 				...state,
 				cards: state.cards.map((c) =>
@@ -878,17 +503,10 @@ function createDeckStore() {
 
 		/**
 		 * Toggle maximize state
-		 * In focus mode, cards cannot be unmaximized - they are always fullscreen
 		 */
 		toggleMaximize(id: string): void {
 			const state = get({ subscribe });
 			const card = state.cards.find((c) => c.id === id);
-
-			// In focus mode, don't allow unmaximizing - cards must stay fullscreen
-			if (state.layoutMode === 'focus' && card?.maximized) {
-				return;
-			}
-
 			if (card?.maximized) {
 				this.unmaximizeCard(id);
 			} else {
@@ -909,12 +527,6 @@ function createDeckStore() {
 			updateAndPersist((state) => {
 				const card = state.cards.find((c) => c.id === id);
 				if (!card) return state;
-
-				// Ensure snapped card gets the highest zIndex
-				const maxExistingZ = state.cards.length > 0
-					? Math.max(...state.cards.map(c => c.zIndex))
-					: 0;
-				const newZIndex = Math.max(state.nextZIndex, maxExistingZ + 1);
 
 				// Calculate snap position and size
 				const { width: boundsW, height: boundsH } = state.workspaceBounds;
@@ -970,12 +582,13 @@ function createDeckStore() {
 									savedPosition: c.savedPosition || { ...card.position },
 									savedSize: c.savedSize || { ...card.size },
 									maximized: false,
-									zIndex: newZIndex
+									minimized: false,
+									zIndex: state.nextZIndex
 								}
 							: c
 					),
 					focusedCardId: id,
-					nextZIndex: newZIndex + 1
+					nextZIndex: state.nextZIndex + 1
 				};
 			});
 		},
@@ -1006,14 +619,17 @@ function createDeckStore() {
 		// ========================================================================
 
 		/**
-		 * Cascade all cards
+		 * Cascade all visible cards
 		 */
 		cascadeCards(): void {
 			updateAndPersist((state) => {
+				const visibleCards = state.cards.filter((c) => !c.minimized);
 				let x = 50;
 				let y = 50;
 
 				const updatedCards = state.cards.map((card) => {
+					if (card.minimized) return card;
+
 					const newCard = {
 						...card,
 						position: { x, y },
@@ -1046,13 +662,14 @@ function createDeckStore() {
 		},
 
 		/**
-		 * Tile all cards
+		 * Tile all visible cards
 		 */
 		tileCards(): void {
 			updateAndPersist((state) => {
-				if (state.cards.length === 0) return state;
+				const visibleCards = state.cards.filter((c) => !c.minimized);
+				if (visibleCards.length === 0) return state;
 
-				const count = state.cards.length;
+				const count = visibleCards.length;
 				const cols = Math.ceil(Math.sqrt(count));
 				const rows = Math.ceil(count / cols);
 
@@ -1061,6 +678,8 @@ function createDeckStore() {
 
 				let idx = 0;
 				const updatedCards = state.cards.map((card) => {
+					if (card.minimized) return card;
+
 					const col = idx % cols;
 					const row = Math.floor(idx / cols);
 					idx++;
@@ -1108,26 +727,6 @@ function createDeckStore() {
 		},
 
 		/**
-		 * Expand context panel (set collapsed to false)
-		 */
-		expandContextPanel(): void {
-			updateAndPersist((state) => ({
-				...state,
-				contextPanelCollapsed: false
-			}));
-		},
-
-		/**
-		 * Collapse context panel (set collapsed to true)
-		 */
-		collapseContextPanel(): void {
-			updateAndPersist((state) => ({
-				...state,
-				contextPanelCollapsed: true
-			}));
-		},
-
-		/**
 		 * Set snap enabled
 		 */
 		setSnapEnabled(enabled: boolean): void {
@@ -1153,39 +752,23 @@ function createDeckStore() {
 
 		/**
 		 * Set mobile mode
-		 * Only resets mobileActiveCardIndex when transitioning from desktop to mobile
-		 * (not on every call, which would reset on window resize)
 		 */
 		setIsMobile(isMobile: boolean): void {
-			update((state) => {
-				// Only reset index if actually switching to mobile from desktop
-				// Don't reset if already mobile (e.g., during keyboard open/close resize)
-				const shouldResetIndex = isMobile && !state.isMobile;
-
-				return {
-					...state,
-					isMobile,
-					// Preserve current index unless transitioning to mobile for the first time
-					mobileActiveCardIndex: shouldResetIndex ? 0 : state.mobileActiveCardIndex
-				};
-			});
+			update((state) => ({
+				...state,
+				isMobile,
+				mobileActiveCardIndex: 0
+			}));
 		},
 
 		/**
 		 * Set active card index for mobile navigation
-		 * Also updates focusedCardId to match the active card
 		 */
 		setMobileActiveCardIndex(index: number): void {
-			update((state) => {
-				const clampedIndex = Math.max(0, Math.min(index, state.cards.length - 1));
-				const activeCard = state.cards[clampedIndex];
-
-				return {
-					...state,
-					mobileActiveCardIndex: clampedIndex,
-					focusedCardId: activeCard?.id ?? state.focusedCardId
-				};
-			});
+			update((state) => ({
+				...state,
+				mobileActiveCardIndex: Math.max(0, Math.min(index, state.cards.length - 1))
+			}));
 		},
 
 		// ========================================================================
@@ -1256,7 +839,11 @@ function createDeckStore() {
 			const existingCard = state.cards.find((c) => c.dataId === dataId && c.type === type);
 
 			if (existingCard) {
-				this.focusCard(existingCard.id);
+				if (existingCard.minimized) {
+					this.restoreCard(existingCard.id);
+				} else {
+					this.focusCard(existingCard.id);
+				}
 				return existingCard.id;
 			}
 
@@ -1277,532 +864,10 @@ function createDeckStore() {
 				snapEnabled: true,
 				gridSnapEnabled: false,
 				isMobile: false,
-				mobileActiveCardIndex: 0,
-				layoutMode: 'freeflow',
-				isShuffling: false,
-				shufflingCards: { outgoingId: null, incomingId: null }
+				mobileActiveCardIndex: 0
 			};
 			set(freshState);
 			saveToStorage(freshState);
-		},
-
-		// ========================================================================
-		// Layout Mode Management
-		// ========================================================================
-
-		/**
-		 * Set layout mode and rearrange cards accordingly
-		 * When leaving focus mode, restores card positions/sizes
-		 */
-		setLayoutMode(mode: LayoutMode): void {
-			updateAndPersist((state) => {
-				let newState = { ...state, layoutMode: mode };
-
-				// If leaving focus mode, restore all cards to their saved positions
-				if (state.layoutMode === 'focus' && mode !== 'focus') {
-					newState = {
-						...newState,
-						cards: newState.cards.map((card) => ({
-							...card,
-							maximized: false,
-							// Restore saved position/size if available
-							position: card.savedPosition || card.position,
-							size: card.savedSize || card.size,
-							savedPosition: undefined,
-							savedSize: undefined
-						}))
-					};
-				}
-
-				// Apply layout arrangement based on mode
-				if (mode !== 'freeflow') {
-					return this.applyLayout(newState, mode);
-				}
-
-				return newState;
-			});
-		},
-
-		/**
-		 * Get current layout mode
-		 */
-		getLayoutMode(): LayoutMode {
-			const state = get({ subscribe });
-			return state.layoutMode;
-		},
-
-		/**
-		 * Apply layout arrangement to cards
-		 */
-		applyLayout(state: DeckState, mode: LayoutMode): DeckState {
-			if (state.cards.length === 0) return state;
-
-			const { width: boundsW, height: boundsH } = state.workspaceBounds;
-			// Symmetric padding - menu moved to bottom left
-			const paddingX = 8;    // Left/right padding between cards
-			const paddingY = 8;    // Bottom padding
-			const paddingTop = 8;  // Top padding - minimal, no UI at top anymore
-
-			let updatedCards: DeckCard[];
-
-			switch (mode) {
-				case 'sidebyside':
-					// Cards arranged side-by-side in vertical columns
-					updatedCards = this.applySideBySideLayout(state.cards, boundsW, boundsH, paddingX, paddingY, paddingTop);
-					break;
-
-				case 'tile':
-					// Cards tiled in a grid pattern
-					updatedCards = this.applyTileLayout(state.cards, boundsW, boundsH, paddingX, paddingY, paddingTop);
-					break;
-
-				case 'stack': {
-					// Cards in left-side deck with main focused card
-					// Ensure focusedCardId is set - default to highest z-index card if not
-					let focusedId = state.focusedCardId;
-					if (!focusedId || !state.cards.find(c => c.id === focusedId)) {
-						const highestZCard = state.cards.reduce((a, b) => a.zIndex > b.zIndex ? a : b);
-						focusedId = highestZCard.id;
-						state = { ...state, focusedCardId: focusedId };
-					}
-					updatedCards = this.applyStackLayout(state.cards, boundsW, boundsH, paddingX, paddingY, paddingTop, focusedId);
-					return { ...state, cards: updatedCards, focusedCardId: focusedId };
-				}
-
-				case 'focus':
-					// One main card takes most space, others in sidebar
-					updatedCards = this.applyFocusLayout(state.cards, boundsW, boundsH, paddingX, state.focusedCardId);
-					break;
-
-				default:
-					// freeflow - don't modify positions
-					return state;
-			}
-
-			return { ...state, cards: updatedCards };
-		},
-
-		/**
-		 * Side-by-side layout: Cards arranged in equal-width vertical columns
-		 */
-		applySideBySideLayout(cards: DeckCard[], boundsW: number, boundsH: number, paddingX: number, paddingY: number, paddingTop: number): DeckCard[] {
-			const count = cards.length;
-			if (count === 0) return cards;
-
-			// Calculate column width - max 4 columns, then start scrolling
-			const maxCols = Math.min(count, 4);
-			const cardWidth = (boundsW - (maxCols + 1) * paddingX) / maxCols;
-			const cardHeight = boundsH - paddingTop - paddingY;
-
-			return cards.map((card, index) => {
-				const x = paddingX + index * (cardWidth + paddingX);
-
-				return {
-					...card,
-					position: { x, y: paddingTop },
-					size: { width: cardWidth, height: cardHeight },
-					maximized: false,
-					snappedTo: null as SnapZone,
-					savedPosition: card.savedPosition || { ...card.position },
-					savedSize: card.savedSize || { ...card.size }
-				};
-			});
-		},
-
-		/**
-		 * Tile layout: Cards tiled in a grid pattern with equal sizes
-		 */
-		applyTileLayout(cards: DeckCard[], boundsW: number, boundsH: number, paddingX: number, paddingY: number, paddingTop: number): DeckCard[] {
-			const count = cards.length;
-			if (count === 0) return cards;
-
-			// Calculate optimal grid dimensions
-			const cols = Math.ceil(Math.sqrt(count));
-			const rows = Math.ceil(count / cols);
-
-			const cardWidth = (boundsW - (cols + 1) * paddingX) / cols;
-			const cardHeight = (boundsH - paddingTop - (rows) * paddingY) / rows;
-
-			return cards.map((card, idx) => {
-				const col = idx % cols;
-				const row = Math.floor(idx / cols);
-
-				return {
-					...card,
-					position: {
-						x: paddingX + col * (cardWidth + paddingX),
-						y: paddingTop + row * (cardHeight + paddingY)
-					},
-					size: { width: cardWidth, height: cardHeight },
-					maximized: false,
-					snappedTo: null as SnapZone,
-					savedPosition: card.savedPosition || { ...card.position },
-					savedSize: card.savedSize || { ...card.size }
-				};
-			});
-		},
-
-		/**
-		 * Stack layout: Left-side deck of compact card previews + one main focused card
-		 * Like a hand of cards fanned down on the left, with one card "in play" on the right
-		 */
-		applyStackLayout(cards: DeckCard[], boundsW: number, boundsH: number, paddingX: number, paddingY: number, paddingTop: number, focusedCardId?: string | null): DeckCard[] {
-			if (cards.length === 0) return cards;
-
-			// Stack panel width for the card deck on the left
-			const stackPanelWidth = 260;
-			const stackPadding = 12;
-			const cardOverlap = 100; // Increased from 64 for better visibility with compact previews
-			const compactCardHeight = 90; // Fixed height for stacked preview cards
-
-			// Main card dimensions (takes up rest of workspace)
-			const mainCardX = stackPanelWidth + stackPadding;
-			const mainCardWidth = boundsW - mainCardX - paddingX;
-			const mainCardHeight = boundsH - paddingTop - paddingY;
-
-			// Find the focused card - use the highest z-index card or the last one
-			let focusedCard = focusedCardId
-				? cards.find(c => c.id === focusedCardId)
-				: null;
-			if (!focusedCard) {
-				// Default to highest z-index card
-				focusedCard = cards.reduce((a, b) => a.zIndex > b.zIndex ? a : b);
-			}
-
-			let nextZ = Math.max(...cards.map(c => c.zIndex), 0) + 1;
-
-			// Stack cards (non-focused) - sort by array order to respect reordering
-			const stackCards = cards.filter(c => c.id !== focusedCard?.id);
-
-			return cards.map((card) => {
-				const isMainCard = card.id === focusedCard?.id;
-
-				if (isMainCard) {
-					// Main card: positioned on the right, nearly full screen
-					return {
-						...card,
-						position: { x: mainCardX, y: paddingTop },
-						size: { width: mainCardWidth, height: mainCardHeight },
-						zIndex: nextZ + cards.length + 1,
-						maximized: false,
-						snappedTo: null as SnapZone,
-						savedPosition: card.savedPosition || { ...card.position },
-						savedSize: card.savedSize || { ...card.size }
-					};
-				} else {
-					// Stack cards: compact preview cards fanned on the left
-					const stackIndex = stackCards.findIndex(c => c.id === card.id);
-					const yOffset = paddingTop + stackIndex * cardOverlap;
-
-					return {
-						...card,
-						position: { x: stackPadding, y: yOffset },
-						size: { width: stackPanelWidth - stackPadding * 2, height: compactCardHeight },
-						zIndex: nextZ + stackIndex,
-						maximized: false,
-						snappedTo: null as SnapZone,
-						savedPosition: card.savedPosition || { ...card.position },
-						savedSize: card.savedSize || { ...card.size }
-					};
-				}
-			});
-		},
-
-		/**
-		 * Focus layout: All cards are maximized but stacked
-		 * Only the focused card is visible (has highest z-index)
-		 * Navigation buttons switch which card is on top
-		 */
-		applyFocusLayout(cards: DeckCard[], _boundsW: number, _boundsH: number, _padding: number, focusedCardId: string | null): DeckCard[] {
-			if (cards.length === 0) return cards;
-
-			// Find the focused card, or use the first card
-			const focusedCard = focusedCardId
-				? cards.find(c => c.id === focusedCardId) || cards[0]
-				: cards[0];
-
-			const highestZ = Math.max(...cards.map(c => c.zIndex), 0);
-
-			return cards.map((card, index) => {
-				const isFocused = card.id === focusedCard?.id;
-
-				// All cards are maximized, but only focused one has highest z-index
-				return {
-					...card,
-					maximized: true,
-					zIndex: isFocused ? highestZ + cards.length + 1 : highestZ + index,
-					// Save current position/size for when we exit focus mode
-					savedPosition: card.savedPosition || { ...card.position },
-					savedSize: card.savedSize || { ...card.size }
-				};
-			});
-		},
-
-		// ========================================================================
-		// Card Reordering (for managed layouts)
-		// ========================================================================
-
-		/**
-		 * Get grid metrics for current layout mode
-		 * Used for calculating slot positions during drag reordering
-		 */
-		getGridMetrics(): { cols: number; rows: number; cellWidth: number; cellHeight: number; paddingX: number; paddingY: number; paddingTop: number } | null {
-			const state = get({ subscribe });
-			if (state.layoutMode !== 'sidebyside' && state.layoutMode !== 'tile' && state.layoutMode !== 'stack') {
-				return null;
-			}
-
-			const { width: boundsW, height: boundsH } = state.workspaceBounds;
-			const paddingX = 8;
-			const paddingY = 8;
-			const paddingTop = 8;
-			const count = state.cards.length;
-
-			if (count === 0) return null;
-
-			if (state.layoutMode === 'sidebyside') {
-				const cols = Math.min(count, 4);
-				const cellWidth = (boundsW - (cols + 1) * paddingX) / cols;
-				const cellHeight = boundsH - paddingTop - paddingY;
-				return { cols, rows: 1, cellWidth, cellHeight, paddingX, paddingY, paddingTop };
-			} else if (state.layoutMode === 'tile') {
-				const cols = Math.ceil(Math.sqrt(count));
-				const rows = Math.ceil(count / cols);
-				const cellWidth = (boundsW - (cols + 1) * paddingX) / cols;
-				const cellHeight = (boundsH - paddingTop - rows * paddingY) / rows;
-				return { cols, rows, cellWidth, cellHeight, paddingX, paddingY, paddingTop };
-			} else {
-				// stack - vertical arrangement of non-focused cards
-				const stackPanelWidth = 260;
-				const stackPadding = 12;
-				const cardOverlap = 100;
-				const compactCardHeight = 90;
-
-				// Only count non-focused cards for stack metrics
-				const stackCardCount = state.focusedCardId
-					? state.cards.filter(c => c.id !== state.focusedCardId).length
-					: Math.max(0, state.cards.length - 1);
-
-				return {
-					cols: 1,
-					rows: stackCardCount,
-					cellWidth: stackPanelWidth - stackPadding * 2,
-					cellHeight: compactCardHeight,
-					paddingX: stackPadding,
-					paddingY: cardOverlap,
-					paddingTop: paddingTop
-				};
-			}
-		},
-
-		/**
-		 * Calculate which slot index a position (x, y) maps to in the current grid layout
-		 * Returns clamped index within valid range [0, cardCount-1]
-		 */
-		calculateSlotIndex(x: number, y: number): number {
-			const state = get({ subscribe });
-			const metrics = this.getGridMetrics();
-			if (!metrics) return 0;
-
-			const { cols, rows, cellWidth, cellHeight, paddingX, paddingTop } = metrics;
-			const count = state.cards.length;
-
-			// Calculate center of dragged position
-			const centerX = x + cellWidth / 2;
-			const centerY = y + cellHeight / 2;
-
-			if (state.layoutMode === 'sidebyside') {
-				// For side-by-side, only X matters - find nearest column
-				const col = Math.round((centerX - paddingX - cellWidth / 2) / (cellWidth + paddingX));
-				return Math.max(0, Math.min(col, count - 1));
-			} else if (state.layoutMode === 'tile') {
-				// For tile, calculate row and column
-				const col = Math.round((centerX - paddingX - cellWidth / 2) / (cellWidth + paddingX));
-				const row = Math.round((centerY - paddingTop - cellHeight / 2) / (cellHeight + metrics.paddingY));
-				const clampedCol = Math.max(0, Math.min(col, cols - 1));
-				const clampedRow = Math.max(0, Math.min(row, rows - 1));
-				const index = clampedRow * cols + clampedCol;
-				return Math.max(0, Math.min(index, count - 1));
-			} else {
-				// For stack, only Y matters - vertical arrangement
-				const cardOverlap = 100;
-				const slotIndex = Math.round((y - paddingTop) / cardOverlap);
-
-				// Stack only contains non-focused cards
-				const stackCardCount = state.focusedCardId
-					? state.cards.filter(c => c.id !== state.focusedCardId).length
-					: Math.max(0, count - 1);
-
-				return Math.max(0, Math.min(slotIndex, stackCardCount - 1));
-			}
-		},
-
-		/**
-		 * Reorder a card to a new position in the array
-		 * Used during drag reordering in managed layouts (sidebyside, tile, stack)
-		 * Reapplies layout after reordering to update card positions
-		 */
-		reorderCard(cardId: string, targetIndex: number): void {
-			update((state) => {
-				// Only allow reordering in managed grid layouts
-				if (state.layoutMode !== 'sidebyside' && state.layoutMode !== 'tile' && state.layoutMode !== 'stack') {
-					return state;
-				}
-
-				// In stack mode, don't allow reordering the focused (main) card
-				if (state.layoutMode === 'stack' && cardId === state.focusedCardId) {
-					return state;
-				}
-
-				// For stack layout, we need to work with non-focused cards only
-				if (state.layoutMode === 'stack') {
-					const stackCards = state.cards.filter(c => c.id !== state.focusedCardId);
-					const currentStackIndex = stackCards.findIndex(c => c.id === cardId);
-
-					if (currentStackIndex === -1 || currentStackIndex === targetIndex) {
-						return state;
-					}
-
-					// Clamp target index to valid range of stack cards
-					const clampedTarget = Math.max(0, Math.min(targetIndex, stackCards.length - 1));
-					if (currentStackIndex === clampedTarget) {
-						return state;
-					}
-
-					// Build new cards array with reordered stack cards
-					const newStackCards = [...stackCards];
-					const [movedCard] = newStackCards.splice(currentStackIndex, 1);
-					newStackCards.splice(clampedTarget, 0, movedCard);
-
-					// Rebuild full cards array: focused card + reordered stack cards
-					const focusedCard = state.cards.find(c => c.id === state.focusedCardId);
-					const newCards = focusedCard ? [focusedCard, ...newStackCards] : newStackCards;
-
-					// Apply layout to update positions
-					let newState: DeckState = { ...state, cards: newCards };
-					newState = this.applyLayout(newState, state.layoutMode);
-
-					return newState;
-				}
-
-				// Standard reorder for sidebyside/tile
-				const currentIndex = state.cards.findIndex(c => c.id === cardId);
-				if (currentIndex === -1 || currentIndex === targetIndex) {
-					return state;
-				}
-
-				// Clamp target index to valid range
-				const clampedTarget = Math.max(0, Math.min(targetIndex, state.cards.length - 1));
-				if (currentIndex === clampedTarget) {
-					return state;
-				}
-
-				// Reorder the cards array
-				const newCards = [...state.cards];
-				const [card] = newCards.splice(currentIndex, 1);
-				newCards.splice(clampedTarget, 0, card);
-
-				// Apply layout to update positions
-				let newState: DeckState = { ...state, cards: newCards };
-				newState = this.applyLayout(newState, state.layoutMode);
-
-				// Don't persist during drag - only save on drag end
-				// This prevents excessive writes during rapid reordering
-				return newState;
-			});
-		},
-
-		/**
-		 * Commit card reorder to storage (call on drag end)
-		 */
-		commitReorder(): void {
-			const state = get({ subscribe });
-			saveToStorage(state);
-			saveToServer(state);
-		},
-
-		// ========================================================================
-		// Shuffle Animation (for stack layout)
-		// ========================================================================
-
-		/**
-		 * Start shuffle animation when swapping main card with a stacked card
-		 * @param outgoingId The current main card that will move to the stack
-		 * @param incomingId The stacked card that will become the main card
-		 */
-		startShuffle(outgoingId: string | null, incomingId: string): void {
-			update((state) => ({
-				...state,
-				isShuffling: true,
-				shufflingCards: { outgoingId, incomingId }
-			}));
-		},
-
-		/**
-		 * End shuffle animation (call after animation completes)
-		 */
-		endShuffle(): void {
-			update((state) => ({
-				...state,
-				isShuffling: false,
-				shufflingCards: { outgoingId: null, incomingId: null }
-			}));
-		},
-
-		/**
-		 * Reapply current layout (useful when cards are added/removed or window resized)
-		 */
-		reapplyLayout(): void {
-			update((state) => {
-				if (state.layoutMode === 'freeflow') return state;
-
-				const newState = this.applyLayout(state, state.layoutMode);
-				saveToStorage(newState);
-				saveToServer(newState);
-				return newState;
-			});
-		},
-
-		/**
-		 * Navigate between cards in focus mode
-		 * @param direction 'prev' or 'next'
-		 */
-		navigateFocusMode(direction: 'prev' | 'next'): void {
-			update((state) => {
-				if (state.layoutMode !== 'focus') return state;
-				if (state.cards.length <= 1) return state;
-
-				// Sort by creation time for consistent ordering
-				const sortedCards = [...state.cards].sort(
-					(a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-				);
-
-				// Find current focused card index
-				const currentIndex = sortedCards.findIndex((c) => c.id === state.focusedCardId);
-				if (currentIndex === -1) return state;
-
-				// Calculate new index with wrapping
-				let newIndex: number;
-				if (direction === 'next') {
-					newIndex = (currentIndex + 1) % sortedCards.length;
-				} else {
-					newIndex = (currentIndex - 1 + sortedCards.length) % sortedCards.length;
-				}
-
-				const newFocusedCard = sortedCards[newIndex];
-				const newFocusedCardId = newFocusedCard.id;
-
-				// Update focused card and reapply layout
-				let newState: DeckState = {
-					...state,
-					focusedCardId: newFocusedCardId
-				};
-
-				newState = this.applyLayout(newState, 'focus');
-				saveToStorage(newState);
-				saveToServer(newState);
-				return newState;
-			});
 		}
 	};
 }
@@ -1818,6 +883,16 @@ export const activeMode = derived(deck, ($deck) => $deck.activeMode);
 
 // All cards
 export const allCards = derived(deck, ($deck) => $deck.cards);
+
+// Visible cards (not minimized)
+export const visibleCards = derived(deck, ($deck) =>
+	$deck.cards.filter((c) => !c.minimized)
+);
+
+// Minimized cards
+export const minimizedCards = derived(deck, ($deck) =>
+	$deck.cards.filter((c) => c.minimized)
+);
 
 // Focused card
 export const focusedCard = derived(deck, ($deck) => {
@@ -1841,13 +916,6 @@ export const mobileActiveCardIndex = derived(deck, ($deck) => $deck.mobileActive
 // Snap settings
 export const snapEnabled = derived(deck, ($deck) => $deck.snapEnabled);
 export const gridSnapEnabled = derived(deck, ($deck) => $deck.gridSnapEnabled);
-
-// Layout mode
-export const layoutMode = derived(deck, ($deck) => $deck.layoutMode);
-
-// Shuffle animation state (for stack layout)
-export const isShuffling = derived(deck, ($deck) => $deck.isShuffling);
-export const shufflingCards = derived(deck, ($deck) => $deck.shufflingCards);
 
 // Check if a specific card is focused
 export const isCardFocused = (cardId: string) =>

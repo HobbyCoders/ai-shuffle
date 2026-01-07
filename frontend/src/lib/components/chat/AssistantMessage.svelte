@@ -1,11 +1,9 @@
 <script lang="ts">
 	/**
-	 * AssistantMessage - Assistant message with markdown rendering and hover-only action buttons
+	 * AssistantMessage - Assistant message with markdown rendering, copy, and fork buttons
 	 */
 	import { marked } from 'marked';
-	import { onDestroy } from 'svelte';
 	import StreamingIndicator from './StreamingIndicator.svelte';
-	import MessageActions from './MessageActions.svelte';
 
 	// Configure marked for markdown rendering
 	marked.setOptions({
@@ -23,6 +21,7 @@
 		hasPartialMessages?: boolean;
 		metadata?: Record<string, unknown>;
 		onCopy?: (content: string, messageId: string) => void;
+		onFork?: (sessionId: string, messageIndex: number, messageId: string) => void;
 	}
 
 	let {
@@ -34,37 +33,12 @@
 		streaming = false,
 		hasPartialMessages = true,
 		metadata,
-		onCopy
+		onCopy,
+		onFork
 	}: Props = $props();
 
-	// Show Read button on any non-streaming assistant message with content
-	// (The metadata-based approach doesn't work for history-loaded messages)
-	const canRead = $derived(Boolean(!streaming && content && content.length > 0));
-
-	let isHovered = $state(false);
-	let isTouchDevice = $state(false);
-	let showActionsOnMobile = $state(false);
-	let isReading = $state(false);
-	let currentAudio = $state<HTMLAudioElement | null>(null);
-
-	function handleTouchStart() {
-		isTouchDevice = true;
-	}
-
-	function handleMessageClick(e: MouseEvent) {
-		// Don't toggle if clicking on interactive elements (links, buttons, code blocks, etc.)
-		const target = e.target as HTMLElement;
-		if (target.closest('a, button, pre, code, video, .media-overlay-buttons')) {
-			return;
-		}
-		// Only toggle on touch devices - desktop uses hover
-		if (isTouchDevice) {
-			showActionsOnMobile = !showActionsOnMobile;
-		}
-	}
-
-	// Show actions if hovered (desktop) or tapped (mobile)
-	const showActions = $derived(isHovered || showActionsOnMobile);
+	let copiedMessageId = $state<string | null>(null);
+	let forkingMessageId = $state<string | null>(null);
 
 	function formatTime(date?: Date): string {
 		const d = date || new Date();
@@ -153,168 +127,91 @@
 		return marked(processedContent, { breaks: true }) as string;
 	}
 
-	/**
-	 * Strip markdown/HTML and prepare text for TTS
-	 */
-	function prepareTextForTTS(text: string): string {
-		// Remove code blocks
-		let cleaned = text.replace(/```[\s\S]*?```/g, ' code block ');
-		// Remove inline code
-		cleaned = cleaned.replace(/`[^`]+`/g, ' code ');
-		// Remove image markdown
-		cleaned = cleaned.replace(/!\[[^\]]*\]\([^)]+\)/g, '');
-		// Remove link markdown but keep text
-		cleaned = cleaned.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-		// Remove bold markers (** or __) but keep text - use non-greedy match
-		cleaned = cleaned.replace(/\*\*(.*?)\*\*/g, '$1');
-		cleaned = cleaned.replace(/__(.*?)__/g, '$1');
-		// Remove italic markers (* or _) but keep text - use non-greedy match
-		cleaned = cleaned.replace(/\*(.*?)\*/g, '$1');
-		cleaned = cleaned.replace(/_(.*?)_/g, '$1');
-		// Remove headers
-		cleaned = cleaned.replace(/^#{1,6}\s+/gm, '');
-		// Remove horizontal rules
-		cleaned = cleaned.replace(/^[-*_]{3,}$/gm, '');
-		// Remove numbered list markers (e.g., "1. ", "2. ", "10. ")
-		cleaned = cleaned.replace(/^\d+\.\s+/gm, '');
-		// Remove bullet list markers (e.g., "- ", "* ", "+ ")
-		cleaned = cleaned.replace(/^[-*+]\s+/gm, '');
-		// Remove blockquotes
-		cleaned = cleaned.replace(/^>\s*/gm, '');
-		// Remove table formatting (pipes and alignment markers)
-		cleaned = cleaned.replace(/\|/g, ' ');
-		cleaned = cleaned.replace(/^[\s\-:]+$/gm, '');
-
-		// Remove emojis (surrogate pairs for emoji ranges)
-		cleaned = cleaned.replace(/[\uD83C-\uDBFF][\uDC00-\uDFFF]/g, '');
-
-		// Remove specific unicode symbol ranges that cause TTS issues:
-		// - Misc symbols (U+2600-U+26FF) - weather, zodiac, chess, etc.
-		// - Dingbats (U+2700-U+27BF) - ornaments, arrows, etc.
-		// - Arrows (U+2190-U+21FF)
-		// - Mathematical operators (U+2200-U+22FF)
-		// - Box drawing (U+2500-U+257F)
-		// - Geometric shapes (U+25A0-U+25FF)
-		// - Variation selectors (U+FE00-U+FE0F)
-		// - Zero-width characters (U+200B-U+200D, U+FEFF)
-		cleaned = cleaned.replace(/[\u2600-\u26FF\u2700-\u27BF\u2190-\u21FF\u2200-\u22FF\u2500-\u257F\u25A0-\u25FF\uFE00-\uFE0F\u200B-\u200D\uFEFF]/g, '');
-
-		// Remove common decorative symbols that might appear in text
-		cleaned = cleaned.replace(/[•◦▪▫●○◆◇★☆✓✔✗✘✕✖]/g, '');
-
-		// Clean up extra whitespace
-		cleaned = cleaned.replace(/\s+/g, ' ').trim();
-		// Limit length for TTS (4000 chars max)
-		if (cleaned.length > 4000) {
-			cleaned = cleaned.substring(0, 4000) + '...';
-		}
-		return cleaned;
-	}
-
-	/**
-	 * Handle reading the message with TTS
-	 */
-	async function handleRead() {
-		// If already reading, stop
-		if (isReading && currentAudio) {
-			currentAudio.pause();
-			currentAudio.currentTime = 0;
-			currentAudio = null;
-			isReading = false;
-			return;
-		}
-
-		const ttsText = prepareTextForTTS(content);
-		if (!ttsText) return;
-
-		isReading = true;
-
-		try {
-			const response = await fetch('/api/v1/settings/tts/stream', {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					'Authorization': `Bearer ${localStorage.getItem('auth_token') || ''}`
-				},
-				body: JSON.stringify({
-					text: ttsText,
-					output_format: 'mp3'
-				})
-			});
-
-			if (!response.ok) {
-				throw new Error(`TTS request failed: ${response.status}`);
+	async function handleCopy() {
+		if (onCopy) {
+			onCopy(content, messageId);
+		} else {
+			try {
+				await navigator.clipboard.writeText(content);
+				copiedMessageId = messageId;
+				setTimeout(() => {
+					copiedMessageId = null;
+				}, 2000);
+			} catch (e) {
+				console.error('Failed to copy to clipboard:', e);
 			}
-
-			const audioBlob = await response.blob();
-			const audioUrl = URL.createObjectURL(audioBlob);
-
-			const audio = new Audio(audioUrl);
-			currentAudio = audio;
-
-			audio.onended = () => {
-				isReading = false;
-				currentAudio = null;
-				URL.revokeObjectURL(audioUrl);
-			};
-
-			audio.onerror = () => {
-				console.error('Audio playback error');
-				isReading = false;
-				currentAudio = null;
-				URL.revokeObjectURL(audioUrl);
-			};
-
-			await audio.play();
-		} catch (e) {
-			console.error('Failed to generate TTS:', e);
-			isReading = false;
-			currentAudio = null;
 		}
 	}
 
-	// Cleanup on component destroy
-	onDestroy(() => {
-		if (currentAudio) {
-			currentAudio.pause();
-			currentAudio = null;
+	async function handleFork() {
+		if (!sessionId || forkingMessageId) return;
+
+		if (onFork) {
+			forkingMessageId = messageId;
+			onFork(sessionId, messageIndex, messageId);
+			// The parent will handle resetting this via state
+			setTimeout(() => {
+				forkingMessageId = null;
+			}, 5000);
 		}
-	});
+	}
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
-<div
-	class="w-full overflow-hidden message-container"
-	onmouseenter={() => isHovered = true}
-	onmouseleave={() => { isHovered = false; showActionsOnMobile = false; }}
-	ontouchstart={handleTouchStart}
-	onclick={handleMessageClick}
-	role="article"
->
-	<div class="min-w-0 max-w-full">
+<div class="w-full assistant-message">
+	<div class="min-w-0">
 		<div class="flex items-center gap-2 mb-1">
 			<span class="font-semibold text-sm text-orange-400">Claude</span>
 			<span class="text-xs text-muted-foreground">{formatTime(timestamp)}</span>
 			{#if streaming}
 				<StreamingIndicator />
 			{/if}
-			{#if showActions && content && !streaming}
-				<!-- Hover/touch action buttons -->
-				<div class="ml-auto">
-					<MessageActions
-						{sessionId}
-						messageContent={content}
-						messageRole="assistant"
-						{canRead}
-						isStreaming={streaming}
-						onRead={handleRead}
-						{isReading}
-					/>
+			{#if content && !streaming}
+				<!-- Action buttons container -->
+				<div class="ml-auto flex items-center gap-1">
+					<!-- Copy response button -->
+					<button
+						class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
+						onclick={handleCopy}
+						title="Copy response"
+					>
+						{#if copiedMessageId === messageId}
+							<svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+							</svg>
+							<span class="text-green-500">Copied</span>
+						{:else}
+							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+							</svg>
+							<span>Copy</span>
+						{/if}
+					</button>
+					<!-- Fork from here button -->
+					{#if sessionId}
+						<button
+							class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
+							onclick={handleFork}
+							title="Fork conversation from this point"
+							disabled={forkingMessageId === messageId}
+						>
+							{#if forkingMessageId === messageId}
+								<svg class="w-3.5 h-3.5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+								</svg>
+								<span>Forking...</span>
+							{:else}
+								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2" />
+								</svg>
+								<span>Fork</span>
+							{/if}
+						</button>
+					{/if}
 				</div>
 			{/if}
 		</div>
-		<div class="overflow-hidden max-w-full">
-			<div class="prose prose-sm max-w-none break-words" style="overflow-wrap: anywhere; word-break: break-word;">
+		<div class="overflow-hidden">
+			<div class="prose prose-sm max-w-none break-words overflow-x-auto">
 				{#if content}
 					{@html renderMarkdown(content, streaming)}
 					{#if streaming}
@@ -342,9 +239,3 @@
 		{/if}
 	</div>
 </div>
-
-<style>
-	.message-container {
-		position: relative;
-	}
-</style>

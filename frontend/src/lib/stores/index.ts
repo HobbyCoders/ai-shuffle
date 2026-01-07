@@ -26,7 +26,8 @@ export * from './pwa';
 // Theme
 export * from './theme';
 
-// Canvas store removed
+// Canvas (media generation)
+export * from './canvas';
 
 // =============================================================================
 // The Deck - Phase 3 Stores
@@ -37,6 +38,7 @@ export * from './theme';
 export {
 	deck,
 	allCards,
+	visibleCards,
 	focusedCard,
 	contextPanelCollapsed,
 	workspaceBounds,
@@ -55,13 +57,10 @@ export {
 } from './deck';
 
 // Background Agents
-// TODO: Create agents store - currently not implemented
-// export * from './agents';
+export * from './agents';
 
-// Studio store removed - components now use API directly
-
-// Hooks store
-export * from './hooks';
+// Studio - Media generation
+export * from './studio';
 
 // =============================================================================
 // Stores with overlapping exports - import directly from module if needed:

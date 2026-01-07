@@ -3,11 +3,12 @@
  */
 
 // Activity modes for the rail
-export type ActivityMode = 'workspace' | 'studio' | 'files';
+export type ActivityMode = 'workspace' | 'agents' | 'studio' | 'files';
 
 // Badge configuration for activity buttons
 export interface ActivityBadges {
 	workspace?: number | 'dot';
+	agents?: number | 'dot';
 	studio?: number | 'dot';
 	files?: number | 'dot';
 }
@@ -22,6 +23,15 @@ export interface DeckSession {
 	unread?: boolean;
 }
 
+// Agent in the deck
+export interface DeckAgent {
+	id: string;
+	name: string;
+	status: 'running' | 'idle' | 'error' | 'paused';
+	task?: string;
+	progress?: number;
+}
+
 // Generation (media) in the deck
 export interface DeckGeneration {
 	id: string;
@@ -31,9 +41,6 @@ export interface DeckGeneration {
 	progress?: number;
 	thumbnailUrl?: string;
 	resultUrl?: string;
-	// Extended fields for store integration
-	provider?: string;
-	model?: string;
 }
 
 // Session info for the context panel
@@ -59,22 +66,29 @@ export interface CardGeometry {
 // Card state for workspace cards
 export interface CardState {
 	id: string;
-	type: 'chat' | 'generation' | 'file' | 'settings' | 'profile' | 'subagent' | 'project' | 'canvas' | 'terminal';
+	type: 'chat' | 'agent' | 'generation' | 'file' | 'settings';
 	title: string;
-	state: 'normal' | 'maximized';
+	state: 'normal' | 'minimized' | 'maximized';
 	geometry: CardGeometry;
 	zIndex: number;
 	icon?: string;
 	data?: unknown;
 }
 
+// Minimized card for the dock
+export interface MinimizedCard {
+	id: string;
+	type: CardState['type'];
+	title: string;
+	icon?: string;
+}
 
 // Running process for the dock
 export interface RunningProcess {
 	id: string;
-	type: 'generation';
+	type: 'generation' | 'agent';
 	title: string;
-	status: DeckGeneration['status'];
+	status: DeckAgent['status'] | DeckGeneration['status'];
 	progress?: number;
 }
 

@@ -6,26 +6,24 @@
 	 * - Header with drag handle and window controls
 	 * - Card type icon (Lucide icons)
 	 * - Editable title on double-click
-	 * - Window controls: maximize/restore, close
+	 * - Window controls: minimize, maximize/restore, close
 	 * - 8 resize handles (n, s, e, w, ne, nw, se, sw)
-	 * - States: focused, maximized
+	 * - States: focused, minimized, maximized
 	 * - Glassmorphism styling
 	 */
 
-	import { MessageSquare, Terminal, Square, X, Maximize2, Copy, Settings, User, Users, FolderKanban, Puzzle, FolderOpen, StickyNote, Zap } from 'lucide-svelte';
+	import { MessageSquare, Bot, Palette, Terminal, Minus, Square, X, Maximize2, Copy } from 'lucide-svelte';
 	import type { DeckCard, CardType } from './types';
 	import type { Snippet } from 'svelte';
-	import { layoutMode } from '$lib/stores/deck';
 
 	interface Props {
 		card: DeckCard;
 		onClose: () => void;
+		onMinimize: () => void;
 		onMaximize: () => void;
 		onFocus: () => void;
 		onMove: (x: number, y: number) => void;
 		onResize: (w: number, h: number) => void;
-		onDragEnd?: () => void;
-		onResizeEnd?: () => void;
 		onTitleChange?: (title: string) => void;
 		children?: Snippet;
 	}
@@ -33,12 +31,11 @@
 	let {
 		card,
 		onClose,
+		onMinimize,
 		onMaximize,
 		onFocus,
 		onMove,
 		onResize,
-		onDragEnd,
-		onResizeEnd,
 		onTitleChange,
 		children
 	}: Props = $props();
@@ -51,36 +48,21 @@
 	// Drag state
 	let isDragging = $state(false);
 	let dragStart = $state({ x: 0, y: 0, cardX: 0, cardY: 0 });
-	let dragCaptureElement: HTMLElement | null = $state(null);
-	let dragPointerId: number | null = $state(null);
 
 	// Resize state
 	let isResizing = $state(false);
 	let resizeEdge = $state<string | null>(null);
 	let resizeStart = $state({ x: 0, y: 0, width: 0, height: 0, cardX: 0, cardY: 0 });
-	let resizeCaptureElement: HTMLElement | null = $state(null);
-	let resizePointerId: number | null = $state(null);
 
 	// Icon mapping
 	const cardIcons: Record<CardType, typeof MessageSquare> = {
 		chat: MessageSquare,
+		agent: Bot,
+		canvas: Palette,
 		terminal: Terminal,
-		settings: Settings,
-		profile: User,
-		subagent: Users,
-		project: FolderKanban,
-		plugins: Puzzle,
-		'user-settings': Settings,
-		'file-browser': FolderOpen,
-		notes: StickyNote,
-		hooks: Zap,
 	};
 
 	const CardIcon = $derived(cardIcons[card.type]);
-
-	// In managed layout modes, cards are positioned by the layout system
-	// Only freeflow allows free dragging, resizing, and maximize toggle
-	const isManagedLayout = $derived($layoutMode !== 'freeflow');
 
 	// Title editing
 	function handleTitleDoubleClick() {
@@ -121,44 +103,6 @@
 		// Only start drag from header area, not buttons
 		if (target.closest('.window-controls') || target.closest('button')) return;
 
-		// In managed layouts, we use a simpler approach:
-		// - Don't capture the pointer (let events bubble naturally)
-		// - Track drag state for visual feedback only
-		// - Use window-level events for actual position tracking
-		if (isManagedLayout) {
-			isDragging = true;
-			dragStart = {
-				x: e.clientX,
-				y: e.clientY,
-				cardX: card.x,
-				cardY: card.y,
-			};
-			onFocus();
-
-			// Use window-level events instead of pointer capture
-			// This avoids issues with capture + reactive state updates
-			const handleWindowMove = (moveEvent: PointerEvent) => {
-				if (!isDragging) return;
-				const dx = moveEvent.clientX - dragStart.x;
-				const dy = moveEvent.clientY - dragStart.y;
-				onMove(dragStart.cardX + dx, dragStart.cardY + dy);
-			};
-
-			const handleWindowUp = () => {
-				isDragging = false;
-				window.removeEventListener('pointermove', handleWindowMove);
-				window.removeEventListener('pointerup', handleWindowUp);
-				window.removeEventListener('pointercancel', handleWindowUp);
-				onDragEnd?.();
-			};
-
-			window.addEventListener('pointermove', handleWindowMove);
-			window.addEventListener('pointerup', handleWindowUp);
-			window.addEventListener('pointercancel', handleWindowUp);
-			return;
-		}
-
-		// Freeflow mode: use pointer capture for precise tracking
 		isDragging = true;
 		dragStart = {
 			x: e.clientX,
@@ -167,17 +111,12 @@
 			cardY: card.y,
 		};
 
-		// Store the element and pointer ID for reliable release
-		dragCaptureElement = target;
-		dragPointerId = e.pointerId;
-
 		onFocus();
-		target.setPointerCapture(e.pointerId);
+		(e.target as HTMLElement).setPointerCapture(e.pointerId);
 	}
 
 	function handlePointerMove(e: PointerEvent) {
-		// Only used in freeflow mode (managed layouts use window events)
-		if (!isDragging || isManagedLayout) return;
+		if (!isDragging) return;
 
 		const dx = e.clientX - dragStart.x;
 		const dy = e.clientY - dragStart.y;
@@ -185,33 +124,10 @@
 	}
 
 	function handlePointerUp(e: PointerEvent) {
-		// Only used in freeflow mode (managed layouts use window events)
-		if (isDragging && !isManagedLayout) {
-			clearDragState();
-			onDragEnd?.();
+		if (isDragging) {
+			isDragging = false;
+			(e.target as HTMLElement).releasePointerCapture(e.pointerId);
 		}
-	}
-
-	function handlePointerCancel(e: PointerEvent) {
-		// Only used in freeflow mode (managed layouts use window events)
-		if (isDragging && !isManagedLayout) {
-			clearDragState();
-			onDragEnd?.();
-		}
-	}
-
-	function clearDragState() {
-		isDragging = false;
-		// Release pointer capture on the SAME element that captured it
-		if (dragCaptureElement && dragPointerId !== null) {
-			try {
-				dragCaptureElement.releasePointerCapture(dragPointerId);
-			} catch {
-				// Ignore - capture may have already been released
-			}
-		}
-		dragCaptureElement = null;
-		dragPointerId = null;
 	}
 
 	// Resize handling
@@ -219,8 +135,6 @@
 		if (card.maximized) return;
 
 		e.stopPropagation();
-		const target = e.target as HTMLElement;
-
 		isResizing = true;
 		resizeEdge = edge;
 		resizeStart = {
@@ -232,12 +146,8 @@
 			cardY: card.y,
 		};
 
-		// Store the element and pointer ID for reliable release
-		resizeCaptureElement = target;
-		resizePointerId = e.pointerId;
-
 		onFocus();
-		target.setPointerCapture(e.pointerId);
+		(e.target as HTMLElement).setPointerCapture(e.pointerId);
 	}
 
 	function handleResizeMove(e: PointerEvent) {
@@ -277,38 +187,15 @@
 
 	function handleResizeEnd(e: PointerEvent) {
 		if (isResizing) {
-			clearResizeState();
-			onResizeEnd?.();
+			isResizing = false;
+			resizeEdge = null;
+			(e.target as HTMLElement).releasePointerCapture(e.pointerId);
 		}
 	}
 
-	function handleResizeCancel(e: PointerEvent) {
-		// Browser cancelled the gesture
-		if (isResizing) {
-			clearResizeState();
-			onResizeEnd?.();
-		}
-	}
-
-	function clearResizeState() {
-		isResizing = false;
-		resizeEdge = null;
-		// Release pointer capture on the SAME element that captured it
-		if (resizeCaptureElement && resizePointerId !== null) {
-			try {
-				resizeCaptureElement.releasePointerCapture(resizePointerId);
-			} catch {
-				// Ignore - capture may have already been released
-			}
-		}
-		resizeCaptureElement = null;
-		resizePointerId = null;
-	}
-
-	// Double-click header to maximize/restore (disabled in managed layouts)
+	// Double-click header to maximize/restore
 	function handleHeaderDoubleClick() {
-		// In managed layouts, don't allow toggling maximize - layout controls positioning
-		if (!isEditingTitle && !isManagedLayout) {
+		if (!isEditingTitle) {
 			onMaximize();
 		}
 	}
@@ -325,6 +212,7 @@
 	class="base-card"
 	class:focused={card.focused}
 	class:maximized={card.maximized}
+	class:minimized={card.minimized}
 	class:dragging={isDragging}
 	class:resizing={isResizing}
 	onclick={handleCardClick}
@@ -335,7 +223,6 @@
 		onpointerdown={handlePointerDown}
 		onpointermove={handlePointerMove}
 		onpointerup={handlePointerUp}
-		onpointercancel={handlePointerCancel}
 		ondblclick={handleHeaderDoubleClick}
 	>
 		<div class="header-left">
@@ -364,21 +251,26 @@
 		</div>
 
 		<div class="window-controls">
-			<!-- Hide maximize button in managed layouts since layout controls positioning -->
-			{#if !isManagedLayout}
-				<button
-					class="control-btn maximize"
-					onclick={(e) => { e.stopPropagation(); onMaximize(); }}
-					title={card.maximized ? 'Restore' : 'Maximize'}
-					aria-label={card.maximized ? 'Restore' : 'Maximize'}
-				>
-					{#if card.maximized}
-						<Copy size={12} />
-					{:else}
-						<Square size={12} />
-					{/if}
-				</button>
-			{/if}
+			<button
+				class="control-btn minimize"
+				onclick={(e) => { e.stopPropagation(); onMinimize(); }}
+				title="Minimize"
+				aria-label="Minimize"
+			>
+				<Minus size={14} />
+			</button>
+			<button
+				class="control-btn maximize"
+				onclick={(e) => { e.stopPropagation(); onMaximize(); }}
+				title={card.maximized ? 'Restore' : 'Maximize'}
+				aria-label={card.maximized ? 'Restore' : 'Maximize'}
+			>
+				{#if card.maximized}
+					<Copy size={12} />
+				{:else}
+					<Square size={12} />
+				{/if}
+			</button>
 			<button
 				class="control-btn close"
 				onclick={(e) => { e.stopPropagation(); onClose(); }}
@@ -397,63 +289,55 @@
 		{/if}
 	</div>
 
-	<!-- Resize Handles (hidden when maximized or in managed layouts) -->
-	{#if !card.maximized && !isManagedLayout}
+	<!-- Resize Handles (hidden when maximized) -->
+	{#if !card.maximized}
 		<div
 			class="resize-handle n"
 			onpointerdown={(e) => handleResizeStart(e, 'n')}
 			onpointermove={handleResizeMove}
 			onpointerup={handleResizeEnd}
-			onpointercancel={handleResizeCancel}
 		></div>
 		<div
 			class="resize-handle s"
 			onpointerdown={(e) => handleResizeStart(e, 's')}
 			onpointermove={handleResizeMove}
 			onpointerup={handleResizeEnd}
-			onpointercancel={handleResizeCancel}
 		></div>
 		<div
 			class="resize-handle e"
 			onpointerdown={(e) => handleResizeStart(e, 'e')}
 			onpointermove={handleResizeMove}
 			onpointerup={handleResizeEnd}
-			onpointercancel={handleResizeCancel}
 		></div>
 		<div
 			class="resize-handle w"
 			onpointerdown={(e) => handleResizeStart(e, 'w')}
 			onpointermove={handleResizeMove}
 			onpointerup={handleResizeEnd}
-			onpointercancel={handleResizeCancel}
 		></div>
 		<div
 			class="resize-handle ne"
 			onpointerdown={(e) => handleResizeStart(e, 'ne')}
 			onpointermove={handleResizeMove}
 			onpointerup={handleResizeEnd}
-			onpointercancel={handleResizeCancel}
 		></div>
 		<div
 			class="resize-handle nw"
 			onpointerdown={(e) => handleResizeStart(e, 'nw')}
 			onpointermove={handleResizeMove}
 			onpointerup={handleResizeEnd}
-			onpointercancel={handleResizeCancel}
 		></div>
 		<div
 			class="resize-handle se"
 			onpointerdown={(e) => handleResizeStart(e, 'se')}
 			onpointermove={handleResizeMove}
 			onpointerup={handleResizeEnd}
-			onpointercancel={handleResizeCancel}
 		></div>
 		<div
 			class="resize-handle sw"
 			onpointerdown={(e) => handleResizeStart(e, 'sw')}
 			onpointermove={handleResizeMove}
 			onpointerup={handleResizeEnd}
-			onpointercancel={handleResizeCancel}
 		></div>
 	{/if}
 </div>
@@ -463,36 +347,32 @@
 		display: flex;
 		flex-direction: column;
 		height: 100%;
-		background: var(--glass-bg);
-		backdrop-filter: blur(12px);
-		-webkit-backdrop-filter: blur(12px);
-		border-radius: var(--radius, 0.75rem);
-		border: 1px solid var(--glass-border);
-		overflow: visible;
-		box-shadow: var(--shadow-m);
-		transition:
-			box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1),
-			border-color 0.2s cubic-bezier(0.4, 0, 0.2, 1),
-			transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-	}
-
-	.base-card:hover:not(.focused):not(.dragging):not(.resizing) {
-		border-color: var(--border-subtle);
-		box-shadow: var(--shadow-l);
+		background: var(--card);
+		border-radius: 12px;
+		border: 1px solid var(--border);
+		overflow: hidden;
+		box-shadow:
+			0 4px 6px -1px rgba(0, 0, 0, 0.3),
+			0 2px 4px -2px rgba(0, 0, 0, 0.15),
+			0 0 0 1px var(--border);
+		transition: box-shadow 0.15s ease, border-color 0.15s ease;
 	}
 
 	.base-card.focused {
 		box-shadow:
-			var(--shadow-l),
-			0 0 0 1px color-mix(in oklch, var(--primary) 30%, transparent),
-			0 0 20px var(--glow-color-soft);
-		border-color: color-mix(in oklch, var(--primary) 40%, transparent);
+			0 10px 15px -3px rgba(0, 0, 0, 0.3),
+			0 4px 6px -4px rgba(0, 0, 0, 0.2),
+			0 0 0 1px hsl(var(--primary) / 0.3);
+		border-color: hsl(var(--primary) / 0.4);
 	}
 
 	.base-card.maximized {
 		border-radius: 0;
 		border: none;
-		box-shadow: none;
+	}
+
+	.base-card.minimized {
+		display: none;
 	}
 
 	.base-card.dragging,
@@ -502,11 +382,7 @@
 	}
 
 	.base-card.dragging {
-		opacity: 0.92;
-		transform: scale(1.005);
-		box-shadow:
-			var(--shadow-l),
-			0 20px 40px color-mix(in oklch, var(--panel-shadow-outer) 60%, transparent);
+		opacity: 0.95;
 	}
 
 	/* Header */
@@ -514,46 +390,13 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		height: 44px;
-		padding: 0 10px 0 14px;
-		/* Use muted color - stays neutral gray regardless of theme secondary color */
-		background: linear-gradient(
-			180deg,
-			color-mix(in oklch, var(--muted) 100%, transparent) 0%,
-			color-mix(in oklch, var(--muted) 85%, var(--card)) 100%
-		);
+		height: 40px;
+		padding: 0 8px 0 12px;
+		background: var(--secondary);
 		border-bottom: 1px solid var(--border);
 		cursor: grab;
 		user-select: none;
 		flex-shrink: 0;
-		position: relative;
-		/* Clip to match parent's top rounded corners - inherits from theme */
-		border-radius: var(--radius, 0.75rem) var(--radius, 0.75rem) 0 0;
-		overflow: hidden;
-	}
-
-	.base-card.maximized .card-header {
-		border-radius: 0;
-	}
-
-	/* Subtle top highlight for depth */
-	.card-header::before {
-		content: '';
-		position: absolute;
-		top: 0;
-		left: 0;
-		right: 0;
-		height: 1px;
-		background: var(--panel-shadow-inset);
-		pointer-events: none;
-	}
-
-	/* Mobile-friendly header height */
-	@media (pointer: coarse) {
-		.card-header {
-			height: 48px;
-			padding: 0 12px 0 16px;
-		}
 	}
 
 	.base-card.dragging .card-header {
@@ -563,7 +406,7 @@
 	.header-left {
 		display: flex;
 		align-items: center;
-		gap: 10px;
+		gap: 8px;
 		flex: 1;
 		min-width: 0;
 	}
@@ -572,61 +415,45 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 24px;
-		height: 24px;
-		color: var(--muted-foreground);
+		color: hsl(var(--muted-foreground));
 		flex-shrink: 0;
-		transition: color 0.15s ease, background-color 0.15s ease;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		background: transparent;
-	}
-
-	.base-card.focused .card-icon {
-		color: var(--primary);
-		background: color-mix(in oklch, var(--primary) 12%, transparent);
 	}
 
 	.card-title {
 		font-size: 0.8125rem;
 		font-weight: 500;
-		color: var(--muted-foreground);
+		color: hsl(var(--foreground) / 0.8);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		cursor: text;
-		transition: color 0.15s ease;
-		/* Improved text rendering for readability */
-		-webkit-font-smoothing: antialiased;
-		-moz-osx-font-smoothing: grayscale;
 	}
 
 	.base-card.focused .card-title {
-		color: var(--foreground);
-		font-weight: 600;
+		color: hsl(var(--foreground));
 	}
 
 	.title-input {
 		font-size: 0.8125rem;
 		font-weight: 500;
-		background: var(--background);
-		border: 1px solid var(--primary);
-		border-radius: calc(var(--radius, 0.75rem) * 0.33);
+		background: hsl(var(--background));
+		border: 1px solid hsl(var(--primary));
+		border-radius: 4px;
 		padding: 2px 6px;
-		color: var(--foreground);
+		color: hsl(var(--foreground));
 		outline: none;
 		width: 100%;
 		max-width: 200px;
-		box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 20%, transparent);
 	}
 
 	/* Window Controls */
 	.window-controls {
 		display: flex;
-		gap: 4px;
+		gap: 0;
 	}
 
 	.control-btn {
-		width: 32px;
+		width: 36px;
 		height: 28px;
 		border: none;
 		background: transparent;
@@ -634,73 +461,33 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		color: var(--muted-foreground);
-		transition:
-			background 0.15s ease,
-			color 0.15s ease,
-			transform 0.1s ease;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-	}
-
-	/* Larger touch targets on mobile */
-	@media (pointer: coarse) {
-		.control-btn {
-			width: 40px;
-			height: 36px;
-		}
+		color: hsl(var(--muted-foreground));
+		transition: background 0.1s ease, color 0.1s ease;
+		border-radius: 0;
 	}
 
 	.control-btn:hover {
-		background: var(--hover-overlay);
-		color: var(--foreground);
-		transform: scale(1.05);
-	}
-
-	.control-btn:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 1px;
-	}
-
-	.control-btn:active {
-		transform: scale(0.95);
-	}
-
-	.control-btn.maximize:hover {
-		background: color-mix(in oklch, var(--success) 20%, transparent);
-		color: var(--success);
+		background: hsl(var(--accent));
+		color: hsl(var(--foreground));
 	}
 
 	.control-btn.close:hover {
-		background: color-mix(in oklch, var(--destructive) 25%, transparent);
-		color: var(--destructive);
+		background: hsl(var(--destructive));
+		color: hsl(var(--destructive-foreground));
 	}
 
 	/* Content */
 	.card-content {
 		flex: 1;
-		min-height: 0; /* Critical: allows flex child to shrink and enables internal scrolling */
 		overflow: hidden;
 		display: flex;
 		flex-direction: column;
-		background: var(--card);
-		position: relative;
-		/* Clip content to match parent's bottom rounded corners - inherits from theme */
-		border-radius: 0 0 var(--radius, 0.75rem) var(--radius, 0.75rem);
-	}
-
-	.base-card.maximized .card-content {
-		border-radius: 0;
 	}
 
 	/* Resize Handles */
 	.resize-handle {
 		position: absolute;
 		z-index: 10;
-		transition: background 0.15s ease;
-	}
-
-	.resize-handle:hover {
-		background: color-mix(in oklch, var(--primary) 30%, transparent);
 	}
 
 	.resize-handle.n,

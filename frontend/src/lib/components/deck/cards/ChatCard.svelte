@@ -4,14 +4,11 @@
 	 *
 	 * Integrates all extracted chat components for full feature parity
 	 * with the main chat interface.
-	 *
-	 * Animation: When transitioning from empty state (centered island) to active chat
-	 * (messages + bottom island), we animate the island sliding down and messages fading in.
 	 */
 	import BaseCard from './BaseCard.svelte';
 	import type { DeckCard } from './types';
 	import { tabs, allTabs } from '$lib/stores/tabs';
-	import { MessageArea, ChatInput, ExecutionModeSelector } from '$lib/components/chat';
+	import { ChatHeader, MessageArea, ChatInput } from '$lib/components/chat';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import ConnectionStatus from '$lib/components/ConnectionStatus.svelte';
@@ -20,12 +17,12 @@
 		card: DeckCard;
 		tabId: string;
 		onClose: () => void;
+		onMinimize: () => void;
 		onMaximize: () => void;
 		onFocus: () => void;
 		onMove: (x: number, y: number) => void;
 		onResize: (w: number, h: number) => void;
-		onDragEnd?: () => void;
-		onResizeEnd?: () => void;
+		onFork?: (sessionId: string, messageIndex: number, messageId: string) => void;
 		mobile?: boolean;
 	}
 
@@ -33,38 +30,17 @@
 		card,
 		tabId,
 		onClose,
+		onMinimize,
 		onMaximize,
 		onFocus,
 		onMove,
 		onResize,
-		onDragEnd,
-		onResizeEnd,
+		onFork,
 		mobile = false
 	}: Props = $props();
 
 	// Get the tab data from the tabs store
 	const tab = $derived($allTabs.find((t) => t.id === tabId));
-
-	// Check if this is an empty state (no messages yet)
-	const isEmptyState = $derived(tab ? tab.messages.length === 0 : true);
-
-	// Animation: Track transition from empty → active state
-	let transitioningFromEmpty = $state(false);
-	let previousIsEmpty = $state(true);
-
-	$effect(() => {
-		// Detect when we transition from empty state to having messages
-		if (previousIsEmpty && !isEmptyState) {
-			transitioningFromEmpty = true;
-			// Reset after animation completes (400ms animation + 50ms buffer)
-			const timer = setTimeout(() => {
-				transitioningFromEmpty = false;
-			}, 450);
-			// Cleanup on unmount
-			return () => clearTimeout(timer);
-		}
-		previousIsEmpty = isEmptyState;
-	});
 
 	// Handle permission response
 	function handlePermissionResponse(
@@ -92,39 +68,71 @@
 		const { request_id, tool_use_id, answers } = event.detail;
 		tabs.sendUserQuestionResponse(tab.id, request_id, tool_use_id, answers);
 	}
+
+	// Handle fork action
+	function handleFork(sessionId: string, messageIndex: number, messageId: string) {
+		onFork?.(sessionId, messageIndex, messageId);
+	}
 </script>
 
 {#if mobile}
-	<!-- Mobile: Full-screen card with no BaseCard wrapper or ChatHeader -->
-	<!-- MobileWorkspace provides the header with title and close button -->
-	<div class="chat-card-content mobile" class:transitioning-from-empty={transitioningFromEmpty}>
+	<!-- Mobile: No BaseCard wrapper, just the content -->
+	<div class="chat-card-content mobile">
 		{#if tab}
-			{#if isEmptyState}
-				<!-- Empty state: Centered layout with mode selector -->
-				<div class="empty-state">
-					<!-- Error display for empty state (e.g., worktree creation failures) -->
-					{#if tab.error}
-						<div class="error-banner">
-							<span>{tab.error}</span>
-							<button onclick={() => tabs.clearTabError(tab.id)}>&times;</button>
-						</div>
-					{/if}
-					<div class="empty-state-content">
-						<ExecutionModeSelector {tab} />
-						<ChatInput {tab} />
+			<ChatHeader {tab} compact />
+			<MessageArea {tab} onFork={handleFork} />
+
+			<!-- Permission Queue -->
+			{#if tab.pendingPermissions && tab.pendingPermissions.length > 0}
+				<div class="border-t border-warning/30 bg-warning/5 p-3">
+					<div class="max-w-full">
+						<PermissionQueue
+							requests={tab.pendingPermissions}
+							on:respond={handlePermissionResponse}
+						/>
 					</div>
 				</div>
-			{:else}
-				<!-- Normal chat view -->
-				<!-- Messages fill the space -->
-				<div class="message-area-wrapper">
-					<MessageArea {tab} />
+			{/if}
+
+			<!-- User Question Queue -->
+			{#if tab.pendingQuestions && tab.pendingQuestions.length > 0}
+				<div class="border-t border-info/30 bg-info/5 p-3">
+					<div class="max-w-full">
+						{#each tab.pendingQuestions as question (question.request_id)}
+							<UserQuestion
+								data={question}
+								on:respond={handleQuestionResponse}
+							/>
+						{/each}
+					</div>
 				</div>
+			{/if}
+
+			<ChatInput {tab} compact />
+		{:else}
+			<div class="chat-loading">
+				<div class="spinner"></div>
+				<p>Loading chat...</p>
+			</div>
+		{/if}
+	</div>
+{:else}
+	<!-- Desktop: Full BaseCard with all features -->
+	<BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize}>
+		<div class="chat-card-content">
+			{#if tab}
+				<!-- Header with context usage, profile/project selectors -->
+				<div class="chat-header-section">
+					<ChatHeader {tab} compact />
+				</div>
+
+				<!-- Main message area -->
+				<MessageArea {tab} onFork={handleFork} />
 
 				<!-- Permission Queue -->
 				{#if tab.pendingPermissions && tab.pendingPermissions.length > 0}
-					<div class="max-w-5xl mx-auto px-4 sm:px-8 py-3">
-						<div class="permission-panel rounded-xl border border-warning/30 bg-warning/5 p-3">
+					<div class="border-t border-warning/30 bg-warning/5 p-3">
+						<div class="max-w-full">
 							<PermissionQueue
 								requests={tab.pendingPermissions}
 								on:respond={handlePermissionResponse}
@@ -135,70 +143,8 @@
 
 				<!-- User Question Queue -->
 				{#if tab.pendingQuestions && tab.pendingQuestions.length > 0}
-					<div class="max-w-5xl mx-auto px-4 sm:px-8 py-3 space-y-3">
-						{#each tab.pendingQuestions as question (question.request_id)}
-							<UserQuestion
-								data={question}
-								on:respond={handleQuestionResponse}
-							/>
-						{/each}
-					</div>
-				{/if}
-
-				<!-- Input at the bottom -->
-				<div class="input-wrapper">
-					<ChatInput {tab} compact />
-				</div>
-			{/if}
-		{:else}
-			<div class="chat-loading">
-				<div class="spinner"></div>
-				<p>Loading chat...</p>
-			</div>
-		{/if}
-	</div>
-{:else}
-	<!-- Desktop: Full BaseCard with all features -->
-	<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
-		<div class="chat-card-content" class:transitioning-from-empty={transitioningFromEmpty}>
-			{#if tab}
-				{#if isEmptyState}
-					<!-- Empty state: Centered layout with mode selector -->
-					<div class="empty-state">
-						<!-- Error display for empty state (e.g., worktree creation failures) -->
-						{#if tab.error}
-							<div class="error-banner">
-								<span>{tab.error}</span>
-								<button onclick={() => tabs.clearTabError(tab.id)}>&times;</button>
-							</div>
-						{/if}
-						<div class="empty-state-content">
-							<ExecutionModeSelector {tab} />
-							<ChatInput {tab} />
-						</div>
-					</div>
-				{:else}
-					<!-- Normal chat view -->
-					<!-- Main message area -->
-					<div class="message-area-wrapper">
-						<MessageArea {tab} />
-					</div>
-
-					<!-- Permission Queue -->
-					{#if tab.pendingPermissions && tab.pendingPermissions.length > 0}
-						<div class="max-w-5xl mx-auto px-4 sm:px-8 py-3">
-							<div class="permission-panel rounded-xl border border-warning/30 bg-warning/5 p-3">
-								<PermissionQueue
-									requests={tab.pendingPermissions}
-									on:respond={handlePermissionResponse}
-								/>
-							</div>
-						</div>
-					{/if}
-
-					<!-- User Question Queue -->
-					{#if tab.pendingQuestions && tab.pendingQuestions.length > 0}
-						<div class="max-w-5xl mx-auto px-4 sm:px-8 py-3 space-y-3">
+					<div class="border-t border-info/30 bg-info/5 p-3">
+						<div class="max-w-full">
 							{#each tab.pendingQuestions as question (question.request_id)}
 								<UserQuestion
 									data={question}
@@ -206,13 +152,11 @@
 								/>
 							{/each}
 						</div>
-					{/if}
-
-					<!-- Input area -->
-					<div class="input-wrapper">
-						<ChatInput {tab} compact />
 					</div>
 				{/if}
+
+				<!-- Input area -->
+				<ChatInput {tab} compact />
 			{:else}
 				<div class="chat-loading">
 					<div class="spinner"></div>
@@ -230,132 +174,20 @@
 		height: 100%;
 		min-height: 0;
 		overflow: hidden;
-		background: var(--card);
-		color: var(--card-foreground);
-		/* Improved text rendering for message readability */
-		-webkit-font-smoothing: antialiased;
-		-moz-osx-font-smoothing: grayscale;
-		text-rendering: optimizeLegibility;
-		/* Clip internal content (messages) but allow fixed-position elements to escape */
-		border-radius: 0 0 12px 12px;
 	}
 
 	.chat-card-content.mobile {
-		flex: 1;
-		min-height: 0; /* Allow shrinking in flex context */
+		height: 100%;
 	}
 
-	/* ========================================
-	   TRANSITION ANIMATION: Empty → Active
-	   ======================================== */
-
-	/* Keyframes for the message area reveal */
-	@keyframes messageAreaReveal {
-		from {
-			opacity: 0;
-			transform: translateY(-16px);
-		}
-		to {
-			opacity: 1;
-			transform: translateY(0);
-		}
-	}
-
-	/* Keyframes for input sliding down into position */
-	@keyframes inputSlideDown {
-		from {
-			opacity: 0.7;
-			transform: translateY(-30vh);
-		}
-		to {
-			opacity: 1;
-			transform: translateY(0);
-		}
-	}
-
-	/* Wrapper for message area - needed for animation */
-	.message-area-wrapper {
-		flex: 1;
-		min-height: 0;
+	.chat-header-section {
 		display: flex;
-		flex-direction: column;
-	}
-
-	/* Wrapper for input - needed for animation */
-	.input-wrapper {
-		flex-shrink: 0;
-	}
-
-	/* Apply animations during transition */
-	.transitioning-from-empty .message-area-wrapper {
-		animation: messageAreaReveal 350ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
-	}
-
-	.transitioning-from-empty .input-wrapper {
-		animation: inputSlideDown 400ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
-	}
-
-	/* Respect reduced motion preference */
-	@media (prefers-reduced-motion: reduce) {
-		.transitioning-from-empty .message-area-wrapper,
-		.transitioning-from-empty .input-wrapper {
-			animation: none;
-		}
-	}
-
-	/* ======================================== */
-
-	/* Empty state - centered layout */
-	.empty-state {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
 		align-items: center;
 		justify-content: center;
-		padding: 1rem;
-		position: relative;
-	}
-
-	.empty-state-content {
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
-		width: 100%;
-		max-width: 600px;
-	}
-
-	/* Error banner for empty state - positioned at top */
-	.error-banner {
-		position: absolute;
-		top: 1rem;
-		left: 1rem;
-		right: 1rem;
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 1rem;
-		padding: 0.75rem 1rem;
-		background: hsl(var(--destructive) / 0.1);
-		border: 1px solid hsl(var(--destructive) / 0.3);
-		border-radius: 0.5rem;
-		color: hsl(var(--destructive));
-		font-size: 0.875rem;
-	}
-
-	.error-banner button {
+		gap: 8px;
+		padding: 8px 12px;
+		border-bottom: 1px solid hsl(var(--border) / 0.5);
 		flex-shrink: 0;
-		background: none;
-		border: none;
-		color: hsl(var(--destructive));
-		font-size: 1.25rem;
-		cursor: pointer;
-		padding: 0;
-		line-height: 1;
-		opacity: 0.7;
-	}
-
-	.error-banner button:hover {
-		opacity: 1;
 	}
 
 	.chat-loading {
@@ -364,22 +196,15 @@
 		flex-direction: column;
 		align-items: center;
 		justify-content: center;
-		gap: 16px;
-		color: var(--muted-foreground);
-		padding: 24px;
-	}
-
-	.chat-loading p {
-		color: var(--foreground);
-		font-size: 0.875rem;
-		font-weight: 500;
+		gap: 12px;
+		color: hsl(var(--muted-foreground));
 	}
 
 	.spinner {
 		width: 24px;
 		height: 24px;
-		border: 2px solid var(--border);
-		border-top-color: var(--primary);
+		border: 2px solid hsl(var(--border));
+		border-top-color: hsl(var(--primary));
 		border-radius: 50%;
 		animation: spin 0.8s linear infinite;
 	}
@@ -394,160 +219,5 @@
 	.chat-card-content :global(.flex-1) {
 		flex: 1;
 		min-height: 0;
-	}
-
-	/* User message styling - distinct teal/primary tint with good contrast */
-	.chat-card-content :global(.user-message) {
-		background: color-mix(in oklch, var(--primary) 10%, var(--card));
-		border: 1px solid color-mix(in oklch, var(--primary) 25%, var(--border));
-		border-radius: 12px;
-		padding: 12px 16px;
-		box-shadow: var(--shadow-s);
-		transition: box-shadow 0.2s ease, transform 0.2s ease, background-color 0.2s ease;
-	}
-
-	.chat-card-content :global(.user-message:hover) {
-		box-shadow: var(--shadow-m);
-		background: color-mix(in oklch, var(--primary) 14%, var(--card));
-	}
-
-	/* Assistant messages - no bubble, clean layout */
-
-	/* Ensure text readability in messages - improved line height and color */
-	.chat-card-content :global(.user-message p),
-	.chat-card-content :global(.prose) {
-		color: var(--foreground);
-		line-height: 1.6;
-	}
-
-	.chat-card-content :global(.user-message p) {
-		font-size: 0.9375rem;
-	}
-
-	/* Fix prose link colors for better visibility */
-	.chat-card-content :global(.prose a) {
-		color: var(--primary);
-		text-decoration-color: color-mix(in oklch, var(--primary) 50%, transparent);
-	}
-
-	.chat-card-content :global(.prose a:hover) {
-		text-decoration-color: var(--primary);
-		opacity: 0.9;
-	}
-
-	/* Code block styling in messages */
-	.chat-card-content :global(.prose pre) {
-		background: var(--muted);
-		border: 1px solid var(--border);
-		box-shadow: var(--shadow-s);
-		border-radius: 8px;
-		margin: 12px 0;
-		padding: 12px 16px;
-	}
-
-	.chat-card-content :global(.prose code:not(pre code)) {
-		background: var(--muted);
-		color: var(--foreground);
-		border: 1px solid var(--border);
-		padding: 2px 6px;
-		border-radius: 4px;
-		font-size: 0.875em;
-		font-weight: 500;
-	}
-
-	/* Error message styling */
-	.chat-card-content :global(.bg-destructive\/10) {
-		background: color-mix(in oklch, var(--destructive) 12%, transparent);
-	}
-
-	/* Permission and question queue sections */
-	.chat-card-content :global(.border-warning\/30) {
-		border-color: color-mix(in oklch, var(--warning) 30%, transparent);
-	}
-
-	.chat-card-content :global(.bg-warning\/5) {
-		background: color-mix(in oklch, var(--warning) 8%, transparent);
-	}
-
-	.chat-card-content :global(.border-info\/30) {
-		border-color: color-mix(in oklch, var(--info) 30%, transparent);
-	}
-
-	.chat-card-content :global(.bg-info\/5) {
-		background: color-mix(in oklch, var(--info) 8%, transparent);
-	}
-
-	/* Scrollbar styling for dark mode readability */
-	.chat-card-content :global(::-webkit-scrollbar-thumb) {
-		background: var(--scrollbar-thumb);
-	}
-
-	.chat-card-content :global(::-webkit-scrollbar-thumb:hover) {
-		background: var(--scrollbar-thumb-hover);
-	}
-
-	/* Action buttons hover state */
-	.chat-card-content :global(button) {
-		transition: all 0.15s ease;
-	}
-
-	.chat-card-content :global(button:hover:not(:disabled)) {
-		background-color: var(--accent);
-	}
-
-	.chat-card-content :global(button:focus-visible) {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
-
-	/* Muted foreground text should be readable */
-	.chat-card-content :global(.text-muted-foreground) {
-		color: var(--muted-foreground);
-	}
-
-	/* Ensure proper foreground colors */
-	.chat-card-content :global(.text-foreground) {
-		color: var(--foreground);
-	}
-
-	/* Input and select styling for dropdowns */
-	.chat-card-content :global(select),
-	.chat-card-content :global(input[type="text"]),
-	.chat-card-content :global(textarea) {
-		background-color: var(--input);
-		color: var(--foreground);
-		border-color: var(--border);
-	}
-
-	.chat-card-content :global(select:focus),
-	.chat-card-content :global(input[type="text"]:focus),
-	.chat-card-content :global(textarea:focus) {
-		border-color: var(--ring);
-		outline: none;
-		box-shadow: 0 0 0 2px color-mix(in oklch, var(--ring) 25%, transparent);
-	}
-
-	/* Select option styling */
-	.chat-card-content :global(select option) {
-		background-color: var(--popover);
-		color: var(--popover-foreground);
-	}
-
-	/* Dropdown/popover styling */
-	.chat-card-content :global([data-radix-popper-content-wrapper]),
-	.chat-card-content :global(.dropdown-content),
-	.chat-card-content :global([role="listbox"]),
-	.chat-card-content :global([role="menu"]) {
-		background-color: var(--popover);
-		color: var(--popover-foreground);
-		border: 1px solid var(--border);
-		box-shadow: var(--shadow-l);
-	}
-
-	/* Dropdown item hover states */
-	.chat-card-content :global([role="option"]:hover),
-	.chat-card-content :global([role="menuitem"]:hover) {
-		background-color: var(--accent);
-		color: var(--accent-foreground);
 	}
 </style>

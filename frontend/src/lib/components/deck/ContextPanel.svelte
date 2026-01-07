@@ -2,7 +2,7 @@
 	/**
 	 * ContextPanel - Right sidebar with collapsible sections
 	 *
-	 * Shows active threads, generations, and session info.
+	 * Shows active threads, running agents, generations, and session info.
 	 * Features glassmorphism styling and collapsible sections.
 	 */
 
@@ -11,12 +11,13 @@
 		ChevronRight,
 		ChevronDown,
 		MessageSquare,
+		Bot,
 		Image,
 		Info,
 		Circle,
 		History
 	} from 'lucide-svelte';
-	import type { DeckSession, DeckGeneration, SessionInfo } from './types';
+	import type { DeckSession, DeckAgent, DeckGeneration, SessionInfo } from './types';
 
 	// Session history item (for loading old chats)
 	export interface HistorySession {
@@ -30,11 +31,13 @@
 		collapsed?: boolean;
 		sessions?: DeckSession[];
 		recentSessions?: HistorySession[];
+		agents?: DeckAgent[];
 		generations?: DeckGeneration[];
 		sessionInfo?: SessionInfo | null;
 		onToggleCollapse?: () => void;
 		onSessionClick?: (session: DeckSession) => void;
 		onHistorySessionClick?: (session: HistorySession) => void;
+		onAgentClick?: (agent: DeckAgent) => void;
 		onGenerationClick?: (generation: DeckGeneration) => void;
 	}
 
@@ -42,11 +45,13 @@
 		collapsed = false,
 		sessions = [],
 		recentSessions = [],
+		agents = [],
 		generations = [],
 		sessionInfo = null,
 		onToggleCollapse,
 		onSessionClick,
 		onHistorySessionClick,
+		onAgentClick,
 		onGenerationClick
 	}: Props = $props();
 
@@ -54,12 +59,28 @@
 	let sectionsCollapsed = $state({
 		threads: false,
 		history: false,
+		agents: false,
 		generations: false,
 		sessionInfo: false
 	});
 
 	function toggleSection(section: keyof typeof sectionsCollapsed) {
 		sectionsCollapsed[section] = !sectionsCollapsed[section];
+	}
+
+	function getAgentStatusColor(status: DeckAgent['status']): string {
+		switch (status) {
+			case 'running':
+				return '#10b981';
+			case 'idle':
+				return '#6b7280';
+			case 'error':
+				return '#ef4444';
+			case 'paused':
+				return '#f59e0b';
+			default:
+				return '#6b7280';
+		}
 	}
 
 	function formatCost(cost: number): string {
@@ -178,6 +199,44 @@
 				{/if}
 			</div>
 
+			<!-- Running Agents Section -->
+			<div class="section">
+				<button class="section-header" onclick={() => toggleSection('agents')}>
+					<div class="section-title">
+						<Bot size={14} strokeWidth={1.5} />
+						<span>Running Agents</span>
+						{#if agents.filter(a => a.status === 'running').length > 0}
+							<span class="section-count active">{agents.filter(a => a.status === 'running').length}</span>
+						{/if}
+					</div>
+					<span class="chevron" class:collapsed={sectionsCollapsed.agents}>
+						<ChevronDown size={14} strokeWidth={2} />
+					</span>
+				</button>
+				{#if !sectionsCollapsed.agents}
+					<div class="section-content">
+						{#if agents.length === 0}
+							<div class="empty-state">No agents running</div>
+						{:else}
+							{#each agents as agent}
+								<button class="list-item" onclick={() => onAgentClick?.(agent)}>
+									<div class="status-dot" style:background={getAgentStatusColor(agent.status)}></div>
+									<div class="item-content">
+										<div class="item-title">{agent.name}</div>
+										{#if agent.task}
+											<div class="item-subtitle">{agent.task}</div>
+										{/if}
+									</div>
+									{#if agent.progress !== undefined && agent.status === 'running'}
+										<div class="progress-indicator">{agent.progress}%</div>
+									{/if}
+								</button>
+							{/each}
+						{/if}
+					</div>
+				{/if}
+			</div>
+
 			<!-- Generations Section -->
 			<div class="section">
 				<button class="section-header" onclick={() => toggleSection('generations')}>
@@ -271,18 +330,19 @@
 <style>
 	.context-panel {
 		position: relative;
-		width: 100%;
+		width: 320px;
 		height: 100%;
 		background: var(--card);
 		backdrop-filter: blur(24px);
-		-webkit-backdrop-filter: blur(24px);
 		border-left: 1px solid var(--border);
 		display: flex;
 		flex-direction: column;
-		overflow: visible;
+		transition: width 0.2s ease;
+		overflow: hidden;
 	}
 
 	.context-panel.collapsed {
+		width: 0;
 		border-left: none;
 		overflow: hidden;
 	}
@@ -292,12 +352,12 @@
 		left: 0;
 		top: 50%;
 		transform: translate(-100%, -50%);
-		width: 28px;
-		height: 52px;
+		width: 24px;
+		height: 48px;
 		background: var(--card);
 		border: 1px solid var(--border);
 		border-right: none;
-		border-radius: 8px 0 0 8px;
+		border-radius: 6px 0 0 6px;
 		color: var(--muted-foreground);
 		cursor: pointer;
 		display: flex;
@@ -305,9 +365,6 @@
 		justify-content: center;
 		transition: all 0.15s ease;
 		z-index: 10;
-		/* Improve touch target */
-		min-width: 44px;
-		min-height: 44px;
 	}
 
 	.collapse-toggle:hover {
@@ -316,15 +373,9 @@
 		border-color: var(--border);
 	}
 
-	.collapse-toggle:focus-visible {
-		outline: 2px solid var(--primary);
-		outline-offset: 2px;
-	}
-
 	.panel-content {
 		flex: 1;
 		overflow-y: auto;
-		overflow-x: hidden;
 		padding: 12px;
 		display: flex;
 		flex-direction: column;
@@ -336,8 +387,7 @@
 		background: var(--secondary);
 		border: 1px solid var(--border);
 		border-radius: 10px;
-		overflow: visible;
-		flex-shrink: 0;
+		overflow: hidden;
 	}
 
 	.section-header {
@@ -394,8 +444,8 @@
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
-		/* Allow section to expand to show all content - no max-height constraint */
-		overflow: visible;
+		max-height: 200px;
+		overflow-y: auto;
 	}
 
 	.empty-state {

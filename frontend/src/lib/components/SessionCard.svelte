@@ -22,9 +22,11 @@
 	}>();
 
 	// Check if session has tags (with fallback for older sessions)
-	$: hasTags = session.tags && session.tags.length > 0;
-	$: displayTags = session.tags?.slice(0, 3) || []; // Show max 3 tags
-	$: moreTags = (session.tags?.length || 0) - 3;
+	// Filter out any malformed tags that might be missing required fields
+	$: validTags = (session.tags || []).filter(tag => tag && tag.id && tag.name);
+	$: hasTags = validTags.length > 0;
+	$: displayTags = validTags.slice(0, 3); // Show max 3 tags
+	$: moreTags = validTags.length - 3;
 
 	function handleTagClick(e: MouseEvent) {
 		e.stopPropagation();
@@ -136,7 +138,7 @@
 
 	<!-- Main card content - slides to reveal delete indicator -->
 	<div
-		class="group relative flex flex-col gap-1.5 px-3 py-2.5 rounded-xl cursor-pointer select-none {isActive ? 'bg-accent border border-border' : 'hover:bg-accent/50'} {selectionMode && isSelected ? 'bg-accent' : ''}"
+		class="group relative flex flex-col gap-1.5 px-3 py-2.5 rounded-xl cursor-pointer select-none border transition-all {isActive ? 'bg-accent border-primary/50 shadow-sm' : 'bg-card border-border hover:bg-accent/50 hover:border-border/80'} {selectionMode && isSelected ? 'bg-accent border-primary/50' : ''}"
 		class:transition-transform={!directionLocked}
 		style="transform: translateX(-{currentSwipeX}px)"
 		on:click={handleCardClick}

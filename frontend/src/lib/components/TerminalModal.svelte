@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { Terminal } from '@xterm/xterm';
-  import { FitAddon } from '@xterm/addon-fit';
-  import { WebLinksAddon } from '@xterm/addon-web-links';
   import '@xterm/xterm/css/xterm.css';
+
+  // Dynamic imports for client-side only xterm modules
+  let Terminal: any;
+  let FitAddon: any;
+  let WebLinksAddon: any;
 
   interface Props {
     sessionId: string;
@@ -15,16 +17,27 @@
   let { sessionId, command = '/rewind', onClose, onRewindComplete }: Props = $props();
 
   let terminalContainer: HTMLDivElement;
-  let terminal: Terminal | null = null;
-  let fitAddon: FitAddon | null = null;
+  let terminal: any = null;
+  let fitAddon: any = null;
   let ws: WebSocket | null = null;
   let isConnected = $state(false);
   let isReady = $state(false);
   let error = $state<string | null>(null);
 
   onMount(() => {
-    initTerminal();
-    connectWebSocket();
+    // Dynamic import xterm modules only on client side
+    (async () => {
+      const xtermModule = await import('@xterm/xterm');
+      const fitModule = await import('@xterm/addon-fit');
+      const webLinksModule = await import('@xterm/addon-web-links');
+
+      Terminal = xtermModule.Terminal;
+      FitAddon = fitModule.FitAddon;
+      WebLinksAddon = webLinksModule.WebLinksAddon;
+
+      initTerminal();
+      connectWebSocket();
+    })();
 
     // Handle window resize
     window.addEventListener('resize', handleResize);
@@ -77,14 +90,14 @@
     fitAddon.fit();
 
     // Handle keyboard input
-    terminal.onData((data) => {
+    terminal.onData((data: string) => {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'input', data }));
       }
     });
 
     // Handle special keys
-    terminal.attachCustomKeyEventHandler((event) => {
+    terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
       // Handle Escape to close
       if (event.key === 'Escape' && event.type === 'keydown') {
         // Send escape to terminal first
