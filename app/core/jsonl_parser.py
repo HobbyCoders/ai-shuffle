@@ -203,6 +203,31 @@ def _extract_local_command_output(content: str) -> Optional[str]:
     return None
 
 
+def _extract_cli_stderr(content: str) -> Optional[str]:
+    """
+    Extract content from CLI stderr tags if present.
+
+    The SDK may output stderr in various formats:
+    - <cli-stderr>...</cli-stderr>
+    - <stderr>...</stderr>
+    - <local-command-stderr>...</local-command-stderr>
+
+    Returns the extracted content, or None if no tags found.
+    """
+    import re
+    # Try various possible stderr tag formats
+    patterns = [
+        r'<cli-stderr>(.*?)</cli-stderr>',
+        r'<stderr>(.*?)</stderr>',
+        r'<local-command-stderr>(.*?)</local-command-stderr>',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, content, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
 def get_agent_jsonl_paths(sdk_session_id: str, working_dir: str = "/workspace") -> Dict[str, Path]:
     """
     Find all agent JSONL files for a session.
@@ -450,8 +475,25 @@ def parse_session_history(
                         "metadata": {"timestamp": timestamp},
                         "streaming": False
                     })
+                    continue
+
+                # Check for CLI stderr output (SDK process errors like max output tokens exceeded)
+                stderr_output = _extract_cli_stderr(content)
+                if stderr_output is not None:
+                    msg_counter += 1
+                    messages.append({
+                        "id": uuid,
+                        "role": "system",
+                        "content": stderr_output,
+                        "type": "system",
+                        "subtype": "stderr",
+                        "metadata": {"timestamp": timestamp},
+                        "streaming": False
+                    })
+                    continue
+
                 # Plain user message - skip empty content and system/command-related messages
-                elif content and not _is_system_content(content):
+                if content and not _is_system_content(content):
                     msg_counter += 1
                     messages.append({
                         "id": uuid,
@@ -597,6 +639,32 @@ def parse_session_history(
                     })
 
         elif entry_type == "assistant" and role == "assistant":
+            # Check for API error messages (synthetic messages from SDK)
+            # These have isApiErrorMessage: true and model: "<synthetic>"
+            if entry.get("isApiErrorMessage"):
+                # Extract the error text from the content
+                error_text = ""
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            error_text = block.get("text", "")
+                            break
+                elif isinstance(content, str):
+                    error_text = content
+
+                if error_text:
+                    msg_counter += 1
+                    messages.append({
+                        "id": uuid,
+                        "role": "system",
+                        "content": error_text,
+                        "type": "system",
+                        "subtype": "api_error",
+                        "metadata": {"timestamp": timestamp},
+                        "streaming": False
+                    })
+                continue
+
             # Assistant message - contains text blocks and tool use blocks
             if isinstance(content, list):
                 for block in content:

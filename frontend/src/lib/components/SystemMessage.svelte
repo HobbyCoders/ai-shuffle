@@ -154,6 +154,29 @@
 				};
 			}
 
+			case 'stderr': {
+				// CLI stderr output - errors/warnings from the Claude SDK process
+				const stderrContent = (data.content as string) || message.content || 'Unknown error';
+				return {
+					title: 'CLI Error',
+					content: stderrContent,
+					badge: 'stderr',
+					badgeColor: 'red'
+				};
+			}
+
+			case 'api_error': {
+				// API error messages from Claude SDK (e.g., max output tokens exceeded)
+				// These are synthetic messages with isApiErrorMessage: true
+				const apiErrorContent = message.content || 'An API error occurred';
+				return {
+					title: 'API Error',
+					content: apiErrorContent,
+					badge: 'api',
+					badgeColor: 'red'
+				};
+			}
+
 			case 'error':
 			case 'exception':
 			case 'validation_error':
