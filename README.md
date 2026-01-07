@@ -1,0 +1,906 @@
+# Claude Code Python SDK - Dockerized AI Agent
+
+A dockerized FastAPI service that provides REST API access to Claude Code CLI with OAuth authentication, designed to run on Unraid servers as a cloud AI agent.
+
+## Key Features
+
+### Core Infrastructure
+- **Claude Code CLI Integration** - Uses official Claude Code CLI with OAuth (not API keys)
+- **REST API Wrapper** - FastAPI-based HTTP interface for Claude interactions
+- **Persistent Authentication** - OAuth tokens persist across container restarts
+- **Docker Containerized** - Easy deployment on Unraid or any Docker host
+- **Pre-built Images** - Available on ghcr.io, no build required
+- **Interactive Login** - Simple OAuth flow via `claude login`
+- **Health Monitoring** - Built-in health checks and status endpoints
+
+### AI Capabilities (v2.1+)
+- **Structured Prompting** - System instructions + context + JSON parsing
+- **File/HTML Analysis** - Analyze and extract data from any content type
+- **Multi-turn Conversations** - Context-aware chatbot capabilities
+- **JSON Mode** - Automatic JSON extraction and parsing from responses
+- **Flexible Output Formats** - JSON, Markdown, text, or list formats
+- **Large Context Support** - Handle up to 50k characters of context
+- **Model Selection** - Choose between Claude Haiku, Sonnet, or Opus
+
+## Docker Image
+
+Pre-built multi-architecture images are automatically published to GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/<your-username>/proxy-python-sdk:latest
+```
+
+**Available tags:**
+- `latest` - Latest build from main branch
+- `v*.*.*` - Specific version releases
+- `main` - Latest main branch build
+
+**Supported platforms:**
+- `linux/amd64` - Standard x86_64 systems, Intel/AMD CPUs
+- `linux/arm64` - ARM systems like Raspberry Pi 4/5, Apple Silicon
+
+> **📖 For detailed information about GitHub Container Registry setup, publishing, and troubleshooting, see [GHCR_SETUP.md](GHCR_SETUP.md)**
+
+## Prerequisites
+
+- Docker and Docker Compose installed
+- Unraid server (or any Docker-compatible system)
+- Anthropic account for Claude OAuth login (free at [claude.ai](https://claude.ai))
+
+## Quick Start
+
+### Unraid Installation (Recommended)
+
+**Method 1: Using Unraid Community Applications**
+
+1. In Unraid, go to **Apps** tab
+2. Search for "Claude Code SDK"
+3. Click **Install**
+4. The template will auto-configure PUID=99 and PGID=100
+5. Click **Apply** to install
+
+**Method 2: Manual Template Installation**
+
+1. In Unraid, go to **Docker** tab
+2. Click **Add Container**
+3. Set **Template Repository** to:
+   ```
+   https://raw.githubusercontent.com/Quickkill0/Proxy-Python-SDK/main/unraid-template.xml
+   ```
+4. Or manually configure:
+   - **Repository**: `ghcr.io/quickkill0/proxy-python-sdk:latest`
+   - **Port**: `8000` → Your desired port
+   - **Path**: `/home/appuser/.config/claude` → `/mnt/user/appdata/claude-sdk`
+   - **Variable PUID**: `99` (Important!)
+   - **Variable PGID**: `100` (Important!)
+
+### Docker Compose Installation (Other Systems)
+
+```bash
+# Create directory and config
+mkdir -p /mnt/user/appdata/claude-sdk
+cd /mnt/user/appdata/claude-sdk
+
+# Download docker-compose.yml
+curl -O https://raw.githubusercontent.com/Quickkill0/Proxy-Python-SDK/main/docker-compose.yml
+
+# Start container
+docker-compose up -d
+```
+
+**Note**: PUID=99 and PGID=100 are default for Unraid. For other systems, you may need PUID=1000 and PGID=1000.
+
+### Option B: Build from Source
+
+If you prefer to build the image yourself:
+
+```bash
+# 1. Clone and Setup
+git clone <your-repo-url>
+cd Proxy-Python-SDK
+
+# 2. Optional: Configure Environment
+cp .env.example .env
+# Edit .env if you want to change defaults (port, logging, etc.)
+
+# 3. Build and Start
+docker-compose up -d --build
+```
+
+### Authentication (Required)
+
+After starting the container, you must authenticate with Claude:
+
+**In Unraid:**
+1. Click on the container icon → **Console**
+2. Run: `claude login`
+3. Follow the OAuth flow in your browser
+4. Type `exit` to close console
+
+**Via Command Line:**
+```bash
+docker exec -it claude-sdk-agent claude login
+```
+
+Your authentication persists in the appdata directory (no need to re-login after restarts).
+
+### Verify Authentication
+
+```bash
+# Check authentication status
+curl http://localhost:8000/auth/status
+
+# Should return: {"authenticated": true, ...}
+```
+
+## Authentication
+
+This SDK uses **Claude OAuth** (not API keys). You authenticate once using `claude login`, and the tokens persist.
+
+### Login Methods
+
+#### Method 1: Direct Container Access (Recommended)
+
+```bash
+docker exec -it claude-sdk-agent claude login
+```
+
+#### Method 2: Via API Endpoint
+
+```bash
+# Get login instructions
+curl http://localhost:8000/auth/login-instructions
+
+# The API will guide you to exec into the container
+```
+
+### Check Authentication Status
+
+```bash
+curl http://localhost:8000/auth/status
+```
+
+Response:
+```json
+{
+  "authenticated": true,
+  "config_dir": "/home/appuser/.config/claude",
+  "message": "Authenticated with Claude Code"
+}
+```
+
+### Logout
+
+```bash
+curl -X POST http://localhost:8000/auth/logout
+```
+
+## Unraid Deployment
+
+### Method 1: Pre-built Image (Fastest)
+
+1. SSH into your Unraid server
+2. Create directory and download config:
+   ```bash
+   cd /mnt/user/appdata/
+   mkdir claude-sdk && cd claude-sdk
+   curl -O https://raw.githubusercontent.com/<your-username>/Proxy-Python-SDK/main/docker-compose.yml
+   curl -O https://raw.githubusercontent.com/<your-username>/Proxy-Python-SDK/main/.env.example
+   mv .env.example .env
+   ```
+3. Edit `.env` if needed (optional)
+4. Pull and start:
+   ```bash
+   docker-compose pull
+   docker-compose up -d
+   ```
+5. Login to Claude:
+   ```bash
+   docker exec -it claude-sdk-agent claude login
+   ```
+
+### Method 2: Build from Source
+
+1. SSH into your Unraid server
+2. Navigate to `/mnt/user/appdata/`
+3. Clone this repository:
+   ```bash
+   cd /mnt/user/appdata/
+   git clone <your-repo-url> claude-sdk
+   cd claude-sdk
+   ```
+4. Start the container:
+   ```bash
+   docker-compose up -d --build
+   ```
+5. Login to Claude:
+   ```bash
+   docker exec -it claude-sdk-agent claude login
+   ```
+
+### Method 3: Unraid Docker UI
+
+1. Open Unraid Web UI → Docker tab
+2. Click "Add Container"
+3. Configure:
+   - **Name**: `claude-sdk-agent`
+   - **Repository**: `ghcr.io/<your-username>/proxy-python-sdk:latest`
+   - **Network Type**: `bridge`
+   - **Port**: `8000` (Container) → `8000` (Host)
+   - **Volume**: Add path mapping for auth persistence:
+     - Container Path: `/home/appuser/.config/claude`
+     - Host Path: `/mnt/user/appdata/claude-sdk/auth`
+     - Access Mode: `Read/Write`
+   - **Console shell command**: `Bash`
+4. Apply and start
+5. Use console to run `claude login`
+
+### Persistent Storage
+
+Authentication tokens are stored in a Docker volume (`claude-auth`) and persist across container restarts and updates.
+
+## Use Cases
+
+### General AI Assistant
+Use the basic `/chat` endpoint for simple Q&A and assistance.
+
+### Application Integration (Kavita, etc.)
+Use `/prompt/structured` and `/analyze/file` endpoints for:
+- Web scraping and data extraction
+- HTML/JSON parsing
+- Content analysis
+- Structured data generation
+
+See [KAVITA_INTEGRATION.md](KAVITA_INTEGRATION.md) for a complete integration guide.
+
+### Chatbots & Conversational AI
+Use `/conversation` endpoint for multi-turn conversations with context.
+
+## API Endpoints
+
+### Authentication Endpoints
+
+#### GET `/auth/status`
+Check if authenticated with Claude Code.
+
+```bash
+curl http://localhost:8000/auth/status
+```
+
+#### GET `/auth/login-instructions`
+Get step-by-step login instructions.
+
+```bash
+curl http://localhost:8000/auth/login-instructions
+```
+
+#### GET `/auth/diagnostics`
+Run diagnostic checks for authentication issues (v2.1+).
+
+Returns detailed information about:
+- HOME environment variable
+- Claude CLI path and installation
+- Config directory location, existence, and permissions
+- Auth status command output
+- Current process user and UID
+
+```bash
+curl http://localhost:8000/auth/diagnostics
+```
+
+**Example Response:**
+```json
+{
+  "home_env": "/home/appuser",
+  "claude_path": "/usr/local/bin/claude",
+  "config_dir": "/home/appuser/.config/claude",
+  "config_dir_exists": true,
+  "config_files": ["auth.json", "config.json"],
+  "config_dir_permissions": "755",
+  "config_dir_owner_uid": 1000,
+  "auth_status_returncode": 0,
+  "auth_status_stdout": "Authenticated",
+  "auth_status_stderr": "",
+  "process_user": "appuser",
+  "process_uid": 1000
+}
+```
+
+#### POST `/auth/logout`
+Logout from Claude Code.
+
+```bash
+curl -X POST http://localhost:8000/auth/logout
+```
+
+### Core Endpoints
+
+#### GET `/health`
+Health check with authentication status.
+
+```bash
+curl http://localhost:8000/health
+```
+
+Response:
+```json
+{
+  "status": "healthy",
+  "service": "claude-code-sdk",
+  "version": "2.0.0",
+  "authenticated": true
+}
+```
+
+#### POST `/chat`
+Send a prompt to Claude and get a response.
+
+```bash
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "What is the capital of France?",
+    "model": "claude-sonnet-4"
+  }'
+```
+
+Response:
+```json
+{
+  "response": "The capital of France is Paris.",
+  "status": "success",
+  "metadata": {
+    "model": "claude-sonnet-4",
+    "returncode": 0
+  }
+}
+```
+
+#### POST `/execute`
+Execute any Claude Code CLI command.
+
+```bash
+curl -X POST http://localhost:8000/execute \
+  -H "Content-Type: application/json" \
+  -d '{
+    "command": "chat",
+    "args": ["--model", "claude-sonnet-4"],
+    "timeout": 300
+  }'
+```
+
+#### GET `/version`
+Get Claude Code version.
+
+```bash
+curl http://localhost:8000/version
+```
+
+### Advanced AI Endpoints (v2.1+)
+
+#### POST `/prompt/structured`
+**Most powerful endpoint** - Structured prompting with system instructions, context, and JSON parsing.
+
+**Use for**: Web scraping, data extraction, content analysis, structured output.
+
+```bash
+curl -X POST http://localhost:8000/prompt/structured \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_prompt": "Extract all product names and prices from this HTML",
+    "system_prompt": "You are a data extractor. Return valid JSON only in format: {\"products\": [{\"name\": string, \"price\": number}]}",
+    "context": "<html><div class=\"product\">Widget - $19.99</div></html>",
+    "json_mode": true,
+    "model": "claude-haiku-4"
+  }'
+```
+
+**Response**:
+```json
+{
+  "success": true,
+  "response": "{\"products\": [{\"name\": \"Widget\", \"price\": 19.99}]}",
+  "parsed_json": {
+    "products": [{"name": "Widget", "price": 19.99}]
+  },
+  "metadata": {
+    "json_parsed": true,
+    "response_length": 156
+  }
+}
+```
+
+**Parameters**:
+- `user_prompt` (required) - Your main question/instruction
+- `system_prompt` (optional) - System-level behavior instructions
+- `context` (optional) - Large context (HTML, code, documents up to 50k chars)
+- `json_mode` (boolean) - Auto-parse JSON from response
+- `model` (optional) - Claude model to use
+- `temperature` (optional) - 0.0-1.0, controls randomness
+- `max_tokens` (optional) - Max response length
+
+---
+
+#### POST `/analyze/file`
+Analyze file content (HTML, JSON, XML, code, text) with specific instructions.
+
+**Use for**: HTML parsing, code analysis, document understanding, format conversion.
+
+```bash
+curl -X POST http://localhost:8000/analyze/file \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "<html>...</html>",
+    "content_type": "html",
+    "analysis_instructions": "Extract all chapter links and titles",
+    "output_format": "json",
+    "model": "claude-haiku-4"
+  }'
+```
+
+**Content Types**:
+- `html` - HTML parsing and data extraction
+- `json` - JSON analysis and transformation
+- `xml` - XML parsing
+- `code` - Code analysis (any language)
+- `text` - Text analysis
+
+**Output Formats**:
+- `json` - Structured JSON
+- `markdown` - Formatted markdown
+- `list` - Bulleted or numbered list
+- `text` - Plain text
+
+---
+
+#### POST `/conversation`
+Multi-turn conversation with full context retention.
+
+**Use for**: Chatbots, interactive assistants, contextual Q&A.
+
+```bash
+curl -X POST http://localhost:8000/conversation \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {"role": "user", "content": "What is Python?"},
+      {"role": "assistant", "content": "Python is a programming language..."},
+      {"role": "user", "content": "What can I build with it?"}
+    ],
+    "system_prompt": "You are a helpful programming tutor.",
+    "model": "claude-sonnet-4"
+  }'
+```
+
+**Response**:
+```json
+{
+  "response": "With Python you can build web applications, data analysis tools...",
+  "status": "success",
+  "metadata": {
+    "message_count": 3
+  }
+}
+```
+
+## Usage Examples
+
+### Python Client
+
+```python
+import requests
+
+# Check auth status
+response = requests.get("http://localhost:8000/auth/status")
+print(response.json())
+
+# Chat with Claude
+response = requests.post(
+    "http://localhost:8000/chat",
+    json={
+        "prompt": "Explain quantum computing in simple terms",
+        "model": "claude-sonnet-4"
+    }
+)
+
+result = response.json()
+print(result["response"])
+```
+
+### JavaScript/Node.js
+
+```javascript
+// Check authentication
+const authStatus = await fetch('http://localhost:8000/auth/status');
+const auth = await authStatus.json();
+console.log('Authenticated:', auth.authenticated);
+
+// Chat with Claude
+const response = await fetch('http://localhost:8000/chat', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    prompt: 'Write a haiku about programming',
+    model: 'claude-sonnet-4'
+  })
+});
+
+const data = await response.json();
+console.log(data.response);
+```
+
+### cURL Examples
+
+```bash
+# Simple chat
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Hello Claude!"}'
+
+# Execute custom command
+curl -X POST http://localhost:8000/execute \
+  -H "Content-Type: application/json" \
+  -d '{
+    "command": "version"
+  }'
+
+# Check health
+curl http://localhost:8000/health
+```
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HOST` | Server host address | `0.0.0.0` |
+| `PORT` | Server port | `8000` |
+| `SERVICE_NAME` | Service identifier | `claude-code-sdk` |
+| `LOG_LEVEL` | Logging level (debug, info, warning, error) | `info` |
+| `COMMAND_TIMEOUT` | Default timeout for Claude commands (seconds) | `300` |
+| `WORKSPACE_DIR` | Host directory to mount as workspace | `./workspace` |
+
+### Available Claude Models
+
+Use these model names in your API requests:
+
+- `claude-sonnet-4` - Latest Claude Sonnet (recommended)
+- `claude-opus-4` - Most capable model
+- `claude-haiku-4` - Fastest model
+- `claude-3-5-sonnet` - Previous generation
+
+## Docker Compose Configuration
+
+The `docker-compose.yml` includes:
+
+- **Persistent Auth Volume** - `claude-auth` stores OAuth tokens
+- **Workspace Volume** - Optional directory for file operations
+- **TTY/STDIN** - Enabled for interactive commands
+- **Resource Limits** - 2 CPU cores, 2GB RAM (configurable)
+- **Health Checks** - Automatic container health monitoring
+- **Logging** - Configured with rotation (10MB, 3 files)
+
+## Monitoring and Maintenance
+
+### View Logs
+
+```bash
+# Real-time logs
+docker-compose logs -f
+
+# Last 100 lines
+docker-compose logs --tail=100
+
+# Specific service
+docker logs claude-sdk-agent
+```
+
+### Check Container Status
+
+```bash
+docker-compose ps
+docker ps | grep claude-sdk
+```
+
+### Restart Service
+
+```bash
+docker-compose restart
+```
+
+### Update Service
+
+```bash
+git pull
+docker-compose down
+docker-compose build --no-cache
+docker-compose up -d
+
+# Re-authenticate if needed
+docker exec -it claude-sdk-agent claude login
+```
+
+### Backup Authentication
+
+```bash
+# Backup auth volume
+docker run --rm -v proxy-python-sdk_claude-auth:/data -v $(pwd):/backup \
+  alpine tar czf /backup/claude-auth-backup.tar.gz -C /data .
+
+# Restore auth volume
+docker run --rm -v proxy-python-sdk_claude-auth:/data -v $(pwd):/backup \
+  alpine tar xzf /backup/claude-auth-backup.tar.gz -C /data
+```
+
+## Interactive API Documentation
+
+FastAPI provides automatic interactive documentation:
+
+- **Swagger UI**: `http://localhost:8000/docs`
+- **ReDoc**: `http://localhost:8000/redoc`
+
+These UIs allow you to test all endpoints directly from your browser.
+
+## Troubleshooting
+
+### Not Authenticated Error
+
+```
+"authenticated": false
+```
+
+**Solution**: Login to Claude Code
+```bash
+docker exec -it claude-sdk-agent claude login
+```
+
+### Container Won't Start
+
+```bash
+# Check logs
+docker-compose logs
+
+# Verify build
+docker-compose build --no-cache
+```
+
+### Claude Command Timeout
+
+If commands timeout (default 300s), increase in `.env`:
+```env
+COMMAND_TIMEOUT=600
+```
+
+### Authentication Lost After Update
+
+If auth is lost after rebuild:
+```bash
+# Check if volume exists
+docker volume ls | grep claude-auth
+
+# Re-login
+docker exec -it claude-sdk-agent claude login
+```
+
+### Port Already in Use
+
+Change port in `.env`:
+```env
+PORT=8001
+```
+
+Then restart:
+```bash
+docker-compose down
+docker-compose up -d
+```
+
+## Architecture
+
+```
+┌─────────────────────────────────────────┐
+│           Client Application            │
+│     (Python, JavaScript, cURL, etc.)    │
+└────────────────┬────────────────────────┘
+                 │ HTTP REST API
+                 ▼
+┌─────────────────────────────────────────┐
+│          FastAPI Service                │
+│      (main.py + auth_helper.py)         │
+└────────────────┬────────────────────────┘
+                 │ Subprocess calls
+                 ▼
+┌─────────────────────────────────────────┐
+│         Claude Code CLI                 │
+│      (OAuth authenticated)              │
+└────────────────┬────────────────────────┘
+                 │ OAuth + API
+                 ▼
+┌─────────────────────────────────────────┐
+│       Anthropic Claude AI               │
+└─────────────────────────────────────────┘
+```
+
+## Security Considerations
+
+1. **OAuth Tokens** - Stored in Docker volume, protected by container isolation
+2. **No API Keys** - Uses OAuth flow, more secure than API keys
+3. **Non-root Container** - Runs as `appuser` (UID 1000)
+4. **Network Isolation** - Uses dedicated Docker network
+5. **CORS** - Configure in production for specific origins
+6. **Firewall** - Secure port 8000 on Unraid with firewall rules
+7. **Reverse Proxy** - Recommended: Use nginx/Traefik with SSL for production
+
+## Development
+
+### Local Development
+
+```bash
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run locally (requires Claude Code installed on host)
+python main.py
+```
+
+### Testing
+
+```bash
+# Build container
+docker-compose build
+
+# Run tests (start container first)
+docker-compose up -d
+
+# Test health
+curl http://localhost:8000/health
+
+# Test auth status
+curl http://localhost:8000/auth/status
+
+# Test chat (after login)
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Say hello"}'
+```
+
+## Advanced Usage
+
+### Custom Workspace
+
+Mount a workspace directory for file operations:
+
+```yaml
+# In docker-compose.yml or .env
+WORKSPACE_DIR=/mnt/user/appdata/claude-workspace
+```
+
+### Multiple Instances
+
+Run multiple instances on different ports:
+
+```bash
+# Instance 1
+PORT=8000 docker-compose up -d
+
+# Instance 2 (separate directory)
+cd ../claude-sdk-2
+PORT=8001 docker-compose up -d
+```
+
+### Integration with Other Services
+
+Use the REST API to integrate with:
+- Home automation (Home Assistant, Node-RED)
+- Chat platforms (Discord, Slack bots)
+- CI/CD pipelines
+- Custom applications
+
+## Troubleshooting
+
+### Authentication Issues
+
+If the health endpoint shows `"authenticated": false` despite successful login, use the diagnostics endpoint:
+
+```bash
+curl http://localhost:8000/auth/diagnostics
+```
+
+This returns detailed information about:
+- HOME environment variable
+- Claude CLI path and availability
+- Config directory location and permissions
+- Authentication status output
+- Current process user and UID
+
+**Common Issues:**
+
+1. **PUID/PGID Mismatch (Unraid)** ⚠️ **MOST COMMON ISSUE**
+   - **Symptom**: Diagnostics show `config_dir_owner_uid: 99` but `process_uid: 1000`, empty `config_files: []`, auth timeout
+   - **Cause**: Unraid uses UID 99/GID 100 by default, but container runs as UID 1000
+   - **Fix**: Stop container, set `PUID=99` and `PGID=100` in `.env` file, then restart:
+     ```bash
+     docker-compose down
+     # Edit .env and set PUID=99 and PGID=100
+     nano /mnt/user/appdata/claude-sdk/.env
+     docker-compose up -d
+     # Re-login after restart
+     docker exec -it claude-sdk-agent claude login
+     ```
+
+2. **HOME not set correctly**
+   - Check that `HOME=/home/appuser` in container
+   - Verify with: `docker exec claude-sdk-agent env | grep HOME`
+
+3. **Config directory permissions**
+   - Ensure `/home/appuser/.config/claude` is owned by the same UID as the process
+   - Check with diagnostics endpoint: `config_dir_owner_uid` should match `process_uid`
+   - If mismatched, see issue #1 above
+
+4. **Volume mount issues**
+   - Verify `claude-auth` volume exists: `docker volume ls`
+   - Check volume mount: `docker inspect claude-sdk-agent`
+   - If using Unraid and you changed PUID/PGID, you may need to delete and recreate the volume
+
+5. **Claude CLI not in PATH**
+   - Verify installation: `docker exec claude-sdk-agent which claude`
+   - Should return: `/usr/local/bin/claude` or `/usr/bin/claude`
+
+**Debugging Steps:**
+
+1. Check container logs:
+```bash
+docker logs claude-sdk-agent
+```
+
+2. Verify authentication interactively:
+```bash
+docker exec -it claude-sdk-agent /bin/bash
+claude auth status
+```
+
+3. Re-login if needed:
+```bash
+docker exec -it claude-sdk-agent claude login
+```
+
+4. Check diagnostics endpoint output for specific error messages
+
+5. Restart container after fixing permissions:
+```bash
+docker-compose restart
+```
+
+## Contributing
+
+Contributions welcome! Please:
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Submit a pull request
+
+## License
+
+This project is open source and available under the MIT License.
+
+## Support
+
+- **Issues**: Open an issue on GitHub
+- **Claude Code Docs**: [docs.anthropic.com](https://docs.anthropic.com)
+- **Unraid Forums**: [forums.unraid.net](https://forums.unraid.net)
+
+## Acknowledgments
+
+- Built with [FastAPI](https://fastapi.tiangolo.com/)
+- Powered by [Anthropic Claude](https://www.anthropic.com/)
+- Uses [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
+- Designed for [Unraid](https://unraid.net/)
+
+---
+
+**Note**: This is an unofficial community project and is not affiliated with Anthropic.

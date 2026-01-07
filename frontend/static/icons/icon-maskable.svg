@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Maskable icons need safe zone padding (inner 80%) -->
+  <rect width="512" height="512" fill="#1a1a1a"/>
+  <circle cx="256" cy="256" r="112" fill="none" stroke="#e5604d" stroke-width="20"/>
+  <circle cx="256" cy="256" r="48" fill="#e5604d"/>
+</svg>

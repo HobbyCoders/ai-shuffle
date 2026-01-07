@@ -1,0 +1,1087 @@
+/* Playfair Display for welcome page display text */
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+	/* ========================================
+	   DARK THEME (Default)
+	   ======================================== */
+	:root,
+	.dark {
+		/* Background colors */
+		--background: oklch(0.14 0.008 260);
+
+		/* AI Shuffle Palette - Welcome Page */
+		--accent-cyan: oklch(0.75 0.15 195);
+		--accent-cyan-dim: oklch(0.60 0.12 195);
+		--accent-cyan-bright: oklch(0.85 0.18 195);
+		--accent-glow: oklch(0.75 0.15 195 / 0.3);
+		--accent-glow-strong: oklch(0.75 0.15 195 / 0.5);
+		--card-surface-welcome: oklch(0.17 0.01 260);
+		--card-bg-welcome: oklch(0.14 0.008 260);
+
+		/* Legacy aliases for compatibility */
+		--gold: var(--accent-cyan);
+		--gold-dim: var(--accent-cyan-dim);
+		--gold-bright: var(--accent-cyan-bright);
+		--gold-glow: var(--accent-glow);
+		--gold-glow-strong: var(--accent-glow-strong);
+
+		/* Dealer Button */
+		--dealer-white: #f8f6f0;
+		--dealer-cream: #e8e4d9;
+		--dealer-shadow: #d4d0c5;
+		--dealer-text: #1a1a1a;
+
+		/* Felt (casino table surface) */
+		--felt: oklch(0.16 0.012 260);
+		--felt-deep: oklch(0.12 0.01 260);
+
+		/* Menu Card */
+		--menu-card-bg: oklch(0.14 0.015 260);
+		--menu-card-border: oklch(0.25 0.01 260);
+
+		/* Display font */
+		--font-display: 'Playfair Display', Georgia, serif;
+		--foreground: oklch(0.95 0.01 260);
+
+		/* Elevated surfaces */
+		--card: oklch(0.18 0.008 260);
+		--card-foreground: oklch(0.95 0.01 260);
+		--popover: oklch(0.20 0.01 260);
+		--popover-foreground: oklch(0.95 0.01 260);
+
+		/* Primary: Teal accent */
+		--primary: oklch(0.72 0.14 180);
+		--primary-foreground: oklch(0.15 0.02 180);
+
+		/* Secondary/Muted */
+		--secondary: oklch(0.22 0.008 260);
+		--secondary-foreground: oklch(0.90 0.01 260);
+		--muted: oklch(0.22 0.01 260);
+		--muted-foreground: oklch(0.65 0.02 260);
+
+		/* Accent for hover states */
+		--accent: oklch(0.25 0.015 260);
+		--accent-foreground: oklch(0.95 0.01 260);
+
+		/* Semantic colors */
+		--destructive: oklch(0.55 0.22 25);
+		--destructive-foreground: oklch(0.95 0 0);
+		--success: oklch(0.65 0.18 145);
+		--success-foreground: oklch(0.15 0.05 145);
+		--warning: oklch(0.75 0.15 85);
+		--warning-foreground: oklch(0.25 0.08 85);
+		--info: oklch(0.65 0.15 240);
+		--info-foreground: oklch(0.15 0.05 240);
+
+		/* Borders and inputs */
+		--border: oklch(0.28 0.01 260);
+		--input: oklch(0.20 0.01 260);
+		--ring: oklch(0.72 0.14 180);
+
+		/* Shadow system */
+		--shadow-s: 0 1px 2px rgba(0,0,0,0.3), 0 1px 3px rgba(0,0,0,0.15);
+		--shadow-m: 0 4px 6px rgba(0,0,0,0.25), 0 2px 4px rgba(0,0,0,0.15);
+		--shadow-l: 0 10px 15px rgba(0,0,0,0.2), 0 4px 6px rgba(0,0,0,0.1);
+
+		/* Border radius */
+		--radius: 0.75rem;
+
+		/* Scrollbar colors */
+		--scrollbar-thumb: oklch(0.35 0.01 260);
+		--scrollbar-thumb-hover: oklch(0.45 0.01 260);
+		--scrollbar-track: transparent;
+
+		/* Glass effects */
+		--glass-bg: oklch(0.18 0.01 260 / 0.8);
+		--glass-border: oklch(0.4 0.01 260 / 0.15);
+		--glass-blur: 12px;
+
+		/* Border variations */
+		--border-subtle: oklch(0.28 0.01 260 / 0.1);
+		--border-medium: oklch(0.28 0.01 260 / 0.2);
+
+		/* Primary variations */
+		--primary-10: oklch(0.72 0.14 180 / 0.1);
+		--primary-20: oklch(0.72 0.14 180 / 0.2);
+		--primary-30: oklch(0.72 0.14 180 / 0.3);
+
+		/* Floating panel */
+		--panel-bg: oklch(0.16 0.012 260 / 0.85);
+		--panel-border: oklch(0.4 0.01 260 / 0.15);
+		--panel-shadow-inset: oklch(0.95 0 0 / 0.03);
+		--panel-shadow-outer: oklch(0 0 0 / 0.4);
+		--panel-shadow-inner: oklch(0 0 0 / 0.2);
+
+		/* Glow effect - uses theme primary color */
+		--glow-color: color-mix(in srgb, var(--primary) 40%, transparent);
+		--glow-color-soft: color-mix(in srgb, var(--primary) 30%, transparent);
+
+		/* Interactive hover overlay */
+		--hover-overlay: oklch(1 0 0 / 0.1);
+		--active-overlay: oklch(1 0 0 / 0.15);
+		--border-subtle: oklch(1 0 0 / 0.1);
+
+		/* ========================================
+		   SEMANTIC UI COLORS
+		   Tool badges, feature indicators, chips, status
+		   ======================================== */
+
+		/* Tool colors - for permission badges and tool indicators */
+		--tool-bash: oklch(0.65 0.18 145);           /* Green - terminal/bash */
+		--tool-read: oklch(0.65 0.15 240);           /* Blue - reading files */
+		--tool-write: oklch(0.75 0.15 85);           /* Amber - writing files */
+		--tool-edit: oklch(0.70 0.16 50);            /* Orange - editing */
+		--tool-glob: oklch(0.65 0.20 300);           /* Purple - glob patterns */
+		--tool-grep: oklch(0.60 0.22 285);           /* Violet - searching */
+		--tool-web: oklch(0.70 0.14 195);            /* Cyan - web operations */
+		--tool-task: oklch(0.60 0.18 260);           /* Indigo - task/agent */
+		--tool-notebook: oklch(0.65 0.20 350);       /* Rose - notebook */
+		--tool-default: oklch(0.55 0.03 260);        /* Gray - fallback */
+
+		/* Feature colors - for plugin/profile feature indicators */
+		--feature-commands: oklch(0.65 0.15 240);    /* Blue */
+		--feature-agents: oklch(0.65 0.20 300);      /* Purple */
+		--feature-skills: oklch(0.65 0.18 145);      /* Green */
+		--feature-hooks: oklch(0.70 0.16 50);        /* Orange */
+
+		/* Status colors with opacity variants */
+		--status-success-bg: oklch(0.65 0.18 145 / 0.15);
+		--status-success-border: oklch(0.65 0.18 145 / 0.30);
+		--status-warning-bg: oklch(0.75 0.15 85 / 0.15);
+		--status-warning-border: oklch(0.75 0.15 85 / 0.30);
+		--status-error-bg: oklch(0.55 0.22 25 / 0.15);
+		--status-error-border: oklch(0.55 0.22 25 / 0.30);
+		--status-info-bg: oklch(0.65 0.15 240 / 0.15);
+		--status-info-border: oklch(0.65 0.15 240 / 0.30);
+		--status-pending-bg: oklch(0.55 0.03 260 / 0.15);
+		--status-pending-border: oklch(0.55 0.03 260 / 0.30);
+
+		/* Chip/badge colors */
+		--chip-primary-bg: oklch(0.72 0.14 180 / 0.15);
+		--chip-primary-text: oklch(0.72 0.14 180);
+		--chip-primary-border: oklch(0.72 0.14 180 / 0.30);
+
+		/* Modal overlay */
+		--modal-overlay: oklch(0 0 0 / 0.6);
+		--modal-overlay-blur: oklch(0 0 0 / 0.4);
+
+		/* Button gradients */
+		--button-primary-gradient: linear-gradient(135deg, var(--primary), oklch(from var(--primary) calc(l - 0.04) c h));
+		--button-success-gradient: linear-gradient(135deg, var(--success), oklch(from var(--success) calc(l - 0.04) c h));
+
+		/* Input states - dark mode */
+		--input-bg: oklch(0.12 0.008 260);
+		--input-bg-hover: oklch(0.14 0.01 260);
+		--input-bg-focus: oklch(0.14 0.01 260);
+		--input-border: oklch(0.30 0.012 260);
+		--input-border-hover: oklch(0.38 0.015 260);
+		--input-placeholder: oklch(0.55 0.02 260);
+
+		/* Text on dark backgrounds */
+		--text-on-dark: oklch(0.95 0.01 260);
+		--text-on-dark-muted: oklch(0.70 0.02 260);
+
+		/* Terminal colors */
+		--terminal-bg: oklch(0.10 0.01 260);
+		--terminal-fg: oklch(0.90 0.01 260);
+		--terminal-cursor: oklch(0.95 0.01 260);
+		--terminal-red: oklch(0.65 0.20 25);
+		--terminal-green: oklch(0.70 0.18 145);
+		--terminal-yellow: oklch(0.80 0.15 85);
+		--terminal-blue: oklch(0.65 0.15 240);
+		--terminal-cyan: oklch(0.75 0.14 195);
+		--terminal-magenta: oklch(0.65 0.20 320);
+
+		/* Chart/visualization colors */
+		--chart-1: oklch(0.65 0.15 240);
+		--chart-2: oklch(0.65 0.20 300);
+		--chart-3: oklch(0.70 0.18 340);
+		--chart-4: oklch(0.70 0.16 50);
+		--chart-5: oklch(0.65 0.18 145);
+		--chart-6: oklch(0.80 0.15 85);
+		--chart-7: oklch(0.55 0.22 25);
+
+		/* Typography - font families (can be overridden by theme presets) */
+		--font-sans: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+		--font-serif: Georgia, Cambria, 'Times New Roman', Times, serif;
+		--font-mono: ui-monospace, 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace;
+	}
+
+	/* ========================================
+	   LIGHT THEME
+	   ======================================== */
+	.light {
+		/* Background colors */
+		--background: oklch(0.98 0.005 260);
+		--foreground: oklch(0.15 0.01 260);
+
+		/* AI Shuffle Palette - Light theme variant */
+		--accent-cyan: oklch(0.55 0.16 195);
+		--accent-cyan-dim: oklch(0.45 0.14 195);
+		--accent-cyan-bright: oklch(0.65 0.18 195);
+		--accent-glow: oklch(0.55 0.16 195 / 0.25);
+		--accent-glow-strong: oklch(0.55 0.16 195 / 0.4);
+		--card-surface-welcome: oklch(0.98 0.005 260);
+		--card-bg-welcome: oklch(0.96 0.003 260);
+
+		/* Legacy aliases for compatibility */
+		--gold: var(--accent-cyan);
+		--gold-dim: var(--accent-cyan-dim);
+		--gold-bright: var(--accent-cyan-bright);
+		--gold-glow: var(--accent-glow);
+		--gold-glow-strong: var(--accent-glow-strong);
+
+		/* Dealer Button - Light theme: subtle gray tones for contrast */
+		--dealer-white: #e8e8e8;
+		--dealer-cream: #d8d8d8;
+		--dealer-shadow: #b8b8b8;
+		--dealer-text: #2a2a2a;
+
+		/* Felt (casino table surface) - Light theme: soft gray surface */
+		--felt: oklch(0.94 0.008 260);
+		--felt-deep: oklch(0.90 0.01 260);
+
+		/* Elevated surfaces */
+		--card: oklch(1 0 0);
+		--card-foreground: oklch(0.15 0.01 260);
+		--popover: oklch(1 0 0);
+		--popover-foreground: oklch(0.15 0.01 260);
+
+		/* Primary: Teal accent (slightly adjusted for light bg) */
+		--primary: oklch(0.55 0.16 180);
+		--primary-foreground: oklch(0.98 0.005 180);
+
+		/* Secondary/Muted */
+		--secondary: oklch(0.95 0.005 260);
+		--secondary-foreground: oklch(0.25 0.01 260);
+		--muted: oklch(0.93 0.008 260);
+		--muted-foreground: oklch(0.45 0.015 260);
+
+		/* Accent for hover states */
+		--accent: oklch(0.90 0.01 260);
+		--accent-foreground: oklch(0.15 0.01 260);
+
+		/* Semantic colors (adjusted for light theme) */
+		--destructive: oklch(0.55 0.22 25);
+		--destructive-foreground: oklch(0.98 0 0);
+		--success: oklch(0.45 0.18 145);
+		--success-foreground: oklch(0.98 0.02 145);
+		--warning: oklch(0.55 0.18 85);
+		--warning-foreground: oklch(0.98 0.02 85);
+		--info: oklch(0.50 0.15 240);
+		--info-foreground: oklch(0.98 0.02 240);
+
+		/* Borders and inputs */
+		--border: oklch(0.85 0.01 260);
+		--input: oklch(0.96 0.005 260);
+		--ring: oklch(0.55 0.16 180);
+
+		/* Shadow system (lighter for light theme) */
+		--shadow-s: 0 1px 2px rgba(0,0,0,0.05), 0 1px 3px rgba(0,0,0,0.08);
+		--shadow-m: 0 4px 6px rgba(0,0,0,0.08), 0 2px 4px rgba(0,0,0,0.06);
+		--shadow-l: 0 10px 15px rgba(0,0,0,0.1), 0 4px 6px rgba(0,0,0,0.05);
+
+		/* Border radius */
+		--radius: 0.75rem;
+
+		/* Scrollbar colors */
+		--scrollbar-thumb: oklch(0.75 0.01 260);
+		--scrollbar-thumb-hover: oklch(0.65 0.01 260);
+
+		/* Glass effects */
+		--glass-bg: oklch(1 0 0 / 0.8);
+		--glass-border: oklch(0.5 0.01 260 / 0.15);
+
+		/* Floating panel */
+		--panel-bg: oklch(1 0 0 / 0.9);
+		--panel-border: oklch(0.8 0.01 260 / 0.3);
+		--panel-shadow-inset: oklch(1 0 0 / 0.5);
+		--panel-shadow-outer: oklch(0 0 0 / 0.1);
+		--panel-shadow-inner: oklch(0 0 0 / 0.05);
+
+		/* Glow effect - uses theme primary color */
+		--glow-color: color-mix(in srgb, var(--primary) 30%, transparent);
+		--glow-color-soft: color-mix(in srgb, var(--primary) 20%, transparent);
+
+		/* Interactive hover overlay */
+		--hover-overlay: oklch(0 0 0 / 0.05);
+		--active-overlay: oklch(0 0 0 / 0.08);
+		--border-subtle: oklch(0 0 0 / 0.08);
+
+		/* ========================================
+		   SEMANTIC UI COLORS - LIGHT THEME
+		   ======================================== */
+
+		/* Tool colors - slightly darker for light backgrounds */
+		--tool-bash: oklch(0.45 0.18 145);
+		--tool-read: oklch(0.50 0.15 240);
+		--tool-write: oklch(0.55 0.18 85);
+		--tool-edit: oklch(0.55 0.18 50);
+		--tool-glob: oklch(0.50 0.20 300);
+		--tool-grep: oklch(0.45 0.22 285);
+		--tool-web: oklch(0.50 0.16 195);
+		--tool-task: oklch(0.45 0.18 260);
+		--tool-notebook: oklch(0.50 0.20 350);
+		--tool-default: oklch(0.45 0.03 260);
+
+		/* Feature colors - light theme */
+		--feature-commands: oklch(0.50 0.15 240);
+		--feature-agents: oklch(0.50 0.20 300);
+		--feature-skills: oklch(0.45 0.18 145);
+		--feature-hooks: oklch(0.55 0.18 50);
+
+		/* Status colors with opacity variants - light theme */
+		--status-success-bg: oklch(0.45 0.18 145 / 0.12);
+		--status-success-border: oklch(0.45 0.18 145 / 0.25);
+		--status-warning-bg: oklch(0.55 0.18 85 / 0.12);
+		--status-warning-border: oklch(0.55 0.18 85 / 0.25);
+		--status-error-bg: oklch(0.55 0.22 25 / 0.12);
+		--status-error-border: oklch(0.55 0.22 25 / 0.25);
+		--status-info-bg: oklch(0.50 0.15 240 / 0.12);
+		--status-info-border: oklch(0.50 0.15 240 / 0.25);
+		--status-pending-bg: oklch(0.45 0.03 260 / 0.12);
+		--status-pending-border: oklch(0.45 0.03 260 / 0.25);
+
+		/* Chip/badge colors - light theme */
+		--chip-primary-bg: oklch(0.55 0.16 180 / 0.12);
+		--chip-primary-text: oklch(0.45 0.16 180);
+		--chip-primary-border: oklch(0.55 0.16 180 / 0.25);
+
+		/* Modal overlay - light theme */
+		--modal-overlay: oklch(0 0 0 / 0.5);
+		--modal-overlay-blur: oklch(0 0 0 / 0.3);
+
+		/* Button gradients - light theme */
+		--button-primary-gradient: linear-gradient(135deg, var(--primary), oklch(from var(--primary) calc(l - 0.06) c h));
+		--button-success-gradient: linear-gradient(135deg, var(--success), oklch(from var(--success) calc(l - 0.06) c h));
+
+		/* Input states - light mode */
+		--input-bg: oklch(0.97 0.003 260);
+		--input-bg-hover: oklch(0.98 0.003 260);
+		--input-bg-focus: oklch(1 0 0);
+		--input-border: oklch(0.82 0.01 260);
+		--input-border-hover: oklch(0.72 0.015 260);
+		--input-placeholder: oklch(0.55 0.015 260);
+
+		/* Text on light backgrounds */
+		--text-on-dark: oklch(0.15 0.01 260);
+		--text-on-dark-muted: oklch(0.40 0.02 260);
+
+		/* Terminal colors - light theme */
+		--terminal-bg: oklch(0.97 0.005 260);
+		--terminal-fg: oklch(0.20 0.01 260);
+		--terminal-cursor: oklch(0.15 0.01 260);
+		--terminal-red: oklch(0.50 0.22 25);
+		--terminal-green: oklch(0.45 0.18 145);
+		--terminal-yellow: oklch(0.55 0.18 85);
+		--terminal-blue: oklch(0.50 0.15 240);
+		--terminal-cyan: oklch(0.50 0.16 195);
+		--terminal-magenta: oklch(0.50 0.20 320);
+
+		/* Chart/visualization colors - light theme */
+		--chart-1: oklch(0.50 0.15 240);
+		--chart-2: oklch(0.50 0.20 300);
+		--chart-3: oklch(0.55 0.18 340);
+		--chart-4: oklch(0.55 0.18 50);
+		--chart-5: oklch(0.45 0.18 145);
+		--chart-6: oklch(0.55 0.18 85);
+		--chart-7: oklch(0.50 0.22 25);
+	}
+
+	/* Theme transition for smooth changes */
+	html {
+		transition: background-color 0.3s ease, color 0.3s ease;
+	}
+
+	/* Smoother transitions */
+	* {
+		border-color: var(--border);
+		transition-property: background-color, border-color, color, fill, stroke, opacity, box-shadow, transform;
+		transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+		transition-duration: 150ms;
+	}
+
+	/* Better focus states */
+	:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+
+	html, body {
+		background-color: var(--background);
+		color: var(--foreground);
+		min-height: 100vh;
+		min-height: 100dvh;
+		height: 100%;
+		font-family: var(--font-sans);
+		font-synthesis: none;
+		text-rendering: optimizeLegibility;
+		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
+		overflow: hidden;
+	}
+}
+
+/* Scrollbar styling using CSS variables */
+* {
+	scrollbar-width: thin;
+	scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+*::-webkit-scrollbar {
+	width: 8px;
+	height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+	background: transparent;
+	border-radius: 4px;
+}
+
+*::-webkit-scrollbar-thumb {
+	background: var(--scrollbar-thumb);
+	border-radius: 4px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+	background: var(--scrollbar-thumb-hover);
+}
+
+*::-webkit-scrollbar-corner {
+	background: transparent;
+}
+
+/* Glass effect for modals/popovers */
+.glass {
+	background: var(--glass-bg);
+	backdrop-filter: blur(12px);
+	-webkit-backdrop-filter: blur(12px);
+}
+
+/* Code blocks */
+pre {
+	background-color: var(--muted);
+	border-radius: 0.5rem;
+	padding: 1rem;
+	overflow-x: auto;
+	font-family: var(--font-mono);
+	font-size: 0.875rem;
+}
+
+code {
+	font-family: var(--font-mono);
+}
+
+/* Button base styles */
+.btn {
+	@apply px-4 py-2 rounded-lg font-medium;
+	transition: all 150ms ease;
+}
+
+.btn:active {
+	transform: scale(0.98);
+}
+
+.btn-primary {
+	background: linear-gradient(135deg, var(--primary), oklch(from var(--primary) calc(l - 0.04) calc(c + 0.02) calc(h - 5)));
+	color: var(--primary-foreground);
+	box-shadow: var(--shadow-s);
+}
+
+.btn-primary:hover {
+	box-shadow: var(--shadow-m);
+	filter: brightness(1.1);
+}
+
+.btn-secondary {
+	background-color: var(--secondary);
+	color: var(--secondary-foreground);
+	border: 1px solid var(--border);
+}
+
+.btn-secondary:hover {
+	background-color: var(--accent);
+}
+
+.btn-danger {
+	background-color: var(--destructive);
+	color: var(--destructive-foreground);
+}
+
+.btn-danger:hover {
+	opacity: 0.9;
+}
+
+/* Input styles */
+.input {
+	width: 100%;
+	padding: 0.5rem 1rem;
+	background-color: var(--input);
+	border: 1px solid var(--border);
+	border-radius: 0.5rem;
+	color: var(--foreground);
+	transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s;
+}
+
+/* Dark mode inputs - deeper background for contrast */
+.dark .input {
+	background-color: oklch(0.12 0.008 260);
+	border-color: oklch(0.30 0.012 260);
+}
+
+.dark .input:hover:not(:focus) {
+	border-color: oklch(0.38 0.015 260);
+}
+
+/* Light mode inputs - subtle gray background */
+.light .input {
+	background-color: oklch(0.97 0.003 260);
+	border-color: oklch(0.82 0.01 260);
+}
+
+.light .input:hover:not(:focus) {
+	border-color: oklch(0.72 0.015 260);
+}
+
+.input::placeholder {
+	color: var(--muted-foreground);
+}
+
+.input:focus {
+	outline: none;
+	box-shadow: 0 0 0 2px var(--ring);
+}
+
+.dark .input:focus {
+	border-color: var(--ring);
+	background-color: oklch(0.14 0.01 260);
+}
+
+.light .input:focus {
+	border-color: var(--ring);
+	background-color: oklch(1 0 0);
+}
+
+/* Select element styling */
+select.input {
+	cursor: pointer;
+	appearance: none;
+	-webkit-appearance: none;
+	-moz-appearance: none;
+	background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+	background-position: right 0.5rem center;
+	background-repeat: no-repeat;
+	background-size: 1.25em 1.25em;
+	padding-right: 2.5rem;
+}
+
+.dark select.input {
+	background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%239ca3af' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+}
+
+select.input option {
+	background-color: var(--card);
+	color: var(--foreground);
+	padding: 0.5rem;
+}
+
+.dark select.input option {
+	background-color: oklch(0.18 0.01 260);
+}
+
+.light select.input option {
+	background-color: oklch(1 0 0);
+}
+
+/* Global select element styling (for selects without .input class) */
+select {
+	color-scheme: light dark;
+}
+
+select option {
+	background-color: var(--popover);
+	color: var(--popover-foreground);
+}
+
+.dark select option {
+	background-color: oklch(0.20 0.01 260);
+}
+
+.light select option {
+	background-color: oklch(1 0 0);
+}
+
+/* Card styles */
+.card {
+	background-color: var(--card);
+	border: 1px solid var(--border);
+	border-radius: 0.5rem;
+	transition: box-shadow 200ms ease, transform 200ms ease;
+}
+
+.card:hover {
+	box-shadow: var(--shadow-m);
+}
+
+/* Subtle text gradient for headings */
+.text-gradient {
+	background: linear-gradient(135deg, var(--foreground), var(--muted-foreground));
+	-webkit-background-clip: text;
+	-webkit-text-fill-color: transparent;
+	background-clip: text;
+}
+
+/* Markdown prose styling */
+.prose {
+	color: var(--foreground);
+	max-width: 100%;
+	width: 100%;
+	overflow-wrap: break-word;
+	word-wrap: break-word;
+}
+
+.prose :where(p):not(:where([class~="not-prose"] *)) {
+	margin-top: 0;
+	margin-bottom: 1rem;
+}
+
+.prose :where(p):last-child:not(:where([class~="not-prose"] *)) {
+	margin-bottom: 0;
+}
+
+.prose :where(code):not(:where([class~="not-prose"] *)) {
+	font-weight: 400;
+	font-size: 0.9em;
+	padding: 0.125rem 0.375rem;
+	border-radius: 0.25rem;
+	background-color: var(--muted);
+	border: 1px solid var(--border);
+	word-break: break-all;
+	overflow-wrap: anywhere;
+}
+
+.prose :where(pre code):not(:where([class~="not-prose"] *)) {
+	padding: 0;
+	background-color: transparent;
+	border: none;
+}
+
+.prose :where(a):not(:where([class~="not-prose"] *)) {
+	color: var(--primary);
+	font-weight: 500;
+	text-decoration: underline;
+	text-decoration-thickness: 1px;
+	text-underline-offset: 2px;
+}
+
+.prose :where(a):not(:where([class~="not-prose"] *)):hover {
+	opacity: 0.8;
+}
+
+.prose :where(ul):not(:where([class~="not-prose"] *)) {
+	padding-left: 1.5rem;
+	list-style-type: disc;
+}
+
+.prose :where(ol):not(:where([class~="not-prose"] *)) {
+	padding-left: 1.5rem;
+	list-style-type: decimal;
+}
+
+.prose :where(li):not(:where([class~="not-prose"] *)) {
+	margin-top: 0.25rem;
+	margin-bottom: 0.25rem;
+	display: list-item;
+}
+
+.prose :where(h1):not(:where([class~="not-prose"] *)) {
+	font-size: 1.5rem;
+	font-weight: 700;
+	margin-top: 1.5rem;
+	margin-bottom: 1rem;
+}
+
+.prose :where(h2):not(:where([class~="not-prose"] *)) {
+	font-size: 1.25rem;
+	font-weight: 700;
+	margin-top: 1.25rem;
+	margin-bottom: 0.75rem;
+}
+
+.prose :where(h3):not(:where([class~="not-prose"] *)) {
+	font-size: 1.125rem;
+	font-weight: 700;
+	margin-top: 1rem;
+	margin-bottom: 0.5rem;
+}
+
+.prose :where(h4):not(:where([class~="not-prose"] *)) {
+	font-size: 1rem;
+	font-weight: 700;
+	margin-top: 0.75rem;
+	margin-bottom: 0.5rem;
+}
+
+.prose :where(blockquote):not(:where([class~="not-prose"] *)) {
+	border-left: 4px solid var(--primary);
+	padding-left: 1rem;
+	font-style: italic;
+	background-color: color-mix(in oklch, var(--muted) 20%, transparent);
+	padding-top: 0.5rem;
+	padding-bottom: 0.5rem;
+	margin-top: 1rem;
+	margin-bottom: 1rem;
+}
+
+/* Table wrapper for horizontal scrolling on mobile */
+.prose :where(table):not(:where([class~="not-prose"] *)) {
+	display: block;
+	width: 100%;
+	overflow-x: auto;
+	-webkit-overflow-scrolling: touch;
+	margin-top: 1rem;
+	margin-bottom: 1rem;
+}
+
+.prose :where(table):not(:where([class~="not-prose"] *)) tbody,
+.prose :where(table):not(:where([class~="not-prose"] *)) thead {
+	display: table;
+	width: 100%;
+	border-collapse: collapse;
+}
+
+.prose :where(th):not(:where([class~="not-prose"] *)) {
+	border: 1px solid var(--border);
+	padding: 0.5rem 0.75rem;
+	background-color: var(--muted);
+	text-align: left;
+	font-weight: 600;
+	white-space: nowrap;
+}
+
+.prose :where(td):not(:where([class~="not-prose"] *)) {
+	border: 1px solid var(--border);
+	padding: 0.5rem 0.75rem;
+}
+
+.prose :where(tr):not(:where([class~="not-prose"] *)):hover {
+	background-color: color-mix(in oklch, var(--muted) 30%, transparent);
+}
+
+.prose :where(strong):not(:where([class~="not-prose"] *)) {
+	font-weight: 600;
+}
+
+.prose :where(em):not(:where([class~="not-prose"] *)) {
+	font-style: italic;
+}
+
+/* ========================================
+   RESPONSIVE BREAKPOINTS & CSS CUSTOM PROPERTIES
+   Mobile: < 640px
+   Tablet: 640px - 1024px
+   Desktop: > 1024px
+   ======================================== */
+
+:root {
+	--breakpoint-mobile: 640px;
+	--breakpoint-tablet: 1024px;
+}
+
+/* ========================================
+   RESPONSIVE UTILITY CLASSES
+   Provide CSS fallback for JS-based responsive behavior
+   ======================================== */
+
+/* Hide on mobile (< 640px) */
+@media (max-width: 639px) {
+	.mobile-hidden,
+	.desktop-only {
+		display: none !important;
+	}
+}
+
+/* Hide on desktop (>= 640px) */
+@media (min-width: 640px) {
+	.desktop-hidden,
+	.mobile-only {
+		display: none !important;
+	}
+}
+
+/* Tablet-specific visibility */
+@media (min-width: 640px) and (max-width: 1023px) {
+	.tablet-hidden {
+		display: none !important;
+	}
+}
+
+@media (max-width: 639px), (min-width: 1024px) {
+	.tablet-only {
+		display: none !important;
+	}
+}
+
+/* ========================================
+   MOBILE LAYOUT FALLBACKS
+   CSS backup for JS-based mobile detection
+   ======================================== */
+
+/* Mobile: Hide desktop-only elements via CSS as fallback */
+@media (max-width: 639px) {
+	/* Hide context panel on mobile */
+	.context-panel-desktop,
+	[data-layout="context-panel"] {
+		display: none !important;
+	}
+
+	/* Hide dock on mobile */
+	.dock-desktop,
+	[data-layout="dock"] {
+		display: none !important;
+	}
+
+	/* Desktop activity rail hidden on mobile */
+	.rail-desktop,
+	[data-layout="rail-desktop"] {
+		display: none !important;
+	}
+
+	/* Mobile activity rail visible and positioned at bottom */
+	.rail-mobile,
+	[data-layout="rail-mobile"] {
+		display: flex !important;
+		position: fixed;
+		bottom: 0;
+		left: 0;
+		right: 0;
+		z-index: 100;
+		background: var(--card);
+		height: calc(64px + env(safe-area-inset-bottom, 0px));
+		padding-bottom: env(safe-area-inset-bottom, 0px);
+	}
+
+	/* Main content takes full width on mobile */
+	.main-content-responsive {
+		grid-column: 1 !important;
+		margin-left: 0 !important;
+		width: 100% !important;
+	}
+
+	/* Ensure proper spacing for mobile bottom rail */
+	.has-mobile-rail {
+		padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px));
+	}
+}
+
+/* Desktop: Hide mobile-only elements via CSS as fallback */
+@media (min-width: 640px) {
+	.rail-mobile,
+	[data-layout="rail-mobile"] {
+		display: none !important;
+	}
+}
+
+/* ========================================
+   TABLET LAYOUT ADJUSTMENTS
+   Intermediate sizing for 640px - 1024px
+   ======================================== */
+
+@media (min-width: 640px) and (max-width: 1023px) {
+	/* Narrower context panel on tablets */
+	.context-panel-responsive {
+		width: 280px !important;
+	}
+
+	/* Slightly narrower activity rail on tablets */
+	.rail-responsive {
+		width: 56px !important;
+	}
+
+	/* Adjust grid for tablet */
+	.deck-layout-responsive {
+		grid-template-columns: 56px 1fr !important;
+	}
+}
+
+/* ========================================
+   MOBILE OPTIMIZATIONS
+   ======================================== */
+
+@media (max-width: 639px) {
+	html {
+		font-size: 16px;
+		-webkit-text-size-adjust: 100%;
+	}
+
+	.btn {
+		min-height: 44px;
+		padding-left: 1rem;
+		padding-right: 1rem;
+	}
+
+	.input {
+		min-height: 44px;
+		font-size: 16px;
+	}
+
+	select.input {
+		font-size: 16px;
+	}
+
+	/* Larger touch targets on mobile */
+	.touch-target {
+		min-width: 44px;
+		min-height: 44px;
+	}
+}
+
+/* ========================================
+   ACCESSIBILITY: REDUCED MOTION
+   ======================================== */
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
+	}
+
+	/* Disable specific animations */
+	.panel-slide-in {
+		animation: none !important;
+	}
+
+	.theme-toggle-icon.rotating {
+		transform: none !important;
+	}
+
+	/* Keep visual feedback but remove motion */
+	.context-container {
+		transition: none !important;
+	}
+
+	.floating-panel {
+		animation: none !important;
+	}
+}
+
+/* Touch-friendly tap targets */
+button, a, .clickable {
+	-webkit-tap-highlight-color: transparent;
+}
+
+/* Prevent text selection on interactive elements */
+.no-select {
+	-webkit-user-select: none;
+	user-select: none;
+}
+
+/* Safe area insets for notched devices */
+@supports (padding-bottom: env(safe-area-inset-bottom)) {
+	.safe-bottom {
+		padding-bottom: env(safe-area-inset-bottom);
+	}
+}
+
+/* Smooth scrolling on mobile */
+.smooth-scroll {
+	-webkit-overflow-scrolling: touch;
+	scroll-behavior: smooth;
+}
+
+/* Floating Panel System - Glass morphism sidebar */
+.floating-panel {
+	background: var(--panel-bg);
+	backdrop-filter: blur(20px);
+	-webkit-backdrop-filter: blur(20px);
+	border: 1px solid var(--panel-border);
+	box-shadow:
+		0 0 0 1px var(--panel-shadow-inset) inset,
+		0 8px 32px var(--panel-shadow-outer),
+		0 2px 8px var(--panel-shadow-inner);
+}
+
+/* Panel slide-in animation */
+.panel-slide-in {
+	animation: panelSlideIn 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes panelSlideIn {
+	from {
+		opacity: 0;
+		transform: translateX(-12px);
+	}
+	to {
+		opacity: 1;
+		transform: translateX(0);
+	}
+}
+
+/* Glow effect for active items */
+.shadow-glow {
+	box-shadow:
+		0 0 12px var(--glow-color),
+		0 0 4px var(--glow-color-soft);
+}
+
+/* Theme toggle button animation */
+.theme-toggle-icon {
+	transition: transform 0.3s ease, opacity 0.3s ease;
+}
+
+.theme-toggle-icon.rotating {
+	transform: rotate(180deg);
+}
+
+/* Custom scrollbar styling */
+.custom-scrollbar::-webkit-scrollbar {
+	width: 8px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+	background: var(--scrollbar-track);
+	border-radius: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+	background: var(--scrollbar-thumb);
+	border-radius: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+	background: var(--primary-30);
+}
+
+/* Floating Island Input Container */
+.floating-island {
+	background-color: var(--input);
+	border: 1px solid var(--border);
+	border-radius: 1rem;
+	box-shadow: var(--shadow-m);
+	transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s;
+}
+
+.floating-island:focus-within {
+	border-color: var(--ring);
+	box-shadow: var(--shadow-l), 0 0 0 2px oklch(from var(--ring) l c h / 0.15);
+}
+
+/* Dark mode floating island - slightly elevated */
+.dark .floating-island {
+	background-color: oklch(0.16 0.01 260);
+	border-color: oklch(0.32 0.012 260);
+}
+
+/* Light mode floating island - pure white with subtle shadow */
+.light .floating-island {
+	background-color: oklch(1 0 0);
+	border-color: oklch(0.82 0.01 260);
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
