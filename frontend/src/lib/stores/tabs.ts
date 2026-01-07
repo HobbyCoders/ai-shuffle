@@ -174,6 +174,12 @@ const tabLastMessageTime: Map<string, number> = new Map();
 // Connection health check - if no message for 90s (3 missed pings), force reconnect
 const CONNECTION_HEALTH_TIMEOUT_MS = 90000;
 
+// Server-authoritative polling for streaming sessions
+// When streaming, poll /sessions/{id}/live for ground truth state
+const tabPollingTimers: Map<string, ReturnType<typeof setInterval>> = new Map();
+const tabLastUpdateId: Map<string, number> = new Map();
+const POLLING_INTERVAL_MS = 500; // Poll every 500ms during streaming
+
 // Interface for persisted tab state (only what we need to restore tabs)
 interface PersistedTab {
 	id: string;
@@ -709,6 +715,9 @@ function createTabsStore() {
 			tabPingTimers.delete(tabId);
 		}
 
+		// Stop polling if active
+		stopPolling(tabId);
+
 		// Clear any waiting for history state, expected session tracking, and health monitoring
 		tabsWaitingForHistory.delete(tabId);
 		tabExpectedSessionId.delete(tabId);
@@ -721,6 +730,176 @@ function createTabsStore() {
 		}
 
 		updateTab(tabId, { wsConnected: false });
+	}
+
+	/**
+	 * Start polling server for live session state.
+	 * This is the server-authoritative approach - frontend state is replaced
+	 * with server state, no merging required.
+	 */
+	function startPolling(tabId: string, sessionId: string) {
+		// Don't start if already polling
+		if (tabPollingTimers.has(tabId)) {
+			console.log(`[Tab ${tabId}] Already polling, skipping start`);
+			return;
+		}
+
+		console.log(`[Tab ${tabId}] Starting server-authoritative polling for session ${sessionId}`);
+		tabLastUpdateId.set(tabId, 0);
+
+		const pollLiveState = async () => {
+			const tab = getTab(tabId);
+			if (!tab || tab.sessionId !== sessionId) {
+				// Tab closed or switched sessions
+				stopPolling(tabId);
+				return;
+			}
+
+			try {
+				const lastUpdateId = tabLastUpdateId.get(tabId) || 0;
+				const response = await fetch(
+					`/api/v1/sessions/${sessionId}/live?since_update_id=${lastUpdateId}`,
+					{ credentials: 'include' }
+				);
+
+				if (response.status === 304) {
+					// No updates since last check
+					return;
+				}
+
+				if (!response.ok) {
+					console.warn(`[Tab ${tabId}] Polling failed: ${response.status}`);
+					return;
+				}
+
+				const data = await response.json();
+				const newUpdateId = data.last_update_id as number;
+				tabLastUpdateId.set(tabId, newUpdateId);
+
+				// Convert server messages to ChatMessage format
+				const serverMessages = (data.messages as Array<Record<string, unknown>>) || [];
+				const messages: ChatMessage[] = serverMessages.map((m, i) => {
+					const msg: ChatMessage = {
+						id: (m.id as string) || `live-${i}`,
+						role: (m.role as 'user' | 'assistant' | 'system') || 'assistant',
+						content: (m.content as string) || '',
+						type: (m.type as MessageType) || 'text',
+						streaming: (m.streaming as boolean) || false,
+					};
+
+					// Tool fields
+					if (m.toolName) msg.toolName = m.toolName as string;
+					if (m.toolId) msg.toolId = m.toolId as string;
+					if (m.toolInput) msg.toolInput = m.toolInput as Record<string, unknown>;
+					if (m.toolResult !== undefined) msg.toolResult = m.toolResult as string;
+					if (m.toolStatus) msg.toolStatus = m.toolStatus as 'running' | 'complete' | 'error';
+
+					// Subagent fields
+					if (m.agentId) msg.agentId = m.agentId as string;
+					if (m.agentType) msg.agentType = m.agentType as string;
+					if (m.agentDescription) msg.agentDescription = m.agentDescription as string;
+					if (m.agentPrompt) msg.agentPrompt = m.agentPrompt as string;
+					if (m.agentStatus) msg.agentStatus = m.agentStatus as 'pending' | 'running' | 'completed' | 'error';
+					if (m.agentChildren) msg.agentChildren = m.agentChildren as SubagentChildMessage[];
+
+					// System message fields
+					if (m.systemSubtype) msg.systemSubtype = m.systemSubtype as string;
+					if (m.systemData) msg.systemData = m.systemData as Record<string, unknown>;
+
+					// Metadata
+					if (m.metadata) msg.metadata = m.metadata as Record<string, unknown>;
+
+					return msg;
+				});
+
+				// Extract todos from messages (look for TodoWrite)
+				let latestTodos: TodoItem[] = [];
+				for (const msg of messages) {
+					if (msg.type === 'tool_use' && msg.toolName === 'TodoWrite' && msg.toolInput?.todos) {
+						const todos = msg.toolInput.todos as TodoItem[];
+						if (Array.isArray(todos)) {
+							latestTodos = todos.map(todo => ({
+								content: todo.content || '',
+								status: todo.status || 'pending',
+								activeForm: todo.activeForm || todo.content || ''
+							}));
+						}
+					}
+				}
+
+				// Extract token usage
+				const usage = data.usage as Record<string, number> || {};
+				const inputTokens = usage.input_tokens || 0;
+				const outputTokens = usage.output_tokens || 0;
+				const cacheCreationTokens = usage.cache_creation_tokens || 0;
+				const cacheReadTokens = usage.cache_read_tokens || 0;
+
+				// Replace tab state with server state - NO MERGING!
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(t => {
+						if (t.id !== tabId) return t;
+						return {
+							...t,
+							messages,
+							isStreaming: data.is_streaming as boolean,
+							todos: latestTodos.length > 0 ? latestTodos : t.todos,
+							totalTokensIn: inputTokens,
+							totalTokensOut: outputTokens,
+							totalCacheCreationTokens: cacheCreationTokens,
+							totalCacheReadTokens: cacheReadTokens,
+							contextUsed: inputTokens + cacheCreationTokens + cacheReadTokens
+						};
+					})
+				}));
+
+				// Stop polling if streaming ended
+				if (!data.is_streaming) {
+					console.log(`[Tab ${tabId}] Streaming ended, stopping polling`);
+					stopPolling(tabId);
+
+					// Trigger notification if enabled
+					const currentTab = getTab(tabId);
+					if (currentTab && isNotificationsEnabled() && getPermission() === 'granted') {
+						const durationSeconds = currentTab.streamStartTime
+							? (Date.now() - currentTab.streamStartTime) / 1000
+							: undefined;
+
+						notifySessionComplete({
+							sessionId: sessionId,
+							sessionTitle: currentTab.title,
+							durationSeconds,
+							tokensIn: inputTokens,
+							tokensOut: outputTokens
+						});
+					}
+
+					// Refresh sessions list (use internal function since we're inside store creation)
+					loadSessionsInternal();
+				}
+
+			} catch (e) {
+				console.error(`[Tab ${tabId}] Polling error:`, e);
+			}
+		};
+
+		// Start polling immediately, then on interval
+		pollLiveState();
+		const timer = setInterval(pollLiveState, POLLING_INTERVAL_MS);
+		tabPollingTimers.set(tabId, timer);
+	}
+
+	/**
+	 * Stop polling for a tab
+	 */
+	function stopPolling(tabId: string) {
+		const timer = tabPollingTimers.get(tabId);
+		if (timer) {
+			clearInterval(timer);
+			tabPollingTimers.delete(tabId);
+			tabLastUpdateId.delete(tabId);
+			console.log(`[Tab ${tabId}] Stopped polling`);
+		}
 	}
 
 	/**
@@ -1761,6 +1940,14 @@ function createTabsStore() {
 					updateTab(tabId, { title });
 				}
 
+				// If session is streaming, start server-authoritative polling
+				// This ensures we get the correct state regardless of any buffer merging issues
+				const receivedSession = data.session_id as string;
+				if (isStreaming && receivedSession) {
+					console.log(`[Tab ${tabId}] Session is streaming, starting server-authoritative polling`);
+					startPolling(tabId, receivedSession);
+				}
+
 				// Process any queued sync events that arrived while waiting for history
 				const queuedEvents = tabsWaitingForHistory.get(tabId);
 				if (queuedEvents && queuedEvents.length > 0) {
@@ -1816,6 +2003,12 @@ function createTabsStore() {
 						};
 					})
 				}));
+
+				// Start server-authoritative polling for this streaming session
+				// Polling ensures we always have correct state even if WebSocket events are missed
+				if (sessionId) {
+					startPolling(tabId, sessionId);
+				}
 
 				// Save again in case session_created wasn't received (backwards compat)
 				saveTabsToServer(get({ subscribe }));
@@ -2184,6 +2377,9 @@ function createTabsStore() {
 				const sessionId = data.session_id as string;
 				console.log('[WS] Done event received, cleaning up streaming messages');
 
+				// Stop polling since streaming is complete
+				stopPolling(tabId);
+
 				// Clear any pending stop timeout since streaming is complete
 				const doneStopTimeout = stopTimeouts.get(tabId);
 				if (doneStopTimeout) {
@@ -2296,6 +2492,9 @@ function createTabsStore() {
 				// should be handled the same way - stop streaming and mark as stopped
 				console.log(`[Tab ${tabId}] Received ${msgType} message`);
 
+				// Stop polling since streaming is stopped
+				stopPolling(tabId);
+
 				// Clear the fallback timeout since we received confirmation
 				const stopTimeout = stopTimeouts.get(tabId);
 				if (stopTimeout) {
@@ -2337,6 +2536,9 @@ function createTabsStore() {
 			}
 
 			case 'error': {
+				// Stop polling since streaming errored
+				stopPolling(tabId);
+
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {

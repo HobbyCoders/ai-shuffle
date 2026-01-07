@@ -19,6 +19,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from fastapi.websockets import WebSocketState
 
 from app.core.sync_engine import sync_engine
+from app.core.live_session_store import live_session_store
 from app.db import database
 from app.core.webhook_service import dispatch_session_complete, dispatch_session_error
 from app.core.cli_bridge import CLIBridge, RewindParser
@@ -188,6 +189,8 @@ async def chat_websocket(
         nonlocal current_session_id
 
         from app.core.query_engine import stream_to_websocket
+        from app.core.jsonl_parser import parse_session_history
+        from app.core.config import settings
         import time
 
         # Generate a message ID for this streaming session
@@ -195,6 +198,7 @@ async def chat_websocket(
         stream_started = False
         query_start_time = time.time()  # Track duration for webhooks
         final_metadata: Dict[str, Any] = {}  # Store metadata from done event
+        current_tool_id: Optional[str] = None  # Track current tool for input streaming
 
         # Unregister this device from SyncEngine while streaming
         # This prevents duplicate events (we get direct events via send_json)
@@ -202,11 +206,39 @@ async def chat_websocket(
         await sync_engine.unregister_device(device_id, session_id)
         logger.info(f"Unregistered device {device_id} during streaming to prevent duplicates")
 
+        # Initialize LiveSessionStore for server-authoritative state
+        # Load existing messages from JSONL first
+        session_data = database.get_session(session_id)
+        initial_messages = []
+        if session_data:
+            sdk_session_id = session_data.get("sdk_session_id")
+            if sdk_session_id:
+                working_dir = "/workspace"
+                if project_id:
+                    project = database.get_project(project_id)
+                    if project:
+                        working_dir = str(settings.workspace_dir / project["path"])
+                try:
+                    initial_messages = parse_session_history(sdk_session_id, working_dir)
+                except Exception as e:
+                    logger.warning(f"Failed to load history for live store: {e}")
+
+        # Start live session with existing messages
+        await live_session_store.start_streaming(session_id, initial_messages)
+
+        # Add user message to live store
+        user_message_id = f"user-{uuid.uuid4()}"
+        await live_session_store.add_user_message(session_id, prompt, user_message_id)
+
         try:
             logger.info(f"Starting query for session {session_id}, profile={profile_id}, project={project_id}, overrides={overrides}")
             if not await send_json({"type": "start", "session_id": session_id, "message_id": message_id}):
                 logger.warning(f"Connection lost before query could start for session {session_id}")
+                await live_session_store.cleanup_session(session_id)
                 return  # Exit early - connection is dead
+
+            # Start assistant message in live store
+            await live_session_store.start_assistant_message(session_id, message_id)
 
             logger.info(f"Calling stream_to_websocket for session {session_id}, api_user_id={api_user_id}")
             async for event in stream_to_websocket(
@@ -265,15 +297,22 @@ async def chat_websocket(
                             )
                             logger.debug(f"Broadcast usage update for session {session_id}: {usage_data}")
 
-                # Broadcast stream chunks (source_device_id=None to not exclude any device)
+                # Broadcast stream chunks AND update LiveSessionStore
+                # LiveSessionStore is the server-authoritative state for reconnecting clients
                 if event_type == 'stream_delta':
                     # Real-time streaming delta - handle different delta types
                     delta_type = event.get('delta_type', 'text')
+                    content = event.get('content', '')
 
                     if delta_type == 'tool_input':
-                        # Tool input streaming - broadcast as tool_input type
+                        # Tool input streaming - update live store
+                        if current_tool_id:
+                            await live_session_store.update_tool_input_streaming(
+                                session_id, current_tool_id, content
+                            )
+                        # Broadcast as tool_input type
                         chunk_data = {
-                            'content': event.get('content', ''),
+                            'content': content,
                             'delta_type': delta_type,
                             'index': event.get('index', 0)
                         }
@@ -285,9 +324,11 @@ async def chat_websocket(
                             source_device_id=None
                         )
                     else:
-                        # Text or other delta - broadcast as text
+                        # Text or other delta - update live store
+                        await live_session_store.append_text(session_id, content)
+                        # Broadcast as text
                         chunk_data = {
-                            'content': event.get('content', ''),
+                            'content': content,
                             'delta_type': delta_type,
                             'index': event.get('index', 0)
                         }
@@ -300,9 +341,11 @@ async def chat_websocket(
                         )
                 elif event_type == 'chunk':
                     # Legacy chunk event (when include_partial_messages=False)
-                    chunk_data = {
-                        'content': event.get('content', '')
-                    }
+                    content = event.get('content', '')
+                    # Update live store
+                    await live_session_store.append_text(session_id, content)
+                    # Broadcast
+                    chunk_data = {'content': content}
                     await sync_engine.broadcast_stream_chunk(
                         session_id=session_id,
                         message_id=message_id,
@@ -311,11 +354,20 @@ async def chat_websocket(
                         source_device_id=None
                     )
                 elif event_type == 'tool_use':
-                    # Tool use event
+                    # Tool use event - update live store
+                    tool_id = event.get('id')
+                    current_tool_id = tool_id  # Track for input streaming
+                    await live_session_store.add_tool_use(
+                        session_id=session_id,
+                        tool_id=tool_id,
+                        name=event.get('name'),
+                        tool_input=event.get('input', {})
+                    )
+                    # Broadcast
                     chunk_data = {
                         'content': '',
                         'tool_name': event.get('name'),
-                        'tool_id': event.get('id'),
+                        'tool_id': tool_id,
                         'tool_input': event.get('input')
                     }
                     await sync_engine.broadcast_stream_chunk(
@@ -326,10 +378,19 @@ async def chat_websocket(
                         source_device_id=None
                     )
                 elif event_type == 'tool_result':
-                    # Tool result event
+                    # Tool result event - update live store
+                    tool_id = event.get('tool_use_id')
+                    current_tool_id = None  # Clear tool tracking
+                    await live_session_store.add_tool_result(
+                        session_id=session_id,
+                        tool_id=tool_id,
+                        result=event.get('output', ''),
+                        is_error=event.get('is_error', False)
+                    )
+                    # Broadcast
                     chunk_data = {
                         'content': event.get('output', ''),
-                        'tool_id': event.get('tool_use_id'),
+                        'tool_id': tool_id,
                         'is_error': event.get('is_error', False)
                     }
                     await sync_engine.broadcast_stream_chunk(
@@ -340,7 +401,14 @@ async def chat_websocket(
                         source_device_id=None
                     )
                 elif event_type == 'system':
-                    # System message (e.g., /context output, local commands)
+                    # System message - update live store
+                    await live_session_store.add_system_message(
+                        session_id=session_id,
+                        content='',
+                        subtype=event.get('subtype'),
+                        data=event.get('data')
+                    )
+                    # Broadcast
                     chunk_data = {
                         'content': '',
                         'subtype': event.get('subtype'),
@@ -354,7 +422,16 @@ async def chat_websocket(
                         source_device_id=None
                     )
                 elif event_type == 'subagent_start':
-                    # Subagent task started
+                    # Subagent task started - update live store
+                    await live_session_store.add_subagent_start(
+                        session_id=session_id,
+                        agent_id=event.get('agent_id'),
+                        agent_type=event.get('agent_type'),
+                        description=event.get('description'),
+                        prompt=event.get('prompt'),
+                        tool_id=event.get('tool_id')
+                    )
+                    # Broadcast
                     chunk_data = {
                         'agent_id': event.get('agent_id'),
                         'agent_type': event.get('agent_type'),
@@ -370,7 +447,13 @@ async def chat_websocket(
                         source_device_id=None
                     )
                 elif event_type == 'subagent_chunk':
-                    # Text chunk from subagent
+                    # Text chunk from subagent - update live store
+                    await live_session_store.append_subagent_text(
+                        session_id=session_id,
+                        agent_id=event.get('agent_id'),
+                        content=event.get('content', '')
+                    )
+                    # Broadcast
                     chunk_data = {
                         'agent_id': event.get('agent_id'),
                         'content': event.get('content', '')
@@ -383,7 +466,15 @@ async def chat_websocket(
                         source_device_id=None
                     )
                 elif event_type == 'subagent_tool_use':
-                    # Tool use within subagent
+                    # Tool use within subagent - update live store
+                    await live_session_store.add_subagent_tool_use(
+                        session_id=session_id,
+                        agent_id=event.get('agent_id'),
+                        tool_id=event.get('id'),
+                        tool_name=event.get('name'),
+                        tool_input=event.get('input', {})
+                    )
+                    # Broadcast
                     chunk_data = {
                         'agent_id': event.get('agent_id'),
                         'name': event.get('name'),
@@ -398,7 +489,15 @@ async def chat_websocket(
                         source_device_id=None
                     )
                 elif event_type == 'subagent_tool_result':
-                    # Tool result within subagent
+                    # Tool result within subagent - update live store
+                    await live_session_store.add_subagent_tool_result(
+                        session_id=session_id,
+                        agent_id=event.get('agent_id'),
+                        tool_id=event.get('tool_use_id'),
+                        result=event.get('output', ''),
+                        is_error=event.get('is_error', False)
+                    )
+                    # Broadcast
                     chunk_data = {
                         'agent_id': event.get('agent_id'),
                         'tool_use_id': event.get('tool_use_id'),
@@ -413,7 +512,14 @@ async def chat_websocket(
                         source_device_id=None
                     )
                 elif event_type == 'subagent_done':
-                    # Subagent completed
+                    # Subagent completed - update live store
+                    await live_session_store.complete_subagent(
+                        session_id=session_id,
+                        agent_id=event.get('agent_id'),
+                        result=event.get('result', ''),
+                        is_error=event.get('is_error', False)
+                    )
+                    # Broadcast
                     chunk_data = {
                         'agent_id': event.get('agent_id'),
                         'result': event.get('result'),
@@ -470,6 +576,13 @@ async def chat_websocket(
                     # Store metadata for webhook dispatch
                     final_metadata = event.get('metadata', {})
 
+                    # End live session store streaming (clears from memory)
+                    await live_session_store.end_streaming(
+                        session_id=session_id,
+                        metadata=final_metadata,
+                        interrupted=False
+                    )
+
                     # Stream completed - broadcast end
                     if stream_started:
                         await sync_engine.broadcast_stream_end(
@@ -502,6 +615,14 @@ async def chat_websocket(
         except asyncio.CancelledError:
             await send_json({"type": "stopped", "session_id": session_id})
             logger.info(f"Query cancelled for session {session_id}")
+
+            # End live session store with interrupted flag
+            await live_session_store.end_streaming(
+                session_id=session_id,
+                metadata={},
+                interrupted=True
+            )
+
             # Broadcast stream end with interrupted flag
             if stream_started:
                 await sync_engine.broadcast_stream_end(
@@ -515,6 +636,14 @@ async def chat_websocket(
         except Exception as e:
             logger.error(f"Query error for session {session_id}: {e}", exc_info=True)
             await send_json({"type": "error", "message": str(e)})
+
+            # End live session store on error
+            await live_session_store.end_streaming(
+                session_id=session_id,
+                metadata={"error": str(e)},
+                interrupted=True
+            )
+
             # Broadcast stream end on error
             if stream_started:
                 await sync_engine.broadcast_stream_end(
@@ -538,6 +667,12 @@ async def chat_websocket(
                 logger.warning(f"Failed to dispatch session.error webhook: {webhook_error}")
 
         finally:
+            # ALWAYS ensure live session store is cleaned up
+            # This prevents stuck state if an exception occurred before end_streaming was called
+            if live_session_store.has_session(session_id):
+                logger.info(f"Cleaning up live session store for session {session_id} (finally block)")
+                await live_session_store.cleanup_session(session_id)
+
             # ALWAYS ensure streaming state is cleared, even if stream_started was never set
             # This prevents stuck streaming state after errors or early termination
             if sync_engine.is_session_streaming(session_id):

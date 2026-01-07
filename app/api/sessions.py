@@ -478,6 +478,167 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
         )
 
 
+@router.get("/{session_id}/live")
+async def get_live_session(
+    request: Request,
+    session_id: str,
+    since_update_id: int = Query(0, description="Only return if updated since this ID (for efficient polling)"),
+    token: str = Depends(require_auth)
+):
+    """
+    Get live session state for streaming sessions.
+
+    This endpoint provides server-authoritative state during streaming.
+    Frontend polls this endpoint instead of maintaining local message state.
+
+    - If session is actively streaming: returns live state from memory
+    - If session is not streaming: returns historical state from JSONL
+    - If since_update_id provided and no updates: returns 304 Not Modified
+
+    Response includes:
+    - messages: Current message state (including in-progress streaming)
+    - is_streaming: Whether session is currently streaming
+    - last_update_id: For efficient polling (only fetch if updated)
+    - usage: Token usage counts
+    """
+    import logging
+    from starlette.responses import Response
+    from app.core.live_session_store import live_session_store
+
+    logger = logging.getLogger(__name__)
+
+    # Check session exists and user has access
+    session = database.get_session(session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}"
+        )
+
+    check_session_access(request, session)
+
+    # Check if session is in live store (actively streaming)
+    if live_session_store.has_session(session_id):
+        # Check if there are updates since last poll
+        if since_update_id > 0:
+            live_data = live_session_store.get_session_since(session_id, since_update_id)
+            if live_data is None:
+                # No updates since last check
+                return Response(status_code=304)
+            return live_data
+        else:
+            live_data = live_session_store.get_session_dict(session_id)
+            if live_data:
+                return live_data
+
+    # Not streaming - load from JSONL (same as get_session but simpler response)
+    sdk_session_id = session.get("sdk_session_id")
+    messages = []
+    working_dir = "/workspace"
+    usage_data = None
+
+    if sdk_session_id:
+        try:
+            from app.core.jsonl_parser import parse_session_history, get_session_cost_from_jsonl
+            from app.core.config import settings
+
+            project_id = session.get("project_id")
+            if project_id:
+                project = database.get_project(project_id)
+                if project:
+                    working_dir = str(settings.workspace_dir / project["path"])
+
+            jsonl_messages = parse_session_history(sdk_session_id, working_dir)
+            if jsonl_messages:
+                # Transform to live format
+                for m in jsonl_messages:
+                    msg = {
+                        "id": m.get("id", ""),
+                        "role": m.get("role", "user"),
+                        "type": m.get("type", "text"),
+                        "content": m.get("content", ""),
+                        "streaming": False,
+                    }
+                    # Tool fields
+                    if m.get("toolName"):
+                        msg["toolName"] = m.get("toolName")
+                    if m.get("toolId"):
+                        msg["toolId"] = m.get("toolId")
+                    if m.get("toolInput"):
+                        msg["toolInput"] = m.get("toolInput")
+                    if m.get("toolResult"):
+                        msg["toolResult"] = m.get("toolResult")
+                    if m.get("toolStatus"):
+                        msg["toolStatus"] = m.get("toolStatus")
+                    # Subagent fields
+                    if m.get("agentId"):
+                        msg["agentId"] = m.get("agentId")
+                    if m.get("agentType"):
+                        msg["agentType"] = m.get("agentType")
+                    if m.get("agentDescription"):
+                        msg["agentDescription"] = m.get("agentDescription")
+                    if m.get("agentStatus"):
+                        msg["agentStatus"] = m.get("agentStatus")
+                    if m.get("agentChildren"):
+                        msg["agentChildren"] = m.get("agentChildren")
+                    # Metadata
+                    if m.get("metadata"):
+                        msg["metadata"] = m.get("metadata")
+
+                    messages.append(msg)
+
+            # Get usage data
+            usage_data = get_session_cost_from_jsonl(sdk_session_id, working_dir)
+
+        except Exception as e:
+            logger.error(f"Failed to parse JSONL for live session {session_id}: {e}")
+
+    # Fall back to DB if JSONL not available
+    if not messages:
+        db_messages = database.get_session_messages(session_id)
+        for m in db_messages:
+            msg = {
+                "id": str(m.get("id", "")),
+                "role": m.get("role", "user"),
+                "type": "tool_use" if m.get("tool_name") else "text",
+                "content": m.get("content", ""),
+                "streaming": False,
+            }
+            if m.get("tool_name"):
+                msg["toolName"] = m.get("tool_name")
+            if m.get("tool_id"):
+                msg["toolId"] = m.get("tool_id")
+            if m.get("tool_input"):
+                msg["toolInput"] = m.get("tool_input")
+            messages.append(msg)
+
+    # Build response in live format
+    input_tokens = session.get("total_tokens_in", 0)
+    output_tokens = session.get("total_tokens_out", 0)
+    cache_creation = session.get("cache_creation_tokens", 0)
+    cache_read = session.get("cache_read_tokens", 0)
+
+    # Override with JSONL data if available
+    if sdk_session_id and usage_data:
+        input_tokens = usage_data.get("total_tokens_in", input_tokens)
+        output_tokens = usage_data.get("total_tokens_out", output_tokens)
+        cache_creation = usage_data.get("cache_creation_tokens", cache_creation)
+        cache_read = usage_data.get("cache_read_tokens", cache_read)
+
+    return {
+        "session_id": session_id,
+        "is_streaming": False,
+        "last_update_id": 0,
+        "messages": messages,
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_creation_tokens": cache_creation,
+            "cache_read_tokens": cache_read,
+        }
+    }
+
+
 @router.patch("/{session_id}")
 async def update_session(
     request: Request,
