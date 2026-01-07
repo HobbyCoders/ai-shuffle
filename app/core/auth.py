@@ -77,8 +77,11 @@ class AuthService:
 
     def __init__(self):
         """Initialize auth service"""
-        self.config_dir = Path(os.environ.get('HOME', '/home/appuser')) / '.claude'
-        self.gh_config_dir = Path(os.environ.get('HOME', '/home/appuser')) / '.config' / 'gh'
+        # Use HOME environment variable for config directories
+        home = Path(os.environ.get('HOME', '/home/appuser'))
+        self.config_dir = home / '.claude'
+        self.gh_config_dir = home / '.config' / 'gh'
+
         # Store active OAuth login process for multi-step flow
         self._claude_login_process = None
         self._claude_login_master_fd = None
@@ -728,6 +731,8 @@ class AuthService:
         """
         import time
         import re
+        import os as os_module
+        import select
 
         if not self._claude_login_process or not self._claude_login_master_fd:
             return {
@@ -745,39 +750,75 @@ class AuthService:
                 "error": "The login process is no longer running. Please start again."
             }
 
+        all_output = ""
+
+        def read_all():
+            """Read all available output"""
+            nonlocal all_output
+            result = ""
+            while True:
+                ready, _, _ = select.select([self._claude_login_master_fd], [], [], 0.1)
+                if not ready:
+                    break
+                try:
+                    data = os_module.read(self._claude_login_master_fd, 4096)
+                    if data:
+                        chunk = data.decode('utf-8', errors='replace')
+                        result += chunk
+                        all_output += chunk
+                    else:
+                        break
+                except OSError:
+                    break
+            return result
+
         try:
-            # Send the auth code
+            # First, read any pending output (the "paste code here" prompt)
+            output = read_all()
+            logger.info(f"Before sending code: {repr(output[:300] if len(output) > 300 else output)}")
+
+            # Send the auth code with carriage return
             logger.info(f"Sending auth code: {auth_code[:10]}...")
-            self._write_pty_input(f"{auth_code}\n")
-            time.sleep(1.0)
+            self._write_pty_input(f"{auth_code}\r")
+            time.sleep(2.0)  # Give CLI time to process the code
 
             # Read response
-            output = self._read_pty_output(timeout=3.0)
-            logger.info(f"After auth code: {repr(output[:500] if len(output) > 500 else output)}")
+            output = read_all()
+            logger.info(f"After auth code ({len(output)} chars): {repr(output[:500] if len(output) > 500 else output)}")
 
-            # Step 5: Confirmation prompt - send Enter
-            if output:
-                logger.info("Sending confirmation Enter")
-                self._write_pty_input("\n")
-                time.sleep(0.5)
-                output = self._read_pty_output(timeout=2.0)
-                logger.info(f"After confirmation: {repr(output[:300] if len(output) > 300 else output)}")
+            # Check if login was successful by looking for success indicators
+            if 'logged in' in all_output.lower() or 'success' in all_output.lower() or 'authenticated' in all_output.lower():
+                logger.info("Login appears successful!")
 
-            # Step 6: Security notes - send Enter
-            if output:
-                logger.info("Sending security notes Enter")
-                self._write_pty_input("\n")
-                time.sleep(0.5)
-                output = self._read_pty_output(timeout=2.0)
-                logger.info(f"After security notes: {repr(output[:300] if len(output) > 300 else output)}")
+            # Check for error indicators
+            if 'error' in all_output.lower() or 'invalid' in all_output.lower() or 'failed' in all_output.lower():
+                logger.warning(f"Possible error in output: {all_output[-200:]}")
 
-            # Step 7: Folder permission (/app) - send "1" for yes
-            if 'folder' in output.lower() or 'permission' in output.lower() or '/app' in output or '1.' in output:
-                logger.info("Sending folder permission: 1")
-                self._write_pty_input("1\n")
+            # Keep pressing Enter and reading to get through remaining prompts
+            for i in range(5):
+                logger.info(f"Sending Enter #{i+1}")
+                self._write_pty_input("\r")
                 time.sleep(1.0)
-                output = self._read_pty_output(timeout=3.0)
-                logger.info(f"After folder permission: {repr(output[:300] if len(output) > 300 else output)}")
+                output = read_all()
+                logger.info(f"After Enter #{i+1} ({len(output)} chars): {repr(output[:300] if len(output) > 300 else output)}")
+
+                # Check for folder permission prompt
+                if 'folder' in output.lower() or '/app' in output or 'trust' in output.lower() or 'allow' in output.lower():
+                    logger.info("Folder permission prompt detected, sending Enter")
+                    self._write_pty_input("\r")
+                    time.sleep(1.0)
+                    output = read_all()
+                    logger.info(f"After folder permission: {repr(output[:300] if len(output) > 300 else output)}")
+
+                # Check if we're done (process exited or credentials exist)
+                if self.is_claude_authenticated():
+                    logger.info("Credentials file detected!")
+                    break
+
+                # Check if process exited
+                if self._claude_login_process.poll() is not None:
+                    logger.info("Process exited")
+                    break
 
             # Give time for credentials to be written
             time.sleep(1.0)

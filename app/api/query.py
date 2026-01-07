@@ -306,6 +306,8 @@ async def list_active_sessions(
     token: str = Depends(require_auth)
 ):
     """
-    List all currently active streaming sessions.
+    List all currently streaming sessions (actively generating responses).
+    Note: This returns sessions that are actively streaming, not just connected.
     """
-    return {"active_sessions": get_active_sessions()}
+    from app.core.query_engine import get_streaming_sessions
+    return {"active_sessions": get_streaming_sessions()}

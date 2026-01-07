@@ -997,3 +997,186 @@ def get_streaming_sessions() -> list:
         for session_id, state in _active_sessions.items()
         if state.is_streaming
     ]
+
+
+async def stream_to_websocket(
+    prompt: str,
+    session_id: str,
+    profile_id: str,
+    project_id: Optional[str] = None,
+    overrides: Optional[Dict[str, Any]] = None
+) -> AsyncGenerator[Dict[str, Any], None]:
+    """
+    Stream Claude response directly to WebSocket.
+
+    This is the simplified streaming function for the WebSocket-first architecture.
+    No sync engine, no background tasks - just direct streaming.
+
+    Yields events:
+    - {"type": "chunk", "content": "..."}
+    - {"type": "tool_use", "name": "...", "input": {...}}
+    - {"type": "tool_result", "name": "...", "output": "..."}
+    - {"type": "done", "session_id": "...", "metadata": {...}}
+    - {"type": "error", "message": "..."}
+    """
+    # Get profile
+    profile = get_profile_or_builtin(profile_id)
+    if not profile:
+        yield {"type": "error", "message": f"Profile not found: {profile_id}"}
+        return
+
+    # Get project if specified
+    project = None
+    if project_id:
+        project = database.get_project(project_id)
+        if not project:
+            yield {"type": "error", "message": f"Project not found: {project_id}"}
+            return
+
+    # Get session for resume ID
+    session = database.get_session(session_id)
+    resume_id = session.get("sdk_session_id") if session else None
+
+    # Build options
+    options = build_options_from_profile(
+        profile=profile,
+        project=project,
+        overrides=overrides,
+        resume_session_id=resume_id
+    )
+
+    # Clean up any existing state for this session
+    state = _active_sessions.get(session_id)
+    if state:
+        logger.info(f"[WS] Cleaning up existing state for session {session_id}")
+        try:
+            await state.client.disconnect()
+        except Exception:
+            pass
+        del _active_sessions[session_id]
+
+    # Create new client
+    logger.info(f"[WS] Creating ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
+    client = ClaudeSDKClient(options=options)
+
+    # Connect
+    try:
+        await client.connect()
+        logger.info(f"[WS] Connected to Claude SDK for session {session_id}")
+    except Exception as e:
+        logger.error(f"[WS] Failed to connect for session {session_id}: {e}")
+        yield {"type": "error", "message": f"Connection failed: {e}"}
+        return
+
+    state = SessionState(
+        client=client,
+        sdk_session_id=resume_id,
+        is_connected=True
+    )
+    _active_sessions[session_id] = state
+
+    # Mark as streaming
+    state.is_streaming = True
+    state.last_activity = datetime.now()
+
+    # Execute query
+    response_text = []
+    metadata = {}
+    sdk_session_id = resume_id
+    interrupted = False
+
+    try:
+        await state.client.query(prompt)
+
+        async for message in state.client.receive_response():
+            if isinstance(message, SystemMessage):
+                if message.subtype == "init" and "session_id" in message.data:
+                    sdk_session_id = message.data["session_id"]
+                    state.sdk_session_id = sdk_session_id
+                    logger.info(f"[WS] Captured SDK session ID: {sdk_session_id}")
+
+            elif isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        response_text.append(block.text)
+                        yield {"type": "chunk", "content": block.text}
+
+                    elif isinstance(block, ToolUseBlock):
+                        yield {
+                            "type": "tool_use",
+                            "name": block.name,
+                            "id": getattr(block, 'id', None),
+                            "input": block.input
+                        }
+
+                    elif isinstance(block, ToolResultBlock):
+                        output = str(block.content)[:2000]
+                        yield {
+                            "type": "tool_result",
+                            "name": getattr(block, 'name', 'unknown'),
+                            "tool_use_id": getattr(block, 'tool_use_id', None),
+                            "output": output
+                        }
+
+                metadata["model"] = message.model
+
+            elif isinstance(message, ResultMessage):
+                metadata["duration_ms"] = message.duration_ms
+                metadata["num_turns"] = message.num_turns
+                metadata["total_cost_usd"] = message.total_cost_usd
+                metadata["is_error"] = message.is_error
+
+    except asyncio.CancelledError:
+        interrupted = True
+        logger.info(f"[WS] Query interrupted for session {session_id}")
+        raise  # Re-raise so caller can handle
+
+    except Exception as e:
+        logger.error(f"[WS] Query error for session {session_id}: {e}")
+        state.is_connected = False
+        yield {"type": "error", "message": str(e)}
+        return
+
+    finally:
+        # Mark as not streaming
+        state.is_streaming = False
+        state.last_activity = datetime.now()
+
+    # Update session in database
+    if sdk_session_id:
+        database.update_session(
+            session_id=session_id,
+            sdk_session_id=sdk_session_id,
+            cost_increment=metadata.get("total_cost_usd", 0),
+            turn_increment=metadata.get("num_turns", 0)
+        )
+        logger.info(f"[WS] Updated session {session_id}, sdk_session_id={sdk_session_id}")
+
+    # Store assistant response
+    full_response = "".join(response_text)
+    if full_response:
+        database.add_session_message(
+            session_id=session_id,
+            role="assistant",
+            content=full_response,
+            metadata=metadata
+        )
+
+    # Log usage
+    if metadata:
+        database.log_usage(
+            session_id=session_id,
+            profile_id=profile_id,
+            model=metadata.get("model"),
+            tokens_in=0,
+            tokens_out=0,
+            cost_usd=metadata.get("total_cost_usd", 0),
+            duration_ms=metadata.get("duration_ms", 0)
+        )
+
+    # Yield done event
+    yield {
+        "type": "done",
+        "session_id": session_id,
+        "metadata": metadata
+    }
