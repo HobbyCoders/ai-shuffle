@@ -3,12 +3,11 @@
  */
 
 // Activity modes for the rail
-export type ActivityMode = 'workspace' | 'agents' | 'studio' | 'files';
+export type ActivityMode = 'workspace' | 'studio' | 'files';
 
 // Badge configuration for activity buttons
 export interface ActivityBadges {
 	workspace?: number | 'dot';
-	agents?: number | 'dot';
 	studio?: number | 'dot';
 	files?: number | 'dot';
 }

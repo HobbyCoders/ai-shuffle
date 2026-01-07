@@ -157,8 +157,8 @@
 	}
 </script>
 
-<div class="w-full assistant-message">
-	<div class="min-w-0">
+<div class="w-full overflow-hidden">
+	<div class="min-w-0 max-w-full">
 		<div class="flex items-center gap-2 mb-1">
 			<span class="font-semibold text-sm text-orange-400">Claude</span>
 			<span class="text-xs text-muted-foreground">{formatTime(timestamp)}</span>
@@ -210,8 +210,8 @@
 				</div>
 			{/if}
 		</div>
-		<div class="overflow-hidden">
-			<div class="prose prose-sm max-w-none break-words overflow-x-auto">
+		<div class="overflow-hidden max-w-full">
+			<div class="prose prose-sm max-w-none break-words" style="overflow-wrap: anywhere; word-break: break-word;">
 				{#if content}
 					{@html renderMarkdown(content, streaming)}
 					{#if streaming}

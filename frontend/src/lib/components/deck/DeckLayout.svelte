@@ -14,8 +14,7 @@
 	import { onMount } from 'svelte';
 	import { ChevronLeft } from 'lucide-svelte';
 	import ActivityRail from './ActivityRail.svelte';
-	import ContextPanel from './ContextPanel.svelte';
-	import Dock from './Dock.svelte';
+	import ActivityPanel from './ActivityPanel.svelte';
 	import type {
 		ActivityMode,
 		ActivityBadges,
@@ -23,31 +22,40 @@
 		DeckAgent,
 		DeckGeneration,
 		SessionInfo,
-		MinimizedCard,
 		RunningProcess
 	} from './types';
-	import type { HistorySession } from './ContextPanel.svelte';
+	import type { ActiveSession, HistorySession, ActivityTabType, OverlayType } from './ActivityPanel.svelte';
 
 	interface Props {
 		activeMode?: ActivityMode;
 		badges?: ActivityBadges;
 		contextCollapsed?: boolean;
-		sessions?: DeckSession[];
+		// Activity Panel props
+		activeTab?: ActivityTabType;
+		activeSessions?: ActiveSession[];
 		recentSessions?: HistorySession[];
-		agents?: DeckAgent[];
+		runningAgents?: DeckAgent[];
+		completedAgents?: DeckAgent[];
 		generations?: DeckGeneration[];
 		currentSession?: SessionInfo | null;
-		minimizedCards?: MinimizedCard[];
+		// Overlay props
+		overlayType?: OverlayType;
+		overlayData?: Record<string, unknown>;
+		// Legacy props (for backwards compat)
+		sessions?: DeckSession[];
+		agents?: DeckAgent[];
 		runningProcesses?: RunningProcess[];
+		// Callbacks
 		onModeChange?: (mode: ActivityMode) => void;
 		onLogoClick?: () => void;
 		onSettingsClick?: () => void;
 		onContextToggle?: () => void;
-		onSessionClick?: (session: DeckSession) => void;
+		onTabChange?: (tab: ActivityTabType) => void;
+		onSessionClick?: (session: ActiveSession) => void;
 		onHistorySessionClick?: (session: HistorySession) => void;
 		onAgentClick?: (agent: DeckAgent) => void;
 		onGenerationClick?: (generation: DeckGeneration) => void;
-		onMinimizedCardClick?: (card: MinimizedCard) => void;
+		onOverlayClose?: () => void;
 		onProcessClick?: (process: RunningProcess) => void;
 		children?: import('svelte').Snippet;
 	}
@@ -56,22 +64,32 @@
 		activeMode = 'workspace',
 		badges = {},
 		contextCollapsed = false,
-		sessions = [],
+		// Activity Panel
+		activeTab = 'threads',
+		activeSessions = [],
 		recentSessions = [],
-		agents = [],
+		runningAgents = [],
+		completedAgents = [],
 		generations = [],
 		currentSession = null,
-		minimizedCards = [],
+		// Overlay
+		overlayType = null,
+		overlayData = {},
+		// Legacy
+		sessions = [],
+		agents = [],
 		runningProcesses = [],
+		// Callbacks
 		onModeChange,
 		onLogoClick,
 		onSettingsClick,
 		onContextToggle,
+		onTabChange,
 		onSessionClick,
 		onHistorySessionClick,
 		onAgentClick,
 		onGenerationClick,
-		onMinimizedCardClick,
+		onOverlayClose,
 		onProcessClick,
 		children
 	}: Props = $props();
@@ -101,21 +119,24 @@
 	}
 </script>
 
-<div class="deck-layout" class:mobile={isMobile} class:context-collapsed={localContextCollapsed}>
-	<!-- Floating Activity Pill - Desktop: top-left, Mobile: bottom-center -->
-	<div class="floating-pill-container" class:mobile={isMobile}>
-		<ActivityRail
-			{activeMode}
-			{badges}
-			{isMobile}
-			{onModeChange}
-			{onLogoClick}
-			{onSettingsClick}
-		/>
-	</div>
+<div class="deck-layout deck-layout-responsive" class:mobile={isMobile} class:context-collapsed={localContextCollapsed}>
+	<!-- Activity Rail - Desktop: left side, Mobile: bottom -->
+	<!-- CSS classes provide fallback if JS is delayed -->
+	{#if !isMobile}
+		<aside class="rail-container rail-desktop mobile-hidden" data-layout="rail-desktop">
+			<ActivityRail
+				{activeMode}
+				{badges}
+				{isMobile}
+				{onModeChange}
+				{onLogoClick}
+				{onSettingsClick}
+			/>
+		</aside>
+	{/if}
 
 	<!-- Main content area -->
-	<div class="main-area">
+	<div class="main-area main-content-responsive">
 		<!-- Workspace slot - contains cards and the context panel overlay -->
 		<main class="workspace-container">
 			{#if children}
@@ -126,28 +147,35 @@
 				</div>
 			{/if}
 
-			<!-- Context Panel - Inside workspace, overlays cards -->
+			<!-- Activity Panel - Inside workspace, overlays cards -->
+			<!-- CSS classes hide on mobile as fallback -->
 			{#if !isMobile}
-				<aside class="context-container" class:collapsed={localContextCollapsed}>
-					<ContextPanel
+				<aside class="context-container context-panel-desktop context-panel-responsive mobile-hidden" class:collapsed={localContextCollapsed} data-layout="context-panel">
+					<ActivityPanel
 						collapsed={localContextCollapsed}
-						{sessions}
+						{activeTab}
+						{activeSessions}
 						{recentSessions}
-						{agents}
+						{runningAgents}
+						{completedAgents}
 						{generations}
 						sessionInfo={currentSession}
+						{overlayType}
+						{overlayData}
 						onToggleCollapse={handleContextToggle}
+						{onTabChange}
 						{onSessionClick}
 						{onHistorySessionClick}
 						{onAgentClick}
 						{onGenerationClick}
+						{onOverlayClose}
 					/>
 				</aside>
 
 				<!-- Expand button - shown when context panel is collapsed -->
 				{#if localContextCollapsed}
 					<button
-						class="context-expand-toggle"
+						class="context-expand-toggle mobile-hidden"
 						onclick={handleContextToggle}
 						title="Expand panel"
 					>
@@ -156,27 +184,29 @@
 				{/if}
 			{/if}
 		</main>
-
-		<!-- Dock - Desktop only -->
-		{#if !isMobile}
-			<div class="dock-container">
-				<Dock
-					{minimizedCards}
-					{runningProcesses}
-					onCardClick={onMinimizedCardClick}
-					{onProcessClick}
-				/>
-			</div>
-		{/if}
 	</div>
 
+	<!-- Mobile Rail - Bottom of screen -->
+	<!-- CSS classes show on mobile as fallback -->
+	{#if isMobile}
+		<footer class="mobile-rail-container rail-mobile desktop-hidden" data-layout="rail-mobile">
+			<ActivityRail
+				{activeMode}
+				{badges}
+				{isMobile}
+				{onModeChange}
+				{onLogoClick}
+				{onSettingsClick}
+			/>
+		</footer>
+	{/if}
 </div>
 
 <style>
 	.deck-layout {
-		position: relative;
-		display: flex;
-		flex-direction: column;
+		display: grid;
+		grid-template-columns: 64px 1fr;
+		grid-template-rows: 1fr;
 		width: 100%;
 		height: 100vh;
 		height: 100dvh; /* Dynamic viewport height for mobile browsers */
@@ -184,21 +214,30 @@
 		overflow: hidden;
 	}
 
-	/* Floating pill container - positions the activity pill */
-	.floating-pill-container {
-		position: fixed;
-		top: 50%;
-		left: 16px;
-		transform: translateY(-50%);
-		z-index: 9999;
-		pointer-events: auto;
+	.deck-layout.mobile {
+		grid-template-columns: 1fr;
+		grid-template-rows: 1fr calc(64px + env(safe-area-inset-bottom, 0px));
 	}
 
-	.floating-pill-container.mobile {
-		top: auto;
-		bottom: calc(16px + env(safe-area-inset-bottom, 0px));
-		left: 50%;
-		transform: translateX(-50%);
+	/* CSS fallback: If JS hasn't loaded yet, use media queries to set mobile layout */
+	@media (max-width: 639px) {
+		.deck-layout:not(.mobile) {
+			grid-template-columns: 1fr;
+			grid-template-rows: 1fr calc(64px + env(safe-area-inset-bottom, 0px));
+		}
+	}
+
+	.rail-container {
+		grid-column: 1;
+		grid-row: 1;
+		z-index: 50;
+	}
+
+	/* CSS fallback: Hide desktop rail on mobile even if JS hasn't set .mobile class */
+	@media (max-width: 639px) {
+		.rail-container {
+			display: none;
+		}
 	}
 
 	.main-area {
@@ -208,7 +247,25 @@
 		min-width: 0;
 		min-height: 0;
 		height: 100%;
-		flex: 1;
+	}
+
+	.deck-layout:not(.mobile) .main-area {
+		grid-column: 2;
+		grid-row: 1;
+	}
+
+	.mobile .main-area {
+		grid-column: 1;
+		grid-row: 1;
+		overflow: hidden;
+	}
+
+	/* CSS fallback: Main area takes full width on mobile */
+	@media (max-width: 639px) {
+		.main-area {
+			grid-column: 1;
+			grid-row: 1;
+		}
 	}
 
 	.workspace-container {
@@ -229,10 +286,6 @@
 		font-size: 0.875rem;
 	}
 
-	.dock-container {
-		flex-shrink: 0;
-	}
-
 	/* Context panel - positioned inside workspace as an overlay */
 	/* z-index: 10000 ensures it's always above maximized cards which use dynamic z-index values */
 	.context-container {
@@ -250,6 +303,39 @@
 		transform: translateX(100%);
 		opacity: 0;
 		pointer-events: none;
+	}
+
+	/* CSS fallback: Hide context panel on mobile */
+	@media (max-width: 639px) {
+		.context-container {
+			display: none;
+		}
+	}
+
+	/* Tablet: Narrower context panel */
+	@media (min-width: 640px) and (max-width: 1023px) {
+		.context-container {
+			width: 280px;
+		}
+	}
+
+	.mobile-rail-container {
+		grid-column: 1;
+		grid-row: 2;
+		z-index: 100;
+		position: relative;
+		background: var(--card);
+		height: calc(64px + env(safe-area-inset-bottom, 0px));
+		min-height: calc(64px + env(safe-area-inset-bottom, 0px));
+		padding-bottom: env(safe-area-inset-bottom, 0px);
+		flex-shrink: 0;
+	}
+
+	/* CSS fallback: Hide mobile rail on desktop */
+	@media (min-width: 640px) {
+		.mobile-rail-container {
+			display: none;
+		}
 	}
 
 	/* Ensure proper layering */
@@ -282,5 +368,30 @@
 	.context-expand-toggle:hover {
 		color: var(--foreground);
 		background: var(--accent);
+	}
+
+	/* CSS fallback: Hide expand toggle on mobile */
+	@media (max-width: 639px) {
+		.context-expand-toggle {
+			display: none;
+		}
+	}
+
+	/* Accessibility: Reduced motion support */
+	@media (prefers-reduced-motion: reduce) {
+		.context-container {
+			transition: none;
+		}
+
+		.context-expand-toggle {
+			transition: none;
+		}
+	}
+
+	/* Tablet: Adjust grid columns */
+	@media (min-width: 640px) and (max-width: 1023px) {
+		.deck-layout {
+			grid-template-columns: 56px 1fr;
+		}
 	}
 </style>

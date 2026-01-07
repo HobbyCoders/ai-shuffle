@@ -68,7 +68,11 @@ export type ModelCapability =
   | 'speech-to-text'
   // Analysis capabilities
   | 'video-understanding'
-  | 'image-understanding';
+  | 'image-understanding'
+  // 3D model capabilities
+  | 'text-to-3d'
+  | 'image-to-3d'
+  | '3d-texturing';
 
 // ============================================================================
 // IMAGE PROVIDER TYPES
@@ -372,6 +376,11 @@ export interface ToolEnvironment {
   AUDIO_PROVIDER?: string;
   AUDIO_API_KEY?: string;
   AUDIO_MODEL?: string;
+  // 3D model generation
+  MODEL3D_PROVIDER?: string;
+  MODEL3D_API_KEY?: string;
+  MODEL3D_MODEL?: string;
+  MESHY_API_KEY?: string;
   // Legacy support (backwards compatible)
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;
@@ -382,6 +391,7 @@ export interface ToolEnvironment {
   GENERATED_IMAGES_DIR?: string;
   GENERATED_VIDEOS_DIR?: string;
   GENERATED_AUDIO_DIR?: string;
+  GENERATED_MODELS_DIR?: string;
 }
 
 // ============================================================================

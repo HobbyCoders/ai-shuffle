@@ -8,6 +8,7 @@
 import { writable, derived, get } from 'svelte/store';
 import type { Session, Profile, PermissionRequest as PermissionRequestType, UserQuestionRequest } from '$lib/api/client';
 import { api } from '$lib/api/client';
+import { agents } from './agents';
 
 export interface ApiUser {
 	id: string;
@@ -109,6 +110,14 @@ export interface ChatTab {
 	draft: string;
 	// Scroll position (preserved when switching cards)
 	scrollTop: number;
+	// Background mode settings (per-tab)
+	backgroundEnabled: boolean;
+	backgroundTaskName: string;
+	backgroundBranch: string;
+	backgroundCreateNewBranch: boolean;
+	backgroundAutoPR: boolean;
+	backgroundAutoMerge: boolean;
+	backgroundMaxDurationMinutes: number;
 }
 
 interface TabsState {
@@ -2548,7 +2557,14 @@ function createTabsStore() {
 						pendingQuestions: [],
 						todos: [],
 						draft: '',
-						scrollTop: 0
+						scrollTop: 0,
+						backgroundEnabled: false,
+						backgroundTaskName: '',
+						backgroundBranch: 'main',
+						backgroundCreateNewBranch: false,
+						backgroundAutoPR: false,
+						backgroundAutoMerge: false,
+						backgroundMaxDurationMinutes: 30
 					}));
 
 					update(s => ({
@@ -2620,7 +2636,14 @@ function createTabsStore() {
 				pendingQuestions: [],
 				todos: [],
 				draft: '',
-				scrollTop: 0
+				scrollTop: 0,
+				backgroundEnabled: false,
+				backgroundTaskName: '',
+				backgroundBranch: 'main',
+				backgroundCreateNewBranch: false,
+				backgroundAutoPR: false,
+				backgroundAutoMerge: false,
+				backgroundMaxDurationMinutes: 30
 			};
 
 			update(s => ({
@@ -2723,12 +2746,19 @@ function createTabsStore() {
 
 		/**
 		 * Send message in a specific tab.
+		 * If background mode is enabled, launches a background agent instead.
 		 * If the tab is currently streaming, this will interrupt the current response
 		 * and then send the new message.
 		 */
-		sendMessage(tabId: string, prompt: string) {
+		async sendMessage(tabId: string, prompt: string) {
 			const tab = getTab(tabId);
 			if (!tab) return;
+
+			// Check if background mode is enabled - launch as background agent
+			if (tab.backgroundEnabled) {
+				await this.launchBackgroundAgent(tabId, prompt);
+				return;
+			}
 
 			const ws = tabConnections.get(tabId);
 			if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -2788,6 +2818,79 @@ function createTabsStore() {
 				project: tab.project || undefined,
 				overrides: Object.keys(overrides).length > 0 ? overrides : undefined
 			}));
+		},
+
+		/**
+		 * Launch a background agent from a tab's message
+		 * Uses the tab's background config settings
+		 */
+		async launchBackgroundAgent(tabId: string, prompt: string) {
+			const tab = getTab(tabId);
+			if (!tab) return;
+
+			// Validate required fields
+			if (!tab.profile) {
+				updateTab(tabId, { error: 'Please select a profile before launching a background agent' });
+				return;
+			}
+			if (!tab.project) {
+				updateTab(tabId, { error: 'Please select a project before launching a background agent' });
+				return;
+			}
+
+			// Generate task name from prompt if not provided
+			const taskName = tab.backgroundTaskName || prompt.split('\n')[0].slice(0, 50);
+
+			try {
+				// Launch the background agent
+				// Note: autoBranch=true always - this creates an isolated worktree for the agent
+				// The agent will create a new branch based on baseBranch
+				const agent = await agents.launchAgent({
+					name: taskName,
+					prompt: prompt,
+					profileId: tab.profile,
+					projectId: tab.project,
+					// Always create isolated worktree for background agents
+					autoBranch: true,
+					// Base branch to create the agent's feature branch from
+					baseBranch: tab.backgroundBranch || 'main',
+					// PR configuration
+					autoPr: tab.backgroundAutoPR,
+					// Duration (0 = unlimited)
+					maxDurationMinutes: tab.backgroundMaxDurationMinutes
+				});
+
+				console.log(`[Tab ${tabId}] Launched background agent: ${agent.id}`);
+
+				// Add a system message to the chat indicating the agent was launched
+				const systemMsgId = `system-${Date.now()}`;
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(t => {
+						if (t.id !== tabId) return t;
+						return {
+							...t,
+							messages: [...t.messages, {
+								id: systemMsgId,
+								role: 'system' as const,
+								content: `🚀 Background agent "${taskName}" launched successfully!\n\nYour task is now running in the background. You can monitor its progress in the Agents tab of the Activity Panel.`,
+								type: 'system' as const,
+								systemSubtype: 'agent_launched'
+							}],
+							// Reset background mode after launching
+							backgroundEnabled: false,
+							backgroundTaskName: ''
+						};
+					})
+				}));
+
+			} catch (error) {
+				console.error('Failed to launch background agent:', error);
+				const err = error as { detail?: string; message?: string };
+				updateTab(tabId, {
+					error: `Failed to launch background agent: ${err.detail || err.message || 'Unknown error'}`
+				});
+			}
 		},
 
 		/**
@@ -2994,6 +3097,55 @@ function createTabsStore() {
 		},
 
 		/**
+		 * Set background mode enabled for a tab
+		 */
+		setTabBackgroundEnabled(tabId: string, enabled: boolean) {
+			updateTab(tabId, { backgroundEnabled: enabled });
+		},
+
+		/**
+		 * Set background task name for a tab
+		 */
+		setTabBackgroundTaskName(tabId: string, taskName: string) {
+			updateTab(tabId, { backgroundTaskName: taskName });
+		},
+
+		/**
+		 * Set background branch for a tab
+		 */
+		setTabBackgroundBranch(tabId: string, branch: string) {
+			updateTab(tabId, { backgroundBranch: branch });
+		},
+
+		/**
+		 * Set background create new branch flag for a tab
+		 */
+		setTabBackgroundCreateNewBranch(tabId: string, createNew: boolean) {
+			updateTab(tabId, { backgroundCreateNewBranch: createNew });
+		},
+
+		/**
+		 * Set background auto PR for a tab
+		 */
+		setTabBackgroundAutoPR(tabId: string, autoPR: boolean) {
+			updateTab(tabId, { backgroundAutoPR: autoPR });
+		},
+
+		/**
+		 * Set background auto merge for a tab
+		 */
+		setTabBackgroundAutoMerge(tabId: string, autoMerge: boolean) {
+			updateTab(tabId, { backgroundAutoMerge: autoMerge });
+		},
+
+		/**
+		 * Set background max duration minutes for a tab
+		 */
+		setTabBackgroundMaxDuration(tabId: string, minutes: number) {
+			updateTab(tabId, { backgroundMaxDurationMinutes: minutes });
+		},
+
+		/**
 		 * Update a tab's state (exposed for direct updates like todos)
 		 */
 		updateTab(tabId: string, updates: Partial<ChatTab>) {
@@ -3038,7 +3190,14 @@ function createTabsStore() {
 				pendingQuestions: [],
 				todos: [],
 				draft: '',
-				scrollTop: 0
+				scrollTop: 0,
+				backgroundEnabled: false,
+				backgroundTaskName: '',
+				backgroundBranch: 'main',
+				backgroundCreateNewBranch: false,
+				backgroundAutoPR: false,
+				backgroundAutoMerge: false,
+				backgroundMaxDurationMinutes: 30
 			});
 			connectTab(tabId);
 			// Save tabs state (debounced)

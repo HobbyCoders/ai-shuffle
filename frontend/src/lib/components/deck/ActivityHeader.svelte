@@ -5,7 +5,7 @@
 	 * Always visible at the top of the Activity Panel
 	 */
 
-	import { MessageSquare, Loader2, AlertCircle } from 'lucide-svelte';
+	import { MessageSquare, Bot, Loader2, AlertCircle } from 'lucide-svelte';
 	import type { ActiveSession } from './ActivityPanel.svelte';
 
 	interface Props {
@@ -18,8 +18,9 @@
 		onSessionClick
 	}: Props = $props();
 
-	// Filter chat sessions for display
+	// Separate chats and agents for display
 	const chats = $derived(sessions.filter(s => s.type === 'chat'));
+	const agents = $derived(sessions.filter(s => s.type === 'agent'));
 
 	function getStatusColor(status: ActiveSession['status']): string {
 		switch (status) {
@@ -39,7 +40,7 @@
 	function getStatusIcon(session: ActiveSession) {
 		if (session.status === 'error') return AlertCircle;
 		if (session.status === 'streaming' || session.status === 'running') return Loader2;
-		return MessageSquare;
+		return session.type === 'agent' ? Bot : MessageSquare;
 	}
 
 	function isAnimating(status: ActiveSession['status']): boolean {
@@ -55,7 +56,6 @@
 	{:else}
 		<div class="sessions-list">
 			{#each sessions as session (session.id)}
-				{@const Icon = getStatusIcon(session)}
 				<button
 					class="session-item"
 					class:selected={session.isSelected}
@@ -63,7 +63,8 @@
 					onclick={() => onSessionClick?.(session)}
 				>
 					<div class="session-icon" class:animating={isAnimating(session.status)}>
-						<Icon
+						<svelte:component
+							this={getStatusIcon(session)}
 							size={14}
 							strokeWidth={1.5}
 							style="color: {getStatusColor(session.status)}"
@@ -71,6 +72,9 @@
 					</div>
 					<div class="session-info">
 						<span class="session-title">{session.title}</span>
+						{#if session.type === 'agent' && session.progress !== undefined}
+							<span class="session-progress">{session.progress}%</span>
+						{/if}
 					</div>
 					{#if session.unread}
 						<div class="unread-dot"></div>
@@ -167,6 +171,13 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+	}
+
+	.session-progress {
+		font-size: 0.625rem;
+		font-weight: 600;
+		color: var(--success);
+		flex-shrink: 0;
 	}
 
 	.unread-dot {

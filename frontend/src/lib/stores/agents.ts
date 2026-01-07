@@ -283,6 +283,7 @@ function createAgentsStore() {
 	const { subscribe, set, update } = writable<AgentsState>(initialState);
 
 	let wsManager: AgentWebSocket | null = null;
+	let initialized = false;
 
 	// WebSocket message handler
 	function handleWsMessage(event: MessageEvent): void {
@@ -387,9 +388,16 @@ function createAgentsStore() {
 
 		/**
 		 * Initialize store - fetch agents and connect WebSocket
+		 * This is idempotent - safe to call multiple times
 		 */
 		async init(): Promise<void> {
 			if (!browser) return;
+
+			// If already initialized and WebSocket is connected, just refresh data
+			if (initialized && wsManager) {
+				await this.refresh();
+				return;
+			}
 
 			update((s) => ({ ...s, loading: true, error: null }));
 
@@ -405,6 +413,7 @@ function createAgentsStore() {
 
 				// Connect WebSocket for real-time updates
 				this.connectWebSocket();
+				initialized = true;
 			} catch (error) {
 				console.error('[Agents] Failed to initialize:', error);
 				update((s) => ({
@@ -446,6 +455,12 @@ function createAgentsStore() {
 
 		/**
 		 * Launch a new background agent
+		 *
+		 * Simplified workflow:
+		 * - Always creates a new feature branch (autoBranch=true)
+		 * - Always creates a PR on completion (autoPr=true)
+		 * - Runs until completion (maxDurationMinutes=0 = unlimited)
+		 * - No auto-review (autoReview=false)
 		 */
 		async launchAgent(options: {
 			name: string;
@@ -466,9 +481,9 @@ function createAgentsStore() {
 					profile_id: options.profileId,
 					project_id: options.projectId,
 					auto_branch: options.autoBranch ?? true,
-					auto_pr: options.autoPr ?? false,
+					auto_pr: options.autoPr ?? true,
 					auto_review: options.autoReview ?? false,
-					max_duration_minutes: options.maxDurationMinutes ?? 30,
+					max_duration_minutes: options.maxDurationMinutes ?? 0,
 					base_branch: options.baseBranch
 				})
 			});
@@ -731,6 +746,7 @@ function createAgentsStore() {
 		 */
 		reset(): void {
 			this.disconnectWebSocket();
+			initialized = false;
 			set(initialState);
 		}
 	};

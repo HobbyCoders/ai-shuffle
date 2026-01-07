@@ -469,11 +469,6 @@ def _create_schema(cursor: sqlite3.Cursor):
         cursor.execute("ALTER TABLE admin ADD COLUMN totp_verified_at TIMESTAMP")
     except sqlite3.OperationalError:
         pass  # Column already exists
-    try:
-        cursor.execute("ALTER TABLE agent_runs ADD COLUMN base_branch TEXT")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-
     # Create indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_templates_category ON templates(category)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_templates_profile ON templates(profile_id)")
@@ -618,6 +613,12 @@ def _create_schema(cursor: sqlite3.Cursor):
             FOREIGN KEY (worktree_id) REFERENCES worktrees(id) ON DELETE SET NULL
         )
     """)
+
+    # Migration: Add base_branch column to agent_runs (for existing DBs)
+    try:
+        cursor.execute("ALTER TABLE agent_runs ADD COLUMN base_branch TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
 
     # Agent tasks - hierarchical task tracking within agent runs
     cursor.execute("""

@@ -50,7 +50,7 @@
 <div class="flex gap-2">
 	<!-- Provider Selector -->
 	<div class="provider-selector relative flex-1">
-		<label class="block text-xs text-muted-foreground mb-1.5">Provider</label>
+		<span id="provider-label" class="block text-xs text-muted-foreground mb-1.5">Provider</span>
 		{#if loading}
 			<div class="w-full bg-muted border border-border rounded-lg px-3 py-2.5 text-sm">
 				<div class="flex items-center gap-2">
@@ -66,6 +66,9 @@
 			<button
 				type="button"
 				onclick={() => (isOpen = !isOpen)}
+				aria-labelledby="provider-label"
+				aria-expanded={isOpen}
+				aria-haspopup="listbox"
 				class="w-full bg-muted border border-border rounded-lg px-3 py-2.5 text-left text-sm text-foreground hover:bg-hover-overlay transition-colors flex items-center justify-between gap-2"
 			>
 				<div class="flex-1 min-w-0">
@@ -77,6 +80,7 @@
 					fill="none"
 					stroke="currentColor"
 					viewBox="0 0 24 24"
+					aria-hidden="true"
 				>
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 				</svg>
@@ -109,10 +113,13 @@
 	<!-- Model Selector (if multiple models available and onModelChange provided) -->
 	{#if onModelChange && availableModels.length > 1}
 		<div class="model-selector relative flex-1">
-			<label class="block text-xs text-muted-foreground mb-1.5">Model</label>
+			<span id="model-label" class="block text-xs text-muted-foreground mb-1.5">Model</span>
 			<button
 				type="button"
 				onclick={() => (isModelOpen = !isModelOpen)}
+				aria-labelledby="model-label"
+				aria-expanded={isModelOpen}
+				aria-haspopup="listbox"
 				class="w-full bg-muted border border-border rounded-lg px-3 py-2.5 text-left text-sm text-foreground hover:bg-hover-overlay transition-colors flex items-center justify-between gap-2"
 			>
 				<div class="flex-1 min-w-0 flex items-center gap-2">
@@ -129,6 +136,7 @@
 					fill="none"
 					stroke="currentColor"
 					viewBox="0 0 24 24"
+					aria-hidden="true"
 				>
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 				</svg>

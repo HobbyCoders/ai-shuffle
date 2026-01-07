@@ -6,7 +6,9 @@
 	 * 1. Launcher Mode: When no agentId is provided, shows agent configuration UI
 	 * 2. Monitor Mode: When agentId is provided, shows agent monitoring UI
 	 *
-	 * This keeps everything within the card-based paradigm - no modals needed.
+	 * Work modes (in launcher):
+	 * - GitHub: Creates feature branch, commits changes, creates PR on completion
+	 * - Local: Works directly on project folder, no git features
 	 */
 
 	import { onMount, onDestroy } from 'svelte';
@@ -24,12 +26,9 @@
 		ExternalLink,
 		Trash2,
 		Rocket,
-		GitPullRequest,
-		Clock,
 		User,
 		FolderKanban,
-		Eye,
-		X
+		Folder
 	} from 'lucide-svelte';
 	import BaseCard from './BaseCard.svelte';
 	import type { DeckCard } from './types';
@@ -45,7 +44,6 @@
 		card: DeckCard;
 		agentId?: string;
 		onClose: () => void;
-		onMinimize: () => void;
 		onMaximize: () => void;
 		onFocus: () => void;
 		onMove: (x: number, y: number) => void;
@@ -58,7 +56,6 @@
 		card,
 		agentId,
 		onClose,
-		onMinimize,
 		onMaximize,
 		onFocus,
 		onMove,
@@ -88,18 +85,6 @@
 	// ============================================
 	// LAUNCHER MODE STATE
 	// ============================================
-	interface LaunchData {
-		name: string;
-		prompt: string;
-		autoBranch: boolean;
-		autoPR: boolean;
-		autoReview: boolean;
-		maxDuration: number;
-		profileId?: string;
-		projectId?: string;
-		baseBranch?: string;
-	}
-
 	interface Branch {
 		name: string;
 		is_current: boolean;
@@ -115,16 +100,14 @@
 		name: string;
 	}
 
+	type WorkMode = 'github' | 'local';
+
 	// Form state
 	let name = $state('');
 	let prompt = $state('');
-	let autoBranch = $state(true);
-	let autoPR = $state(false);
-	let autoReview = $state(false);
-	let maxDuration = $state(30); // minutes
 	let profileId = $state<string | undefined>(undefined);
 	let projectId = $state<string | undefined>(undefined);
-	let showOptions = $state(false);
+	let workMode = $state<WorkMode>('github');
 	let isLaunching = $state(false);
 	let launchError = $state<string | null>(null);
 
@@ -136,14 +119,7 @@
 	let loadingProfiles = $state(true);
 	let loadingProjects = $state(true);
 	let loadingBranches = $state(false);
-
-	const durations = [
-		{ value: 0, label: 'Unlimited' },
-		{ value: 15, label: '15 minutes' },
-		{ value: 30, label: '30 minutes' },
-		{ value: 60, label: '1 hour' },
-		{ value: 120, label: '2 hours' }
-	];
+	let isGitRepo = $state(false);
 
 	// Validation
 	const canLaunch = $derived(name.trim().length > 0 && prompt.trim().length > 0 && !isLaunching);
@@ -184,6 +160,7 @@
 		loadingBranches = true;
 		branches = [];
 		baseBranch = undefined;
+		isGitRepo = false;
 		try {
 			const response = await fetch(`/api/v1/projects/${projId}/git/branches`, {
 				credentials: 'include'
@@ -191,14 +168,27 @@
 			if (response.ok) {
 				const data = await response.json();
 				branches = data.branches ?? [];
+				isGitRepo = branches.length > 0;
 				// Set default to the default branch (main/master) or current branch
 				const defaultBranch = branches.find(b => b.name === 'main' || b.name === 'master') ?? branches.find(b => b.is_current);
 				if (defaultBranch) {
 					baseBranch = defaultBranch.name;
 				}
+				// If it's a git repo, default to GitHub mode; otherwise, force local mode
+				if (isGitRepo) {
+					workMode = 'github';
+				} else {
+					workMode = 'local';
+				}
+			} else {
+				// If branches endpoint fails, assume not a git repo
+				isGitRepo = false;
+				workMode = 'local';
 			}
 		} catch (err) {
 			console.error('Failed to fetch branches:', err);
+			isGitRepo = false;
+			workMode = 'local';
 		} finally {
 			loadingBranches = false;
 		}
@@ -211,6 +201,7 @@
 		} else {
 			branches = [];
 			baseBranch = undefined;
+			isGitRepo = false;
 		}
 	});
 
@@ -221,16 +212,17 @@
 		launchError = null;
 
 		try {
+			const useGitFeatures = workMode === 'github' && isGitRepo;
 			const launchedAgent = await agents.launchAgent({
 				name: name.trim(),
 				prompt: prompt.trim(),
 				profileId,
 				projectId,
-				autoBranch,
-				autoPr: autoPR,
-				autoReview,
-				maxDurationMinutes: maxDuration,
-				baseBranch
+				autoBranch: useGitFeatures,    // Create branch only in GitHub mode
+				autoPr: useGitFeatures,        // Create PR only in GitHub mode
+				autoReview: false,             // No auto-review
+				maxDurationMinutes: 0,         // Unlimited duration (run until complete)
+				baseBranch: useGitFeatures ? baseBranch : undefined
 			});
 
 			// Transition to monitor mode
@@ -500,7 +492,7 @@
 	}
 </script>
 
-<BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
+<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
 	{#if mode === 'launcher'}
 		<!-- LAUNCHER MODE UI -->
 		<div class="launcher-content">
@@ -551,162 +543,122 @@
 					<p class="form-hint">Be specific about requirements, constraints, and expected outcomes</p>
 				</div>
 
-				<!-- Options toggle -->
-				<button
-					onclick={() => showOptions = !showOptions}
-					class="options-toggle"
-				>
-					<svg
-						class="options-chevron {showOptions ? 'rotate-90' : ''}"
-						fill="none"
-						stroke="currentColor"
-						viewBox="0 0 24 24"
+				<!-- Profile selector -->
+				<div class="form-group">
+					<label class="form-label with-icon">
+						<User class="w-4 h-4 text-muted-foreground" />
+						Profile
+					</label>
+					<select
+						bind:value={profileId}
+						disabled={isLaunching || loadingProfiles}
+						class="form-select"
 					>
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-					</svg>
-					Advanced Options
-				</button>
+						<option value={undefined}>
+							{loadingProfiles ? 'Loading profiles...' : 'Use default'}
+						</option>
+						{#each profiles as profile}
+							<option value={profile.id}>{profile.name}</option>
+						{/each}
+					</select>
+				</div>
 
-				<!-- Options (collapsible) -->
-				{#if showOptions}
-					<div class="options-panel">
-						<!-- Git options -->
-						<div class="options-section">
-							<h4 class="options-section-label">Git</h4>
+				<!-- Project selector -->
+				<div class="form-group">
+					<label class="form-label with-icon">
+						<FolderKanban class="w-4 h-4 text-muted-foreground" />
+						Project
+					</label>
+					<select
+						bind:value={projectId}
+						disabled={isLaunching || loadingProjects}
+						class="form-select"
+					>
+						<option value={undefined}>
+							{loadingProjects ? 'Loading projects...' : 'Select a project'}
+						</option>
+						{#each projects as project}
+							<option value={project.id}>{project.name}</option>
+						{/each}
+					</select>
+				</div>
 
-							<!-- Auto-branch toggle -->
-							<label class="toggle-row">
-								<div class="toggle-label">
-									<GitBranch class="w-4 h-4 text-muted-foreground" />
-									<span>Create branch automatically</span>
-								</div>
-								<button
-									type="button"
-									onclick={() => autoBranch = !autoBranch}
-									disabled={isLaunching}
-									class="toggle-button {autoBranch ? 'active' : ''}"
-								>
-									<span class="toggle-knob {autoBranch ? 'active' : ''}"></span>
-								</button>
-							</label>
-
-							<!-- Auto-PR toggle -->
-							<label class="toggle-row">
-								<div class="toggle-label">
-									<GitPullRequest class="w-4 h-4 text-muted-foreground" />
-									<span>Create PR on completion</span>
-								</div>
-								<button
-									type="button"
-									onclick={() => autoPR = !autoPR}
-									disabled={isLaunching}
-									class="toggle-button {autoPR ? 'active' : ''}"
-								>
-									<span class="toggle-knob {autoPR ? 'active' : ''}"></span>
-								</button>
-							</label>
-
-							<!-- Auto-Review toggle -->
-							<label class="toggle-row">
-								<div class="toggle-label">
-									<Eye class="w-4 h-4 text-muted-foreground" />
-									<span>Auto-review changes</span>
-								</div>
-								<button
-									type="button"
-									onclick={() => autoReview = !autoReview}
-									disabled={isLaunching}
-									class="toggle-button {autoReview ? 'active' : ''}"
-								>
-									<span class="toggle-knob {autoReview ? 'active' : ''}"></span>
-								</button>
-							</label>
-						</div>
-
-						<!-- Duration -->
-						<div class="form-group">
-							<label class="form-label with-icon">
-								<Clock class="w-4 h-4 text-muted-foreground" />
-								Max Duration
-							</label>
-							<select
-								bind:value={maxDuration}
+				<!-- Work Mode selector (shows when project is selected) -->
+				{#if projectId}
+					<div class="form-group">
+						<label class="form-label">Work Mode</label>
+						<div class="work-mode-buttons">
+							<!-- GitHub mode button -->
+							<button
+								type="button"
+								onclick={() => workMode = 'github'}
+								disabled={isLaunching || !isGitRepo}
+								class="work-mode-btn {workMode === 'github' ? 'active' : ''} {!isGitRepo ? 'disabled' : ''}"
+							>
+								<GitBranch class="w-4 h-4" />
+								<span>GitHub</span>
+							</button>
+							<!-- Local mode button -->
+							<button
+								type="button"
+								onclick={() => workMode = 'local'}
 								disabled={isLaunching}
-								class="form-select"
+								class="work-mode-btn {workMode === 'local' ? 'active' : ''}"
 							>
-								{#each durations as d}
-									<option value={d.value}>{d.label}</option>
-								{/each}
-							</select>
+								<Folder class="w-4 h-4" />
+								<span>Local</span>
+							</button>
 						</div>
-
-						<!-- Profile selector -->
-						<div class="form-group">
-							<label class="form-label with-icon">
-								<User class="w-4 h-4 text-muted-foreground" />
-								Profile (optional)
-							</label>
-							<select
-								bind:value={profileId}
-								disabled={isLaunching || loadingProfiles}
-								class="form-select"
-							>
-								<option value={undefined}>
-									{loadingProfiles ? 'Loading profiles...' : 'Use default'}
-								</option>
-								{#each profiles as profile}
-									<option value={profile.id}>{profile.name}</option>
-								{/each}
-							</select>
-						</div>
-
-						<!-- Project selector -->
-						<div class="form-group">
-							<label class="form-label with-icon">
-								<FolderKanban class="w-4 h-4 text-muted-foreground" />
-								Project (optional)
-							</label>
-							<select
-								bind:value={projectId}
-								disabled={isLaunching || loadingProjects}
-								class="form-select"
-							>
-								<option value={undefined}>
-									{loadingProjects ? 'Loading projects...' : 'Current workspace'}
-								</option>
-								{#each projects as project}
-									<option value={project.id}>{project.name}</option>
-								{/each}
-							</select>
-						</div>
-
-						<!-- Branch selector (shows when project is selected) -->
-						{#if projectId && branches.length > 0}
-							<div class="form-group">
-								<label class="form-label with-icon">
-									<GitBranch class="w-4 h-4 text-muted-foreground" />
-									Base Branch
-								</label>
-								<select
-									bind:value={baseBranch}
-									disabled={isLaunching || loadingBranches}
-									class="form-select"
-								>
-									{#if loadingBranches}
-										<option value={undefined}>Loading branches...</option>
-									{:else}
-										{#each branches as branch}
-											<option value={branch.name}>
-												{branch.name}{branch.is_current ? ' (current)' : ''}
-											</option>
-										{/each}
-									{/if}
-								</select>
-								<p class="form-hint">The worktree will be created from this branch</p>
-							</div>
+						{#if !isGitRepo && !loadingBranches}
+							<p class="form-hint warning">This project is not a Git repository. Working in local mode.</p>
 						{/if}
 					</div>
+
+					<!-- Branch selector (shows only in GitHub mode with branches) -->
+					{#if workMode === 'github' && isGitRepo && branches.length > 0}
+						<div class="form-group">
+							<label class="form-label with-icon">
+								<GitBranch class="w-4 h-4 text-muted-foreground" />
+								Start From Branch
+							</label>
+							<select
+								bind:value={baseBranch}
+								disabled={isLaunching || loadingBranches}
+								class="form-select"
+							>
+								{#if loadingBranches}
+									<option value={undefined}>Loading branches...</option>
+								{:else}
+									{#each branches as branch}
+										<option value={branch.name}>
+											{branch.name}{branch.is_current ? ' (current)' : ''}
+										</option>
+									{/each}
+								{/if}
+							</select>
+						</div>
+					{/if}
 				{/if}
+
+				<!-- Workflow info -->
+				<div class="workflow-info">
+					<p class="workflow-title">Workflow</p>
+					{#if workMode === 'github' && isGitRepo}
+						<ul class="workflow-list">
+							<li>• Agent creates a new feature branch</li>
+							<li>• Works until the task is complete</li>
+							<li>• Automatically creates a pull request</li>
+							<li>• You can stop the agent at any time</li>
+						</ul>
+					{:else}
+						<ul class="workflow-list">
+							<li>• Agent works directly on the project folder</li>
+							<li>• Changes are made without Git branching</li>
+							<li>• Works until the task is complete</li>
+							<li>• You can stop the agent at any time</li>
+						</ul>
+					{/if}
+				</div>
 			</div>
 
 			<!-- Footer -->
@@ -1229,6 +1181,79 @@
 	.launch-button:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
+	}
+
+	/* Workflow Info */
+	.workflow-info {
+		background: color-mix(in oklch, var(--muted) 50%, transparent);
+		border-radius: 10px;
+		padding: 12px 14px;
+		border: 1px solid var(--border);
+	}
+
+	.workflow-title {
+		font-size: 0.8125rem;
+		font-weight: 600;
+		color: var(--foreground);
+		margin: 0 0 8px 0;
+	}
+
+	.workflow-list {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+
+	.workflow-list li {
+		font-size: 0.75rem;
+		color: var(--muted-foreground);
+		line-height: 1.4;
+	}
+
+	/* Work Mode Buttons */
+	.work-mode-buttons {
+		display: flex;
+		gap: 8px;
+	}
+
+	.work-mode-btn {
+		flex: 1;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 8px;
+		padding: 10px 14px;
+		background: oklch(0.12 0.008 260);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		color: var(--muted-foreground);
+		font-size: 0.875rem;
+		font-weight: 500;
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.work-mode-btn:hover:not(:disabled) {
+		background: color-mix(in oklch, var(--muted) 80%, transparent);
+		border-color: color-mix(in oklch, var(--border) 100%, var(--primary) 20%);
+	}
+
+	.work-mode-btn.active {
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		border-color: var(--primary);
+		color: var(--primary);
+	}
+
+	.work-mode-btn.disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.form-hint.warning {
+		color: oklch(0.7 0.15 80);
 	}
 
 	/* ============================================

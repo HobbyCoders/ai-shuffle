@@ -16,14 +16,14 @@
 	}
 </script>
 
-<div class="w-full user-message">
-	<div class="min-w-0">
+<div class="w-full user-message overflow-hidden">
+	<div class="min-w-0 max-w-full">
 		<div class="flex items-center gap-2 mb-1">
 			<span class="font-semibold text-sm text-blue-400">You</span>
 			<span class="text-xs text-muted-foreground">{formatTime(timestamp)}</span>
 		</div>
-		<div class="overflow-hidden">
-			<p class="whitespace-pre-wrap break-words overflow-wrap-anywhere text-foreground">{content}</p>
+		<div class="overflow-hidden max-w-full">
+			<p class="whitespace-pre-wrap break-words text-foreground" style="overflow-wrap: anywhere; word-break: break-word;">{content}</p>
 		</div>
 	</div>
 </div>

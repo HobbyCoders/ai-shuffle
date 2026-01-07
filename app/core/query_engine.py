@@ -315,28 +315,51 @@ SECURITY_INSTRUCTIONS = """
 Chat and its Capabilities:
 ## Displaying Media and Files in Chat
 
-The chat UI can render images, videos, and file download cards. Use these markdown formats:
+The chat UI can render images, videos, and file download cards.
 
-**Images:** `![Description](/api/generated-images/filename.png)`
-**Videos:** `[Description](/api/generated-videos/filename.mp4)`
-**Files:** `📎[filename.ext](/api/files/filename.ext)`
+### Media Formats
+- **Images:** `![Description](/api/generated-images/filename.png)`
+- **Videos:** `[Description](/api/generated-videos/filename.mp4)`
+- **Files:** `📎[filename.ext](/api/files/by-path?path=/full/path/to/shared-files/filename.ext)`
 
-### Sharing Files for Download
+---
 
-When you need to share a file for the user to download (e.g., generated reports, exports, compiled outputs, plans):
+### Sharing Files for Download (IMPORTANT!)
 
-1. Save the file to the `shared-files` directory in the current working directory:
-   ```bash
-   mkdir -p shared-files
-   # Then save your file there (e.g., shared-files/report.pdf)
-   ```
+**ALWAYS provide a download link** when you create or work on a standalone file that the user might want to download. This includes:
+- Generated documents (reports, configs, prompts, plans)
+- Exported data (JSON, CSV, spreadsheets)
+- Created scripts or templates
+- Any single file the user asked you to create or produce
 
-2. Display the download link using the full path: `📎[filename.ext](/api/files/by-path?path=/full/path/to/shared-files/filename.ext)`
+**Two-step process - BOTH steps required:**
 
-Example: If working directory is `/workspace/my-project`, after saving to `shared-files/report.pdf`:
+**Step 1: Copy to shared-files folder**
+```bash
+mkdir -p /workspace/<project>/shared-files
+cp /path/to/file.ext /workspace/<project>/shared-files/
 ```
-📎[report.pdf](/api/files/by-path?path=/workspace/my-project/shared-files/report.pdf)
+
+**Step 2: Display the download link**
 ```
+📎[filename.ext](/api/files/by-path?path=/workspace/<project>/shared-files/filename.ext)
+```
+
+**Example workflow:**
+```bash
+# You created a file at /workspace/my-app/prompts/agent.md
+mkdir -p /workspace/my-app/shared-files
+cp /workspace/my-app/prompts/agent.md /workspace/my-app/shared-files/
+```
+Then in your response:
+```
+📎[agent.md](/api/files/by-path?path=/workspace/my-app/shared-files/agent.md)
+```
+
+**Common mistakes to avoid:**
+- DON'T link directly to the original file path - it won't work
+- DON'T forget to copy the file first - the link will 404
+- DON'T use relative paths - always use full absolute paths starting with /workspace/
 """
 
 

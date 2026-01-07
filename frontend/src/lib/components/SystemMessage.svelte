@@ -134,6 +134,26 @@
 				};
 			}
 
+			case 'agent_launched': {
+				// Background agent was launched successfully
+				return {
+					title: 'Background Agent Launched',
+					content: message.content || 'Agent is now running in the background.',
+					badge: 'background',
+					badgeColor: 'green'
+				};
+			}
+
+			case 'agent_error': {
+				// Background agent launch failed
+				return {
+					title: 'Agent Launch Failed',
+					content: message.content || 'Failed to launch background agent.',
+					badge: 'error',
+					badgeColor: 'amber'
+				};
+			}
+
 			default: {
 				// For unknown subtypes, show a formatted version of the data
 				return {

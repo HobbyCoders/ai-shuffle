@@ -12,6 +12,7 @@ Based on patterns from query_engine.py but adapted for long-running background e
 
 import asyncio
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -197,15 +198,21 @@ class AgentExecutionEngine:
         profile_id: Optional[str] = None,
         project_id: Optional[str] = None,
         auto_branch: bool = True,
-        auto_pr: bool = False,
+        auto_pr: bool = True,
         auto_review: bool = False,
-        max_duration_minutes: int = 30,
+        max_duration_minutes: int = 0,
         base_branch: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Launch a new background agent.
 
         The agent will be queued and started when a slot is available.
+
+        Simplified workflow:
+        - Always creates a new feature branch (auto_branch=True)
+        - Always creates a PR on completion (auto_pr=True)
+        - Runs until completion (max_duration_minutes=0 = unlimited)
+        - No auto-review (auto_review=False)
         """
         agent_run_id = f"agent-{uuid.uuid4().hex[:12]}"
 
@@ -481,26 +488,24 @@ class AgentExecutionEngine:
             # Continue without worktree
 
     def _build_agent_prompt(self, agent_run: Dict[str, Any], state: AgentRunState) -> str:
-        """Build the enhanced prompt for the agent"""
+        """Build the prompt for the agent with minimal context injection.
+
+        Note: GitHub workflow instructions should be in the profile's system prompt,
+        not injected here. Use a dedicated "Background Agent" profile for GitHub workflows.
+        """
         base_prompt = agent_run["prompt"]
 
-        # Add context about the agent environment
-        context_parts = [
-            "You are running as an autonomous background agent.",
-            "Complete the following task thoroughly and independently.",
-            "",
-        ]
+        # Only add minimal context about the current environment
+        context_parts = []
 
         if state.branch_name:
-            context_parts.append(f"You are working on branch: {state.branch_name}")
-            context_parts.append("Commit your changes as you make progress.")
-            context_parts.append("")
-
-        if agent_run.get("auto_pr"):
-            context_parts.append("When complete, your changes should be ready for a pull request.")
+            context_parts.append(f"**Current branch:** `{state.branch_name}`")
+            base_branch = agent_run.get("base_branch", "main")
+            context_parts.append(f"**Base branch:** `{base_branch}`")
             context_parts.append("")
 
         context_parts.append("## Task")
+        context_parts.append("")
         context_parts.append(base_prompt)
 
         return "\n".join(context_parts)
@@ -589,6 +594,169 @@ class AgentExecutionEngine:
             "pr_url": agent_run_updated.get("pr_url") if agent_run_updated else None
         })
 
+    async def _commit_and_push_changes(
+        self,
+        agent_run_id: str,
+        agent_run: Dict[str, Any],
+        state: AgentRunState
+    ) -> bool:
+        """
+        Commit any uncommitted changes and push to remote.
+
+        This handles the git workflow so the agent doesn't have to:
+        1. Stage all changes (git add -A)
+        2. Commit with a descriptive message
+        3. Fetch and rebase on base branch
+        4. Push to remote
+
+        Returns True if there are changes to create a PR for, False otherwise.
+        """
+        import subprocess
+
+        if not state.worktree_path or not state.branch_name:
+            self._log(agent_run_id, "Cannot commit: no worktree or branch", "warning")
+            return False
+
+        base_branch = agent_run.get('base_branch', 'main')
+
+        try:
+            # Step 1: Check for any changes (staged, unstaged, or untracked)
+            self._log(agent_run_id, "Checking for uncommitted changes...")
+            status_result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                cwd=state.worktree_path,
+                timeout=30
+            )
+
+            has_uncommitted_changes = bool(status_result.stdout.strip())
+
+            if has_uncommitted_changes:
+                self._log(agent_run_id, f"Found uncommitted changes:\n{status_result.stdout.strip()}")
+
+                # Step 2: Stage all changes
+                self._log(agent_run_id, "Staging all changes...")
+                add_result = subprocess.run(
+                    ["git", "add", "-A"],
+                    capture_output=True,
+                    text=True,
+                    cwd=state.worktree_path,
+                    timeout=30
+                )
+                if add_result.returncode != 0:
+                    self._log(agent_run_id, f"Failed to stage changes: {add_result.stderr}", "error")
+                    return False
+
+                # Step 3: Create commit with descriptive message
+                commit_msg = f"feat: {agent_run['name']}\n\nAutomated changes by background agent.\n\nTask: {agent_run['prompt'][:200]}"
+                self._log(agent_run_id, "Creating commit...")
+                commit_result = subprocess.run(
+                    ["git", "commit", "-m", commit_msg],
+                    capture_output=True,
+                    text=True,
+                    cwd=state.worktree_path,
+                    timeout=30
+                )
+                if commit_result.returncode != 0:
+                    # Check if it's just "nothing to commit"
+                    if "nothing to commit" in commit_result.stdout or "nothing to commit" in commit_result.stderr:
+                        self._log(agent_run_id, "No changes to commit (already committed by agent)")
+                    else:
+                        self._log(agent_run_id, f"Failed to commit: {commit_result.stderr}", "error")
+                        return False
+                else:
+                    self._log(agent_run_id, "Changes committed successfully")
+            else:
+                self._log(agent_run_id, "No uncommitted changes found")
+
+            # Step 4: Check if we have any commits ahead of base branch
+            # First fetch to ensure we have latest remote state
+            self._log(agent_run_id, "Fetching from origin...")
+            fetch_result = subprocess.run(
+                ["git", "fetch", "origin"],
+                capture_output=True,
+                text=True,
+                cwd=state.worktree_path,
+                timeout=60
+            )
+            if fetch_result.returncode != 0:
+                self._log(agent_run_id, f"Warning: git fetch failed: {fetch_result.stderr}", "warning")
+
+            # Check for commits difference
+            self._log(agent_run_id, f"Checking for commits relative to origin/{base_branch}")
+            diff_check = subprocess.run(
+                ["git", "rev-list", "--count", f"origin/{base_branch}..HEAD"],
+                capture_output=True,
+                text=True,
+                cwd=state.worktree_path,
+                timeout=30
+            )
+
+            commit_count = int(diff_check.stdout.strip()) if diff_check.stdout.strip().isdigit() else 0
+
+            if commit_count == 0:
+                self._log(agent_run_id, "No commits ahead of base branch - nothing to push", "warning")
+                return False
+
+            self._log(agent_run_id, f"Found {commit_count} commit(s) to push")
+
+            # Step 5: Rebase on base branch to handle any parallel changes
+            self._log(agent_run_id, f"Rebasing on origin/{base_branch}...")
+            rebase_result = subprocess.run(
+                ["git", "rebase", f"origin/{base_branch}"],
+                capture_output=True,
+                text=True,
+                cwd=state.worktree_path,
+                timeout=120
+            )
+            if rebase_result.returncode != 0:
+                self._log(agent_run_id, f"Rebase failed, aborting and trying merge: {rebase_result.stderr}", "warning")
+                # Abort rebase
+                subprocess.run(
+                    ["git", "rebase", "--abort"],
+                    capture_output=True,
+                    cwd=state.worktree_path,
+                    timeout=30
+                )
+                # Try merge instead
+                merge_result = subprocess.run(
+                    ["git", "merge", f"origin/{base_branch}", "-m", f"Merge {base_branch} into {state.branch_name}"],
+                    capture_output=True,
+                    text=True,
+                    cwd=state.worktree_path,
+                    timeout=60
+                )
+                if merge_result.returncode != 0:
+                    self._log(agent_run_id, f"Merge also failed: {merge_result.stderr}", "error")
+                    return False
+                self._log(agent_run_id, "Merged base branch successfully")
+            else:
+                self._log(agent_run_id, "Rebased successfully")
+
+            # Step 6: Push to remote
+            self._log(agent_run_id, f"Pushing branch {state.branch_name} to origin...")
+            push_result = subprocess.run(
+                ["git", "push", "-u", "origin", state.branch_name, "--force-with-lease"],
+                capture_output=True,
+                text=True,
+                cwd=state.worktree_path,
+                timeout=120
+            )
+            if push_result.returncode != 0:
+                self._log(agent_run_id, f"Failed to push: {push_result.stderr}", "error")
+                return False
+
+            self._log(agent_run_id, "Branch pushed successfully")
+            return True
+
+        except subprocess.TimeoutExpired as e:
+            self._log(agent_run_id, f"Git operation timed out: {e}", "error")
+            return False
+        except Exception as e:
+            self._log(agent_run_id, f"Git operation failed: {type(e).__name__}: {e}", "error")
+            return False
+
     async def _create_pull_request(
         self,
         agent_run_id: str,
@@ -602,10 +770,16 @@ class AgentExecutionEngine:
             self._log(agent_run_id, "Cannot create PR: no worktree or branch", "warning")
             return
 
-        self._log(agent_run_id, f"Creating pull request for branch {state.branch_name}")
+        self._log(agent_run_id, f"Preparing pull request for branch {state.branch_name}")
 
         try:
-            # Check if gh is authenticated
+            # Step 1: Commit and push any changes (handles the full git workflow)
+            has_changes = await self._commit_and_push_changes(agent_run_id, agent_run, state)
+            if not has_changes:
+                self._log(agent_run_id, "No changes to create PR for", "warning")
+                return
+
+            # Step 2: Check if gh is authenticated
             auth_check = subprocess.run(
                 ["gh", "auth", "status"],
                 capture_output=True,
@@ -617,32 +791,6 @@ class AgentExecutionEngine:
                 self._log(agent_run_id, f"GitHub CLI not authenticated: {auth_check.stderr}", "error")
                 return
 
-            # Check if there are any commits on the branch
-            diff_check = subprocess.run(
-                ["git", "log", "--oneline", f"HEAD...origin/{agent_run.get('base_branch', 'main')}", "--"],
-                capture_output=True,
-                text=True,
-                cwd=state.worktree_path,
-                timeout=30
-            )
-            if not diff_check.stdout.strip():
-                self._log(agent_run_id, "No commits to push - branch has no changes", "warning")
-                return
-
-            # Push the branch
-            self._log(agent_run_id, f"Pushing branch {state.branch_name} to origin")
-            push_result = subprocess.run(
-                ["git", "push", "-u", "origin", state.branch_name],
-                capture_output=True,
-                text=True,
-                cwd=state.worktree_path,
-                timeout=120
-            )
-            if push_result.returncode != 0:
-                self._log(agent_run_id, f"Failed to push branch: {push_result.stderr}", "error")
-                return
-            self._log(agent_run_id, f"Branch pushed successfully")
-
             # Get project for GitHub repo info
             project_id = agent_run.get("project_id")
             project = database.get_project(project_id) if project_id else None
@@ -651,12 +799,39 @@ class AgentExecutionEngine:
                 return
 
             repo = database.get_git_repository_by_project(project_id)
-            if not repo or not repo.get("github_repo_name"):
+            github_repo = repo.get("github_repo_name") if repo else None
+
+            # Fallback: try to extract github repo from git remote URL
+            if not github_repo:
+                self._log(agent_run_id, "github_repo_name not in database, attempting to extract from git remote")
+                try:
+                    remote_result = subprocess.run(
+                        ["git", "remote", "get-url", "origin"],
+                        capture_output=True,
+                        text=True,
+                        cwd=state.worktree_path,
+                        timeout=10
+                    )
+                    if remote_result.returncode == 0:
+                        url = remote_result.stdout.strip()
+                        self._log(agent_run_id, f"Found remote URL: {url}")
+                        # Parse: https://github.com/owner/repo.git or git@github.com:owner/repo.git
+                        match = re.search(r'github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$', url)
+                        if match:
+                            github_repo = match.group(1)
+                            self._log(agent_run_id, f"Extracted GitHub repo: {github_repo}")
+                        else:
+                            self._log(agent_run_id, f"Could not parse GitHub repo from URL: {url}", "warning")
+                    else:
+                        self._log(agent_run_id, f"Failed to get git remote URL: {remote_result.stderr}", "warning")
+                except Exception as e:
+                    self._log(agent_run_id, f"Error extracting GitHub repo from remote: {e}", "warning")
+
+            if not github_repo:
                 self._log(agent_run_id, "Cannot create PR: not a GitHub repository", "warning")
                 return
 
-            github_repo = repo["github_repo_name"]
-            default_branch = repo.get("default_branch", "main")
+            default_branch = repo.get("default_branch", "main") if repo else "main"
 
             # Create PR using gh CLI
             pr_title = f"Agent: {agent_run['name']}"
@@ -691,9 +866,17 @@ class AgentExecutionEngine:
             )
 
             if result.returncode == 0:
-                pr_url = result.stdout.strip()
-                database.update_agent_run(agent_run_id, pr_url=pr_url)
-                self._log(agent_run_id, f"Pull request created: {pr_url}")
+                output = result.stdout.strip()
+                # Extract PR URL using regex to handle different gh CLI output formats
+                url_match = re.search(r'https://github\.com/\S+/pull/\d+', output)
+                if url_match:
+                    pr_url = url_match.group(0)
+                    database.update_agent_run(agent_run_id, pr_url=pr_url)
+                    self._log(agent_run_id, f"Pull request created: {pr_url}")
+                else:
+                    self._log(agent_run_id, f"PR created but could not extract URL from output: {output}", "warning")
+                    # Still update with the full output as fallback
+                    database.update_agent_run(agent_run_id, pr_url=output)
             else:
                 self._log(agent_run_id, f"Failed to create PR (exit code {result.returncode}): {result.stderr}", "error")
                 if result.stdout:

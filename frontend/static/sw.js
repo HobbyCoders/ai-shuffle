@@ -1,7 +1,7 @@
 // AI Hub Service Worker
-// Version: 1.0.0
+// Version: 1.0.2
 
-const CACHE_NAME = 'ai-hub-v1';
+const CACHE_NAME = 'ai-hub-v2';
 const OFFLINE_URL = '/offline.html';
 
 // Static assets to cache on install

@@ -13,9 +13,9 @@
 		profiles,
 		projects,
 		type ChatTab,
-		type Profile,
 		type Project
 	} from '$lib/stores/tabs';
+	import type { Profile } from '$lib/api/client';
 	import { isAdmin, apiUser } from '$lib/stores/auth';
 	import { groups, organizeByGroups } from '$lib/stores/groups';
 	import DropdownContextMenu from './DropdownContextMenu.svelte';

@@ -15,7 +15,7 @@ import { getPreference, setPreference } from '$lib/api/client';
 // Types
 // ============================================================================
 
-export type DeckMode = 'workspace' | 'agents' | 'studio' | 'files';
+export type DeckMode = 'workspace' | 'studio' | 'files';
 
 /**
  * Layout modes for card arrangement in the workspace
@@ -543,15 +543,43 @@ function createDeckStore() {
 		 * Remove a card from the deck
 		 * Automatically reapplies the current layout mode if not freeflow
 		 * On mobile, adjusts the active card index to show the previous card
+		 * In focus mode, if removing the maximized card, automatically opens the first minimized card
 		 */
 		removeCard(id: string): void {
 			update((state) => {
 				// Find the index of the card being removed (among visible cards)
 				const visibleCards = state.cards.filter((c) => !c.minimized);
 				const removedCardIndex = visibleCards.findIndex((c) => c.id === id);
+				const removedCard = state.cards.find((c) => c.id === id);
 
 				// Filter out the removed card
-				const newCards = state.cards.filter((c) => c.id !== id);
+				let newCards = state.cards.filter((c) => c.id !== id);
+
+				// In focus mode, if we're removing the maximized card, restore the first minimized card
+				if (state.layoutMode === 'focus' && removedCard?.maximized) {
+					const minimizedCards = newCards.filter((c) => c.minimized);
+					if (minimizedCards.length > 0) {
+						// Find the first minimized card (by creation time for consistency)
+						const firstMinimized = minimizedCards.sort(
+							(a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+						)[0];
+
+						// Restore and maximize the first minimized card
+						const highestZ = Math.max(...newCards.map((c) => c.zIndex), 0);
+						newCards = newCards.map((c) => {
+							if (c.id === firstMinimized.id) {
+								return {
+									...c,
+									minimized: false,
+									maximized: true,
+									zIndex: highestZ + 1
+								};
+							}
+							return c;
+						});
+					}
+				}
+
 				const newVisibleCards = newCards.filter((c) => !c.minimized);
 
 				// Calculate new mobile active card index
@@ -571,15 +599,26 @@ function createDeckStore() {
 					newMobileActiveCardIndex = 0;
 				}
 
+				// Determine new focused card ID
+				let newFocusedCardId = state.focusedCardId === id ? null : state.focusedCardId;
+
+				// In focus mode, set focusedCardId to the newly maximized card
+				if (state.layoutMode === 'focus') {
+					const maximizedCard = newCards.find((c) => c.maximized);
+					if (maximizedCard) {
+						newFocusedCardId = maximizedCard.id;
+					}
+				}
+
 				let newState: DeckState = {
 					...state,
 					cards: newCards,
-					focusedCardId: state.focusedCardId === id ? null : state.focusedCardId,
+					focusedCardId: newFocusedCardId,
 					mobileActiveCardIndex: newMobileActiveCardIndex
 				};
 
-				// Auto-reapply layout mode if not freeflow
-				if (state.layoutMode !== 'freeflow') {
+				// Auto-reapply layout mode if not freeflow (skip for focus mode as we handled it above)
+				if (state.layoutMode !== 'freeflow' && state.layoutMode !== 'focus') {
 					newState = this.applyLayout(newState, state.layoutMode);
 				}
 
@@ -603,6 +642,8 @@ function createDeckStore() {
 		 * (swipe, dot navigation, etc.) via setMobileActiveCardIndex().
 		 * This prevents unwanted card switching when focus events fire from
 		 * typing in input fields or textareas.
+		 *
+		 * In stack mode, focusing a card also reapplies the layout to make it the main card.
 		 */
 		focusCard(id: string): void {
 			update((state) => {
@@ -621,7 +662,7 @@ function createDeckStore() {
 				// This prevents focus events from typing in inputs from
 				// triggering unwanted card switches
 
-				const newState = {
+				let newState: DeckState = {
 					...state,
 					cards: state.cards.map((c) =>
 						c.id === id ? { ...c, zIndex: newZIndex } : c
@@ -630,6 +671,11 @@ function createDeckStore() {
 					nextZIndex: newZIndex + 1
 					// Note: mobileActiveCardIndex is NOT updated here
 				};
+
+				// In stack mode, reapply layout to make the focused card the main card
+				if (state.layoutMode === 'stack') {
+					newState = this.applyLayout(newState, 'stack');
+				}
 
 				// Only save to localStorage, not server (avoid position sync issues)
 				saveToStorage(newState);
@@ -1080,6 +1126,16 @@ function createDeckStore() {
 		},
 
 		/**
+		 * Expand context panel (set collapsed to false)
+		 */
+		expandContextPanel(): void {
+			updateAndPersist((state) => ({
+				...state,
+				contextPanelCollapsed: false
+			}));
+		},
+
+		/**
 		 * Set snap enabled
 		 */
 		setSnapEnabled(enabled: boolean): void {
@@ -1314,8 +1370,8 @@ function createDeckStore() {
 					break;
 
 				case 'stack':
-					// Cards stacked in a cascade pattern
-					updatedCards = this.applyStackLayout(state.cards, boundsW, boundsH);
+					// Cards in left-side deck with main focused card
+					updatedCards = this.applyStackLayout(state.cards, boundsW, boundsH, state.focusedCardId);
 					break;
 
 				case 'focus':
@@ -1402,89 +1458,106 @@ function createDeckStore() {
 		},
 
 		/**
-		 * Stack layout: Cards stacked in a cascade pattern (like a deck of cards)
+		 * Stack layout: Left-side deck of card thumbnails + one main focused card
+		 * Like a hand of cards fanned down on the left, with one card "in play" on the right
 		 */
-		applyStackLayout(cards: DeckCard[], boundsW: number, boundsH: number): DeckCard[] {
+		applyStackLayout(cards: DeckCard[], boundsW: number, boundsH: number, focusedCardId?: string | null): DeckCard[] {
 			const visibleCards = cards.filter((c) => !c.minimized);
 			if (visibleCards.length === 0) return cards;
 
-			// Card size for stack view - slightly smaller to show cascade
-			const cardWidth = Math.min(600, boundsW * 0.7);
-			const cardHeight = Math.min(500, boundsH * 0.8);
+			// Stack panel width for the card deck on the left
+			const stackPanelWidth = 260;
+			const stackPadding = 12;
+			const cardOverlap = 64; // How much each card overlaps the one above
 
-			// Starting position - centered with room for cascade
-			const startX = (boundsW - cardWidth) / 2 - (visibleCards.length * 15);
-			const startY = (boundsH - cardHeight) / 2 - (visibleCards.length * 10);
+			// Main card dimensions (takes up rest of workspace)
+			const mainCardX = stackPanelWidth + stackPadding;
+			const mainCardWidth = boundsW - mainCardX - stackPadding;
+			const mainCardHeight = boundsH - stackPadding * 2;
 
-			const cascadeOffsetX = 30;
-			const cascadeOffsetY = 25;
+			// Find the focused card - use the highest z-index card or the last one
+			let focusedCard = focusedCardId
+				? visibleCards.find(c => c.id === focusedCardId)
+				: null;
+			if (!focusedCard) {
+				// Default to highest z-index card
+				focusedCard = visibleCards.reduce((a, b) => a.zIndex > b.zIndex ? a : b);
+			}
 
-			let idx = 0;
 			let nextZ = Math.max(...cards.map(c => c.zIndex), 0) + 1;
+
+			// Stack cards (non-focused) - sort by creation time for consistent ordering
+			const stackCards = visibleCards.filter(c => c.id !== focusedCard?.id)
+				.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 
 			return cards.map((card) => {
 				if (card.minimized) return card;
 
-				const x = Math.max(20, startX + idx * cascadeOffsetX);
-				const y = Math.max(20, startY + idx * cascadeOffsetY);
-				const zIndex = nextZ + idx;
-				idx++;
+				const isMainCard = card.id === focusedCard?.id;
 
-				return {
-					...card,
-					position: { x, y },
-					size: { width: cardWidth, height: cardHeight },
-					zIndex,
-					maximized: false,
-					snappedTo: null as SnapZone,
-					savedPosition: card.savedPosition || { ...card.position },
-					savedSize: card.savedSize || { ...card.size }
-				};
-			});
-		},
-
-		/**
-		 * Focus layout: One card is maximized, all others are minimized
-		 * When switching cards in focus mode, the current card is minimized
-		 * and the new card is maximized
-		 */
-		applyFocusLayout(cards: DeckCard[], boundsW: number, boundsH: number, padding: number, focusedCardId: string | null): DeckCard[] {
-			// Find cards that aren't already minimized (before this layout change)
-			const nonMinimizedCards = cards.filter((c) => !c.minimized);
-			if (nonMinimizedCards.length === 0) return cards;
-
-			// Find the focused card, or use the first non-minimized card
-			const focusedCard = focusedCardId
-				? nonMinimizedCards.find(c => c.id === focusedCardId) || nonMinimizedCards[0]
-				: nonMinimizedCards[0];
-
-			const highestZ = Math.max(...cards.map(c => c.zIndex), 0);
-
-			return cards.map((card) => {
-				if (card.id === focusedCard?.id) {
-					// Focused card: maximize it
+				if (isMainCard) {
+					// Main card: positioned on the right, nearly full screen
 					return {
 						...card,
-						minimized: false,
-						maximized: true,
-						zIndex: highestZ + 1,
-						// Save current position/size for when we exit focus mode
+						position: { x: mainCardX, y: stackPadding },
+						size: { width: mainCardWidth, height: mainCardHeight },
+						zIndex: nextZ + visibleCards.length + 1,
+						maximized: false,
+						snappedTo: null as SnapZone,
 						savedPosition: card.savedPosition || { ...card.position },
 						savedSize: card.savedSize || { ...card.size }
 					};
-				} else if (!card.minimized) {
-					// Other non-minimized cards: minimize them
+				} else {
+					// Stack cards: positioned in a fanned deck on the left
+					const stackIndex = stackCards.findIndex(c => c.id === card.id);
+					const yOffset = stackPadding + stackIndex * cardOverlap;
+					const cardHeight = Math.min(280, (boundsH - stackPadding * 2 - (stackCards.length - 1) * cardOverlap));
+
 					return {
 						...card,
-						minimized: true,
+						position: { x: stackPadding, y: yOffset },
+						size: { width: stackPanelWidth - stackPadding * 2, height: cardHeight },
+						zIndex: nextZ + stackIndex,
 						maximized: false,
-						// Save current position/size for restore
+						snappedTo: null as SnapZone,
 						savedPosition: card.savedPosition || { ...card.position },
 						savedSize: card.savedSize || { ...card.size }
 					};
 				}
-				// Already minimized cards stay minimized
-				return card;
+			});
+		},
+
+		/**
+		 * Focus layout: All cards are maximized but stacked
+		 * Only the focused card is visible (has highest z-index)
+		 * Navigation buttons switch which card is on top
+		 */
+		applyFocusLayout(cards: DeckCard[], boundsW: number, boundsH: number, padding: number, focusedCardId: string | null): DeckCard[] {
+			const visibleCards = cards.filter((c) => !c.minimized);
+			if (visibleCards.length === 0) return cards;
+
+			// Find the focused card, or use the first visible card
+			const focusedCard = focusedCardId
+				? visibleCards.find(c => c.id === focusedCardId) || visibleCards[0]
+				: visibleCards[0];
+
+			const highestZ = Math.max(...cards.map(c => c.zIndex), 0);
+
+			return cards.map((card) => {
+				if (card.minimized) return card;
+
+				const isFocused = card.id === focusedCard?.id;
+
+				// All visible cards are maximized, but only focused one has highest z-index
+				return {
+					...card,
+					minimized: false,
+					maximized: true,
+					zIndex: isFocused ? highestZ + visibleCards.length + 1 : highestZ + visibleCards.indexOf(card),
+					// Save current position/size for when we exit focus mode
+					savedPosition: card.savedPosition || { ...card.position },
+					savedSize: card.savedSize || { ...card.size }
+				};
 			});
 		},
 
@@ -1496,6 +1569,50 @@ function createDeckStore() {
 				if (state.layoutMode === 'freeflow') return state;
 
 				const newState = this.applyLayout(state, state.layoutMode);
+				saveToStorage(newState);
+				saveToServer(newState);
+				return newState;
+			});
+		},
+
+		/**
+		 * Navigate between cards in focus mode
+		 * @param direction 'prev' or 'next'
+		 */
+		navigateFocusMode(direction: 'prev' | 'next'): void {
+			update((state) => {
+				if (state.layoutMode !== 'focus') return state;
+
+				const visibleCards = state.cards.filter((c) => !c.minimized);
+				if (visibleCards.length <= 1) return state;
+
+				// Sort by creation time for consistent ordering
+				const sortedCards = [...visibleCards].sort(
+					(a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+				);
+
+				// Find current focused card index
+				const currentIndex = sortedCards.findIndex((c) => c.id === state.focusedCardId);
+				if (currentIndex === -1) return state;
+
+				// Calculate new index with wrapping
+				let newIndex: number;
+				if (direction === 'next') {
+					newIndex = (currentIndex + 1) % sortedCards.length;
+				} else {
+					newIndex = (currentIndex - 1 + sortedCards.length) % sortedCards.length;
+				}
+
+				const newFocusedCard = sortedCards[newIndex];
+				const newFocusedCardId = newFocusedCard.id;
+
+				// Update focused card and reapply layout
+				let newState: DeckState = {
+					...state,
+					focusedCardId: newFocusedCardId
+				};
+
+				newState = this.applyLayout(newState, 'focus');
 				saveToStorage(newState);
 				saveToServer(newState);
 				return newState;

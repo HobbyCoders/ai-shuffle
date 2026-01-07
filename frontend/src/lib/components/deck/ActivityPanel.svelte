@@ -6,7 +6,7 @@
 	 * ┌─────────────────────────────────────┐
 	 * │  ACTIVE SESSIONS (Fixed Header)     │  ← Always visible
 	 * ├─────────────────────────────────────┤
-	 * │  [Threads] [Studio] [Info]          │  ← Tab Bar
+	 * │  [Threads] [Agents] [Studio] [Info] │  ← Tab Bar
 	 * ├─────────────────────────────────────┤
 	 * │  TAB CONTENT AREA (scrollable)      │  ← Changes per tab
 	 * ├─────────────────────────────────────┤
@@ -19,14 +19,15 @@
 	import ActivityTabs from './ActivityTabs.svelte';
 	import ActivityOverlay from './ActivityOverlay.svelte';
 	import ThreadsTabContent from './tabs/ThreadsTabContent.svelte';
+	import AgentsTabContent from './tabs/AgentsTabContent.svelte';
 	import StudioTabContent from './tabs/StudioTabContent.svelte';
 	import InfoTabContent from './tabs/InfoTabContent.svelte';
-	import type { DeckSession, DeckGeneration, SessionInfo } from './types';
+	import type { DeckSession, DeckAgent, DeckGeneration, SessionInfo } from './types';
 
 	// Active session for unified display
 	export interface ActiveSession {
 		id: string;
-		type: 'chat';
+		type: 'chat' | 'agent';
 		title: string;
 		status: 'active' | 'idle' | 'streaming' | 'running' | 'error';
 		progress?: number;
@@ -42,7 +43,7 @@
 		isOpen?: boolean;
 	}
 
-	export type ActivityTabType = 'threads' | 'studio' | 'info';
+	export type ActivityTabType = 'threads' | 'agents' | 'studio' | 'info';
 	export type OverlayType = 'chat-settings' | null;
 
 	interface Props {
@@ -54,6 +55,8 @@
 
 		// Tab content
 		recentSessions?: HistorySession[];
+		runningAgents?: DeckAgent[];
+		completedAgents?: DeckAgent[];
 		generations?: DeckGeneration[];
 		sessionInfo?: SessionInfo | null;
 
@@ -66,6 +69,7 @@
 		onTabChange?: (tab: ActivityTabType) => void;
 		onSessionClick?: (session: ActiveSession) => void;
 		onHistorySessionClick?: (session: HistorySession) => void;
+		onAgentClick?: (agent: DeckAgent) => void;
 		onGenerationClick?: (generation: DeckGeneration) => void;
 		onOverlayClose?: () => void;
 	}
@@ -75,6 +79,8 @@
 		activeTab = 'threads',
 		activeSessions = [],
 		recentSessions = [],
+		runningAgents = [],
+		completedAgents = [],
 		generations = [],
 		sessionInfo = null,
 		overlayType = null,
@@ -83,17 +89,20 @@
 		onTabChange,
 		onSessionClick,
 		onHistorySessionClick,
+		onAgentClick,
 		onGenerationClick,
 		onOverlayClose
 	}: Props = $props();
 
 	// Derived values
 	const hasActiveOverlay = $derived(overlayType !== null);
+	const runningAgentCount = $derived(runningAgents.filter(a => a.status === 'running').length);
 	const generatingCount = $derived(generations.filter(g => g.status === 'generating').length);
 
 	// Tab badges
 	const tabBadges = $derived({
 		threads: activeSessions.filter(s => s.unread).length || undefined,
+		agents: runningAgentCount || undefined,
 		studio: generatingCount || undefined,
 		info: undefined
 	});
@@ -141,6 +150,12 @@
 						<ThreadsTabContent
 							{recentSessions}
 							{onHistorySessionClick}
+						/>
+					{:else if activeTab === 'agents'}
+						<AgentsTabContent
+							running={runningAgents}
+							completed={completedAgents}
+							{onAgentClick}
 						/>
 					{:else if activeTab === 'studio'}
 						<StudioTabContent

@@ -9,7 +9,7 @@
 	 * - Failed agents
 	 * - Statistics
 	 */
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount } from 'svelte';
 	import { Rocket, Clock, CheckCircle, XCircle, BarChart3, Bot, RefreshCw, Loader2, AlertCircle } from 'lucide-svelte';
 	import AgentListItem from './AgentListItem.svelte';
 	import AgentStats from './AgentStats.svelte';
@@ -43,13 +43,11 @@
 	const activeAgentsForTab = $derived([...running, ...paused]);
 
 	// Initialize store on mount
+	// Note: WebSocket connection is intentionally NOT disconnected on component destroy
+	// because agents run in the background and should maintain their connection
+	// across navigation/component lifecycle changes
 	onMount(() => {
 		agents.init();
-	});
-
-	// Cleanup on destroy
-	onDestroy(() => {
-		agents.disconnectWebSocket();
 	});
 
 	// Tab configuration - use function for counts to get reactive values

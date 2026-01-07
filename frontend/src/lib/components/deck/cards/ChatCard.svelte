@@ -17,7 +17,6 @@
 		card: DeckCard;
 		tabId: string;
 		onClose: () => void;
-		onMinimize: () => void;
 		onMaximize: () => void;
 		onFocus: () => void;
 		onMove: (x: number, y: number) => void;
@@ -27,6 +26,7 @@
 		onFork?: (sessionId: string, messageIndex: number, messageId: string) => void;
 		onOpenProfileCard?: (editId?: string) => void;
 		onOpenProjectCard?: (editId?: string) => void;
+		onOpenSettings?: () => void;
 		mobile?: boolean;
 	}
 
@@ -34,7 +34,6 @@
 		card,
 		tabId,
 		onClose,
-		onMinimize,
 		onMaximize,
 		onFocus,
 		onMove,
@@ -44,6 +43,7 @@
 		onFork,
 		onOpenProfileCard,
 		onOpenProjectCard,
+		onOpenSettings,
 		mobile = false
 	}: Props = $props();
 
@@ -118,7 +118,7 @@
 			{/if}
 
 			<!-- Input at the bottom -->
-			<ChatInput {tab} compact {onOpenProfileCard} {onOpenProjectCard} />
+			<ChatInput {tab} compact {onOpenProfileCard} {onOpenProjectCard} {onOpenSettings} />
 		{:else}
 			<div class="chat-loading">
 				<div class="spinner"></div>
@@ -128,7 +128,7 @@
 	</div>
 {:else}
 	<!-- Desktop: Full BaseCard with all features -->
-	<BaseCard {card} {onClose} {onMinimize} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
+	<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
 		<div class="chat-card-content">
 			{#if tab}
 				<!-- Main message area -->
@@ -161,7 +161,7 @@
 				{/if}
 
 				<!-- Input area -->
-				<ChatInput {tab} compact {onOpenProfileCard} {onOpenProjectCard} />
+				<ChatInput {tab} compact {onOpenProfileCard} {onOpenProjectCard} {onOpenSettings} />
 			{:else}
 				<div class="chat-loading">
 					<div class="spinner"></div>
@@ -181,6 +181,12 @@
 		overflow: hidden;
 		background: var(--card);
 		color: var(--card-foreground);
+		/* Improved text rendering for message readability */
+		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
+		text-rendering: optimizeLegibility;
+		/* Clip internal content (messages) but allow fixed-position elements to escape */
+		border-radius: 0 0 12px 12px;
 	}
 
 	.chat-card-content.mobile {
@@ -193,13 +199,15 @@
 		flex-direction: column;
 		align-items: center;
 		justify-content: center;
-		gap: 12px;
+		gap: 16px;
 		color: var(--muted-foreground);
+		padding: 24px;
 	}
 
 	.chat-loading p {
 		color: var(--foreground);
 		font-size: 0.875rem;
+		font-weight: 500;
 	}
 
 	.spinner {
@@ -225,38 +233,30 @@
 
 	/* User message styling - distinct teal/primary tint with good contrast */
 	.chat-card-content :global(.user-message) {
-		background: color-mix(in oklch, var(--primary) 12%, var(--card));
-		border: 1px solid color-mix(in oklch, var(--primary) 30%, var(--border));
-		border-radius: 0.75rem;
-		padding: 0.875rem 1rem;
+		background: color-mix(in oklch, var(--primary) 10%, var(--card));
+		border: 1px solid color-mix(in oklch, var(--primary) 25%, var(--border));
+		border-radius: 12px;
+		padding: 12px 16px;
 		box-shadow: var(--shadow-s);
 		transition: box-shadow 0.2s ease, transform 0.2s ease, background-color 0.2s ease;
 	}
 
 	.chat-card-content :global(.user-message:hover) {
 		box-shadow: var(--shadow-m);
-		background: color-mix(in oklch, var(--primary) 16%, var(--card));
+		background: color-mix(in oklch, var(--primary) 14%, var(--card));
 	}
 
-	/* Assistant message styling - subtle accent background */
-	.chat-card-content :global(.assistant-message) {
-		background: var(--accent);
-		border: 1px solid var(--border);
-		border-radius: 0.75rem;
-		padding: 0.875rem 1rem;
-		box-shadow: var(--shadow-s);
-		transition: box-shadow 0.2s ease, transform 0.2s ease, background-color 0.2s ease;
-	}
+	/* Assistant messages - no bubble, clean layout */
 
-	.chat-card-content :global(.assistant-message:hover) {
-		box-shadow: var(--shadow-m);
-		background: color-mix(in oklch, var(--accent) 90%, var(--foreground) 10%);
-	}
-
-	/* Ensure text readability in messages */
+	/* Ensure text readability in messages - improved line height and color */
 	.chat-card-content :global(.user-message p),
-	.chat-card-content :global(.assistant-message .prose) {
+	.chat-card-content :global(.prose) {
 		color: var(--foreground);
+		line-height: 1.6;
+	}
+
+	.chat-card-content :global(.user-message p) {
+		font-size: 0.9375rem;
 	}
 
 	/* Fix prose link colors for better visibility */
@@ -275,15 +275,19 @@
 		background: var(--muted);
 		border: 1px solid var(--border);
 		box-shadow: var(--shadow-s);
+		border-radius: 8px;
+		margin: 12px 0;
+		padding: 12px 16px;
 	}
 
 	.chat-card-content :global(.prose code:not(pre code)) {
 		background: var(--muted);
 		color: var(--foreground);
 		border: 1px solid var(--border);
-		padding: 0.125rem 0.375rem;
-		border-radius: 0.25rem;
-		font-size: 0.9em;
+		padding: 2px 6px;
+		border-radius: 4px;
+		font-size: 0.875em;
+		font-weight: 500;
 	}
 
 	/* Error message styling */
@@ -324,6 +328,11 @@
 
 	.chat-card-content :global(button:hover:not(:disabled)) {
 		background-color: var(--accent);
+	}
+
+	.chat-card-content :global(button:focus-visible) {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	/* Muted foreground text should be readable */

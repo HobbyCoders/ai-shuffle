@@ -12,14 +12,13 @@
 	 * - Glassmorphism styling
 	 */
 
-	import { MessageSquare, Bot, Palette, Terminal, Minus, Square, X, Maximize2, Copy, Settings, User, Users, FolderKanban } from 'lucide-svelte';
+	import { MessageSquare, Bot, Palette, Terminal, Square, X, Maximize2, Copy, Settings, User, Users, FolderKanban } from 'lucide-svelte';
 	import type { DeckCard, CardType } from './types';
 	import type { Snippet } from 'svelte';
 
 	interface Props {
 		card: DeckCard;
 		onClose: () => void;
-		onMinimize: () => void;
 		onMaximize: () => void;
 		onFocus: () => void;
 		onMove: (x: number, y: number) => void;
@@ -33,7 +32,6 @@
 	let {
 		card,
 		onClose,
-		onMinimize,
 		onMaximize,
 		onFocus,
 		onMove,
@@ -262,14 +260,6 @@
 
 		<div class="window-controls">
 			<button
-				class="control-btn minimize"
-				onclick={(e) => { e.stopPropagation(); onMinimize(); }}
-				title="Minimize"
-				aria-label="Minimize"
-			>
-				<Minus size={14} />
-			</button>
-			<button
 				class="control-btn maximize"
 				onclick={(e) => { e.stopPropagation(); onMaximize(); }}
 				title={card.maximized ? 'Restore' : 'Maximize'}
@@ -362,7 +352,7 @@
 		-webkit-backdrop-filter: blur(12px);
 		border-radius: 12px;
 		border: 1px solid var(--glass-border);
-		overflow: hidden;
+		overflow: visible;
 		box-shadow: var(--shadow-m);
 		transition:
 			box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1),
@@ -412,8 +402,8 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		height: 40px;
-		padding: 0 8px 0 12px;
+		height: 44px;
+		padding: 0 10px 0 14px;
 		background: linear-gradient(
 			180deg,
 			color-mix(in oklch, var(--secondary) 100%, transparent) 0%,
@@ -438,6 +428,14 @@
 		pointer-events: none;
 	}
 
+	/* Mobile-friendly header height */
+	@media (pointer: coarse) {
+		.card-header {
+			height: 48px;
+			padding: 0 12px 0 16px;
+		}
+	}
+
 	.base-card.dragging .card-header {
 		cursor: grabbing;
 	}
@@ -445,7 +443,7 @@
 	.header-left {
 		display: flex;
 		align-items: center;
-		gap: 8px;
+		gap: 10px;
 		flex: 1;
 		min-width: 0;
 	}
@@ -454,28 +452,37 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
+		width: 24px;
+		height: 24px;
 		color: var(--muted-foreground);
 		flex-shrink: 0;
-		transition: color 0.15s ease;
+		transition: color 0.15s ease, background-color 0.15s ease;
+		border-radius: 6px;
+		background: transparent;
 	}
 
 	.base-card.focused .card-icon {
 		color: var(--primary);
+		background: color-mix(in oklch, var(--primary) 12%, transparent);
 	}
 
 	.card-title {
 		font-size: 0.8125rem;
 		font-weight: 500;
-		color: color-mix(in oklch, var(--foreground) 75%, transparent);
+		color: var(--muted-foreground);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		cursor: text;
 		transition: color 0.15s ease;
+		/* Improved text rendering for readability */
+		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
 	}
 
 	.base-card.focused .card-title {
 		color: var(--foreground);
+		font-weight: 600;
 	}
 
 	.title-input {
@@ -495,12 +502,12 @@
 	/* Window Controls */
 	.window-controls {
 		display: flex;
-		gap: 2px;
+		gap: 4px;
 	}
 
 	.control-btn {
 		width: 32px;
-		height: 26px;
+		height: 28px;
 		border: none;
 		background: transparent;
 		cursor: pointer;
@@ -512,7 +519,15 @@
 			background 0.15s ease,
 			color 0.15s ease,
 			transform 0.1s ease;
-		border-radius: 4px;
+		border-radius: 6px;
+	}
+
+	/* Larger touch targets on mobile */
+	@media (pointer: coarse) {
+		.control-btn {
+			width: 40px;
+			height: 36px;
+		}
 	}
 
 	.control-btn:hover {
@@ -521,13 +536,13 @@
 		transform: scale(1.05);
 	}
 
-	.control-btn:active {
-		transform: scale(0.95);
+	.control-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
 	}
 
-	.control-btn.minimize:hover {
-		background: color-mix(in oklch, var(--warning) 20%, transparent);
-		color: var(--warning);
+	.control-btn:active {
+		transform: scale(0.95);
 	}
 
 	.control-btn.maximize:hover {
@@ -543,10 +558,13 @@
 	/* Content */
 	.card-content {
 		flex: 1;
-		overflow: hidden;
+		min-height: 0; /* Critical: allows flex child to shrink and enables internal scrolling */
+		overflow: visible;
 		display: flex;
 		flex-direction: column;
 		background: var(--card);
+		/* Allow fixed-position children (dropdowns, modals) to escape */
+		position: relative;
 	}
 
 	/* Resize Handles */

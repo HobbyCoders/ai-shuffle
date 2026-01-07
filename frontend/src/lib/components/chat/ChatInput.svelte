@@ -1,15 +1,16 @@
 <script lang="ts">
 	/**
-	 * ChatInput - Full input section with file upload, autocomplete, and voice recording
+	 * ChatInput - Modern chat input island with progressive disclosure
+	 *
+	 * Layer 1: Minimal - textarea + essential buttons
+	 * Layer 2: Context Bar - compact profile/project display (cosmetic) + settings gear
 	 */
-	import { tick, onDestroy, createEventDispatcher } from 'svelte';
-	import { tabs, profiles, projects, type ChatTab, type Profile, type Project } from '$lib/stores/tabs';
-	import { claudeAuthenticated, isAdmin, apiUser } from '$lib/stores/auth';
+	import { tick, onDestroy } from 'svelte';
+	import { tabs, profiles, projects, type ChatTab } from '$lib/stores/tabs';
+	import { claudeAuthenticated, apiUser } from '$lib/stores/auth';
 	import { api, type FileUploadResponse } from '$lib/api/client';
-	import { groups, organizeByGroups } from '$lib/stores/groups';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
-	import DropdownContextMenu from './DropdownContextMenu.svelte';
 
 	interface Command {
 		name: string;
@@ -23,16 +24,10 @@
 		tab: ChatTab;
 		compact?: boolean;
 		onOpenTerminalModal?: (tabId: string, command: string) => void;
-		onOpenProfileCard?: (editId?: string) => void;
-		onOpenProjectCard?: (editId?: string) => void;
+		onOpenSettings?: () => void;
 	}
 
-	let { tab, compact = false, onOpenTerminalModal, onOpenProfileCard, onOpenProjectCard }: Props = $props();
-
-	const dispatch = createEventDispatcher<{
-		openProfileCard: { editId?: string };
-		openProjectCard: { editId?: string };
-	}>();
+	let { tab, compact = false, onOpenTerminalModal, onOpenSettings }: Props = $props();
 
 	// Context usage calculation
 	function formatTokenCount(count: number): string {
@@ -50,118 +45,6 @@
 	const contextMax = 200000;
 	const contextPercent = $derived(Math.min((contextUsed / contextMax) * 100, 100));
 
-	// Organize profiles and projects by groups
-	const profilesOrganized = $derived(organizeByGroups($profiles, 'profiles', $groups));
-	const hasProfileGroups = $derived(profilesOrganized.groupOrder.length > 0);
-	const projectsOrganized = $derived(organizeByGroups($projects, 'projects', $groups));
-	const hasProjectGroups = $derived(projectsOrganized.groupOrder.length > 0);
-
-	// Context menu state for profiles
-	let profileContextMenu = $state<{
-		show: boolean;
-		x: number;
-		y: number;
-		profile: Profile | null;
-	}>({ show: false, x: 0, y: 0, profile: null });
-
-	// Context menu state for projects
-	let projectContextMenu = $state<{
-		show: boolean;
-		x: number;
-		y: number;
-		project: Project | null;
-	}>({ show: false, x: 0, y: 0, project: null });
-
-	function handleProfileContextMenu(e: MouseEvent, profile: Profile) {
-		e.preventDefault();
-		e.stopPropagation();
-		profileContextMenu = {
-			show: true,
-			x: e.clientX,
-			y: e.clientY,
-			profile
-		};
-	}
-
-	function handleProjectContextMenu(e: MouseEvent, project: Project) {
-		e.preventDefault();
-		e.stopPropagation();
-		projectContextMenu = {
-			show: true,
-			x: e.clientX,
-			y: e.clientY,
-			project
-		};
-	}
-
-	function closeProfileContextMenu() {
-		profileContextMenu = { show: false, x: 0, y: 0, profile: null };
-	}
-
-	function closeProjectContextMenu() {
-		projectContextMenu = { show: false, x: 0, y: 0, project: null };
-	}
-
-	// Profile context menu handlers
-	function handleProfileSelect(e: CustomEvent<{ id: string }>) {
-		tabs.setTabProfile(tab.id, e.detail.id);
-	}
-
-	function handleProfileEdit(e: CustomEvent<{ id: string }>) {
-		onOpenProfileCard?.(e.detail.id);
-		dispatch('openProfileCard', { editId: e.detail.id });
-	}
-
-	async function handleProfileDuplicate(e: CustomEvent<{ id: string }>) {
-		const profile = $profiles.find(p => p.id === e.detail.id);
-		if (!profile) return;
-
-		const newId = `${profile.id}-copy-${Date.now().toString(36)}`;
-		const newName = `${profile.name} (Copy)`;
-
-		try {
-			await tabs.createProfile({
-				id: newId,
-				name: newName,
-				description: profile.description,
-				config: profile.config || {}
-			});
-		} catch (err) {
-			console.error('Failed to duplicate profile:', err);
-		}
-	}
-
-	async function handleProfileDelete(e: CustomEvent<{ id: string }>) {
-		if (confirm(`Delete profile "${$profiles.find(p => p.id === e.detail.id)?.name}"? This cannot be undone.`)) {
-			await tabs.deleteProfile(e.detail.id);
-		}
-	}
-
-	function handleProfileOpenCard(e: CustomEvent<{ type: 'profile' | 'project'; editId?: string }>) {
-		onOpenProfileCard?.(e.detail.editId);
-		dispatch('openProfileCard', { editId: e.detail.editId });
-	}
-
-	// Project context menu handlers
-	function handleProjectSelect(e: CustomEvent<{ id: string }>) {
-		tabs.setTabProject(tab.id, e.detail.id);
-	}
-
-	function handleProjectEdit(e: CustomEvent<{ id: string }>) {
-		onOpenProjectCard?.(e.detail.id);
-		dispatch('openProjectCard', { editId: e.detail.id });
-	}
-
-	async function handleProjectDelete(e: CustomEvent<{ id: string }>) {
-		if (confirm(`Delete project "${$projects.find(p => p.id === e.detail.id)?.name}"? This cannot be undone.`)) {
-			await tabs.deleteProject(e.detail.id);
-		}
-	}
-
-	function handleProjectOpenCard(e: CustomEvent<{ type: 'profile' | 'project'; editId?: string }>) {
-		onOpenProjectCard?.(e.detail.editId);
-		dispatch('openProjectCard', { editId: e.detail.editId });
-	}
 
 	// Input state - use tab.draft for persistence across card switches
 	let inputValue = $state(tab.draft || '');
@@ -231,45 +114,16 @@
 	let commandAutocompleteRef = $state<CommandAutocomplete | null>(null);
 	let fileAutocompleteRef = $state<FileAutocomplete | null>(null);
 
-	// Override popup state
-	let showModelPopup = $state(false);
-	let showModePopup = $state(false);
-	let showProfilePopup = $state(false);
-	let showProjectPopup = $state(false);
+	// Island ref
+	let islandRef = $state<HTMLDivElement | null>(null);
 
-	// Get current profile settings
-	const currentProfile = $derived($profiles.find(p => p.id === tab.profile));
-	const profileModel = $derived(currentProfile?.config?.model || 'sonnet');
-	const profilePermissionMode = $derived(currentProfile?.config?.permission_mode || 'default');
-	const effectiveModel = $derived(tab.modelOverride || profileModel);
-	const effectiveMode = $derived(tab.permissionModeOverride || profilePermissionMode);
-
-	const modelLabels: Record<string, string> = {
-		sonnet: 'Sonnet',
-		'sonnet-1m': 'Sonnet 1M',
-		opus: 'Opus',
-		haiku: 'Haiku'
-	};
-
-	const modeLabels: Record<string, string> = {
-		default: 'Ask',
-		acceptEdits: 'Auto-Accept',
-		plan: 'Plan',
-		bypassPermissions: 'Bypass'
-	};
-
-	// Get selected profile/project names for display
+	// Get selected profile/project names for display (cosmetic only)
 	const selectedProfileName = $derived($profiles.find(p => p.id === tab.profile)?.name || 'Profile');
 	const selectedProjectName = $derived($projects.find(p => p.id === tab.project)?.name || 'Project');
-	const isProfileLocked = $derived(!!$apiUser?.profile_id);
-	const isProjectLocked = $derived(!!$apiUser?.project_id || !!tab.sessionId);
 
-	// Close all popups helper
-	function closeAllPopups() {
-		showModelPopup = false;
-		showModePopup = false;
-		showProfilePopup = false;
-		showProjectPopup = false;
+	// Open settings in Activity Panel
+	function openSettings() {
+		onOpenSettings?.();
 	}
 
 	// Check if input contains an active @ mention
@@ -533,10 +387,17 @@
 			startRecording();
 		}
 	}
+
+	// Context color based on usage
+	const contextColor = $derived(
+		contextPercent > 80 ? 'text-red-500' :
+		contextPercent > 60 ? 'text-amber-500' :
+		'text-emerald-500'
+	);
 </script>
 
-<div class="px-3 py-1.5 sm:p-4 {compact ? 'py-2' : ''}">
-	<div class="max-w-4xl mx-auto">
+<div class="chat-input-wrapper">
+	<div class="chat-input-container">
 		<!-- Hidden file input -->
 		<input
 			type="file"
@@ -549,447 +410,28 @@
 
 		<!-- Recording Error Message -->
 		{#if recordingError}
-			<div class="mb-2 px-3 py-2 bg-destructive/10 border border-destructive/30 rounded-lg text-sm text-destructive flex items-center justify-between floating-panel">
+			<div class="error-banner">
 				<span>{recordingError}</span>
-				<button type="button" onclick={() => recordingError = ''} class="ml-2 hover:opacity-70">&times;</button>
+				<button type="button" onclick={() => recordingError = ''} class="error-close">&times;</button>
 			</div>
 		{/if}
 
-		<form onsubmit={(e) => { e.preventDefault(); handleSubmit(); }} class="relative">
-			<!-- Floating Island Input Container - now contains everything -->
-			<div class="chat-pill-island">
-				<!-- Top Controls Row (Context + Profile + Project + Model + Mode + Attach) -->
-				<div class="pill-controls-row">
-				<!-- Context Usage Indicator -->
-				<div class="relative group">
-					<button
-						type="button"
-						class="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium rounded-full bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50 transition-all"
-						title="Context usage: {formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}"
-					>
-						<!-- Circular progress indicator -->
-						<svg class="w-3.5 h-3.5 -rotate-90" viewBox="0 0 20 20">
-							<circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="2" opacity="0.2" />
-							<circle
-								cx="10" cy="10" r="8" fill="none"
-								stroke={contextPercent > 80 ? '#ef4444' : contextPercent > 60 ? '#f59e0b' : '#22c55e'}
-								stroke-width="2"
-								stroke-dasharray={2 * Math.PI * 8}
-								stroke-dashoffset={2 * Math.PI * 8 * (1 - contextPercent / 100)}
-								stroke-linecap="round"
-							/>
-						</svg>
-						<span>{Math.round(contextPercent)}%</span>
-					</button>
-					<!-- Token dropdown -->
-					<div class="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 w-52 bg-card border border-border rounded-xl shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
-						<div class="py-2 px-3 space-y-2">
-							<!-- Context header -->
-							<div class="flex items-center justify-between text-xs pb-1 border-b border-border">
-								<span class="text-muted-foreground">Context</span>
-								<span class="text-foreground font-medium">{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}</span>
-							</div>
-							<div class="flex items-center justify-between text-xs">
-								<span class="flex items-center gap-1.5 text-muted-foreground">
-									<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4" />
-									</svg>
-									Input
-								</span>
-								<span class="text-foreground font-medium">{formatTokenCount(tab.totalTokensIn)}</span>
-							</div>
-							<div class="flex items-center justify-between text-xs">
-								<span class="flex items-center gap-1.5 text-muted-foreground">
-									<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8v12m0 0l4-4m-4 4l-4-4" />
-									</svg>
-									Output
-								</span>
-								<span class="text-foreground font-medium">{formatTokenCount(tab.totalTokensOut)}</span>
-							</div>
-							{#if tab.totalCacheCreationTokens > 0}
-								<div class="flex items-center justify-between text-xs">
-									<span class="flex items-center gap-1.5 text-muted-foreground">
-										<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-										</svg>
-										Cache Creation
-									</span>
-									<span class="text-foreground font-medium">{formatTokenCount(tab.totalCacheCreationTokens)}</span>
-								</div>
-							{/if}
-							{#if tab.totalCacheReadTokens > 0}
-								<div class="flex items-center justify-between text-xs">
-									<span class="flex items-center gap-1.5 text-blue-400">
-										<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-										</svg>
-										Cache Read
-									</span>
-									<span class="text-blue-400 font-medium">{formatTokenCount(tab.totalCacheReadTokens)}</span>
-								</div>
-							{/if}
-						</div>
-					</div>
-				</div>
-
-				<!-- Profile Selector Pill (always visible, mobile-friendly) -->
-				{#if !isProfileLocked}
-					<div class="relative">
-						<button
-							type="button"
-							onclick={() => { closeAllPopups(); showProfilePopup = !showProfilePopup; }}
-							class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {tab.profile ? 'bg-accent/50 text-foreground border border-transparent hover:border-border/50' : 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30'}"
-							disabled={tab.isStreaming}
-						>
-							<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-							</svg>
-							<span class="max-w-[80px] truncate">{selectedProfileName}</span>
-							<svg class="w-2.5 h-2.5 opacity-60 transition-transform {showProfilePopup ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
-							</svg>
-						</button>
-						{#if showProfilePopup}
-							<button class="fixed inset-0 z-40" onclick={() => showProfilePopup = false} aria-label="Close"></button>
-							<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[160px] max-h-[280px] overflow-y-auto {profileContextMenu.show ? 'pointer-events-auto' : ''}">
-								{#if $profiles.length === 0}
-									<div class="px-3 py-2 text-xs text-muted-foreground">No profiles</div>
-								{:else}
-									<!-- Grouped profiles -->
-									{#each profilesOrganized.groupOrder as groupItem}
-										{@const groupProfiles = profilesOrganized.grouped.get(groupItem.name) || []}
-										{#if groupProfiles.length > 0}
-											<div class="py-0.5">
-												<button
-													type="button"
-													class="w-full flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-medium text-muted-foreground hover:text-foreground uppercase tracking-wide bg-muted/30 transition-colors"
-													onclick={() => groups.toggleGroupCollapsed('profiles', groupItem.name)}
-												>
-													<svg class="w-2.5 h-2.5 transition-transform {groupItem.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-													</svg>
-													<span>{groupItem.name}</span>
-													<span class="text-muted-foreground/60 ml-auto">({groupProfiles.length})</span>
-												</button>
-												{#if !groupItem.collapsed}
-													{#each groupProfiles as profile}
-														<button
-															type="button"
-															onclick={() => {
-																tabs.setTabProfile(tab.id, profile.id);
-																showProfilePopup = false;
-															}}
-															oncontextmenu={(e) => handleProfileContextMenu(e, profile)}
-															class="w-full px-3 py-1.5 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-2 {tab.profile === profile.id ? 'bg-accent/50 text-foreground font-medium' : 'text-muted-foreground'}"
-															title="Right-click for options"
-														>
-															<span class="truncate">{profile.name}</span>
-															{#if tab.profile === profile.id}
-																<svg class="w-3 h-3 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
-																</svg>
-															{/if}
-														</button>
-													{/each}
-												{/if}
-											</div>
-										{/if}
-									{/each}
-									<!-- Ungrouped profiles -->
-									{#if profilesOrganized.ungrouped.length > 0}
-										{#if hasProfileGroups}
-											<div class="py-0.5">
-												<div class="px-2.5 py-1 text-[10px] font-medium text-muted-foreground uppercase tracking-wide bg-muted/30">
-													Other
-												</div>
-											</div>
-										{/if}
-										{#each profilesOrganized.ungrouped as profile}
-											<button
-												type="button"
-												onclick={() => {
-													tabs.setTabProfile(tab.id, profile.id);
-													showProfilePopup = false;
-												}}
-												oncontextmenu={(e) => handleProfileContextMenu(e, profile)}
-												class="w-full px-3 py-1.5 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-2 {tab.profile === profile.id ? 'bg-accent/50 text-foreground font-medium' : 'text-muted-foreground'}"
-												title="Right-click for options"
-											>
-												<span class="truncate">{profile.name}</span>
-												{#if tab.profile === profile.id}
-													<svg class="w-3 h-3 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
-													</svg>
-												{/if}
-											</button>
-										{/each}
-									{/if}
-								{/if}
-							</div>
-						{/if}
-					</div>
-				{:else}
-					<!-- Locked profile indicator -->
-					<div class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full bg-accent/30 text-muted-foreground">
-						<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-						</svg>
-						<span class="max-w-[80px] truncate">{selectedProfileName}</span>
-						<svg class="w-2.5 h-2.5 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-						</svg>
-					</div>
-				{/if}
-
-				<!-- Project Selector Pill (always visible, mobile-friendly) -->
-				{#if !isProjectLocked}
-					<div class="relative">
-						<button
-							type="button"
-							onclick={() => { closeAllPopups(); showProjectPopup = !showProjectPopup; }}
-							class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {tab.project ? 'bg-accent/50 text-foreground border border-transparent hover:border-border/50' : 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30'}"
-							disabled={tab.isStreaming}
-						>
-							<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-							</svg>
-							<span class="max-w-[80px] truncate">{selectedProjectName}</span>
-							<svg class="w-2.5 h-2.5 opacity-60 transition-transform {showProjectPopup ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
-							</svg>
-						</button>
-						{#if showProjectPopup}
-							<button class="fixed inset-0 z-40" onclick={() => showProjectPopup = false} aria-label="Close"></button>
-							<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[160px] max-h-[280px] overflow-y-auto {projectContextMenu.show ? 'pointer-events-auto' : ''}">
-								{#if $projects.length === 0}
-									<div class="px-3 py-2 text-xs text-muted-foreground">No projects</div>
-								{:else}
-									<!-- Grouped projects -->
-									{#each projectsOrganized.groupOrder as groupItem}
-										{@const groupProjects = projectsOrganized.grouped.get(groupItem.name) || []}
-										{#if groupProjects.length > 0}
-											<div class="py-0.5">
-												<button
-													type="button"
-													class="w-full flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-medium text-muted-foreground hover:text-foreground uppercase tracking-wide bg-muted/30 transition-colors"
-													onclick={() => groups.toggleGroupCollapsed('projects', groupItem.name)}
-												>
-													<svg class="w-2.5 h-2.5 transition-transform {groupItem.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-													</svg>
-													<span>{groupItem.name}</span>
-													<span class="text-muted-foreground/60 ml-auto">({groupProjects.length})</span>
-												</button>
-												{#if !groupItem.collapsed}
-													{#each groupProjects as project}
-														<button
-															type="button"
-															onclick={() => {
-																tabs.setTabProject(tab.id, project.id);
-																showProjectPopup = false;
-															}}
-															oncontextmenu={(e) => handleProjectContextMenu(e, project)}
-															class="w-full px-3 py-1.5 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-2 {tab.project === project.id ? 'bg-accent/50 text-foreground font-medium' : 'text-muted-foreground'}"
-															title="Right-click for options"
-														>
-															<span class="truncate">{project.name}</span>
-															{#if tab.project === project.id}
-																<svg class="w-3 h-3 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
-																</svg>
-															{/if}
-														</button>
-													{/each}
-												{/if}
-											</div>
-										{/if}
-									{/each}
-									<!-- Ungrouped projects -->
-									{#if projectsOrganized.ungrouped.length > 0}
-										{#if hasProjectGroups}
-											<div class="py-0.5">
-												<div class="px-2.5 py-1 text-[10px] font-medium text-muted-foreground uppercase tracking-wide bg-muted/30">
-													Other
-												</div>
-											</div>
-										{/if}
-										{#each projectsOrganized.ungrouped as project}
-											<button
-												type="button"
-												onclick={() => {
-													tabs.setTabProject(tab.id, project.id);
-													showProjectPopup = false;
-												}}
-												oncontextmenu={(e) => handleProjectContextMenu(e, project)}
-												class="w-full px-3 py-1.5 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-2 {tab.project === project.id ? 'bg-accent/50 text-foreground font-medium' : 'text-muted-foreground'}"
-												title="Right-click for options"
-											>
-												<span class="truncate">{project.name}</span>
-												{#if tab.project === project.id}
-													<svg class="w-3 h-3 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
-													</svg>
-												{/if}
-											</button>
-										{/each}
-									{/if}
-								{/if}
-							</div>
-						{/if}
-					</div>
-				{:else}
-					<!-- Locked project indicator -->
-					<div class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full bg-accent/30 text-muted-foreground">
-						<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-						</svg>
-						<span class="max-w-[80px] truncate">{selectedProjectName}</span>
-						<svg class="w-2.5 h-2.5 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-						</svg>
-					</div>
-				{/if}
-
-				<!-- Model/Mode Pills (Admin only) -->
-				{#if $isAdmin}
-					<!-- Model Selector Pill -->
-					<div class="relative">
-						<button
-							type="button"
-							onclick={() => { closeAllPopups(); showModelPopup = !showModelPopup; }}
-							class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {tab.modelOverride ? 'bg-primary/15 text-primary border border-primary/30' : 'bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50'}"
-							disabled={tab.isStreaming}
-						>
-							<span>{modelLabels[effectiveModel] || effectiveModel}</span>
-							<svg class="w-2.5 h-2.5 opacity-60 transition-transform rotate-180 {showModelPopup ? 'rotate-0' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
-							</svg>
-						</button>
-						{#if showModelPopup}
-							<button class="fixed inset-0 z-40" onclick={() => showModelPopup = false} aria-label="Close"></button>
-							<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[90px]">
-								{#each [['sonnet', 'Sonnet'], ['sonnet-1m', 'Sonnet 1M'], ['opus', 'Opus'], ['haiku', 'Haiku']] as [value, label]}
-									<button
-										type="button"
-										onclick={() => {
-											if (value === profileModel) {
-												tabs.setTabModelOverride(tab.id, null);
-											} else {
-												tabs.setTabModelOverride(tab.id, value);
-											}
-											showModelPopup = false;
-										}}
-										class="w-full px-3 py-1.5 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-3 {effectiveModel === value ? 'bg-accent/50 text-foreground font-medium' : 'text-muted-foreground'}"
-									>
-										<span>{label}</span>
-										{#if effectiveModel === value}
-											<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
-											</svg>
-										{/if}
-									</button>
-								{/each}
-							</div>
-						{/if}
-					</div>
-
-					<!-- Permission Mode Selector Pill -->
-					<div class="relative">
-						<button
-							type="button"
-							onclick={() => { closeAllPopups(); showModePopup = !showModePopup; }}
-							class="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-full transition-all disabled:opacity-40 {tab.permissionModeOverride ? 'bg-primary/15 text-primary border border-primary/30' : 'bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50'}"
-							disabled={tab.isStreaming}
-						>
-							<span>{modeLabels[effectiveMode] || effectiveMode}</span>
-							<svg class="w-2.5 h-2.5 opacity-60 transition-transform rotate-180 {showModePopup ? 'rotate-0' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
-							</svg>
-						</button>
-						{#if showModePopup}
-							<button class="fixed inset-0 z-40" onclick={() => showModePopup = false} aria-label="Close"></button>
-							<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 min-w-[100px]">
-								{#each [['default', 'Ask'], ['acceptEdits', 'Auto-Accept'], ['plan', 'Plan'], ['bypassPermissions', 'Bypass']] as [value, label]}
-									<button
-										type="button"
-										onclick={() => {
-											if (value === profilePermissionMode) {
-												tabs.setTabPermissionModeOverride(tab.id, null);
-											} else {
-												tabs.setTabPermissionModeOverride(tab.id, value);
-											}
-											showModePopup = false;
-										}}
-										class="w-full px-3 py-1.5 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-3 {effectiveMode === value ? 'bg-accent/50 text-foreground font-medium' : 'text-muted-foreground'}"
-									>
-										<span>{label}</span>
-										{#if effectiveMode === value}
-											<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
-											</svg>
-										{/if}
-									</button>
-								{/each}
-							</div>
-						{/if}
-					</div>
-				{/if}
-
-				<!-- Attach File Button -->
-				<button
-					type="button"
-					onclick={triggerFileUpload}
-					class="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-full bg-accent/50 text-muted-foreground hover:text-foreground border border-transparent hover:border-border/50 transition-all disabled:opacity-40"
-					disabled={tab.isStreaming || !$claudeAuthenticated || isUploading}
-					title={tab.project ? 'Attach file' : 'Select a project to attach files'}
-				>
-					{#if isUploading}
-						<svg class="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-							<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-						</svg>
-					{:else}
-						<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-						</svg>
-					{/if}
-					<span>Attach</span>
-				</button>
-
-				<!-- Reset Button (Admin only) -->
-				{#if $isAdmin && (tab.modelOverride || tab.permissionModeOverride)}
-					<button
-						type="button"
-						onclick={() => {
-							tabs.setTabModelOverride(tab.id, null);
-							tabs.setTabPermissionModeOverride(tab.id, null);
-						}}
-						class="inline-flex items-center gap-1 px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground rounded-full hover:bg-accent/50 transition-all disabled:opacity-40"
-						title="Reset to defaults"
-						disabled={tab.isStreaming}
-					>
-						<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-						</svg>
-						<span class="hidden sm:inline">Reset</span>
-					</button>
-				{/if}
-			</div>
-
-				<!-- Uploaded Files -->
+		<form onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}>
+			<!-- Main Island -->
+			<div class="chat-island" bind:this={islandRef}>
+				<!-- Uploaded Files (if any) -->
 				{#if uploadedFiles.length > 0}
-					<div class="px-3 pt-2 pb-0 flex flex-wrap gap-1.5">
+					<div class="uploaded-files">
 						{#each uploadedFiles as file, index}
-							<div class="flex items-center gap-1.5 bg-accent/50 text-xs px-2 py-1 rounded-lg group">
-								<svg class="w-3.5 h-3.5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<div class="file-chip">
+								<svg class="w-3 h-3 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
 								</svg>
-								<span class="text-foreground truncate max-w-[100px]" title={file.path}>{file.filename}</span>
+								<span class="file-name" title={file.path}>{file.filename}</span>
 								<button
 									type="button"
 									onclick={() => removeUploadedFile(index)}
-									class="text-muted-foreground hover:text-destructive opacity-60 group-hover:opacity-100 transition-opacity"
+									class="file-remove"
 									aria-label="Remove file"
 								>
 									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1001,11 +443,10 @@
 					</div>
 				{/if}
 
-				<!-- Main Input Row -->
-				<div class="pill-input-row">
-					<!-- Textarea Container -->
-					<div class="flex-1 relative min-w-0">
-						<!-- Command Autocomplete -->
+				<!-- Input Row -->
+				<div class="input-row">
+					<!-- Textarea with autocomplete -->
+					<div class="textarea-wrapper">
 						<CommandAutocomplete
 							bind:this={commandAutocompleteRef}
 							inputValue={inputValue}
@@ -1015,7 +456,6 @@
 							onClose={() => showCommandAutocomplete = false}
 						/>
 
-						<!-- File Autocomplete (@ mentions) -->
 						<FileAutocomplete
 							bind:this={fileAutocompleteRef}
 							inputValue={inputValue}
@@ -1031,50 +471,63 @@
 							oninput={handleInputChange}
 							onkeydown={handleKeyDown}
 							placeholder="Message Claude..."
-							class="w-full bg-transparent border-0 px-2 sm:px-3 py-2 text-foreground placeholder-muted-foreground/60 resize-none focus:outline-none focus:ring-0 min-h-[44px] max-h-[200px] leading-relaxed text-sm sm:text-base"
+							class="chat-textarea"
 							rows="1"
 							disabled={!$claudeAuthenticated}
 						></textarea>
 					</div>
 
-					<!-- Voice/Send/Stop Buttons -->
-					<div class="flex items-center gap-1">
-						<!-- Voice Recording Button -->
+					<!-- Right side action buttons -->
+					<div class="action-buttons">
+						<button
+							type="button"
+							onclick={triggerFileUpload}
+							disabled={tab.isStreaming || !$claudeAuthenticated || isUploading}
+							class="action-btn"
+							title={isUploading ? 'Uploading...' : tab.project ? 'Attach file' : 'Select a project to attach files'}
+						>
+							{#if isUploading}
+								<svg class="w-[18px] h-[18px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+									<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+								</svg>
+							{:else}
+								<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+								</svg>
+							{/if}
+						</button>
+
 						<button
 							type="button"
 							onclick={toggleRecording}
 							disabled={!$claudeAuthenticated || isUploading || isTranscribing}
-							class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center rounded-xl transition-all disabled:opacity-30 disabled:cursor-not-allowed {isRecording ? 'bg-destructive/20 text-destructive animate-pulse' : isTranscribing ? 'bg-primary/15 text-primary' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}"
+							class="action-btn {isRecording ? 'recording' : ''} {isTranscribing ? 'transcribing' : ''}"
 							title={isRecording ? 'Stop recording' : isTranscribing ? 'Transcribing...' : 'Voice input'}
 						>
 							{#if isTranscribing}
-								<svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<svg class="w-[18px] h-[18px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
 								</svg>
 							{:else}
-								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+								<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
 								</svg>
 							{/if}
 						</button>
 
 						{#if tab.isStreaming}
-							<!-- When streaming: show send button if text entered (interrupts then sends), otherwise show stop button -->
 							{#if inputValue.trim()}
-								<button
-									type="submit"
-									class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-primary hover:bg-primary/90 text-primary-foreground rounded-xl transition-all"
-									title="Send message (interrupts current response)"
-								>
-									<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
+								<button type="submit" class="send-btn" title="Send message (interrupts current response)">
+									<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" />
 									</svg>
 								</button>
 							{:else}
 								<button
 									type="button"
 									onclick={() => tabs.stopGeneration(tab.id)}
-									class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-destructive/15 text-destructive hover:bg-destructive/25 rounded-xl transition-all"
+									class="stop-btn"
 									title="Stop generating"
 								>
 									<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
@@ -1083,18 +536,58 @@
 								</button>
 							{/if}
 						{:else}
-							<!-- Send Button -->
 							<button
 								type="submit"
-								class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-primary hover:bg-primary/90 text-primary-foreground rounded-xl transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+								class="send-btn"
 								disabled={!inputValue.trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing}
 								title={isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : "Send message"}
 							>
-								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
+								<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" />
 								</svg>
 							</button>
 						{/if}
+					</div>
+				</div>
+
+				<!-- Simplified Context Bar - cosmetic display only -->
+				<div class="context-bar">
+					<!-- Left: Profile & Project as display text (not interactive) -->
+					<div class="context-selectors">
+						<span class="context-selector {tab.profile ? '' : 'unset'}">
+							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+							</svg>
+							<span>{selectedProfileName}</span>
+						</span>
+
+						<span class="context-separator">•</span>
+
+						<span class="context-selector {tab.project ? '' : 'unset'}">
+							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+							</svg>
+							<span>{selectedProjectName}</span>
+						</span>
+					</div>
+
+					<!-- Right: Context % and Settings gear -->
+					<div class="context-right">
+						<span class="context-percent {contextColor}" title="{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)} tokens">
+							{Math.round(contextPercent)}%
+						</span>
+
+						<button
+							type="button"
+							onclick={openSettings}
+							class="settings-btn"
+							title="Open settings"
+						>
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+							</svg>
+						</button>
 					</div>
 				</div>
 			</div>
@@ -1102,43 +595,326 @@
 	</div>
 </div>
 
-<!-- Profile Context Menu -->
-{#if profileContextMenu.show && profileContextMenu.profile}
-	<DropdownContextMenu
-		show={profileContextMenu.show}
-		x={profileContextMenu.x}
-		y={profileContextMenu.y}
-		itemId={profileContextMenu.profile.id}
-		itemName={profileContextMenu.profile.name}
-		itemType="profile"
-		isSelected={tab.profile === profileContextMenu.profile.id}
-		isBuiltin={profileContextMenu.profile.is_builtin}
-		currentGroup={$groups.profiles.assignments[profileContextMenu.profile.id]}
-		onClose={closeProfileContextMenu}
-		on:select={handleProfileSelect}
-		on:edit={handleProfileEdit}
-		on:duplicate={handleProfileDuplicate}
-		on:delete={handleProfileDelete}
-		on:openCard={handleProfileOpenCard}
-	/>
-{/if}
+<style>
+	/* Wrapper - provides safe spacing */
+	.chat-input-wrapper {
+		padding: 0.5rem 0.75rem 0.75rem;
+		flex-shrink: 0; /* Prevents input from shrinking - stays fixed at bottom */
+	}
 
-<!-- Project Context Menu -->
-{#if projectContextMenu.show && projectContextMenu.project}
-	<DropdownContextMenu
-		show={projectContextMenu.show}
-		x={projectContextMenu.x}
-		y={projectContextMenu.y}
-		itemId={projectContextMenu.project.id}
-		itemName={projectContextMenu.project.name}
-		itemType="project"
-		isSelected={tab.project === projectContextMenu.project.id}
-		isBuiltin={false}
-		currentGroup={$groups.projects.assignments[projectContextMenu.project.id]}
-		onClose={closeProjectContextMenu}
-		on:select={handleProjectSelect}
-		on:edit={handleProjectEdit}
-		on:delete={handleProjectDelete}
-		on:openCard={handleProjectOpenCard}
-	/>
-{/if}
+	@media (min-width: 640px) {
+		.chat-input-wrapper {
+			padding: 0.75rem 1rem 1rem;
+		}
+	}
+
+	/* Container with max-width */
+	.chat-input-container {
+		max-width: 56rem;
+		margin: 0 auto;
+	}
+
+	/* Error banner */
+	.error-banner {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+		margin-bottom: 0.5rem;
+		padding: 0.5rem 0.75rem;
+		background: color-mix(in srgb, var(--destructive) 10%, transparent);
+		border: 1px solid color-mix(in srgb, var(--destructive) 30%, transparent);
+		border-radius: 0.75rem;
+		font-size: 0.8125rem;
+		color: var(--destructive);
+	}
+
+	.error-close {
+		font-size: 1.25rem;
+		line-height: 1;
+		opacity: 0.7;
+		transition: opacity 0.15s;
+	}
+
+	.error-close:hover {
+		opacity: 1;
+	}
+
+	/* Main Island */
+	.chat-island {
+		display: flex;
+		flex-direction: column;
+		background: color-mix(in srgb, var(--card) 95%, transparent);
+		backdrop-filter: blur(20px);
+		-webkit-backdrop-filter: blur(20px);
+		border: 1px solid var(--border);
+		border-radius: 1.25rem;
+		box-shadow: 0 2px 12px -2px rgba(0, 0, 0, 0.08);
+		overflow: visible;
+		transition: border-color 0.2s, box-shadow 0.2s;
+	}
+
+	.chat-island:focus-within {
+		border-color: color-mix(in srgb, var(--primary) 50%, var(--border));
+		box-shadow: 0 2px 16px -2px rgba(0, 0, 0, 0.1), 0 0 0 3px color-mix(in srgb, var(--primary) 10%, transparent);
+	}
+
+	:global(.dark) .chat-island {
+		background: color-mix(in srgb, oklch(0.16 0.01 260) 95%, transparent);
+		border-color: oklch(0.28 0.01 260);
+	}
+
+	:global(.light) .chat-island {
+		background: white;
+		border-color: oklch(0.88 0.005 260);
+		box-shadow: 0 2px 12px -2px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
+	}
+
+	/* Uploaded files section */
+	.uploaded-files {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.375rem;
+		padding: 0.5rem 0.75rem 0;
+	}
+
+	.file-chip {
+		display: flex;
+		align-items: center;
+		gap: 0.375rem;
+		padding: 0.25rem 0.5rem;
+		background: color-mix(in srgb, var(--accent) 60%, transparent);
+		border-radius: 0.5rem;
+		font-size: 0.75rem;
+	}
+
+	.file-name {
+		max-width: 100px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: var(--foreground);
+	}
+
+	.file-remove {
+		opacity: 0.5;
+		transition: opacity 0.15s, color 0.15s;
+	}
+
+	.file-remove:hover {
+		opacity: 1;
+		color: var(--destructive);
+	}
+
+	/* Input row */
+	.input-row {
+		display: flex;
+		align-items: flex-end;
+		gap: 0.5rem;
+		padding: 0.5rem;
+	}
+
+	@media (min-width: 640px) {
+		.input-row {
+			padding: 0.625rem 0.75rem;
+		}
+	}
+
+	/* Textarea wrapper */
+	.textarea-wrapper {
+		flex: 1;
+		min-width: 0;
+		position: relative;
+		background: transparent;
+		border-radius: 1rem;
+		transition: background-color 0.15s;
+	}
+
+	/* Textarea */
+	.chat-textarea {
+		width: 100%;
+		min-height: 42px;
+		max-height: 180px;
+		padding: 0.625rem 0.875rem;
+		background: transparent;
+		border: none;
+		outline: none;
+		resize: none;
+		font-size: 0.9375rem;
+		line-height: 1.5;
+		color: var(--foreground);
+		field-sizing: content;
+	}
+
+	.chat-textarea::placeholder {
+		color: var(--muted-foreground);
+		opacity: 0.6;
+	}
+
+	/* Action buttons */
+	.action-buttons {
+		display: flex;
+		align-items: center;
+		gap: 0.25rem;
+		flex-shrink: 0;
+		padding-bottom: 0.125rem;
+	}
+
+	.action-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 36px;
+		height: 36px;
+		border-radius: 0.75rem;
+		color: var(--muted-foreground);
+		transition: background-color 0.15s, color 0.15s;
+	}
+
+	.action-btn:hover:not(:disabled) {
+		background: var(--accent);
+		color: var(--foreground);
+	}
+
+	.action-btn:disabled {
+		opacity: 0.3;
+		cursor: not-allowed;
+	}
+
+	.action-btn.recording {
+		background: color-mix(in srgb, var(--destructive) 20%, transparent);
+		color: var(--destructive);
+		animation: pulse 1.5s ease-in-out infinite;
+	}
+
+	.action-btn.transcribing {
+		background: color-mix(in srgb, var(--primary) 15%, transparent);
+		color: var(--primary);
+	}
+
+	@keyframes pulse {
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0.6; }
+	}
+
+	.send-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 36px;
+		height: 36px;
+		background: var(--primary);
+		color: var(--primary-foreground);
+		border-radius: 0.75rem;
+		transition: background-color 0.15s, opacity 0.15s;
+	}
+
+	.send-btn:hover:not(:disabled) {
+		background: color-mix(in srgb, var(--primary) 90%, black);
+	}
+
+	.send-btn:disabled {
+		opacity: 0.3;
+		cursor: not-allowed;
+	}
+
+	.stop-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 36px;
+		height: 36px;
+		background: color-mix(in srgb, var(--destructive) 15%, transparent);
+		color: var(--destructive);
+		border-radius: 0.75rem;
+		transition: background-color 0.15s;
+	}
+
+	.stop-btn:hover {
+		background: color-mix(in srgb, var(--destructive) 25%, transparent);
+	}
+
+	/* Simplified Context Bar */
+	.context-bar {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+		padding: 0.375rem 0.625rem;
+		border-top: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+	}
+
+	@media (min-width: 640px) {
+		.context-bar {
+			padding: 0.5rem 0.75rem;
+		}
+	}
+
+	.context-selectors {
+		display: flex;
+		align-items: center;
+		gap: 0.375rem;
+		flex-wrap: wrap;
+	}
+
+	.context-selector {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.375rem;
+		padding: 0.25rem 0.5rem;
+		font-size: 0.75rem;
+		font-weight: 500;
+		color: var(--muted-foreground);
+		border-radius: 0.5rem;
+	}
+
+	.context-selector.unset {
+		color: var(--warning);
+	}
+
+	.context-selector span {
+		max-width: 100px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	@media (min-width: 640px) {
+		.context-selector span {
+			max-width: 140px;
+		}
+	}
+
+	.context-separator {
+		color: var(--muted-foreground);
+		opacity: 0.4;
+		font-size: 0.75rem;
+	}
+
+	.context-right {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
+	.context-percent {
+		font-size: 0.6875rem;
+		font-weight: 600;
+	}
+
+	.settings-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 32px;
+		height: 32px;
+		border-radius: 0.5rem;
+		color: var(--muted-foreground);
+		transition: background-color 0.15s, color 0.15s;
+	}
+
+	.settings-btn:hover {
+		background: var(--accent);
+		color: var(--foreground);
+	}
+</style>

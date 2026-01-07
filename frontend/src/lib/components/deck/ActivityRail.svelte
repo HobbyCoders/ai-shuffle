@@ -1,12 +1,12 @@
 <script lang="ts">
 	/**
-	 * ActivityRail - Floating pill navigation bar for The Deck
+	 * ActivityRail - Vertical navigation rail for The Deck
 	 *
 	 * Displays mode buttons with active states, badges, and tooltips.
-	 * Floats as a horizontal pill bar with glassmorphism effect.
+	 * Switches to horizontal layout on mobile.
 	 */
 
-	import { Plus, Monitor, Bot, Palette, FolderOpen, Settings } from 'lucide-svelte';
+	import { Plus, Monitor, Palette, FolderOpen, Settings } from 'lucide-svelte';
 	import type { ActivityMode, ActivityBadges } from './types';
 
 	interface Props {
@@ -34,7 +34,6 @@
 		color: string;
 	}> = [
 		{ mode: 'workspace', label: 'Workspace', color: '#3b82f6' },
-		{ mode: 'agents', label: 'Agents', color: '#10b981' },
 		{ mode: 'studio', label: 'Studio', color: '#a855f7' },
 		{ mode: 'files', label: 'Files', color: '#f59e0b' }
 	];
@@ -48,19 +47,16 @@
 	}
 </script>
 
-<div class="activity-pill" class:mobile={isMobile}>
-	<!-- Plus button -->
+<div class="activity-rail" class:mobile={isMobile}>
+	<!-- Plus button - top on desktop, included in mobile rail -->
 	<button
 		class="plus-button"
 		onclick={() => onLogoClick?.()}
 		title="New"
 	>
-		<Plus size={20} strokeWidth={2.5} />
+		<Plus size={24} strokeWidth={2} />
 		<span class="tooltip">New</span>
 	</button>
-
-	<!-- Divider -->
-	<div class="divider"></div>
 
 	<!-- Activity buttons -->
 	<div class="activities">
@@ -74,15 +70,16 @@
 				onclick={() => handleModeClick(activity.mode)}
 				title={activity.label}
 			>
+				{#if isActive}
+					<div class="active-indicator"></div>
+				{/if}
 				<div class="icon-wrapper">
 					{#if activity.mode === 'workspace'}
-						<Monitor size={20} strokeWidth={1.5} />
-					{:else if activity.mode === 'agents'}
-						<Bot size={20} strokeWidth={1.5} />
+						<Monitor size={22} strokeWidth={1.5} />
 					{:else if activity.mode === 'studio'}
-						<Palette size={20} strokeWidth={1.5} />
+						<Palette size={22} strokeWidth={1.5} />
 					{:else if activity.mode === 'files'}
-						<FolderOpen size={20} strokeWidth={1.5} />
+						<FolderOpen size={22} strokeWidth={1.5} />
 					{/if}
 				</div>
 				{#if badge !== undefined}
@@ -97,72 +94,47 @@
 		{/each}
 	</div>
 
-	<!-- Spacer to push settings to bottom -->
-	<div class="spacer"></div>
-
-	<!-- Divider -->
-	<div class="divider"></div>
-
-	<!-- Settings button -->
+	<!-- Settings button at bottom - always show, mobile layout handled by parent -->
 	<button
 		class="settings-button"
 		onclick={() => onSettingsClick?.()}
 		title="Settings"
 	>
-		<Settings size={18} strokeWidth={1.5} />
+		<Settings size={20} strokeWidth={1.5} />
 		<span class="tooltip">Settings</span>
 	</button>
 </div>
 
 <style>
-	.activity-pill {
+	.activity-rail {
 		display: flex;
 		flex-direction: column;
 		align-items: center;
-		width: 56px;
+		width: 64px;
+		height: 100%;
 		background: color-mix(in srgb, var(--card) 85%, transparent);
-		backdrop-filter: blur(20px);
-		-webkit-backdrop-filter: blur(20px);
-		border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-		border-radius: 28px;
-		padding: 10px 0;
-		gap: 4px;
-		box-shadow:
-			0 4px 24px -4px rgba(0, 0, 0, 0.15),
-			0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
+		border-right: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+		padding: 12px 0;
+		gap: 8px;
+		box-shadow: 2px 0 20px -5px rgba(0, 0, 0, 0.1);
 	}
 
-	/* Mobile: horizontal layout at bottom */
-	.activity-pill.mobile {
+	.activity-rail.mobile {
 		flex-direction: row;
-		width: auto;
-		height: 52px;
-		border-radius: 26px;
-		padding: 0 10px;
-		gap: 6px;
-	}
-
-	.divider {
-		width: 32px;
-		height: 1px;
-		background: var(--border);
-		opacity: 0.5;
-		margin: 4px 0;
-	}
-
-	.mobile .divider {
-		width: 1px;
-		height: 28px;
-		margin: 0 6px;
-	}
-
-	.spacer {
-		flex: 1;
-		min-height: 8px;
-	}
-
-	.mobile .spacer {
-		display: none;
+		width: 100%;
+		height: auto;
+		min-height: 64px;
+		border-right: none;
+		border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+		/* Safe area support for notched devices */
+		padding: 8px 16px;
+		padding-bottom: max(12px, env(safe-area-inset-bottom, 12px));
+		padding-left: max(16px, env(safe-area-inset-left, 16px));
+		padding-right: max(16px, env(safe-area-inset-right, 16px));
+		justify-content: space-around;
+		box-shadow: 0 -2px 20px -5px rgba(0, 0, 0, 0.1);
 	}
 
 	.plus-button {
@@ -170,20 +142,22 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 36px;
-		height: 36px;
-		background: var(--primary);
+		width: 40px;
+		height: 40px;
+		background: linear-gradient(135deg, var(--primary) 0%, color-mix(in srgb, var(--primary) 80%, #8b5cf6) 100%);
 		border: none;
-		border-radius: 50%;
+		border-radius: 12px;
 		color: var(--primary-foreground);
 		cursor: pointer;
 		transition: all 0.2s ease;
-		flex-shrink: 0;
+		margin-bottom: 16px;
+		box-shadow: 0 4px 12px -2px color-mix(in srgb, var(--primary) 40%, transparent);
+		-webkit-tap-highlight-color: transparent;
 	}
 
 	.plus-button:hover {
 		transform: scale(1.08);
-		box-shadow: 0 0 16px color-mix(in srgb, var(--primary) 50%, transparent);
+		box-shadow: 0 6px 20px -2px color-mix(in srgb, var(--primary) 50%, transparent);
 	}
 
 	.plus-button:active {
@@ -191,18 +165,55 @@
 	}
 
 	.mobile .plus-button {
-		width: 38px;
-		height: 38px;
+		margin-bottom: 0;
+		/* Apple HIG: minimum 44x44px touch target */
+		width: 48px;
+		height: 48px;
+		border-radius: 12px;
+	}
+
+	.plus-button .tooltip {
+		position: absolute;
+		left: calc(100% + 12px);
+		top: 50%;
+		transform: translateY(-50%);
+		padding: 6px 10px;
+		background: var(--popover);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		font-size: 0.75rem;
+		color: var(--popover-foreground);
+		white-space: nowrap;
+		opacity: 0;
+		visibility: hidden;
+		transition: all 0.15s ease;
+		pointer-events: none;
+		z-index: 100;
+		box-shadow: var(--shadow-m);
+	}
+
+	.mobile .plus-button .tooltip {
+		left: 50%;
+		top: auto;
+		bottom: calc(100% + 12px);
+		transform: translateX(-50%);
+	}
+
+	.plus-button:hover .tooltip {
+		opacity: 1;
+		visibility: visible;
 	}
 
 	.activities {
 		display: flex;
 		flex-direction: column;
-		gap: 2px;
+		gap: 4px;
+		flex: 1;
 	}
 
 	.mobile .activities {
 		flex-direction: row;
+		flex: initial;
 		gap: 4px;
 	}
 
@@ -211,14 +222,23 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 40px;
-		height: 40px;
+		width: 48px;
+		height: 48px;
 		background: transparent;
 		border: none;
-		border-radius: 50%;
+		border-radius: 12px;
 		color: var(--muted-foreground);
 		cursor: pointer;
-		transition: all 0.15s ease;
+		transition: all 0.2s ease;
+		-webkit-tap-highlight-color: transparent;
+	}
+
+	/* Mobile: ensure 44x44px minimum touch target */
+	.mobile .activity-button {
+		width: 48px;
+		height: 48px;
+		min-width: 48px;
+		min-height: 48px;
 	}
 
 	.activity-button:hover {
@@ -226,31 +246,48 @@
 		background: color-mix(in srgb, var(--foreground) 8%, transparent);
 	}
 
+	.activity-button:active {
+		transform: scale(0.92);
+	}
+
 	.activity-button.active {
 		color: var(--activity-color);
 		background: color-mix(in srgb, var(--activity-color) 15%, transparent);
+		box-shadow: 0 0 16px -2px color-mix(in srgb, var(--activity-color) 30%, transparent);
 	}
 
-	.activity-button.active .icon-wrapper {
-		filter: drop-shadow(0 0 6px var(--activity-color));
+	.active-indicator {
+		position: absolute;
+		left: 0;
+		top: 50%;
+		transform: translateY(-50%);
+		width: 3px;
+		height: 24px;
+		background: var(--activity-color);
+		border-radius: 0 2px 2px 0;
+		box-shadow: 0 0 12px var(--activity-color), 0 0 24px color-mix(in srgb, var(--activity-color) 60%, transparent);
 	}
 
-	.mobile .activity-button {
-		width: 42px;
-		height: 42px;
+	.mobile .active-indicator {
+		left: 50%;
+		top: auto;
+		bottom: 0;
+		transform: translateX(-50%);
+		width: 24px;
+		height: 3px;
+		border-radius: 2px 2px 0 0;
 	}
 
 	.icon-wrapper {
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		transition: filter 0.15s ease;
 	}
 
 	.badge {
 		position: absolute;
-		top: 2px;
-		right: 2px;
+		top: 4px;
+		right: 4px;
 		min-width: 16px;
 		height: 16px;
 		padding: 0 4px;
@@ -262,7 +299,6 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
 	}
 
 	.badge.dot {
@@ -270,11 +306,10 @@
 		height: 8px;
 		min-width: 8px;
 		padding: 0;
-		top: 6px;
-		right: 6px;
+		top: 8px;
+		right: 8px;
 	}
 
-	/* Tooltips appear to the right on desktop (vertical), above on mobile (horizontal) */
 	.tooltip {
 		position: absolute;
 		left: calc(100% + 12px);
@@ -302,14 +337,13 @@
 		transform: translateX(-50%);
 	}
 
-	.plus-button:hover .tooltip,
 	.activity-button:hover .tooltip,
 	.settings-button:hover .tooltip {
 		opacity: 1;
 		visibility: visible;
 	}
 
-	/* Disable tooltips on mobile - touch hover states cause issues */
+	/* Disable tooltips on mobile - touch hover states cause layout issues */
 	.mobile .activity-button:hover .tooltip,
 	.mobile .settings-button:hover .tooltip,
 	.mobile .plus-button:hover .tooltip {
@@ -322,15 +356,16 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 36px;
-		height: 36px;
+		width: 40px;
+		height: 40px;
 		background: transparent;
 		border: none;
-		border-radius: 50%;
+		border-radius: 10px;
 		color: var(--muted-foreground);
 		cursor: pointer;
-		transition: all 0.15s ease;
-		flex-shrink: 0;
+		transition: all 0.2s ease;
+		margin-top: auto;
+		-webkit-tap-highlight-color: transparent;
 	}
 
 	.settings-button:hover {
@@ -338,8 +373,78 @@
 		background: color-mix(in srgb, var(--foreground) 8%, transparent);
 	}
 
+	.settings-button:active {
+		transform: scale(0.92);
+	}
+
+	/* Mobile-specific settings button styling - ensure 44x44px touch target */
 	.mobile .settings-button {
-		width: 38px;
-		height: 38px;
+		margin-top: 0;
+		width: 48px;
+		height: 48px;
+		min-width: 48px;
+		min-height: 48px;
+	}
+
+	.mobile .settings-button .tooltip {
+		left: 50%;
+		top: auto;
+		bottom: calc(100% + 12px);
+		transform: translateX(-50%);
+	}
+
+	/* Tablet adjustments - medium screens */
+	@media (min-width: 600px) and (max-width: 1024px) {
+		/* Increase icon sizes for tablet */
+		.mobile .plus-button {
+			width: 52px;
+			height: 52px;
+		}
+
+		.mobile .activity-button {
+			width: 52px;
+			height: 52px;
+			min-width: 52px;
+			min-height: 52px;
+		}
+
+		.mobile .activity-button .icon-wrapper :global(svg) {
+			width: 24px;
+			height: 24px;
+		}
+
+		.mobile .settings-button {
+			width: 52px;
+			height: 52px;
+			min-width: 52px;
+			min-height: 52px;
+		}
+
+		.mobile .settings-button :global(svg) {
+			width: 22px;
+			height: 22px;
+		}
+
+		.mobile .activities {
+			gap: 8px;
+		}
+	}
+
+	/* Landscape orientation adjustments */
+	@media (orientation: landscape) and (max-height: 500px) {
+		.mobile {
+			min-height: 56px;
+			padding: 6px 16px;
+			padding-bottom: max(8px, env(safe-area-inset-bottom, 8px));
+		}
+
+		.mobile .plus-button,
+		.mobile .activity-button,
+		.mobile .settings-button {
+			width: 44px;
+			height: 44px;
+			min-width: 44px;
+			min-height: 44px;
+		}
 	}
 </style>
