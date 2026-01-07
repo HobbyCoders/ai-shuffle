@@ -29,12 +29,6 @@ async def health_check():
     }
 
 
-@router.get("/", response_model=HealthResponse)
-async def root():
-    """Root endpoint (same as health)"""
-    return await health_check()
-
-
 @router.get("/api/v1/health", response_model=HealthResponse)
 async def api_health_check():
     """API health check endpoint"""

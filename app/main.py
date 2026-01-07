@@ -94,165 +94,40 @@ app.include_router(query.router)
 # Serve static files (Svelte build) if they exist
 static_dir = Path(__file__).parent / "static"
 if static_dir.exists():
-    app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
+    # Mount static assets (js, css, etc.) at /_app
+    app_assets = static_dir / "_app"
+    if app_assets.exists():
+        app.mount("/_app", StaticFiles(directory=str(app_assets)), name="app_assets")
 
+    # Serve other static files
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static_files")
 
-# Legacy endpoints for backward compatibility
-# These map old endpoints to new API structure
+    # Serve index.html for SPA routes
+    from fastapi.responses import FileResponse
 
-from fastapi import HTTPException, status
-from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+    @app.get("/")
+    async def serve_spa_root():
+        return FileResponse(static_dir / "index.html")
 
+    @app.get("/login")
+    async def serve_spa_login():
+        return FileResponse(static_dir / "index.html")
 
-class LegacyChatRequest(BaseModel):
-    prompt: str = Field(..., description="The prompt/question to send to Claude")
-    model: Optional[str] = Field(None, description="Claude model to use")
-    system_prompt: Optional[str] = Field(None, description="Optional system instructions")
+    @app.get("/setup")
+    async def serve_spa_setup():
+        return FileResponse(static_dir / "index.html")
 
+    @app.get("/chat")
+    async def serve_spa_chat():
+        return FileResponse(static_dir / "index.html")
 
-class LegacyConversationMessage(BaseModel):
-    role: str = Field(..., description="'user' or 'assistant'")
-    content: str = Field(..., description="Message content")
+    @app.get("/chat/{path:path}")
+    async def serve_spa_chat_path(path: str):
+        return FileResponse(static_dir / "index.html")
 
-
-class LegacyConversationRequest(BaseModel):
-    messages: List[LegacyConversationMessage] = Field(..., description="Conversation history")
-    system_prompt: Optional[str] = Field(None, description="System instructions")
-    model: Optional[str] = Field(None, description="Claude model to use")
-
-
-@app.post("/chat")
-async def legacy_chat(request: LegacyChatRequest):
-    """Legacy chat endpoint - maps to /api/v1/query"""
-    from app.core.query_engine import execute_query
-
-    if not auth_service.is_claude_authenticated():
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Claude CLI not authenticated. Please run 'claude login' in the container."
-        )
-
-    try:
-        overrides = {}
-        if request.model:
-            overrides["model"] = request.model
-        if request.system_prompt:
-            overrides["system_prompt_append"] = request.system_prompt
-
-        result = await execute_query(
-            prompt=request.prompt,
-            profile_id="code-reader",
-            overrides=overrides if overrides else None
-        )
-
-        return {
-            "response": result["response"],
-            "status": "success",
-            "metadata": result["metadata"]
-        }
-
-    except Exception as e:
-        logger.error(f"Legacy chat error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Claude SDK error: {str(e)}"
-        )
-
-
-@app.post("/conversation")
-async def legacy_conversation(request: LegacyConversationRequest):
-    """Legacy conversation endpoint"""
-    from app.core.query_engine import execute_query
-
-    if not auth_service.is_claude_authenticated():
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Claude CLI not authenticated"
-        )
-
-    try:
-        # Get the last user message
-        last_user_msg = None
-        for msg in reversed(request.messages):
-            if msg.role == "user":
-                last_user_msg = msg.content
-                break
-
-        if not last_user_msg:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No user message found in conversation"
-            )
-
-        overrides = {}
-        if request.model:
-            overrides["model"] = request.model
-        if request.system_prompt:
-            overrides["system_prompt_append"] = request.system_prompt
-
-        result = await execute_query(
-            prompt=last_user_msg,
-            profile_id="code-reader",
-            overrides=overrides if overrides else None
-        )
-
-        return {
-            "response": result["response"],
-            "status": "success",
-            "metadata": result["metadata"]
-        }
-
-    except Exception as e:
-        logger.error(f"Legacy conversation error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Claude SDK error: {str(e)}"
-        )
-
-
-@app.get("/auth/status")
-async def legacy_auth_status():
-    """Legacy auth status endpoint"""
-    return auth_service.get_claude_auth_info()
-
-
-@app.get("/auth/login-instructions")
-async def legacy_login_instructions():
-    """Legacy login instructions endpoint"""
-    return auth_service.get_login_instructions()
-
-
-@app.get("/version")
-async def legacy_version():
-    """Legacy version endpoint"""
-    import subprocess
-
-    try:
-        result = subprocess.run(
-            ['claude', '--version'],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-
-        if result.returncode == 0:
-            return {
-                "version": result.stdout.strip(),
-                "status": "success"
-            }
-        else:
-            return {
-                "version": "unknown",
-                "status": "error",
-                "error": result.stderr
-            }
-    except Exception as e:
-        return {
-            "version": "unknown",
-            "status": "error",
-            "error": str(e)
-        }
+    @app.get("/favicon.svg")
+    async def serve_favicon():
+        return FileResponse(static_dir / "favicon.svg")
 
 
 if __name__ == "__main__":

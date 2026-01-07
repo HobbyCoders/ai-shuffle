@@ -41,6 +41,10 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy application code first
+COPY app/ ./app/
+COPY .env.example .
+
 # Build frontend
 COPY frontend/package*.json ./frontend/
 WORKDIR /app/frontend
@@ -49,14 +53,10 @@ RUN npm install
 COPY frontend/ ./
 RUN npm run build
 
-# Copy built frontend to app/static
+# Copy built frontend to app/static (after app/ is copied)
 RUN mkdir -p /app/app/static && cp -r build/* /app/app/static/
 
 WORKDIR /app
-
-# Copy application code - new modular structure
-COPY app/ ./app/
-COPY .env.example .
 
 # Copy entrypoint script
 COPY entrypoint.sh /entrypoint.sh

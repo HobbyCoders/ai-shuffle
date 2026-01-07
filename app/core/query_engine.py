@@ -52,12 +52,10 @@ def build_options_from_profile(
     override_append = overrides.get("system_prompt_append", "")
 
     if system_prompt is None:
-        # No preset, just security instructions
-        final_system_prompt = {
-            "type": "preset",
-            "preset": "claude_code",
-            "append": SECURITY_INSTRUCTIONS + ("\n\n" + override_append if override_append else "")
-        }
+        # No preset - just security instructions as plain text
+        final_system_prompt = SECURITY_INSTRUCTIONS
+        if override_append:
+            final_system_prompt += "\n\n" + override_append
     elif isinstance(system_prompt, dict):
         # Has preset config
         existing_append = system_prompt.get("append", "")
@@ -73,12 +71,10 @@ def build_options_from_profile(
             "append": full_append
         }
     else:
-        # String system prompt
-        final_system_prompt = {
-            "type": "preset",
-            "preset": "claude_code",
-            "append": SECURITY_INSTRUCTIONS + "\n\n" + str(system_prompt) + ("\n\n" + override_append if override_append else "")
-        }
+        # String system prompt - use it directly with security instructions
+        final_system_prompt = SECURITY_INSTRUCTIONS + "\n\n" + str(system_prompt)
+        if override_append:
+            final_system_prompt += "\n\n" + override_append
 
     # Build options
     options = ClaudeAgentOptions(
@@ -162,8 +158,9 @@ async def execute_query(
     try:
         async for message in query(prompt=prompt, options=options):
             if isinstance(message, SystemMessage):
-                if message.subtype == "init":
-                    sdk_session_id = message.session_id
+                # session_id comes in warmup message data after first query
+                if message.subtype == "init" and "session_id" in message.data:
+                    sdk_session_id = message.data["session_id"]
 
             elif isinstance(message, AssistantMessage):
                 for block in message.content:
@@ -282,8 +279,9 @@ async def stream_query(
     try:
         async for message in query(prompt=prompt, options=options):
             if isinstance(message, SystemMessage):
-                if message.subtype == "init":
-                    sdk_session_id = message.session_id
+                # session_id comes in warmup message data after first query
+                if message.subtype == "init" and "session_id" in message.data:
+                    sdk_session_id = message.data["session_id"]
 
             elif isinstance(message, AssistantMessage):
                 for block in message.content:

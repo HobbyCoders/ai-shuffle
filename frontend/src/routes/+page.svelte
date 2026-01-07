@@ -62,7 +62,7 @@
 
 				<!-- Profile selector -->
 				<select
-					bind:value={$selectedProfile}
+					value={$selectedProfile}
 					on:change={(e) => chat.setProfile(e.currentTarget.value)}
 					class="input !w-auto !py-1.5 text-sm"
 				>
