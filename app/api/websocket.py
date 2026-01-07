@@ -5,13 +5,16 @@ Primary endpoint: /ws/chat/{session_id}
 - Handles all chat interactions via WebSocket
 - Streams Claude responses directly to client
 - Simple, reliable, no race conditions
+
+Additional endpoints:
+- /ws/cli/{session_id} - Interactive CLI bridge for commands like /rewind
 """
 
 import logging
 import json
 import asyncio
 import uuid
-from typing import Optional
+from typing import Optional, Dict, Any
 from datetime import datetime
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, HTTPException, status
@@ -21,6 +24,11 @@ from app.core.sync_engine import sync_engine, SyncEvent
 from app.db import database
 from app.core.auth import auth_service
 from app.core.profiles import get_profile_or_builtin
+from app.core.cli_bridge import CLIBridge, RewindParser
+from app.core.slash_commands import (
+    discover_commands, get_command_by_name, is_slash_command,
+    parse_command_input, is_interactive_command, get_all_commands
+)
 
 logger = logging.getLogger(__name__)
 
@@ -206,18 +214,78 @@ async def chat_websocket(
                         _active_chat_sessions[session_id] = query_task
 
                     elif msg_type == "stop":
-                        # Stop current query
+                        # Stop current query - use interrupt_session for proper SDK-level cancellation
                         session_id = data.get("session_id") or current_session_id
-                        if session_id and session_id in _active_chat_sessions:
-                            _active_chat_sessions[session_id].cancel()
+                        if session_id:
+                            from app.core.query_engine import interrupt_session
+                            # First, try to interrupt at the SDK level (this signals Claude to stop)
+                            interrupted = await interrupt_session(session_id)
+                            logger.info(f"Interrupt session {session_id}: {interrupted}")
+
+                            # Then cancel the asyncio task as a backup
+                            if session_id in _active_chat_sessions:
+                                task = _active_chat_sessions[session_id]
+                                if not task.done():
+                                    task.cancel()
+                                    try:
+                                        await asyncio.wait_for(task, timeout=2.0)
+                                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                                        pass
 
                     elif msg_type == "load_session":
-                        # Load a session's message history
+                        # Load a session's message history from JSONL file
                         session_id = data.get("session_id")
                         if session_id:
                             session = database.get_session(session_id)
                             if session:
-                                messages = database.get_session_messages(session_id)
+                                # Try to load from JSONL file first (source of truth)
+                                sdk_session_id = session.get("sdk_session_id")
+                                messages = []
+
+                                if sdk_session_id:
+                                    try:
+                                        from app.core.jsonl_parser import parse_session_history
+                                        # Get working dir from project if available
+                                        working_dir = "/workspace"
+                                        project_id = session.get("project_id")
+                                        if project_id:
+                                            project = database.get_project(project_id)
+                                            if project:
+                                                from app.core.config import settings
+                                                working_dir = str(settings.workspace_dir / project["path"])
+
+                                        messages = parse_session_history(sdk_session_id, working_dir)
+                                        logger.info(f"Loaded {len(messages)} messages from JSONL for session {session_id}")
+                                    except Exception as e:
+                                        logger.error(f"Failed to parse JSONL for session {session_id}: {e}")
+                                        messages = []
+
+                                # Fall back to database if JSONL not available or failed
+                                if not messages:
+                                    db_messages = database.get_session_messages(session_id)
+                                    # Transform DB messages to streaming format
+                                    for m in db_messages:
+                                        msg_type_value = None
+                                        if m.get("tool_name"):
+                                            msg_type_value = "tool_use"
+                                        elif m.get("role") == "assistant":
+                                            msg_type_value = "text"
+                                        elif m.get("role") in ("tool_use", "tool_result"):
+                                            msg_type_value = m.get("role")
+
+                                        messages.append({
+                                            "id": f"msg-{m.get('id', 0)}",
+                                            "role": "assistant" if m.get("role") in ("tool_use", "tool_result") else m.get("role"),
+                                            "content": m.get("content", ""),
+                                            "type": msg_type_value,
+                                            "toolName": m.get("tool_name"),
+                                            "toolId": m.get("tool_id"),
+                                            "toolInput": m.get("tool_input"),
+                                            "metadata": m.get("metadata"),
+                                            "streaming": False
+                                        })
+                                    logger.info(f"Loaded {len(messages)} messages from DB for session {session_id}")
+
                                 current_session_id = session_id
                                 await send_json({
                                     "type": "history",
@@ -482,3 +550,195 @@ async def global_sync_websocket(
 
     except Exception as e:
         logger.error(f"Global WebSocket error for device={device_id}: {e}")
+
+
+# =============================================================================
+# CLI BRIDGE WEBSOCKET - Interactive terminal for /rewind and similar commands
+# =============================================================================
+
+# Track active CLI bridges
+_active_cli_bridges: Dict[str, CLIBridge] = {}
+
+
+@router.websocket("/ws/cli/{session_id}")
+async def cli_websocket(
+    websocket: WebSocket,
+    session_id: str,
+    token: Optional[str] = Query(None, description="Authentication token")
+):
+    """
+    WebSocket endpoint for interactive CLI commands like /rewind.
+
+    This creates a PTY bridge to the Claude CLI, allowing the frontend
+    to render a terminal and interact with commands that require
+    keyboard input (arrow keys, Enter, etc.).
+
+    Message types FROM server:
+    - output: Terminal output data (may include ANSI codes)
+    - ready: CLI is ready for input
+    - exit: CLI process has exited
+    - error: Error occurred
+    - rewind_complete: Rewind operation completed with checkpoint info
+
+    Message types TO server:
+    - input: Raw text input
+    - key: Special key (up, down, enter, escape, etc.)
+    - resize: Terminal resize {cols, rows}
+    - start: Start CLI with command {command: "/rewind"}
+    - stop: Stop the CLI process
+    """
+    await websocket.accept()
+
+    if not await authenticate_websocket(websocket, token):
+        await websocket.close(code=4001, reason="Authentication failed")
+        return
+
+    # Get session info
+    session = database.get_session(session_id)
+    if not session:
+        await websocket.close(code=4004, reason="Session not found")
+        return
+
+    sdk_session_id = session.get("sdk_session_id")
+    if not sdk_session_id:
+        await websocket.send_json({
+            "type": "error",
+            "message": "Session has no SDK session ID - cannot use CLI commands"
+        })
+        await websocket.close(code=4005, reason="No SDK session")
+        return
+
+    # Get working directory from project or profile
+    working_dir = "/workspace"
+    project_id = session.get("project_id")
+    if project_id:
+        project = database.get_project(project_id)
+        if project:
+            from app.core.config import settings
+            working_dir = str(settings.workspace_dir / project["path"])
+
+    logger.info(f"CLI WebSocket connected for session {session_id}, sdk_session={sdk_session_id}")
+
+    cli_bridge: Optional[CLIBridge] = None
+    output_buffer = ""  # For parsing rewind output
+
+    async def on_output(data: str):
+        """Handle CLI output"""
+        nonlocal output_buffer
+        output_buffer += data
+
+        if websocket.client_state == WebSocketState.CONNECTED:
+            await websocket.send_json({
+                "type": "output",
+                "data": data
+            })
+
+            # Check if rewind completed
+            if RewindParser.is_rewind_complete(output_buffer):
+                checkpoint_msg = RewindParser.get_selected_checkpoint_message(output_buffer)
+                selected_option = RewindParser.parse_selected_option(output_buffer)
+
+                await websocket.send_json({
+                    "type": "rewind_complete",
+                    "checkpoint_message": checkpoint_msg,
+                    "selected_option": selected_option,
+                    "options": {
+                        1: "Restore code and conversation",
+                        2: "Restore conversation",
+                        3: "Restore code",
+                        4: "Never mind"
+                    }
+                })
+
+    async def on_exit(exit_code: int):
+        """Handle CLI exit"""
+        if websocket.client_state == WebSocketState.CONNECTED:
+            await websocket.send_json({
+                "type": "exit",
+                "exit_code": exit_code
+            })
+
+    try:
+        while True:
+            try:
+                data = await asyncio.wait_for(
+                    websocket.receive_json(),
+                    timeout=300.0  # 5 minute timeout for CLI operations
+                )
+
+                msg_type = data.get("type")
+
+                if msg_type == "start":
+                    # Start CLI with specified command
+                    command = data.get("command", "/rewind")
+
+                    if cli_bridge and cli_bridge.is_running:
+                        await cli_bridge.stop()
+
+                    output_buffer = ""  # Reset buffer
+
+                    cli_bridge = CLIBridge(
+                        session_id=session_id,
+                        sdk_session_id=sdk_session_id,
+                        working_dir=working_dir,
+                        on_output=on_output,
+                        on_exit=on_exit
+                    )
+
+                    success = await cli_bridge.start(command)
+                    if success:
+                        _active_cli_bridges[session_id] = cli_bridge
+                        await websocket.send_json({
+                            "type": "ready",
+                            "command": command
+                        })
+                    else:
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": "Failed to start CLI"
+                        })
+
+                elif msg_type == "input":
+                    # Send raw input
+                    if cli_bridge and cli_bridge.is_running:
+                        await cli_bridge.send_input(data.get("data", ""))
+
+                elif msg_type == "key":
+                    # Send special key
+                    if cli_bridge and cli_bridge.is_running:
+                        await cli_bridge.send_key(data.get("key", ""))
+
+                elif msg_type == "resize":
+                    # Resize terminal
+                    if cli_bridge and cli_bridge.is_running:
+                        cols = data.get("cols", 80)
+                        rows = data.get("rows", 24)
+                        await cli_bridge.resize(cols, rows)
+
+                elif msg_type == "stop":
+                    # Stop CLI
+                    if cli_bridge:
+                        await cli_bridge.stop()
+                        cli_bridge = None
+
+                elif msg_type == "pong":
+                    pass
+
+            except asyncio.TimeoutError:
+                if websocket.client_state != WebSocketState.CONNECTED:
+                    break
+                # Send ping
+                await websocket.send_json({"type": "ping"})
+
+    except WebSocketDisconnect:
+        logger.info(f"CLI WebSocket disconnected for session {session_id}")
+
+    except Exception as e:
+        logger.error(f"CLI WebSocket error for session {session_id}: {e}", exc_info=True)
+
+    finally:
+        # Clean up CLI bridge
+        if cli_bridge:
+            await cli_bridge.stop()
+        if session_id in _active_cli_bridges:
+            del _active_cli_bridges[session_id]

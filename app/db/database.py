@@ -564,6 +564,7 @@ def get_sessions(
     profile_id: Optional[str] = None,
     status: Optional[str] = None,
     api_user_id: Optional[str] = None,
+    api_users_only: bool = False,
     limit: int = 50,
     offset: int = 0
 ) -> List[Dict[str, Any]]:
@@ -580,7 +581,10 @@ def get_sessions(
     if status:
         query += " AND status = ?"
         params.append(status)
-    if api_user_id is not None:
+    if api_users_only:
+        # Filter for sessions that have an API user (exclude admin sessions)
+        query += " AND api_user_id IS NOT NULL"
+    elif api_user_id is not None:
         if api_user_id:
             query += " AND api_user_id = ?"
             params.append(api_user_id)
@@ -722,6 +726,28 @@ def add_session_message(
             "metadata": metadata,
             "created_at": now
         }
+
+
+def delete_session_message(session_id: str, message_id: int) -> bool:
+    """Delete a specific message from a session"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM session_messages WHERE session_id = ? AND id = ?",
+            (session_id, message_id)
+        )
+        return cursor.rowcount > 0
+
+
+def delete_session_messages_after(session_id: str, message_id: int) -> int:
+    """Delete all messages after a specific message ID (for rewind)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM session_messages WHERE session_id = ? AND id > ?",
+            (session_id, message_id)
+        )
+        return cursor.rowcount
 
 
 # ============================================================================

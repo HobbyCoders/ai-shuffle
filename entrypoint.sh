@@ -66,6 +66,32 @@ if [ -f /home/appuser/.claude/.credentials.json ]; then
     CREDS_SIZE=$(stat -c%s /home/appuser/.claude/.credentials.json 2>/dev/null || echo "0")
     if [ "$CREDS_SIZE" -gt "10" ]; then
         echo "Claude Code credentials found in volume (${CREDS_SIZE} bytes)"
+
+        # Ensure settings.json has hasCompletedOnboarding to skip CLI onboarding wizard
+        SETTINGS_FILE="/home/appuser/.claude/settings.json"
+        if [ -f "$SETTINGS_FILE" ]; then
+            # Check if hasCompletedOnboarding is already set
+            if ! grep -q '"hasCompletedOnboarding"' "$SETTINGS_FILE" 2>/dev/null; then
+                echo "Adding hasCompletedOnboarding to settings.json..."
+                # Use Python to safely update JSON
+                python3 -c "
+import json
+with open('$SETTINGS_FILE', 'r') as f:
+    data = json.load(f)
+data['hasCompletedOnboarding'] = True
+if 'theme' not in data:
+    data['theme'] = 'dark'
+with open('$SETTINGS_FILE', 'w') as f:
+    json.dump(data, f, indent=2)
+print('Settings updated with hasCompletedOnboarding=true')
+" 2>/dev/null || echo "Could not update settings.json"
+            fi
+        else
+            # Create settings.json with required fields
+            echo "Creating settings.json with hasCompletedOnboarding..."
+            echo '{"theme": "dark", "hasCompletedOnboarding": true}' > "$SETTINGS_FILE"
+        fi
+        chown appuser:appuser "$SETTINGS_FILE" 2>/dev/null || true
     fi
 else
     echo "Claude Code: No credentials found - login via web UI required"

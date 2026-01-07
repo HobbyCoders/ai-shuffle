@@ -68,6 +68,13 @@ interface TabsState {
 	adminSessionsFilter: string | null; // null = all, '' = admin only, 'user_id' = specific user
 	defaultProfile: string;
 	defaultProject: string;
+	// Selection state for batch operations
+	selectedSessionIds: Set<string>;
+	selectedAdminSessionIds: Set<string>;
+	selectionMode: boolean;
+	adminSelectionMode: boolean;
+	// Loading state to prevent race conditions
+	sessionsLoading: boolean;
 }
 
 // WebSocket connections per tab
@@ -117,7 +124,14 @@ function createTabsStore() {
 		apiUsers: [],
 		adminSessionsFilter: null,
 		defaultProfile: getPersistedProfile(),
-		defaultProject: getPersistedProject()
+		defaultProject: getPersistedProject(),
+		// Initialize selection state
+		selectedSessionIds: new Set<string>(),
+		selectedAdminSessionIds: new Set<string>(),
+		selectionMode: false,
+		adminSelectionMode: false,
+		// Initialize loading state
+		sessionsLoading: false
 	});
 
 	/**
@@ -276,14 +290,30 @@ function createTabsStore() {
 
 		switch (msgType) {
 			case 'history': {
-				const messages = (data.messages as Array<Record<string, unknown>>)?.map((m, i) => ({
-					id: `msg-${m.id || i}`,
-					role: m.role as 'user' | 'assistant',
-					content: m.content as string,
-					type: m.role === 'assistant' ? 'text' as const : undefined,
-					metadata: m.metadata as Record<string, unknown>,
-					streaming: false
-				})) || [];
+				// Handle both JSONL format (with explicit type) and legacy DB format
+				const messages = (data.messages as Array<Record<string, unknown>>)?.map((m, i) => {
+					// Determine message type - JSONL messages have explicit 'type' field
+					let msgType: MessageType | undefined = m.type as MessageType | undefined;
+
+					// Legacy DB format: infer type from role
+					if (!msgType && m.role === 'assistant') {
+						msgType = 'text';
+					} else if (!msgType && (m.role === 'tool_use' || m.role === 'tool_result')) {
+						msgType = m.role as MessageType;
+					}
+
+					return {
+						id: String(m.id || `msg-${i}`),
+						role: (m.role === 'tool_use' || m.role === 'tool_result' ? 'assistant' : m.role) as 'user' | 'assistant',
+						content: m.content as string,
+						type: msgType,
+						toolName: (m.toolName || m.tool_name) as string | undefined,
+						toolId: m.toolId as string | undefined,
+						toolInput: (m.toolInput || m.tool_input) as Record<string, unknown> | undefined,
+						metadata: m.metadata as Record<string, unknown>,
+						streaming: false
+					};
+				}) || [];
 
 				updateTab(tabId, {
 					sessionId: data.session_id as string,
@@ -397,14 +427,28 @@ function createTabsStore() {
 
 						const messages = [...tab.messages];
 						const toolUseId = data.tool_use_id as string;
-						const toolUseIdx = messages.findLastIndex(
-							m => m.type === 'tool_use' && (m.toolId === toolUseId || m.streaming)
-						);
-						if (toolUseIdx !== -1) {
-							messages[toolUseIdx] = {
-								...messages[toolUseIdx],
-								streaming: false
-							};
+
+						// Find and update the matching tool_use message
+						// First try to match by toolId, then fall back to any streaming tool
+						let foundByToolId = false;
+						for (let i = messages.length - 1; i >= 0; i--) {
+							const m = messages[i];
+							if (m.type === 'tool_use' && m.toolId === toolUseId) {
+								messages[i] = { ...m, streaming: false };
+								foundByToolId = true;
+								break;
+							}
+						}
+
+						// If not found by toolId, update any streaming tool_use message
+						if (!foundByToolId) {
+							for (let i = messages.length - 1; i >= 0; i--) {
+								const m = messages[i];
+								if (m.type === 'tool_use' && m.streaming) {
+									messages[i] = { ...m, streaming: false };
+									break;
+								}
+							}
 						}
 
 						messages.push({
@@ -480,7 +524,11 @@ function createTabsStore() {
 				break;
 			}
 
-			case 'stopped': {
+			case 'stopped':
+			case 'interrupted': {
+				// Both 'stopped' (from task cancellation) and 'interrupted' (from SDK interrupt)
+				// should be handled the same way - stop streaming and mark as stopped
+				console.log(`[Tab ${tabId}] Received ${msgType} message`);
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
@@ -549,12 +597,14 @@ function createTabsStore() {
 	 * For API users: the backend automatically filters to their sessions
 	 */
 	async function loadSessionsInternal() {
+		update(s => ({ ...s, sessionsLoading: true }));
 		try {
 			// Load user's own sessions (admin_only=true for admins gets sessions without api_user_id)
 			const sessions = await api.get<Session[]>('/sessions?limit=50&admin_only=true');
-			update(s => ({ ...s, sessions }));
+			update(s => ({ ...s, sessions, sessionsLoading: false }));
 		} catch (e) {
 			console.error('Failed to load sessions:', e);
+			update(s => ({ ...s, sessionsLoading: false }));
 		}
 	}
 
@@ -565,9 +615,12 @@ function createTabsStore() {
 		try {
 			let url = '/sessions?limit=50';
 			if (apiUserId) {
+				// Filter by specific API user
 				url += `&api_user_id=${encodeURIComponent(apiUserId)}`;
+			} else {
+				// Show all API user sessions (exclude admin's own sessions)
+				url += '&api_users_only=true';
 			}
-			// Don't add admin_only - we want API user sessions here
 			const adminSessions = await api.get<Session[]>(url);
 			update(s => ({ ...s, adminSessions, adminSessionsFilter: apiUserId ?? null }));
 		} catch (e) {
@@ -732,6 +785,10 @@ function createTabsStore() {
 
 		/**
 		 * Stop generation in a specific tab
+		 *
+		 * Note: We do NOT set isStreaming: false here. We wait for the backend
+		 * to send a 'stopped' message confirming the stop was successful.
+		 * This prevents the UI from showing "stopped" while the backend continues.
 		 */
 		stopGeneration(tabId: string) {
 			const tab = getTab(tabId);
@@ -739,13 +796,15 @@ function createTabsStore() {
 
 			const ws = tabConnections.get(tabId);
 			if (ws?.readyState === WebSocket.OPEN && tab.sessionId) {
+				console.log(`[Tab ${tabId}] Sending stop request for session ${tab.sessionId}`);
 				ws.send(JSON.stringify({
 					type: 'stop',
 					session_id: tab.sessionId
 				}));
 			}
 
-			updateTab(tabId, { isStreaming: false });
+			// Don't set isStreaming: false here - wait for 'stopped' confirmation from backend
+			// The backend will send either 'stopped' or 'done' when it actually stops
 		},
 
 		/**
@@ -754,14 +813,29 @@ function createTabsStore() {
 		async loadSessionInTab(tabId: string, sessionId: string) {
 			try {
 				const session = await api.get<Session & { messages: Array<Record<string, unknown>> }>(`/sessions/${sessionId}`);
-				const messages: ChatMessage[] = session.messages.map((m, i) => ({
-					id: `msg-${m.id || i}`,
-					role: m.role as 'user' | 'assistant',
-					content: m.content as string,
-					type: m.role === 'assistant' ? 'text' as const : undefined,
-					metadata: m.metadata as Record<string, unknown>,
-					streaming: false
-				}));
+				const messages: ChatMessage[] = session.messages.map((m, i) => {
+					// Determine message type - JSONL messages have explicit 'type' field
+					let msgType: MessageType | undefined = m.type as MessageType | undefined;
+
+					// Legacy DB format: infer type from role
+					if (!msgType && m.role === 'assistant') {
+						msgType = 'text';
+					} else if (!msgType && (m.role === 'tool_use' || m.role === 'tool_result')) {
+						msgType = m.role as MessageType;
+					}
+
+					return {
+						id: String(m.id || `msg-${i}`),
+						role: (m.role === 'tool_use' || m.role === 'tool_result' ? 'assistant' : m.role) as 'user' | 'assistant',
+						content: m.content as string,
+						type: msgType,
+						toolName: (m.toolName || m.tool_name) as string | undefined,
+						toolId: m.toolId as string | undefined,
+						toolInput: (m.toolInput || m.tool_input) as Record<string, unknown> | undefined,
+						metadata: m.metadata as Record<string, unknown>,
+						streaming: false
+					};
+				});
 
 				// Generate title from first user message
 				let title = 'Chat';
@@ -917,6 +991,115 @@ function createTabsStore() {
 						: tab
 				)
 			}));
+		},
+
+		// Selection mode methods
+		toggleSelectionMode(isAdmin: boolean = false) {
+			update(s => {
+				if (isAdmin) {
+					return {
+						...s,
+						adminSelectionMode: !s.adminSelectionMode,
+						selectedAdminSessionIds: new Set<string>()
+					};
+				}
+				return {
+					...s,
+					selectionMode: !s.selectionMode,
+					selectedSessionIds: new Set<string>()
+				};
+			});
+		},
+
+		exitSelectionMode(isAdmin: boolean = false) {
+			update(s => {
+				if (isAdmin) {
+					return {
+						...s,
+						adminSelectionMode: false,
+						selectedAdminSessionIds: new Set<string>()
+					};
+				}
+				return {
+					...s,
+					selectionMode: false,
+					selectedSessionIds: new Set<string>()
+				};
+			});
+		},
+
+		toggleSessionSelection(sessionId: string, isAdmin: boolean = false) {
+			update(s => {
+				if (isAdmin) {
+					const newSet = new Set(s.selectedAdminSessionIds);
+					if (newSet.has(sessionId)) {
+						newSet.delete(sessionId);
+					} else {
+						newSet.add(sessionId);
+					}
+					return { ...s, selectedAdminSessionIds: newSet };
+				}
+				const newSet = new Set(s.selectedSessionIds);
+				if (newSet.has(sessionId)) {
+					newSet.delete(sessionId);
+				} else {
+					newSet.add(sessionId);
+				}
+				return { ...s, selectedSessionIds: newSet };
+			});
+		},
+
+		selectAllSessions(isAdmin: boolean = false) {
+			update(s => {
+				if (isAdmin) {
+					const allIds = new Set(s.adminSessions.map(session => session.id));
+					return { ...s, selectedAdminSessionIds: allIds };
+				}
+				const allIds = new Set(s.sessions.map(session => session.id));
+				return { ...s, selectedSessionIds: allIds };
+			});
+		},
+
+		deselectAllSessions(isAdmin: boolean = false) {
+			update(s => {
+				if (isAdmin) {
+					return { ...s, selectedAdminSessionIds: new Set<string>() };
+				}
+				return { ...s, selectedSessionIds: new Set<string>() };
+			});
+		},
+
+		async deleteSelectedSessions(isAdmin: boolean = false) {
+			const state = get({ subscribe });
+			const sessionIds = isAdmin
+				? Array.from(state.selectedAdminSessionIds)
+				: Array.from(state.selectedSessionIds);
+
+			if (sessionIds.length === 0) return;
+
+			// Use batch delete endpoint
+			await api.post('/sessions/batch-delete', { session_ids: sessionIds });
+
+			// Reload sessions
+			await this.loadSessions();
+			if (isAdmin) {
+				await loadAdminSessionsInternal(state.adminSessionsFilter);
+			}
+
+			// Clear any tabs that had deleted sessions
+			update(s => ({
+				...s,
+				tabs: s.tabs.map(tab =>
+					sessionIds.includes(tab.sessionId || '')
+						? { ...tab, sessionId: null, messages: [], title: 'New Chat' }
+						: tab
+				),
+				// Exit selection mode and clear selections
+				selectionMode: isAdmin ? s.selectionMode : false,
+				adminSelectionMode: isAdmin ? false : s.adminSelectionMode,
+				selectedSessionIds: isAdmin ? s.selectedSessionIds : new Set<string>(),
+				selectedAdminSessionIds: isAdmin ? new Set<string>() : s.selectedAdminSessionIds
+			}));
 		}
 	};
 }
@@ -935,3 +1118,10 @@ export const apiUsers = derived(tabs, $tabs => $tabs.apiUsers);
 export const adminSessionsFilter = derived(tabs, $tabs => $tabs.adminSessionsFilter);
 export const defaultProfile = derived(tabs, $tabs => $tabs.defaultProfile);
 export const defaultProject = derived(tabs, $tabs => $tabs.defaultProject);
+// Selection state derived stores
+export const selectedSessionIds = derived(tabs, $tabs => $tabs.selectedSessionIds);
+export const selectedAdminSessionIds = derived(tabs, $tabs => $tabs.selectedAdminSessionIds);
+export const selectionMode = derived(tabs, $tabs => $tabs.selectionMode);
+export const adminSelectionMode = derived(tabs, $tabs => $tabs.adminSelectionMode);
+// Loading state
+export const sessionsLoading = derived(tabs, $tabs => $tabs.sessionsLoading);

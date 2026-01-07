@@ -15,12 +15,21 @@
 		adminSessionsFilter,
 		defaultProfile,
 		defaultProject,
+		selectedSessionIds,
+		selectedAdminSessionIds,
+		selectionMode,
+		adminSelectionMode,
+		sessionsLoading,
 		type ChatMessage,
 		type ChatTab,
 		type ApiUser
 	} from '$lib/stores/tabs';
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import { marked } from 'marked';
+	import TerminalModal from '$lib/components/TerminalModal.svelte';
+	import RewindModal from '$lib/components/RewindModal.svelte';
+	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
+	import { executeCommand, isSlashCommand, syncAfterRewind, type Command } from '$lib/api/commands';
 
 	// Configure marked for better code highlighting
 	marked.setOptions({
@@ -46,6 +55,19 @@
 	let fileInput: HTMLInputElement;
 	let isUploading = false;
 	let textareas: Record<string, HTMLTextAreaElement> = {};
+
+	// Terminal modal state for /resume and other interactive commands
+	let showTerminalModal = false;
+	let terminalCommand = '/resume';
+	let terminalSessionId = '';
+
+	// Rewind modal state (V2 - direct JSONL manipulation)
+	let showRewindModal = false;
+	let rewindSessionId = '';
+
+	// Command autocomplete state
+	let showCommandAutocomplete: Record<string, boolean> = {};
+	let commandAutocompleteRefs: Record<string, CommandAutocomplete> = {};
 
 	// Accordion states for profile form sections
 	let expandedSections: Record<string, boolean> = {
@@ -125,6 +147,24 @@
 			}
 			Promise.all(promises);
 		}
+
+		// Handle page restored from bfcache (back/forward navigation)
+		// This ensures sessions list is fresh after browser back/forward
+		const handlePageShow = (event: PageTransitionEvent) => {
+			if (event.persisted && $isAuthenticated) {
+				console.log('[Page] Restored from bfcache, refreshing sessions');
+				tabs.loadSessions();
+				if ($isAdmin) {
+					tabs.loadAdminSessions();
+				}
+			}
+		};
+
+		window.addEventListener('pageshow', handlePageShow);
+
+		return () => {
+			window.removeEventListener('pageshow', handlePageShow);
+		};
 	});
 
 	onDestroy(() => {
@@ -154,13 +194,18 @@
 			const contentUpdated = totalContentLength > (lastContentLengths[tabId] || 0);
 			lastContentLengths[tabId] = totalContentLength;
 
-			const autoScroll = shouldAutoScroll[tabId] !== false;
+			// Check if we should auto-scroll BEFORE the setTimeout
+			// Default to true for new tabs, and check current position
+			const isCurrentlyNearBottom = isNearBottom(container, 150);
+			const autoScroll = shouldAutoScroll[tabId] !== false && isCurrentlyNearBottom;
+
 			if ((newMessageArrived || (contentUpdated && $activeTab.isStreaming)) && autoScroll) {
-				setTimeout(() => {
-					if (container && isNearBottom(container, 150)) {
+				// Use requestAnimationFrame for smoother scrolling
+				requestAnimationFrame(() => {
+					if (container) {
 						container.scrollTop = container.scrollHeight;
 					}
-				}, 10);
+				});
 			}
 		}
 	}
@@ -188,6 +233,16 @@
 	}
 
 	function handleKeyDown(e: KeyboardEvent, tabId: string) {
+		// Let the command autocomplete handle the event first if visible
+		const autocomplete = commandAutocompleteRefs[tabId];
+		if (autocomplete && showCommandAutocomplete[tabId]) {
+			const handled = autocomplete.handleKeyDown(e);
+			if (handled) {
+				return; // Autocomplete handled the event
+			}
+		}
+
+		// Normal textarea behavior
 		if (e.key === 'Enter' && !e.shiftKey) {
 			e.preventDefault();
 			handleSubmit(tabId);
@@ -200,6 +255,105 @@
 			textarea.style.height = 'auto';
 			textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
 		}
+	}
+
+	// Handle input changes for command autocomplete
+	function handleInputChange(tabId: string) {
+		const input = tabInputs[tabId] || '';
+		// Show autocomplete when input starts with /
+		showCommandAutocomplete[tabId] = input.startsWith('/') && input.length > 0;
+		showCommandAutocomplete = showCommandAutocomplete;
+		autoResize(tabId);
+	}
+
+	// Handle command selection from autocomplete
+	async function handleCommandSelect(tabId: string, command: Command) {
+		showCommandAutocomplete[tabId] = false;
+		showCommandAutocomplete = showCommandAutocomplete;
+
+		if (command.type === 'interactive') {
+			// Open terminal modal for interactive commands
+			openTerminalModal(tabId, `/${command.name}`);
+		} else {
+			// For custom commands, fill in the command
+			tabInputs[tabId] = `/${command.name} `;
+			tabInputs = tabInputs;
+			// Focus the textarea
+			setTimeout(() => {
+				const textarea = textareas[tabId];
+				if (textarea) {
+					textarea.focus();
+					textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+				}
+			}, 0);
+		}
+	}
+
+	// Open the terminal modal for interactive commands (like /resume)
+	function openTerminalModal(tabId: string, command: string = '/resume') {
+		const tab = $allTabs.find(t => t.id === tabId);
+		if (!tab?.sessionId) {
+			alert('Please start a conversation first before using this command.');
+			return;
+		}
+		terminalSessionId = tab.sessionId;
+		terminalCommand = command;
+		showTerminalModal = true;
+	}
+
+	// Open the rewind modal (V2 - direct JSONL manipulation)
+	function openRewindModal(tabId: string) {
+		const tab = $allTabs.find(t => t.id === tabId);
+		if (!tab?.sessionId) {
+			alert('Please start a conversation first before using rewind.');
+			return;
+		}
+		rewindSessionId = tab.sessionId;
+		showRewindModal = true;
+	}
+
+	// Handle rewind completion from RewindModal V2
+	async function handleRewindCompleteV2(success: boolean, messagesRemoved: number) {
+		console.log('Rewind V2 complete:', { success, messagesRemoved });
+
+		if (success && messagesRemoved > 0 && $activeTabId && rewindSessionId) {
+			// Reload the session to reflect changes
+			await tabs.loadSessionInTab($activeTabId, rewindSessionId);
+		}
+
+		rewindSessionId = '';
+	}
+
+	// Close the rewind modal
+	function closeRewindModal() {
+		showRewindModal = false;
+		rewindSessionId = '';
+	}
+
+	// Handle rewind completion from TerminalModal (legacy - for /resume)
+	async function handleRewindComplete(checkpointMessage: string | null, selectedOption: number | null) {
+		console.log('Rewind complete (legacy):', { checkpointMessage, selectedOption });
+
+		// Sync our chat if conversation was restored (options 1 or 2)
+		if (terminalSessionId && checkpointMessage && (selectedOption === 1 || selectedOption === 2)) {
+			try {
+				const result = await syncAfterRewind(terminalSessionId, checkpointMessage, selectedOption);
+				console.log('Chat sync result:', result);
+
+				// Reload the session to reflect changes
+				if ($activeTabId && result.success && result.deleted_count > 0) {
+					await tabs.loadSessionInTab($activeTabId, terminalSessionId);
+				}
+			} catch (error) {
+				console.error('Failed to sync chat after rewind:', error);
+			}
+		}
+	}
+
+	// Close the terminal modal
+	function closeTerminalModal() {
+		showTerminalModal = false;
+		terminalSessionId = '';
 	}
 
 	async function handleLogout() {
@@ -225,14 +379,24 @@
 		const date = new Date(dateStr);
 		const now = new Date();
 		const diff = now.getTime() - date.getTime();
+		const minutes = Math.floor(diff / 60000);
 		const hours = Math.floor(diff / 3600000);
 		const days = Math.floor(diff / 86400000);
 
-		if (hours < 1) return 'Just now';
+		if (minutes < 1) return 'Just now';
+		if (minutes < 5) return '5m ago';
+		if (minutes < 10) return '10m ago';
+		if (minutes < 30) return '30m ago';
+		if (minutes < 60) return '50m ago';
 		if (hours < 24) return `${hours}h ago`;
 		if (days === 1) return 'Yesterday';
 		if (days < 7) return `${days}d ago`;
 		return date.toLocaleDateString();
+	}
+
+	function formatSessionCost(cost: number | undefined | null): string {
+		if (cost === undefined || cost === null || cost === 0) return '';
+		return `$${cost.toFixed(4)}`;
 	}
 
 	function truncateTitle(title: string | null, maxLength: number = 35): string {
@@ -242,6 +406,11 @@
 
 	// Open session in new tab
 	function openSessionInNewTab(sessionId: string) {
+		// Prevent clicking while sessions are loading (race condition with bfcache)
+		if ($sessionsLoading) {
+			console.log('[Page] Ignoring session click while loading');
+			return;
+		}
 		tabs.createTab(sessionId);
 		sidebarOpen = false;
 	}
@@ -259,6 +428,20 @@
 		if (confirm('Delete this session?')) {
 			await tabs.deleteSession(sessionId);
 		}
+	}
+
+	async function handleBatchDelete(isAdmin: boolean = false) {
+		const count = isAdmin ? $selectedAdminSessionIds.size : $selectedSessionIds.size;
+		if (count === 0) return;
+
+		if (confirm(`Delete ${count} selected session${count > 1 ? 's' : ''}?`)) {
+			await tabs.deleteSelectedSessions(isAdmin);
+		}
+	}
+
+	function handleToggleSelection(e: Event, sessionId: string, isAdmin: boolean = false) {
+		e.stopPropagation();
+		tabs.toggleSessionSelection(sessionId, isAdmin);
 	}
 
 	function handleNewTab() {
@@ -567,32 +750,89 @@
 				<!-- My Chats Tab Content -->
 				{#if sidebarTab === 'my-chats'}
 					<div class="flex-1 overflow-y-auto px-3 pb-3 pt-2">
-						<div class="text-xs text-muted-foreground uppercase tracking-wider px-2 mb-2">History</div>
-						<div class="space-y-1">
+						<!-- Header with History label and selection toggle -->
+						<div class="flex items-center justify-between px-2 mb-2">
+							<div class="text-xs text-muted-foreground uppercase tracking-wider">History</div>
+							{#if $sessions.length > 0}
+								<button
+									on:click={() => tabs.toggleSelectionMode(false)}
+									class="text-xs text-muted-foreground hover:text-foreground transition-colors"
+									title={$selectionMode ? 'Exit selection mode' : 'Select multiple'}
+								>
+									{$selectionMode ? 'Cancel' : 'Select'}
+								</button>
+							{/if}
+						</div>
+
+						<!-- Selection Actions Bar -->
+						{#if $selectionMode && $sessions.length > 0}
+							<div class="flex items-center gap-2 px-2 py-2 mb-2 bg-accent rounded-lg">
+								<button
+									on:click={() => {
+										if ($selectedSessionIds.size === $sessions.length) {
+											tabs.deselectAllSessions(false);
+										} else {
+											tabs.selectAllSessions(false);
+										}
+									}}
+									class="text-xs text-muted-foreground hover:text-foreground transition-colors"
+								>
+									{$selectedSessionIds.size === $sessions.length ? 'Deselect All' : 'Select All'}
+								</button>
+								<span class="text-xs text-muted-foreground">
+									{$selectedSessionIds.size} selected
+								</span>
+								{#if $selectedSessionIds.size > 0}
+									<button
+										on:click={() => handleBatchDelete(false)}
+										class="ml-auto text-xs text-destructive hover:text-destructive/80 font-medium transition-colors"
+									>
+										Delete ({$selectedSessionIds.size})
+									</button>
+								{/if}
+							</div>
+						{/if}
+
+						<div class="space-y-1" class:opacity-50={$sessionsLoading} class:pointer-events-none={$sessionsLoading}>
 							{#each $sessions as session}
 								<div
-									class="group flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-accent cursor-pointer transition-colors"
-									on:click={() => openSessionInNewTab(session.id)}
-									on:keypress={(e) => e.key === 'Enter' && openSessionInNewTab(session.id)}
+									class="group flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-accent cursor-pointer transition-colors {$selectionMode && $selectedSessionIds.has(session.id) ? 'bg-accent/50' : ''}"
+									on:click={() => $selectionMode ? tabs.toggleSessionSelection(session.id, false) : openSessionInNewTab(session.id)}
+									on:keypress={(e) => e.key === 'Enter' && ($selectionMode ? tabs.toggleSessionSelection(session.id, false) : openSessionInNewTab(session.id))}
 									role="button"
 									tabindex="0"
 								>
+									<!-- Checkbox for selection mode -->
+									{#if $selectionMode}
+										<input
+											type="checkbox"
+											checked={$selectedSessionIds.has(session.id)}
+											on:click|stopPropagation={(e) => handleToggleSelection(e, session.id, false)}
+											class="w-4 h-4 rounded border-border text-primary focus:ring-primary cursor-pointer"
+										/>
+									{/if}
 									<div class="flex-1 min-w-0">
 										<p class="text-sm text-foreground truncate">{truncateTitle(session.title)}</p>
-										<p class="text-xs text-muted-foreground">{formatDate(session.updated_at)}</p>
+										<p class="text-xs text-muted-foreground">
+											{formatDate(session.updated_at)}{#if session.total_cost_usd}<span class="text-green-500 ml-2">{formatSessionCost(session.total_cost_usd)}</span>{/if}
+										</p>
 									</div>
-									<button
-										on:click|stopPropagation={(e) => deleteSession(e, session.id)}
-										class="opacity-0 group-hover:opacity-100 p-1 text-muted-foreground hover:text-destructive transition-opacity"
-										title="Delete session"
-									>
-										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-										</svg>
-									</button>
+									{#if !$selectionMode}
+										<button
+											on:click|stopPropagation={(e) => deleteSession(e, session.id)}
+											class="opacity-0 group-hover:opacity-100 p-1 text-muted-foreground hover:text-destructive transition-opacity"
+											title="Delete session"
+										>
+											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+											</svg>
+										</button>
+									{/if}
 								</div>
 							{/each}
-							{#if $sessions.length === 0}
+							{#if $sessionsLoading}
+								<p class="text-xs text-muted-foreground px-2 animate-pulse">Loading sessions...</p>
+							{:else if $sessions.length === 0}
 								<p class="text-xs text-muted-foreground px-2">No chat history yet</p>
 							{/if}
 						</div>
@@ -617,29 +857,84 @@
 							</select>
 						</div>
 
-						<div class="text-xs text-muted-foreground uppercase tracking-wider px-2 mb-2">API User Sessions</div>
+						<!-- Header with label and selection toggle -->
+						<div class="flex items-center justify-between px-2 mb-2">
+							<div class="text-xs text-muted-foreground uppercase tracking-wider">API User Sessions</div>
+							{#if $adminSessions.length > 0}
+								<button
+									on:click={() => tabs.toggleSelectionMode(true)}
+									class="text-xs text-muted-foreground hover:text-foreground transition-colors"
+									title={$adminSelectionMode ? 'Exit selection mode' : 'Select multiple'}
+								>
+									{$adminSelectionMode ? 'Cancel' : 'Select'}
+								</button>
+							{/if}
+						</div>
+
+						<!-- Selection Actions Bar -->
+						{#if $adminSelectionMode && $adminSessions.length > 0}
+							<div class="flex items-center gap-2 px-2 py-2 mb-2 bg-accent rounded-lg">
+								<button
+									on:click={() => {
+										if ($selectedAdminSessionIds.size === $adminSessions.length) {
+											tabs.deselectAllSessions(true);
+										} else {
+											tabs.selectAllSessions(true);
+										}
+									}}
+									class="text-xs text-muted-foreground hover:text-foreground transition-colors"
+								>
+									{$selectedAdminSessionIds.size === $adminSessions.length ? 'Deselect All' : 'Select All'}
+								</button>
+								<span class="text-xs text-muted-foreground">
+									{$selectedAdminSessionIds.size} selected
+								</span>
+								{#if $selectedAdminSessionIds.size > 0}
+									<button
+										on:click={() => handleBatchDelete(true)}
+										class="ml-auto text-xs text-destructive hover:text-destructive/80 font-medium transition-colors"
+									>
+										Delete ({$selectedAdminSessionIds.size})
+									</button>
+								{/if}
+							</div>
+						{/if}
+
 						<div class="space-y-1">
 							{#each $adminSessions as session}
 								<div
-									class="group flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-accent cursor-pointer transition-colors"
-									on:click={() => openSessionInNewTab(session.id)}
-									on:keypress={(e) => e.key === 'Enter' && openSessionInNewTab(session.id)}
+									class="group flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-accent cursor-pointer transition-colors {$adminSelectionMode && $selectedAdminSessionIds.has(session.id) ? 'bg-accent/50' : ''}"
+									on:click={() => $adminSelectionMode ? tabs.toggleSessionSelection(session.id, true) : openSessionInNewTab(session.id)}
+									on:keypress={(e) => e.key === 'Enter' && ($adminSelectionMode ? tabs.toggleSessionSelection(session.id, true) : openSessionInNewTab(session.id))}
 									role="button"
 									tabindex="0"
 								>
+									<!-- Checkbox for selection mode -->
+									{#if $adminSelectionMode}
+										<input
+											type="checkbox"
+											checked={$selectedAdminSessionIds.has(session.id)}
+											on:click|stopPropagation={(e) => handleToggleSelection(e, session.id, true)}
+											class="w-4 h-4 rounded border-border text-primary focus:ring-primary cursor-pointer"
+										/>
+									{/if}
 									<div class="flex-1 min-w-0">
 										<p class="text-sm text-foreground truncate">{truncateTitle(session.title)}</p>
-										<p class="text-xs text-muted-foreground">{formatDate(session.updated_at)}</p>
+										<p class="text-xs text-muted-foreground">
+											{formatDate(session.updated_at)}{#if session.total_cost_usd}<span class="text-green-500 ml-2">{formatSessionCost(session.total_cost_usd)}</span>{/if}
+										</p>
 									</div>
-									<button
-										on:click|stopPropagation={(e) => deleteSession(e, session.id)}
-										class="opacity-0 group-hover:opacity-100 p-1 text-muted-foreground hover:text-destructive transition-opacity"
-										title="Delete session"
-									>
-										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-										</svg>
-									</button>
+									{#if !$adminSelectionMode}
+										<button
+											on:click|stopPropagation={(e) => deleteSession(e, session.id)}
+											class="opacity-0 group-hover:opacity-100 p-1 text-muted-foreground hover:text-destructive transition-opacity"
+											title="Delete session"
+										>
+											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+											</svg>
+										</button>
+									{/if}
 								</div>
 							{/each}
 							{#if $adminSessions.length === 0}
@@ -794,6 +1089,21 @@
 						</svg>
 					</button>
 				</div>
+
+				<!-- Rewind Button (V2 - direct JSONL manipulation) -->
+				{#if currentTab.sessionId}
+					<button
+						on:click={() => openRewindModal(tabId)}
+						class="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
+						title="Rewind conversation and/or code"
+						disabled={currentTab.isStreaming}
+					>
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0019 16V8a1 1 0 00-1.6-.8l-5.333 4zM4.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0011 16V8a1 1 0 00-1.6-.8l-5.334 4z" />
+						</svg>
+						<span class="hidden sm:inline">Rewind</span>
+					</button>
+				{/if}
 
 				<!-- Connection Status -->
 				<div class="flex-1"></div>
@@ -1051,14 +1361,27 @@
 							{/if}
 						</button>
 
-						<!-- Textarea -->
+						<!-- Textarea with Command Autocomplete -->
 						<div class="flex-1 relative">
+							<!-- Command Autocomplete -->
+							<CommandAutocomplete
+								bind:this={commandAutocompleteRefs[tabId]}
+								inputValue={tabInputs[tabId] || ''}
+								projectId={currentTab.project}
+								visible={showCommandAutocomplete[tabId] || false}
+								onSelect={(cmd) => handleCommandSelect(tabId, cmd)}
+								onClose={() => {
+									showCommandAutocomplete[tabId] = false;
+									showCommandAutocomplete = showCommandAutocomplete;
+								}}
+							/>
+
 							<textarea
 								bind:this={textareas[tabId]}
 								bind:value={tabInputs[tabId]}
-								on:input={() => autoResize(tabId)}
+								on:input={() => handleInputChange(tabId)}
 								on:keydown={(e) => handleKeyDown(e, tabId)}
-								placeholder="Message Claude..."
+								placeholder="Message Claude... (type / for commands)"
 								class="w-full bg-card border border-border rounded-lg px-4 py-2.5 text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:ring-2 focus:ring-ring min-h-[40px] max-h-[200px] leading-normal shadow-s"
 								rows="1"
 								disabled={currentTab.isStreaming || !$claudeAuthenticated}
@@ -1451,6 +1774,25 @@
 			</div>
 		</div>
 	</div>
+{/if}
+
+<!-- Terminal Modal for interactive CLI commands (like /resume) -->
+{#if showTerminalModal && terminalSessionId}
+	<TerminalModal
+		sessionId={terminalSessionId}
+		command={terminalCommand}
+		onClose={closeTerminalModal}
+		onRewindComplete={handleRewindComplete}
+	/>
+{/if}
+
+<!-- Rewind Modal V2 - Direct JSONL manipulation (bulletproof) -->
+{#if showRewindModal && rewindSessionId}
+	<RewindModal
+		sessionId={rewindSessionId}
+		onClose={closeRewindModal}
+		onRewindComplete={handleRewindCompleteV2}
+	/>
 {/if}
 
 <style>

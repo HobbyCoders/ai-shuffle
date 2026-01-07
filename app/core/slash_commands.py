@@ -6,6 +6,7 @@ from .claude/commands/ directories in project working directories.
 """
 
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -139,12 +140,6 @@ def parse_command_file(file_path: Path, source: str, namespace: Optional[str] = 
     if isinstance(allowed_tools, str):
         allowed_tools = [t.strip() for t in allowed_tools.split(",")]
 
-    # Parse argument-hint (normalize to string if it's a list)
-    argument_hint = frontmatter.get("argument-hint")
-    if isinstance(argument_hint, list):
-        # Join list items with space - common format is [arg1] [arg2]
-        argument_hint = " ".join(f"[{item}]" if not item.startswith("[") else item for item in argument_hint)
-
     return SlashCommand(
         name=name,
         description=description,
@@ -153,7 +148,7 @@ def parse_command_file(file_path: Path, source: str, namespace: Optional[str] = 
         source=source,
         namespace=namespace,
         allowed_tools=allowed_tools,
-        argument_hint=argument_hint,
+        argument_hint=frontmatter.get("argument-hint"),
         model=frontmatter.get("model"),
         disable_model_invocation=frontmatter.get("disable-model-invocation", False)
     )
@@ -275,7 +270,6 @@ def parse_command_input(text: str) -> tuple[str, str]:
 
 # Built-in interactive commands that require CLI bridge (PTY-based)
 # These commands genuinely need terminal interaction and cannot be handled via REST API
-# Note: These are NOT shown in the popup autocomplete
 INTERACTIVE_COMMANDS = {
     "resume": {
         "description": "Resume a previous conversation",
@@ -285,7 +279,6 @@ INTERACTIVE_COMMANDS = {
 
 # Built-in commands that use REST API instead of interactive CLI
 # V2: /rewind now uses direct JSONL manipulation - bulletproof, no PTY needed
-# Note: These are NOT shown in the popup autocomplete
 REST_API_COMMANDS = {
     "rewind": {
         "description": "Rewind conversation and/or code to a previous point",
@@ -293,15 +286,6 @@ REST_API_COMMANDS = {
         "requires_session": True,
         "method": "direct_jsonl",  # V2: No CLI interaction, direct file manipulation
         "note": "V2 implementation uses direct JSONL truncation for bulletproof rewind"
-    }
-}
-
-# SDK built-in commands that are shown in the popup autocomplete
-# These are passed directly to the SDK and handled internally
-SDK_BUILTIN_COMMANDS = {
-    "compact": {
-        "description": "Compact conversation history to free up context space",
-        "type": "sdk_builtin"
     }
 }
 
@@ -330,86 +314,15 @@ def get_rest_api_command_info(command_name: str) -> Optional[Dict[str, Any]]:
     return REST_API_COMMANDS.get(name)
 
 
-def is_sdk_builtin_command(command_name: str) -> bool:
-    """Check if a command is an SDK built-in command"""
-    name = command_name.lstrip("/")
-    return name in SDK_BUILTIN_COMMANDS
-
-
-def get_sdk_builtin_command_info(command_name: str) -> Optional[Dict[str, Any]]:
-    """Get information about an SDK built-in command"""
-    name = command_name.lstrip("/")
-    return SDK_BUILTIN_COMMANDS.get(name)
-
-
-def discover_plugin_commands() -> List[Dict[str, Any]]:
-    """
-    Discover commands from enabled plugins.
-
-    Returns list of command info dicts for plugin commands.
-    Commands are namespaced as plugin-name:command-name.
-    """
-    # Import here to avoid circular imports
-    from app.core.plugin_service import get_plugin_service
-
-    commands = []
-
-    try:
-        plugin_service = get_plugin_service()
-        installed = plugin_service.get_installed_plugins()
-        enabled_states = plugin_service.get_enabled_plugins()
-
-        for plugin in installed:
-            # Skip disabled plugins
-            if not enabled_states.get(plugin.id, False):
-                continue
-
-            # Skip plugins without commands
-            if not plugin.has_commands:
-                continue
-
-            # Get plugin details for command list
-            details = plugin_service.get_plugin_details(plugin.id)
-            if not details:
-                continue
-
-            install_path = Path(details.install_path)
-            commands_dir = install_path / "commands"
-
-            if not commands_dir.exists():
-                continue
-
-            # Scan command files in the plugin's commands directory
-            for cmd_file in commands_dir.glob("**/*.md"):
-                cmd = parse_command_file(cmd_file, source="plugin", namespace=plugin.name)
-                if cmd:
-                    # Namespace the command as plugin-name:command-name
-                    namespaced_name = f"{plugin.name}:{cmd.name}"
-                    commands.append({
-                        "name": namespaced_name,
-                        "display": f"/{namespaced_name}",
-                        "description": cmd.description,
-                        "argument_hint": cmd.argument_hint,
-                        "type": "plugin",
-                        "source": plugin.id
-                    })
-
-    except Exception as e:
-        logger.error(f"Failed to discover plugin commands: {e}")
-
-    return commands
-
-
 def get_all_commands(working_dir: str) -> List[Dict[str, Any]]:
     """
-    Get all available commands for the popup autocomplete.
+    Get all available commands (custom + interactive + REST API built-ins).
 
     Returns list of command info dicts for autocomplete.
-    Note: /resume and /rewind are excluded as they are handled separately.
     """
     commands = []
 
-    # Add custom commands from .claude/commands/
+    # Add custom commands
     for cmd in discover_commands(working_dir):
         commands.append({
             "name": cmd.name,
@@ -419,21 +332,25 @@ def get_all_commands(working_dir: str) -> List[Dict[str, Any]]:
             "type": "custom"
         })
 
-    # Add SDK built-in commands (like /compact)
-    for name, info in SDK_BUILTIN_COMMANDS.items():
+    # Add interactive built-in commands
+    for name, info in INTERACTIVE_COMMANDS.items():
         commands.append({
             "name": name,
             "display": f"/{name}",
             "description": info["description"],
             "argument_hint": None,
-            "type": "sdk_builtin"
+            "type": "interactive"
         })
 
-    # Add plugin commands from enabled plugins
-    commands.extend(discover_plugin_commands())
-
-    # Note: INTERACTIVE_COMMANDS (/resume) and REST_API_COMMANDS (/rewind)
-    # are intentionally excluded from the popup as they are handled separately
+    # Add REST API built-in commands (like rewind)
+    for name, info in REST_API_COMMANDS.items():
+        commands.append({
+            "name": name,
+            "display": f"/{name}",
+            "description": info["description"],
+            "argument_hint": None,
+            "type": "rest_api"
+        })
 
     # Sort by name
     commands.sort(key=lambda x: x["name"])

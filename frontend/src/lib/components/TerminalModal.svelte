@@ -1,11 +1,9 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { Terminal } from '@xterm/xterm';
+  import { FitAddon } from '@xterm/addon-fit';
+  import { WebLinksAddon } from '@xterm/addon-web-links';
   import '@xterm/xterm/css/xterm.css';
-
-  // Dynamic imports for client-side only xterm modules
-  let Terminal: any;
-  let FitAddon: any;
-  let WebLinksAddon: any;
 
   interface Props {
     sessionId: string;
@@ -17,27 +15,16 @@
   let { sessionId, command = '/rewind', onClose, onRewindComplete }: Props = $props();
 
   let terminalContainer: HTMLDivElement;
-  let terminal: any = null;
-  let fitAddon: any = null;
+  let terminal: Terminal | null = null;
+  let fitAddon: FitAddon | null = null;
   let ws: WebSocket | null = null;
   let isConnected = $state(false);
   let isReady = $state(false);
   let error = $state<string | null>(null);
 
   onMount(() => {
-    // Dynamic import xterm modules only on client side
-    (async () => {
-      const xtermModule = await import('@xterm/xterm');
-      const fitModule = await import('@xterm/addon-fit');
-      const webLinksModule = await import('@xterm/addon-web-links');
-
-      Terminal = xtermModule.Terminal;
-      FitAddon = fitModule.FitAddon;
-      WebLinksAddon = webLinksModule.WebLinksAddon;
-
-      initTerminal();
-      connectWebSocket();
-    })();
+    initTerminal();
+    connectWebSocket();
 
     // Handle window resize
     window.addEventListener('resize', handleResize);
@@ -51,48 +38,34 @@
     cleanup();
   });
 
-  // Get CSS variable value as computed color
-  function getCssVar(name: string, fallback: string): string {
-    if (typeof document === 'undefined') return fallback;
-    const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-    return value || fallback;
-  }
-
-  // Build terminal theme from CSS variables
-  function getTerminalTheme() {
-    const bg = getCssVar('--terminal-bg', '#1a1a2e');
-    const fg = getCssVar('--terminal-fg', '#eaeaea');
-    return {
-      background: bg,
-      foreground: fg,
-      cursor: getCssVar('--terminal-cursor', '#f5f5f5'),
-      cursorAccent: bg,
-      selectionBackground: getCssVar('--accent', '#3d3d5c'),
-      black: bg,
-      red: getCssVar('--terminal-red', '#ff6b6b'),
-      green: getCssVar('--terminal-green', '#4ade80'),
-      yellow: getCssVar('--terminal-yellow', '#fbbf24'),
-      blue: getCssVar('--terminal-blue', '#60a5fa'),
-      magenta: getCssVar('--terminal-magenta', '#c084fc'),
-      cyan: getCssVar('--terminal-cyan', '#22d3ee'),
-      white: fg,
-      brightBlack: getCssVar('--muted-foreground', '#4a4a6a'),
-      brightRed: getCssVar('--terminal-red', '#ff8a8a'),
-      brightGreen: getCssVar('--terminal-green', '#6ee7a0'),
-      brightYellow: getCssVar('--terminal-yellow', '#fcd34d'),
-      brightBlue: getCssVar('--terminal-blue', '#93c5fd'),
-      brightMagenta: getCssVar('--terminal-magenta', '#d8b4fe'),
-      brightCyan: getCssVar('--terminal-cyan', '#67e8f9'),
-      brightWhite: '#ffffff'
-    };
-  }
-
   function initTerminal() {
     terminal = new Terminal({
       cursorBlink: true,
       fontSize: 14,
-      fontFamily: getCssVar('--font-mono', 'Menlo, Monaco, "Courier New", monospace'),
-      theme: getTerminalTheme(),
+      fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+      theme: {
+        background: '#1a1a2e',
+        foreground: '#eaeaea',
+        cursor: '#f5f5f5',
+        cursorAccent: '#1a1a2e',
+        selectionBackground: '#3d3d5c',
+        black: '#1a1a2e',
+        red: '#ff6b6b',
+        green: '#4ade80',
+        yellow: '#fbbf24',
+        blue: '#60a5fa',
+        magenta: '#c084fc',
+        cyan: '#22d3ee',
+        white: '#eaeaea',
+        brightBlack: '#4a4a6a',
+        brightRed: '#ff8a8a',
+        brightGreen: '#6ee7a0',
+        brightYellow: '#fcd34d',
+        brightBlue: '#93c5fd',
+        brightMagenta: '#d8b4fe',
+        brightCyan: '#67e8f9',
+        brightWhite: '#ffffff'
+      },
       allowProposedApi: true
     });
 
@@ -104,14 +77,14 @@
     fitAddon.fit();
 
     // Handle keyboard input
-    terminal.onData((data: string) => {
+    terminal.onData((data) => {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'input', data }));
       }
     });
 
     // Handle special keys
-    terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+    terminal.attachCustomKeyEventHandler((event) => {
       // Handle Escape to close
       if (event.key === 'Escape' && event.type === 'keydown') {
         // Send escape to terminal first
@@ -259,7 +232,7 @@
 
 <!-- Modal backdrop -->
 <div
-  class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+  class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
   onclick={handleBackdropClick}
   onkeydown={(e) => e.key === 'Escape' && handleClose()}
   role="dialog"

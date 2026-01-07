@@ -168,13 +168,17 @@ class Project(ProjectBase):
 
 class SessionMessage(BaseModel):
     """A message in a session"""
-    id: int
+    id: Any  # Can be int from DB or string from JSONL
     role: str  # user, assistant, system, tool
     content: str
-    tool_name: Optional[str] = None
-    tool_input: Optional[Dict[str, Any]] = None
+    type: Optional[str] = None  # text, tool_use, tool_result - critical for rendering
+    tool_name: Optional[str] = None  # snake_case for DB compatibility
+    tool_input: Optional[Dict[str, Any]] = None  # snake_case for DB compatibility
+    toolName: Optional[str] = None  # camelCase for frontend compatibility
+    toolInput: Optional[Dict[str, Any]] = None  # camelCase for frontend compatibility
+    toolId: Optional[str] = None  # Tool ID for matching tool_use to tool_result
     metadata: Optional[Dict[str, Any]] = None
-    created_at: datetime
+    created_at: Optional[datetime] = None  # Optional for JSONL messages without timestamp
 
 
 class SessionBase(BaseModel):
@@ -357,3 +361,46 @@ class ApiUser(ApiUserBase):
 class ApiUserWithKey(ApiUser):
     """API user response with newly generated key (only on create)"""
     api_key: str  # Only returned once on creation
+
+
+# ============================================================================
+# Rewind Models
+# ============================================================================
+
+class RewindCheckpoint(BaseModel):
+    """A checkpoint that can be rewound to"""
+    index: int
+    message: str  # Truncated message for display
+    full_message: Optional[str] = None
+    timestamp: Optional[str] = None
+    is_current: bool = False
+
+
+class RewindRequest(BaseModel):
+    """Request to execute a rewind operation"""
+    checkpoint_index: int = Field(..., ge=0, description="Index of checkpoint to rewind to")
+    restore_option: int = Field(..., ge=1, le=4, description="1=code+conversation, 2=conversation, 3=code, 4=cancel")
+    checkpoint_message: Optional[str] = None
+
+
+class RewindCheckpointsResponse(BaseModel):
+    """Response containing available checkpoints"""
+    success: bool
+    session_id: str
+    checkpoints: List[RewindCheckpoint] = []
+    error: Optional[str] = None
+
+
+class RewindExecuteResponse(BaseModel):
+    """Response from executing a rewind"""
+    success: bool
+    message: str
+    checkpoint_index: Optional[int] = None
+    restore_option: Optional[int] = None
+    error: Optional[str] = None
+
+
+class RewindStatus(BaseModel):
+    """Current rewind status"""
+    has_pending: bool
+    pending_rewind: Optional[Dict[str, Any]] = None
