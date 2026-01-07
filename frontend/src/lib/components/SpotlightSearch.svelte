@@ -19,8 +19,8 @@
   let searchQuery = $state('');
   let commands = $state<Command[]>([]);
   let selectedIndex = $state(0);
-  let searchInput = $state<HTMLInputElement | undefined>(undefined);
-  let listElement = $state<HTMLDivElement | undefined>(undefined);
+  let searchInput: HTMLInputElement;
+  let listElement: HTMLDivElement;
 
   // Quick actions
   const quickActions = [
@@ -198,7 +198,7 @@
 {#if visible}
   <!-- Backdrop with blur -->
   <div
-    class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-start justify-center pt-[15vh] max-sm:pt-[10vh] bg-black/60 backdrop-blur-sm"
+    class="fixed inset-0 z-50 flex items-start justify-center pt-[15vh] bg-black/60 backdrop-blur-sm"
     onclick={handleBackdropClick}
     role="dialog"
     aria-modal="true"

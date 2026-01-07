@@ -150,6 +150,8 @@ export interface Session {
 	title: string | null;
 	status: string;
 	total_cost_usd: number;
+	total_tokens_in: number;
+	total_tokens_out: number;
 	turn_count: number;
 	created_at: string;
 	updated_at: string;

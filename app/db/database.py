@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 # Schema version for migrations
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def get_connection() -> sqlite3.Connection:
@@ -258,6 +258,19 @@ def _create_schema(cursor: sqlite3.Cursor):
         )
     """)
 
+    # User preferences (for persisting open tabs across devices)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_preferences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_type TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value JSON,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_type, user_id, key)
+        )
+    """)
+
     # Create indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)")
@@ -276,6 +289,7 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_key_sessions_user ON api_key_sessions(api_user_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON checkpoints(session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_checkpoints_message_uuid ON checkpoints(message_uuid)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_preferences_user ON user_preferences(user_type, user_id)")
 
 
 def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
@@ -1310,3 +1324,77 @@ def delete_all_session_checkpoints(session_id: str) -> int:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM checkpoints WHERE session_id = ?", (session_id,))
         return cursor.rowcount
+
+
+# ============================================================================
+# User Preferences Operations
+# ============================================================================
+
+def get_user_preference(user_type: str, user_id: str, key: str) -> Optional[Dict[str, Any]]:
+    """Get a user preference by key"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM user_preferences WHERE user_type = ? AND user_id = ? AND key = ?",
+            (user_type, user_id, key)
+        )
+        row = cursor.fetchone()
+        if row:
+            result = row_to_dict(row)
+            # Parse JSON value
+            if result and result.get("value"):
+                result["value"] = json.loads(result["value"])
+            return result
+        return None
+
+
+def set_user_preference(user_type: str, user_id: str, key: str, value: Any) -> Dict[str, Any]:
+    """Set a user preference (upsert)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        now = datetime.utcnow().isoformat()
+        value_json = json.dumps(value)
+
+        cursor.execute(
+            """INSERT INTO user_preferences (user_type, user_id, key, value, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(user_type, user_id, key) DO UPDATE SET
+                   value = excluded.value,
+                   updated_at = excluded.updated_at""",
+            (user_type, user_id, key, value_json, now)
+        )
+
+        return {
+            "user_type": user_type,
+            "user_id": user_id,
+            "key": key,
+            "value": value,
+            "updated_at": now
+        }
+
+
+def delete_user_preference(user_type: str, user_id: str, key: str) -> bool:
+    """Delete a user preference"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM user_preferences WHERE user_type = ? AND user_id = ? AND key = ?",
+            (user_type, user_id, key)
+        )
+        return cursor.rowcount > 0
+
+
+def get_all_user_preferences(user_type: str, user_id: str) -> List[Dict[str, Any]]:
+    """Get all preferences for a user"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM user_preferences WHERE user_type = ? AND user_id = ?",
+            (user_type, user_id)
+        )
+        rows = rows_to_list(cursor.fetchall())
+        # Parse JSON values
+        for row in rows:
+            if row.get("value"):
+                row["value"] = json.loads(row["value"])
+        return rows
