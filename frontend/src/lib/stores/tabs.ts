@@ -178,8 +178,14 @@ const tabLastMessageTime: Map<string, number> = new Map();
 // - Normal: if no message for 90s (3 missed pings), force reconnect
 // - Streaming: if no message for 15s during active streaming, force reconnect
 //   (messages should arrive frequently during streaming)
+// - Tool execution: if tool is pending, use longer timeout (tools can take a while)
 const CONNECTION_HEALTH_TIMEOUT_MS = 90000;
 const STREAMING_HEALTH_TIMEOUT_MS = 15000;
+const TOOL_EXECUTION_TIMEOUT_MS = 120000; // 2 minutes for tool execution (Bash, etc. can take a while)
+
+// Track pending tool executions per tab - when tools are running, we expect longer gaps between messages
+// This prevents false disconnects when Claude SDK is waiting for tool results
+const tabPendingTools: Map<string, Set<string>> = new Map();
 
 // Server-authoritative polling for streaming sessions
 // When streaming, poll /sessions/{id}/live for ground truth state
@@ -619,13 +625,30 @@ function createTabsStore() {
 					currentWs.send(JSON.stringify({ type: 'pong' }));
 
 					// Check connection health - if no message received for too long, connection may be dead
-					// Use shorter timeout during streaming (messages should arrive frequently)
+					// Use appropriate timeout based on state:
+					// - Tool execution pending: use long timeout (tools like Bash can take 2+ minutes)
+					// - Streaming: use short timeout (text should flow frequently)
+					// - Idle: use normal timeout
 					const currentTab = getTab(tabId);
-					const healthTimeout = currentTab?.isStreaming ? STREAMING_HEALTH_TIMEOUT_MS : CONNECTION_HEALTH_TIMEOUT_MS;
+					const pendingTools = tabPendingTools.get(tabId);
+					const hasToolsPending = pendingTools && pendingTools.size > 0;
+
+					let healthTimeout: number;
+					if (hasToolsPending) {
+						// Tool is running - use long timeout (tools can take a while)
+						healthTimeout = TOOL_EXECUTION_TIMEOUT_MS;
+					} else if (currentTab?.isStreaming) {
+						// Streaming text - should get frequent updates
+						healthTimeout = STREAMING_HEALTH_TIMEOUT_MS;
+					} else {
+						// Not streaming - use normal timeout
+						healthTimeout = CONNECTION_HEALTH_TIMEOUT_MS;
+					}
+
 					const lastMessageTime = tabLastMessageTime.get(tabId) || 0;
 					const timeSinceLastMessage = Date.now() - lastMessageTime;
 					if (timeSinceLastMessage > healthTimeout) {
-						console.warn(`[Tab ${tabId}] Connection appears stale (${Math.round(timeSinceLastMessage / 1000)}s since last message, streaming=${currentTab?.isStreaming}), forcing reconnect`);
+						console.warn(`[Tab ${tabId}] Connection appears stale (${Math.round(timeSinceLastMessage / 1000)}s since last message, streaming=${currentTab?.isStreaming}, toolsPending=${hasToolsPending ? pendingTools?.size : 0}), forcing reconnect`);
 						// Force close to trigger reconnect
 						currentWs.close(4000, 'Connection health timeout');
 					}
@@ -722,10 +745,11 @@ function createTabsStore() {
 		// Stop polling if active
 		stopPolling(tabId);
 
-		// Clear any waiting for history state, expected session tracking, and health monitoring
+		// Clear any waiting for history state, expected session tracking, health monitoring, and pending tools
 		tabsWaitingForHistory.delete(tabId);
 		tabExpectedSessionId.delete(tabId);
 		tabLastMessageTime.delete(tabId);
+		tabPendingTools.delete(tabId);
 
 		const ws = tabConnections.get(tabId);
 		if (ws) {
@@ -2274,6 +2298,17 @@ function createTabsStore() {
 				// When include_partial_messages=True, stream_block_start may have already created this tool
 				const toolId = data.id as string;
 
+				// Track this tool as pending - extends connection timeout while tool executes
+				if (toolId) {
+					let pending = tabPendingTools.get(tabId);
+					if (!pending) {
+						pending = new Set();
+						tabPendingTools.set(tabId, pending);
+					}
+					pending.add(toolId);
+					console.log(`[Tab ${tabId}] Tool started: ${data.name} (${toolId}), pending tools: ${pending.size}`);
+				}
+
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
@@ -2338,6 +2373,15 @@ function createTabsStore() {
 				const output = data.output as string;
 				const isError = data.is_error as boolean;
 
+				// Remove this tool from pending - no longer waiting for it
+				if (toolUseId) {
+					const pending = tabPendingTools.get(tabId);
+					if (pending) {
+						pending.delete(toolUseId);
+						console.log(`[Tab ${tabId}] Tool completed: ${toolUseId}, pending tools: ${pending.size}`);
+					}
+				}
+
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
@@ -2401,6 +2445,9 @@ function createTabsStore() {
 					clearTimeout(doneStopTimeout);
 					stopTimeouts.delete(tabId);
 				}
+
+				// Clear pending tools tracking since stream is complete
+				tabPendingTools.delete(tabId);
 
 				// Get current tab state before updating (for notification)
 				const currentTab = getTab(tabId);
@@ -2516,6 +2563,9 @@ function createTabsStore() {
 					clearTimeout(stopTimeout);
 					stopTimeouts.delete(tabId);
 				}
+
+				// Clear pending tools tracking since stream is stopped
+				tabPendingTools.delete(tabId);
 
 				update(s => ({
 					...s,
@@ -2645,6 +2695,13 @@ function createTabsStore() {
 				if (ws?.readyState === WebSocket.OPEN) {
 					ws.send(JSON.stringify({ type: 'pong' }));
 				}
+				break;
+			}
+
+			case 'heartbeat': {
+				// Heartbeat from server during long operations (tool execution, subagents)
+				// Just receiving this message updates tabLastMessageTime (done in onmessage)
+				// which prevents false disconnect detection
 				break;
 			}
 
@@ -2817,6 +2874,17 @@ function createTabsStore() {
 				const toolId = data.id as string;
 				const toolInput = data.input as Record<string, unknown>;
 
+				// Track this subagent tool as pending - extends connection timeout while tool executes
+				if (toolId) {
+					let pending = tabPendingTools.get(tabId);
+					if (!pending) {
+						pending = new Set();
+						tabPendingTools.set(tabId, pending);
+					}
+					pending.add(toolId);
+					console.log(`[Tab ${tabId}] Subagent tool started: ${toolName} (${toolId}), pending tools: ${pending.size}`);
+				}
+
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
@@ -2851,6 +2919,15 @@ function createTabsStore() {
 				const toolUseId = data.tool_use_id as string;
 				const output = data.output as string;
 				const isError = data.is_error as boolean;
+
+				// Remove this subagent tool from pending - no longer waiting for it
+				if (toolUseId) {
+					const pending = tabPendingTools.get(tabId);
+					if (pending) {
+						pending.delete(toolUseId);
+						console.log(`[Tab ${tabId}] Subagent tool completed: ${toolUseId}, pending tools: ${pending.size}`);
+					}
+				}
 
 				update(s => ({
 					...s,

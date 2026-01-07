@@ -230,6 +230,23 @@ async def chat_websocket(
         user_message_id = f"user-{uuid.uuid4()}"
         await live_session_store.add_user_message(session_id, prompt, user_message_id)
 
+        # Heartbeat task to keep WebSocket alive during long operations (tool execution, subagents)
+        # The streaming loop blocks when SDK is waiting for tool results, so we send periodic
+        # heartbeats to prevent frontend from thinking the connection is dead.
+        heartbeat_task: Optional[asyncio.Task] = None
+        heartbeat_stop = asyncio.Event()
+
+        async def send_heartbeats():
+            """Send periodic heartbeat events while streaming."""
+            while not heartbeat_stop.is_set():
+                try:
+                    await asyncio.wait_for(heartbeat_stop.wait(), timeout=5.0)
+                    # Event was set, stop sending heartbeats
+                    break
+                except asyncio.TimeoutError:
+                    # Timeout expired, send heartbeat
+                    await send_json({"type": "heartbeat", "timestamp": asyncio.get_event_loop().time()})
+
         try:
             logger.info(f"Starting query for session {session_id}, profile={profile_id}, project={project_id}, overrides={overrides}")
             if not await send_json({"type": "start", "session_id": session_id, "message_id": message_id}):
@@ -239,6 +256,9 @@ async def chat_websocket(
 
             # Start assistant message in live store
             await live_session_store.start_assistant_message(session_id, message_id)
+
+            # Start heartbeat task
+            heartbeat_task = asyncio.create_task(send_heartbeats())
 
             logger.info(f"Calling stream_to_websocket for session {session_id}, api_user_id={api_user_id}")
             async for event in stream_to_websocket(
@@ -253,14 +273,13 @@ async def chat_websocket(
                 event_type = event.get('type')
                 logger.debug(f"Streaming event for session {session_id}: {event_type}")
 
-                # Send to this websocket - check if connection is still alive
-                if not await send_json(event):
-                    # Connection died during streaming - let query continue for other devices
-                    # but stop sending to this one
+                # Send to this websocket - may fail if connection died
+                # Important: Do NOT skip store updates if WebSocket fails!
+                # The live_session_store must be updated regardless of WebSocket state
+                # so that polling clients can receive updates.
+                ws_connected = await send_json(event)
+                if not ws_connected:
                     logger.warning(f"Connection lost during streaming for session {session_id}, continuing for other devices")
-                    # Don't break the loop - the query continues and other devices still get events
-                    # Just stop trying to send to this dead connection
-                    continue
 
                 # Broadcast to other devices via SyncEngine
                 # Start streaming on first content event
@@ -684,6 +703,14 @@ async def chat_websocket(
                 logger.warning(f"Failed to dispatch session.error webhook: {webhook_error}")
 
         finally:
+            # Stop heartbeat task
+            if heartbeat_task and not heartbeat_task.done():
+                heartbeat_stop.set()
+                try:
+                    await asyncio.wait_for(heartbeat_task, timeout=1.0)
+                except asyncio.TimeoutError:
+                    heartbeat_task.cancel()
+
             # ALWAYS ensure live session store is cleaned up
             # This prevents stuck state if an exception occurred before end_streaming was called
             if live_session_store.has_session(session_id):
