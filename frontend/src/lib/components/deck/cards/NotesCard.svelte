@@ -149,22 +149,29 @@
 		saving = true;
 		try {
 			if (isCreatingNew) {
-				await createNote(projectId, {
+				// Create new note and switch to editing mode
+				const newNote = await createNote(projectId, {
 					title: editorTitle.trim(),
 					content: editorContent,
 					tags: editorTags,
 					is_pinned: editorPinned
 				});
+				// Switch from creating to editing the newly created note
+				isCreatingNew = false;
+				editingNote = newNote;
 			} else if (editingNote) {
-				await updateNote(projectId, editingNote.id, {
+				// Update existing note and stay in editor
+				const updatedNote = await updateNote(projectId, editingNote.id, {
 					title: editorTitle.trim(),
 					content: editorContent,
 					tags: editorTags,
 					is_pinned: editorPinned
 				});
+				// Update the editing note reference with latest data
+				editingNote = updatedNote;
 			}
 			hasUnsavedChanges = false;
-			closeEditor();
+			// Don't close editor - user stays in edit mode
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to save note';
 		} finally {
@@ -671,13 +678,22 @@
 	}
 
 	.pin-btn {
-		padding: 4px;
+		padding: 8px;
 		background: none;
 		border: none;
 		color: var(--muted-foreground);
 		cursor: pointer;
 		opacity: 0;
 		transition: opacity 0.2s;
+		/* Ensure minimum touch target size */
+		min-width: 32px;
+		min-height: 32px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		margin: -4px;
+		margin-right: -8px;
+		flex-shrink: 0;
 	}
 
 	.note-item:hover .pin-btn {
@@ -686,6 +702,13 @@
 
 	.pin-btn:hover {
 		color: var(--primary);
+	}
+
+	/* Touch devices: always show pin button */
+	@media (pointer: coarse) {
+		.pin-btn {
+			opacity: 1;
+		}
 	}
 
 	.note-meta {

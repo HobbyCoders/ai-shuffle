@@ -817,10 +817,9 @@
 	}
 </script>
 
-<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
-	{#snippet children()}
-		<div class="settings" class:mobile>
-			<!-- Tab Bar -->
+<!-- Define settings content as a local snippet to avoid duplication -->
+{#snippet settingsContent()}
+	<!-- Tab Bar -->
 			<nav class="tab-bar">
 				<button
 					class="tab-btn"
@@ -1806,9 +1805,22 @@
 					</div>
 				{/if}
 			</div>
-		</div>
-	{/snippet}
-</BaseCard>
+{/snippet}
+
+<!-- Conditional wrapper: Mobile uses no BaseCard, Desktop uses BaseCard -->
+{#if mobile}
+	<div class="settings mobile">
+		{@render settingsContent()}
+	</div>
+{:else}
+	<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
+		{#snippet children()}
+			<div class="settings">
+				{@render settingsContent()}
+			</div>
+		{/snippet}
+	</BaseCard>
+{/if}
 
 <style>
 	/* ========================================
@@ -1864,6 +1876,9 @@
 	.tab-btn svg {
 		width: 18px;
 		height: 18px;
+		/* Ensure icon inherits color from parent button */
+		stroke: currentColor;
+		transition: stroke 150ms ease;
 	}
 
 	/* Content Area */

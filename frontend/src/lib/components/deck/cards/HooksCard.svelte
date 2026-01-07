@@ -21,7 +21,8 @@
 		hookSaving,
 		hookStats
 	} from '$lib/stores/hooks';
-	import { chat, selectedProject, projects, profiles, selectedProfile } from '$lib/stores/chat';
+	import { projects, profiles } from '$lib/stores/tabs';
+	import { chat, selectedProject, selectedProfile } from '$lib/stores/chat';
 	import type { Hook, HookCreate, HookUpdate, HookTestResult } from '$lib/api/client';
 	import HookListItem from '$lib/components/hooks/HookListItem.svelte';
 	import HookForm from '$lib/components/hooks/HookForm.svelte';
