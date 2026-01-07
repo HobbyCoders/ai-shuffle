@@ -665,6 +665,7 @@
 	.pin-icon {
 		color: var(--primary);
 		flex-shrink: 0;
+		margin-left: 2px;
 	}
 
 	.note-title {
@@ -692,7 +693,7 @@
 		align-items: center;
 		justify-content: center;
 		margin: -4px;
-		margin-right: -8px;
+		margin-right: -4px;
 		flex-shrink: 0;
 	}
 

@@ -223,6 +223,7 @@ class SyncEngine:
     - Support for streaming events (message chunks)
     - Exclude source device from broadcasts (to avoid echo)
     - Buffer streaming content for late-joining devices
+    - Enforce single active device per session (session locking)
     """
 
     def __init__(self):
@@ -234,6 +235,8 @@ class SyncEngine:
         self._streaming_sessions: Set[str] = set()
         # Buffer for in-progress streaming content per session
         self._streaming_buffers: Dict[str, StreamingBuffer] = {}
+        # Session locks: session_id -> device_id that owns the lock
+        self._session_locks: Dict[str, str] = {}
 
     async def register_device(
         self,
@@ -304,6 +307,66 @@ class SyncEngine:
     def is_session_streaming(self, session_id: str) -> bool:
         """Check if a session is currently streaming"""
         return session_id in self._streaming_sessions
+
+    async def acquire_session_lock(self, session_id: str, device_id: str) -> tuple[bool, Optional[str]]:
+        """Acquire exclusive lock on a session for a device.
+
+        Only one device can hold the lock for a session at a time.
+        If the same device already holds the lock, it succeeds (idempotent).
+
+        Args:
+            session_id: The session to lock
+            device_id: The device requesting the lock
+
+        Returns:
+            Tuple of (success, current_owner_device_id)
+            - (True, None) if lock acquired successfully
+            - (False, owner_device_id) if another device holds the lock
+        """
+        async with self._lock:
+            if session_id in self._session_locks:
+                current_owner = self._session_locks[session_id]
+                if current_owner != device_id:
+                    logger.info(f"Session {session_id[:8]} lock denied for device {device_id[:8]}, owned by {current_owner[:8]}")
+                    return False, current_owner
+                # Same device already owns it
+                return True, None
+
+            self._session_locks[session_id] = device_id
+            logger.info(f"Session {session_id[:8]} lock acquired by device {device_id[:8]}")
+            return True, None
+
+    async def release_session_lock(self, session_id: str, device_id: str) -> bool:
+        """Release the lock on a session.
+
+        Only the device that holds the lock can release it.
+
+        Args:
+            session_id: The session to unlock
+            device_id: The device releasing the lock
+
+        Returns:
+            True if lock was released, False if device didn't hold the lock
+        """
+        async with self._lock:
+            if session_id not in self._session_locks:
+                return True  # No lock exists, consider it released
+
+            if self._session_locks[session_id] != device_id:
+                logger.warning(f"Device {device_id[:8]} tried to release lock on session {session_id[:8]} owned by {self._session_locks[session_id][:8]}")
+                return False
+
+            del self._session_locks[session_id]
+            logger.info(f"Session {session_id[:8]} lock released by device {device_id[:8]}")
+            return True
+
+    def get_session_lock_owner(self, session_id: str) -> Optional[str]:
+        """Get the device ID that currently holds the lock on a session."""
+        return self._session_locks.get(session_id)
+
+    def is_session_locked(self, session_id: str) -> bool:
+        """Check if a session is currently locked by any device."""
+        return session_id in self._session_locks
 
     async def broadcast_event(
         self,

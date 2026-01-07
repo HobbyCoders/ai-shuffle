@@ -284,6 +284,61 @@
 					{/if}
 				</div>
 			{:else}
+				<!-- Profile/Project selector bar (mobile) -->
+				<div class="selector-bar">
+					<div class="selector-item">
+						<button
+							type="button"
+							class="selector-btn"
+							onclick={() => showProfileDropdown = !showProfileDropdown}
+						>
+							<User size={14} />
+							<span class="selector-label">{currentProfile?.name || 'Profile'}</span>
+							<span class="chevron" class:open={showProfileDropdown}><ChevronDown size={14} /></span>
+						</button>
+						{#if showProfileDropdown}
+							<div class="selector-dropdown">
+								{#each $profiles as profile}
+									<button
+										type="button"
+										class="selector-dropdown-item"
+										class:selected={profile.id === $selectedProfile}
+										onclick={() => handleSelectProfile(profile.id)}
+									>
+										<span>{profile.name}</span>
+									</button>
+								{/each}
+							</div>
+						{/if}
+					</div>
+					<span class="selector-divider">/</span>
+					<div class="selector-item">
+						<button
+							type="button"
+							class="selector-btn"
+							onclick={() => showProjectDropdown = !showProjectDropdown}
+						>
+							<FolderKanban size={14} />
+							<span class="selector-label">{currentProject?.name || 'Project'}</span>
+							<span class="chevron" class:open={showProjectDropdown}><ChevronDown size={14} /></span>
+						</button>
+						{#if showProjectDropdown}
+							<div class="selector-dropdown">
+								{#each $projects as project}
+									<button
+										type="button"
+										class="selector-dropdown-item"
+										class:selected={project.id === $selectedProject}
+										onclick={() => handleSelectProject(project.id)}
+									>
+										<span>{project.name}</span>
+									</button>
+								{/each}
+							</div>
+						{/if}
+					</div>
+				</div>
+
 				<!-- Tabs -->
 				<div class="hooks-tabs">
 					{#each tabs as tab}
@@ -541,6 +596,61 @@
 						{/if}
 					</div>
 				{:else}
+					<!-- Profile/Project selector bar -->
+					<div class="selector-bar">
+						<div class="selector-item">
+							<button
+								type="button"
+								class="selector-btn"
+								onclick={() => showProfileDropdown = !showProfileDropdown}
+							>
+								<User size={14} />
+								<span class="selector-label">{currentProfile?.name || 'Profile'}</span>
+								<span class="chevron" class:open={showProfileDropdown}><ChevronDown size={14} /></span>
+							</button>
+							{#if showProfileDropdown}
+								<div class="selector-dropdown">
+									{#each $profiles as profile}
+										<button
+											type="button"
+											class="selector-dropdown-item"
+											class:selected={profile.id === $selectedProfile}
+											onclick={() => handleSelectProfile(profile.id)}
+										>
+											<span>{profile.name}</span>
+										</button>
+									{/each}
+								</div>
+							{/if}
+						</div>
+						<span class="selector-divider">/</span>
+						<div class="selector-item">
+							<button
+								type="button"
+								class="selector-btn"
+								onclick={() => showProjectDropdown = !showProjectDropdown}
+							>
+								<FolderKanban size={14} />
+								<span class="selector-label">{currentProject?.name || 'Project'}</span>
+								<span class="chevron" class:open={showProjectDropdown}><ChevronDown size={14} /></span>
+							</button>
+							{#if showProjectDropdown}
+								<div class="selector-dropdown">
+									{#each $projects as project}
+										<button
+											type="button"
+											class="selector-dropdown-item"
+											class:selected={project.id === $selectedProject}
+											onclick={() => handleSelectProject(project.id)}
+										>
+											<span>{project.name}</span>
+										</button>
+									{/each}
+								</div>
+							{/if}
+						</div>
+					</div>
+
 					<!-- Tabs -->
 					<div class="hooks-tabs">
 						{#each tabs as tab}
@@ -926,6 +1036,98 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+
+	/* Selector bar for profile/project */
+	.selector-bar {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		padding: 8px 16px;
+		border-bottom: 1px solid var(--border);
+		background: var(--muted);
+		font-size: 0.8125rem;
+	}
+
+	.selector-item {
+		position: relative;
+	}
+
+	.selector-btn {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		padding: 4px 8px;
+		background: transparent;
+		border: none;
+		color: var(--foreground);
+		font-size: 0.8125rem;
+		border-radius: 4px;
+		cursor: pointer;
+		transition: background 0.15s;
+	}
+
+	.selector-btn:hover {
+		background: var(--secondary);
+	}
+
+	.selector-btn .chevron {
+		display: inline-flex;
+		transition: transform 0.2s;
+		color: var(--muted-foreground);
+	}
+
+	.selector-btn .chevron.open {
+		transform: rotate(180deg);
+	}
+
+	.selector-label {
+		max-width: 120px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.selector-divider {
+		color: var(--muted-foreground);
+	}
+
+	.selector-dropdown {
+		position: absolute;
+		top: calc(100% + 4px);
+		left: 0;
+		min-width: 150px;
+		background: var(--card);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		box-shadow: var(--shadow-l);
+		z-index: 100;
+		max-height: 200px;
+		overflow-y: auto;
+	}
+
+	.selector-dropdown-item {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		width: 100%;
+		padding: 8px 12px;
+		background: transparent;
+		border: none;
+		color: var(--foreground);
+		font-size: 0.8125rem;
+		text-align: left;
+		cursor: pointer;
+		transition: background 0.15s;
+	}
+
+	.selector-dropdown-item:hover {
+		background: var(--muted);
+	}
+
+	.selector-dropdown-item.selected {
+		background: var(--primary);
+		color: var(--primary-foreground);
 	}
 
 	/* Tabs */

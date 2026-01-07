@@ -223,8 +223,6 @@
 <style>
 	/* CSS Custom Properties for consistent theming */
 	.mobile-welcome {
-		--accent-cyan: #22d3ee;
-		--accent-cyan-rgb: 34, 211, 238;
 
 		position: absolute;
 		inset: 0;
@@ -356,10 +354,10 @@
 	.carousel-card:nth-child(5) { --i: 4; }
 
 	.carousel-card.active {
-		border-color: var(--accent-cyan);
+		border-color: var(--primary);
 		box-shadow:
 			0 12px 32px rgba(0, 0, 0, 0.5),
-			0 0 24px rgba(var(--accent-cyan-rgb), 0.15);
+			0 0 24px var(--glow-color-soft);
 	}
 
 	.carousel-card:active {
@@ -381,10 +379,10 @@
 	}
 
 	.carousel-card.active .card-icon {
-		background: rgba(var(--accent-cyan-rgb), 0.1);
-		border-color: var(--accent-cyan);
-		color: var(--accent-cyan);
-		box-shadow: 0 0 20px rgba(var(--accent-cyan-rgb), 0.2);
+		background: var(--glow-color-soft);
+		border-color: var(--primary);
+		color: var(--primary);
+		box-shadow: 0 0 20px var(--glow-color-soft);
 	}
 
 	.card-label {

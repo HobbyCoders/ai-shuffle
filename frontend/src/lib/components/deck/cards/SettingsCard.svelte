@@ -144,6 +144,12 @@
 	let deepseekKeySuccess = $state('');
 	let deepseekKeyError = $state('');
 
+	let geminiApiKey = $state('');
+	let geminiApiKeyMasked = $state('');
+	let savingGeminiKey = $state(false);
+	let geminiKeySuccess = $state('');
+	let geminiKeyError = $state('');
+
 	// Model selection state
 	let imageModel = $state('');
 	let selectedImageModel = $state('');
@@ -364,6 +370,8 @@
 				model_3d_model: string | null;
 				deepseek_api_key_set: boolean;
 				deepseek_api_key_masked: string;
+				image_api_key_set: boolean;
+				image_api_key_masked: string;
 			}>('/settings/integrations');
 
 			openaiApiKeyMasked = settings.openai_api_key_masked;
@@ -384,6 +392,7 @@
 			selected3DModel = settings.model_3d_model || 'meshy-6';
 			current3DModel = selected3DModel;
 			deepseekApiKeyMasked = settings.deepseek_api_key_masked || '';
+			geminiApiKeyMasked = settings.image_api_key_masked || '';
 		} catch (e) {
 			console.error('Failed to load integration settings:', e);
 		}
@@ -445,6 +454,26 @@
 			deepseekKeyError = e.detail || 'Failed to save';
 		}
 		savingDeepseekKey = false;
+	}
+
+	async function saveGeminiApiKey() {
+		if (!geminiApiKey.trim()) return;
+		savingGeminiKey = true;
+		geminiKeyError = '';
+		geminiKeySuccess = '';
+		try {
+			await api.post('/settings/integrations/api-key', {
+				key_name: 'gemini_api_key',
+				key_value: geminiApiKey
+			});
+			geminiKeySuccess = 'Saved';
+			geminiApiKey = '';
+			await loadIntegrationSettings();
+			setTimeout(() => geminiKeySuccess = '', 3000);
+		} catch (e: any) {
+			geminiKeyError = e.detail || 'Failed to save';
+		}
+		savingGeminiKey = false;
 	}
 
 	// Model update functions
@@ -1237,6 +1266,33 @@
 										</div>
 										{#if deepseekKeySuccess}<span class="inline-success">{deepseekKeySuccess}</span>{/if}
 										{#if deepseekKeyError}<span class="inline-error">{deepseekKeyError}</span>{/if}
+									</div>
+
+									<!-- Google Gemini -->
+									<div class="api-key-row">
+										<div class="api-key-info">
+											<span class="api-key-name">Google Gemini</span>
+											{#if geminiApiKeyMasked}
+												<code class="masked-key">{geminiApiKeyMasked}</code>
+											{/if}
+										</div>
+										<div class="api-key-input">
+											<input
+												type="password"
+												bind:value={geminiApiKey}
+												placeholder={geminiApiKeyMasked ? 'Enter new key...' : 'AIza...'}
+												class="input compact"
+											/>
+											<button
+												onclick={saveGeminiApiKey}
+												disabled={savingGeminiKey || !geminiApiKey.trim()}
+												class="btn primary compact"
+											>
+												{savingGeminiKey ? '...' : 'Save'}
+											</button>
+										</div>
+										{#if geminiKeySuccess}<span class="inline-success">{geminiKeySuccess}</span>{/if}
+										{#if geminiKeyError}<span class="inline-error">{geminiKeyError}</span>{/if}
 									</div>
 								</div>
 							{/if}

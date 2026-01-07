@@ -123,6 +123,9 @@ export interface ChatTab {
 	worktreeId: string | null;   // Selected existing worktree ID (null = create new)
 	worktreeMode: 'new' | 'existing';  // Whether creating new or using existing worktree
 	selectedWorktreeBranch: string | null;  // Branch name of selected existing worktree (for display)
+	// Session lock state (multi-device conflict)
+	sessionLocked: boolean;      // True if session is locked by another device
+	sessionLockedBy: string | undefined;  // Device ID that has the lock
 }
 
 interface TabsState {
@@ -2579,6 +2582,52 @@ function createTabsStore() {
 				break;
 			}
 
+			case 'session_locked': {
+				// Session is locked by another device
+				const lockedSessionId = data.session_id as string;
+				const lockedBy = data.locked_by as string;
+				const lockMessage = data.message as string;
+				console.warn(`[Tab ${tabId}] Session ${lockedSessionId} is locked by device ${lockedBy}: ${lockMessage}`);
+
+				// Set error on the tab to inform user
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+						return {
+							...tab,
+							error: 'This session is already open on another device. Click "Take Over" to use it here.',
+							sessionLocked: true,
+							sessionLockedBy: lockedBy
+						};
+					})
+				}));
+				break;
+			}
+
+			case 'session_takeover': {
+				// Another device has taken over this session
+				const newDevice = data.new_device as string;
+				const takeoverMessage = data.message as string;
+				console.warn(`[Tab ${tabId}] Session taken over by device ${newDevice}: ${takeoverMessage}`);
+
+				// Clear the session from this tab and show message
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+						return {
+							...tab,
+							error: 'This session was taken over by another device.',
+							isStreaming: false,
+							sessionLocked: false,
+							sessionLockedBy: undefined
+						};
+					})
+				}));
+				break;
+			}
+
 			case 'ping': {
 				const ws = tabConnections.get(tabId);
 				if (ws?.readyState === WebSocket.OPEN) {
@@ -3318,7 +3367,9 @@ function createTabsStore() {
 						worktreeBaseBranch: 'main',
 						worktreeId: null,
 						worktreeMode: 'new',
-						selectedWorktreeBranch: null
+						selectedWorktreeBranch: null,
+						sessionLocked: false,
+						sessionLockedBy: undefined
 					}));
 
 					update(s => ({
@@ -3403,7 +3454,9 @@ function createTabsStore() {
 				worktreeBaseBranch: 'main',
 				worktreeId: null,
 				worktreeMode: 'new',
-				selectedWorktreeBranch: null
+				selectedWorktreeBranch: null,
+				sessionLocked: false,
+				sessionLockedBy: undefined
 			};
 
 			update(s => ({
@@ -3929,6 +3982,32 @@ function createTabsStore() {
 				const error = e as { detail?: string };
 				updateTab(tabId, { error: error.detail || 'Failed to load session' });
 				return false;
+			}
+		},
+
+		/**
+		 * Force takeover a session that is locked by another device
+		 */
+		forceLoadSessionInTab(tabId: string, sessionId: string) {
+			const ws = tabConnections.get(tabId);
+			if (ws && ws.readyState === WebSocket.OPEN) {
+				// Clear the error and lock state
+				updateTab(tabId, {
+					error: null,
+					sessionLocked: false,
+					sessionLockedBy: undefined
+				});
+
+				// Set expected session for race condition prevention
+				tabExpectedSessionId.set(tabId, sessionId);
+				tabsWaitingForHistory.set(tabId, []);
+
+				// Send load_session with force=true to take over
+				ws.send(JSON.stringify({
+					type: 'load_session',
+					session_id: sessionId,
+					force: true
+				}));
 			}
 		},
 

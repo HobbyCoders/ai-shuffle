@@ -18,7 +18,7 @@ from typing import Optional, Dict, Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from fastapi.websockets import WebSocketState
 
-from app.core.sync_engine import sync_engine
+from app.core.sync_engine import sync_engine, SyncEvent
 from app.core.live_session_store import live_session_store
 from app.db import database
 from app.core.webhook_service import dispatch_session_complete, dispatch_session_error
@@ -898,11 +898,40 @@ async def chat_websocket(
                     elif msg_type == "load_session":
                         # Load a session's message history from JSONL file
                         session_id = data.get("session_id")
+                        force_takeover = data.get("force", False)  # Allow forced takeover
                         if session_id:
                             session = database.get_session(session_id)
                             if session:
-                                # Unregister from old session if switching
+                                # Check for session lock - enforce single active device per session
+                                lock_success, lock_owner = await sync_engine.acquire_session_lock(session_id, device_id)
+                                if not lock_success and not force_takeover:
+                                    # Session is locked by another device
+                                    await send_json({
+                                        "type": "session_locked",
+                                        "session_id": session_id,
+                                        "locked_by": lock_owner,
+                                        "message": "This session is already open on another device. Use force=true to take over."
+                                    })
+                                    continue
+                                elif not lock_success and force_takeover:
+                                    # Force takeover - release the old lock and acquire new one
+                                    # First, notify the old device that it's being kicked
+                                    await sync_engine.broadcast_event(
+                                        SyncEvent(
+                                            event_type="session_takeover",
+                                            session_id=session_id,
+                                            data={"new_device": device_id, "message": "Session taken over by another device"}
+                                        ),
+                                        exclude_device_id=device_id
+                                    )
+                                    # Release old lock and acquire for this device
+                                    await sync_engine.release_session_lock(session_id, lock_owner)
+                                    await sync_engine.acquire_session_lock(session_id, device_id)
+                                    logger.info(f"Device {device_id[:8]} force-took over session {session_id[:8]} from {lock_owner[:8]}")
+
+                                # Release lock on old session if switching
                                 if current_session_id and current_session_id != session_id:
+                                    await sync_engine.release_session_lock(current_session_id, device_id)
                                     await sync_engine.unregister_device(device_id, current_session_id)
 
                                 # Register to new session
@@ -1171,6 +1200,8 @@ async def chat_websocket(
             # before this cleanup runs (e.g., page reload during streaming)
             if current_session_id:
                 await sync_engine.unregister_device(device_id, current_session_id, websocket)
+                # Release session lock when disconnecting
+                await sync_engine.release_session_lock(current_session_id, device_id)
                 logger.info(f"Cleanup: unregister device {device_id} from session {current_session_id}")
 
     except WebSocketDisconnect:
