@@ -10,13 +10,13 @@ Based on patterns from Anvil's SessionManager:
 import logging
 import uuid
 import asyncio
-from typing import Optional, Dict, Any, AsyncGenerator
+from typing import Optional, Dict, Any, AsyncGenerator, List
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient
 from claude_agent_sdk import (
-    AssistantMessage, TextBlock, ToolUseBlock, ToolResultBlock,
+    AssistantMessage, UserMessage, TextBlock, ToolUseBlock, ToolResultBlock,
     ResultMessage, SystemMessage
 )
 
@@ -24,8 +24,56 @@ from app.db import database
 from app.core.config import settings
 from app.core.profiles import get_profile_or_builtin
 from app.core.sync_engine import sync_engine
+from app.core.checkpoint_manager import checkpoint_manager
 
 logger = logging.getLogger(__name__)
+
+
+class MessageQueue:
+    """
+    Async message queue for streaming input mode.
+
+    Allows messages to be queued while Claude is still processing,
+    enabling true streaming input with message queueing.
+    """
+    def __init__(self):
+        self._queue: asyncio.Queue = asyncio.Queue()
+        self._closed: bool = False
+        self._first_message_sent: bool = False
+
+    async def put(self, message: Dict[str, Any]):
+        """Add a message to the queue"""
+        if not self._closed:
+            await self._queue.put(message)
+
+    def close(self):
+        """Close the queue - no more messages will be yielded"""
+        self._closed = True
+        # Put a sentinel to unblock any waiting get()
+        try:
+            self._queue.put_nowait(None)
+        except asyncio.QueueFull:
+            pass
+
+    @property
+    def is_closed(self) -> bool:
+        return self._closed
+
+    async def __aiter__(self):
+        """Async iterator that yields messages from the queue"""
+        while not self._closed:
+            try:
+                # Wait for next message with timeout to allow checking closed status
+                message = await asyncio.wait_for(self._queue.get(), timeout=0.5)
+                if message is None:  # Sentinel value
+                    break
+                self._first_message_sent = True
+                yield message
+            except asyncio.TimeoutError:
+                # Check if we should continue waiting
+                if self._closed:
+                    break
+                continue
 
 
 @dataclass
@@ -38,6 +86,7 @@ class SessionState:
     interrupt_requested: bool = False  # Flag to signal interrupt request
     last_activity: datetime = field(default_factory=datetime.now)
     background_task: Optional[asyncio.Task] = None  # Track background streaming task
+    message_queue: Optional[MessageQueue] = None  # Queue for streaming input messages
 
 
 # Track active sessions - key is our session_id, value is SessionState
@@ -283,6 +332,18 @@ async def execute_query(
                             "output": output
                         })
                 metadata["model"] = message.model
+
+            elif isinstance(message, UserMessage):
+                # UserMessage contains tool results from Claude's tool executions
+                for block in message.content:
+                    if isinstance(block, ToolResultBlock):
+                        output = str(block.content)[:2000] if block.content else ""
+                        tool_messages.append({
+                            "type": "tool_result",
+                            "name": "unknown",
+                            "tool_id": block.tool_use_id,
+                            "output": output
+                        })
 
             elif isinstance(message, ResultMessage):
                 metadata["duration_ms"] = message.duration_ms
@@ -586,6 +647,37 @@ async def stream_query(
 
                 metadata["model"] = message.model
 
+            elif isinstance(message, UserMessage):
+                # UserMessage contains tool results from Claude's tool executions
+                for block in message.content:
+                    if isinstance(block, ToolResultBlock):
+                        output = str(block.content)[:2000] if block.content else ""
+                        logger.debug(f"UserMessage ToolResultBlock - tool_use_id: {block.tool_use_id}, content length: {len(str(block.content) if block.content else '')}")
+
+                        yield {
+                            "type": "tool_result",
+                            "name": "unknown",
+                            "tool_use_id": block.tool_use_id,
+                            "output": output
+                        }
+
+                        # Collect tool result for storage
+                        tool_messages.append({
+                            "type": "tool_result",
+                            "name": "unknown",
+                            "tool_id": block.tool_use_id,
+                            "output": output
+                        })
+
+                        # Broadcast tool result to other devices
+                        await sync_engine.broadcast_stream_chunk(
+                            session_id=session_id,
+                            message_id=assistant_msg_id,
+                            chunk_type="tool_result",
+                            chunk_data={"name": "unknown", "output": output, "tool_use_id": block.tool_use_id},
+                            source_device_id=device_id
+                        )
+
             elif isinstance(message, ResultMessage):
                 metadata["duration_ms"] = message.duration_ms
                 metadata["num_turns"] = message.num_turns
@@ -682,6 +774,17 @@ async def stream_query(
             cost_usd=metadata.get("total_cost_usd", 0),
             duration_ms=metadata.get("duration_ms", 0)
         )
+
+    # Create checkpoint after successful query (for rewind functionality)
+    if not interrupted and sdk_session_id:
+        try:
+            checkpoint_manager.create_checkpoint(
+                session_id=session_id,
+                description=prompt[:50],
+                create_git_snapshot=True
+            )
+        except Exception as e:
+            logger.warning(f"Failed to create checkpoint for session {session_id}: {e}")
 
     # Yield done event (unless already yielded error/interrupted)
     if not interrupted:
@@ -883,6 +986,33 @@ async def _run_background_query(
 
                 metadata["model"] = message.model
 
+            elif isinstance(message, UserMessage):
+                # UserMessage contains tool results from Claude's tool executions
+                for block in message.content:
+                    if isinstance(block, ToolResultBlock):
+                        output = str(block.content)[:2000] if block.content else ""
+                        logger.debug(f"[Background] UserMessage ToolResultBlock - tool_use_id: {block.tool_use_id}, content length: {len(str(block.content) if block.content else '')}")
+
+                        # Collect tool result for storage
+                        tool_messages.append({
+                            "type": "tool_result",
+                            "name": "unknown",
+                            "tool_id": block.tool_use_id,
+                            "output": output
+                        })
+
+                        await sync_engine.broadcast_stream_chunk(
+                            session_id=session_id,
+                            message_id=assistant_msg_id,
+                            chunk_type="tool_result",
+                            chunk_data={
+                                "name": "unknown",
+                                "tool_use_id": block.tool_use_id,
+                                "output": output
+                            },
+                            source_device_id=None
+                        )
+
             elif isinstance(message, ResultMessage):
                 metadata["duration_ms"] = message.duration_ms
                 metadata["num_turns"] = message.num_turns
@@ -976,6 +1106,17 @@ async def _run_background_query(
             cost_usd=metadata.get("total_cost_usd", 0),
             duration_ms=metadata.get("duration_ms", 0)
         )
+
+    # Create checkpoint after successful query (for rewind functionality)
+    if not interrupted and sdk_session_id and not metadata.get("error"):
+        try:
+            checkpoint_manager.create_checkpoint(
+                session_id=session_id,
+                description=prompt[:50],
+                create_git_snapshot=True
+            )
+        except Exception as e:
+            logger.warning(f"[Background] Failed to create checkpoint for session {session_id}: {e}")
 
     logger.info(f"[Background] Query completed for session {session_id}")
 
@@ -1133,18 +1274,92 @@ def get_streaming_sessions() -> list:
     ]
 
 
+def build_message_payload(prompt: str, images: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Build a message payload for streaming input, with optional images."""
+    if images:
+        content = [{"type": "text", "text": prompt}]
+        for img in images:
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img.get("media_type", "image/png"),
+                    "data": img.get("data", "")
+                }
+            })
+    else:
+        content = prompt
+
+    return {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": content
+        }
+    }
+
+
+async def queue_message(
+    session_id: str,
+    prompt: str,
+    images: Optional[List[Dict[str, Any]]] = None
+) -> bool:
+    """
+    Queue a message to an active streaming session.
+
+    This allows sending follow-up messages while Claude is still processing.
+    The message will be processed after the current response completes.
+
+    Args:
+        session_id: The session ID
+        prompt: The text prompt
+        images: Optional image attachments
+
+    Returns:
+        True if message was queued, False if session not found or not streaming
+    """
+    state = _active_sessions.get(session_id)
+    if not state or not state.message_queue:
+        logger.warning(f"Cannot queue message: session {session_id} not found or no queue")
+        return False
+
+    if state.message_queue.is_closed:
+        logger.warning(f"Cannot queue message: queue closed for session {session_id}")
+        return False
+
+    message = build_message_payload(prompt, images)
+    await state.message_queue.put(message)
+    logger.info(f"[WS] Queued message for session {session_id}, images={len(images) if images else 0}")
+    return True
+
+
 async def stream_to_websocket(
     prompt: str,
     session_id: str,
     profile_id: str,
     project_id: Optional[str] = None,
-    overrides: Optional[Dict[str, Any]] = None
+    overrides: Optional[Dict[str, Any]] = None,
+    images: Optional[List[Dict[str, Any]]] = None
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
-    Stream Claude response directly to WebSocket.
+    Stream Claude response directly to WebSocket using streaming input mode.
 
-    This is the simplified streaming function for the WebSocket-first architecture.
-    No sync engine, no background tasks - just direct streaming.
+    This uses the full streaming input API with message queueing, allowing:
+    - Image attachments in messages
+    - Queued messages (send follow-ups while Claude is still responding)
+    - Rich multimodal interactions
+
+    The session stays active after the initial response, allowing additional
+    messages to be queued via queue_message().
+
+    Args:
+        prompt: The text prompt
+        session_id: Session ID
+        profile_id: Profile ID
+        project_id: Optional project ID
+        overrides: Optional query overrides
+        images: Optional list of image attachments with format:
+                [{"media_type": "image/png", "data": "base64..."}]
 
     Yields events:
     - {"type": "chunk", "content": "..."}
@@ -1179,19 +1394,33 @@ async def stream_to_websocket(
         resume_session_id=resume_id
     )
 
-    # Clean up any existing state for this session
+    # Check if we have an existing active session with a message queue
     state = _active_sessions.get(session_id)
+    if state and state.is_connected and state.message_queue and not state.message_queue.is_closed:
+        # Session is already active - queue this message instead of creating new connection
+        logger.info(f"[WS] Session {session_id} already active, queueing message")
+        message = build_message_payload(prompt, images)
+        await state.message_queue.put(message)
+        # The existing stream will handle this message
+        # Just yield a queued notification
+        yield {"type": "queued", "session_id": session_id, "message": "Message queued for processing"}
+        return
+
+    # Clean up any existing state for this session
     if state:
         logger.info(f"[WS] Cleaning up existing state for session {session_id}")
+        if state.message_queue:
+            state.message_queue.close()
         try:
             await state.client.disconnect()
         except Exception:
             pass
         del _active_sessions[session_id]
 
-    # Create new client
+    # Create new client and message queue
     logger.info(f"[WS] Creating ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
     client = ClaudeSDKClient(options=options)
+    message_queue = MessageQueue()
 
     # Connect
     try:
@@ -1205,7 +1434,8 @@ async def stream_to_websocket(
     state = SessionState(
         client=client,
         sdk_session_id=resume_id,
-        is_connected=True
+        is_connected=True,
+        message_queue=message_queue
     )
     _active_sessions[session_id] = state
 
@@ -1213,15 +1443,22 @@ async def stream_to_websocket(
     state.is_streaming = True
     state.last_activity = datetime.now()
 
-    # Execute query
+    # Queue the initial message
+    initial_message = build_message_payload(prompt, images)
+    await message_queue.put(initial_message)
+    logger.info(f"[WS] Queued initial message for session {session_id}, images={len(images) if images else 0}")
+
+    # Execute query with streaming input (message queue as async generator)
     response_text = []
     tool_messages = []  # Collect tool use/result messages for storage
     metadata = {}
     sdk_session_id = resume_id
     interrupted = False
+    last_prompt = prompt  # Track last prompt for title update
 
     try:
-        await state.client.query(prompt)
+        # Pass the message queue as the streaming input generator
+        await state.client.query(message_queue)
 
         async for message in state.client.receive_response():
             # Check for interrupt request as a failsafe
@@ -1284,6 +1521,29 @@ async def stream_to_websocket(
 
                 metadata["model"] = message.model
 
+            elif isinstance(message, UserMessage):
+                # UserMessage contains tool results from Claude's tool executions
+                # The SDK sends tool results back as UserMessage with ToolResultBlock content
+                for block in message.content:
+                    if isinstance(block, ToolResultBlock):
+                        output = str(block.content)[:2000] if block.content else ""
+                        logger.debug(f"[WS] UserMessage ToolResultBlock - tool_use_id: {block.tool_use_id}, content length: {len(str(block.content) if block.content else '')}, is_error: {block.is_error}")
+
+                        # Collect tool result for storage
+                        tool_messages.append({
+                            "type": "tool_result",
+                            "name": "unknown",  # UserMessage ToolResultBlock doesn't have name
+                            "tool_id": block.tool_use_id,
+                            "output": output
+                        })
+
+                        yield {
+                            "type": "tool_result",
+                            "name": "unknown",
+                            "tool_use_id": block.tool_use_id,
+                            "output": output
+                        }
+
             elif isinstance(message, ResultMessage):
                 metadata["duration_ms"] = message.duration_ms
                 metadata["num_turns"] = message.num_turns
@@ -1306,10 +1566,13 @@ async def stream_to_websocket(
         state.is_streaming = False
         state.interrupt_requested = False
         state.last_activity = datetime.now()
+        # Close the message queue to signal no more messages
+        if state.message_queue:
+            state.message_queue.close()
 
     # Update session in database - always update title to the last user message
-    title = prompt[:50].strip()
-    if len(prompt) > 50:
+    title = last_prompt[:50].strip()
+    if len(last_prompt) > 50:
         title += "..."
 
     database.update_session(
@@ -1362,6 +1625,18 @@ async def stream_to_websocket(
             cost_usd=metadata.get("total_cost_usd", 0),
             duration_ms=metadata.get("duration_ms", 0)
         )
+
+    # Create checkpoint after successful query (for rewind functionality)
+    # This captures the git state AFTER Claude's changes
+    if not interrupted and sdk_session_id:
+        try:
+            checkpoint_manager.create_checkpoint(
+                session_id=session_id,
+                description=prompt[:50],
+                create_git_snapshot=True
+            )
+        except Exception as e:
+            logger.warning(f"Failed to create checkpoint for session {session_id}: {e}")
 
     # Yield done or interrupted event
     if interrupted:

@@ -448,6 +448,13 @@ function createChatStore() {
 				break;
 			}
 
+			case 'queued': {
+				// Message was queued to active session
+				// The user message was already added in sendQuery, just log it
+				console.log('[Chat] Message queued for processing');
+				break;
+			}
+
 			case 'ping': {
 				// Respond to ping
 				if (ws?.readyState === WebSocket.OPEN) {

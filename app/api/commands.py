@@ -349,6 +349,7 @@ class CheckpointV2(BaseModel):
     full_message: str
     timestamp: Optional[str] = None
     git_available: bool = False
+    git_ref: Optional[str] = None
 
 
 class CheckpointsResponseV2(BaseModel):
@@ -365,8 +366,8 @@ async def get_rewind_checkpoints(session_id: str):
     """
     Get available checkpoints for a session that can be rewound to.
 
-    V2: Reads directly from Claude's JSONL files for accurate checkpoint data.
-    Each checkpoint is a user message with a UUID that can be used for rewind.
+    V2: Uses CheckpointManager which combines JSONL checkpoints with
+    persisted git snapshot information from the database.
     """
     # Get session info
     session = database.get_session(session_id)
@@ -382,11 +383,8 @@ async def get_rewind_checkpoints(session_id: str):
             error="Session has no SDK session ID - start a conversation first"
         )
 
-    # Get working directory
-    working_dir = get_working_dir_for_project(session.get("project_id"))
-
-    # Get checkpoints directly from JSONL
-    checkpoints = jsonl_rewind_service.get_checkpoints(sdk_session_id, working_dir)
+    # Get checkpoints via CheckpointManager (combines JSONL + database git_refs)
+    checkpoints = checkpoint_manager.get_checkpoints(session_id, include_git=True)
 
     if not checkpoints:
         # Fallback: get from our local database (less accurate but better than nothing)
@@ -402,7 +400,8 @@ async def get_rewind_checkpoints(session_id: str):
                     message_preview=content[:100] + ('...' if len(content) > 100 else ''),
                     full_message=content,
                     timestamp=str(msg.get("created_at", "")),
-                    git_available=False
+                    git_available=False,
+                    git_ref=None
                 ))
 
         return CheckpointsResponseV2(
@@ -416,12 +415,13 @@ async def get_rewind_checkpoints(session_id: str):
     # Convert to response model
     response_checkpoints = [
         CheckpointV2(
-            uuid=cp.uuid,
-            index=cp.index,
-            message_preview=cp.message_preview,
-            full_message=cp.full_message,
-            timestamp=cp.timestamp,
-            git_available=False  # Git integration can be added later
+            uuid=cp['message_uuid'],
+            index=cp['message_index'],
+            message_preview=cp['message_preview'],
+            full_message=cp.get('full_message', cp['message_preview']),
+            timestamp=cp.get('timestamp'),
+            git_available=cp.get('git_available', False),
+            git_ref=cp.get('git_ref')
         )
         for cp in checkpoints
     ]

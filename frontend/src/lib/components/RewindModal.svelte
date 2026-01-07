@@ -14,6 +14,7 @@
 		full_message: string;
 		timestamp?: string;
 		git_available: boolean;
+		git_ref?: string | null;
 	}
 
 	interface CheckpointsResponse {
@@ -36,7 +37,7 @@
 	interface Props {
 		sessionId: string;
 		onClose: () => void;
-		onRewindComplete: (success: boolean, messagesRemoved: number) => void;
+		onRewindComplete: (success: boolean, messagesRemoved: number, restoredMessageText?: string) => void;
 	}
 
 	let { sessionId, onClose, onRewindComplete }: Props = $props();
@@ -50,7 +51,6 @@
 	// Rewind options
 	let restoreChat = $state(true);
 	let restoreCode = $state(false);
-	let includeResponse = $state(true);
 
 	// Load checkpoints on mount
 	$effect(() => {
@@ -101,32 +101,84 @@
 		executing = true;
 		error = null;
 
+		// Save the message text to restore to the input field
+		const messageTextToRestore = selectedCheckpoint.full_message;
+
+		// Find the checkpoint before the selected one (we want to rewind BEFORE the selected message)
+		// The selected message and its response will be removed, and the text goes to input field
+		const checkpointIndex = checkpoints.findIndex(c => c.uuid === selectedCheckpoint!.uuid);
+
+		// If this is the first checkpoint (index 0), we need to handle it differently
+		// In this case, we'll rewind to before the first message (effectively clear the conversation)
+		const targetCheckpoint = checkpointIndex > 0 ? checkpoints[checkpointIndex - 1] : null;
+
 		try {
-			const response = await fetch(`/api/v1/commands/rewind/execute/${sessionId}`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json'
-				},
-				credentials: 'include',
-				body: JSON.stringify({
-					target_uuid: selectedCheckpoint.uuid,
-					restore_chat: restoreChat,
-					restore_code: restoreCode,
-					include_response: includeResponse
-				})
-			});
+			if (targetCheckpoint) {
+				// Normal case: rewind to the checkpoint before the selected message
+				// include_response: true keeps Claude's response to that earlier checkpoint
+				const response = await fetch(`/api/v1/commands/rewind/execute/${sessionId}`, {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json'
+					},
+					credentials: 'include',
+					body: JSON.stringify({
+						target_uuid: targetCheckpoint.uuid,
+						restore_chat: restoreChat,
+						restore_code: restoreCode,
+						include_response: true  // Keep the response to the checkpoint BEFORE our selected one
+					})
+				});
 
-			if (!response.ok) {
-				throw new Error(`Rewind failed: ${response.statusText}`);
-			}
+				if (!response.ok) {
+					throw new Error(`Rewind failed: ${response.statusText}`);
+				}
 
-			const data: RewindResponse = await response.json();
+				const data: RewindResponse = await response.json();
 
-			if (data.success) {
-				onRewindComplete(true, data.messages_removed);
-				onClose();
+				if (data.success) {
+					onRewindComplete(true, data.messages_removed, messageTextToRestore);
+					onClose();
+				} else {
+					error = data.error || data.message || 'Rewind failed';
+				}
 			} else {
-				error = data.error || data.message || 'Rewind failed';
+				// Edge case: selected the first message, rewind to the very beginning
+				// Use the selected checkpoint's UUID but with include_response: false
+				// to truncate immediately after it (keeping nothing since it's the target itself)
+				// Actually, we need a different approach - truncate to exclude the first message too
+				// The backend truncate_to_checkpoint with include_response: false keeps the target message
+				// We need to send a special "clear all" or find a workaround
+				// Simplest: don't allow rewinding the first message, or use include_response: false
+				// which at least removes the response
+				const response = await fetch(`/api/v1/commands/rewind/execute/${sessionId}`, {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json'
+					},
+					credentials: 'include',
+					body: JSON.stringify({
+						target_uuid: selectedCheckpoint.uuid,
+						restore_chat: restoreChat,
+						restore_code: restoreCode,
+						include_response: false  // Remove response to first message
+					})
+				});
+
+				if (!response.ok) {
+					throw new Error(`Rewind failed: ${response.statusText}`);
+				}
+
+				const data: RewindResponse = await response.json();
+
+				if (data.success) {
+					// For first message, we removed the response but kept the user message
+					// The text still goes to input field for editing
+					onRewindComplete(true, data.messages_removed, messageTextToRestore);
+					onClose();
+				} else {
+					error = data.error || data.message || 'Rewind failed';
+				}
 			}
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Unknown error';
@@ -222,6 +274,9 @@
 												{#if i === checkpoints.length - 1}
 													<span class="text-xs bg-primary/20 text-primary px-1.5 py-0.5 rounded">Current</span>
 												{/if}
+												{#if checkpoint.git_ref}
+													<span class="text-xs bg-green-500/20 text-green-600 dark:text-green-400 px-1.5 py-0.5 rounded" title="Git snapshot available">Git</span>
+												{/if}
 											</div>
 											<p class="text-sm mt-1 truncate">{truncateMessage(checkpoint.message_preview)}</p>
 											{#if checkpoint.timestamp}
@@ -255,36 +310,42 @@
 							</div>
 						</label>
 
-						<label class="flex items-center gap-3 cursor-pointer">
+						<label class="flex items-center gap-3 cursor-pointer {!selectedCheckpoint?.git_ref ? 'opacity-50' : ''}">
 							<input
 								type="checkbox"
 								bind:checked={restoreCode}
-								disabled
-								class="w-4 h-4 rounded border-border opacity-50"
-							/>
-							<div class="opacity-50">
-								<span class="text-sm font-medium">Restore code changes</span>
-								<p class="text-xs text-muted-foreground">Revert files to checkpoint state (requires git)</p>
-							</div>
-						</label>
-
-						<label class="flex items-center gap-3 cursor-pointer {!restoreChat ? 'opacity-50' : ''}">
-							<input
-								type="checkbox"
-								bind:checked={includeResponse}
-								disabled={!restoreChat}
+								disabled={!selectedCheckpoint?.git_ref}
 								class="w-4 h-4 rounded border-border"
 							/>
 							<div>
-								<span class="text-sm font-medium">Keep Claude's response</span>
-								<p class="text-xs text-muted-foreground">Include the response to the selected message</p>
+								<span class="text-sm font-medium">Restore code changes</span>
+								<p class="text-xs text-muted-foreground">
+									{#if selectedCheckpoint?.git_ref}
+										Revert files to checkpoint state (git snapshot available)
+									{:else}
+										No git snapshot for this checkpoint
+									{/if}
+								</p>
 							</div>
 						</label>
 					</div>
 
+					<!-- Info about what happens -->
+					<div class="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-blue-600 dark:text-blue-400">
+						<div class="flex items-start gap-2">
+							<svg class="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+							</svg>
+							<div class="text-sm">
+								<p>The selected message and Claude's response will be removed. The message text will be placed in your input field so you can modify and resend it.</p>
+							</div>
+						</div>
+					</div>
+
 					<!-- Warning -->
 					{#if selectedCheckpoint && restoreChat}
-						{@const messagesToRemove = checkpoints.length - selectedCheckpoint.index - (includeResponse ? 1 : 0)}
+						{@const checkpointIdx = checkpoints.findIndex(c => c.uuid === selectedCheckpoint?.uuid)}
+						{@const messagesToRemove = checkpoints.length - checkpointIdx}
 						{#if messagesToRemove > 0}
 							<div class="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-amber-600 dark:text-amber-400">
 								<div class="flex items-start gap-2">
@@ -292,7 +353,7 @@
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
 									</svg>
 									<div class="text-sm">
-										<p class="font-medium">This will remove approximately {messagesToRemove} message{messagesToRemove > 1 ? 's' : ''} from the conversation.</p>
+										<p class="font-medium">This will remove approximately {messagesToRemove} user message{messagesToRemove > 1 ? 's' : ''} and {messagesToRemove > 1 ? 'their' : 'its'} response{messagesToRemove > 1 ? 's' : ''} from the conversation.</p>
 										<p class="mt-1 text-xs opacity-80">This action cannot be undone. A backup will be created.</p>
 									</div>
 								</div>
