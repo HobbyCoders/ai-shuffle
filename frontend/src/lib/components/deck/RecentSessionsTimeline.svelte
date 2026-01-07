@@ -10,7 +10,7 @@
 	 */
 
 	import { MessageSquare, Zap } from 'lucide-svelte';
-	import type { Session } from '$lib/stores/tabs';
+	import type { Session } from '$lib/api/client';
 
 	interface Props {
 		sessions: Session[];
@@ -118,14 +118,14 @@
 							</div>
 
 							<div class="card-preview">
-								Session with {session.turn_count || session.message_count || 0} {(session.turn_count || session.message_count || 0) === 1 ? 'turn' : 'turns'}
+								Session with {session.turn_count || 0} {(session.turn_count || 0) === 1 ? 'turn' : 'turns'}
 							</div>
 
 							<div class="card-footer">
 								<span class="card-time">{formatTimeOfDay(session.updated_at)}</span>
 								<span class="card-meta">
 									<MessageSquare size={12} />
-									{session.turn_count || session.message_count || 0}
+									{session.turn_count || 0}
 								</span>
 							</div>
 						</button>

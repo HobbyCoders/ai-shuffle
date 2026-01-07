@@ -14,6 +14,7 @@
 	import { tabs, projects } from '$lib/stores/tabs';
 	import { groups } from '$lib/stores/groups';
 	import { Search, Plus, Trash2, FolderOpen, X, Download } from 'lucide-svelte';
+	import GroupDropdown from '$lib/components/GroupDropdown.svelte';
 	import './card-design-system.css';
 
 	interface Props {
@@ -229,6 +230,8 @@
 								<span class="card-item-id">/workspace/{project.path}/</span>
 							</div>
 							<div class="card-item-actions">
+								<!-- Group dropdown (portal-based to escape overflow:hidden) -->
+								<GroupDropdown entityType="projects" entityId={project.id} />
 								<button
 									onclick={() => (deletingId = project.id)}
 									class="card-action-btn card-action-btn--destructive"

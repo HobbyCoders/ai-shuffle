@@ -10,7 +10,7 @@
 	 */
 
 	import { MessageSquare, Zap } from 'lucide-svelte';
-	import type { Session } from '$lib/stores/tabs';
+	import type { Session } from '$lib/api/client';
 
 	interface Props {
 		sessions: Session[];
@@ -53,7 +53,7 @@
 				{:else}
 					<MessageSquare size={12} />
 				{/if}
-				<span>{session.turn_count || session.message_count || 0}</span>
+				<span>{session.turn_count || 0}</span>
 			</div>
 
 			<!-- Title (center) -->

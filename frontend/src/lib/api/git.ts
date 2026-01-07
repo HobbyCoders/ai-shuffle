@@ -24,6 +24,21 @@ export interface GitStatus {
 // Branch Types
 // ============================================================================
 
+// Raw branch data from API (snake_case)
+interface RawBranch {
+    name: string;
+    is_current: boolean;
+    is_remote: boolean;
+    upstream?: string;
+    ahead?: number;
+    behind?: number;
+    commit?: string;
+    commit_message?: string;
+    has_worktree?: boolean;
+    worktree_id?: string;
+}
+
+// Transformed branch for frontend (camelCase)
 export interface Branch {
     name: string;
     current: boolean;
@@ -32,6 +47,24 @@ export interface Branch {
     ahead?: number;
     behind?: number;
     lastCommit?: string;
+    // Worktree association
+    hasWorktree?: boolean;
+    worktreeId?: string;
+}
+
+// Transform raw branch to frontend format
+function transformBranch(raw: RawBranch): Branch {
+    return {
+        name: raw.name,
+        current: raw.is_current,
+        remote: raw.is_remote,
+        upstream: raw.upstream,
+        ahead: raw.ahead,
+        behind: raw.behind,
+        lastCommit: raw.commit_message,
+        hasWorktree: raw.has_worktree,
+        worktreeId: raw.worktree_id
+    };
 }
 
 export interface CreateBranchRequest {
@@ -147,6 +180,11 @@ export async function getGitStatus(projectId: string): Promise<GitStatus> {
 // Branch API
 // ============================================================================
 
+interface RawBranchListResponse {
+    branches: RawBranch[];
+    current_branch: string | null;
+}
+
 export interface BranchListResponse {
     branches: Branch[];
     current_branch: string | null;
@@ -159,8 +197,8 @@ export interface BranchListResponse {
  */
 export async function getBranches(projectId: string, includeRemote: boolean = false): Promise<Branch[]> {
     const params = includeRemote ? '' : '?include_remote=false';
-    const response = await api.get<BranchListResponse>(`${BASE}/${projectId}/git/branches${params}`);
-    return response.branches;
+    const response = await api.get<RawBranchListResponse>(`${BASE}/${projectId}/git/branches${params}`);
+    return response.branches.map(transformBranch);
 }
 
 /**

@@ -86,7 +86,7 @@
 	});
 
 	// Load projects on mount
-	onMount(async () => {
+	onMount(() => {
 		// Check mobile
 		function checkMobile() {
 			isMobile = window.innerWidth < 768;
@@ -94,19 +94,21 @@
 		checkMobile();
 		window.addEventListener('resize', checkMobile);
 
-		// Load projects
-		try {
-			projects = await api.get<Project[]>('/projects');
-		} catch (e) {
-			console.error('[Files] Failed to load projects:', e);
-		} finally {
-			loadingProjects = false;
-		}
+		// Load projects asynchronously
+		(async () => {
+			try {
+				projects = await api.get<Project[]>('/projects');
+			} catch (e) {
+				console.error('[Files] Failed to load projects:', e);
+			} finally {
+				loadingProjects = false;
+			}
 
-		// If there's a persisted project selection, load its files
-		if ($files.selectedProjectId) {
-			files.loadFiles();
-		}
+			// If there's a persisted project selection, load its files
+			if ($files.selectedProjectId) {
+				files.loadFiles();
+			}
+		})();
 
 		// Close context menu and dropdowns on click outside
 		function handleClickOutside(e: MouseEvent) {

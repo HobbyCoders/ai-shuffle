@@ -19,7 +19,7 @@
 		activeCardIndex: number;
 		onCardChange: (index: number) => void;
 		onCloseCard: (id: string) => void;
-		onCreateCard: (type: CardType) => void;
+		onCreateCard: (type: string) => void;
 		onOpenNavigator?: () => void;
 		isApiUser?: boolean;
 		children?: Snippet<[DeckCard]>;
@@ -92,6 +92,14 @@
 		return interactive !== null;
 	}
 
+	// Check if touch target is within a designated swipe zone
+	function isInSwipeZone(target: EventTarget | null): boolean {
+		if (!(target instanceof HTMLElement)) return false;
+		// Swipe zones: chat island, terminal input area, or any element with data-swipe-zone
+		const swipeZone = target.closest('.chat-island, .terminal-input, [data-swipe-zone]');
+		return swipeZone !== null;
+	}
+
 	// Touch handlers
 	function handleTouchStart(e: TouchEvent) {
 		if (cards.length <= 1) return;
@@ -101,6 +109,9 @@
 
 		// Don't initiate swipe if touching an interactive element
 		if (isInteractiveElement(e.target)) return;
+
+		// Only allow swipes from designated swipe zones (chat island, terminal input, etc.)
+		if (!isInSwipeZone(e.target)) return;
 
 		touchStartX = e.touches[0].clientX;
 		touchStartY = e.touches[0].clientY;

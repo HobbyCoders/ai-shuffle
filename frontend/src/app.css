@@ -519,14 +519,20 @@ select option {
 	opacity: 0.8;
 }
 
-.prose :where(ul):not(:where([class~="not-prose"] *)),
+.prose :where(ul):not(:where([class~="not-prose"] *)) {
+	padding-left: 1.5rem;
+	list-style-type: disc;
+}
+
 .prose :where(ol):not(:where([class~="not-prose"] *)) {
 	padding-left: 1.5rem;
+	list-style-type: decimal;
 }
 
 .prose :where(li):not(:where([class~="not-prose"] *)) {
 	margin-top: 0.25rem;
 	margin-bottom: 0.25rem;
+	display: list-item;
 }
 
 .prose :where(h1):not(:where([class~="not-prose"] *)) {

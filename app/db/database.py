@@ -1340,6 +1340,14 @@ def get_session(session_id: str) -> Optional[Dict[str, Any]]:
         return row_to_dict(cursor.fetchone())
 
 
+def get_session_by_sdk_id(sdk_session_id: str) -> Optional[Dict[str, Any]]:
+    """Get a session by SDK session ID (the Claude Code session ID)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM sessions WHERE sdk_session_id = ?", (sdk_session_id,))
+        return row_to_dict(cursor.fetchone())
+
+
 def get_sessions(
     project_id: Optional[str] = None,
     profile_id: Optional[str] = None,

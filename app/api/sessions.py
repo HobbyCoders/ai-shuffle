@@ -1019,6 +1019,162 @@ async def import_session(
 
 
 # ============================================================================
+# Import Claude Code JSONL Session
+# ============================================================================
+
+class ImportJSONLRequest(BaseModel):
+    """Request body for importing a JSONL session"""
+    jsonl_path: str
+    profile_id: Optional[str] = None
+    project_id: Optional[str] = None
+
+
+class ImportJSONLResponse(BaseModel):
+    """Response for JSONL session import"""
+    session_id: str
+    sdk_session_id: str
+    title: Optional[str]
+    message_count: int
+    status: str
+
+
+@router.post("/import-jsonl", response_model=ImportJSONLResponse)
+async def import_jsonl_session(
+    request: Request,
+    body: ImportJSONLRequest,
+    token: str = Depends(require_auth)
+):
+    """
+    Import an existing Claude Code JSONL session into AI Shuffle.
+
+    This allows resuming sessions that were created directly in Claude Code
+    without going through AI Shuffle. The session will be registered in the
+    AI Shuffle database, allowing it to be resumed and managed like any other session.
+
+    Args:
+        body: Request containing:
+            - jsonl_path: Full path to the JSONL file
+            - profile_id: Optional profile to associate (defaults to 'default')
+            - project_id: Optional project to associate
+
+    Returns:
+        Information about the imported session
+    """
+    import logging
+    import uuid
+    from pathlib import Path
+    from app.core.jsonl_parser import (
+        get_session_cost_from_jsonl,
+        _get_session_title_and_preview
+    )
+
+    logger = logging.getLogger(__name__)
+
+    jsonl_path = Path(body.jsonl_path)
+
+    # Validate the file exists and is a JSONL file
+    if not jsonl_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"JSONL file not found: {body.jsonl_path}"
+        )
+
+    if not jsonl_path.suffix == '.jsonl':
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File must be a JSONL file"
+        )
+
+    # Skip agent files
+    if jsonl_path.name.startswith("agent-"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot import agent files (subagent logs)"
+        )
+
+    # Get SDK session ID from filename
+    sdk_session_id = jsonl_path.stem
+
+    # Check if this session is already imported
+    existing_session = database.get_session_by_sdk_id(sdk_session_id)
+    if existing_session:
+        return ImportJSONLResponse(
+            session_id=existing_session["id"],
+            sdk_session_id=sdk_session_id,
+            title=existing_session.get("title"),
+            message_count=existing_session.get("turn_count", 0),
+            status="already_exists"
+        )
+
+    # Get title and preview from JSONL
+    title, preview, message_count = _get_session_title_and_preview(jsonl_path)
+    if not title:
+        title = f"Imported: {sdk_session_id[:8]}..."
+
+    # Get profile (default to 'default')
+    profile_id = body.profile_id or 'default'
+    profile = database.get_profile(profile_id)
+    if not profile:
+        profile_id = 'default'
+
+    # Validate project if specified
+    project_id = body.project_id
+    if project_id:
+        project = database.get_project(project_id)
+        if not project:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project not found: {project_id}"
+            )
+
+    # Get working dir from project or from the JSONL path
+    working_dir = str(jsonl_path.parent.parent)  # Go up from session file to project dir
+
+    # Parse JSONL to get token usage
+    try:
+        usage_data = get_session_cost_from_jsonl(sdk_session_id, working_dir)
+        total_tokens_in = usage_data.get("total_tokens_in", 0) if usage_data else 0
+        total_tokens_out = usage_data.get("total_tokens_out", 0) if usage_data else 0
+        total_cost = usage_data.get("total_cost", 0.0) if usage_data else 0.0
+    except Exception as e:
+        logger.warning(f"Could not get token usage from JSONL: {e}")
+        total_tokens_in = 0
+        total_tokens_out = 0
+        total_cost = 0.0
+
+    # Create new session in database
+    new_session_id = f"ses-{uuid.uuid4().hex[:16]}"
+
+    database.create_session(
+        session_id=new_session_id,
+        profile_id=profile_id,
+        project_id=project_id,
+        title=title,
+        api_user_id=None  # Local import
+    )
+
+    # Update session with SDK session ID and stats
+    database.update_session(
+        session_id=new_session_id,
+        sdk_session_id=sdk_session_id,
+        cost_increment=total_cost,
+        tokens_in_increment=total_tokens_in,
+        tokens_out_increment=total_tokens_out,
+        turn_increment=message_count
+    )
+
+    logger.info(f"Imported JSONL session {new_session_id} (SDK: {sdk_session_id}) with {message_count} messages")
+
+    return ImportJSONLResponse(
+        session_id=new_session_id,
+        sdk_session_id=sdk_session_id,
+        title=title,
+        message_count=message_count,
+        status="success"
+    )
+
+
+# ============================================================================
 # Session Fork Endpoint
 # ============================================================================
 

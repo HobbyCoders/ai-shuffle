@@ -29,10 +29,9 @@
 
 	interface Props {
 		tab: ChatTab;
-		onFork?: (sessionId: string, messageIndex: number, messageId: string) => void;
 	}
 
-	let { tab, onFork }: Props = $props();
+	let { tab }: Props = $props();
 
 	let containerRef = $state<HTMLDivElement | null>(null);
 	let shouldAutoScroll = $state(true); // Start with auto-scroll enabled
@@ -212,7 +211,6 @@
 						streaming={message.streaming}
 						{hasPartialMessages}
 						metadata={message.metadata}
-						onFork={onFork}
 					/>
 				{:else if message.type === 'tool_use' && message.toolName === 'TodoWrite'}
 					<!-- TodoWrite - Render as TodoList component -->

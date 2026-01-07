@@ -80,13 +80,11 @@ export function showNotification(
 			requireInteraction: options?.requireInteraction || false
 		});
 
-		if (options?.onClick) {
-			notification.onclick = () => {
-				window.focus();
-				notification.close();
-				options.onClick?.();
-			};
-		}
+		notification.onclick = () => {
+			window.focus();
+			notification.close();
+			options?.onClick?.();
+		};
 
 		return notification;
 	} catch (error) {
@@ -95,29 +93,85 @@ export function showNotification(
 	}
 }
 
+export interface SessionCompleteInfo {
+	sessionTitle?: string | null;
+	sessionId: string;
+	durationSeconds?: number;
+	totalCostUsd?: number;
+	tokensIn?: number;
+	tokensOut?: number;
+	model?: string;
+}
+
+/**
+ * Format duration in a human-readable way
+ */
+function formatDuration(seconds: number): string {
+	if (seconds < 60) {
+		return `${Math.round(seconds)}s`;
+	}
+	const minutes = Math.floor(seconds / 60);
+	const secs = Math.round(seconds % 60);
+	if (minutes < 60) {
+		return secs > 0 ? `${minutes}m ${secs}s` : `${minutes}m`;
+	}
+	const hours = Math.floor(minutes / 60);
+	const mins = minutes % 60;
+	return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+}
+
+/**
+ * Format cost in a readable way
+ */
+function formatCost(cost: number): string {
+	if (cost < 0.01) {
+		return `$${cost.toFixed(4)}`;
+	}
+	if (cost < 1) {
+		return `$${cost.toFixed(3)}`;
+	}
+	return `$${cost.toFixed(2)}`;
+}
+
 /**
  * Show a notification for session completion
  *
- * @param sessionTitle - The title of the completed session
- * @param sessionId - The session ID (for navigation)
- * @param duration - How long the session took (in seconds)
+ * @param info - Session completion information including title, duration, cost, etc.
  */
-export function notifySessionComplete(
-	sessionTitle: string | null,
-	sessionId: string,
-	duration?: number
-): Notification | null {
-	const title = 'Session Complete';
-	let body = sessionTitle || 'Your AI session has completed';
+export function notifySessionComplete(info: SessionCompleteInfo): Notification | null {
+	const { sessionTitle, sessionId, durationSeconds, totalCostUsd } = info;
 
-	if (duration && duration > 60) {
-		const minutes = Math.floor(duration / 60);
-		body += ` (${minutes}m ${Math.round(duration % 60)}s)`;
+	const title = 'Session Complete';
+
+	// Build body with session title, duration, and cost
+	const parts: string[] = [];
+
+	if (sessionTitle) {
+		parts.push(sessionTitle);
+	}
+
+	const details: string[] = [];
+	if (durationSeconds !== undefined && durationSeconds > 0) {
+		details.push(formatDuration(durationSeconds));
+	}
+	if (totalCostUsd !== undefined && totalCostUsd > 0) {
+		details.push(formatCost(totalCostUsd));
+	}
+
+	let body: string;
+	if (parts.length > 0 && details.length > 0) {
+		body = `${parts.join('')} (${details.join(' · ')})`;
+	} else if (parts.length > 0) {
+		body = parts.join('');
+	} else if (details.length > 0) {
+		body = `Completed in ${details.join(' · ')}`;
+	} else {
+		body = 'Your AI session has completed';
 	}
 
 	return showNotification(title, {
 		body,
-		tag: `session-${sessionId}`,
+		tag: `session-${sessionId}-${Date.now()}`,
 		onClick: () => {
 			// Navigate to the session
 			window.location.hash = '';

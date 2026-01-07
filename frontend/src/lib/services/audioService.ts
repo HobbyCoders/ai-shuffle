@@ -63,7 +63,7 @@ export class AudioService {
 
 	// Audio data
 	private audioChunks: Blob[] = [];
-	private analyserData: Uint8Array | null = null;
+	private analyserData: Uint8Array<ArrayBuffer> | null = null;
 
 	// VAD state
 	private vadState: VADState = {

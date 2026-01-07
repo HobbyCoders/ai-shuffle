@@ -62,7 +62,9 @@ class StreamingBuffer:
     messages: List[Dict[str, Any]] = field(default_factory=list)
     started_at: datetime = field(default_factory=datetime.utcnow)
 
-    def add_chunk(self, chunk_type: str, content: str, tool_name: str = None, tool_id: str = None, tool_input: Dict = None, subtype: str = None, data: Dict = None):
+    def add_chunk(self, chunk_type: str, content: str, tool_name: str = None, tool_id: str = None, tool_input: Dict = None, subtype: str = None, data: Dict = None,
+                  agent_id: str = None, agent_type: str = None, description: str = None, prompt: str = None,
+                  tool_use_id: str = None, output: str = None, is_error: bool = False, result: str = None):
         """Add a streaming chunk to the buffer"""
         # Find or create message for this chunk type
         if chunk_type == 'text':
@@ -124,6 +126,81 @@ class StreamingBuffer:
                 'data': data,
                 'streaming': False
             })
+        elif chunk_type == 'subagent_start':
+            # Subagent task started - create a new subagent message group
+            self.messages.append({
+                'type': 'subagent',
+                'role': 'assistant',
+                'content': '',
+                'agent_id': agent_id,
+                'agent_type': agent_type,
+                'agent_description': description,
+                'agent_prompt': prompt,
+                'agent_status': 'running',
+                'tool_id': tool_id,
+                'agent_children': [],
+                'streaming': True
+            })
+        elif chunk_type == 'subagent_chunk':
+            # Text chunk from subagent - add to subagent's children
+            subagent = next((m for m in self.messages if m.get('type') == 'subagent' and m.get('agent_id') == agent_id), None)
+            if subagent:
+                children = subagent.get('agent_children', [])
+                # Find or create text child
+                text_child = next((c for c in children if c.get('type') == 'text' and c.get('streaming')), None)
+                if text_child:
+                    text_child['content'] = (text_child.get('content') or '') + content
+                else:
+                    children.append({
+                        'id': f'{agent_id}-text-{len(children)}',
+                        'type': 'text',
+                        'content': content,
+                        'streaming': True
+                    })
+                subagent['agent_children'] = children
+        elif chunk_type == 'subagent_tool_use':
+            # Tool use within subagent
+            subagent = next((m for m in self.messages if m.get('type') == 'subagent' and m.get('agent_id') == agent_id), None)
+            if subagent:
+                children = subagent.get('agent_children', [])
+                # Mark any previous text child as complete
+                for c in children:
+                    if c.get('type') == 'text':
+                        c['streaming'] = False
+                # Add tool use child
+                children.append({
+                    'id': f'{agent_id}-tool-{tool_id}',
+                    'type': 'tool_use',
+                    'toolName': tool_name,
+                    'toolId': tool_id,
+                    'toolInput': tool_input,
+                    'toolStatus': 'running',
+                    'streaming': True
+                })
+                subagent['agent_children'] = children
+        elif chunk_type == 'subagent_tool_result':
+            # Tool result within subagent - embed in matching tool_use
+            subagent = next((m for m in self.messages if m.get('type') == 'subagent' and m.get('agent_id') == agent_id), None)
+            if subagent:
+                children = subagent.get('agent_children', [])
+                # Find matching tool_use and embed result
+                for c in children:
+                    if c.get('type') == 'tool_use' and c.get('toolId') == tool_use_id:
+                        c['toolResult'] = output
+                        c['toolStatus'] = 'error' if is_error else 'complete'
+                        c['streaming'] = False
+                        break
+                subagent['agent_children'] = children
+        elif chunk_type == 'subagent_done':
+            # Subagent completed - update status
+            subagent = next((m for m in self.messages if m.get('type') == 'subagent' and m.get('agent_id') == agent_id), None)
+            if subagent:
+                subagent['agent_status'] = 'error' if is_error else 'completed'
+                subagent['content'] = result or ''
+                subagent['streaming'] = False
+                # Mark all children as not streaming
+                for c in subagent.get('agent_children', []):
+                    c['streaming'] = False
 
     def get_messages(self) -> List[Dict[str, Any]]:
         """Get all buffered messages"""
@@ -308,7 +385,7 @@ class SyncEngine:
         self,
         session_id: str,
         message_id: str,
-        chunk_type: str,  # 'text', 'tool_use', 'tool_result'
+        chunk_type: str,  # 'text', 'tool_use', 'tool_result', 'subagent_*'
         chunk_data: Dict[str, Any],
         source_device_id: Optional[str] = None
     ):
@@ -319,11 +396,20 @@ class SyncEngine:
             buffer.add_chunk(
                 chunk_type=chunk_type,
                 content=chunk_data.get('content', ''),
-                tool_name=chunk_data.get('tool_name'),
-                tool_id=chunk_data.get('tool_id'),
-                tool_input=chunk_data.get('tool_input'),
+                tool_name=chunk_data.get('tool_name') or chunk_data.get('name'),  # subagent uses 'name'
+                tool_id=chunk_data.get('tool_id') or chunk_data.get('id'),  # subagent uses 'id'
+                tool_input=chunk_data.get('tool_input') or chunk_data.get('input'),  # subagent uses 'input'
                 subtype=chunk_data.get('subtype'),
-                data=chunk_data.get('data')
+                data=chunk_data.get('data'),
+                # Subagent-specific parameters
+                agent_id=chunk_data.get('agent_id'),
+                agent_type=chunk_data.get('agent_type'),
+                description=chunk_data.get('description'),
+                prompt=chunk_data.get('prompt'),
+                tool_use_id=chunk_data.get('tool_use_id'),
+                output=chunk_data.get('output'),
+                is_error=chunk_data.get('is_error', False),
+                result=chunk_data.get('result')
             )
 
         event = SyncEvent(

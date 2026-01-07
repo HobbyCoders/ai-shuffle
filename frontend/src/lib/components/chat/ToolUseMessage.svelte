@@ -390,10 +390,10 @@
 				</svg>
 			</summary>
 			<div>
-				{#if isEditTool}
-					<!-- Side-by-side diff view for Edit tool -->
+				{#if isEditTool && status !== 'error'}
+					<!-- Side-by-side diff view for Edit tool (only shown on success) -->
 					<div class="px-3 py-2">
-						<div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+						<div class="grid grid-cols-1 gap-2">
 							<!-- Old (removed) -->
 							<div class="min-w-0">
 								<div class="text-[10px] text-red-400 mb-1 font-medium flex items-center gap-1">
@@ -417,6 +417,16 @@
 										<pre class="text-[10px] font-mono text-green-400 m-0 w-max !bg-transparent !p-0 !rounded-none">{newString || ' '}</pre>
 									</div>
 								</div>
+							</div>
+						</div>
+					</div>
+				{:else if isEditTool && status === 'error'}
+					<!-- Show error result for failed Edit tool -->
+					<div class="px-3 py-2">
+						<div class="text-[10px] text-red-400 mb-1 font-medium">Error</div>
+						<div class="rounded border border-red-500/20 bg-red-500/5 p-2">
+							<div class="max-h-60 overflow-auto">
+								<pre class="text-[10px] font-mono text-red-400 m-0 w-max !bg-transparent !p-0 !rounded-none">{result || 'Edit failed'}</pre>
 							</div>
 						</div>
 					</div>
@@ -456,7 +466,7 @@
 				{:else if isBashTool}
 					<!-- Stacked on mobile, side-by-side on desktop for Bash tool -->
 					<div class="px-3 py-2">
-						<div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+						<div class="grid grid-cols-1 gap-2">
 							<!-- Command -->
 							<div class="min-w-0">
 								<div class="text-[10px] text-yellow-500 mb-1 font-medium flex items-center gap-1">
@@ -491,7 +501,7 @@
 					</div>
 				{:else if partialInput || input}
 					<div class="px-3 py-2">
-						<div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+						<div class="grid grid-cols-1 gap-2">
 							<!-- Input -->
 							<div class="min-w-0">
 								<div class="text-[10px] text-muted-foreground mb-1 font-medium">Input</div>

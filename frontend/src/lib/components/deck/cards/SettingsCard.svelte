@@ -269,6 +269,8 @@
 	let currentTtsSpeed = $state(1.0);
 	let ttsOutputFormat = $state('mp3');
 	let currentTtsOutputFormat = $state('mp3');
+	let ttsInstructions = $state('');
+	let currentTtsInstructions = $state('');
 	let savingTtsSettings = $state(false);
 
 	// Meshy settings
@@ -294,8 +296,14 @@
 
 	// Helper function to get available voices for selected TTS model
 	function getAvailableVoices(): TTSVoice[] {
-		const model = ALL_TTS_MODELS.find(m => m.id === selectedTtsModel);
+		const model = ALL_TTS_MODELS.find(m => m.id === currentTtsModel);
 		return model?.voices || [];
+	}
+
+	// Check if current TTS model supports steerability (voice instructions)
+	function isCurrentModelSteerable(): boolean {
+		const model = ALL_TTS_MODELS.find(m => m.id === currentTtsModel);
+		return model?.capabilities?.steerability ?? false;
 	}
 
 	// Helper to group models by provider
@@ -539,6 +547,7 @@
 				tts_voice: string | null;
 				tts_speed: number | null;
 				tts_output_format: string | null;
+				tts_instructions: string | null;
 				stt_model: string | null;
 				meshy_api_key_set: boolean;
 				meshy_api_key_masked: string;
@@ -565,6 +574,8 @@
 			ttsSpeed = currentTtsSpeed;
 			currentTtsOutputFormat = settings.tts_output_format || 'mp3';
 			ttsOutputFormat = currentTtsOutputFormat;
+			currentTtsInstructions = settings.tts_instructions || '';
+			ttsInstructions = currentTtsInstructions;
 			// Meshy settings
 			meshyApiKeyMasked = settings.meshy_api_key_masked || '';
 			selected3DModel = settings.model_3d_model || 'meshy-6';
@@ -808,6 +819,7 @@
 			const model = ALL_TTS_MODELS.find(m => m.id === selectedTtsModel);
 			if (model && model.voices.length > 0) {
 				selectedTtsVoice = model.voices[0].id;
+				currentTtsVoice = model.voices[0].id;
 			}
 			audioConfigSuccess = 'TTS model updated';
 			setTimeout(() => audioConfigSuccess = '', 3000);
@@ -827,12 +839,14 @@
 				model: selectedTtsModel,
 				voice: selectedTtsVoice,
 				speed: ttsSpeed,
-				output_format: ttsOutputFormat
+				output_format: ttsOutputFormat,
+				instructions: ttsInstructions
 			});
 			currentTtsModel = selectedTtsModel;
 			currentTtsVoice = selectedTtsVoice;
 			currentTtsSpeed = ttsSpeed;
 			currentTtsOutputFormat = ttsOutputFormat;
+			currentTtsInstructions = ttsInstructions;
 			audioConfigSuccess = 'TTS settings updated';
 			setTimeout(() => audioConfigSuccess = '', 3000);
 		} catch (e: any) {
@@ -2034,8 +2048,9 @@
 						<div class="model-cards tts-cards">
 							{#each models as model}
 								<button
-									onclick={() => { selectedTtsModel = model.id; }}
-									class="model-card {model.id === selectedTtsModel ? 'active' : ''}"
+									onclick={() => { selectedTtsModel = model.id; saveTtsModel(); }}
+									disabled={savingTtsModel}
+									class="model-card {model.id === currentTtsModel ? 'active' : ''}"
 								>
 									<div class="model-card-header">
 										<span class="model-card-name">{model.displayName}</span>
@@ -2073,12 +2088,26 @@
 								<option value={voice.id}>{voice.name} {voice.gender ? `(${voice.gender})` : ''}</option>
 							{/each}
 							{#if getAvailableVoices().length === 0}
-								<option value="alloy">Alloy (default)</option>
-								<option value="echo">Echo</option>
-								<option value="fable">Fable</option>
-								<option value="onyx">Onyx</option>
-								<option value="nova">Nova</option>
-								<option value="shimmer">Shimmer</option>
+								{#if currentTtsModel?.startsWith('gemini') || currentTtsModel?.startsWith('chirp')}
+									<!-- Gemini TTS fallback voices -->
+									<option value="Zephyr">Zephyr (default)</option>
+									<option value="Puck">Puck</option>
+									<option value="Charon">Charon</option>
+									<option value="Kore">Kore</option>
+								{:else if currentTtsModel === 'neural2' || currentTtsModel === 'wavenet' || currentTtsModel === 'standard'}
+									<!-- Google Cloud TTS fallback voices -->
+									<option value="en-US-A">US English A (default)</option>
+									<option value="en-US-C">US English C</option>
+									<option value="en-GB-B">UK English B</option>
+								{:else}
+									<!-- OpenAI TTS fallback voices -->
+									<option value="alloy">Alloy (default)</option>
+									<option value="echo">Echo</option>
+									<option value="fable">Fable</option>
+									<option value="onyx">Onyx</option>
+									<option value="nova">Nova</option>
+									<option value="shimmer">Shimmer</option>
+								{/if}
 							{/if}
 						</select>
 					</div>
@@ -2096,6 +2125,23 @@
 							<option value="flac">FLAC</option>
 						</select>
 					</div>
+					{#if isCurrentModelSteerable()}
+						<div class="tts-setting-row steerability-section">
+							<label>
+								Voice Instructions
+								<span class="badge-steerable">Steerable</span>
+							</label>
+							<textarea
+								bind:value={ttsInstructions}
+								placeholder="e.g., Speak in a warm, friendly tone with moderate pace. Add slight pauses for emphasis."
+								class="input instructions-input"
+								rows="3"
+							></textarea>
+							<p class="instructions-hint">
+								Customize how the voice sounds - control tone, pace, emotion, and speaking style.
+							</p>
+						</div>
+					{/if}
 					<button
 						onclick={saveTtsSettings}
 						disabled={savingTtsSettings}

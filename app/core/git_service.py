@@ -209,8 +209,8 @@ class GitService:
                 upstream = parts[4] if len(parts) > 4 else ""
                 track_info = parts[5] if len(parts) > 5 else ""
 
-                # Skip HEAD reference
-                if name == "origin/HEAD":
+                # Skip HEAD reference and bare remote names
+                if name == "origin/HEAD" or name == "origin":
                     continue
 
                 is_remote = name.startswith("origin/") or "/" in name

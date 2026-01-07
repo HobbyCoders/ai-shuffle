@@ -26,7 +26,6 @@
 		onResize: (w: number, h: number) => void;
 		onDragEnd?: () => void;
 		onResizeEnd?: () => void;
-		onFork?: (sessionId: string, messageIndex: number, messageId: string) => void;
 		mobile?: boolean;
 	}
 
@@ -40,7 +39,6 @@
 		onResize,
 		onDragEnd,
 		onResizeEnd,
-		onFork,
 		mobile = false
 	}: Props = $props();
 
@@ -94,11 +92,6 @@
 		const { request_id, tool_use_id, answers } = event.detail;
 		tabs.sendUserQuestionResponse(tab.id, request_id, tool_use_id, answers);
 	}
-
-	// Handle fork action
-	function handleFork(sessionId: string, messageIndex: number, messageId: string) {
-		onFork?.(sessionId, messageIndex, messageId);
-	}
 </script>
 
 {#if mobile}
@@ -125,7 +118,7 @@
 				<!-- Normal chat view -->
 				<!-- Messages fill the space -->
 				<div class="message-area-wrapper">
-					<MessageArea {tab} onFork={handleFork} />
+					<MessageArea {tab} />
 				</div>
 
 				<!-- Permission Queue -->
@@ -190,7 +183,7 @@
 					<!-- Normal chat view -->
 					<!-- Main message area -->
 					<div class="message-area-wrapper">
-						<MessageArea {tab} onFork={handleFork} />
+						<MessageArea {tab} />
 					</div>
 
 					<!-- Permission Queue -->

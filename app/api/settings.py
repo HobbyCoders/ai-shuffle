@@ -4,11 +4,15 @@ Settings API routes - integration settings, API keys, and configuration
 
 import asyncio
 import logging
+import os
+import uuid
 import httpx
 from io import BytesIO
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.db import database
@@ -154,6 +158,10 @@ class IntegrationSettingsResponse(BaseModel):
     video_model: Optional[str] = None  # "veo-3.1-fast-generate-preview", "sora-2", etc.
     # Audio settings (TTS/STT)
     tts_model: Optional[str] = None  # "gpt-4o-mini-tts", "tts-1", "tts-1-hd"
+    tts_voice: Optional[str] = None  # "alloy", "echo", "nova", etc.
+    tts_speed: Optional[float] = None  # 0.25 to 4.0
+    tts_output_format: Optional[str] = None  # "mp3", "wav", "opus", etc.
+    tts_instructions: Optional[str] = None  # Voice instructions for steerable models
     stt_model: Optional[str] = None  # "gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"
     # 3D Model generation settings (Meshy)
     meshy_api_key_set: bool = False
@@ -317,6 +325,11 @@ async def get_integration_settings(token: str = Depends(require_auth)):
     video_provider = database.get_system_setting("video_provider")
     video_model = database.get_system_setting("video_model")
     tts_model = database.get_system_setting("tts_model") or "gpt-4o-mini-tts"
+    tts_voice = database.get_system_setting("tts_voice") or "alloy"
+    tts_speed_str = database.get_system_setting("tts_speed")
+    tts_speed = float(tts_speed_str) if tts_speed_str else 1.0
+    tts_output_format = database.get_system_setting("tts_output_format") or "mp3"
+    tts_instructions = database.get_system_setting("tts_instructions") or ""
     stt_model = database.get_system_setting("stt_model") or "whisper-1"
     model3d_provider = database.get_system_setting("model3d_provider")
     model3d_model = database.get_system_setting("model3d_model")
@@ -331,6 +344,10 @@ async def get_integration_settings(token: str = Depends(require_auth)):
         video_provider=video_provider,
         video_model=video_model,
         tts_model=tts_model,
+        tts_voice=tts_voice,
+        tts_speed=tts_speed,
+        tts_output_format=tts_output_format,
+        tts_instructions=tts_instructions,
         stt_model=stt_model,
         meshy_api_key_set=bool(meshy_api_key),
         meshy_api_key_masked=mask_api_key(meshy_api_key) if meshy_api_key else "",
@@ -480,57 +497,148 @@ async def remove_deepseek_api_key(token: str = Depends(require_admin)):
 # ============================================================================
 
 # Available TTS models
+# supports_streaming: True = model supports SSE streaming audio
+# supports_instructions: True = model supports voice style instructions (steerable)
+# Providers:
+#   - "gemini-tts": Gemini API (generativelanguage.googleapis.com) - uses image_api_key
+#   - "google-cloud-tts": Google Cloud TTS API (texttospeech.googleapis.com) - uses image_api_key
+#   - "openai-tts": OpenAI API - uses openai_api_key
 TTS_MODELS = {
+    # Gemini API TTS Models (generativelanguage.googleapis.com)
+    "gemini-2.5-flash-tts": {
+        "name": "Gemini TTS",
+        "provider": "gemini-tts",
+        "description": "Natural language style control, emotion, multi-speaker",
+        "price_display": "~$0.015/1M chars",
+        "price_per_million": 15.0,
+        "supports_streaming": False,  # REST API doesn't stream, need Live API
+        "supports_instructions": True
+    },
+    # Google Cloud TTS Models (texttospeech.googleapis.com)
+    "chirp-3-hd": {
+        "name": "Chirp 3 HD",
+        "provider": "google-cloud-tts",
+        "description": "Low-latency, real-time communication optimized",
+        "price_display": "~$0.016/1M chars",
+        "price_per_million": 16.0,
+        "supports_streaming": False,  # REST API returns full audio
+        "supports_instructions": False,
+        "voice_prefix": "Chirp3-HD"  # Voice names: en-US-Chirp3-HD-Charon
+    },
+    "neural2": {
+        "name": "Neural2",
+        "provider": "google-cloud-tts",
+        "description": "High-quality natural speech, no training required",
+        "price_display": "~$0.016/1M chars",
+        "price_per_million": 16.0,
+        "supports_streaming": False,
+        "supports_instructions": False,
+        "voice_prefix": "Neural2"  # Voice names: en-US-Neural2-A
+    },
+    "wavenet": {
+        "name": "WaveNet",
+        "provider": "google-cloud-tts",
+        "description": "Premium quality with natural intonation",
+        "price_display": "~$0.016/1M chars",
+        "price_per_million": 16.0,
+        "supports_streaming": False,
+        "supports_instructions": False,
+        "voice_prefix": "Wavenet"  # Voice names: en-US-Wavenet-A
+    },
+    "standard": {
+        "name": "Standard",
+        "provider": "google-cloud-tts",
+        "description": "Cost-effective basic synthesis",
+        "price_display": "~$0.004/1M chars",
+        "price_per_million": 4.0,
+        "supports_streaming": False,
+        "supports_instructions": False,
+        "voice_prefix": "Standard"  # Voice names: en-US-Standard-A
+    },
+    "studio": {
+        "name": "Studio",
+        "provider": "google-cloud-tts",
+        "description": "Professional narration quality voices",
+        "price_display": "~$0.160/1M chars",
+        "price_per_million": 160.0,
+        "supports_streaming": False,
+        "supports_instructions": False,
+        "voice_prefix": "Studio"  # Voice names: en-US-Studio-M
+    },
+    "polyglot": {
+        "name": "Polyglot",
+        "provider": "google-cloud-tts",
+        "description": "Multi-language support for international content",
+        "price_display": "~$0.016/1M chars",
+        "price_per_million": 16.0,
+        "supports_streaming": False,
+        "supports_instructions": False,
+        "voice_prefix": "Polyglot"  # Voice names: es-ES-Polyglot-1
+    },
+    # OpenAI TTS Models
     "gpt-4o-mini-tts": {
         "name": "GPT-4o Mini TTS",
+        "provider": "openai-tts",
         "description": "Steerable TTS with natural speech and instructions support",
         "price_display": "~$0.015/min",
-        "price_per_minute": 0.015
+        "price_per_minute": 0.015,
+        "supports_streaming": True,  # Supports SSE streaming
+        "supports_instructions": True
     },
     "tts-1": {
         "name": "TTS-1",
+        "provider": "openai-tts",
         "description": "Standard quality TTS, optimized for speed",
         "price_display": "~$0.015/1K chars",
-        "price_per_1k_chars": 0.015
+        "price_per_1k_chars": 0.015,
+        "supports_streaming": True,  # OpenAI TTS supports streaming response
+        "supports_instructions": False
     },
     "tts-1-hd": {
         "name": "TTS-1 HD",
+        "provider": "openai-tts",
         "description": "High quality TTS with better clarity",
         "price_display": "~$0.030/1K chars",
-        "price_per_1k_chars": 0.030
+        "price_per_1k_chars": 0.030,
+        "supports_streaming": True,  # OpenAI TTS supports streaming response
+        "supports_instructions": False
     }
 }
 
 # Available STT models
 STT_MODELS = {
-    # Google STT Models
+    # Google STT Models (diarization requires Google Cloud implementation)
     "gemini-2.5-flash": {
         "name": "Gemini Audio",
         "provider": "google-stt",
         "description": "Long-form audio, diarization, context-aware transcription",
         "price_display": "~$0.006/min",
-        "price_per_minute": 0.006
+        "price_per_minute": 0.006,
+        "supports_diarization": True
     },
     "chirp-3": {
         "name": "Chirp 3",
         "provider": "google-stt",
         "description": "Multilingual, noisy environments, latest accuracy",
         "price_display": "~$0.016/min",
-        "price_per_minute": 0.016
+        "price_per_minute": 0.016,
+        "supports_diarization": True
     },
     "latest-long": {
         "name": "Latest Long",
         "provider": "google-stt",
         "description": "Long-form content, media, conversations",
         "price_display": "~$0.016/min",
-        "price_per_minute": 0.016
+        "price_per_minute": 0.016,
+        "supports_diarization": True
     },
     "latest-short": {
         "name": "Latest Short",
         "provider": "google-stt",
         "description": "Voice commands, short utterances",
         "price_display": "~$0.016/min",
-        "price_per_minute": 0.016
+        "price_per_minute": 0.016,
+        "supports_diarization": False
     },
     # OpenAI STT Models
     "gpt-4o-transcribe-diarize": {
@@ -538,28 +646,33 @@ STT_MODELS = {
         "provider": "openai-stt",
         "description": "Ultra-fast transcription with speaker identification",
         "price_display": "~$0.006/min",
-        "price_per_minute": 0.006
+        "price_per_minute": 0.006,
+        "supports_diarization": True,
+        "requires_chunking_strategy": True  # Required for audio > 30s
     },
     "gpt-4o-transcribe": {
         "name": "GPT-4o Transcribe",
         "provider": "openai-stt",
         "description": "Fast transcription (10 min in ~15 seconds)",
         "price_display": "~$0.006/min",
-        "price_per_minute": 0.006
+        "price_per_minute": 0.006,
+        "supports_diarization": False
     },
     "gpt-4o-mini-transcribe": {
         "name": "GPT-4o Mini Transcribe",
         "provider": "openai-stt",
         "description": "Cost-efficient transcription",
         "price_display": "~$0.003/min",
-        "price_per_minute": 0.003
+        "price_per_minute": 0.003,
+        "supports_diarization": False
     },
     "whisper-1": {
         "name": "Whisper",
         "provider": "openai-stt",
         "description": "General-purpose with translation to English",
         "price_display": "~$0.006/min",
-        "price_per_minute": 0.006
+        "price_per_minute": 0.006,
+        "supports_diarization": False
     }
 }
 
@@ -567,6 +680,15 @@ STT_MODELS = {
 class AudioModelUpdateRequest(BaseModel):
     """Request to update TTS or STT model"""
     model: str
+
+
+class TTSSettingsRequest(BaseModel):
+    """Request to update TTS settings (model, voice, speed, format, instructions)"""
+    model: Optional[str] = None
+    voice: Optional[str] = None
+    speed: Optional[float] = None
+    output_format: Optional[str] = None
+    instructions: Optional[str] = None  # Voice instructions for steerable models
 
 
 @router.get("/integrations/audio/models")
@@ -627,6 +749,52 @@ async def update_tts_model(
 
     database.set_system_setting("tts_model", model)
     return {"success": True, "model": model}
+
+
+@router.patch("/integrations/tts")
+async def update_tts_settings(
+    request: TTSSettingsRequest,
+    token: str = Depends(require_admin)
+):
+    """
+    Update TTS settings including model, voice, speed, and output format.
+
+    All fields are optional - only provided fields will be updated.
+    """
+    if request.model:
+        model = request.model.strip()
+        if model not in TTS_MODELS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid TTS model. Available: {', '.join(TTS_MODELS.keys())}"
+            )
+        database.set_system_setting("tts_model", model)
+
+    if request.voice:
+        database.set_system_setting("tts_voice", request.voice.strip())
+
+    if request.speed is not None:
+        if request.speed < 0.25 or request.speed > 4.0:
+            raise HTTPException(
+                status_code=400,
+                detail="Speed must be between 0.25 and 4.0"
+            )
+        database.set_system_setting("tts_speed", str(request.speed))
+
+    if request.output_format:
+        valid_formats = ["mp3", "wav", "opus", "aac", "flac", "pcm"]
+        if request.output_format not in valid_formats:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid output format. Available: {', '.join(valid_formats)}"
+            )
+        database.set_system_setting("tts_output_format", request.output_format)
+
+    if request.instructions is not None:
+        # Allow empty string to clear instructions
+        database.set_system_setting("tts_instructions", request.instructions.strip())
+
+    return {"success": True}
 
 
 @router.patch("/integrations/audio/stt")
@@ -741,22 +909,270 @@ async def transcribe_audio(
     token: str = Depends(require_auth)
 ):
     """
-    Transcribe audio to text using OpenAI STT models.
+    Transcribe audio to text using OpenAI or Google STT models.
 
     Accepts audio files (webm, mp3, mp4, wav, m4a, etc.) and returns transcribed text.
-    Uses the configured STT model (whisper-1, gpt-4o-transcribe, gpt-4o-mini-transcribe).
-    Requires an OpenAI API key to be configured in settings.
+    Uses the configured STT model from settings.
+
+    OpenAI models: whisper-1, gpt-4o-transcribe, gpt-4o-mini-transcribe, gpt-4o-transcribe-diarize
+    Google models: gemini-2.5-flash, chirp-3, latest-long, latest-short (uses Gemini API)
     """
-    # Check if OpenAI key is configured
+    # Get configured STT model (default to whisper-1 for backwards compatibility)
+    stt_model = database.get_system_setting("stt_model") or "whisper-1"
+    model_info = STT_MODELS.get(stt_model, {})
+    provider = model_info.get("provider", "openai-stt")
+
+    # Route to appropriate provider
+    if provider == "google-stt":
+        return await _transcribe_with_gemini(file, stt_model, model_info)
+    else:
+        return await _transcribe_with_openai(file, stt_model, model_info)
+
+
+async def _transcribe_with_gemini(
+    file: UploadFile,
+    stt_model: str,
+    model_info: dict
+) -> TranscriptionResponse:
+    """Transcribe audio using Google Gemini API."""
+    import base64
+
+    # Check for Gemini API key
+    gemini_key = get_decrypted_api_key("image_api_key")  # Gemini key is stored as image_api_key
+    if not gemini_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Google Gemini API key not configured. Go to Settings > Integrations to add your key."
+        )
+
+    # Validate file type - Gemini supports various audio formats
+    content_type = file.content_type or ""
+    allowed_types = [
+        "audio/webm", "audio/mp3", "audio/mpeg", "audio/mp4",
+        "audio/wav", "audio/x-wav", "audio/m4a", "audio/x-m4a",
+        "audio/ogg", "audio/flac", "audio/aac", "audio/aiff",
+        "video/webm"  # video/webm often contains audio only
+    ]
+
+    # Also check by extension
+    filename = file.filename or "audio.webm"
+    allowed_extensions = [".webm", ".mp3", ".mp4", ".wav", ".m4a", ".ogg", ".mpeg", ".flac", ".aac", ".aiff"]
+    file_ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+    if content_type not in allowed_types and file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported audio format: {content_type or file_ext}. Supported: webm, mp3, mp4, wav, m4a, ogg, flac, aac, aiff"
+        )
+
+    # Read the audio file
+    try:
+        audio_data = await file.read()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to read audio file: {str(e)}")
+
+    if len(audio_data) == 0:
+        raise HTTPException(status_code=400, detail="Audio file is empty")
+
+    # Gemini supports larger files - up to 1GB via File API, but inline is limited
+    # For inline, max is about 20MB base64 encoded
+    if len(audio_data) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Audio file too large. Maximum size is 20MB for inline transcription.")
+
+    # Map content types to Gemini MIME types
+    mime_type_map = {
+        "audio/webm": "audio/webm",
+        "audio/mp3": "audio/mp3",
+        "audio/mpeg": "audio/mpeg",
+        "audio/mp4": "audio/mp4",
+        "audio/wav": "audio/wav",
+        "audio/x-wav": "audio/wav",
+        "audio/m4a": "audio/mp4",
+        "audio/x-m4a": "audio/mp4",
+        "audio/ogg": "audio/ogg",
+        "audio/flac": "audio/flac",
+        "audio/aac": "audio/aac",
+        "audio/aiff": "audio/aiff",
+        "video/webm": "audio/webm",
+    }
+
+    # Determine MIME type
+    gemini_mime_type = mime_type_map.get(content_type)
+    if not gemini_mime_type and file_ext:
+        ext_to_mime = {
+            ".webm": "audio/webm",
+            ".mp3": "audio/mp3",
+            ".mp4": "audio/mp4",
+            ".wav": "audio/wav",
+            ".m4a": "audio/mp4",
+            ".ogg": "audio/ogg",
+            ".mpeg": "audio/mpeg",
+            ".flac": "audio/flac",
+            ".aac": "audio/aac",
+            ".aiff": "audio/aiff",
+        }
+        gemini_mime_type = ext_to_mime.get(file_ext, "audio/webm")
+
+    if not gemini_mime_type:
+        gemini_mime_type = "audio/webm"  # Default fallback
+
+    # Base64 encode the audio data
+    audio_base64 = base64.standard_b64encode(audio_data).decode("utf-8")
+
+    # Check if diarization is supported and requested
+    supports_diarization = model_info.get("supports_diarization", False)
+
+    # Build the prompt for transcription
+    if supports_diarization:
+        transcription_prompt = (
+            "Please transcribe this audio accurately. "
+            "If there are multiple speakers, identify them and format the output as:\n"
+            "Speaker 1: [text]\nSpeaker 2: [text]\n...\n"
+            "If there's only one speaker, just provide the transcription."
+        )
+    else:
+        transcription_prompt = "Please transcribe this audio accurately. Provide only the transcription text."
+
+    # Determine which Gemini model to use for transcription
+    # Map STT model IDs to actual Gemini model names
+    gemini_model_map = {
+        "gemini-2.5-flash": "gemini-2.5-flash-preview-05-20",  # Latest flash model
+        "chirp-3": "gemini-2.0-flash",  # Chirp uses Gemini flash for audio
+        "latest-long": "gemini-2.0-flash",  # Long-form content
+        "latest-short": "gemini-2.0-flash",  # Short utterances
+    }
+    gemini_model = gemini_model_map.get(stt_model, "gemini-2.0-flash")
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            # Build the Gemini API request with audio content
+            payload = {
+                "contents": [
+                    {
+                        "parts": [
+                            {
+                                "inlineData": {
+                                    "mimeType": gemini_mime_type,
+                                    "data": audio_base64
+                                }
+                            },
+                            {
+                                "text": transcription_prompt
+                            }
+                        ]
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": 0.1,  # Low temperature for accurate transcription
+                    "maxOutputTokens": 8192
+                }
+            }
+
+            response = await client.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent?key={gemini_key}",
+                json=payload,
+                headers={"Content-Type": "application/json"}
+            )
+
+            if response.status_code == 400:
+                error_data = response.json()
+                error_msg = error_data.get("error", {}).get("message", "Bad request")
+                logger.error(f"Gemini transcription failed: {response.status_code} - {error_msg}")
+
+                # Check for specific error types
+                if "API_KEY_INVALID" in str(error_data):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Google AI API key is invalid. Please update it in Settings > Integrations."
+                    )
+                elif "SAFETY" in str(error_data) or "blocked" in error_msg.lower():
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Audio was blocked by safety filters."
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Transcription failed: {error_msg}"
+                    )
+
+            elif response.status_code == 401 or response.status_code == 403:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Google AI API key is invalid or expired. Please update it in Settings > Integrations."
+                )
+
+            elif response.status_code == 429:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Google AI rate limit exceeded. Please wait a moment and try again."
+                )
+
+            elif response.status_code != 200:
+                error_detail = response.text
+                logger.error(f"Gemini transcription failed: {response.status_code} - {error_detail}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Transcription failed: {error_detail}"
+                )
+
+            result = response.json()
+
+            # Extract the transcription from the response
+            candidates = result.get("candidates", [])
+            if not candidates:
+                raise HTTPException(
+                    status_code=500,
+                    detail="No transcription was generated. The model may have refused the request."
+                )
+
+            parts = candidates[0].get("content", {}).get("parts", [])
+            transcribed_text = ""
+
+            for part in parts:
+                if "text" in part:
+                    transcribed_text = part["text"].strip()
+                    break
+
+            if not transcribed_text:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Transcription returned empty result."
+                )
+
+            return TranscriptionResponse(
+                text=transcribed_text,
+                duration_seconds=None  # Gemini doesn't return duration
+            )
+
+    except HTTPException:
+        raise
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail="Transcription timed out. Please try with a shorter audio clip."
+        )
+    except Exception as e:
+        logger.error(f"Gemini transcription error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Transcription failed: {str(e)}"
+        )
+
+
+async def _transcribe_with_openai(
+    file: UploadFile,
+    stt_model: str,
+    model_info: dict
+) -> TranscriptionResponse:
+    """Transcribe audio using OpenAI API."""
+    # Check for OpenAI API key
     openai_key = get_decrypted_api_key("openai_api_key")
     if not openai_key:
         raise HTTPException(
             status_code=400,
             detail="OpenAI API key not configured. Go to Settings > Integrations to add your key."
         )
-
-    # Get configured STT model (default to whisper-1 for backwards compatibility)
-    stt_model = database.get_system_setting("stt_model") or "whisper-1"
 
     # Validate file type
     content_type = file.content_type or ""
@@ -794,14 +1210,29 @@ async def transcribe_audio(
     max_retries = 3
     retry_delay = 2  # seconds
 
+    # Check if this model requires special handling for diarization
+    is_diarize_model = stt_model == "gpt-4o-transcribe-diarize"
+
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             # Prepare the multipart form data with selected model
+            # For gpt-4o-transcribe-diarize, we need:
+            # - chunking_strategy: "auto" (required for audio > 30s)
+            # - response_format: "diarized_json" to get speaker annotations
+            if is_diarize_model:
+                response_format = "diarized_json"
+            else:
+                response_format = "json"
+
             files = {
                 "file": (filename, BytesIO(audio_data), content_type or "audio/webm"),
                 "model": (None, stt_model),
-                "response_format": (None, "json"),
+                "response_format": (None, response_format),
             }
+
+            # Add chunking_strategy for diarize model (required for audio > 30s)
+            if is_diarize_model:
+                files["chunking_strategy"] = (None, "auto")
 
             response = None
             _last_error = None  # Tracks error type for potential logging
@@ -844,6 +1275,27 @@ async def transcribe_audio(
                     status_code=429,
                     detail="OpenAI rate limit exceeded. Please wait 30-60 seconds and try again. If this persists, check your OpenAI account usage limits."
                 )
+            elif response.status_code == 400:
+                # Parse the error to give a better message
+                error_detail = response.text
+                logger.error(f"OpenAI transcription failed: {response.status_code} - {error_detail}")
+
+                # Check for specific error types
+                if "does not support the format" in error_detail or "unsupported_format" in error_detail:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"The model '{stt_model}' does not support this audio format. Try using 'whisper-1' which supports more formats, or convert your audio to mp3/wav."
+                    )
+                elif "chunking_strategy is required" in error_detail:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="This model requires diarization settings. Please use a different model or contact support."
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Transcription failed: {error_detail}"
+                    )
             elif response.status_code != 200:
                 error_detail = response.text
                 logger.error(f"OpenAI transcription failed: {response.status_code} - {error_detail}")
@@ -853,7 +1305,24 @@ async def transcribe_audio(
                 )
 
             result = response.json()
-            transcribed_text = result.get("text", "").strip()
+
+            # Handle diarized_json format which has segments with speaker labels
+            if is_diarize_model and "segments" in result:
+                # Extract text with speaker labels from segments
+                # Format: "Speaker A: text\nSpeaker B: text\n..."
+                segments = result.get("segments", [])
+                if segments:
+                    lines = []
+                    for seg in segments:
+                        speaker = seg.get("speaker", "Unknown")
+                        text = seg.get("text", "").strip()
+                        if text:
+                            lines.append(f"{speaker}: {text}")
+                    transcribed_text = "\n".join(lines)
+                else:
+                    transcribed_text = result.get("text", "").strip()
+            else:
+                transcribed_text = result.get("text", "").strip()
 
             return TranscriptionResponse(
                 text=transcribed_text,
@@ -868,11 +1337,773 @@ async def transcribe_audio(
             detail="Transcription timed out. Please try with a shorter audio clip."
         )
     except Exception as e:
-        logger.error(f"Transcription error: {e}")
+        logger.error(f"OpenAI transcription error: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Transcription failed: {str(e)}"
         )
+
+
+# ============================================================================
+# Text-to-Speech Generation
+# ============================================================================
+
+
+class TTSGenerateRequest(BaseModel):
+    """Request to generate TTS audio"""
+    text: str
+    model: Optional[str] = None  # If not provided, uses configured default
+    voice: Optional[str] = None  # If not provided, uses configured default
+    speed: Optional[float] = None  # 0.25 to 4.0
+    output_format: Optional[str] = "mp3"  # mp3, wav, opus, aac, flac, pcm
+    instructions: Optional[str] = None  # Voice style instructions (for steerable models)
+
+
+class TTSGenerateResponse(BaseModel):
+    """Response from TTS generation"""
+    success: bool
+    audio_url: Optional[str] = None
+    file_path: Optional[str] = None
+    duration_seconds: Optional[float] = None
+    error: Optional[str] = None
+
+
+def get_generated_audio_dir() -> Path:
+    """Get the directory for generated audio files."""
+    audio_dir = Path(os.environ.get("GENERATED_AUDIO_DIR", "generated-audio"))
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    return audio_dir
+
+
+@router.post("/tts/generate", response_model=TTSGenerateResponse)
+async def generate_tts(
+    request: TTSGenerateRequest,
+    token: str = Depends(require_auth)
+):
+    """
+    Generate TTS audio (non-streaming).
+
+    Returns a URL to the generated audio file.
+    Use this for:
+    - Studio TTS generator
+    - Downloading audio files
+    - Models that don't support streaming
+
+    For streaming audio (conversation mode), use /tts/stream instead.
+    """
+    # Get configured model or use request override
+    tts_model = request.model or database.get_system_setting("tts_model") or "gpt-4o-mini-tts"
+    model_info = TTS_MODELS.get(tts_model)
+
+    if not model_info:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid TTS model: {tts_model}. Available: {', '.join(TTS_MODELS.keys())}"
+        )
+
+    provider = model_info.get("provider", "openai-tts")
+
+    # Get voice and other settings
+    voice = request.voice or database.get_system_setting("tts_voice") or "alloy"
+    speed = request.speed
+    if speed is None:
+        speed_str = database.get_system_setting("tts_speed")
+        speed = float(speed_str) if speed_str else 1.0
+    output_format = request.output_format or database.get_system_setting("tts_output_format") or "mp3"
+    instructions = request.instructions or database.get_system_setting("tts_instructions") or ""
+
+    # Validate text
+    text = request.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+    if len(text) > 4096:
+        raise HTTPException(status_code=400, detail="Text too long. Maximum 4096 characters.")
+
+    # Validate speed
+    if speed < 0.25 or speed > 4.0:
+        raise HTTPException(status_code=400, detail="Speed must be between 0.25 and 4.0")
+
+    # Route to appropriate provider
+    if provider == "gemini-tts":
+        return await _generate_tts_gemini(text, tts_model, voice, speed, output_format, instructions, model_info)
+    elif provider == "google-cloud-tts":
+        return await _generate_tts_google_cloud(text, tts_model, voice, speed, output_format, instructions, model_info)
+    else:
+        return await _generate_tts_openai(text, tts_model, voice, speed, output_format, instructions, model_info)
+
+
+async def _generate_tts_openai(
+    text: str,
+    model: str,
+    voice: str,
+    speed: float,
+    output_format: str,
+    instructions: str,
+    model_info: dict
+) -> TTSGenerateResponse:
+    """Generate TTS using OpenAI API."""
+    openai_key = get_decrypted_api_key("openai_api_key")
+    if not openai_key:
+        raise HTTPException(
+            status_code=400,
+            detail="OpenAI API key not configured. Go to Settings > Integrations to add your key."
+        )
+
+    # OpenAI valid voices
+    valid_voices = ["alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer", "verse", "marin", "cedar"]
+    if voice not in valid_voices:
+        voice = "alloy"  # Default fallback
+
+    # Valid output formats
+    valid_formats = ["mp3", "opus", "aac", "flac", "wav", "pcm"]
+    if output_format not in valid_formats:
+        output_format = "mp3"
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            request_body = {
+                "model": model,
+                "input": text,
+                "voice": voice,
+                "speed": speed,
+                "response_format": output_format
+            }
+
+            # Add instructions for steerable models
+            if model_info.get("supports_instructions") and instructions:
+                request_body["instructions"] = instructions
+
+            response = await client.post(
+                "https://api.openai.com/v1/audio/speech",
+                headers={
+                    "Authorization": f"Bearer {openai_key}",
+                    "Content-Type": "application/json"
+                },
+                json=request_body
+            )
+
+            if response.status_code == 401:
+                raise HTTPException(
+                    status_code=400,
+                    detail="OpenAI API key is invalid. Please update it in Settings > Integrations."
+                )
+            elif response.status_code == 429:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Rate limit exceeded. Please wait and try again."
+                )
+            elif response.status_code != 200:
+                error_detail = response.text
+                logger.error(f"OpenAI TTS failed: {response.status_code} - {error_detail}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"TTS generation failed: {error_detail}"
+                )
+
+            # Save audio to file
+            audio_data = response.content
+            audio_dir = get_generated_audio_dir()
+            filename = f"tts-{uuid.uuid4().hex[:8]}.{output_format}"
+            file_path = audio_dir / filename
+
+            with open(file_path, "wb") as f:
+                f.write(audio_data)
+
+            # Return URL to the audio file
+            encoded_path = str(file_path).replace("\\", "/")
+            audio_url = f"/api/generated-audio/by-path?path={encoded_path}"
+
+            return TTSGenerateResponse(
+                success=True,
+                audio_url=audio_url,
+                file_path=str(file_path)
+            )
+
+    except HTTPException:
+        raise
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail="TTS generation timed out. Please try with shorter text."
+        )
+    except Exception as e:
+        logger.error(f"OpenAI TTS error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"TTS generation failed: {str(e)}"
+        )
+
+
+async def _generate_tts_gemini(
+    text: str,
+    model: str,
+    voice: str,
+    speed: float,
+    output_format: str,
+    instructions: str,
+    model_info: dict
+) -> TTSGenerateResponse:
+    """Generate TTS using Gemini API (generativelanguage.googleapis.com)."""
+    import base64
+
+    gemini_key = get_decrypted_api_key("image_api_key")
+    if not gemini_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Google AI API key not configured. Go to Settings > Integrations to add your key."
+        )
+
+    # Map model IDs to Gemini model names
+    gemini_model_map = {
+        "gemini-2.5-flash-tts": "gemini-2.5-flash-preview-tts",
+    }
+    gemini_model = gemini_model_map.get(model, "gemini-2.0-flash")
+
+    # For Gemini TTS, we use the generateContent endpoint with speech config
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            # Build speech config
+            speech_config = {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {
+                        "voiceName": voice if voice else "Zephyr"
+                    }
+                }
+            }
+
+            # Build the request
+            payload = {
+                "contents": [
+                    {
+                        "parts": [
+                            {"text": text}
+                        ]
+                    }
+                ],
+                "generationConfig": {
+                    "responseModalities": ["AUDIO"],
+                    "speechConfig": speech_config
+                }
+            }
+
+            # Add style instructions if supported
+            if model_info.get("supports_instructions") and instructions:
+                # Prepend instructions to the text as a system-like prompt
+                payload["contents"][0]["parts"].insert(0, {
+                    "text": f"[Voice style: {instructions}]\n\n"
+                })
+
+            response = await client.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent?key={gemini_key}",
+                json=payload,
+                headers={"Content-Type": "application/json"}
+            )
+
+            if response.status_code == 400:
+                error_data = response.json()
+                error_msg = error_data.get("error", {}).get("message", "Bad request")
+                logger.error(f"Gemini TTS failed: {response.status_code} - {error_msg}")
+                raise HTTPException(status_code=400, detail=f"TTS generation failed: {error_msg}")
+            elif response.status_code == 401 or response.status_code == 403:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Google AI API key is invalid. Please update it in Settings > Integrations."
+                )
+            elif response.status_code == 429:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Rate limit exceeded. Please wait and try again."
+                )
+            elif response.status_code != 200:
+                error_detail = response.text
+                logger.error(f"Gemini TTS failed: {response.status_code} - {error_detail}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"TTS generation failed: {error_detail}"
+                )
+
+            result = response.json()
+
+            # Extract audio from response
+            candidates = result.get("candidates", [])
+            if not candidates:
+                raise HTTPException(
+                    status_code=500,
+                    detail="No audio was generated."
+                )
+
+            parts = candidates[0].get("content", {}).get("parts", [])
+
+            for part in parts:
+                if "inlineData" in part:
+                    inline_data = part["inlineData"]
+                    audio_base64 = inline_data.get("data")
+                    mime_type = inline_data.get("mimeType", "audio/mp3")
+
+                    if audio_base64:
+                        # Decode and save
+                        audio_data = base64.b64decode(audio_base64)
+                        audio_dir = get_generated_audio_dir()
+
+                        # Determine extension from mime type
+                        ext_map = {
+                            "audio/mp3": "mp3",
+                            "audio/mpeg": "mp3",
+                            "audio/wav": "wav",
+                            "audio/ogg": "ogg",
+                            "audio/opus": "opus"
+                        }
+                        ext = ext_map.get(mime_type, "mp3")
+
+                        filename = f"tts-{uuid.uuid4().hex[:8]}.{ext}"
+                        file_path = audio_dir / filename
+
+                        with open(file_path, "wb") as f:
+                            f.write(audio_data)
+
+                        encoded_path = str(file_path).replace("\\", "/")
+                        audio_url = f"/api/generated-audio/by-path?path={encoded_path}"
+
+                        return TTSGenerateResponse(
+                            success=True,
+                            audio_url=audio_url,
+                            file_path=str(file_path)
+                        )
+
+            raise HTTPException(
+                status_code=500,
+                detail="No audio data in response."
+            )
+
+    except HTTPException:
+        raise
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail="TTS generation timed out. Please try with shorter text."
+        )
+    except Exception as e:
+        logger.error(f"Gemini TTS error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"TTS generation failed: {str(e)}"
+        )
+
+
+
+
+async def _generate_tts_google_cloud(
+    text: str,
+    model: str,
+    voice: str,
+    speed: float,
+    output_format: str,
+    instructions: str,
+    model_info: dict
+) -> TTSGenerateResponse:
+    """Generate TTS using Google Cloud Text-to-Speech API (texttospeech.googleapis.com)."""
+    import base64
+
+    # Google Cloud TTS can use the same API key as Gemini
+    api_key = get_decrypted_api_key("image_api_key")
+    if not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Google AI API key not configured. Go to Settings > Integrations to add your key."
+        )
+
+    # Map output format to Google Cloud TTS audio encoding
+    encoding_map = {
+        "mp3": "MP3",
+        "wav": "LINEAR16",
+        "ogg": "OGG_OPUS",
+        "opus": "OGG_OPUS",
+        "alaw": "ALAW",
+        "mulaw": "MULAW"
+    }
+    audio_encoding = encoding_map.get(output_format, "MP3")
+
+    # Build voice name from model prefix and user voice selection
+    # Format: {language}-{voice_prefix}-{voiceName}
+    # e.g., en-US-Chirp3-HD-Charon, en-US-Neural2-A, en-US-Wavenet-D
+    voice_prefix = model_info.get("voice_prefix", "Neural2")
+    language_code = "en-US"  # Default language
+
+    # OpenAI voice names that should be ignored for Google Cloud TTS
+    openai_voices = {"alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer", "verse"}
+
+    # Default voices for each model type
+    default_voices = {
+        "Chirp3-HD": "Charon",
+        "Neural2": "C",
+        "Wavenet": "D",
+        "Standard": "A",
+        "Studio": "M",
+        "Polyglot": "1"
+    }
+
+    # Determine voice name
+    if voice and voice.lower() in openai_voices:
+        # OpenAI voice selected - use default for this model type
+        default_voice = default_voices.get(voice_prefix, "A")
+        voice_name = f"{language_code}-{voice_prefix}-{default_voice}"
+    elif voice and "-" in voice and ("standard" in voice.lower() or "wavenet" in voice.lower() or "neural2" in voice.lower() or "chirp" in voice.lower() or "studio" in voice.lower() or "polyglot" in voice.lower()):
+        # Full Google Cloud voice name provided (e.g., en-US-Neural2-A)
+        voice_name = voice
+        # Extract language code from voice name
+        parts = voice.split("-")
+        if len(parts) >= 2:
+            language_code = f"{parts[0]}-{parts[1]}"
+    elif voice and len(voice) <= 2:
+        # Single letter/number variant (e.g., "A", "B", "C", "1")
+        voice_name = f"{language_code}-{voice_prefix}-{voice.upper()}"
+    elif voice:
+        # Assume it's a voice variant name for Chirp3-HD style voices (e.g., "Charon", "Leda")
+        voice_name = f"{language_code}-{voice_prefix}-{voice}"
+    else:
+        # No voice specified - use default
+        default_voice = default_voices.get(voice_prefix, "A")
+        voice_name = f"{language_code}-{voice_prefix}-{default_voice}"
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            # Build the request payload
+            payload = {
+                "input": {
+                    "text": text
+                },
+                "voice": {
+                    "languageCode": language_code,
+                    "name": voice_name
+                },
+                "audioConfig": {
+                    "audioEncoding": audio_encoding,
+                    "speakingRate": speed  # 0.25 to 4.0
+                }
+            }
+
+            # Make request to Google Cloud TTS API
+            response = await client.post(
+                f"https://texttospeech.googleapis.com/v1/text:synthesize?key={api_key}",
+                json=payload,
+                headers={"Content-Type": "application/json"}
+            )
+
+            if response.status_code == 400:
+                error_data = response.json()
+                error_msg = error_data.get("error", {}).get("message", "Bad request")
+                logger.error(f"Google Cloud TTS failed: {response.status_code} - {error_msg}")
+                raise HTTPException(status_code=400, detail=f"TTS generation failed: {error_msg}")
+            elif response.status_code == 401 or response.status_code == 403:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Google API key is invalid or doesn't have Text-to-Speech API enabled. Please check your API key permissions."
+                )
+            elif response.status_code == 429:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Rate limit exceeded. Please wait and try again."
+                )
+            elif response.status_code != 200:
+                error_detail = response.text
+                logger.error(f"Google Cloud TTS failed: {response.status_code} - {error_detail}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"TTS generation failed: {error_detail}"
+                )
+
+            result = response.json()
+
+            # Extract audio content (base64 encoded)
+            audio_content = result.get("audioContent")
+            if not audio_content:
+                raise HTTPException(
+                    status_code=500,
+                    detail="No audio content in response."
+                )
+
+            # Decode and save
+            audio_data = base64.b64decode(audio_content)
+            audio_dir = get_generated_audio_dir()
+
+            # Determine file extension
+            ext_map = {
+                "MP3": "mp3",
+                "LINEAR16": "wav",
+                "OGG_OPUS": "ogg",
+                "ALAW": "wav",
+                "MULAW": "wav"
+            }
+            ext = ext_map.get(audio_encoding, "mp3")
+
+            filename = f"tts-{uuid.uuid4().hex[:8]}.{ext}"
+            file_path = audio_dir / filename
+
+            with open(file_path, "wb") as f:
+                f.write(audio_data)
+
+            encoded_path = str(file_path).replace("\\", "/")
+            audio_url = f"/api/generated-audio/by-path?path={encoded_path}"
+
+            return TTSGenerateResponse(
+                success=True,
+                audio_url=audio_url,
+                file_path=str(file_path)
+            )
+
+    except HTTPException:
+        raise
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail="TTS generation timed out. Please try with shorter text."
+        )
+    except Exception as e:
+        logger.error(f"Google Cloud TTS error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"TTS generation failed: {str(e)}"
+        )
+
+@router.post("/tts/stream")
+async def stream_tts(
+    request: TTSGenerateRequest,
+    token: str = Depends(require_auth)
+):
+    """
+    Stream TTS audio in real-time.
+
+    Returns audio chunks as they're generated for low-latency playback.
+    Only supported by certain models (gpt-4o-mini-tts).
+
+    For models that don't support streaming, falls back to generating
+    the full audio and returning it as a single response.
+    """
+    # Get configured model or use request override
+    tts_model = request.model or database.get_system_setting("tts_model") or "gpt-4o-mini-tts"
+    model_info = TTS_MODELS.get(tts_model)
+
+    if not model_info:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid TTS model: {tts_model}. Available: {', '.join(TTS_MODELS.keys())}"
+        )
+
+    # Check if model supports streaming
+    if not model_info.get("supports_streaming", False):
+        # Fall back to non-streaming - generate full audio and stream as single chunk
+        result = await generate_tts(request, token)
+        if not result.success:
+            raise HTTPException(status_code=500, detail=result.error or "TTS generation failed")
+
+        # Read the file and return as streaming response
+        if result.file_path:
+            async def single_chunk_stream():
+                with open(result.file_path, "rb") as f:
+                    yield f.read()
+
+            output_format = request.output_format or "mp3"
+            mime_types = {
+                "mp3": "audio/mpeg",
+                "opus": "audio/opus",
+                "aac": "audio/aac",
+                "flac": "audio/flac",
+                "wav": "audio/wav",
+                "pcm": "audio/pcm"
+            }
+            return StreamingResponse(
+                single_chunk_stream(),
+                media_type=mime_types.get(output_format, "audio/mpeg")
+            )
+
+    # Determine provider and route to appropriate streaming implementation
+    provider = model_info.get("provider", "openai-tts")
+
+    # Google TTS (Gemini or Cloud TTS) - fall back to non-streaming
+    if provider in ("gemini-tts", "google-cloud-tts"):
+        return await _stream_tts_google(request, tts_model, model_info)
+
+    # OpenAI streaming
+    openai_key = get_decrypted_api_key("openai_api_key")
+    if not openai_key:
+        raise HTTPException(
+            status_code=400,
+            detail="OpenAI API key not configured. Go to Settings > Integrations to add your key."
+        )
+
+    # Get voice and settings
+    voice = request.voice or database.get_system_setting("tts_voice") or "alloy"
+    speed = request.speed
+    if speed is None:
+        speed_str = database.get_system_setting("tts_speed")
+        speed = float(speed_str) if speed_str else 1.0
+    output_format = request.output_format or "mp3"
+    instructions = request.instructions or database.get_system_setting("tts_instructions") or ""
+
+    # Validate text
+    text = request.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+    if len(text) > 4096:
+        raise HTTPException(status_code=400, detail="Text too long. Maximum 4096 characters.")
+
+    # OpenAI valid voices
+    valid_voices = ["alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer", "verse", "marin", "cedar"]
+    if voice not in valid_voices:
+        voice = "alloy"
+
+    async def stream_openai_audio():
+        """Stream audio from OpenAI TTS API."""
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                request_body = {
+                    "model": tts_model,
+                    "input": text,
+                    "voice": voice,
+                    "speed": speed,
+                    "response_format": output_format,
+                    "stream": True  # Enable streaming
+                }
+
+                # Add instructions for steerable models
+                if model_info.get("supports_instructions") and instructions:
+                    request_body["instructions"] = instructions
+
+                async with client.stream(
+                    "POST",
+                    "https://api.openai.com/v1/audio/speech",
+                    headers={
+                        "Authorization": f"Bearer {openai_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json=request_body
+                ) as response:
+                    if response.status_code != 200:
+                        error_text = ""
+                        async for chunk in response.aiter_bytes():
+                            error_text += chunk.decode("utf-8", errors="ignore")
+                        logger.error(f"OpenAI TTS streaming failed: {response.status_code} - {error_text}")
+                        return
+
+                    async for chunk in response.aiter_bytes():
+                        if chunk:
+                            yield chunk
+
+        except Exception as e:
+            logger.error(f"OpenAI TTS streaming error: {e}")
+
+    mime_types = {
+        "mp3": "audio/mpeg",
+        "opus": "audio/opus",
+        "aac": "audio/aac",
+        "flac": "audio/flac",
+        "wav": "audio/wav",
+        "pcm": "audio/pcm"
+    }
+
+    return StreamingResponse(
+        stream_openai_audio(),
+        media_type=mime_types.get(output_format, "audio/mpeg"),
+        headers={
+            "Cache-Control": "no-cache",
+            "Transfer-Encoding": "chunked"
+        }
+    )
+
+
+async def _stream_tts_google(
+    request: TTSGenerateRequest,
+    model: str,
+    model_info: dict
+) -> StreamingResponse:
+    """
+    Stream TTS audio from Google Cloud TTS API.
+
+    Uses the streaming_synthesize method for Chirp 3 HD voices.
+    For models that don't support true streaming, falls back to
+    generating full audio and streaming it as a single chunk.
+    """
+    gemini_key = get_decrypted_api_key("image_api_key")
+    if not gemini_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Google AI API key not configured. Go to Settings > Integrations to add your key."
+        )
+
+    # Get voice and settings
+    voice = request.voice or database.get_system_setting("tts_voice") or "en-US-Chirp3-HD-Achernar"
+    speed = request.speed
+    if speed is None:
+        speed_str = database.get_system_setting("tts_speed")
+        speed = float(speed_str) if speed_str else 1.0
+    output_format = request.output_format or "mp3"
+
+    # Validate text
+    text = request.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+    if len(text) > 4096:
+        raise HTTPException(status_code=400, detail="Text too long. Maximum 4096 characters.")
+
+    # Google Cloud TTS streaming requires the Cloud TTS API with specific voices
+    # Chirp 3 HD voices follow the pattern: {language}-Chirp3-HD-{voiceName}
+    # For now, we'll use the REST API and stream the result as a single chunk
+    # True streaming would require gRPC client which adds complexity
+
+    # Fall back to non-streaming generation for Google
+    # The streaming_synthesize API requires gRPC, not REST
+    provider = model_info.get("provider", "gemini-tts")
+    if provider == "google-cloud-tts":
+        result = await _generate_tts_google_cloud(
+            text=text,
+            model=model,
+            voice=voice,
+            speed=speed,
+            output_format=output_format,
+            instructions="",
+            model_info=model_info
+        )
+    else:
+        result = await _generate_tts_gemini(
+            text=text,
+            model=model,
+            voice=voice,
+            speed=speed,
+            output_format=output_format,
+            instructions="",
+            model_info=model_info
+        )
+
+    if not result.success:
+        raise HTTPException(status_code=500, detail=result.error or "TTS generation failed")
+
+    # Stream the generated file
+    if result.file_path:
+        async def stream_file():
+            with open(result.file_path, "rb") as f:
+                # Stream in chunks for better memory efficiency
+                while chunk := f.read(8192):
+                    yield chunk
+
+        mime_types = {
+            "mp3": "audio/mpeg",
+            "opus": "audio/opus",
+            "aac": "audio/aac",
+            "flac": "audio/flac",
+            "wav": "audio/wav",
+            "pcm": "audio/pcm",
+            "LINEAR16": "audio/wav"
+        }
+        return StreamingResponse(
+            stream_file(),
+            media_type=mime_types.get(output_format, "audio/mpeg"),
+            headers={
+                "Cache-Control": "no-cache",
+                "Transfer-Encoding": "chunked"
+            }
+        )
+
+    raise HTTPException(status_code=500, detail="TTS generation failed - no file produced")
 
 
 # ============================================================================

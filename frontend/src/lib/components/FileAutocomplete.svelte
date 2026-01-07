@@ -319,6 +319,27 @@
         onClose();
         return true;
 
+      case 'Backspace':
+        // If the input ends with a path (trailing /), go back to parent directory
+        const backspaceAtInfo = extractAtQuery(inputValue);
+        if (backspaceAtInfo && backspaceAtInfo.query.endsWith('/')) {
+          event.preventDefault();
+          // Get the parent path - remove trailing slash and last path component
+          const pathWithoutTrailingSlash = backspaceAtInfo.query.slice(0, -1);
+          const lastSlashIdx = pathWithoutTrailingSlash.lastIndexOf('/');
+          if (lastSlashIdx === -1) {
+            // At root level - use a special marker to tell parent to just show @
+            // We use type 'directory' with empty path, parent will handle it
+            onSelect({ name: '', type: 'directory', path: '' });
+          } else {
+            // Go to parent directory (keep trailing slash)
+            const parentPath = pathWithoutTrailingSlash.slice(0, lastSlashIdx + 1);
+            onSelect({ name: '', type: 'directory', path: parentPath });
+          }
+          return true;
+        }
+        return false;
+
       default:
         return false;
     }

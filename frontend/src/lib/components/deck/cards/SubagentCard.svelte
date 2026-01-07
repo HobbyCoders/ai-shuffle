@@ -18,6 +18,7 @@
 	import { api } from '$lib/api/client';
 	import { groups } from '$lib/stores/groups';
 	import { Search, Plus, Trash2, Download, Upload, X, ArrowLeft, Monitor, User, Settings, Terminal, Check, Lock, RotateCcw } from 'lucide-svelte';
+	import GroupDropdown from '$lib/components/GroupDropdown.svelte';
 	import './card-design-system.css';
 
 	interface Subagent {
@@ -601,6 +602,8 @@
 									<p class="card-item-description">{agent.description}</p>
 								</div>
 								<div class="card-item-actions">
+									<!-- Group dropdown (portal-based to escape overflow:hidden) -->
+									<GroupDropdown entityType="subagents" entityId={agent.id} />
 									{#if agent.is_builtin && agent.is_modified}
 										<button
 											onclick={(e) => handleRevert(agent.id, e)}

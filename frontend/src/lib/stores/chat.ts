@@ -14,7 +14,7 @@
 import { writable, derived, get } from 'svelte/store';
 import type { Session, Profile } from '$lib/api/client';
 import { api } from '$lib/api/client';
-import { isNotificationsEnabled, notifySessionComplete, getPermission } from '$lib/services/notifications';
+import { isNotificationsEnabled, notifySessionComplete, getPermission, type SessionCompleteInfo } from '$lib/services/notifications';
 
 export type MessageType = 'text' | 'tool_use' | 'tool_result';
 
@@ -752,6 +752,12 @@ function createChatStore() {
 				// Query complete
 				const metadata = data.metadata as Record<string, unknown>;
 				const currentState = get({ subscribe });
+				const sessionId = data.session_id as string || currentState.sessionId;
+
+				// Calculate duration from stream start time
+				const durationSeconds = currentState.streamStartTime
+					? (Date.now() - currentState.streamStartTime) / 1000
+					: undefined;
 
 				update(s => {
 					// Mark all streaming messages as complete
@@ -780,22 +786,24 @@ function createChatStore() {
 						messages,
 						isStreaming: false,
 						streamStartTime: null,
-						sessionId: data.session_id as string || s.sessionId
+						sessionId
 					};
 				});
 
-				// Trigger browser notification if enabled, permission granted, and session took > 10 seconds
-				if (isNotificationsEnabled() && getPermission() === 'granted' && currentState.streamStartTime) {
-					const duration = (Date.now() - currentState.streamStartTime) / 1000;
-					if (duration > 10) {
-						// Find session title from sessions list
-						const session = currentState.sessions.find(s => s.id === currentState.sessionId);
-						notifySessionComplete(
-							session?.title || null,
-							currentState.sessionId || '',
-							duration
-						);
-					}
+				// Trigger browser notification if enabled and permission granted
+				if (isNotificationsEnabled() && getPermission() === 'granted') {
+					const session = currentState.sessions.find(s => s.id === sessionId);
+					const sessionTitle = session?.title || (metadata?.title as string) || null;
+
+					notifySessionComplete({
+						sessionId: sessionId || '',
+						sessionTitle,
+						durationSeconds,
+						totalCostUsd: metadata?.total_cost_usd as number | undefined,
+						tokensIn: metadata?.tokens_in as number | undefined,
+						tokensOut: metadata?.tokens_out as number | undefined,
+						model: metadata?.model as string | undefined
+					});
 				}
 
 				// Refresh sessions list

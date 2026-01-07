@@ -95,7 +95,7 @@ def seed_builtin_subagents(force_update: bool = False) -> Dict[str, str]:
                      any admin customizations.
 
     Returns:
-        Dict mapping subagent ID to action taken ("created", "updated", "exists")
+        Dict mapping subagent ID to action taken ("created", "updated", "exists", "repaired")
     """
     results = {}
 
@@ -117,6 +117,13 @@ def seed_builtin_subagents(force_update: bool = False) -> Dict[str, str]:
             )
             logger.info(f"Created built-in subagent: {subagent_id}")
             results[subagent_id] = "created"
+
+        elif existing.get("is_builtin") and not existing.get("default_prompt"):
+            # AUTO-REPAIR: Built-in subagent exists but missing default values
+            # This happens when database was created before v26 migration
+            _update_builtin_defaults(subagent_id, definition)
+            logger.info(f"Repaired defaults for built-in subagent: {subagent_id}")
+            results[subagent_id] = "repaired"
 
         elif force_update and existing.get("is_builtin"):
             # Update the default values (but not the current values - preserve admin edits)

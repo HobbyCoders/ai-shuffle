@@ -41,6 +41,9 @@ class BranchInfo(BaseModel):
     upstream: Optional[str] = None
     ahead: int = 0
     behind: int = 0
+    # Worktree association
+    has_worktree: bool = False
+    worktree_id: Optional[str] = None
 
 
 class BranchListResponse(BaseModel):
@@ -336,6 +339,15 @@ async def list_branches(
     branches = git_service.list_branches(working_dir, include_remote=include_remote)
     current_branch = git_service.get_current_branch(working_dir)
 
+    # Get worktrees for this project to check branch associations
+    repo = database.get_git_repository_by_project(project_id)
+    worktree_branch_map: dict[str, str] = {}  # branch_name -> worktree_id
+    if repo:
+        worktrees = database.get_worktrees_for_repository(repo["id"])
+        for wt in worktrees:
+            if wt.get("branch_name"):
+                worktree_branch_map[wt["branch_name"]] = wt["id"]
+
     branch_infos = [
         BranchInfo(
             name=b["name"],
@@ -345,7 +357,9 @@ async def list_branches(
             commit_message=b["commit_message"],
             upstream=b["upstream"],
             ahead=b["ahead"],
-            behind=b["behind"]
+            behind=b["behind"],
+            has_worktree=b["name"] in worktree_branch_map,
+            worktree_id=worktree_branch_map.get(b["name"])
         )
         for b in branches
     ]

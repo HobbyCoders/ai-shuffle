@@ -1,12 +1,12 @@
 <script lang="ts">
-	import type { Component } from 'svelte';
+	import type { Component, ComponentType } from 'svelte';
 	import { onMount } from 'svelte';
 
 	interface Props {
 		type: string;
 		label: string;
 		description: string;
-		icon: Component;
+		icon: ComponentType | Component<any>;
 		shortcut: string;
 		rotation: number;
 		offsetY?: number;

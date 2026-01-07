@@ -170,11 +170,31 @@ class WorktreeManager:
         }
 
     def is_worktree_valid(self, worktree: Dict) -> bool:
-        """Check if a worktree folder exists on disk"""
+        """
+        Check if a worktree is valid on disk.
+
+        A valid git worktree has:
+        1. The directory exists
+        2. Contains a .git file (not directory) that points to the main repo
+
+        An empty folder or folder without .git file is NOT a valid worktree.
+        """
         if not worktree:
             return False
         worktree_path = settings.workspace_dir / worktree["worktree_path"]
-        return worktree_path.exists()
+        if not worktree_path.exists():
+            return False
+
+        # Check for .git file (worktrees have a .git FILE, not directory)
+        git_file = worktree_path / ".git"
+        if not git_file.exists():
+            return False
+
+        # .git should be a file (pointing to main repo), not a directory
+        if git_file.is_dir():
+            return False
+
+        return True
 
     def create_worktree(
         self,
@@ -325,11 +345,11 @@ class WorktreeManager:
         result = []
 
         for wt in worktrees:
-            worktree_path = settings.workspace_dir / wt["worktree_path"]
-            wt["exists"] = worktree_path.exists()
+            # Check if worktree is valid (not just if folder exists)
+            wt["exists"] = self.is_worktree_valid(wt)
 
             if not wt["exists"]:
-                # Mark as deleted but don't remove - let sync handle it
+                # Invalid worktree (missing, empty, or corrupted) - skip it
                 continue
 
             # Get all sessions for this worktree
@@ -388,11 +408,11 @@ class WorktreeManager:
         existing_worktrees = database.get_active_worktrees_for_repository(repo["id"])
         for wt in existing_worktrees:
             if wt["branch_name"] == branch_name:
-                # Verify the worktree still exists on disk
-                worktree_full_path = settings.workspace_dir / wt["worktree_path"]
-                if not worktree_full_path.exists():
-                    # Stale record - worktree was deleted outside the app
-                    logger.info(f"Cleaning up stale worktree record for branch '{branch_name}' (path no longer exists: {worktree_full_path})")
+                # Verify the worktree is still valid on disk (not just folder exists)
+                if not self.is_worktree_valid(wt):
+                    # Stale/invalid record - worktree was deleted or corrupted
+                    worktree_full_path = settings.workspace_dir / wt["worktree_path"]
+                    logger.info(f"Cleaning up stale worktree record for branch '{branch_name}' (invalid worktree at: {worktree_full_path})")
                     database.update_worktree(wt["id"], status=WorktreeStatus.DELETED)
                     continue  # Allow creation to proceed
 
@@ -526,9 +546,8 @@ class WorktreeManager:
         worktrees = database.get_worktrees_with_sessions(repo["id"])
 
         for wt in worktrees:
-            # Check if worktree folder exists
-            worktree_path = settings.workspace_dir / wt["worktree_path"]
-            wt["exists"] = worktree_path.exists()
+            # Check if worktree is valid (not just if folder exists)
+            wt["exists"] = self.is_worktree_valid(wt)
 
             # Legacy support: also check deprecated worktrees.session_id if no sessions found
             if not wt["sessions"] and wt.get("session_id"):
@@ -552,9 +571,9 @@ class WorktreeManager:
         if not worktree:
             return None
 
-        # Check if worktree folder exists
+        # Check if worktree is valid (not just if folder exists)
         worktree_abs_path = str(settings.workspace_dir / worktree["worktree_path"])
-        worktree["exists"] = Path(worktree_abs_path).exists()
+        worktree["exists"] = self.is_worktree_valid(worktree)
 
         if worktree["exists"]:
             worktree["git_status"] = self.git_service.get_status(worktree_abs_path)

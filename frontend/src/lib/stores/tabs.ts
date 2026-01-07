@@ -8,6 +8,7 @@
 import { writable, derived, get } from 'svelte/store';
 import type { Session, Profile, PermissionRequest as PermissionRequestType, UserQuestionRequest } from '$lib/api/client';
 import { api } from '$lib/api/client';
+import { isNotificationsEnabled, notifySessionComplete, getPermission, type SessionCompleteInfo } from '$lib/services/notifications';
 
 export interface ApiUser {
 	id: string;
@@ -112,6 +113,8 @@ export interface ChatTab {
 	draft: string;
 	// Scroll position (preserved when switching cards)
 	scrollTop: number;
+	// Stream start time for duration tracking (notifications)
+	streamStartTime: number | null;
 	// Execution mode settings (per-tab)
 	executionMode: ExecutionMode;
 	worktreeBranch: string;      // The new branch name for worktree mode
@@ -387,20 +390,28 @@ if (typeof window !== 'undefined') {
 
 /**
  * Save selection to backend (debounced) for cross-device persistence
+ *
+ * IMPORTANT: If profile or project is empty, we preserve the existing localStorage value
+ * to avoid accidentally clearing the user's selection when only one field changes.
  */
 async function saveSelectionToBackend(profile: string, project: string) {
-	// Update localStorage immediately
+	// If either value is empty, preserve the existing localStorage value
+	// This prevents clearing one selection when only the other is changed
+	const effectiveProfile = profile || getPersistedProfile();
+	const effectiveProject = project || getPersistedProject();
+
+	// Update localStorage immediately (always update both to keep in sync)
 	if (typeof window !== 'undefined') {
-		if (profile) {
-			localStorage.setItem('aihub_selectedProfile', profile);
+		if (effectiveProfile) {
+			localStorage.setItem('aihub_selectedProfile', effectiveProfile);
 		}
-		if (project) {
-			localStorage.setItem('aihub_selectedProject', project);
+		if (effectiveProject) {
+			localStorage.setItem('aihub_selectedProject', effectiveProject);
 		}
 	}
 
-	// Store pending selection for flush on unload
-	pendingSelection = { profile, project };
+	// Store pending selection for flush on unload (use effective values)
+	pendingSelection = { profile: effectiveProfile, project: effectiveProject };
 
 	// Clear existing timer
 	if (selectionSyncTimeout) {
@@ -1653,7 +1664,8 @@ function createTabsStore() {
 						return {
 							...tab,
 							sessionId,
-							isStreaming: true
+							isStreaming: true,
+							streamStartTime: Date.now()
 							// NO empty message added here - wait for actual content
 						};
 					})
@@ -2033,6 +2045,14 @@ function createTabsStore() {
 					stopTimeouts.delete(tabId);
 				}
 
+				// Get current tab state before updating (for notification)
+				const currentTab = getTab(tabId);
+				const durationSeconds = currentTab?.streamStartTime
+					? (Date.now() - currentTab.streamStartTime) / 1000
+					: undefined;
+
+				let finalTitle: string | null = null;
+
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
@@ -2063,39 +2083,57 @@ function createTabsStore() {
 								title = firstUserMsg.content.substring(0, 100) + (firstUserMsg.content.length > 100 ? '...' : '');
 							}
 						}
+						finalTitle = title;
 
 						return {
 							...tab,
 							messages,
 							isStreaming: false,
+							streamStartTime: null,
 							sessionId: sessionId || tab.sessionId,
 							title
 						};
 					})
 				}));
 
+				// Trigger browser notification if enabled and permission granted
+				if (isNotificationsEnabled() && getPermission() === 'granted') {
+					notifySessionComplete({
+						sessionId: sessionId || '',
+						sessionTitle: finalTitle,
+						durationSeconds,
+						totalCostUsd: metadata?.total_cost_usd as number | undefined,
+						tokensIn: metadata?.tokens_in as number | undefined,
+						tokensOut: metadata?.tokens_out as number | undefined,
+						model: metadata?.model as string | undefined
+					});
+				}
+
 				// Load token counts from session history - single source of truth
 				// This is more reliable than tracking incremental tokens during streaming
+				// Add a small delay to ensure JSONL is fully written by the SDK
 				if (sessionId) {
-					api.get<Session>(`/sessions/${sessionId}`).then(session => {
-						console.log('[Tab] Loaded session token counts:', {
-							sessionId,
-							total_tokens_in: session.total_tokens_in,
-							total_tokens_out: session.total_tokens_out,
-							cache_creation_tokens: session.cache_creation_tokens,
-							cache_read_tokens: session.cache_read_tokens,
-							context_tokens: session.context_tokens
+					setTimeout(() => {
+						api.get<Session>(`/sessions/${sessionId}`).then(session => {
+							console.log('[Tab] Loaded session token counts:', {
+								sessionId,
+								total_tokens_in: session.total_tokens_in,
+								total_tokens_out: session.total_tokens_out,
+								cache_creation_tokens: session.cache_creation_tokens,
+								cache_read_tokens: session.cache_read_tokens,
+								context_tokens: session.context_tokens
+							});
+							updateTab(tabId, {
+								totalTokensIn: session.total_tokens_in || 0,
+								totalTokensOut: session.total_tokens_out || 0,
+								totalCacheCreationTokens: session.cache_creation_tokens || 0,
+								totalCacheReadTokens: session.cache_read_tokens || 0,
+								contextUsed: session.context_tokens || 0
+							});
+						}).catch(err => {
+							console.error('[Tab] Failed to load session token counts:', err);
 						});
-						updateTab(tabId, {
-							totalTokensIn: session.total_tokens_in || 0,
-							totalTokensOut: session.total_tokens_out || 0,
-							totalCacheCreationTokens: session.cache_creation_tokens || 0,
-							totalCacheReadTokens: session.cache_read_tokens || 0,
-							contextUsed: session.context_tokens || 0
-						});
-					}).catch(err => {
-						console.error('[Tab] Failed to load session token counts:', err);
-					});
+					}, 500); // 500ms delay for JSONL write completion
 				}
 
 				// Refresh sessions list
@@ -2124,9 +2162,14 @@ function createTabsStore() {
 					tabs: s.tabs.map(tab => {
 						if (tab.id !== tabId) return tab;
 
-						let messages = tab.messages.map(m =>
-							m.streaming ? { ...m, streaming: false } : m
-						);
+						let messages = tab.messages.map(m => {
+							// Mark running tools as error (interrupted)
+							if (m.type === 'tool_use' && m.toolStatus === 'running') {
+								return { ...m, streaming: false, toolStatus: 'error' as const };
+							}
+							// Mark streaming text as not streaming
+							return m.streaming ? { ...m, streaming: false } : m;
+						});
 						messages = messages.filter(
 							m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
 						);
@@ -2780,6 +2823,7 @@ function createTabsStore() {
 						todos: [],
 						draft: '',
 						scrollTop: 0,
+						streamStartTime: null,
 						executionMode: 'local',
 						worktreeBranch: '',
 						worktreeBaseBranch: 'main',
@@ -2835,13 +2879,11 @@ function createTabsStore() {
 		createTab(sessionId?: string) {
 			const newTabId = generateTabId();
 
-			// Get the current state to access the last used profile/project
-			const currentState = get({ subscribe });
-			const activeTab = currentState.tabs.find(t => t.id === currentState.activeTabId);
-
-			// Priority: active tab's selection > localStorage (which syncs from backend)
-			const profile = activeTab?.profile || getPersistedProfile();
-			const project = activeTab?.project || getPersistedProject();
+			// Always use localStorage for profile/project selection
+			// This is the user's explicitly saved preference, more reliable than
+			// trying to inherit from "active" tabs which may be orphaned/stale
+			const profile = getPersistedProfile();
+			const project = getPersistedProject();
 
 			const newTab: ChatTab = {
 				id: newTabId,
@@ -2866,6 +2908,7 @@ function createTabsStore() {
 				todos: [],
 				draft: '',
 				scrollTop: 0,
+				streamStartTime: null,
 				executionMode: 'local',
 				worktreeBranch: '',
 				worktreeBaseBranch: 'main',
@@ -2904,6 +2947,13 @@ function createTabsStore() {
 			// Don't close if the tab is actively streaming
 			if (tab?.isStreaming) {
 				return;
+			}
+
+			// Before closing, save this tab's profile/project as the default selection
+			// This ensures the selection persists even when all tabs are closed
+			if (tab?.profile || tab?.project) {
+				console.log('[Tabs] closeTab - saving selection:', tab.profile, tab.project);
+				saveSelectionToBackend(tab.profile, tab.project);
 			}
 
 			// Send close_session message before disconnecting (so other devices know)
@@ -3270,9 +3320,13 @@ function createTabsStore() {
 						tabs: s.tabs.map(t => {
 							if (t.id !== tabId) return t;
 
-							let messages = t.messages.map(m =>
-								m.streaming ? { ...m, streaming: false } : m
-							);
+							let messages = t.messages.map(m => {
+								// Mark running tools as error (interrupted)
+								if (m.type === 'tool_use' && m.toolStatus === 'running') {
+									return { ...m, streaming: false, toolStatus: 'error' as const };
+								}
+								return m.streaming ? { ...m, streaming: false } : m;
+							});
 							// Remove empty assistant messages
 							messages = messages.filter(
 								m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
@@ -3391,29 +3445,41 @@ function createTabsStore() {
 
 		/**
 		 * Set profile for a tab
+		 * @param tabId - The tab to update
+		 * @param profileId - The profile ID to set
+		 * @param persistAsDefault - If true, saves as default selection for new chat cards (default: true)
+		 *                           Set to false when setting profile for non-chat-card purposes (e.g., ConversationCard)
 		 */
-		setTabProfile(tabId: string, profileId: string) {
+		setTabProfile(tabId: string, profileId: string, persistAsDefault: boolean = true) {
 			updateTab(tabId, { profile: profileId });
 			// Save tabs state (debounced) to persist the profile selection
 			saveTabsToServer(get({ subscribe }));
 			// Also save as default selection for new tabs (cross-device persistence)
-			const tab = getTab(tabId);
-			if (tab) {
-				saveSelectionToBackend(profileId, tab.project);
+			if (persistAsDefault) {
+				const tab = getTab(tabId);
+				if (tab) {
+					saveSelectionToBackend(profileId, tab.project);
+				}
 			}
 		},
 
 		/**
 		 * Set project for a tab
+		 * @param tabId - The tab to update
+		 * @param projectId - The project ID to set
+		 * @param persistAsDefault - If true, saves as default selection for new chat cards (default: true)
+		 *                           Set to false when setting project for non-chat-card purposes (e.g., ConversationCard)
 		 */
-		setTabProject(tabId: string, projectId: string) {
+		setTabProject(tabId: string, projectId: string, persistAsDefault: boolean = true) {
 			updateTab(tabId, { project: projectId });
 			// Save tabs state (debounced) to persist the project selection
 			saveTabsToServer(get({ subscribe }));
 			// Also save as default selection for new tabs (cross-device persistence)
-			const tab = getTab(tabId);
-			if (tab) {
-				saveSelectionToBackend(tab.profile, projectId);
+			if (persistAsDefault) {
+				const tab = getTab(tabId);
+				if (tab) {
+					saveSelectionToBackend(tab.profile, projectId);
+				}
 			}
 		},
 
@@ -3555,6 +3621,7 @@ function createTabsStore() {
 				todos: [],
 				draft: '',
 				scrollTop: 0,
+				streamStartTime: null,
 				executionMode: 'local',
 				worktreeBranch: '',
 				worktreeBaseBranch: 'main',

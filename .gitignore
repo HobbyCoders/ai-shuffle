@@ -79,3 +79,4 @@ tools/node_modules/
 CLAUDE.md
 unban.py
 frontend/build-frontend.bat
+/generated-audio

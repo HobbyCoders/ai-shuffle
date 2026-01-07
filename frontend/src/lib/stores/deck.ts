@@ -29,7 +29,6 @@ export type LayoutMode = 'freeflow' | 'sidebyside' | 'tile' | 'stack' | 'focus';
 
 export type DeckCardType =
 	| 'chat'
-	| 'conversation'
 	| 'file-browser'
 	| 'settings'
 	| 'user-settings'
@@ -37,9 +36,6 @@ export type DeckCardType =
 	| 'terminal'
 	| 'subagent'
 	| 'project'
-	| 'image-studio'
-	| 'model-studio'
-	| 'audio-studio'
 	| 'plugins';
 
 export type SnapZone =
@@ -136,6 +132,53 @@ let isLoadingFromServer = false;
 let hasSyncedFromServer = false; // Prevents writing to server before initial sync completes
 let lastServerSync = 0;
 
+// Track pending deck state for flush on page unload
+let pendingDeckState: DeckState | null = null;
+
+/**
+ * Immediately flush any pending deck save to backend (sync, for beforeunload)
+ * Uses sendBeacon for reliable delivery during page unload
+ */
+function flushPendingDeckSave() {
+	if (!pendingDeckState || !hasSyncedFromServer) return;
+
+	// Cancel the debounce timers
+	if (serverSyncTimer) {
+		clearTimeout(serverSyncTimer);
+		serverSyncTimer = null;
+	}
+	if (saveTimer) {
+		clearTimeout(saveTimer);
+		saveTimer = null;
+	}
+
+	// Save to localStorage synchronously
+	try {
+		const persisted = createPersistedState(pendingDeckState);
+		localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
+	} catch (e) {
+		console.error('[Deck] Failed to flush state to localStorage:', e);
+	}
+
+	// Use sendBeacon for reliable delivery to server during page unload
+	const persisted = createPersistedState(pendingDeckState);
+	const data = JSON.stringify({ key: SERVER_PREFERENCE_KEY, value: persisted });
+	navigator.sendBeacon('/api/v1/preferences/' + SERVER_PREFERENCE_KEY, new Blob([data], { type: 'application/json' }));
+
+	console.log('[Deck] Flushed pending state on unload');
+	pendingDeckState = null;
+}
+
+// Register beforeunload handler to flush pending saves when browser closes
+if (typeof window !== 'undefined') {
+	window.addEventListener('beforeunload', flushPendingDeckSave);
+	document.addEventListener('visibilitychange', () => {
+		if (document.visibilityState === 'hidden') {
+			flushPendingDeckSave();
+		}
+	});
+}
+
 function parsePersistedState(parsed: PersistedDeckState): Partial<DeckState> {
 	return {
 		activeMode: parsed.activeMode,
@@ -183,6 +226,9 @@ function loadFromStorage(): Partial<DeckState> | null {
 function saveToStorage(state: DeckState) {
 	if (typeof window === 'undefined') return;
 
+	// Track pending state for flush on unload
+	pendingDeckState = state;
+
 	if (saveTimer) {
 		clearTimeout(saveTimer);
 	}
@@ -195,6 +241,10 @@ function saveToStorage(state: DeckState) {
 			console.error('[Deck] Failed to save state to localStorage:', e);
 		}
 		saveTimer = null;
+		// Clear pending state after successful save
+		if (pendingDeckState === state) {
+			pendingDeckState = null;
+		}
 	}, SAVE_DEBOUNCE_MS);
 }
 
@@ -211,6 +261,9 @@ async function saveToServer(state: DeckState) {
 		return;
 	}
 
+	// Track pending state for flush on unload
+	pendingDeckState = state;
+
 	if (serverSyncTimer) {
 		clearTimeout(serverSyncTimer);
 	}
@@ -225,6 +278,10 @@ async function saveToServer(state: DeckState) {
 			console.error('[Deck] Failed to sync state to server:', e);
 		}
 		serverSyncTimer = null;
+		// Clear pending state after successful save
+		if (pendingDeckState === state) {
+			pendingDeckState = null;
+		}
 	}, SERVER_SYNC_DEBOUNCE_MS);
 }
 
@@ -325,8 +382,6 @@ function getDefaultTitle(type: DeckCardType): string {
 	switch (type) {
 		case 'chat':
 			return 'New Chat';
-		case 'conversation':
-			return 'Conversation';
 		case 'file-browser':
 			return 'Files';
 		case 'settings':

@@ -51,13 +51,9 @@
 		SettingsCard,
 		UserSettingsCard,
 		CardShuffle,
-		ImageStudioCard,
-		ModelStudioCard,
-		AudioStudioCard,
 		FileBrowserCard,
 		PluginManagerCard,
-		StackedCardPreview,
-		ConversationCard
+		StackedCardPreview
 	} from '$lib/components/deck/cards';
 	import type { CardType, DeckCard as CardsDeckCard } from '$lib/components/deck/cards/types';
 
@@ -66,10 +62,8 @@
 	import AnalyticsModal from '$lib/components/AnalyticsModal.svelte';
 	import TerminalModal from '$lib/components/TerminalModal.svelte';
 	import ImportSessionModal from '$lib/components/ImportSessionModal.svelte';
-	import GitModal from '$lib/components/git/GitModal.svelte';
 	import TagManager from '$lib/components/TagManager.svelte';
 	import KnowledgeManager from '$lib/components/KnowledgeManager.svelte';
-	import Canvas from '$lib/components/canvas/Canvas.svelte';
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
 	import CardDeckNavigator from '$lib/components/deck/CardDeckNavigator.svelte';
@@ -109,10 +103,8 @@
 	let showAnalyticsModal = $state(false);
 	let showTerminalModal = $state(false);
 	let showImportModal = $state(false);
-	let showGitModal = $state(false);
 	let showTagManager = $state(false);
 	let showKnowledgeModal = $state(false);
-	let showCanvas = $state(false);
 	let showSpotlight = $state(false);
 	let showAdvancedSearch = $state(false);
 	let showCardNavigator = $state(false);
@@ -184,18 +176,10 @@
 				return 'subagent';
 			case 'project':
 				return 'project';
-			case 'image-studio':
-				return 'image-studio';
-			case 'model-studio':
-				return 'model-studio';
-			case 'audio-studio':
-				return 'audio-studio';
 			case 'file-browser':
 				return 'file-browser';
 			case 'plugins':
 				return 'plugins';
-			case 'conversation':
-				return 'conversation';
 			default:
 				return 'chat';
 		}
@@ -230,6 +214,7 @@
 		// Use all cards from deck store
 		const allDeckCards = $allCards;
 
+		// First, ensure all chat cards have tabs
 		for (const card of allDeckCards) {
 			if (card.type !== 'chat') continue;
 
@@ -255,6 +240,22 @@
 					const newTabId = tabs.createTab();
 					deck.setCardMeta(card.id, { tabId: newTabId });
 				}
+			}
+		}
+
+		// Second, clean up orphaned tabs (tabs without a matching card)
+		// Get all tabIds that are referenced by chat cards
+		const cardTabIds = new Set(
+			allDeckCards
+				.filter(card => card.type === 'chat' && card.meta?.tabId)
+				.map(card => card.meta?.tabId as string)
+		);
+
+		// Close any tabs that don't have a corresponding card
+		for (const tab of currentTabs) {
+			if (!cardTabIds.has(tab.id)) {
+				console.log('[Sync] Closing orphaned tab:', tab.id);
+				tabs.closeTab(tab.id);
 			}
 		}
 	}
@@ -313,6 +314,9 @@
 
 		// Initial workspace bounds
 		updateWorkspaceBounds();
+
+		// Enforce layout mode after workspace bounds are set (except freeflow which preserves positions)
+		deck.reapplyLayout();
 
 		// Register keyboard shortcuts
 		shortcutRegistrations = [
@@ -383,12 +387,8 @@
 						showImportModal = false;
 					} else if (showTerminalModal) {
 						showTerminalModal = false;
-					} else if (showGitModal) {
-						showGitModal = false;
 					} else if (showKnowledgeModal) {
 						showKnowledgeModal = false;
-					} else if (showCanvas) {
-						showCanvas = false;
 					} else if (showAnalyticsModal) {
 						showAnalyticsModal = false;
 					} else if (showTagManager) {
@@ -449,32 +449,6 @@
 				shift: true,
 				category: 'navigation',
 				action: () => { showAdvancedSearch = !showAdvancedSearch; }
-			}),
-
-			// Git modal (Cmd+Shift+G)
-			registerShortcut({
-				id: 'git-modal',
-				description: 'Open Git & GitHub',
-				key: 'g',
-				cmdOrCtrl: true,
-				shift: true,
-				category: 'navigation',
-				action: () => {
-					if ($activeTab?.project) {
-						showGitModal = !showGitModal;
-					}
-				}
-			}),
-
-			// Toggle Canvas (Cmd+Shift+C)
-			registerShortcut({
-				id: 'toggle-canvas',
-				description: 'Toggle Canvas view',
-				key: 'c',
-				cmdOrCtrl: true,
-				shift: true,
-				category: 'navigation',
-				action: () => { showCanvas = !showCanvas; }
 			}),
 
 			// Close focused card (Cmd+W)
@@ -586,7 +560,7 @@
 	// ============================================
 	// Card Lifecycle Handlers
 	// ============================================
-	function handleCreateCard(type: CardType | 'recent-sessions') {
+	function handleCreateCard(type: string) {
 		let deckCardType: DeckCardType;
 		let title: string;
 		let dataId: string | null = null;
@@ -659,21 +633,6 @@
 				title = 'My Settings';
 				break;
 			}
-			case 'image-studio': {
-				deckCardType = 'image-studio';
-				title = 'Image Studio';
-				break;
-			}
-			case 'model-studio': {
-				deckCardType = 'model-studio';
-				title = '3D Models';
-				break;
-			}
-			case 'audio-studio': {
-				deckCardType = 'audio-studio';
-				title = 'Audio Studio';
-				break;
-			}
 			case 'file-browser': {
 				deckCardType = 'file-browser';
 				title = 'Files';
@@ -688,11 +647,6 @@
 				}
 				deckCardType = 'plugins';
 				title = 'Plugins';
-				break;
-			}
-			case 'conversation': {
-				deckCardType = 'conversation';
-				title = 'Conversation';
 				break;
 			}
 			default:
@@ -810,10 +764,6 @@
 		deck.setCardTitle(id, title);
 	}
 
-	function handleFork(_cardId: string, _sessionId: string, _messageIndex: number, _messageId: string) {
-		// Fork functionality to be implemented
-	}
-
 	// ============================================
 	// Layout Mode Handler
 	// ============================================
@@ -870,14 +820,17 @@
 	}
 
 	function handleSpotlightSelectCommand(command: Command) {
-		// For interactive commands, open terminal modal
+		// For interactive commands, create a terminal card
 		if (command.type === 'interactive') {
 			// Need an active session for terminal
 			const activeCard = $allCards.find((c) => c.id === $focusedCardId);
 			if (activeCard?.dataId) {
-				terminalSessionId = activeCard.dataId;
-				terminalCommand = `/${command.name}`;
-				showTerminalModal = true;
+				// Create terminal card with session pre-selected
+				deck.addCard('terminal', {
+					title: `Terminal - ${command.name}`,
+					dataId: activeCard.dataId,
+					meta: { command: `/${command.name}` }
+				});
 			}
 		}
 		showSpotlight = false;
@@ -963,9 +916,6 @@
 								onFocus={() => handleCardFocus(card.id)}
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
-								onFork={(sessionId, messageIndex, messageId) =>
-									handleFork(card.id, sessionId, messageIndex, messageId)
-								}
 							/>
 						{:else if card.type === 'terminal'}
 							<TerminalCard
@@ -1028,36 +978,6 @@
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
 							/>
-						{:else if card.type === 'image-studio'}
-							<ImageStudioCard
-								{card}
-								mobile={true}
-								onClose={() => handleCardClose(card.id)}
-								onMaximize={() => handleCardMaximize(card.id)}
-								onFocus={() => handleCardFocus(card.id)}
-								onMove={(x, y) => handleCardMove(card.id, x, y)}
-								onResize={(w, h) => handleCardResize(card.id, w, h)}
-							/>
-						{:else if card.type === 'model-studio'}
-							<ModelStudioCard
-								{card}
-								mobile={true}
-								onClose={() => handleCardClose(card.id)}
-								onMaximize={() => handleCardMaximize(card.id)}
-								onFocus={() => handleCardFocus(card.id)}
-								onMove={(x, y) => handleCardMove(card.id, x, y)}
-								onResize={(w, h) => handleCardResize(card.id, w, h)}
-							/>
-						{:else if card.type === 'audio-studio'}
-							<AudioStudioCard
-								{card}
-								mobile={true}
-								onClose={() => handleCardClose(card.id)}
-								onMaximize={() => handleCardMaximize(card.id)}
-								onFocus={() => handleCardFocus(card.id)}
-								onMove={(x, y) => handleCardMove(card.id, x, y)}
-								onResize={(w, h) => handleCardResize(card.id, w, h)}
-							/>
 						{:else if card.type === 'file-browser'}
 							<FileBrowserCard
 								{card}
@@ -1070,16 +990,6 @@
 							/>
 						{:else if card.type === 'plugins'}
 							<PluginManagerCard
-								{card}
-								mobile={true}
-								onClose={() => handleCardClose(card.id)}
-								onMaximize={() => handleCardMaximize(card.id)}
-								onFocus={() => handleCardFocus(card.id)}
-								onMove={(x, y) => handleCardMove(card.id, x, y)}
-								onResize={(w, h) => handleCardResize(card.id, w, h)}
-							/>
-						{:else if card.type === 'conversation'}
-							<ConversationCard
 								{card}
 								mobile={true}
 								onClose={() => handleCardClose(card.id)}
@@ -1158,9 +1068,6 @@
 												onResize={(w, h) => handleCardResize(card.id, w, h)}
 												onDragEnd={() => handleCardDragEnd(card.id)}
 												onResizeEnd={() => handleCardResizeEnd(card.id)}
-												onFork={(sessionId, messageIndex, messageId) =>
-													handleFork(card.id, sessionId, messageIndex, messageId)
-												}
 											/>
 										{:else}
 											<div class="card-loading">
@@ -1234,39 +1141,6 @@
 											onDragEnd={() => handleCardDragEnd(card.id)}
 											onResizeEnd={() => handleCardResizeEnd(card.id)}
 										/>
-									{:else if card.type === 'image-studio'}
-										<ImageStudioCard
-											{card}
-											onClose={() => handleCardClose(card.id)}
-											onMaximize={() => handleCardMaximize(card.id)}
-											onFocus={() => handleCardFocus(card.id)}
-											onMove={(x, y) => handleCardMove(card.id, x, y)}
-											onResize={(w, h) => handleCardResize(card.id, w, h)}
-											onDragEnd={() => handleCardDragEnd(card.id)}
-											onResizeEnd={() => handleCardResizeEnd(card.id)}
-										/>
-									{:else if card.type === 'model-studio'}
-										<ModelStudioCard
-											{card}
-											onClose={() => handleCardClose(card.id)}
-											onMaximize={() => handleCardMaximize(card.id)}
-											onFocus={() => handleCardFocus(card.id)}
-											onMove={(x, y) => handleCardMove(card.id, x, y)}
-											onResize={(w, h) => handleCardResize(card.id, w, h)}
-											onDragEnd={() => handleCardDragEnd(card.id)}
-											onResizeEnd={() => handleCardResizeEnd(card.id)}
-										/>
-									{:else if card.type === 'audio-studio'}
-										<AudioStudioCard
-											{card}
-											onClose={() => handleCardClose(card.id)}
-											onMaximize={() => handleCardMaximize(card.id)}
-											onFocus={() => handleCardFocus(card.id)}
-											onMove={(x, y) => handleCardMove(card.id, x, y)}
-											onResize={(w, h) => handleCardResize(card.id, w, h)}
-											onDragEnd={() => handleCardDragEnd(card.id)}
-											onResizeEnd={() => handleCardResizeEnd(card.id)}
-										/>
 									{:else if card.type === 'file-browser'}
 										<FileBrowserCard
 											{card}
@@ -1280,17 +1154,6 @@
 										/>
 									{:else if card.type === 'plugins'}
 										<PluginManagerCard
-											{card}
-											onClose={() => handleCardClose(card.id)}
-											onMaximize={() => handleCardMaximize(card.id)}
-											onFocus={() => handleCardFocus(card.id)}
-											onMove={(x, y) => handleCardMove(card.id, x, y)}
-											onResize={(w, h) => handleCardResize(card.id, w, h)}
-											onDragEnd={() => handleCardDragEnd(card.id)}
-											onResizeEnd={() => handleCardResizeEnd(card.id)}
-										/>
-									{:else if card.type === 'conversation'}
-										<ConversationCard
 											{card}
 											onClose={() => handleCardClose(card.id)}
 											onMaximize={() => handleCardMaximize(card.id)}
@@ -1351,10 +1214,6 @@
 		onCreateChat={() => handleCreateCard('chat')}
 		onCreateTerminal={() => handleCreateCard('terminal')}
 		onOpenThread={handleNavigatorOpenThread}
-		onOpenImageStudio={() => handleCreateCard('image-studio')}
-		onOpenModelStudio={() => handleCreateCard('model-studio')}
-		onOpenAudioStudio={() => handleCreateCard('audio-studio')}
-		onOpenConversation={() => handleCreateCard('conversation')}
 		onOpenFileBrowser={() => handleCreateCard('file-browser')}
 		onOpenProjects={() => handleCreateCard('project')}
 		onOpenProfiles={() => handleCreateCard('profile')}
@@ -1437,32 +1296,6 @@
 			projectId={$activeTab.project}
 			on:close={() => showKnowledgeModal = false}
 		/>
-	{/if}
-
-	<!-- Git Modal -->
-	{#if showGitModal && $activeTab?.project}
-		<GitModal
-			open={showGitModal}
-			projectId={$activeTab.project}
-			onClose={() => showGitModal = false}
-			onOpenSession={(sessionId) => {
-				const tabId = tabs.openSession(sessionId);
-				const sessionData = $sessions.find((s) => s.id === sessionId);
-				deck.addCard('chat', {
-					title: sessionData?.title || 'Chat',
-					dataId: sessionId,
-					meta: { tabId }
-				});
-				showGitModal = false;
-			}}
-		/>
-	{/if}
-
-	<!-- Canvas Modal (full-screen overlay) -->
-	{#if showCanvas}
-		<div class="fixed inset-0 z-50 bg-background">
-			<Canvas on:close={() => showCanvas = false} />
-		</div>
 	{/if}
 
 	<!-- Terminal Modal for interactive CLI commands -->

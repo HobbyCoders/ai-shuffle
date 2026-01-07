@@ -53,6 +53,14 @@ export interface ImageAspectRatio {
 	supportedBy: ImageProvider[];
 }
 
+export interface VideoAspectRatio {
+	value: string;
+	label: string;
+	width: number;
+	height: number;
+	supportedBy: VideoProvider[];
+}
+
 export interface ImageStylePreset {
 	id: string;
 	name: string;
@@ -373,6 +381,80 @@ export const GOOGLE_VIDEO_MODELS: VideoModel[] = [
 	}
 ];
 
+// Gemini TTS voices (30 voices with mythological/astronomical names)
+const GEMINI_TTS_VOICES: TTSVoice[] = [
+	{ id: 'Zephyr', name: 'Zephyr', language: 'multi', gender: 'neutral' },
+	{ id: 'Puck', name: 'Puck', language: 'multi', gender: 'neutral' },
+	{ id: 'Charon', name: 'Charon', language: 'multi', gender: 'male' },
+	{ id: 'Kore', name: 'Kore', language: 'multi', gender: 'female' },
+	{ id: 'Fenrir', name: 'Fenrir', language: 'multi', gender: 'male' },
+	{ id: 'Leda', name: 'Leda', language: 'multi', gender: 'female' },
+	{ id: 'Orus', name: 'Orus', language: 'multi', gender: 'male' },
+	{ id: 'Aoede', name: 'Aoede', language: 'multi', gender: 'female' },
+	{ id: 'Callirrhoe', name: 'Callirrhoe', language: 'multi', gender: 'female' },
+	{ id: 'Autonoe', name: 'Autonoe', language: 'multi', gender: 'female' },
+	{ id: 'Enceladus', name: 'Enceladus', language: 'multi', gender: 'male' },
+	{ id: 'Iapetus', name: 'Iapetus', language: 'multi', gender: 'male' },
+	{ id: 'Umbriel', name: 'Umbriel', language: 'multi', gender: 'neutral' },
+	{ id: 'Algieba', name: 'Algieba', language: 'multi', gender: 'female' },
+	{ id: 'Despina', name: 'Despina', language: 'multi', gender: 'female' },
+	{ id: 'Erinome', name: 'Erinome', language: 'multi', gender: 'female' },
+	{ id: 'Algenib', name: 'Algenib', language: 'multi', gender: 'male' },
+	{ id: 'Rasalgethi', name: 'Rasalgethi', language: 'multi', gender: 'male' },
+	{ id: 'Laomedeia', name: 'Laomedeia', language: 'multi', gender: 'female' },
+	{ id: 'Achernar', name: 'Achernar', language: 'multi', gender: 'male' },
+	{ id: 'Alnilam', name: 'Alnilam', language: 'multi', gender: 'male' },
+	{ id: 'Schedar', name: 'Schedar', language: 'multi', gender: 'male' },
+	{ id: 'Gacrux', name: 'Gacrux', language: 'multi', gender: 'male' },
+	{ id: 'Pulcherrima', name: 'Pulcherrima', language: 'multi', gender: 'female' },
+	{ id: 'Achird', name: 'Achird', language: 'multi', gender: 'male' },
+	{ id: 'Zubenelgenubi', name: 'Zubenelgenubi', language: 'multi', gender: 'male' },
+	{ id: 'Vindemiatrix', name: 'Vindemiatrix', language: 'multi', gender: 'female' },
+	{ id: 'Sadachbia', name: 'Sadachbia', language: 'multi', gender: 'male' },
+	{ id: 'Sadaltager', name: 'Sadaltager', language: 'multi', gender: 'male' },
+	{ id: 'Sulafat', name: 'Sulafat', language: 'multi', gender: 'female' }
+];
+
+// Google Cloud TTS voices (WaveNet, Neural2, Standard, Studio)
+const GOOGLE_CLOUD_TTS_VOICES: TTSVoice[] = [
+	// US English voices
+	{ id: 'en-US-A', name: 'US English A', language: 'en-US', gender: 'male' },
+	{ id: 'en-US-B', name: 'US English B', language: 'en-US', gender: 'male' },
+	{ id: 'en-US-C', name: 'US English C', language: 'en-US', gender: 'female' },
+	{ id: 'en-US-D', name: 'US English D', language: 'en-US', gender: 'male' },
+	{ id: 'en-US-E', name: 'US English E', language: 'en-US', gender: 'female' },
+	{ id: 'en-US-F', name: 'US English F', language: 'en-US', gender: 'female' },
+	{ id: 'en-US-G', name: 'US English G', language: 'en-US', gender: 'female' },
+	{ id: 'en-US-H', name: 'US English H', language: 'en-US', gender: 'female' },
+	{ id: 'en-US-I', name: 'US English I', language: 'en-US', gender: 'male' },
+	{ id: 'en-US-J', name: 'US English J', language: 'en-US', gender: 'male' },
+	// British English voices
+	{ id: 'en-GB-A', name: 'UK English A', language: 'en-GB', gender: 'female' },
+	{ id: 'en-GB-B', name: 'UK English B', language: 'en-GB', gender: 'male' },
+	{ id: 'en-GB-C', name: 'UK English C', language: 'en-GB', gender: 'female' },
+	{ id: 'en-GB-D', name: 'UK English D', language: 'en-GB', gender: 'male' },
+	{ id: 'en-GB-F', name: 'UK English F', language: 'en-GB', gender: 'female' },
+	// Australian English voices
+	{ id: 'en-AU-A', name: 'AU English A', language: 'en-AU', gender: 'female' },
+	{ id: 'en-AU-B', name: 'AU English B', language: 'en-AU', gender: 'male' },
+	{ id: 'en-AU-C', name: 'AU English C', language: 'en-AU', gender: 'female' },
+	{ id: 'en-AU-D', name: 'AU English D', language: 'en-AU', gender: 'male' }
+];
+
+// Studio voices (premium professional narration)
+const GOOGLE_STUDIO_VOICES: TTSVoice[] = [
+	{ id: 'en-US-Studio-M', name: 'Studio M', language: 'en-US', gender: 'male' },
+	{ id: 'en-US-Studio-O', name: 'Studio O', language: 'en-US', gender: 'female' },
+	{ id: 'en-US-Studio-Q', name: 'Studio Q', language: 'en-US', gender: 'male' },
+	{ id: 'en-GB-Studio-B', name: 'Studio B (UK)', language: 'en-GB', gender: 'male' },
+	{ id: 'en-GB-Studio-C', name: 'Studio C (UK)', language: 'en-GB', gender: 'female' }
+];
+
+// Polyglot voices (multi-language)
+const GOOGLE_POLYGLOT_VOICES: TTSVoice[] = [
+	{ id: 'Polyglot-1', name: 'Polyglot 1', language: 'multi', gender: 'male' }
+];
+
 export const GOOGLE_TTS_MODELS: TTSModel[] = [
 	{
 		id: 'gemini-2.5-flash-tts',
@@ -388,7 +470,7 @@ export const GOOGLE_TTS_MODELS: TTSModel[] = [
 			multiSpeaker: true,
 			emotionControl: true
 		},
-		voices: [], // Dynamically loaded
+		voices: GEMINI_TTS_VOICES,
 		outputFormats: ['mp3', 'wav', 'ogg', 'opus'],
 		speedRange: { min: 0.5, max: 2.0 },
 		maxInputLength: 5000,
@@ -408,7 +490,7 @@ export const GOOGLE_TTS_MODELS: TTSModel[] = [
 			multiSpeaker: false,
 			emotionControl: false
 		},
-		voices: [], // Dynamically loaded (30 styles, 80+ locales)
+		voices: GEMINI_TTS_VOICES, // Chirp 3 uses same voices as Gemini TTS
 		outputFormats: ['mp3', 'wav', 'ogg', 'linear16'],
 		speedRange: { min: 0.25, max: 4.0 },
 		maxInputLength: 5000,
@@ -428,7 +510,7 @@ export const GOOGLE_TTS_MODELS: TTSModel[] = [
 			multiSpeaker: false,
 			emotionControl: false
 		},
-		voices: [], // Dynamically loaded
+		voices: GOOGLE_CLOUD_TTS_VOICES,
 		outputFormats: ['mp3', 'wav', 'ogg', 'linear16'],
 		speedRange: { min: 0.25, max: 4.0 },
 		maxInputLength: 5000,
@@ -448,7 +530,7 @@ export const GOOGLE_TTS_MODELS: TTSModel[] = [
 			multiSpeaker: false,
 			emotionControl: false
 		},
-		voices: [], // Dynamically loaded
+		voices: GOOGLE_CLOUD_TTS_VOICES,
 		outputFormats: ['mp3', 'wav', 'ogg', 'linear16'],
 		speedRange: { min: 0.25, max: 4.0 },
 		maxInputLength: 5000,
@@ -468,11 +550,51 @@ export const GOOGLE_TTS_MODELS: TTSModel[] = [
 			multiSpeaker: false,
 			emotionControl: false
 		},
-		voices: [], // Dynamically loaded (300+ voices, 50+ languages)
+		voices: GOOGLE_CLOUD_TTS_VOICES,
 		outputFormats: ['mp3', 'wav', 'ogg', 'linear16'],
 		speedRange: { min: 0.25, max: 4.0 },
 		maxInputLength: 5000,
 		pricePerMillion: 4.0
+	},
+	{
+		id: 'studio',
+		name: 'studio',
+		displayName: 'Studio',
+		provider: 'google-tts',
+		description: 'Professional narration quality voices',
+		capabilities: {
+			streaming: true,
+			ssml: true,
+			customVoices: false,
+			steerability: false,
+			multiSpeaker: false,
+			emotionControl: false
+		},
+		voices: GOOGLE_STUDIO_VOICES,
+		outputFormats: ['mp3', 'wav', 'ogg', 'linear16'],
+		speedRange: { min: 0.25, max: 4.0 },
+		maxInputLength: 5000,
+		pricePerMillion: 160.0
+	},
+	{
+		id: 'polyglot',
+		name: 'polyglot',
+		displayName: 'Polyglot',
+		provider: 'google-tts',
+		description: 'Multi-language support for international content',
+		capabilities: {
+			streaming: true,
+			ssml: true,
+			customVoices: false,
+			steerability: false,
+			multiSpeaker: true,
+			emotionControl: false
+		},
+		voices: GOOGLE_POLYGLOT_VOICES,
+		outputFormats: ['mp3', 'wav', 'ogg', 'linear16'],
+		speedRange: { min: 0.25, max: 4.0 },
+		maxInputLength: 5000,
+		pricePerMillion: 16.0
 	}
 ];
 
@@ -972,7 +1094,7 @@ export const IMAGE_ASPECT_RATIOS: ImageAspectRatio[] = [
 	{ value: '4:5', label: 'Instagram', width: 34, height: 42, supportedBy: ['google-gemini'] }
 ];
 
-export const VIDEO_ASPECT_RATIOS: ImageAspectRatio[] = [
+export const VIDEO_ASPECT_RATIOS: VideoAspectRatio[] = [
 	{ value: '16:9', label: 'Landscape', width: 48, height: 27, supportedBy: ['google-veo', 'openai-sora'] },
 	{ value: '9:16', label: 'Portrait', width: 27, height: 48, supportedBy: ['google-veo', 'openai-sora'] },
 	{ value: '1:1', label: 'Square', width: 40, height: 40, supportedBy: ['google-veo', 'openai-sora'] }

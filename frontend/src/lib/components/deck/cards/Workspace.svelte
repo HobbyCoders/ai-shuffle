@@ -23,7 +23,7 @@
 		onCardFocus: (id: string) => void;
 		onCardMove: (id: string, x: number, y: number) => void;
 		onCardResize: (id: string, width: number, height: number) => void;
-		onCreateCard: (type: CardType) => void;
+		onCreateCard: (type: string) => void;
 		layoutMode?: LayoutMode;
 		onLayoutModeChange?: (mode: LayoutMode) => void;
 		onFocusNavigate?: (direction: 'prev' | 'next') => void;
@@ -51,7 +51,7 @@
 	const focusModeCards = $derived(
 		isFocusMode
 			? [...cards].sort(
-					(a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+					(a, b) => (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0)
 				)
 			: []
 	);
@@ -121,7 +121,7 @@
 	// Card type config for create menu (used in empty state)
 	const cardTypes: { type: CardType; label: string; icon: typeof MessageSquare }[] = [
 		{ type: 'chat', label: 'New Chat', icon: MessageSquare },
-		{ type: 'agent', label: 'New Agent', icon: Bot },
+		{ type: 'subagent', label: 'New Agent', icon: Bot },
 		{ type: 'terminal', label: 'New Terminal', icon: Terminal }
 	];
 </script>

@@ -131,9 +131,14 @@
 	// Voice recording state
 	let isRecording = $state(false);
 	let isTranscribing = $state(false);
+	let isPreparing = $state(false); // New: getting mic access
 	let mediaRecorder = $state<MediaRecorder | null>(null);
 	let recordingError = $state('');
 	let recordingStartTime = $state<number>(0);
+	let audioLevel = $state(0); // For audio level visualization (0-1)
+	let analyserNode = $state<AnalyserNode | null>(null);
+	let audioContext = $state<AudioContext | null>(null);
+	let animationFrameId = $state<number | null>(null);
 
 	// Use a non-reactive array for audio chunks to avoid Svelte 5 reactivity issues
 	// with rapid MediaRecorder ondataavailable events
@@ -336,8 +341,13 @@
 
 		// For directories, replace with path (with trailing /) and keep autocomplete open
 		if (file.type === 'directory') {
-			const pathWithSlash = file.path.endsWith('/') ? file.path : file.path + '/';
-			inputValue = inputValue.substring(0, atStartIndex) + '@' + pathWithSlash;
+			// Handle empty path (going back to root) - just show @
+			if (!file.path) {
+				inputValue = inputValue.substring(0, atStartIndex) + '@';
+			} else {
+				const pathWithSlash = file.path.endsWith('/') ? file.path : file.path + '/';
+				inputValue = inputValue.substring(0, atStartIndex) + '@' + pathWithSlash;
+			}
 			tick().then(() => textareaRef?.focus());
 			return;
 		}
@@ -398,9 +408,88 @@
 	// Minimum recording duration in milliseconds to avoid empty/too-short recordings
 	const MIN_RECORDING_DURATION = 500;
 
+	// Audio level monitoring for visualization
+	// Returns a promise that resolves when the audio system is ready to capture
+	// The returned function starts the visualization loop (call after isRecording = true)
+	async function initAudioMonitoring(stream: MediaStream): Promise<(() => void) | null> {
+		try {
+			audioContext = new AudioContext();
+
+			// If AudioContext is suspended (common on some browsers), resume it
+			if (audioContext.state === 'suspended') {
+				await audioContext.resume();
+			}
+
+			const source = audioContext.createMediaStreamSource(stream);
+			analyserNode = audioContext.createAnalyser();
+			analyserNode.fftSize = 256;
+			analyserNode.smoothingTimeConstant = 0.5;
+			source.connect(analyserNode);
+
+			const dataArray = new Uint8Array(analyserNode.frequencyBinCount);
+
+			// Wait for AudioContext to be in 'running' state
+			// This is the proper API signal that the audio system is ready
+			if (audioContext.state !== 'running') {
+				const ctx = audioContext; // Capture reference for closure
+				await new Promise<void>((resolve) => {
+					const handleStateChange = () => {
+						if (ctx.state === 'running') {
+							ctx.removeEventListener('statechange', handleStateChange);
+							resolve();
+						}
+					};
+					ctx.addEventListener('statechange', handleStateChange);
+
+					// Safety timeout - resolve after 1s even if state never changes
+					// (shouldn't happen in practice, but prevents infinite hang)
+					setTimeout(() => {
+						ctx.removeEventListener('statechange', handleStateChange);
+						resolve();
+					}, 1000);
+				});
+			}
+
+			// Return a function to start the visualization loop
+			// This should be called AFTER isRecording is set to true
+			return function startVisualization() {
+				function updateLevel() {
+					if (!analyserNode || !isRecording) {
+						audioLevel = 0;
+						return;
+					}
+					analyserNode.getByteFrequencyData(dataArray);
+					// Calculate average level
+					const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+					// Normalize to 0-1 range with some amplification for better visual feedback
+					audioLevel = Math.min(1, average / 128);
+					animationFrameId = requestAnimationFrame(updateLevel);
+				}
+				updateLevel();
+			};
+		} catch (e) {
+			console.warn('Audio level monitoring not available:', e);
+			return null;
+		}
+	}
+
+	function stopAudioLevelMonitoring() {
+		if (animationFrameId) {
+			cancelAnimationFrame(animationFrameId);
+			animationFrameId = null;
+		}
+		if (audioContext) {
+			audioContext.close().catch(() => {});
+			audioContext = null;
+		}
+		analyserNode = null;
+		audioLevel = 0;
+	}
+
 	async function startRecording() {
 		recordingError = '';
 		audioChunksRef = []; // Reset chunks array
+		isPreparing = true; // Show preparing state while getting mic and initializing audio
 
 		try {
 			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -426,8 +515,22 @@
 			recorder.start(1000); // 1 second chunks
 			mediaRecorder = recorder;
 			recordingStartTime = Date.now();
+
+			// Initialize audio monitoring and wait for the audio system to be ready
+			// This ensures the microphone is actively capturing before showing the recording UI
+			// Prevents the issue where users start speaking before the system is ready
+			const startVisualization = await initAudioMonitoring(stream);
+
+			// Only now show the recording UI - system is ready to capture speech
+			isPreparing = false;
 			isRecording = true;
+
+			// Start the visualization loop now that isRecording is true
+			if (startVisualization) {
+				startVisualization();
+			}
 		} catch (error: unknown) {
+			isPreparing = false;
 			console.error('Failed to start recording:', error);
 			const err = error as { name?: string; message?: string };
 			if (err.name === 'NotAllowedError') {
@@ -441,6 +544,9 @@
 	}
 
 	async function stopRecording() {
+		// Stop audio level monitoring first
+		stopAudioLevelMonitoring();
+
 		if (!mediaRecorder || mediaRecorder.state === 'inactive') {
 			isRecording = false;
 			return;
@@ -814,22 +920,57 @@
 							{/if}
 						</button>
 
+						<!-- Voice Input Button with Rich Visual Feedback -->
 						<button
 							type="button"
 							onclick={toggleRecording}
-							disabled={!$claudeAuthenticated || isUploading || isTranscribing || !canRecord}
-							class="dock-action-btn {isRecording ? 'recording' : ''} {isTranscribing ? 'transcribing' : ''}"
-							title={!canRecord ? 'Configure OpenAI API key in Settings to use voice input' : isRecording ? 'Stop recording' : isTranscribing ? 'Transcribing...' : 'Voice input'}
+							disabled={!$claudeAuthenticated || isUploading || isTranscribing || isPreparing || !canRecord}
+							class="voice-btn"
+							class:preparing={isPreparing}
+							class:recording={isRecording}
+							class:transcribing={isTranscribing}
+							title={!canRecord ? 'Configure OpenAI API key in Settings to use voice input' : isPreparing ? 'Preparing...' : isRecording ? 'Tap to stop' : isTranscribing ? 'Transcribing...' : 'Voice input'}
+							style="--audio-level: {audioLevel}"
 						>
-							{#if isTranscribing}
-								<svg class="w-[18px] h-[18px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
-								</svg>
-							{:else}
-								<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-								</svg>
+							<!-- Audio level rings (visible when recording) -->
+							{#if isRecording}
+								<div class="voice-rings">
+									<div class="voice-ring voice-ring-1" style="transform: scale({1 + audioLevel * 0.5}); opacity: {0.3 + audioLevel * 0.4}"></div>
+									<div class="voice-ring voice-ring-2" style="transform: scale({1 + audioLevel * 0.8}); opacity: {0.2 + audioLevel * 0.3}"></div>
+									<div class="voice-ring voice-ring-3" style="transform: scale({1 + audioLevel * 1.2}); opacity: {0.1 + audioLevel * 0.2}"></div>
+								</div>
 							{/if}
+
+							<!-- Button content -->
+							<div class="voice-btn-content">
+								{#if isTranscribing}
+									<!-- Processing: animated dots -->
+									<div class="voice-processing">
+										<span class="processing-dot"></span>
+										<span class="processing-dot"></span>
+										<span class="processing-dot"></span>
+									</div>
+								{:else if isPreparing}
+									<!-- Preparing: pulsing mic -->
+									<svg class="voice-icon voice-icon-preparing" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+									</svg>
+								{:else if isRecording}
+									<!-- Recording: live waveform indicator -->
+									<div class="voice-waveform">
+										<span class="waveform-bar" style="height: {20 + audioLevel * 60}%"></span>
+										<span class="waveform-bar" style="height: {40 + audioLevel * 50}%"></span>
+										<span class="waveform-bar" style="height: {30 + audioLevel * 70}%"></span>
+										<span class="waveform-bar" style="height: {50 + audioLevel * 40}%"></span>
+										<span class="waveform-bar" style="height: {25 + audioLevel * 55}%"></span>
+									</div>
+								{:else}
+									<!-- Idle: mic icon -->
+									<svg class="voice-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+									</svg>
+								{/if}
+							</div>
 						</button>
 					</div>
 				</div>
@@ -1540,5 +1681,170 @@
 		.controls-center {
 			gap: 4px;
 		}
+	}
+
+	/* ===== VOICE BUTTON WITH RICH VISUAL FEEDBACK ===== */
+	.voice-btn {
+		position: relative;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 36px;
+		height: 36px;
+		background: transparent;
+		border: none;
+		border-radius: 50%;
+		cursor: pointer;
+		color: rgba(255, 255, 255, 0.4);
+		transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+		overflow: visible;
+	}
+
+	:global(.light) .voice-btn {
+		color: rgba(0, 0, 0, 0.4);
+	}
+
+	.voice-btn:hover:not(:disabled) {
+		background: rgba(255, 255, 255, 0.05);
+		color: rgba(255, 255, 255, 0.6);
+	}
+
+	:global(.light) .voice-btn:hover:not(:disabled) {
+		background: rgba(0, 0, 0, 0.05);
+		color: rgba(0, 0, 0, 0.6);
+	}
+
+	.voice-btn:disabled {
+		opacity: 0.3;
+		cursor: not-allowed;
+	}
+
+	/* Preparing state: pulsing animation */
+	.voice-btn.preparing {
+		background: rgba(245, 158, 11, 0.15);
+		color: #f59e0b;
+	}
+
+	.voice-btn.preparing .voice-icon-preparing {
+		animation: voice-pulse 1s ease-in-out infinite;
+	}
+
+	@keyframes voice-pulse {
+		0%, 100% {
+			transform: scale(1);
+			opacity: 0.7;
+		}
+		50% {
+			transform: scale(1.1);
+			opacity: 1;
+		}
+	}
+
+	/* Recording state: vibrant red glow */
+	.voice-btn.recording {
+		background: rgba(239, 68, 68, 0.2);
+		color: #ef4444;
+		box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.3);
+	}
+
+	/* Transcribing state: teal processing */
+	.voice-btn.transcribing {
+		background: rgba(45, 212, 191, 0.15);
+		color: #2dd4bf;
+	}
+
+	/* Voice button content container */
+	.voice-btn-content {
+		position: relative;
+		z-index: 2;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 100%;
+		height: 100%;
+	}
+
+	/* Mic icon */
+	.voice-icon {
+		width: 18px;
+		height: 18px;
+		transition: transform 0.2s ease;
+	}
+
+	/* Audio level rings (expand outward when speaking) */
+	.voice-rings {
+		position: absolute;
+		inset: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		pointer-events: none;
+		z-index: 1;
+	}
+
+	.voice-ring {
+		position: absolute;
+		width: 100%;
+		height: 100%;
+		border-radius: 50%;
+		border: 2px solid rgba(239, 68, 68, 0.5);
+		transition: transform 0.1s ease-out, opacity 0.1s ease-out;
+	}
+
+	.voice-ring-1 { animation-delay: 0s; }
+	.voice-ring-2 { animation-delay: 0.1s; }
+	.voice-ring-3 { animation-delay: 0.2s; }
+
+	/* Waveform visualization */
+	.voice-waveform {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 2px;
+		height: 18px;
+	}
+
+	.waveform-bar {
+		width: 3px;
+		min-height: 4px;
+		background: currentColor;
+		border-radius: 1.5px;
+		transition: height 0.08s ease-out;
+	}
+
+	/* Processing dots animation */
+	.voice-processing {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 4px;
+	}
+
+	.processing-dot {
+		width: 4px;
+		height: 4px;
+		background: currentColor;
+		border-radius: 50%;
+		animation: processing-bounce 1.2s infinite ease-in-out;
+	}
+
+	.processing-dot:nth-child(1) { animation-delay: 0s; }
+	.processing-dot:nth-child(2) { animation-delay: 0.2s; }
+	.processing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+	@keyframes processing-bounce {
+		0%, 80%, 100% {
+			transform: scale(0.8);
+			opacity: 0.5;
+		}
+		40% {
+			transform: scale(1.2);
+			opacity: 1;
+		}
+	}
+
+	/* Active/pressed state */
+	.voice-btn:active:not(:disabled) {
+		transform: scale(0.95);
 	}
 </style>

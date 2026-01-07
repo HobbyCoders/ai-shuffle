@@ -3352,21 +3352,25 @@ async def stream_to_websocket(
         state.interrupt_requested = False
         state.last_activity = datetime.now()
 
-    # Update session in database - always update title to the last user message
-    title = prompt[:50].strip()
-    if len(prompt) > 50:
-        title += "..."
+    # Update session in database
+    # Only set title for new sessions (when resume_id was None, meaning first message)
+    # This preserves the first user message as the session title
+    title_to_set = None
+    if not resume_id:
+        title_to_set = prompt[:50].strip()
+        if len(prompt) > 50:
+            title_to_set += "..."
 
     database.update_session(
         session_id=session_id,
         sdk_session_id=sdk_session_id,
-        title=title,
+        title=title_to_set,
         cost_increment=metadata.get("total_cost_usd", 0),
         tokens_in_increment=metadata.get("tokens_in", 0),
         tokens_out_increment=metadata.get("tokens_out", 0),
         turn_increment=metadata.get("num_turns", 0)
     )
-    logger.info(f"[WS] Updated session {session_id}, sdk_session_id={sdk_session_id}, title={title}")
+    logger.info(f"[WS] Updated session {session_id}, sdk_session_id={sdk_session_id}, title={title_to_set}")
 
     # Store tool messages (tool_use and tool_result)
     for tool_msg in tool_messages:

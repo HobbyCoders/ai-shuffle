@@ -19,10 +19,10 @@
 
 	import { onMount } from 'svelte';
 	import {
-		MessageSquare, Terminal, Clock, Image, Box, AudioLines,
+		MessageSquare, Terminal, Clock,
 		Settings, FolderOpen, X, Files, User, Users, Pencil, Check,
 		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronRight, Bot, Puzzle,
-		List, GitBranch, Key, Mic
+		List, GitBranch, Key
 	} from 'lucide-svelte';
 	import { tabs, type ApiUser } from '$lib/stores/tabs';
 	import type { Session } from '$lib/api/client';
@@ -41,10 +41,6 @@
 		onCreateChat: () => void;
 		onCreateTerminal: () => void;
 		onOpenThread: (sessionId: string) => void;
-		onOpenImageStudio?: () => void;
-		onOpenModelStudio?: () => void;
-		onOpenAudioStudio?: () => void;
-		onOpenConversation?: () => void;
 		onOpenFileBrowser?: () => void;
 		onOpenProjects?: () => void;
 		onOpenProfiles?: () => void;
@@ -64,10 +60,6 @@
 		onCreateChat,
 		onCreateTerminal,
 		onOpenThread,
-		onOpenImageStudio,
-		onOpenModelStudio,
-		onOpenAudioStudio,
-		onOpenConversation,
 		onOpenFileBrowser,
 		onOpenProjects,
 		onOpenProfiles,
@@ -153,7 +145,7 @@
 	let renameDeckName = $state('');
 
 	// Card types for main deck
-	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'image-studio' | 'model-studio' | 'audio-studio' | 'conversation' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins' | 'user-settings';
+	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins' | 'user-settings';
 
 	// Cards that API users are allowed to see (whitelist approach)
 	const API_USER_ALLOWED_CARDS = new Set(['new-chat', 'recent', 'file-browser', 'user-settings']);
@@ -263,38 +255,6 @@
 				subtitle: `${sessions.length} conversations`,
 				icon: Clock,
 				hasChildren: true
-			},
-			{
-				id: 'image-studio',
-				type: 'action',
-				action: 'image-studio',
-				title: 'Image Studio',
-				subtitle: 'Generate & edit images',
-				icon: Image
-			},
-			{
-				id: 'model-studio',
-				type: 'action',
-				action: 'model-studio',
-				title: '3D Models',
-				subtitle: 'Generate 3D assets',
-				icon: Box
-			},
-			{
-				id: 'audio-studio',
-				type: 'action',
-				action: 'audio-studio',
-				title: 'Audio Studio',
-				subtitle: 'Text to speech & more',
-				icon: AudioLines
-			},
-			{
-				id: 'conversation',
-				type: 'action',
-				action: 'conversation',
-				title: 'Conversation',
-				subtitle: 'Voice chat with AI',
-				icon: Mic
 			},
 			{
 				id: 'file-browser',
@@ -456,7 +416,7 @@
 				icon: MessageSquare,
 				sessionId: session.id,
 				isStreaming: isSessionStreaming(session.id),
-				messageCount: session.message_count,
+				messageCount: session.turn_count,
 				lastActive: formatRelativeTime(session.updated_at)
 			}));
 	});
@@ -482,7 +442,7 @@
 						icon: MessageSquare,
 						sessionId: session.id,
 						isStreaming: isSessionStreaming(session.id),
-						messageCount: session.message_count,
+						messageCount: session.turn_count,
 						lastActive: formatRelativeTime(session.updated_at)
 					});
 				}
@@ -590,10 +550,6 @@
 		switch (action) {
 			case 'new-chat': onCreateChat(); break;
 			case 'terminal': onCreateTerminal(); break;
-			case 'image-studio': onOpenImageStudio?.(); break;
-			case 'model-studio': onOpenModelStudio?.(); break;
-			case 'audio-studio': onOpenAudioStudio?.(); break;
-			case 'conversation': onOpenConversation?.(); break;
 			case 'file-browser': onOpenFileBrowser?.(); break;
 			case 'projects': onOpenProjects?.(); break;
 			case 'profiles': onOpenProfiles?.(); break;

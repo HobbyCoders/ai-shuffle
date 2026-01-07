@@ -13,6 +13,7 @@
 	import { groups as groupsStore } from '$lib/stores/groups';
 	import { plugins, installedPlugins, fileBasedAgents } from '$lib/stores/plugins';
 	import type { PluginInfo, FileBasedAgent } from '$lib/api/plugins';
+	import GroupDropdown from '$lib/components/GroupDropdown.svelte';
 	import './card-design-system.css';
 
 	// Types
@@ -1604,53 +1605,8 @@
 								</div>
 								<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 								<div class="card-item-actions" onclick={(e) => e.stopPropagation()}>
-									<!-- Group dropdown -->
-									<div class="dropdown-container">
-										<button class="card-action-btn" title="Assign to group">
-											<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path
-													stroke-linecap="round"
-													stroke-linejoin="round"
-													stroke-width="2"
-													d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"
-												/>
-											</svg>
-										</button>
-										<div class="dropdown-menu">
-											{#each groups?.profiles?.groups || [] as group}
-												<button
-													class="dropdown-item"
-													onclick={() => assignToGroup(profile.id, group.name)}
-												>
-													{#if groups?.profiles?.assignments?.[profile.id] === group.name}
-														<svg class="check-icon small" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-														</svg>
-													{:else}
-														<span class="spacer"></span>
-													{/if}
-													{group.name}
-												</button>
-											{/each}
-											{#if groups?.profiles?.assignments?.[profile.id]}
-												<button
-													class="dropdown-item muted"
-													onclick={() => removeFromGroup(profile.id)}
-												>
-													<span class="spacer"></span>
-													Remove
-												</button>
-											{/if}
-											<div class="dropdown-divider"></div>
-											<button
-												class="dropdown-item muted"
-												onclick={() => createGroup(profile.id)}
-											>
-												<span class="spacer"></span>
-												+ New group
-											</button>
-										</div>
-									</div>
+									<!-- Group dropdown (portal-based to escape overflow:hidden) -->
+									<GroupDropdown entityType="profiles" entityId={profile.id} />
 
 									<button
 										class="card-action-btn"
@@ -1698,7 +1654,7 @@
 					</svg>
 					New Profile
 				</button>
-				<button class="card-btn-secondary" onclick={triggerImport} disabled={profileImporting}>
+				<button class="card-btn-secondary" onclick={triggerImport} disabled={profileImporting} title="Import profile">
 					{#if profileImporting}
 						<span class="card-spinner card-spinner--small"></span>
 					{:else}
@@ -1711,7 +1667,6 @@
 							/>
 						</svg>
 					{/if}
-					Import
 				</button>
 			</div>
 		{/if}
