@@ -531,7 +531,7 @@
 	.remember-option {
 		display: block;
 		padding: 0.625rem 0.75rem;
-		border-radius: 0.75rem;
+		border-radius: var(--radius, 0.75rem);
 		border: 1px solid var(--border);
 		background: var(--card);
 		cursor: pointer;

@@ -154,13 +154,30 @@
 				};
 			}
 
+			case 'error':
+			case 'exception':
+			case 'validation_error':
+			case 'permission_error':
+			case 'timeout_error': {
+				// SDK errors and exceptions
+				const errorMessage = (data.message as string) || (data.error as string) || message.content || 'An error occurred';
+				return {
+					title: 'Error',
+					content: errorMessage,
+					badge: subtype.replace(/_/g, ' '),
+					badgeColor: 'red'
+				};
+			}
+
 			default: {
 				// For unknown subtypes, show a formatted version of the data
+				// Check if it looks like an error based on subtype name
+				const isError = subtype.includes('error') || subtype.includes('fail') || subtype.includes('exception');
 				return {
 					title: subtype.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
 					content: typeof data === 'object' ? JSON.stringify(data, null, 2) : String(data),
 					badge: subtype,
-					badgeColor: 'gray'
+					badgeColor: isError ? 'red' : 'gray'
 				};
 			}
 		}
@@ -175,6 +192,7 @@
 			case 'green': return 'bg-success/20 text-success';
 			case 'blue': return 'bg-info/20 text-info';
 			case 'purple': return 'bg-primary/20 text-primary';
+			case 'red': return 'bg-destructive/20 text-destructive';
 			default: return 'bg-muted text-muted-foreground';
 		}
 	}

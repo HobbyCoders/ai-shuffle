@@ -121,6 +121,43 @@
 		}
 	}
 
+	// Get CSS variable value as computed color
+	function getCssVar(name: string, fallback: string): string {
+		if (typeof document === 'undefined') return fallback;
+		const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+		return value || fallback;
+	}
+
+	// Build terminal theme from CSS variables
+	function getTerminalTheme() {
+		const bg = getCssVar('--terminal-bg', '#0d0d14');
+		const fg = getCssVar('--terminal-fg', '#e4e4e7');
+		return {
+			background: bg,
+			foreground: fg,
+			cursor: getCssVar('--terminal-cursor', '#f5f5f5'),
+			cursorAccent: bg,
+			selectionBackground: getCssVar('--accent', '#3d3d5c'),
+			black: bg,
+			red: getCssVar('--terminal-red', '#ff6b6b'),
+			green: getCssVar('--terminal-green', '#4ade80'),
+			yellow: getCssVar('--terminal-yellow', '#fbbf24'),
+			blue: getCssVar('--terminal-blue', '#60a5fa'),
+			magenta: getCssVar('--terminal-magenta', '#c084fc'),
+			cyan: getCssVar('--terminal-cyan', '#22d3ee'),
+			white: fg,
+			// Bright variants - slightly lighter/more saturated
+			brightBlack: getCssVar('--muted-foreground', '#4a4a6a'),
+			brightRed: getCssVar('--terminal-red', '#ff8a8a'),
+			brightGreen: getCssVar('--terminal-green', '#6ee7a0'),
+			brightYellow: getCssVar('--terminal-yellow', '#fcd34d'),
+			brightBlue: getCssVar('--terminal-blue', '#93c5fd'),
+			brightMagenta: getCssVar('--terminal-magenta', '#d8b4fe'),
+			brightCyan: getCssVar('--terminal-cyan', '#67e8f9'),
+			brightWhite: '#ffffff'
+		};
+	}
+
 	function initTerminal() {
 		if (!XTerminal || !FitAddon || !WebLinksAddon || !terminalContainer) {
 			return;
@@ -134,30 +171,8 @@
 		terminal = new XTerminal({
 			cursorBlink: true,
 			fontSize: 13,
-			fontFamily: "'SF Mono', 'Fira Code', 'Consolas', monospace",
-			theme: {
-				background: '#0d0d14',
-				foreground: '#e4e4e7',
-				cursor: '#f5f5f5',
-				cursorAccent: '#0d0d14',
-				selectionBackground: '#3d3d5c',
-				black: '#0d0d14',
-				red: '#ff6b6b',
-				green: '#4ade80',
-				yellow: '#fbbf24',
-				blue: '#60a5fa',
-				magenta: '#c084fc',
-				cyan: '#22d3ee',
-				white: '#e4e4e7',
-				brightBlack: '#4a4a6a',
-				brightRed: '#ff8a8a',
-				brightGreen: '#6ee7a0',
-				brightYellow: '#fcd34d',
-				brightBlue: '#93c5fd',
-				brightMagenta: '#d8b4fe',
-				brightCyan: '#67e8f9',
-				brightWhite: '#ffffff'
-			},
+			fontFamily: getCssVar('--font-mono', "'SF Mono', 'Fira Code', 'Consolas', monospace"),
+			theme: getTerminalTheme(),
 			allowProposedApi: true
 		});
 

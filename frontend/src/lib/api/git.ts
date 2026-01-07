@@ -163,6 +163,7 @@ export interface CreateWorktreeRequest {
     create_new?: boolean;
     base_branch?: string;
     profile_id?: string;
+    copy_uncommitted?: boolean;  // Copy uncommitted files from main repo to worktree
 }
 
 // ============================================================================
@@ -309,4 +310,52 @@ export interface WorktreeSyncResult {
  */
 export async function syncWorktrees(projectId: string): Promise<WorktreeSyncResult> {
     return api.post<WorktreeSyncResult>(`${BASE}/${projectId}/sync-worktrees`);
+}
+
+// ============================================================================
+// Worktree File Browsing API
+// ============================================================================
+
+export interface WorktreeFileItem {
+    name: string;
+    type: 'file' | 'directory';
+    size: number | null;
+    sizeFormatted: string | null;
+    path: string;
+    extension: string | null;
+    modifiedAt: string;
+    createdAt: string;
+}
+
+export interface WorktreeFilesResponse {
+    files: WorktreeFileItem[];
+    path: string;
+    worktreeId: string;
+    worktreePath: string;
+}
+
+/**
+ * List files within a worktree directory.
+ * This allows browsing files in the worktree's working directory,
+ * which is separate from the main project directory.
+ *
+ * @param projectId - The project ID
+ * @param worktreeId - The worktree ID to browse files in
+ * @param path - Relative path within the worktree (empty for root)
+ * @param showHidden - Whether to show hidden files
+ */
+export async function getWorktreeFiles(
+    projectId: string,
+    worktreeId: string,
+    path: string = '',
+    showHidden: boolean = false
+): Promise<WorktreeFilesResponse> {
+    const params = new URLSearchParams();
+    if (path) params.set('path', path);
+    if (showHidden) params.set('show_hidden', 'true');
+
+    const queryString = params.toString();
+    const url = `${BASE}/${projectId}/git/worktrees/${worktreeId}/files${queryString ? `?${queryString}` : ''}`;
+
+    return api.get<WorktreeFilesResponse>(url);
 }

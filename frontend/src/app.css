@@ -117,14 +117,99 @@
 		--panel-shadow-outer: oklch(0 0 0 / 0.4);
 		--panel-shadow-inner: oklch(0 0 0 / 0.2);
 
-		/* Glow effect */
-		--glow-color: oklch(0.72 0.14 180 / 0.4);
-		--glow-color-soft: oklch(0.72 0.14 180 / 0.3);
+		/* Glow effect - uses theme primary color */
+		--glow-color: color-mix(in srgb, var(--primary) 40%, transparent);
+		--glow-color-soft: color-mix(in srgb, var(--primary) 30%, transparent);
 
 		/* Interactive hover overlay */
 		--hover-overlay: oklch(1 0 0 / 0.1);
 		--active-overlay: oklch(1 0 0 / 0.15);
 		--border-subtle: oklch(1 0 0 / 0.1);
+
+		/* ========================================
+		   SEMANTIC UI COLORS
+		   Tool badges, feature indicators, chips, status
+		   ======================================== */
+
+		/* Tool colors - for permission badges and tool indicators */
+		--tool-bash: oklch(0.65 0.18 145);           /* Green - terminal/bash */
+		--tool-read: oklch(0.65 0.15 240);           /* Blue - reading files */
+		--tool-write: oklch(0.75 0.15 85);           /* Amber - writing files */
+		--tool-edit: oklch(0.70 0.16 50);            /* Orange - editing */
+		--tool-glob: oklch(0.65 0.20 300);           /* Purple - glob patterns */
+		--tool-grep: oklch(0.60 0.22 285);           /* Violet - searching */
+		--tool-web: oklch(0.70 0.14 195);            /* Cyan - web operations */
+		--tool-task: oklch(0.60 0.18 260);           /* Indigo - task/agent */
+		--tool-notebook: oklch(0.65 0.20 350);       /* Rose - notebook */
+		--tool-default: oklch(0.55 0.03 260);        /* Gray - fallback */
+
+		/* Feature colors - for plugin/profile feature indicators */
+		--feature-commands: oklch(0.65 0.15 240);    /* Blue */
+		--feature-agents: oklch(0.65 0.20 300);      /* Purple */
+		--feature-skills: oklch(0.65 0.18 145);      /* Green */
+		--feature-hooks: oklch(0.70 0.16 50);        /* Orange */
+
+		/* Status colors with opacity variants */
+		--status-success-bg: oklch(0.65 0.18 145 / 0.15);
+		--status-success-border: oklch(0.65 0.18 145 / 0.30);
+		--status-warning-bg: oklch(0.75 0.15 85 / 0.15);
+		--status-warning-border: oklch(0.75 0.15 85 / 0.30);
+		--status-error-bg: oklch(0.55 0.22 25 / 0.15);
+		--status-error-border: oklch(0.55 0.22 25 / 0.30);
+		--status-info-bg: oklch(0.65 0.15 240 / 0.15);
+		--status-info-border: oklch(0.65 0.15 240 / 0.30);
+		--status-pending-bg: oklch(0.55 0.03 260 / 0.15);
+		--status-pending-border: oklch(0.55 0.03 260 / 0.30);
+
+		/* Chip/badge colors */
+		--chip-primary-bg: oklch(0.72 0.14 180 / 0.15);
+		--chip-primary-text: oklch(0.72 0.14 180);
+		--chip-primary-border: oklch(0.72 0.14 180 / 0.30);
+
+		/* Modal overlay */
+		--modal-overlay: oklch(0 0 0 / 0.6);
+		--modal-overlay-blur: oklch(0 0 0 / 0.4);
+
+		/* Button gradients */
+		--button-primary-gradient: linear-gradient(135deg, var(--primary), oklch(from var(--primary) calc(l - 0.04) c h));
+		--button-success-gradient: linear-gradient(135deg, var(--success), oklch(from var(--success) calc(l - 0.04) c h));
+
+		/* Input states - dark mode */
+		--input-bg: oklch(0.12 0.008 260);
+		--input-bg-hover: oklch(0.14 0.01 260);
+		--input-bg-focus: oklch(0.14 0.01 260);
+		--input-border: oklch(0.30 0.012 260);
+		--input-border-hover: oklch(0.38 0.015 260);
+		--input-placeholder: oklch(0.55 0.02 260);
+
+		/* Text on dark backgrounds */
+		--text-on-dark: oklch(0.95 0.01 260);
+		--text-on-dark-muted: oklch(0.70 0.02 260);
+
+		/* Terminal colors */
+		--terminal-bg: oklch(0.10 0.01 260);
+		--terminal-fg: oklch(0.90 0.01 260);
+		--terminal-cursor: oklch(0.95 0.01 260);
+		--terminal-red: oklch(0.65 0.20 25);
+		--terminal-green: oklch(0.70 0.18 145);
+		--terminal-yellow: oklch(0.80 0.15 85);
+		--terminal-blue: oklch(0.65 0.15 240);
+		--terminal-cyan: oklch(0.75 0.14 195);
+		--terminal-magenta: oklch(0.65 0.20 320);
+
+		/* Chart/visualization colors */
+		--chart-1: oklch(0.65 0.15 240);
+		--chart-2: oklch(0.65 0.20 300);
+		--chart-3: oklch(0.70 0.18 340);
+		--chart-4: oklch(0.70 0.16 50);
+		--chart-5: oklch(0.65 0.18 145);
+		--chart-6: oklch(0.80 0.15 85);
+		--chart-7: oklch(0.55 0.22 25);
+
+		/* Typography - font families (can be overridden by theme presets) */
+		--font-sans: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+		--font-serif: Georgia, Cambria, 'Times New Roman', Times, serif;
+		--font-mono: ui-monospace, 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace;
 	}
 
 	/* ========================================
@@ -219,14 +304,93 @@
 		--panel-shadow-outer: oklch(0 0 0 / 0.1);
 		--panel-shadow-inner: oklch(0 0 0 / 0.05);
 
-		/* Glow effect */
-		--glow-color: oklch(0.55 0.16 180 / 0.3);
-		--glow-color-soft: oklch(0.55 0.16 180 / 0.2);
+		/* Glow effect - uses theme primary color */
+		--glow-color: color-mix(in srgb, var(--primary) 30%, transparent);
+		--glow-color-soft: color-mix(in srgb, var(--primary) 20%, transparent);
 
 		/* Interactive hover overlay */
 		--hover-overlay: oklch(0 0 0 / 0.05);
 		--active-overlay: oklch(0 0 0 / 0.08);
 		--border-subtle: oklch(0 0 0 / 0.08);
+
+		/* ========================================
+		   SEMANTIC UI COLORS - LIGHT THEME
+		   ======================================== */
+
+		/* Tool colors - slightly darker for light backgrounds */
+		--tool-bash: oklch(0.45 0.18 145);
+		--tool-read: oklch(0.50 0.15 240);
+		--tool-write: oklch(0.55 0.18 85);
+		--tool-edit: oklch(0.55 0.18 50);
+		--tool-glob: oklch(0.50 0.20 300);
+		--tool-grep: oklch(0.45 0.22 285);
+		--tool-web: oklch(0.50 0.16 195);
+		--tool-task: oklch(0.45 0.18 260);
+		--tool-notebook: oklch(0.50 0.20 350);
+		--tool-default: oklch(0.45 0.03 260);
+
+		/* Feature colors - light theme */
+		--feature-commands: oklch(0.50 0.15 240);
+		--feature-agents: oklch(0.50 0.20 300);
+		--feature-skills: oklch(0.45 0.18 145);
+		--feature-hooks: oklch(0.55 0.18 50);
+
+		/* Status colors with opacity variants - light theme */
+		--status-success-bg: oklch(0.45 0.18 145 / 0.12);
+		--status-success-border: oklch(0.45 0.18 145 / 0.25);
+		--status-warning-bg: oklch(0.55 0.18 85 / 0.12);
+		--status-warning-border: oklch(0.55 0.18 85 / 0.25);
+		--status-error-bg: oklch(0.55 0.22 25 / 0.12);
+		--status-error-border: oklch(0.55 0.22 25 / 0.25);
+		--status-info-bg: oklch(0.50 0.15 240 / 0.12);
+		--status-info-border: oklch(0.50 0.15 240 / 0.25);
+		--status-pending-bg: oklch(0.45 0.03 260 / 0.12);
+		--status-pending-border: oklch(0.45 0.03 260 / 0.25);
+
+		/* Chip/badge colors - light theme */
+		--chip-primary-bg: oklch(0.55 0.16 180 / 0.12);
+		--chip-primary-text: oklch(0.45 0.16 180);
+		--chip-primary-border: oklch(0.55 0.16 180 / 0.25);
+
+		/* Modal overlay - light theme */
+		--modal-overlay: oklch(0 0 0 / 0.5);
+		--modal-overlay-blur: oklch(0 0 0 / 0.3);
+
+		/* Button gradients - light theme */
+		--button-primary-gradient: linear-gradient(135deg, var(--primary), oklch(from var(--primary) calc(l - 0.06) c h));
+		--button-success-gradient: linear-gradient(135deg, var(--success), oklch(from var(--success) calc(l - 0.06) c h));
+
+		/* Input states - light mode */
+		--input-bg: oklch(0.97 0.003 260);
+		--input-bg-hover: oklch(0.98 0.003 260);
+		--input-bg-focus: oklch(1 0 0);
+		--input-border: oklch(0.82 0.01 260);
+		--input-border-hover: oklch(0.72 0.015 260);
+		--input-placeholder: oklch(0.55 0.015 260);
+
+		/* Text on light backgrounds */
+		--text-on-dark: oklch(0.15 0.01 260);
+		--text-on-dark-muted: oklch(0.40 0.02 260);
+
+		/* Terminal colors - light theme */
+		--terminal-bg: oklch(0.97 0.005 260);
+		--terminal-fg: oklch(0.20 0.01 260);
+		--terminal-cursor: oklch(0.15 0.01 260);
+		--terminal-red: oklch(0.50 0.22 25);
+		--terminal-green: oklch(0.45 0.18 145);
+		--terminal-yellow: oklch(0.55 0.18 85);
+		--terminal-blue: oklch(0.50 0.15 240);
+		--terminal-cyan: oklch(0.50 0.16 195);
+		--terminal-magenta: oklch(0.50 0.20 320);
+
+		/* Chart/visualization colors - light theme */
+		--chart-1: oklch(0.50 0.15 240);
+		--chart-2: oklch(0.50 0.20 300);
+		--chart-3: oklch(0.55 0.18 340);
+		--chart-4: oklch(0.55 0.18 50);
+		--chart-5: oklch(0.45 0.18 145);
+		--chart-6: oklch(0.55 0.18 85);
+		--chart-7: oklch(0.50 0.22 25);
 	}
 
 	/* Theme transition for smooth changes */
@@ -254,7 +418,7 @@
 		min-height: 100vh;
 		min-height: 100dvh;
 		height: 100%;
-		font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+		font-family: var(--font-sans);
 		font-synthesis: none;
 		text-rendering: optimizeLegibility;
 		-webkit-font-smoothing: antialiased;
@@ -305,12 +469,12 @@ pre {
 	border-radius: 0.5rem;
 	padding: 1rem;
 	overflow-x: auto;
-	font-family: ui-monospace, 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace;
+	font-family: var(--font-mono);
 	font-size: 0.875rem;
 }
 
 code {
-	font-family: ui-monospace, 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace;
+	font-family: var(--font-mono);
 }
 
 /* Button base styles */

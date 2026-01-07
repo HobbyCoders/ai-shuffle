@@ -584,7 +584,7 @@
 		display: block;
 		width: 100%;
 		padding: 0.75rem;
-		border-radius: 0.875rem;
+		border-radius: var(--radius, 0.75rem);
 		border: 1px solid var(--border);
 		background: var(--card);
 		cursor: pointer;

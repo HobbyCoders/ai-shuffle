@@ -1,6 +1,5 @@
 // The Deck - Core Layout Components
 export { default as DeckLayout } from './DeckLayout.svelte';
-export { default as ActivityRail } from './ActivityRail.svelte';
 export { default as ContextPanel } from './ContextPanel.svelte';
 export { default as ActivityPanel } from './ActivityPanel.svelte';
 export { default as ActivityHeader } from './ActivityHeader.svelte';

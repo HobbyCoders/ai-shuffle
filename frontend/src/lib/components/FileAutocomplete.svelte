@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { getWorktreeFiles } from '$lib/api/git';
   import { getNotesAutocomplete } from '$lib/api/client';
 
   export interface FileItem {
@@ -23,12 +24,13 @@
   interface Props {
     inputValue: string;
     projectId?: string;
+    worktreeId?: string;  // If provided, use worktree file API instead of project file API
     onSelect: (file: FileItem) => void;
     onClose: () => void;
     visible: boolean;
   }
 
-  let { inputValue, projectId, onSelect, onClose, visible }: Props = $props();
+  let { inputValue, projectId, worktreeId, onSelect, onClose, visible }: Props = $props();
 
   let files = $state<FileItem[]>([]);
   let filteredFiles = $state<FileItem[]>([]);
@@ -234,18 +236,11 @@
     inNotesFolder = false;
 
     try {
-      const params = new URLSearchParams();
-      if (path) {
-        params.set('path', path);
-      }
-
-      const response = await fetch(`/api/v1/projects/${projectId}/files?${params}`, {
-        credentials: 'include'
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        // Add virtual folders at root level
+      // If we have a worktreeId, use the worktree file API
+      // This allows browsing files in the worktree's directory instead of the main project
+      if (worktreeId) {
+        const response = await getWorktreeFiles(projectId, worktreeId, path);
+        // Add virtual folders at root level (for worktrees too)
         if (!path) {
           files = [
             {
@@ -260,13 +255,57 @@
               path: NOTES_FOLDER,
               size: null
             },
-            ...data.files
+            ...response.files.map(f => ({
+              name: f.name,
+              type: f.type as 'file' | 'directory',
+              path: f.path,
+              size: f.size
+            }))
           ];
         } else {
-          files = data.files;
+          files = response.files.map(f => ({
+            name: f.name,
+            type: f.type as 'file' | 'directory',
+            path: f.path,
+            size: f.size
+          }));
         }
       } else {
-        files = [];
+        // Use the standard project file API
+        const params = new URLSearchParams();
+        if (path) {
+          params.set('path', path);
+        }
+
+        const response = await fetch(`/api/v1/projects/${projectId}/files?${params}`, {
+          credentials: 'include'
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          // Add virtual folders at root level
+          if (!path) {
+            files = [
+              {
+                name: CHAT_HISTORY_FOLDER,
+                type: 'directory' as const,
+                path: CHAT_HISTORY_FOLDER,
+                size: null
+              },
+              {
+                name: NOTES_FOLDER,
+                type: 'directory' as const,
+                path: NOTES_FOLDER,
+                size: null
+              },
+              ...data.files
+            ];
+          } else {
+            files = data.files;
+          }
+        } else {
+          files = [];
+        }
       }
     } catch (error) {
       console.error('Failed to fetch files:', error);

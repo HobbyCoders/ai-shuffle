@@ -36,8 +36,9 @@
 		font-size: clamp(1.5rem, 4vw, 2rem);
 		font-weight: 600;
 		letter-spacing: 0.15em;
-		color: var(--accent-cyan);
-		text-shadow: 0 0 30px var(--accent-glow-strong);
+		/* Use theme primary color instead of hardcoded accent-cyan */
+		color: var(--primary);
+		text-shadow: 0 0 30px var(--glow-color);
 		opacity: 0;
 		transform: translateY(15px);
 		transition:
@@ -74,10 +75,11 @@
 		width: 100px;
 		height: 2px;
 		margin-top: 0.25rem;
+		/* Use theme primary color */
 		background: linear-gradient(
 			90deg,
 			transparent 0%,
-			var(--accent-cyan) 50%,
+			var(--primary) 50%,
 			transparent 100%
 		);
 		opacity: 0;

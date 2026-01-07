@@ -466,7 +466,7 @@
 		background: var(--glass-bg);
 		backdrop-filter: blur(12px);
 		-webkit-backdrop-filter: blur(12px);
-		border-radius: 12px;
+		border-radius: var(--radius, 0.75rem);
 		border: 1px solid var(--glass-border);
 		overflow: visible;
 		box-shadow: var(--shadow-m);
@@ -516,18 +516,19 @@
 		justify-content: space-between;
 		height: 44px;
 		padding: 0 10px 0 14px;
+		/* Use muted color - stays neutral gray regardless of theme secondary color */
 		background: linear-gradient(
 			180deg,
-			color-mix(in oklch, var(--secondary) 100%, transparent) 0%,
-			color-mix(in oklch, var(--secondary) 85%, var(--card)) 100%
+			color-mix(in oklch, var(--muted) 100%, transparent) 0%,
+			color-mix(in oklch, var(--muted) 85%, var(--card)) 100%
 		);
 		border-bottom: 1px solid var(--border);
 		cursor: grab;
 		user-select: none;
 		flex-shrink: 0;
 		position: relative;
-		/* Clip to match parent's top rounded corners */
-		border-radius: 12px 12px 0 0;
+		/* Clip to match parent's top rounded corners - inherits from theme */
+		border-radius: var(--radius, 0.75rem) var(--radius, 0.75rem) 0 0;
 		overflow: hidden;
 	}
 
@@ -576,7 +577,7 @@
 		color: var(--muted-foreground);
 		flex-shrink: 0;
 		transition: color 0.15s ease, background-color 0.15s ease;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		background: transparent;
 	}
 
@@ -609,7 +610,7 @@
 		font-weight: 500;
 		background: var(--background);
 		border: 1px solid var(--primary);
-		border-radius: 4px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 		padding: 2px 6px;
 		color: var(--foreground);
 		outline: none;
@@ -638,7 +639,7 @@
 			background 0.15s ease,
 			color 0.15s ease,
 			transform 0.1s ease;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 	}
 
 	/* Larger touch targets on mobile */
@@ -683,8 +684,8 @@
 		flex-direction: column;
 		background: var(--card);
 		position: relative;
-		/* Clip content to match parent's bottom rounded corners */
-		border-radius: 0 0 12px 12px;
+		/* Clip content to match parent's bottom rounded corners - inherits from theme */
+		border-radius: 0 0 var(--radius, 0.75rem) var(--radius, 0.75rem);
 	}
 
 	.base-card.maximized .card-content {

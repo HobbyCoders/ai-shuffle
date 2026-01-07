@@ -1,19 +1,18 @@
 <script lang="ts">
 	/**
-	 * SettingsCard - Settings management in card format
+	 * SettingsCard - Redesigned Modern Settings UI
 	 *
-	 * Categories:
-	 * - Account: General settings, Security, Authentication
-	 * - API & Users: API Users management, Rate Limits
-	 * - AI Models: API Keys, Image/Video/Audio model selection
-	 * - System: Notifications, Background Cleanup
+	 * Streamlined categories:
+	 * - Account: General, Security, Connections (merged)
+	 * - AI: API Keys & Model Selection (merged, compact)
+	 * - System: Users, Notifications, Cleanup (merged)
 	 */
 	import BaseCard from './BaseCard.svelte';
 	import type { DeckCard } from './types';
 	import { onMount } from 'svelte';
 	import { auth, username, isAdmin, claudeAuthenticated, githubAuthenticated } from '$lib/stores/auth';
 	import { api } from '$lib/api/client';
-	import { theme, themePreference, isDark, type Theme } from '$lib/stores/theme';
+	import { theme, themePreference, isDark, currentPresetId, themePresets, type Theme } from '$lib/stores/theme';
 	import type { ApiUser, ApiUserWithKey, Profile, WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
 	import type { Project } from '$lib/stores/chat';
 	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig, changePassword } from '$lib/api/auth';
@@ -27,7 +26,7 @@
 	import WebhookManager from '$lib/components/WebhookManager.svelte';
 	import TwoFactorSetup from '$lib/components/TwoFactorSetup.svelte';
 	import RateLimitManager from '$lib/components/RateLimitManager.svelte';
-	import { slide, fade, fly } from 'svelte/transition';
+	import { slide, fade } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
 	import {
 		getUserCredentialPolicies,
@@ -72,70 +71,20 @@
 		mobile = false
 	}: Props = $props();
 
-	// Navigation state
-	type Category = 'account' | 'api-users' | 'ai-models' | 'system';
-	type Section =
-		| 'general' | 'security' | 'authentication'
-		| 'users' | 'rate-limits' | 'credential-policies'
-		| 'api-keys' | 'models'
-		| 'notifications' | 'cleanup';
+	// Navigation - simplified to 3 main tabs
+	type Tab = 'account' | 'ai' | 'system';
+	let activeTab: Tab = $state('account');
 
-	let activeCategory: Category = $state('account');
-	let activeSection: Section = $state('general');
-	let mobileMenuOpen = $state(false);
+	// Collapsible sections state
+	let expandedSections: Set<string> = $state(new Set(['general']));
 
-	// Category definitions
-	const categories: { id: Category; label: string; icon: string; sections: { id: Section; label: string }[] }[] = [
-		{
-			id: 'account',
-			label: 'Account',
-			icon: 'M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z',
-			sections: [
-				{ id: 'general', label: 'General' },
-				{ id: 'security', label: 'Security' },
-				{ id: 'authentication', label: 'Connections' }
-			]
-		},
-		{
-			id: 'api-users',
-			label: 'API & Users',
-			icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z',
-			sections: [
-				{ id: 'users', label: 'API Users' },
-				{ id: 'rate-limits', label: 'Rate Limits' }
-			]
-		},
-		{
-			id: 'ai-models',
-			label: 'AI Models',
-			icon: 'M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z',
-			sections: [
-				{ id: 'api-keys', label: 'API Keys' },
-				{ id: 'models', label: 'Models' }
-			]
-		},
-		{
-			id: 'system',
-			label: 'System',
-			icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z',
-			sections: [
-				{ id: 'notifications', label: 'Notifications' },
-				{ id: 'cleanup', label: 'Cleanup' }
-			]
+	function toggleSection(section: string) {
+		if (expandedSections.has(section)) {
+			expandedSections.delete(section);
+		} else {
+			expandedSections.add(section);
 		}
-	];
-
-	function selectCategory(cat: Category) {
-		activeCategory = cat;
-		const category = categories.find(c => c.id === cat);
-		if (category && category.sections.length > 0) {
-			activeSection = category.sections[0].id;
-		}
-		mobileMenuOpen = false;
-	}
-
-	function selectSection(section: Section) {
-		activeSection = section;
+		expandedSections = new Set(expandedSections);
 	}
 
 	// Data state
@@ -145,17 +94,17 @@
 	let loading = $state(true);
 	let error = $state('');
 
-	// Form state for API Users - inline form mode
+	// Form state for API Users
 	let formMode: 'closed' | 'create' | 'edit' = $state('closed');
 	let editingUser: ApiUser | null = $state(null);
 	let newlyCreatedKey: string | null = $state(null);
 	let regeneratedKey: string | null = $state(null);
 
-	// Per-user credential policies state (shown within each user card)
+	// Per-user credential policies
 	let userPolicies: Map<string, UserCredentialPolicy[]> = $state(new Map());
 	let loadingUserPolicies = $state<string | null>(null);
-	let savingUserPolicy = $state<string | null>(null); // format: "userId:credentialType"
-	let expandedUserPolicies = $state<string | null>(null); // userId of expanded policies section
+	let savingUserPolicy = $state<string | null>(null);
+	let expandedUserPolicies = $state<string | null>(null);
 
 	// Workspace state
 	let workspaceConfig: WorkspaceConfig | null = $state(null);
@@ -176,178 +125,61 @@
 	let claudeCompletingLogin = $state(false);
 	let githubUser: string | null = $state(null);
 
-	// Integration settings
+	// API Keys state
 	let openaiApiKey = $state('');
 	let openaiApiKeyMasked = $state('');
 	let savingOpenaiKey = $state(false);
 	let openaiKeySuccess = $state('');
 	let openaiKeyError = $state('');
 
-	// Image generation settings
-	interface ImageModel {
-		id: string;
-		name: string;
-		description: string;
-		price_per_image: number;
-		provider: string;
-		provider_name: string;
-		available: boolean;
-		is_current: boolean;
-	}
-	interface ImageProvider {
-		id: string;
-		name: string;
-		description: string;
-		available: boolean;
-		is_current: boolean;
-	}
-	let imageModels: ImageModel[] = $state([]);
-	let imageProviders: ImageProvider[] = $state([]);
-	let imageProvider = $state('');
-	let imageModel = $state('');
-	let imageApiKey = $state('');
-	let imageApiKeyMasked = $state('');
-	let savingImageConfig = $state(false);
-	let imageConfigSuccess = $state('');
-	let imageConfigError = $state('');
-	let selectedImageModel = $state('');
-	let updatingImageModel = $state(false);
-
-	// Video generation settings
-	interface VideoModel {
-		id: string;
-		name: string;
-		description: string;
-		price_per_second: number;
-		provider: string;
-		provider_name: string;
-		max_duration: number;
-		capabilities: string[];
-		available: boolean;
-		is_current: boolean;
-	}
-	interface VideoProvider {
-		id: string;
-		name: string;
-		description: string;
-		available: boolean;
-		is_current: boolean;
-	}
-	let videoModels: VideoModel[] = $state([]);
-	let videoProviders: VideoProvider[] = $state([]);
-	let videoModel = $state('');
-	let videoProvider = $state('');
-	let selectedVideoModel = $state('');
-	let savingVideoModel = $state(false);
-	let videoConfigSuccess = $state('');
-	let videoConfigError = $state('');
-
-	// Audio settings
-	interface AudioModel {
-		id: string;
-		name: string;
-		description: string;
-		price_display: string;
-		available: boolean;
-		is_current: boolean;
-	}
-	let ttsModels: AudioModel[] = $state([]);
-	let sttModels: AudioModel[] = $state([]);
-	let selectedTtsModel = $state('');
-	let selectedSttModel = $state('');
-	let currentTtsModel = $state('');
-	let currentSttModel = $state('');
-	let savingTtsModel = $state(false);
-	let savingSttModel = $state(false);
-	let audioConfigSuccess = $state('');
-	let audioConfigError = $state('');
-
-	// Extended TTS settings
-	let selectedTtsVoice = $state('alloy');
-	let currentTtsVoice = $state('alloy');
-	let ttsSpeed = $state(1.0);
-	let currentTtsSpeed = $state(1.0);
-	let ttsOutputFormat = $state('mp3');
-	let currentTtsOutputFormat = $state('mp3');
-	let ttsInstructions = $state('');
-	let currentTtsInstructions = $state('');
-	let savingTtsSettings = $state(false);
-
-	// Meshy settings
 	let meshyApiKey = $state('');
 	let meshyApiKeyMasked = $state('');
 	let savingMeshyKey = $state(false);
 	let meshyKeySuccess = $state('');
 	let meshyKeyError = $state('');
 
-	// DeepSeek settings
 	let deepseekApiKey = $state('');
 	let deepseekApiKeyMasked = $state('');
 	let savingDeepseekKey = $state(false);
 	let deepseekKeySuccess = $state('');
 	let deepseekKeyError = $state('');
 
-	// 3D Model settings
+	// Model selection state
+	let imageModel = $state('');
+	let selectedImageModel = $state('');
+	let updatingImageModel = $state(false);
+	let imageConfigSuccess = $state('');
+	let imageConfigError = $state('');
+
+	let videoModel = $state('');
+	let selectedVideoModel = $state('');
+	let savingVideoModel = $state(false);
+	let videoConfigSuccess = $state('');
+	let videoConfigError = $state('');
+
+	let currentTtsModel = $state('');
+	let selectedTtsModel = $state('');
+	let savingTtsModel = $state(false);
+	let selectedTtsVoice = $state('alloy');
+	let currentTtsVoice = $state('alloy');
+	let ttsSpeed = $state(1.0);
+	let ttsOutputFormat = $state('mp3');
+	let ttsInstructions = $state('');
+	let savingTtsSettings = $state(false);
+
+	let currentSttModel = $state('');
+	let selectedSttModel = $state('');
+	let savingSttModel = $state(false);
+	let audioConfigSuccess = $state('');
+	let audioConfigError = $state('');
+
 	let selected3DModel = $state('meshy-6');
 	let current3DModel = $state('meshy-6');
 	let saving3DModel = $state(false);
 	let model3DSuccess = $state('');
 	let model3DError = $state('');
 
-	// Helper function to get available voices for selected TTS model
-	function getAvailableVoices(): TTSVoice[] {
-		const model = ALL_TTS_MODELS.find(m => m.id === currentTtsModel);
-		return model?.voices || [];
-	}
-
-	// Check if current TTS model supports steerability (voice instructions)
-	function isCurrentModelSteerable(): boolean {
-		const model = ALL_TTS_MODELS.find(m => m.id === currentTtsModel);
-		return model?.capabilities?.steerability ?? false;
-	}
-
-	// Helper to group models by provider
-	function groupImageModelsByProvider() {
-		const groups: Record<string, AIImageModel[]> = {};
-		for (const model of ALL_IMAGE_MODELS) {
-			const providerName = PROVIDER_DISPLAY_NAMES[model.provider] || model.provider;
-			if (!groups[providerName]) groups[providerName] = [];
-			groups[providerName].push(model);
-		}
-		return groups;
-	}
-
-	function groupVideoModelsByProvider() {
-		const groups: Record<string, AIVideoModel[]> = {};
-		for (const model of ALL_VIDEO_MODELS) {
-			const providerName = PROVIDER_DISPLAY_NAMES[model.provider] || model.provider;
-			if (!groups[providerName]) groups[providerName] = [];
-			groups[providerName].push(model);
-		}
-		return groups;
-	}
-
-	function groupTtsModelsByProvider() {
-		const groups: Record<string, TTSModel[]> = {};
-		for (const model of ALL_TTS_MODELS) {
-			const providerName = PROVIDER_DISPLAY_NAMES[model.provider] || model.provider;
-			if (!groups[providerName]) groups[providerName] = [];
-			groups[providerName].push(model);
-		}
-		return groups;
-	}
-
-	function groupSttModelsByProvider() {
-		const groups: Record<string, STTModel[]> = {};
-		for (const model of ALL_STT_MODELS) {
-			const providerName = PROVIDER_DISPLAY_NAMES[model.provider] || model.provider;
-			if (!groups[providerName]) groups[providerName] = [];
-			groups[providerName].push(model);
-		}
-		return groups;
-	}
-
-	// Password change state
+	// Password change
 	let currentPassword = $state('');
 	let newPassword = $state('');
 	let confirmPassword = $state('');
@@ -355,7 +187,7 @@
 	let passwordChangeError = $state('');
 	let passwordChangeSuccess = $state('');
 
-	// Cleanup settings state
+	// Cleanup settings
 	interface CleanupConfig {
 		cleanup_interval_minutes: number;
 		sdk_session_max_age_minutes: number;
@@ -381,31 +213,20 @@
 		sleep_timeout_minutes: number;
 		cleanup_interval_minutes: number;
 	}
-	interface CleanupPreview {
-		images: { name: string; size: number; project: string; age_days: number }[];
-		videos: { name: string; size: number; project: string; age_days: number }[];
-		shared_files: { name: string; size: number; project: string; age_days: number }[];
-		uploads: { name: string; size: number; project: string; age_days: number }[];
-		total_count: number;
-		total_bytes: number;
-		total_bytes_formatted: string;
-	}
 	let cleanupConfig: CleanupConfig | null = $state(null);
 	let cleanupStatus: CleanupStatus | null = $state(null);
-	let cleanupPreview: CleanupPreview | null = $state(null);
 	let loadingCleanup = $state(true);
 	let savingCleanup = $state(false);
-	let runningCleanup = $state(false);
 	let cleanupSuccess = $state('');
 	let cleanupError = $state('');
 
-	// Browser notification state
+	// Notifications
 	let browserNotificationsEnabled = $state(false);
 	let browserNotificationsSupported = $state(false);
 	let notificationPermission = $state<NotificationPermission | 'unsupported'>('default');
 	let requestingPermission = $state(false);
 
-	// API User form data
+	// API User form
 	let formData = $state({
 		name: '',
 		description: '',
@@ -430,22 +251,17 @@
 
 	async function toggleBrowserNotifications() {
 		if (!browserNotificationsSupported) return;
-
 		if (!browserNotificationsEnabled) {
 			if (notificationPermission === 'default') {
 				requestingPermission = true;
 				const result = await requestPermission();
 				requestingPermission = false;
 				notificationPermission = result;
-
-				if (result !== 'granted') {
-					return;
-				}
+				if (result !== 'granted') return;
 			} else if (notificationPermission === 'denied') {
 				return;
 			}
 		}
-
 		browserNotificationsEnabled = !browserNotificationsEnabled;
 		setNotificationsEnabled(browserNotificationsEnabled);
 	}
@@ -478,13 +294,12 @@
 		loading = false;
 	}
 
-	// Per-user credential policy functions
 	async function loadUserPolicies(userId: string) {
 		loadingUserPolicies = userId;
 		try {
 			const response = await getUserCredentialPolicies(userId);
 			userPolicies.set(userId, response.policies);
-			userPolicies = new Map(userPolicies); // Trigger reactivity
+			userPolicies = new Map(userPolicies);
 		} catch (e: any) {
 			console.error('Failed to load user policies:', e);
 		}
@@ -507,7 +322,6 @@
 			expandedUserPolicies = null;
 		} else {
 			expandedUserPolicies = userId;
-			// Load policies if not already loaded
 			if (!userPolicies.has(userId)) {
 				loadUserPolicies(userId);
 			}
@@ -537,11 +351,7 @@
 			const settings = await api.get<{
 				openai_api_key_set: boolean;
 				openai_api_key_masked: string;
-				image_provider: string | null;
 				image_model: string | null;
-				image_api_key_set: boolean;
-				image_api_key_masked: string;
-				video_provider: string | null;
 				video_model: string | null;
 				tts_model: string | null;
 				tts_voice: string | null;
@@ -555,98 +365,31 @@
 				deepseek_api_key_set: boolean;
 				deepseek_api_key_masked: string;
 			}>('/settings/integrations');
+
 			openaiApiKeyMasked = settings.openai_api_key_masked;
-			imageProvider = settings.image_provider || '';
 			imageModel = settings.image_model || '';
-			imageApiKeyMasked = settings.image_api_key_masked || '';
 			selectedImageModel = settings.image_model || '';
-			videoProvider = settings.video_provider || '';
 			videoModel = settings.video_model || '';
 			selectedVideoModel = settings.video_model || '';
 			currentTtsModel = settings.tts_model || 'gpt-4o-mini-tts';
-			currentSttModel = settings.stt_model || 'whisper-1';
 			selectedTtsModel = currentTtsModel;
+			currentSttModel = settings.stt_model || 'whisper-1';
 			selectedSttModel = currentSttModel;
-			// Extended TTS settings
-			currentTtsVoice = settings.tts_voice || 'alloy';
-			selectedTtsVoice = currentTtsVoice;
-			currentTtsSpeed = settings.tts_speed || 1.0;
-			ttsSpeed = currentTtsSpeed;
-			currentTtsOutputFormat = settings.tts_output_format || 'mp3';
-			ttsOutputFormat = currentTtsOutputFormat;
-			currentTtsInstructions = settings.tts_instructions || '';
-			ttsInstructions = currentTtsInstructions;
-			// Meshy settings
+			selectedTtsVoice = settings.tts_voice || 'alloy';
+			currentTtsVoice = selectedTtsVoice;
+			ttsSpeed = settings.tts_speed || 1.0;
+			ttsOutputFormat = settings.tts_output_format || 'mp3';
+			ttsInstructions = settings.tts_instructions || '';
 			meshyApiKeyMasked = settings.meshy_api_key_masked || '';
 			selected3DModel = settings.model_3d_model || 'meshy-6';
 			current3DModel = selected3DModel;
-			// DeepSeek settings
 			deepseekApiKeyMasked = settings.deepseek_api_key_masked || '';
 		} catch (e) {
 			console.error('Failed to load integration settings:', e);
 		}
-
-		// Load image models
-		try {
-			const imageResponse = await api.get<{
-				models: ImageModel[];
-				providers: ImageProvider[];
-				current_provider: string | null;
-				current_model: string | null;
-			}>('/settings/integrations/image/models');
-			imageModels = imageResponse.models;
-			imageProviders = imageResponse.providers;
-			if (!selectedImageModel && imageResponse.current_model) {
-				selectedImageModel = imageResponse.current_model;
-			} else if (!selectedImageModel && imageModels.length > 0) {
-				const availableModel = imageModels.find(m => m.available);
-				selectedImageModel = availableModel?.id || imageModels[0].id;
-			}
-		} catch (e) {
-			console.error('Failed to load image models:', e);
-		}
-
-		// Load video models
-		try {
-			const videoResponse = await api.get<{
-				models: VideoModel[];
-				providers: VideoProvider[];
-				current_provider: string | null;
-				current_model: string | null;
-			}>('/settings/integrations/video/models');
-			videoModels = videoResponse.models;
-			videoProviders = videoResponse.providers;
-			if (!selectedVideoModel && videoResponse.current_model) {
-				selectedVideoModel = videoResponse.current_model;
-			} else if (!selectedVideoModel && videoModels.length > 0) {
-				const availableModel = videoModels.find(m => m.available);
-				selectedVideoModel = availableModel?.id || videoModels[0].id;
-			}
-		} catch (e) {
-			console.error('Failed to load video models:', e);
-		}
-
-		// Load audio models
-		try {
-			const audioResponse = await api.get<{
-				tts_models: AudioModel[];
-				stt_models: AudioModel[];
-				current_tts: string;
-				current_stt: string;
-				openai_configured: boolean;
-			}>('/settings/integrations/audio/models');
-			ttsModels = audioResponse.tts_models;
-			sttModels = audioResponse.stt_models;
-			currentTtsModel = audioResponse.current_tts;
-			currentSttModel = audioResponse.current_stt;
-			selectedTtsModel = currentTtsModel;
-			selectedSttModel = currentSttModel;
-		} catch (e) {
-			console.error('Failed to load audio models:', e);
-		}
 	}
 
-	// OpenAI API Key functions
+	// API Key save functions
 	async function saveOpenaiApiKey() {
 		if (!openaiApiKey.trim()) {
 			openaiKeyError = 'Please enter an API key';
@@ -661,172 +404,128 @@
 			});
 			openaiApiKeyMasked = result.masked_key;
 			openaiApiKey = '';
-			openaiKeySuccess = 'OpenAI API key saved successfully';
+			openaiKeySuccess = 'Saved';
 			setTimeout(() => openaiKeySuccess = '', 3000);
 		} catch (e: any) {
-			openaiKeyError = e.detail || 'Failed to save API key';
+			openaiKeyError = e.detail || 'Failed to save';
 		} finally {
 			savingOpenaiKey = false;
 		}
 	}
 
-	// Meshy API Key function
 	async function saveMeshyKey() {
 		if (!meshyApiKey.trim()) return;
 		savingMeshyKey = true;
 		meshyKeyError = '';
 		meshyKeySuccess = '';
 		try {
-			await api.post('/meshy/config/api-key', {
-				api_key: meshyApiKey
-			});
-			meshyKeySuccess = 'Meshy API key saved';
+			await api.post('/meshy/config/api-key', { api_key: meshyApiKey });
+			meshyKeySuccess = 'Saved';
 			meshyApiKey = '';
 			await loadIntegrationSettings();
 			setTimeout(() => meshyKeySuccess = '', 3000);
 		} catch (e: any) {
-			meshyKeyError = e.detail || 'Failed to save Meshy key';
+			meshyKeyError = e.detail || 'Failed to save';
 		}
 		savingMeshyKey = false;
 	}
 
-	// DeepSeek API Key function
 	async function saveDeepseekKey() {
 		if (!deepseekApiKey.trim()) return;
 		savingDeepseekKey = true;
 		deepseekKeyError = '';
 		deepseekKeySuccess = '';
 		try {
-			await api.post('/settings/integrations/deepseek', {
-				api_key: deepseekApiKey
-			});
-			deepseekKeySuccess = 'DeepSeek API key saved';
+			await api.post('/settings/integrations/deepseek', { api_key: deepseekApiKey });
+			deepseekKeySuccess = 'Saved';
 			deepseekApiKey = '';
 			await loadIntegrationSettings();
 			setTimeout(() => deepseekKeySuccess = '', 3000);
 		} catch (e: any) {
-			deepseekKeyError = e.detail || 'Failed to save DeepSeek key';
+			deepseekKeyError = e.detail || 'Failed to save';
 		}
 		savingDeepseekKey = false;
 	}
 
-	// 3D Model function
-	async function save3DModel() {
-		if (selected3DModel === current3DModel) return;
-		saving3DModel = true;
-		model3DError = '';
-		model3DSuccess = '';
-		try {
-			await api.put('/meshy/config/settings', {
-				model: selected3DModel
-			});
-			current3DModel = selected3DModel;
-			model3DSuccess = '3D model saved';
-			setTimeout(() => model3DSuccess = '', 3000);
-		} catch (e: any) {
-			model3DError = e.detail || 'Failed to save 3D model';
-		}
-		saving3DModel = false;
-	}
-
-	// Image config functions
-	async function saveImageConfig() {
-		if (!imageApiKey.trim() && !imageApiKeyMasked) {
-			imageConfigError = 'Please enter an API key';
-			return;
-		}
-		if (!selectedImageModel) {
-			imageConfigError = 'Please select a model';
-			return;
-		}
-		savingImageConfig = true;
-		imageConfigError = '';
-		imageConfigSuccess = '';
-		try {
-			const result = await api.post<{success: boolean, provider: string, model: string, masked_key: string}>('/settings/integrations/image', {
-				provider: 'google',
-				model: selectedImageModel,
-				api_key: imageApiKey || imageApiKeyMasked
-			});
-			imageProvider = result.provider;
-			imageModel = result.model;
-			imageApiKeyMasked = result.masked_key;
-			imageApiKey = '';
-			imageConfigSuccess = 'Image generation configured successfully';
-			setTimeout(() => imageConfigSuccess = '', 3000);
-		} catch (e: any) {
-			imageConfigError = e.detail || 'Failed to save configuration';
-		} finally {
-			savingImageConfig = false;
-		}
-	}
-
+	// Model update functions
 	async function updateImageModel() {
 		if (!selectedImageModel || selectedImageModel === imageModel) return;
 		updatingImageModel = true;
 		imageConfigError = '';
 		imageConfigSuccess = '';
 		try {
-			const result = await api.patch<{success: boolean, provider: string, model: string}>('/settings/integrations/image/model', {
+			await api.patch<{success: boolean, model: string}>('/settings/integrations/image/model', {
 				model: selectedImageModel
 			});
-			imageModel = result.model;
-			imageProvider = result.provider;
-			imageConfigSuccess = 'Image model updated';
+			imageModel = selectedImageModel;
+			imageConfigSuccess = 'Updated';
 			setTimeout(() => imageConfigSuccess = '', 3000);
-			await loadIntegrationSettings();
 		} catch (e: any) {
-			imageConfigError = e.detail || 'Failed to update image model';
+			imageConfigError = e.detail || 'Failed to update';
 		} finally {
 			updatingImageModel = false;
 		}
 	}
 
-	// Video model functions
-	async function saveVideoModel() {
+	async function updateVideoModel() {
 		if (!selectedVideoModel || selectedVideoModel === videoModel) return;
 		savingVideoModel = true;
 		videoConfigError = '';
 		videoConfigSuccess = '';
 		try {
-			const result = await api.patch<{success: boolean, provider: string, model: string}>('/settings/integrations/video/model', {
+			await api.patch<{success: boolean, model: string}>('/settings/integrations/video/model', {
 				model: selectedVideoModel
 			});
-			videoModel = result.model;
-			videoProvider = result.provider;
-			videoConfigSuccess = 'Video model updated';
+			videoModel = selectedVideoModel;
+			videoConfigSuccess = 'Updated';
 			setTimeout(() => videoConfigSuccess = '', 3000);
-			await loadIntegrationSettings();
 		} catch (e: any) {
-			videoConfigError = e.detail || 'Failed to update video model';
+			videoConfigError = e.detail || 'Failed to update';
 		} finally {
 			savingVideoModel = false;
 		}
 	}
 
-	// Audio model functions
-	async function saveTtsModel() {
+	async function updateTtsModel() {
 		if (!selectedTtsModel || selectedTtsModel === currentTtsModel) return;
 		savingTtsModel = true;
 		audioConfigError = '';
 		audioConfigSuccess = '';
 		try {
-			await api.patch<{success: boolean, model: string}>('/settings/integrations/audio/tts', {
+			await api.patch<{success: boolean}>('/settings/integrations/audio/tts', {
 				model: selectedTtsModel
 			});
 			currentTtsModel = selectedTtsModel;
-			// Reset voice to default when changing models
 			const model = ALL_TTS_MODELS.find(m => m.id === selectedTtsModel);
 			if (model && model.voices.length > 0) {
 				selectedTtsVoice = model.voices[0].id;
 				currentTtsVoice = model.voices[0].id;
 			}
-			audioConfigSuccess = 'TTS model updated';
+			audioConfigSuccess = 'Updated';
 			setTimeout(() => audioConfigSuccess = '', 3000);
 		} catch (e: any) {
-			audioConfigError = e.detail || 'Failed to update TTS model';
+			audioConfigError = e.detail || 'Failed to update';
 		} finally {
 			savingTtsModel = false;
+		}
+	}
+
+	async function updateSttModel() {
+		if (!selectedSttModel || selectedSttModel === currentSttModel) return;
+		savingSttModel = true;
+		audioConfigError = '';
+		audioConfigSuccess = '';
+		try {
+			await api.patch<{success: boolean}>('/settings/integrations/audio/stt', {
+				model: selectedSttModel
+			});
+			currentSttModel = selectedSttModel;
+			audioConfigSuccess = 'Updated';
+			setTimeout(() => audioConfigSuccess = '', 3000);
+		} catch (e: any) {
+			audioConfigError = e.detail || 'Failed to update';
+		} finally {
+			savingSttModel = false;
 		}
 	}
 
@@ -844,38 +543,32 @@
 			});
 			currentTtsModel = selectedTtsModel;
 			currentTtsVoice = selectedTtsVoice;
-			currentTtsSpeed = ttsSpeed;
-			currentTtsOutputFormat = ttsOutputFormat;
-			currentTtsInstructions = ttsInstructions;
-			audioConfigSuccess = 'TTS settings updated';
+			audioConfigSuccess = 'TTS settings saved';
 			setTimeout(() => audioConfigSuccess = '', 3000);
 		} catch (e: any) {
-			audioConfigError = e.detail || 'Failed to update TTS settings';
+			audioConfigError = e.detail || 'Failed to save';
 		} finally {
 			savingTtsSettings = false;
 		}
 	}
 
-	async function saveSttModel() {
-		if (!selectedSttModel || selectedSttModel === currentSttModel) return;
-		savingSttModel = true;
-		audioConfigError = '';
-		audioConfigSuccess = '';
+	async function save3DModel() {
+		if (selected3DModel === current3DModel) return;
+		saving3DModel = true;
+		model3DError = '';
+		model3DSuccess = '';
 		try {
-			await api.patch<{success: boolean, model: string}>('/settings/integrations/audio/stt', {
-				model: selectedSttModel
-			});
-			currentSttModel = selectedSttModel;
-			audioConfigSuccess = 'STT model updated';
-			setTimeout(() => audioConfigSuccess = '', 3000);
+			await api.put('/meshy/config/settings', { model: selected3DModel });
+			current3DModel = selected3DModel;
+			model3DSuccess = 'Updated';
+			setTimeout(() => model3DSuccess = '', 3000);
 		} catch (e: any) {
-			audioConfigError = e.detail || 'Failed to update STT model';
-		} finally {
-			savingSttModel = false;
+			model3DError = e.detail || 'Failed to save';
 		}
+		saving3DModel = false;
 	}
 
-	// Cleanup settings functions
+	// Cleanup functions
 	async function loadCleanupSettings() {
 		loadingCleanup = true;
 		try {
@@ -898,241 +591,32 @@
 		cleanupError = '';
 		cleanupSuccess = '';
 		try {
-			const result = await api.post<CleanupConfig>('/settings/cleanup', cleanupConfig);
-			cleanupConfig = result;
-			cleanupSuccess = 'Settings saved successfully';
+			await api.post('/settings/cleanup', cleanupConfig);
+			cleanupSuccess = 'Settings saved';
 			setTimeout(() => cleanupSuccess = '', 3000);
 		} catch (e: any) {
-			cleanupError = e.detail || 'Failed to save settings';
+			cleanupError = e.detail || 'Failed to save';
 		} finally {
 			savingCleanup = false;
 		}
 	}
 
-	async function loadCleanupPreview() {
-		try {
-			// Save current config first so preview reflects UI state
-			if (cleanupConfig) {
-				await api.post('/settings/cleanup', cleanupConfig);
-			}
-			cleanupPreview = await api.get<CleanupPreview>('/settings/cleanup/preview');
-		} catch (e: any) {
-			cleanupError = e.detail || 'Failed to load preview';
-		}
-	}
-
-	async function runCleanupNow() {
-		runningCleanup = true;
-		cleanupError = '';
-		cleanupSuccess = '';
-		try {
-			const result = await api.post<{
-				success: boolean;
-				images_deleted: number;
-				videos_deleted: number;
-				shared_files_deleted: number;
-				uploads_deleted: number;
-				bytes_freed: number;
-				bytes_freed_formatted: string;
-			}>('/settings/cleanup/run');
-			const total = result.images_deleted + result.videos_deleted + result.shared_files_deleted + result.uploads_deleted;
-			if (total > 0) {
-				cleanupSuccess = `Cleanup complete: ${total} files deleted (${result.bytes_freed_formatted} freed)`;
-			} else {
-				cleanupSuccess = 'Cleanup complete: No files to delete';
-			}
-			cleanupPreview = null;
-			setTimeout(() => cleanupSuccess = '', 5000);
-		} catch (e: any) {
-			cleanupError = e.detail || 'Cleanup failed';
-		} finally {
-			runningCleanup = false;
-		}
-	}
-
-	function formatIdleTime(seconds: number): string {
-		if (seconds < 60) return `${Math.round(seconds)}s`;
-		if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
-		return `${Math.round(seconds / 3600)}h ${Math.round((seconds % 3600) / 60)}m`;
-	}
-
-	// Workspace functions
-	let workspaceValidateTimeout: ReturnType<typeof setTimeout>;
-
-	async function validateWorkspace() {
-		if (!workspacePath.trim()) {
-			workspaceValidation = null;
-			workspaceError = '';
-			return;
-		}
-		validatingWorkspace = true;
-		workspaceError = '';
-		workspaceSuccess = '';
-		try {
-			workspaceValidation = await validateWorkspacePath(workspacePath);
-			if (!workspaceValidation.valid && workspaceValidation.error) {
-				workspaceError = workspaceValidation.error;
-			}
-		} catch (e: any) {
-			workspaceError = e.detail || 'Failed to validate path';
-			workspaceValidation = null;
-		} finally {
-			validatingWorkspace = false;
-		}
-	}
-
-	function handleWorkspaceInput() {
-		clearTimeout(workspaceValidateTimeout);
-		workspaceSuccess = '';
-		workspaceValidateTimeout = setTimeout(validateWorkspace, 500);
-	}
-
-	async function saveWorkspace() {
-		if (!workspaceValidation?.valid) {
-			workspaceError = 'Please enter a valid workspace path';
-			return;
-		}
-		savingWorkspace = true;
-		workspaceError = '';
-		workspaceSuccess = '';
-		try {
-			workspaceConfig = await setWorkspaceConfig(workspacePath);
-			workspaceSuccess = 'Workspace folder updated successfully';
-		} catch (e: any) {
-			workspaceError = e.detail || 'Failed to save workspace path';
-		} finally {
-			savingWorkspace = false;
-		}
-	}
-
-	// Auth functions
-	async function handleGitHubLogin() {
-		if (!githubToken.trim()) {
-			error = 'Please enter a GitHub token';
-			return;
-		}
-		githubLoginLoading = true;
-		error = '';
-		try {
-			const result = await api.post<{success: boolean, message: string, error?: string}>('/auth/github/login', { token: githubToken });
-			if (result.success) {
-				githubToken = '';
-				await auth.checkAuth();
-				await loadAuthStatus();
-			} else {
-				error = result.error || result.message;
-			}
-		} catch (e: any) {
-			error = e.detail || 'GitHub login failed';
-		}
-		githubLoginLoading = false;
-	}
-
-	async function handleGitHubLogout() {
-		try {
-			await api.post('/auth/github/logout');
-			githubUser = null;
-			await auth.checkAuth();
-		} catch (e: any) {
-			error = e.detail || 'GitHub logout failed';
-		}
-	}
-
-	async function handleClaudeLogin(forceReauth: boolean = false) {
-		claudeLoginLoading = true;
-		claudeOAuthUrl = null;
-		claudeOAuthState = null;
-		claudeAuthCode = '';
-		error = '';
-		try {
-			const result = await api.post<{success: boolean, oauth_url?: string, state?: string, already_authenticated?: boolean, message: string, error?: string}>('/auth/claude/login', { force_reauth: forceReauth });
-			if (result.already_authenticated) {
-				await auth.checkAuth();
-				claudeLoginLoading = false;
-				return;
-			}
-			if (result.oauth_url && result.state) {
-				claudeOAuthUrl = result.oauth_url;
-				claudeOAuthState = result.state;
-			} else {
-				error = result.error || result.message || 'Failed to start OAuth login';
-			}
-		} catch (e: any) {
-			error = e.detail || 'Claude login failed';
-		}
-		claudeLoginLoading = false;
-	}
-
-	async function handleClaudeReconnect() {
-		await handleClaudeLogin(true);
-	}
-
-	async function completeClaudeLogin() {
-		if (!claudeAuthCode.trim()) {
-			error = 'Please enter the authorization code';
-			return;
-		}
-		if (!claudeOAuthState) {
-			error = 'OAuth state missing. Please restart the login process.';
-			return;
-		}
-		claudeCompletingLogin = true;
-		error = '';
-		try {
-			const result = await api.post<{success: boolean, message: string, error?: string}>('/auth/claude/complete', {
-				code: claudeAuthCode,
-				state: claudeOAuthState
-			});
-			if (result.success) {
-				claudeOAuthUrl = null;
-				claudeOAuthState = null;
-				claudeAuthCode = '';
-				await auth.checkAuth();
-			} else {
-				error = result.error || result.message;
-			}
-		} catch (e: any) {
-			error = e.detail || 'Failed to complete Claude login';
-		}
-		claudeCompletingLogin = false;
-	}
-
-	function cancelClaudeLogin() {
-		claudeOAuthUrl = null;
-		claudeOAuthState = null;
-		claudeAuthCode = '';
-	}
-
-	async function handleClaudeLogout() {
-		try {
-			await api.post('/auth/claude/logout');
-			await auth.checkAuth();
-		} catch (e: any) {
-			error = e.detail || 'Claude logout failed';
-		}
-	}
-
 	// Password change
-	async function handlePasswordChange() {
-		if (!currentPassword || !newPassword || !confirmPassword) {
-			passwordChangeError = 'Please fill in all fields';
-			return;
-		}
-		if (newPassword.length < 8) {
-			passwordChangeError = 'New password must be at least 8 characters';
-			return;
-		}
+	async function handleChangePassword() {
 		if (newPassword !== confirmPassword) {
 			passwordChangeError = 'Passwords do not match';
 			return;
 		}
-
+		if (newPassword.length < 8) {
+			passwordChangeError = 'Password must be at least 8 characters';
+			return;
+		}
 		changingPassword = true;
 		passwordChangeError = '';
 		passwordChangeSuccess = '';
 		try {
 			await changePassword(currentPassword, newPassword);
-			passwordChangeSuccess = 'Password changed successfully';
+			passwordChangeSuccess = 'Password changed';
 			currentPassword = '';
 			newPassword = '';
 			confirmPassword = '';
@@ -1144,57 +628,159 @@
 		}
 	}
 
-	// API User functions - inline form mode
+	// Workspace validation
+	async function handleValidateWorkspace() {
+		if (!workspacePath.trim()) return;
+		validatingWorkspace = true;
+		workspaceError = '';
+		try {
+			workspaceValidation = await validateWorkspacePath(workspacePath);
+		} catch (e: any) {
+			workspaceError = e.detail || 'Validation failed';
+		} finally {
+			validatingWorkspace = false;
+		}
+	}
+
+	async function handleSaveWorkspace() {
+		if (!workspacePath.trim()) return;
+		savingWorkspace = true;
+		workspaceError = '';
+		workspaceSuccess = '';
+		try {
+			await setWorkspaceConfig(workspacePath);
+			workspaceSuccess = 'Workspace saved';
+			setTimeout(() => workspaceSuccess = '', 3000);
+		} catch (e: any) {
+			workspaceError = e.detail || 'Failed to save';
+		} finally {
+			savingWorkspace = false;
+		}
+	}
+
+	// OAuth functions
+	async function startClaudeOAuth() {
+		claudeLoginLoading = true;
+		try {
+			const result = await api.get<{authorization_url: string, state: string}>('/auth/claude/authorize');
+			claudeOAuthUrl = result.authorization_url;
+			claudeOAuthState = result.state;
+			window.open(result.authorization_url, '_blank', 'width=600,height=700');
+		} catch (e: any) {
+			error = e.detail || 'Failed to start OAuth';
+		} finally {
+			claudeLoginLoading = false;
+		}
+	}
+
+	async function completeClaudeOAuth() {
+		if (!claudeAuthCode.trim() || !claudeOAuthState) return;
+		claudeCompletingLogin = true;
+		try {
+			await api.post('/auth/claude/callback', {
+				code: claudeAuthCode,
+				state: claudeOAuthState
+			});
+			claudeOAuthUrl = null;
+			claudeOAuthState = null;
+			claudeAuthCode = '';
+			await auth.checkAuth();
+		} catch (e: any) {
+			error = e.detail || 'Failed to complete OAuth';
+		} finally {
+			claudeCompletingLogin = false;
+		}
+	}
+
+	async function connectGithub() {
+		if (!githubToken.trim()) return;
+		githubLoginLoading = true;
+		try {
+			await api.post('/auth/github/token', { token: githubToken });
+			await loadAuthStatus();
+			await auth.checkAuth();
+			githubToken = '';
+		} catch (e: any) {
+			error = e.detail || 'Failed to connect GitHub';
+		} finally {
+			githubLoginLoading = false;
+		}
+	}
+
+	async function disconnectGithub() {
+		try {
+			await api.delete('/auth/github/token');
+			githubUser = null;
+			await auth.checkAuth();
+		} catch (e: any) {
+			error = e.detail || 'Failed to disconnect';
+		}
+	}
+
+	// API User functions
 	function openCreateForm() {
-		editingUser = null;
-		formData = { name: '', description: '', project_id: '', profile_ids: [], web_login_allowed: true };
-		newlyCreatedKey = null;
 		formMode = 'create';
+		formData = { name: '', description: '', project_id: '', profile_ids: [], web_login_allowed: true };
 	}
 
 	function openEditForm(user: ApiUser) {
+		formMode = 'edit';
 		editingUser = user;
 		formData = {
 			name: user.name,
 			description: user.description || '',
 			project_id: user.project_id || '',
 			profile_ids: user.profile_ids || [],
-			web_login_allowed: user.web_login_allowed
+			web_login_allowed: user.web_login_allowed ?? true
 		};
-		formMode = 'edit';
 	}
 
 	function closeForm() {
 		formMode = 'closed';
 		editingUser = null;
 		newlyCreatedKey = null;
-		regeneratedKey = null;
-		formData = { name: '', description: '', project_id: '', profile_ids: [], web_login_allowed: true };
 	}
 
-	async function saveApiUser() {
+	async function saveUser() {
 		if (!formData.name.trim()) {
 			error = 'Name is required';
 			return;
 		}
 		try {
-			if (editingUser) {
-				await api.put(`/api-users/${editingUser.id}`, formData);
-				await loadData();
-				closeForm();
-			} else {
+			if (formMode === 'create') {
 				const result = await api.post<ApiUserWithKey>('/api-users', formData);
 				newlyCreatedKey = result.api_key;
 				await loadData();
-				// Stay in form mode to show the key
+			} else if (formMode === 'edit' && editingUser) {
+				await api.put(`/api-users/${editingUser.id}`, formData);
+				await loadData();
+				closeForm();
 			}
 		} catch (e: any) {
-			error = e.detail || 'Failed to save API user';
+			error = e.detail || 'Failed to save user';
+		}
+	}
+
+	async function regenerateKey(userId: string) {
+		try {
+			const result = await api.post<{api_key: string}>(`/api-users/${userId}/regenerate-key`, {});
+			regeneratedKey = result.api_key;
+		} catch (e: any) {
+			error = e.detail || 'Failed to regenerate key';
+		}
+	}
+
+	async function toggleUserActive(user: ApiUser) {
+		try {
+			await api.patch(`/api-users/${user.id}/status`, { is_active: !user.is_active });
+			await loadData();
+		} catch (e: any) {
+			error = e.detail || 'Failed to update status';
 		}
 	}
 
 	async function deleteUser(userId: string) {
-		if (!confirm('Delete this API user?')) return;
+		if (!confirm('Delete this user?')) return;
 		try {
 			await api.delete(`/api-users/${userId}`);
 			await loadData();
@@ -1203,1825 +789,1239 @@
 		}
 	}
 
-	async function toggleActive(user: ApiUser) {
-		try {
-			await api.put(`/api-users/${user.id}`, { is_active: !user.is_active });
-			await loadData();
-		} catch (e: any) {
-			error = e.detail || 'Failed to update user';
+	// Helpers
+	function getAvailableVoices(): TTSVoice[] {
+		const model = ALL_TTS_MODELS.find(m => m.id === currentTtsModel);
+		return model?.voices || [];
+	}
+
+	function isCurrentModelSteerable(): boolean {
+		const model = ALL_TTS_MODELS.find(m => m.id === currentTtsModel);
+		return model?.capabilities?.steerability ?? false;
+	}
+
+	function formatIdleTime(seconds: number): string {
+		if (seconds < 60) return `${seconds}s`;
+		if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+		return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+	}
+
+	function groupModelsByProvider<T extends { provider: string }>(models: T[]): Record<string, T[]> {
+		const groups: Record<string, T[]> = {};
+		for (const model of models) {
+			const name = PROVIDER_DISPLAY_NAMES[model.provider] || model.provider;
+			if (!groups[name]) groups[name] = [];
+			groups[name].push(model);
 		}
-	}
-
-	async function regenerateKey(userId: string) {
-		if (!confirm('Regenerate API key? The old key will stop working.')) return;
-		try {
-			const result = await api.post<{api_key: string}>(`/api-users/${userId}/regenerate-key`);
-			regeneratedKey = result.api_key;
-		} catch (e: any) {
-			error = e.detail || 'Failed to regenerate key';
-		}
-	}
-
-	function copyToClipboard(text: string) {
-		navigator.clipboard.writeText(text);
-	}
-
-	function formatDate(date: string | null): string {
-		if (!date) return 'Never';
-		return new Date(date).toLocaleDateString();
+		return groups;
 	}
 </script>
 
-{#if mobile}
-	<div class="settings-card-content mobile">
-		<div class="mobile-header">
-			<button onclick={() => mobileMenuOpen = !mobileMenuOpen} class="menu-toggle">
-				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
-				</svg>
-				<span>{categories.find(c => c.id === activeCategory)?.label} / {categories.find(c => c.id === activeCategory)?.sections.find(s => s.id === activeSection)?.label}</span>
-			</button>
-		</div>
-
-		{#if mobileMenuOpen}
-			<div class="mobile-menu">
-				{#each categories as cat}
-					<div class="mobile-category">
-						<button onclick={() => selectCategory(cat.id)} class="category-btn {activeCategory === cat.id ? 'active' : ''}">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d={cat.icon} />
-							</svg>
-							{cat.label}
-						</button>
-						{#if activeCategory === cat.id}
-							<div class="mobile-sections">
-								{#each cat.sections as section}
-									<button
-										onclick={() => { selectSection(section.id); mobileMenuOpen = false; }}
-										class="section-btn {activeSection === section.id ? 'active' : ''}"
-									>
-										{section.label}
-									</button>
-								{/each}
-							</div>
-						{/if}
-					</div>
-				{/each}
-			</div>
-		{/if}
-
-		<div class="mobile-content">
-			{@render settingsContent()}
-		</div>
-	</div>
-{:else}
-	<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
-		<div class="settings-card-content">
-			<div class="settings-inner">
-				<!-- Sidebar -->
-				<nav class="settings-sidebar">
-					{#each categories as cat}
-						<div class="sidebar-category">
-							<button
-								onclick={() => selectCategory(cat.id)}
-								class="category-header {activeCategory === cat.id ? 'active' : ''}"
-							>
-								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d={cat.icon} />
-								</svg>
-								<span>{cat.label}</span>
-							</button>
-							{#if activeCategory === cat.id}
-								<div class="sidebar-sections">
-									{#each cat.sections as section}
-										<button
-											onclick={() => selectSection(section.id)}
-											class="section-btn {activeSection === section.id ? 'active' : ''}"
-										>
-											{section.label}
-										</button>
-									{/each}
-								</div>
-							{/if}
-						</div>
-					{/each}
-				</nav>
-
-				<!-- Content -->
-				<div class="settings-content">
-					{@render settingsContent()}
-				</div>
-			</div>
-		</div>
-	</BaseCard>
-{/if}
-
-{#snippet settingsContent()}
-	{#if error}
-		<div class="error-banner">
-			<span>{error}</span>
-			<button onclick={() => error = ''} class="close-btn">&times;</button>
-		</div>
-	{/if}
-
-	<!-- ACCOUNT > GENERAL -->
-	{#if activeSection === 'general'}
-		<div class="section-content">
-			<div class="section-header">
-				<h3>General Settings</h3>
-				<p>Customize your experience.</p>
-			</div>
-
-			<!-- Theme -->
-			<div class="settings-group">
-				<h4>Appearance</h4>
-				<div class="theme-options">
-					<button onclick={() => theme.setTheme('light')} class="theme-btn {$themePreference === 'light' ? 'active' : ''}">
-						<div class="theme-preview light">☀️</div>
-						<span>Light</span>
-					</button>
-					<button onclick={() => theme.setTheme('dark')} class="theme-btn {$themePreference === 'dark' ? 'active' : ''}">
-						<div class="theme-preview dark">🌙</div>
-						<span>Dark</span>
-					</button>
-					<button onclick={() => theme.setTheme('system')} class="theme-btn {$themePreference === 'system' ? 'active' : ''}">
-						<div class="theme-preview system">💻</div>
+<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
+	{#snippet children()}
+		<div class="settings" class:mobile>
+			<!-- Tab Bar -->
+			<nav class="tab-bar">
+				<button
+					class="tab-btn"
+					class:active={activeTab === 'account'}
+					onclick={() => activeTab = 'account'}
+				>
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+						<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+						<circle cx="12" cy="7" r="4"/>
+					</svg>
+					<span>Account</span>
+				</button>
+				<button
+					class="tab-btn"
+					class:active={activeTab === 'ai'}
+					onclick={() => activeTab = 'ai'}
+				>
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+						<path d="M12 2L2 7l10 5 10-5-10-5z"/>
+						<path d="M2 17l10 5 10-5"/>
+						<path d="M2 12l10 5 10-5"/>
+					</svg>
+					<span>AI Models</span>
+				</button>
+				{#if $isAdmin}
+					<button
+						class="tab-btn"
+						class:active={activeTab === 'system'}
+						onclick={() => activeTab = 'system'}
+					>
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+							<circle cx="12" cy="12" r="3"/>
+							<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+						</svg>
 						<span>System</span>
 					</button>
-				</div>
-			</div>
-
-			<!-- Workspace -->
-			<div class="settings-group">
-				<h4>Workspace</h4>
-				{#if workspaceConfig === null}
-					<p class="text-muted">Loading...</p>
-				{:else if workspaceConfig?.is_local_mode}
-					<div class="input-row">
-						<input
-							type="text"
-							bind:value={workspacePath}
-							oninput={handleWorkspaceInput}
-							class="input flex-1 font-mono text-sm"
-							placeholder="/path/to/workspace"
-						/>
-						<button
-							onclick={saveWorkspace}
-							disabled={savingWorkspace || validatingWorkspace || !workspaceValidation?.valid || workspacePath === workspaceConfig?.workspace_path}
-							class="btn btn-primary"
-						>
-							{savingWorkspace ? '...' : 'Save'}
-						</button>
-					</div>
-					{#if workspaceSuccess}
-						<p class="text-success text-sm">{workspaceSuccess}</p>
-					{:else if workspaceError}
-						<p class="text-error text-sm">{workspaceError}</p>
-					{:else if validatingWorkspace}
-						<p class="text-muted text-sm">Validating...</p>
-					{:else if workspaceValidation && workspacePath !== workspaceConfig?.workspace_path}
-						<p class="text-sm {workspaceValidation.valid ? 'text-success' : 'text-error'}">
-							{workspaceValidation.valid ? (workspaceValidation.exists ? '✓ Directory exists' : '✓ Will be created') : 'Invalid path'}
-						</p>
-					{/if}
-				{:else}
-					<div class="docker-info">
-						<span>🐳</span>
-						<div>
-							<p class="font-medium">Docker Mode</p>
-							<p class="text-muted text-sm">Workspace: <code>{workspaceConfig?.workspace_path}</code></p>
-						</div>
-					</div>
 				{/if}
-			</div>
-		</div>
-	{/if}
+			</nav>
 
-	<!-- ACCOUNT > SECURITY -->
-	{#if activeSection === 'security'}
-		<div class="section-content">
-			<div class="section-header">
-				<h3>Security</h3>
-				<p>Manage your account security.</p>
-			</div>
-
-			<!-- Change Password -->
-			<div class="settings-group">
-				<h4>Change Password</h4>
-				<div class="form-stack">
-					<input type="password" bind:value={currentPassword} class="input" placeholder="Current password" autocomplete="current-password" />
-					<input type="password" bind:value={newPassword} class="input" placeholder="New password (min 8 characters)" autocomplete="new-password" />
-					<input type="password" bind:value={confirmPassword} class="input" placeholder="Confirm new password" autocomplete="new-password" />
-					{#if passwordChangeError}
-						<p class="text-error text-sm">{passwordChangeError}</p>
-					{/if}
-					{#if passwordChangeSuccess}
-						<p class="text-success text-sm">{passwordChangeSuccess}</p>
-					{/if}
-					<button onclick={handlePasswordChange} class="btn btn-primary" disabled={changingPassword}>
-						{changingPassword ? 'Changing...' : 'Change Password'}
-					</button>
-				</div>
-			</div>
-
-			<!-- 2FA -->
-			<div class="settings-group">
-				<h4>Two-Factor Authentication</h4>
-				<TwoFactorSetup />
-			</div>
-
-			<!-- Encryption Info -->
-			<div class="info-card success">
-				<span class="icon">🔒</span>
-				<div>
-					<h4>Encryption</h4>
-					<p>Your API keys are encrypted at rest using your password.</p>
-				</div>
-			</div>
-		</div>
-	{/if}
-
-	<!-- ACCOUNT > AUTHENTICATION (Connections) -->
-	{#if activeSection === 'authentication'}
-		<div class="section-content">
-			<div class="section-header">
-				<h3>Connections</h3>
-				<p>Connect external services.</p>
-			</div>
-
-			<!-- Claude Code -->
-			<div class="connection-card">
-				<div class="connection-header">
-					<div class="connection-icon orange">🤖</div>
-					<div class="connection-info">
-						<div class="connection-title">
-							<span>Claude Code</span>
-							{#if $claudeAuthenticated}
-								<span class="badge success">Connected</span>
-							{:else}
-								<span class="badge muted">Not Connected</span>
-							{/if}
-						</div>
-						<p class="text-muted text-sm">AI-powered code assistance</p>
-					</div>
-				</div>
-				<div class="connection-actions">
-					{#if $claudeAuthenticated}
-						<button onclick={handleClaudeReconnect} disabled={claudeLoginLoading} class="btn btn-primary flex-1">
-							{claudeLoginLoading ? 'Connecting...' : 'Reconnect'}
-						</button>
-						<button onclick={handleClaudeLogout} class="btn btn-secondary flex-1">Disconnect</button>
-					{:else if claudeOAuthUrl}
-						<div class="oauth-flow">
-							<a href={claudeOAuthUrl} target="_blank" rel="noopener noreferrer" class="btn btn-primary w-full">
-								1. Open Login Page
-							</a>
-							<div class="input-row">
-								<input type="text" bind:value={claudeAuthCode} placeholder="2. Paste code here" class="input flex-1" />
-								<button onclick={completeClaudeLogin} disabled={claudeCompletingLogin || !claudeAuthCode.trim()} class="btn btn-primary">
-									{claudeCompletingLogin ? '...' : 'OK'}
-								</button>
-							</div>
-							<button onclick={cancelClaudeLogin} class="text-muted text-sm hover:underline">Cancel</button>
-						</div>
-					{:else}
-						<button onclick={() => handleClaudeLogin()} disabled={claudeLoginLoading} class="btn btn-primary w-full">
-							{claudeLoginLoading ? 'Starting...' : 'Connect Claude'}
-						</button>
-					{/if}
-				</div>
-			</div>
-
-			<!-- GitHub -->
-			<div class="connection-card">
-				<div class="connection-header">
-					<div class="connection-icon">🐙</div>
-					<div class="connection-info">
-						<div class="connection-title">
-							<span>GitHub</span>
-							{#if $githubAuthenticated}
-								<span class="badge success">Connected</span>
-							{:else}
-								<span class="badge muted">Not Connected</span>
-							{/if}
-						</div>
-						<p class="text-muted text-sm">{$githubAuthenticated && githubUser ? githubUser : 'Repository management'}</p>
-					</div>
-				</div>
-				<div class="connection-actions">
-					{#if $githubAuthenticated}
-						<button onclick={handleGitHubLogout} class="btn btn-secondary w-full">Disconnect</button>
-					{:else}
-						<input type="password" bind:value={githubToken} placeholder="Personal Access Token" class="input" />
-						<button onclick={handleGitHubLogin} disabled={githubLoginLoading} class="btn btn-primary w-full">
-							{githubLoginLoading ? 'Connecting...' : 'Connect GitHub'}
-						</button>
-						<p class="text-muted text-sm text-center">
-							<a href="https://github.com/settings/tokens/new?scopes=repo,read:org,gist,workflow" target="_blank" class="text-primary hover:underline">Create token</a>
-						</p>
-					{/if}
-				</div>
-			</div>
-		</div>
-	{/if}
-
-	<!-- API & USERS > USERS (with inline Key Policies) -->
-	{#if activeSection === 'users'}
-		<div class="section-content api-users-section">
-			<!-- Section Header -->
-			<div class="section-header">
-				<div class="section-title-row">
-					<h3>API Users</h3>
-					<p>Manage programmatic access and credential policies.</p>
-				</div>
-				{#if formMode === 'closed'}
-					<button onclick={openCreateForm} class="btn btn-primary btn-glow">
-						<span class="btn-icon">+</span>
-						Create User
-					</button>
-				{/if}
-			</div>
-
-			<!-- Scrollable Content Area -->
-			<div class="api-users-scroll-area">
-				<!-- Inline Form Panel -->
-				{#if formMode !== 'closed'}
-					<div class="inline-form-panel" transition:slide={{ duration: 300, easing: quintOut }}>
-						<div class="form-panel-header">
-							<h4>{formMode === 'edit' ? 'Edit API User' : 'Create API User'}</h4>
-							<button onclick={closeForm} class="icon-btn close-form" title="Close">✕</button>
-						</div>
-
-						{#if newlyCreatedKey}
-							<div class="key-success-panel" transition:fade={{ duration: 200 }}>
-								<div class="success-icon">🔑</div>
-								<h5>API User Created Successfully</h5>
-								<p class="key-warning">Copy this key now — it won't be shown again:</p>
-								<div class="key-display-inline">
-									<code>{newlyCreatedKey}</code>
-									<button
-										onclick={() => { copyToClipboard(newlyCreatedKey || ''); closeForm(); }}
-										class="btn btn-primary btn-glow"
-									>
-										Copy & Close
-									</button>
-								</div>
-							</div>
-						{:else}
-							<div class="form-grid">
-								<div class="form-field full-width">
-									<label>Name <span class="required">*</span></label>
-									<input
-										bind:value={formData.name}
-										class="input input-lg"
-										placeholder="My Application"
-									/>
-								</div>
-								<div class="form-field full-width">
-									<label>Description</label>
-									<textarea
-										bind:value={formData.description}
-										class="input"
-										rows="2"
-										placeholder="Optional description"
-									></textarea>
-								</div>
-								<div class="form-field">
-									<label>Project</label>
-									<select bind:value={formData.project_id} class="input">
-										<option value="">Default</option>
-										{#each projects as project}
-											<option value={project.id}>{project.name}</option>
-										{/each}
-									</select>
-								</div>
-								<div class="form-field full-width">
-									<label>Allowed Profiles</label>
-									<p class="field-hint" style="margin-top: 0; margin-bottom: var(--space-2);">
-										{formData.profile_ids.length === 0 ? 'No restriction - user can access any profile' : `${formData.profile_ids.length} profile${formData.profile_ids.length !== 1 ? 's' : ''} selected`}
-									</p>
-									<div class="profile-multiselect">
-										{#each profiles as profile}
-											<label class="profile-checkbox-item">
-												<input
-													type="checkbox"
-													checked={formData.profile_ids.includes(profile.id)}
-													onchange={(e) => {
-														const target = e.target as HTMLInputElement;
-														if (target.checked) {
-															formData.profile_ids = [...formData.profile_ids, profile.id];
-														} else {
-															formData.profile_ids = formData.profile_ids.filter(id => id !== profile.id);
-														}
-													}}
-												/>
-												<span class="profile-name">{profile.name}</span>
-											</label>
-										{/each}
-										{#if profiles.length === 0}
-											<p class="empty-profiles-hint">No profiles available</p>
-										{/if}
-									</div>
-								</div>
-								<div class="form-field full-width">
-									<label class="checkbox-label">
-										<input type="checkbox" bind:checked={formData.web_login_allowed} />
-										<span>Allow web login</span>
-									</label>
-									<p class="field-hint">User can register with the API key and set credentials for web access</p>
-								</div>
-								{#if editingUser?.username}
-									<div class="info-box full-width">
-										<p><strong>Registered as:</strong> @{editingUser.username}</p>
-									</div>
-								{/if}
-							</div>
-							<div class="form-actions">
-								<button onclick={closeForm} class="btn btn-secondary">Cancel</button>
-								<button onclick={saveApiUser} class="btn btn-primary btn-glow">
-									{formMode === 'edit' ? 'Update User' : 'Create User'}
-								</button>
-							</div>
-						{/if}
+			<!-- Content -->
+			<div class="content">
+				{#if error}
+					<div class="alert error" transition:slide={{ duration: 200 }}>
+						<span>{error}</span>
+						<button onclick={() => error = ''} class="close-btn">&times;</button>
 					</div>
 				{/if}
 
-				<!-- User List -->
-				{#if loading}
-					<div class="loading-state">
-						<div class="loading-spinner"></div>
-						<span>Loading users...</span>
-					</div>
-				{:else if apiUsers.length === 0}
-					<div class="empty-state atmospheric">
-						<div class="empty-icon">👤</div>
-						<p class="empty-title">No API users yet</p>
-						<p class="empty-desc">Create your first user to enable external access.</p>
-					</div>
-				{:else}
-					<div class="user-list">
-						{#each apiUsers as user, index}
-							<div
-								class="user-card"
-								class:active={user.is_active}
-								class:inactive={!user.is_active}
-								class:editing={editingUser?.id === user.id}
-								class:policies-expanded={expandedUserPolicies === user.id}
-								style="animation-delay: {index * 60}ms"
-							>
-								<div class="user-card-main">
-									<div class="user-info">
-										<div class="user-header">
-											<span class="user-name">{user.name}</span>
-											{#if user.username}
-												<span class="badge primary">@{user.username}</span>
-											{/if}
-											<span class="badge {user.is_active ? 'success' : 'error'}">{user.is_active ? 'Active' : 'Inactive'}</span>
-											{#if user.web_login_allowed}
-												<span class="badge info" title="Can login via web with username/password">🌐 Web</span>
-											{/if}
+				<!-- ACCOUNT TAB -->
+				{#if activeTab === 'account'}
+					<div class="tab-content" transition:fade={{ duration: 150 }}>
+						<!-- General Section -->
+						<section class="section">
+							<button class="section-header" onclick={() => toggleSection('general')}>
+								<h3>General</h3>
+								<svg class="chevron" class:expanded={expandedSections.has('general')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<polyline points="6 9 12 15 18 9"/>
+								</svg>
+							</button>
+							{#if expandedSections.has('general')}
+								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
+									<!-- Theme -->
+									<div class="setting-row">
+										<div class="setting-info">
+											<label>Theme</label>
+											<span class="setting-desc">Choose your preferred appearance</span>
 										</div>
-										{#if user.description}
-											<p class="user-desc">{user.description}</p>
+										<div class="theme-switcher">
+											<button
+												class="theme-option"
+												class:active={$themePreference === 'light'}
+												onclick={() => theme.setTheme('light')}
+											>
+												<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+													<circle cx="12" cy="12" r="5"/>
+													<path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+												</svg>
+											</button>
+											<button
+												class="theme-option"
+												class:active={$themePreference === 'dark'}
+												onclick={() => theme.setTheme('dark')}
+											>
+												<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+													<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+												</svg>
+											</button>
+											<button
+												class="theme-option"
+												class:active={$themePreference === 'system'}
+												onclick={() => theme.setTheme('system')}
+											>
+												<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+													<rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+													<line x1="8" y1="21" x2="16" y2="21"/>
+													<line x1="12" y1="17" x2="12" y2="21"/>
+												</svg>
+											</button>
+										</div>
+									</div>
+
+									<!-- Theme Preset -->
+									<div class="setting-row">
+										<div class="setting-info">
+											<label for="theme-preset">Theme Style</label>
+											<span class="setting-desc">Choose a color palette</span>
+										</div>
+										<select
+											id="theme-preset"
+											class="input"
+											value={$currentPresetId ?? ''}
+											onchange={(e) => theme.setPreset(e.currentTarget.value || null)}
+										>
+											<option value="">Default</option>
+											{#each themePresets as preset}
+												<option value={preset.id}>{preset.label}</option>
+											{/each}
+										</select>
+									</div>
+
+									<!-- Workspace Path -->
+									<div class="setting-row vertical">
+										<div class="setting-info">
+											<label>Workspace Path</label>
+											<span class="setting-desc">Base directory for projects</span>
+										</div>
+										<div class="input-group">
+											<input
+												type="text"
+												bind:value={workspacePath}
+												placeholder="/path/to/workspace"
+												class="input"
+											/>
+											<button
+												onclick={handleValidateWorkspace}
+												disabled={validatingWorkspace || !workspacePath.trim()}
+												class="btn secondary"
+											>
+												{validatingWorkspace ? '...' : 'Validate'}
+											</button>
+											<button
+												onclick={handleSaveWorkspace}
+												disabled={savingWorkspace || !workspacePath.trim()}
+												class="btn primary"
+											>
+												{savingWorkspace ? '...' : 'Save'}
+											</button>
+										</div>
+										{#if workspaceValidation}
+											<div class="validation-result" class:valid={workspaceValidation.valid}>
+												{workspaceValidation.valid ? '✓ Valid path' : `✗ ${workspaceValidation.error}`}
+											</div>
 										{/if}
-										<div class="user-meta">
-											<span>Profiles: {user.profile_ids?.length ? user.profile_ids.map(id => profiles.find(p => p.id === id)?.name || id).join(', ') : 'Any'}</span>
-											{#if user.username}
-												<span>Web Login: ✓ Registered</span>
-											{:else if user.web_login_allowed}
-												<span>Web Login: Pending registration</span>
+										{#if workspaceSuccess}
+											<div class="success-msg">{workspaceSuccess}</div>
+										{/if}
+										{#if workspaceError}
+											<div class="error-msg">{workspaceError}</div>
+										{/if}
+									</div>
+								</div>
+							{/if}
+						</section>
+
+						<!-- Security Section -->
+						<section class="section">
+							<button class="section-header" onclick={() => toggleSection('security')}>
+								<h3>Security</h3>
+								<svg class="chevron" class:expanded={expandedSections.has('security')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<polyline points="6 9 12 15 18 9"/>
+								</svg>
+							</button>
+							{#if expandedSections.has('security')}
+								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
+									<!-- Password Change -->
+									<div class="setting-row vertical">
+										<div class="setting-info">
+											<label>Change Password</label>
+										</div>
+										<div class="password-form">
+											<input
+												type="password"
+												bind:value={currentPassword}
+												placeholder="Current password"
+												class="input"
+											/>
+											<input
+												type="password"
+												bind:value={newPassword}
+												placeholder="New password (8+ chars)"
+												class="input"
+											/>
+											<input
+												type="password"
+												bind:value={confirmPassword}
+												placeholder="Confirm password"
+												class="input"
+											/>
+											<button
+												onclick={handleChangePassword}
+												disabled={changingPassword || !currentPassword || !newPassword || !confirmPassword}
+												class="btn primary"
+											>
+												{changingPassword ? 'Changing...' : 'Change Password'}
+											</button>
+										</div>
+										{#if passwordChangeSuccess}
+											<div class="success-msg">{passwordChangeSuccess}</div>
+										{/if}
+										{#if passwordChangeError}
+											<div class="error-msg">{passwordChangeError}</div>
+										{/if}
+									</div>
+
+									<!-- 2FA -->
+									<div class="setting-row vertical">
+										<div class="setting-info">
+											<label>Two-Factor Authentication</label>
+											<span class="setting-desc">Add an extra layer of security</span>
+										</div>
+										<TwoFactorSetup />
+									</div>
+								</div>
+							{/if}
+						</section>
+
+						<!-- Connections Section -->
+						<section class="section">
+							<button class="section-header" onclick={() => toggleSection('connections')}>
+								<h3>Connections</h3>
+								<svg class="chevron" class:expanded={expandedSections.has('connections')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<polyline points="6 9 12 15 18 9"/>
+								</svg>
+							</button>
+							{#if expandedSections.has('connections')}
+								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
+									<!-- Claude Code -->
+									<div class="connection-row">
+										<div class="connection-info">
+											<div class="connection-icon claude">
+												<svg viewBox="0 0 24 24" fill="currentColor">
+													<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+												</svg>
+											</div>
+											<div>
+												<span class="connection-name">Claude Code</span>
+												{#if $claudeAuthenticated}
+													<span class="badge success">Connected</span>
+												{/if}
+											</div>
+										</div>
+										<div class="connection-actions">
+											{#if $claudeAuthenticated}
+												<span class="connected-text">Authenticated</span>
+											{:else if claudeOAuthUrl}
+												<div class="oauth-flow">
+													<input
+														type="text"
+														bind:value={claudeAuthCode}
+														placeholder="Paste code from browser"
+														class="input compact"
+													/>
+													<button
+														onclick={completeClaudeOAuth}
+														disabled={claudeCompletingLogin || !claudeAuthCode}
+														class="btn primary compact"
+													>
+														{claudeCompletingLogin ? '...' : 'Complete'}
+													</button>
+												</div>
 											{:else}
-												<span>Web Login: Disabled</span>
+												<button
+													onclick={startClaudeOAuth}
+													disabled={claudeLoginLoading}
+													class="btn primary compact"
+												>
+													{claudeLoginLoading ? '...' : 'Connect'}
+												</button>
 											{/if}
-											<span>Last used: {formatDate(user.last_used_at)}</span>
 										</div>
 									</div>
-									<div class="user-actions">
-										<button onclick={() => toggleUserPolicies(user.id)} class="icon-btn" title="Key Policies" class:active={expandedUserPolicies === user.id}>🔑</button>
-										<button onclick={() => openEditForm(user)} class="icon-btn" title="Edit">✏️</button>
-										<button onclick={() => regenerateKey(user.id)} class="icon-btn" title="Regenerate Key">🔄</button>
-										<button onclick={() => toggleActive(user)} class="icon-btn" title={user.is_active ? 'Deactivate' : 'Activate'}>
-											{user.is_active ? '⏸️' : '▶️'}
-										</button>
-										<button onclick={() => deleteUser(user.id)} class="icon-btn danger" title="Delete">🗑️</button>
+
+									<!-- GitHub -->
+									<div class="connection-row">
+										<div class="connection-info">
+											<div class="connection-icon github">
+												<svg viewBox="0 0 24 24" fill="currentColor">
+													<path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+												</svg>
+											</div>
+											<div>
+												<span class="connection-name">GitHub</span>
+												{#if githubUser}
+													<span class="badge success">@{githubUser}</span>
+												{/if}
+											</div>
+										</div>
+										<div class="connection-actions">
+											{#if githubUser}
+												<button onclick={disconnectGithub} class="btn danger compact">Disconnect</button>
+											{:else}
+												<div class="oauth-flow">
+													<input
+														type="password"
+														bind:value={githubToken}
+														placeholder="Personal access token"
+														class="input compact"
+													/>
+													<button
+														onclick={connectGithub}
+														disabled={githubLoginLoading || !githubToken}
+														class="btn primary compact"
+													>
+														{githubLoginLoading ? '...' : 'Connect'}
+													</button>
+												</div>
+											{/if}
+										</div>
 									</div>
 								</div>
-							</div>
+							{/if}
+						</section>
+					</div>
+				{/if}
 
-							<!-- Per-user Key Policies (below card) -->
-							{#if expandedUserPolicies === user.id}
-								<div class="user-policies-below" transition:slide={{ duration: 200, easing: quintOut }}>
-									<div class="policies-below-header">
-										<span class="policies-below-title">🔑 Key Policies</span>
-										<span class="policies-below-hint">Configure API key access for {user.name}</span>
-									</div>
-									{#if loadingUserPolicies === user.id}
-										<div class="policies-loading">
-											<div class="loading-spinner small"></div>
-											<span>Loading policies...</span>
+				<!-- AI TAB -->
+				{#if activeTab === 'ai'}
+					<div class="tab-content" transition:fade={{ duration: 150 }}>
+						<!-- API Keys Section -->
+						<section class="section">
+							<button class="section-header" onclick={() => toggleSection('api-keys')}>
+								<h3>API Keys</h3>
+								<svg class="chevron" class:expanded={expandedSections.has('api-keys')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<polyline points="6 9 12 15 18 9"/>
+								</svg>
+							</button>
+							{#if expandedSections.has('api-keys')}
+								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
+									<!-- OpenAI -->
+									<div class="api-key-row">
+										<div class="api-key-info">
+											<span class="api-key-name">OpenAI</span>
+											{#if openaiApiKeyMasked}
+												<code class="masked-key">{openaiApiKeyMasked}</code>
+											{/if}
 										</div>
-									{:else if userPolicies.has(user.id)}
-										<div class="policies-below-list">
-											{#each userPolicies.get(user.id) || [] as policy}
-												<div class="policy-row" class:has-override={policy.source === 'user'}>
-													<div class="policy-row-info">
-														<span class="policy-row-name">{policy.name}</span>
-														{#if policy.source === 'user'}
-															<span class="policy-custom-badge">Custom</span>
+										<div class="api-key-input">
+											<input
+												type="password"
+												bind:value={openaiApiKey}
+												placeholder={openaiApiKeyMasked ? 'Enter new key...' : 'sk-...'}
+												class="input compact"
+											/>
+											<button
+												onclick={saveOpenaiApiKey}
+												disabled={savingOpenaiKey || !openaiApiKey.trim()}
+												class="btn primary compact"
+											>
+												{savingOpenaiKey ? '...' : 'Save'}
+											</button>
+										</div>
+										{#if openaiKeySuccess}<span class="inline-success">{openaiKeySuccess}</span>{/if}
+										{#if openaiKeyError}<span class="inline-error">{openaiKeyError}</span>{/if}
+									</div>
+
+									<!-- Meshy -->
+									<div class="api-key-row">
+										<div class="api-key-info">
+											<span class="api-key-name">Meshy (3D)</span>
+											{#if meshyApiKeyMasked}
+												<code class="masked-key">{meshyApiKeyMasked}</code>
+											{/if}
+										</div>
+										<div class="api-key-input">
+											<input
+												type="password"
+												bind:value={meshyApiKey}
+												placeholder={meshyApiKeyMasked ? 'Enter new key...' : 'API key'}
+												class="input compact"
+											/>
+											<button
+												onclick={saveMeshyKey}
+												disabled={savingMeshyKey || !meshyApiKey.trim()}
+												class="btn primary compact"
+											>
+												{savingMeshyKey ? '...' : 'Save'}
+											</button>
+										</div>
+										{#if meshyKeySuccess}<span class="inline-success">{meshyKeySuccess}</span>{/if}
+										{#if meshyKeyError}<span class="inline-error">{meshyKeyError}</span>{/if}
+									</div>
+
+									<!-- DeepSeek -->
+									<div class="api-key-row">
+										<div class="api-key-info">
+											<span class="api-key-name">DeepSeek</span>
+											{#if deepseekApiKeyMasked}
+												<code class="masked-key">{deepseekApiKeyMasked}</code>
+											{/if}
+										</div>
+										<div class="api-key-input">
+											<input
+												type="password"
+												bind:value={deepseekApiKey}
+												placeholder={deepseekApiKeyMasked ? 'Enter new key...' : 'sk-...'}
+												class="input compact"
+											/>
+											<button
+												onclick={saveDeepseekKey}
+												disabled={savingDeepseekKey || !deepseekApiKey.trim()}
+												class="btn primary compact"
+											>
+												{savingDeepseekKey ? '...' : 'Save'}
+											</button>
+										</div>
+										{#if deepseekKeySuccess}<span class="inline-success">{deepseekKeySuccess}</span>{/if}
+										{#if deepseekKeyError}<span class="inline-error">{deepseekKeyError}</span>{/if}
+									</div>
+								</div>
+							{/if}
+						</section>
+
+						<!-- Image Models Section -->
+						<section class="section">
+							<button class="section-header" onclick={() => toggleSection('image-models')}>
+								<h3>Image Generation</h3>
+								<svg class="chevron" class:expanded={expandedSections.has('image-models')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<polyline points="6 9 12 15 18 9"/>
+								</svg>
+							</button>
+							{#if expandedSections.has('image-models')}
+								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
+									<div class="model-selector">
+										<select
+											bind:value={selectedImageModel}
+											onchange={updateImageModel}
+											disabled={updatingImageModel}
+											class="input select"
+										>
+											{#each Object.entries(groupModelsByProvider(ALL_IMAGE_MODELS)) as [provider, models]}
+												<optgroup label={provider}>
+													{#each models as model}
+														<option value={model.id}>
+															{model.displayName} — ${model.pricePerImage.toFixed(2)}/img
+														</option>
+													{/each}
+												</optgroup>
+											{/each}
+										</select>
+										{#if updatingImageModel}
+											<span class="loading-indicator">Updating...</span>
+										{/if}
+									</div>
+									{#if imageConfigSuccess}<div class="success-msg">{imageConfigSuccess}</div>{/if}
+									{#if imageConfigError}<div class="error-msg">{imageConfigError}</div>{/if}
+								</div>
+							{/if}
+						</section>
+
+						<!-- Video Models Section -->
+						<section class="section">
+							<button class="section-header" onclick={() => toggleSection('video-models')}>
+								<h3>Video Generation</h3>
+								<svg class="chevron" class:expanded={expandedSections.has('video-models')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<polyline points="6 9 12 15 18 9"/>
+								</svg>
+							</button>
+							{#if expandedSections.has('video-models')}
+								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
+									<div class="model-selector">
+										<select
+											bind:value={selectedVideoModel}
+											onchange={updateVideoModel}
+											disabled={savingVideoModel}
+											class="input select"
+										>
+											{#each Object.entries(groupModelsByProvider(ALL_VIDEO_MODELS)) as [provider, models]}
+												<optgroup label={provider}>
+													{#each models as model}
+														<option value={model.id}>
+															{model.displayName} — ${model.pricePerSecond.toFixed(2)}/sec, max {model.maxDuration}s
+														</option>
+													{/each}
+												</optgroup>
+											{/each}
+										</select>
+										{#if savingVideoModel}
+											<span class="loading-indicator">Updating...</span>
+										{/if}
+									</div>
+									{#if videoConfigSuccess}<div class="success-msg">{videoConfigSuccess}</div>{/if}
+									{#if videoConfigError}<div class="error-msg">{videoConfigError}</div>{/if}
+								</div>
+							{/if}
+						</section>
+
+						<!-- Audio Section -->
+						<section class="section">
+							<button class="section-header" onclick={() => toggleSection('audio-models')}>
+								<h3>Audio (TTS/STT)</h3>
+								<svg class="chevron" class:expanded={expandedSections.has('audio-models')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<polyline points="6 9 12 15 18 9"/>
+								</svg>
+							</button>
+							{#if expandedSections.has('audio-models')}
+								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
+									<!-- TTS Model -->
+									<div class="setting-row">
+										<label class="setting-label">Text-to-Speech Model</label>
+										<select
+											bind:value={selectedTtsModel}
+											onchange={updateTtsModel}
+											disabled={savingTtsModel}
+											class="input select"
+										>
+											{#each Object.entries(groupModelsByProvider(ALL_TTS_MODELS)) as [provider, models]}
+												<optgroup label={provider}>
+													{#each models as model}
+														<option value={model.id}>{model.displayName}</option>
+													{/each}
+												</optgroup>
+											{/each}
+										</select>
+									</div>
+
+									<!-- TTS Voice -->
+									<div class="setting-row">
+										<label class="setting-label">Voice</label>
+										<select bind:value={selectedTtsVoice} class="input select">
+											{#each getAvailableVoices() as voice}
+												<option value={voice.id}>{voice.name} {voice.gender ? `(${voice.gender})` : ''}</option>
+											{/each}
+											{#if getAvailableVoices().length === 0}
+												<option value="alloy">Alloy</option>
+												<option value="echo">Echo</option>
+												<option value="fable">Fable</option>
+												<option value="onyx">Onyx</option>
+												<option value="nova">Nova</option>
+												<option value="shimmer">Shimmer</option>
+											{/if}
+										</select>
+									</div>
+
+									<!-- TTS Speed -->
+									<div class="setting-row">
+										<label class="setting-label">Speed ({ttsSpeed.toFixed(1)}x)</label>
+										<input type="range" min="0.25" max="4.0" step="0.1" bind:value={ttsSpeed} class="slider" />
+									</div>
+
+									<!-- TTS Format -->
+									<div class="setting-row">
+										<label class="setting-label">Output Format</label>
+										<select bind:value={ttsOutputFormat} class="input select compact">
+											<option value="mp3">MP3</option>
+											<option value="wav">WAV</option>
+											<option value="opus">Opus</option>
+											<option value="aac">AAC</option>
+											<option value="flac">FLAC</option>
+										</select>
+									</div>
+
+									<!-- Voice Instructions (if steerable) -->
+									{#if isCurrentModelSteerable()}
+										<div class="setting-row vertical">
+											<label class="setting-label">Voice Instructions <span class="badge primary">Steerable</span></label>
+											<textarea
+												bind:value={ttsInstructions}
+												placeholder="e.g., Speak in a warm, friendly tone..."
+												class="input textarea"
+												rows="2"
+											></textarea>
+										</div>
+									{/if}
+
+									<button
+										onclick={saveTtsSettings}
+										disabled={savingTtsSettings}
+										class="btn primary"
+									>
+										{savingTtsSettings ? 'Saving...' : 'Save TTS Settings'}
+									</button>
+
+									<hr class="divider" />
+
+									<!-- STT Model -->
+									<div class="setting-row">
+										<label class="setting-label">Speech-to-Text Model</label>
+										<select
+											bind:value={selectedSttModel}
+											onchange={updateSttModel}
+											disabled={savingSttModel}
+											class="input select"
+										>
+											{#each Object.entries(groupModelsByProvider(ALL_STT_MODELS)) as [provider, models]}
+												<optgroup label={provider}>
+													{#each models as model}
+														<option value={model.id}>{model.displayName}</option>
+													{/each}
+												</optgroup>
+											{/each}
+										</select>
+									</div>
+
+									{#if audioConfigSuccess}<div class="success-msg">{audioConfigSuccess}</div>{/if}
+									{#if audioConfigError}<div class="error-msg">{audioConfigError}</div>{/if}
+								</div>
+							{/if}
+						</section>
+
+						<!-- 3D Models Section -->
+						<section class="section">
+							<button class="section-header" onclick={() => toggleSection('3d-models')}>
+								<h3>3D Generation</h3>
+								<svg class="chevron" class:expanded={expandedSections.has('3d-models')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<polyline points="6 9 12 15 18 9"/>
+								</svg>
+							</button>
+							{#if expandedSections.has('3d-models')}
+								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
+									<div class="model-selector">
+										<select
+											bind:value={selected3DModel}
+											onchange={save3DModel}
+											disabled={saving3DModel}
+											class="input select"
+										>
+											<option value="meshy-6">Meshy 6 (Latest) — Best Quality</option>
+											<option value="meshy-5">Meshy 5 — Balanced</option>
+											<option value="meshy-4">Meshy 4 — Fast</option>
+										</select>
+										{#if saving3DModel}
+											<span class="loading-indicator">Updating...</span>
+										{/if}
+									</div>
+									{#if model3DSuccess}<div class="success-msg">{model3DSuccess}</div>{/if}
+									{#if model3DError}<div class="error-msg">{model3DError}</div>{/if}
+								</div>
+							{/if}
+						</section>
+					</div>
+				{/if}
+
+				<!-- SYSTEM TAB -->
+				{#if activeTab === 'system' && $isAdmin}
+					<div class="tab-content" transition:fade={{ duration: 150 }}>
+						<!-- API Users Section -->
+						<section class="section">
+							<button class="section-header" onclick={() => toggleSection('users')}>
+								<h3>API Users</h3>
+								<svg class="chevron" class:expanded={expandedSections.has('users')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<polyline points="6 9 12 15 18 9"/>
+								</svg>
+							</button>
+							{#if expandedSections.has('users')}
+								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
+									{#if loading}
+										<div class="loading-text">Loading...</div>
+									{:else}
+										<button onclick={openCreateForm} class="btn primary compact mb-3">
+											+ New User
+										</button>
+
+										{#if formMode !== 'closed'}
+											<div class="user-form" transition:slide={{ duration: 200 }}>
+												<h4>{formMode === 'create' ? 'Create User' : 'Edit User'}</h4>
+												<input
+													type="text"
+													bind:value={formData.name}
+													placeholder="Username"
+													class="input"
+												/>
+												<input
+													type="text"
+													bind:value={formData.description}
+													placeholder="Description (optional)"
+													class="input"
+												/>
+												<select bind:value={formData.project_id} class="input select">
+													<option value="">No project restriction</option>
+													{#each projects as project}
+														<option value={project.id}>{project.name}</option>
+													{/each}
+												</select>
+												<label class="checkbox-label">
+													<input type="checkbox" bind:checked={formData.web_login_allowed} />
+													<span>Allow web login</span>
+												</label>
+												<div class="form-actions">
+													<button onclick={closeForm} class="btn secondary compact">Cancel</button>
+													<button onclick={saveUser} class="btn primary compact">
+														{formMode === 'create' ? 'Create' : 'Save'}
+													</button>
+												</div>
+												{#if newlyCreatedKey}
+													<div class="api-key-display">
+														<strong>API Key (save now!):</strong>
+														<code>{newlyCreatedKey}</code>
+													</div>
+												{/if}
+											</div>
+										{/if}
+
+										<div class="users-list">
+											{#each apiUsers as user}
+												<div class="user-row" class:inactive={!user.is_active}>
+													<div class="user-info">
+														<span class="user-name">{user.name}</span>
+														{#if !user.is_active}
+															<span class="badge muted">Inactive</span>
+														{/if}
+														{#if user.description}
+															<span class="user-desc">{user.description}</span>
 														{/if}
 													</div>
-													<div class="policy-row-control">
-														<select
-															value={policy.policy}
-															onchange={(e) => handleUserPolicyChange(user.id, policy.credential_type, (e.currentTarget as HTMLSelectElement).value as CredentialPolicyType)}
-															disabled={savingUserPolicy === `${user.id}:${policy.credential_type}`}
-															class="policy-row-select"
-														>
-															<option value="admin_provided">Admin Provides</option>
-															<option value="user_provided">User Must Provide</option>
-															<option value="optional">Optional</option>
-														</select>
-														{#if savingUserPolicy === `${user.id}:${policy.credential_type}`}
-															<div class="saving-indicator"></div>
-														{/if}
+													<div class="user-actions">
+														<button onclick={() => openEditForm(user)} class="icon-btn" title="Edit">
+															<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+																<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+																<path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+															</svg>
+														</button>
+														<button onclick={() => regenerateKey(user.id)} class="icon-btn" title="Regenerate Key">
+															<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+																<polyline points="23 4 23 10 17 10"/>
+																<path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+															</svg>
+														</button>
+														<button onclick={() => toggleUserActive(user)} class="icon-btn" title={user.is_active ? 'Deactivate' : 'Activate'}>
+															{#if user.is_active}
+																<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+																	<path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>
+																	<line x1="12" y1="2" x2="12" y2="12"/>
+																</svg>
+															{:else}
+																<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+																	<path d="M5 12.55a11 11 0 0 1 14.08 0"/>
+																	<path d="M1.42 9a16 16 0 0 1 21.16 0"/>
+																	<path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
+																	<circle cx="12" cy="20" r="1"/>
+																</svg>
+															{/if}
+														</button>
+														<button onclick={() => deleteUser(user.id)} class="icon-btn danger" title="Delete">
+															<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+																<polyline points="3 6 5 6 21 6"/>
+																<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+															</svg>
+														</button>
 													</div>
 												</div>
+												{#if regeneratedKey && editingUser?.id === user.id}
+													<div class="api-key-display" transition:slide>
+														<strong>New API Key:</strong>
+														<code>{regeneratedKey}</code>
+													</div>
+												{/if}
 											{/each}
 										</div>
-									{:else}
-										<div class="policies-empty">No credential policies available</div>
 									{/if}
 								</div>
 							{/if}
-						{/each}
-					</div>
-				{/if}
+						</section>
 
-				<!-- Regenerated Key Display (floating) -->
-				{#if regeneratedKey}
-					<div class="key-display floating" transition:fly={{ y: 20, duration: 300 }}>
-						<p class="font-medium">New API Key Generated</p>
-						<div class="input-row">
-							<code class="flex-1">{regeneratedKey}</code>
-							<button onclick={() => { copyToClipboard(regeneratedKey || ''); regeneratedKey = null; }} class="btn btn-primary">Copy</button>
-						</div>
-					</div>
-				{/if}
-			</div>
-		</div>
-	{/if}
-
-	<!-- API & USERS > RATE LIMITS -->
-	{#if activeSection === 'rate-limits'}
-		<div class="section-content">
-			<div class="section-header">
-				<h3>Rate Limits</h3>
-				<p>Configure API rate limiting.</p>
-			</div>
-			<RateLimitManager />
-		</div>
-	{/if}
-
-	<!-- AI MODELS > API KEYS -->
-	{#if activeSection === 'api-keys'}
-		<div class="section-content">
-			<div class="section-header">
-				<h3>API Keys</h3>
-				<p>Configure provider API keys for AI features.</p>
-			</div>
-
-			<!-- OpenAI -->
-			<div class="api-key-card">
-				<div class="api-key-header">
-					<div class="api-icon openai">🤖</div>
-					<div>
-						<div class="api-title">
-							<span>OpenAI</span>
-							{#if openaiApiKeyMasked}
-								<span class="badge success">Configured</span>
+						<!-- Rate Limits Section -->
+						<section class="section">
+							<button class="section-header" onclick={() => toggleSection('rate-limits')}>
+								<h3>Rate Limits</h3>
+								<svg class="chevron" class:expanded={expandedSections.has('rate-limits')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<polyline points="6 9 12 15 18 9"/>
+								</svg>
+							</button>
+							{#if expandedSections.has('rate-limits')}
+								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
+									<RateLimitManager />
+								</div>
 							{/if}
-						</div>
-						<p class="text-muted text-sm">TTS, STT, GPT Image, Sora</p>
-					</div>
-				</div>
-				<div class="api-key-form">
-					{#if openaiApiKeyMasked}
-						<p class="text-muted text-sm font-mono">{openaiApiKeyMasked}</p>
-					{/if}
-					<div class="input-row">
-						<input type="password" bind:value={openaiApiKey} placeholder={openaiApiKeyMasked ? 'Enter new key...' : 'sk-...'} class="input flex-1 font-mono" />
-						<button onclick={saveOpenaiApiKey} disabled={savingOpenaiKey || !openaiApiKey.trim()} class="btn btn-primary">
-							{savingOpenaiKey ? '...' : 'Save'}
-						</button>
-					</div>
-					{#if openaiKeySuccess}
-						<p class="text-success text-sm">{openaiKeySuccess}</p>
-					{:else if openaiKeyError}
-						<p class="text-error text-sm">{openaiKeyError}</p>
-					{/if}
-				</div>
-			</div>
+						</section>
 
-			<!-- Google Gemini -->
-			<div class="api-key-card">
-				<div class="api-key-header">
-					<div class="api-icon google">🔷</div>
-					<div>
-						<div class="api-title">
-							<span>Google Gemini</span>
-							{#if imageApiKeyMasked}
-								<span class="badge success">Configured</span>
-							{/if}
-						</div>
-						<p class="text-muted text-sm">Imagen, Veo, Gemini Flash</p>
-					</div>
-				</div>
-				<div class="api-key-form">
-					{#if imageApiKeyMasked}
-						<p class="text-muted text-sm font-mono">{imageApiKeyMasked}</p>
-					{/if}
-					<div class="input-row">
-						<input type="password" bind:value={imageApiKey} placeholder={imageApiKeyMasked ? 'Enter new key...' : 'AIza...'} class="input flex-1 font-mono" />
-						<button onclick={saveImageConfig} disabled={savingImageConfig || (!imageApiKey.trim() && !imageApiKeyMasked)} class="btn btn-primary">
-							{savingImageConfig ? '...' : 'Save'}
-						</button>
-					</div>
-					{#if imageConfigSuccess}
-						<p class="text-success text-sm">{imageConfigSuccess}</p>
-					{:else if imageConfigError}
-						<p class="text-error text-sm">{imageConfigError}</p>
-					{/if}
-				</div>
-			</div>
-
-			<!-- Meshy AI -->
-			<div class="api-key-card">
-				<div class="api-key-header">
-					<div class="api-icon meshy">
-						<svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-							<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
-							<polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
-							<line x1="12" y1="22.08" x2="12" y2="12"/>
-						</svg>
-					</div>
-					<div>
-						<div class="api-title">
-							<span>Meshy AI</span>
-							{#if meshyApiKeyMasked}
-								<span class="badge success">Configured</span>
-							{/if}
-						</div>
-						<p class="text-muted text-sm">3D model generation</p>
-					</div>
-				</div>
-				<div class="api-key-form">
-					{#if meshyApiKeyMasked}
-						<p class="text-muted text-sm font-mono">{meshyApiKeyMasked}</p>
-					{/if}
-					<div class="input-row">
-						<input type="password" bind:value={meshyApiKey} placeholder={meshyApiKeyMasked ? 'Enter new key...' : 'msy_...'} class="input flex-1 font-mono" />
-						<button onclick={saveMeshyKey} disabled={savingMeshyKey || !meshyApiKey.trim()} class="btn btn-primary">
-							{savingMeshyKey ? '...' : 'Save'}
-						</button>
-					</div>
-					{#if meshyKeySuccess}
-						<p class="text-success text-sm">{meshyKeySuccess}</p>
-					{:else if meshyKeyError}
-						<p class="text-error text-sm">{meshyKeyError}</p>
-					{/if}
-				</div>
-			</div>
-
-			<!-- DeepSeek -->
-			<div class="api-key-card">
-				<div class="api-key-header">
-					<div class="api-icon deepseek">🔮</div>
-					<div>
-						<div class="api-title">
-							<span>DeepSeek</span>
-							{#if deepseekApiKeyMasked}
-								<span class="badge success">Configured</span>
-							{/if}
-						</div>
-						<p class="text-muted text-sm">AI reasoning & collaboration</p>
-					</div>
-				</div>
-				<div class="api-key-form">
-					{#if deepseekApiKeyMasked}
-						<p class="text-muted text-sm font-mono">{deepseekApiKeyMasked}</p>
-					{/if}
-					<div class="input-row">
-						<input type="password" bind:value={deepseekApiKey} placeholder={deepseekApiKeyMasked ? 'Enter new key...' : 'sk-...'} class="input flex-1 font-mono" />
-						<button onclick={saveDeepseekKey} disabled={savingDeepseekKey || !deepseekApiKey.trim()} class="btn btn-primary">
-							{savingDeepseekKey ? '...' : 'Save'}
-						</button>
-					</div>
-					{#if deepseekKeySuccess}
-						<p class="text-success text-sm">{deepseekKeySuccess}</p>
-					{:else if deepseekKeyError}
-						<p class="text-error text-sm">{deepseekKeyError}</p>
-					{/if}
-				</div>
-			</div>
-		</div>
-	{/if}
-
-	<!-- AI MODELS > MODELS -->
-	{#if activeSection === 'models'}
-		<div class="section-content models-section">
-			<div class="section-header">
-				<h3>AI Models</h3>
-				<p>Select default models for generation tasks.</p>
-			</div>
-
-			{#if audioConfigSuccess || imageConfigSuccess || videoConfigSuccess}
-				<div class="success-banner">{audioConfigSuccess || imageConfigSuccess || videoConfigSuccess}</div>
-			{/if}
-			{#if audioConfigError || imageConfigError || videoConfigError}
-				<div class="error-banner">
-					<span>{audioConfigError || imageConfigError || videoConfigError}</span>
-					<button onclick={() => { audioConfigError = ''; imageConfigError = ''; videoConfigError = ''; }} class="close-btn">&times;</button>
-				</div>
-			{/if}
-
-			<!-- Image Generation Models -->
-			<div class="settings-group">
-				<h4>Image Generation</h4>
-				<p class="group-description">Select the default model for generating images.</p>
-
-				{#each Object.entries(groupImageModelsByProvider()) as [provider, models]}
-					<div class="provider-section">
-						<div class="provider-header">{provider}</div>
-						<div class="model-cards">
-							{#each models as model}
-								<button
-									onclick={() => { selectedImageModel = model.id; updateImageModel(); }}
-									disabled={updatingImageModel}
-									class="model-card {model.id === imageModel ? 'active' : ''} {model.deprecated ? 'deprecated' : ''}"
-								>
-									<div class="model-card-header">
-										<span class="model-card-name">{model.displayName}</span>
-										{#if model.deprecated}
-											<span class="badge warning">Deprecated</span>
-										{/if}
-									</div>
-									<p class="model-card-desc">{model.description}</p>
-									<div class="model-card-capabilities">
-										{#if model.capabilities.editing}
-											<span class="capability-badge">Editing</span>
-										{/if}
-										{#if model.capabilities.inpainting}
-											<span class="capability-badge">Inpainting</span>
-										{/if}
-										{#if model.capabilities.referenceImages}
-											<span class="capability-badge">References</span>
-										{/if}
-										{#if model.capabilities.textRendering !== 'none'}
-											<span class="capability-badge text-{model.capabilities.textRendering}">
-												Text: {model.capabilities.textRendering}
+						<!-- Notifications Section -->
+						<section class="section">
+							<button class="section-header" onclick={() => toggleSection('notifications')}>
+								<h3>Notifications</h3>
+								<svg class="chevron" class:expanded={expandedSections.has('notifications')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<polyline points="6 9 12 15 18 9"/>
+								</svg>
+							</button>
+							{#if expandedSections.has('notifications')}
+								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
+									<!-- Browser Notifications -->
+									<div class="setting-row">
+										<div class="setting-info">
+											<label>Browser Notifications</label>
+											<span class="setting-desc">
+												{#if !browserNotificationsSupported}
+													Not supported in this browser
+												{:else if notificationPermission === 'denied'}
+													Blocked — enable in browser settings
+												{:else}
+													Get notified when tasks complete
+												{/if}
 											</span>
-										{/if}
+										</div>
+										<button
+											onclick={toggleBrowserNotifications}
+											disabled={!browserNotificationsSupported || notificationPermission === 'denied' || requestingPermission}
+											class="toggle"
+											class:active={browserNotificationsEnabled}
+										>
+											<span class="toggle-knob"></span>
+										</button>
 									</div>
-									<div class="model-card-footer">
-										<span class="model-card-price">${model.pricePerImage.toFixed(2)}/image</span>
-										<span class="model-card-resolution">{model.maxOutputSize}</span>
-									</div>
-								</button>
-							{/each}
-						</div>
-					</div>
-				{/each}
-			</div>
 
-			<!-- Video Generation Models -->
-			<div class="settings-group">
-				<h4>Video Generation</h4>
-				<p class="group-description">Select the default model for generating videos.</p>
+									<hr class="divider" />
 
-				{#each Object.entries(groupVideoModelsByProvider()) as [provider, models]}
-					<div class="provider-section">
-						<div class="provider-header">{provider}</div>
-						<div class="model-cards">
-							{#each models as model}
-								<button
-									onclick={() => { selectedVideoModel = model.id; saveVideoModel(); }}
-									disabled={savingVideoModel}
-									class="model-card {model.id === videoModel ? 'active' : ''}"
-								>
-									<div class="model-card-header">
-										<span class="model-card-name">{model.displayName}</span>
-									</div>
-									<p class="model-card-desc">{model.description}</p>
-									<div class="model-card-capabilities">
-										{#if model.capabilities.nativeAudio}
-											<span class="capability-badge audio">Audio</span>
-										{/if}
-										{#if model.capabilities.extension}
-											<span class="capability-badge">Extend</span>
-										{/if}
-										{#if model.capabilities.frameBridging}
-											<span class="capability-badge">Frame Bridge</span>
-										{/if}
-										{#if model.capabilities.imageToVideo}
-											<span class="capability-badge">Image-to-Video</span>
-										{/if}
-									</div>
-									<div class="model-card-footer">
-										<span class="model-card-price">${model.pricePerSecond.toFixed(2)}/sec</span>
-										<span class="model-card-resolution">Max {model.maxDuration}s</span>
-									</div>
-								</button>
-							{/each}
-						</div>
-					</div>
-				{/each}
-			</div>
-
-			<!-- Text-to-Speech Models -->
-			<div class="settings-group">
-				<h4>Text-to-Speech</h4>
-				<p class="group-description">Configure speech synthesis settings.</p>
-
-				{#each Object.entries(groupTtsModelsByProvider()) as [provider, models]}
-					<div class="provider-section">
-						<div class="provider-header">{provider}</div>
-						<div class="model-cards tts-cards">
-							{#each models as model}
-								<button
-									onclick={() => { selectedTtsModel = model.id; saveTtsModel(); }}
-									disabled={savingTtsModel}
-									class="model-card {model.id === currentTtsModel ? 'active' : ''}"
-								>
-									<div class="model-card-header">
-										<span class="model-card-name">{model.displayName}</span>
-									</div>
-									<p class="model-card-desc">{model.description}</p>
-									<div class="model-card-capabilities">
-										{#if model.capabilities.steerability}
-											<span class="capability-badge highlight">Steerable</span>
-										{/if}
-										{#if model.capabilities.streaming}
-											<span class="capability-badge">Streaming</span>
-										{/if}
-										{#if model.capabilities.emotionControl}
-											<span class="capability-badge">Emotion</span>
-										{/if}
-										{#if model.capabilities.multiSpeaker}
-											<span class="capability-badge">Multi-Speaker</span>
-										{/if}
-									</div>
-									<div class="model-card-footer">
-										<span class="model-card-price">${model.pricePerMillion}/1M chars</span>
-									</div>
-								</button>
-							{/each}
-						</div>
-					</div>
-				{/each}
-
-				<!-- TTS Settings -->
-				<div class="tts-settings">
-					<div class="tts-setting-row">
-						<label>Voice</label>
-						<select bind:value={selectedTtsVoice} class="input">
-							{#each getAvailableVoices() as voice}
-								<option value={voice.id}>{voice.name} {voice.gender ? `(${voice.gender})` : ''}</option>
-							{/each}
-							{#if getAvailableVoices().length === 0}
-								{#if currentTtsModel?.startsWith('gemini') || currentTtsModel?.startsWith('chirp')}
-									<!-- Gemini TTS fallback voices -->
-									<option value="Zephyr">Zephyr (default)</option>
-									<option value="Puck">Puck</option>
-									<option value="Charon">Charon</option>
-									<option value="Kore">Kore</option>
-								{:else if currentTtsModel === 'neural2' || currentTtsModel === 'wavenet' || currentTtsModel === 'standard'}
-									<!-- Google Cloud TTS fallback voices -->
-									<option value="en-US-A">US English A (default)</option>
-									<option value="en-US-C">US English C</option>
-									<option value="en-GB-B">UK English B</option>
-								{:else}
-									<!-- OpenAI TTS fallback voices -->
-									<option value="alloy">Alloy (default)</option>
-									<option value="echo">Echo</option>
-									<option value="fable">Fable</option>
-									<option value="onyx">Onyx</option>
-									<option value="nova">Nova</option>
-									<option value="shimmer">Shimmer</option>
-								{/if}
+									<!-- Webhooks -->
+									<h4 class="subsection-title">Webhooks</h4>
+									<WebhookManager />
+								</div>
 							{/if}
-						</select>
-					</div>
-					<div class="tts-setting-row">
-						<label>Speed ({ttsSpeed.toFixed(2)}x)</label>
-						<input type="range" min="0.25" max="4.0" step="0.05" bind:value={ttsSpeed} class="slider" />
-					</div>
-					<div class="tts-setting-row">
-						<label>Output Format</label>
-						<select bind:value={ttsOutputFormat} class="input">
-							<option value="mp3">MP3</option>
-							<option value="wav">WAV</option>
-							<option value="opus">Opus</option>
-							<option value="aac">AAC</option>
-							<option value="flac">FLAC</option>
-						</select>
-					</div>
-					{#if isCurrentModelSteerable()}
-						<div class="tts-setting-row steerability-section">
-							<label>
-								Voice Instructions
-								<span class="badge-steerable">Steerable</span>
-							</label>
-							<textarea
-								bind:value={ttsInstructions}
-								placeholder="e.g., Speak in a warm, friendly tone with moderate pace. Add slight pauses for emphasis."
-								class="input instructions-input"
-								rows="3"
-							></textarea>
-							<p class="instructions-hint">
-								Customize how the voice sounds - control tone, pace, emotion, and speaking style.
-							</p>
-						</div>
-					{/if}
-					<button
-						onclick={saveTtsSettings}
-						disabled={savingTtsSettings}
-						class="btn btn-primary"
-					>
-						{savingTtsSettings ? 'Saving...' : 'Save TTS Settings'}
-					</button>
-				</div>
-			</div>
+						</section>
 
-			<!-- Speech-to-Text Models -->
-			<div class="settings-group">
-				<h4>Speech-to-Text</h4>
-				<p class="group-description">Configure speech recognition settings.</p>
+						<!-- Cleanup Section -->
+						<section class="section">
+							<button class="section-header" onclick={() => toggleSection('cleanup')}>
+								<h3>Background Cleanup</h3>
+								<svg class="chevron" class:expanded={expandedSections.has('cleanup')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<polyline points="6 9 12 15 18 9"/>
+								</svg>
+							</button>
+							{#if expandedSections.has('cleanup')}
+								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
+									{#if loadingCleanup}
+										<div class="loading-text">Loading...</div>
+									{:else if cleanupConfig}
+										<!-- Status -->
+										<div class="cleanup-status" class:sleeping={cleanupStatus?.is_sleeping}>
+											<span class="status-icon">{cleanupStatus?.is_sleeping ? '😴' : '⚡'}</span>
+											<div class="status-info">
+												<strong>{cleanupStatus?.is_sleeping ? 'Sleeping' : 'Active'}</strong>
+												<span>Idle {formatIdleTime(cleanupStatus?.idle_seconds || 0)}</span>
+											</div>
+										</div>
 
-				{#each Object.entries(groupSttModelsByProvider()) as [provider, models]}
-					<div class="provider-section">
-						<div class="provider-header">{provider}</div>
-						<div class="model-cards stt-cards">
-							{#each models as model}
-								<button
-									onclick={() => { selectedSttModel = model.id; saveSttModel(); }}
-									disabled={savingSttModel}
-									class="model-card {model.id === currentSttModel ? 'active' : ''}"
-								>
-									<div class="model-card-header">
-										<span class="model-card-name">{model.displayName}</span>
-									</div>
-									<p class="model-card-desc">{model.description}</p>
-									<div class="model-card-capabilities">
-										{#if model.capabilities.diarization}
-											<span class="capability-badge highlight">Diarization</span>
+										<!-- Sleep Mode -->
+										<div class="setting-row">
+											<div class="setting-info">
+												<label>Sleep Mode</label>
+												<span class="setting-desc">Pause cleanup when inactive</span>
+											</div>
+											<button
+												onclick={() => cleanupConfig && (cleanupConfig.sleep_mode_enabled = !cleanupConfig.sleep_mode_enabled)}
+												class="toggle"
+												class:active={cleanupConfig.sleep_mode_enabled}
+											>
+												<span class="toggle-knob"></span>
+											</button>
+										</div>
+
+										{#if cleanupConfig.sleep_mode_enabled}
+											<div class="setting-row">
+												<label class="setting-label">Sleep after (min)</label>
+												<input type="number" min="1" max="60" bind:value={cleanupConfig.sleep_timeout_minutes} class="input compact number" />
+											</div>
 										{/if}
-										{#if model.capabilities.translation}
-											<span class="capability-badge">Translation</span>
-										{/if}
-										{#if model.capabilities.timestamps}
-											<span class="capability-badge">Timestamps</span>
-										{/if}
-										{#if model.capabilities.realtime}
-											<span class="capability-badge">Realtime</span>
-										{/if}
-									</div>
-									<div class="model-card-footer">
-										<span class="model-card-price">${model.pricePerMinute.toFixed(3)}/min</span>
-										<span class="model-card-resolution">Max {model.maxFileSizeMB}MB</span>
-									</div>
-									<div class="model-card-formats">
-										{model.inputFormats.slice(0, 5).join(', ')}{model.inputFormats.length > 5 ? '...' : ''}
-									</div>
-								</button>
-							{/each}
-						</div>
+
+										<hr class="divider" />
+
+										<!-- File Cleanup Toggles -->
+										<h4 class="subsection-title">File Cleanup</h4>
+
+										<div class="cleanup-grid">
+											<div class="cleanup-item">
+												<span>Images</span>
+												<div class="cleanup-controls">
+													{#if cleanupConfig.cleanup_images_enabled}
+														<input type="number" min="1" max="365" bind:value={cleanupConfig.cleanup_images_max_age_days} class="input compact number" />
+														<span class="unit">days</span>
+													{/if}
+													<button
+														onclick={() => cleanupConfig && (cleanupConfig.cleanup_images_enabled = !cleanupConfig.cleanup_images_enabled)}
+														class="toggle small"
+														class:active={cleanupConfig.cleanup_images_enabled}
+													>
+														<span class="toggle-knob"></span>
+													</button>
+												</div>
+											</div>
+
+											<div class="cleanup-item">
+												<span>Videos</span>
+												<div class="cleanup-controls">
+													{#if cleanupConfig.cleanup_videos_enabled}
+														<input type="number" min="1" max="365" bind:value={cleanupConfig.cleanup_videos_max_age_days} class="input compact number" />
+														<span class="unit">days</span>
+													{/if}
+													<button
+														onclick={() => cleanupConfig && (cleanupConfig.cleanup_videos_enabled = !cleanupConfig.cleanup_videos_enabled)}
+														class="toggle small"
+														class:active={cleanupConfig.cleanup_videos_enabled}
+													>
+														<span class="toggle-knob"></span>
+													</button>
+												</div>
+											</div>
+
+											<div class="cleanup-item">
+												<span>Shared Files</span>
+												<div class="cleanup-controls">
+													{#if cleanupConfig.cleanup_shared_files_enabled}
+														<input type="number" min="1" max="365" bind:value={cleanupConfig.cleanup_shared_files_max_age_days} class="input compact number" />
+														<span class="unit">days</span>
+													{/if}
+													<button
+														onclick={() => cleanupConfig && (cleanupConfig.cleanup_shared_files_enabled = !cleanupConfig.cleanup_shared_files_enabled)}
+														class="toggle small"
+														class:active={cleanupConfig.cleanup_shared_files_enabled}
+													>
+														<span class="toggle-knob"></span>
+													</button>
+												</div>
+											</div>
+
+											<div class="cleanup-item">
+												<span>Uploads</span>
+												<div class="cleanup-controls">
+													{#if cleanupConfig.cleanup_uploads_enabled}
+														<input type="number" min="1" max="365" bind:value={cleanupConfig.cleanup_uploads_max_age_days} class="input compact number" />
+														<span class="unit">days</span>
+													{/if}
+													<button
+														onclick={() => cleanupConfig && (cleanupConfig.cleanup_uploads_enabled = !cleanupConfig.cleanup_uploads_enabled)}
+														class="toggle small"
+														class:active={cleanupConfig.cleanup_uploads_enabled}
+													>
+														<span class="toggle-knob"></span>
+													</button>
+												</div>
+											</div>
+										</div>
+
+										<hr class="divider" />
+
+										<!-- Session Timeouts -->
+										<h4 class="subsection-title">Session Timeouts</h4>
+										<div class="timeout-grid">
+											<div class="timeout-item">
+												<label>SDK Session</label>
+												<div class="timeout-input">
+													<input type="number" min="5" max="480" bind:value={cleanupConfig.sdk_session_max_age_minutes} class="input compact number" />
+													<span class="unit">min</span>
+												</div>
+											</div>
+											<div class="timeout-item">
+												<label>WebSocket</label>
+												<div class="timeout-input">
+													<input type="number" min="1" max="60" bind:value={cleanupConfig.websocket_max_age_minutes} class="input compact number" />
+													<span class="unit">min</span>
+												</div>
+											</div>
+											<div class="timeout-item">
+												<label>Sync Logs</label>
+												<div class="timeout-input">
+													<input type="number" min="1" max="168" bind:value={cleanupConfig.sync_log_retention_hours} class="input compact number" />
+													<span class="unit">hrs</span>
+												</div>
+											</div>
+										</div>
+
+										{#if cleanupSuccess}<div class="success-msg">{cleanupSuccess}</div>{/if}
+										{#if cleanupError}<div class="error-msg">{cleanupError}</div>{/if}
+
+										<button
+											onclick={saveCleanupConfig}
+											disabled={savingCleanup}
+											class="btn primary mt-3"
+										>
+											{savingCleanup ? 'Saving...' : 'Save Cleanup Settings'}
+										</button>
+									{/if}
+								</div>
+							{/if}
+						</section>
 					</div>
-				{/each}
-			</div>
-
-			<!-- 3D Generation Models -->
-			<div class="settings-group">
-				<h4>3D Generation</h4>
-				<p class="group-description">Select the AI model for 3D generation.</p>
-
-				<div class="provider-section">
-					<div class="provider-header">Meshy AI</div>
-					<div class="input-group">
-						<select
-							class="input"
-							bind:value={selected3DModel}
-							onchange={save3DModel}
-							disabled={saving3DModel}
-						>
-							<option value="meshy-6">Meshy 6 (Latest) - Best Quality</option>
-							<option value="meshy-5">Meshy 5 - Balanced</option>
-							<option value="meshy-4">Meshy 4 - Fast</option>
-						</select>
-					</div>
-					{#if model3DSuccess}
-						<p class="text-success text-sm mt-2">{model3DSuccess}</p>
-					{/if}
-					{#if model3DError}
-						<p class="text-error text-sm mt-2">{model3DError}</p>
-					{/if}
-				</div>
+				{/if}
 			</div>
 		</div>
-	{/if}
-
-	<!-- SYSTEM > NOTIFICATIONS -->
-	{#if activeSection === 'notifications'}
-		<div class="section-content">
-			<div class="section-header">
-				<h3>Notifications</h3>
-				<p>Configure alerts and webhooks.</p>
-			</div>
-
-			<div class="settings-group">
-				<h4>Browser Notifications</h4>
-				{#if !browserNotificationsSupported}
-					<p class="text-muted">Not supported in this browser.</p>
-				{:else if notificationPermission === 'denied'}
-					<p class="text-error">Blocked. Enable in browser settings.</p>
-				{:else}
-					<div class="toggle-row">
-						<div>
-							<p class="font-medium">Desktop notifications</p>
-							<p class="text-muted text-sm">Get notified when sessions complete</p>
-						</div>
-						<button
-							onclick={toggleBrowserNotifications}
-							disabled={requestingPermission}
-							class="toggle {browserNotificationsEnabled ? 'active' : ''}"
-						>
-							<span class="toggle-knob"></span>
-						</button>
-					</div>
-				{/if}
-			</div>
-
-			{#if $isAdmin}
-				<div class="settings-group">
-					<h4>Webhooks</h4>
-					<WebhookManager />
-				</div>
-			{/if}
-		</div>
-	{/if}
-
-	<!-- SYSTEM > CLEANUP -->
-	{#if activeSection === 'cleanup'}
-		<div class="section-content">
-			<div class="section-header">
-				<h3>Background Cleanup</h3>
-				<p>Automatic cleanup of sessions and files.</p>
-			</div>
-
-			{#if loadingCleanup}
-				<div class="loading">Loading...</div>
-			{:else if cleanupConfig}
-				<!-- Status -->
-				<div class="cleanup-status {cleanupStatus?.is_sleeping ? 'sleeping' : 'active'}">
-					<span class="status-icon">{cleanupStatus?.is_sleeping ? '😴' : '⚡'}</span>
-					<div>
-						<p class="font-medium">{cleanupStatus?.is_sleeping ? 'Sleeping' : 'Active'}</p>
-						<p class="text-muted text-sm">
-							{#if cleanupStatus}Idle for {formatIdleTime(cleanupStatus.idle_seconds)}{/if}
-						</p>
-					</div>
-					<span class="text-muted text-sm">Every {cleanupConfig.cleanup_interval_minutes}m</span>
-				</div>
-
-				<!-- Sleep Mode -->
-				<div class="settings-group">
-					<div class="toggle-row">
-						<div>
-							<h4>Sleep Mode</h4>
-							<p class="text-muted text-sm">Pause cleanup when inactive</p>
-						</div>
-						<button
-							onclick={() => cleanupConfig && (cleanupConfig.sleep_mode_enabled = !cleanupConfig.sleep_mode_enabled)}
-							class="toggle {cleanupConfig.sleep_mode_enabled ? 'active' : ''}"
-						>
-							<span class="toggle-knob"></span>
-						</button>
-					</div>
-					{#if cleanupConfig.sleep_mode_enabled}
-						<div class="cleanup-inputs">
-							<div>
-								<label>Sleep after (min)</label>
-								<input type="number" min="1" max="60" bind:value={cleanupConfig.sleep_timeout_minutes} class="input" />
-							</div>
-							<div>
-								<label>Cleanup interval (min)</label>
-								<input type="number" min="1" max="60" bind:value={cleanupConfig.cleanup_interval_minutes} class="input" />
-							</div>
-						</div>
-					{/if}
-				</div>
-
-				<!-- File Cleanup -->
-				<div class="settings-group">
-					<h4>File Cleanup</h4>
-					<div class="cleanup-items">
-						<div class="cleanup-item">
-							<div class="cleanup-item-label">
-								<span>🖼️ Images</span>
-								{#if cleanupPreview && cleanupPreview.images.length > 0}
-									<span class="preview-count">{cleanupPreview.images.length} files</span>
-								{/if}
-							</div>
-							<div class="cleanup-controls">
-								{#if cleanupConfig.cleanup_images_enabled}
-									<input type="number" min="1" max="365" bind:value={cleanupConfig.cleanup_images_max_age_days} class="input small" />
-									<span class="text-muted">days</span>
-								{/if}
-								<button
-									onclick={() => cleanupConfig && (cleanupConfig.cleanup_images_enabled = !cleanupConfig.cleanup_images_enabled)}
-									class="toggle-sm {cleanupConfig.cleanup_images_enabled ? 'active' : ''}"
-								>
-									<span class="toggle-knob-sm"></span>
-								</button>
-							</div>
-						</div>
-						<div class="cleanup-item">
-							<div class="cleanup-item-label">
-								<span>🎬 Videos</span>
-								{#if cleanupPreview && cleanupPreview.videos.length > 0}
-									<span class="preview-count">{cleanupPreview.videos.length} files</span>
-								{/if}
-							</div>
-							<div class="cleanup-controls">
-								{#if cleanupConfig.cleanup_videos_enabled}
-									<input type="number" min="1" max="365" bind:value={cleanupConfig.cleanup_videos_max_age_days} class="input small" />
-									<span class="text-muted">days</span>
-								{/if}
-								<button
-									onclick={() => cleanupConfig && (cleanupConfig.cleanup_videos_enabled = !cleanupConfig.cleanup_videos_enabled)}
-									class="toggle-sm {cleanupConfig.cleanup_videos_enabled ? 'active' : ''}"
-								>
-									<span class="toggle-knob-sm"></span>
-								</button>
-							</div>
-						</div>
-						<div class="cleanup-item">
-							<div class="cleanup-item-label">
-								<span>📄 Shared Files</span>
-								{#if cleanupPreview && cleanupPreview.shared_files.length > 0}
-									<span class="preview-count">{cleanupPreview.shared_files.length} files</span>
-								{/if}
-							</div>
-							<div class="cleanup-controls">
-								{#if cleanupConfig.cleanup_shared_files_enabled}
-									<input type="number" min="1" max="365" bind:value={cleanupConfig.cleanup_shared_files_max_age_days} class="input small" />
-									<span class="text-muted">days</span>
-								{/if}
-								<button
-									onclick={() => cleanupConfig && (cleanupConfig.cleanup_shared_files_enabled = !cleanupConfig.cleanup_shared_files_enabled)}
-									class="toggle-sm {cleanupConfig.cleanup_shared_files_enabled ? 'active' : ''}"
-								>
-									<span class="toggle-knob-sm"></span>
-								</button>
-							</div>
-						</div>
-						<div class="cleanup-item">
-							<div class="cleanup-item-label">
-								<span>📁 Uploads</span>
-								{#if cleanupPreview && cleanupPreview.uploads.length > 0}
-									<span class="preview-count">{cleanupPreview.uploads.length} files</span>
-								{/if}
-							</div>
-							<div class="cleanup-controls">
-								{#if cleanupConfig.cleanup_uploads_enabled}
-									<input type="number" min="1" max="365" bind:value={cleanupConfig.cleanup_uploads_max_age_days} class="input small" />
-									<span class="text-muted">days</span>
-								{/if}
-								<button
-									onclick={() => cleanupConfig && (cleanupConfig.cleanup_uploads_enabled = !cleanupConfig.cleanup_uploads_enabled)}
-									class="toggle-sm {cleanupConfig.cleanup_uploads_enabled ? 'active' : ''}"
-								>
-									<span class="toggle-knob-sm"></span>
-								</button>
-							</div>
-						</div>
-					</div>
-				</div>
-
-				<!-- Session Timeouts -->
-				<div class="settings-group">
-					<h4>Session Timeouts</h4>
-					<div class="cleanup-inputs three-col">
-						<div>
-							<label>SDK Session (min)</label>
-							<input type="number" min="5" max="480" bind:value={cleanupConfig.sdk_session_max_age_minutes} class="input" />
-						</div>
-						<div>
-							<label>WebSocket (min)</label>
-							<input type="number" min="1" max="60" bind:value={cleanupConfig.websocket_max_age_minutes} class="input" />
-						</div>
-						<div>
-							<label>Sync Logs (hrs)</label>
-							<input type="number" min="1" max="168" bind:value={cleanupConfig.sync_log_retention_hours} class="input" />
-						</div>
-					</div>
-				</div>
-
-				{#if cleanupError}
-					<div class="error-banner">{cleanupError}</div>
-				{/if}
-				{#if cleanupSuccess}
-					<div class="success-banner">{cleanupSuccess}</div>
-				{/if}
-
-				<!-- Preview Summary (inline) -->
-				{#if cleanupPreview}
-					<div class="cleanup-preview-inline {cleanupPreview.total_count > 0 ? 'has-files' : 'no-files'}">
-						{#if cleanupPreview.total_count === 0}
-							<span class="preview-status">✓ No files match cleanup criteria</span>
-						{:else}
-							<span class="preview-status">⚠ {cleanupPreview.total_count} files ({cleanupPreview.total_bytes_formatted}) would be deleted</span>
-						{/if}
-						<button onclick={() => { cleanupPreview = null; }} class="preview-clear" title="Clear preview">✕</button>
-					</div>
-				{/if}
-
-				<div class="cleanup-actions">
-					<button onclick={saveCleanupConfig} disabled={savingCleanup} class="btn btn-primary flex-1">
-						{savingCleanup ? 'Saving...' : 'Save Settings'}
-					</button>
-					<button onclick={loadCleanupPreview} class="btn btn-secondary">Preview</button>
-					{#if cleanupPreview && cleanupPreview.total_count > 0}
-						<button onclick={runCleanupNow} disabled={runningCleanup} class="btn btn-danger">
-							{runningCleanup ? 'Deleting...' : 'Delete Files'}
-						</button>
-					{/if}
-				</div>
-			{/if}
-		</div>
-	{/if}
-{/snippet}
+	{/snippet}
+</BaseCard>
 
 <style>
-	/* ═══════════════════════════════════════════════════════════════════════════════
-	   NEO-GLASS DESIGN SYSTEM - Settings Card
-	   ═══════════════════════════════════════════════════════════════════════════════
+	/* ========================================
+	   SETTINGS - Modern Redesign
+	   Theme-compliant using CSS variables
+	   ======================================== */
 
-	   A refined glassmorphism aesthetic with:
-	   - Translucent layered surfaces
-	   - Subtle depth through shadows
-	   - OKLch color space for perceptual uniformity
-	   - Micro-interactions with spring transitions
-	   - 8px grid spacing system
-
-	   ═══════════════════════════════════════════════════════════════════════════════ */
-
-	/* ═══════════════════════════════════════════════════════════════════════════════
-	   ROOT CONTAINER & DESIGN TOKENS
-	   ═══════════════════════════════════════════════════════════════════════════════ */
-
-	.settings-card-content {
-		/* Typography */
-		--font-display: 'Inter', system-ui, -apple-system, sans-serif;
-		--font-mono: 'JetBrains Mono', 'SF Mono', 'Monaco', monospace;
-
-		/* Type scale */
-		--text-xs: 0.6875rem;   /* 11px */
-		--text-sm: 0.75rem;     /* 12px */
-		--text-base: 0.8125rem; /* 13px */
-		--text-md: 0.875rem;    /* 14px */
-		--text-lg: 1rem;        /* 16px */
-		--text-xl: 1.125rem;    /* 18px */
-
-		/* Spacing (8px grid) */
-		--space-1: 4px;
-		--space-2: 8px;
-		--space-3: 12px;
-		--space-4: 16px;
-		--space-5: 20px;
-		--space-6: 24px;
-		--space-8: 32px;
-
-		/* Border radius */
-		--radius-sm: 6px;
-		--radius-md: 10px;
-		--radius-lg: 14px;
-		--radius-xl: 18px;
-		--radius-full: 9999px;
-
-		/* Max width for centered layout */
-		--settings-max-width: 1000px;
-
-		/* Surface colors */
-		--surface-0: var(--card, oklch(0.18 0.008 260));
-		--surface-1: color-mix(in oklch, var(--muted, oklch(0.22 0.01 260)) 60%, transparent);
-		--surface-2: color-mix(in oklch, var(--muted, oklch(0.22 0.01 260)) 80%, transparent);
-		--surface-hover: color-mix(in oklch, var(--primary, oklch(0.72 0.14 180)) 8%, var(--muted, oklch(0.22 0.01 260)));
-		--surface-active: color-mix(in oklch, var(--primary, oklch(0.72 0.14 180)) 15%, var(--muted, oklch(0.22 0.01 260)));
-
-		/* Borders */
-		--border-subtle: color-mix(in oklch, var(--border, oklch(0.28 0.01 260)) 60%, transparent);
-		--border-default: var(--border, oklch(0.28 0.01 260));
-		--border-emphasis: color-mix(in oklch, var(--primary, oklch(0.72 0.14 180)) 40%, var(--border, oklch(0.28 0.01 260)));
-
-		/* Text hierarchy */
-		--text-primary: var(--foreground, oklch(0.95 0.01 260));
-		--text-secondary: var(--muted-foreground, oklch(0.65 0.02 260));
-		--text-tertiary: color-mix(in oklch, var(--muted-foreground, oklch(0.65 0.02 260)) 70%, transparent);
-
-		/* Semantic colors */
-		--accent-primary: var(--primary, oklch(0.72 0.14 180));
-		--accent-success: var(--success, oklch(0.65 0.18 145));
-		--accent-warning: var(--warning, oklch(0.75 0.15 85));
-		--accent-danger: var(--destructive, oklch(0.55 0.22 25));
-		--accent-info: var(--info, oklch(0.65 0.15 240));
-
-		/* Shadows */
-		--shadow-inset: inset 0 1px 0 0 rgba(255,255,255,0.03);
-		--shadow-xs: 0 1px 2px rgba(0,0,0,0.15);
-		--shadow-sm: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.08);
-		--shadow-md: 0 4px 6px -1px rgba(0,0,0,0.15), 0 2px 4px -1px rgba(0,0,0,0.08);
-		--shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.15), 0 4px 6px -2px rgba(0,0,0,0.08);
-		--shadow-glow: 0 0 20px color-mix(in oklch, var(--primary, oklch(0.72 0.14 180)) 30%, transparent);
-		--shadow-glow-soft: 0 0 12px color-mix(in oklch, var(--primary, oklch(0.72 0.14 180)) 15%, transparent);
-
-		/* Transitions */
-		--transition-fast: 100ms cubic-bezier(0.4, 0, 0.2, 1);
-		--transition-base: 150ms cubic-bezier(0.4, 0, 0.2, 1);
-		--transition-smooth: 200ms cubic-bezier(0.16, 1, 0.3, 1);
-		--transition-spring: 300ms cubic-bezier(0.34, 1.56, 0.64, 1);
-
+	.settings {
 		display: flex;
-		justify-content: center;
-		height: 100%;
-		overflow: hidden;
-		background: var(--surface-0);
-		position: relative;
-		font-family: var(--font-display);
-	}
-
-	/* Inner container - holds sidebar + content, centered and clamped */
-	.settings-inner {
-		display: flex;
-		width: 100%;
-		max-width: var(--settings-max-width);
-		height: 100%;
-		gap: var(--space-4);
-		padding: var(--space-4);
-	}
-
-	/* Glass edge highlight at top */
-	.settings-card-content::before {
-		content: '';
-		position: absolute;
-		top: 0;
-		left: 0;
-		right: 0;
-		height: 1px;
-		background: linear-gradient(
-			90deg,
-			transparent 0%,
-			color-mix(in oklch, var(--accent-primary) 30%, transparent) 20%,
-			color-mix(in oklch, var(--accent-primary) 50%, transparent) 50%,
-			color-mix(in oklch, var(--accent-primary) 30%, transparent) 80%,
-			transparent 100%
-		);
-		z-index: 10;
-	}
-
-	/* Light mode adjustments */
-	:global(.light) .settings-card-content {
-		--shadow-xs: 0 1px 2px rgba(0,0,0,0.06);
-		--shadow-sm: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04);
-		--shadow-md: 0 4px 6px -1px rgba(0,0,0,0.08), 0 2px 4px -1px rgba(0,0,0,0.04);
-		--shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.08), 0 4px 6px -2px rgba(0,0,0,0.04);
-	}
-
-	.settings-card-content.mobile {
 		flex-direction: column;
+		height: 100%;
+		background: var(--card);
+		color: var(--card-foreground);
+		font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
 	}
 
-	/* ═══════════════════════════════════════════════════════════════════════════════
-	   SIDEBAR - Floating Pill Design
-	   ═══════════════════════════════════════════════════════════════════════════════ */
-
-	.settings-sidebar {
-		width: 180px;
+	/* Tab Bar */
+	.tab-bar {
+		display: flex;
+		gap: 2px;
+		padding: 12px 16px;
+		background: var(--muted);
+		border-bottom: 1px solid var(--border);
 		flex-shrink: 0;
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-lg);
-		overflow-y: auto;
-		overflow-x: hidden;
-		padding: var(--space-3);
-		position: relative;
-		box-shadow: var(--shadow-sm);
-		/* Frosted glass effect */
-		backdrop-filter: blur(12px);
-		-webkit-backdrop-filter: blur(12px);
 	}
 
-	/* Subtle inner glow at top */
-	.settings-sidebar::before {
-		content: '';
-		position: absolute;
-		top: 0;
-		left: 0;
-		right: 0;
-		height: 1px;
-		background: linear-gradient(
-			90deg,
-			transparent 0%,
-			color-mix(in oklch, var(--foreground) 10%, transparent) 30%,
-			color-mix(in oklch, var(--foreground) 15%, transparent) 50%,
-			color-mix(in oklch, var(--foreground) 10%, transparent) 70%,
-			transparent 100%
-		);
-		border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-	}
-
-	.sidebar-category {
-		margin-bottom: var(--space-1);
-	}
-
-	.category-header {
+	.tab-btn {
 		display: flex;
 		align-items: center;
-		gap: var(--space-2);
-		width: 100%;
-		padding: var(--space-2) var(--space-3);
-		border: 1px solid transparent;
-		background: transparent;
-		color: var(--text-secondary);
-		font-family: var(--font-display);
-		font-size: var(--text-base);
-		font-weight: 500;
-		border-radius: var(--radius-md);
-		cursor: pointer;
-		transition: all var(--transition-smooth);
-		text-align: left;
-	}
-
-	.category-header:hover {
-		background: var(--surface-1);
-		color: var(--text-primary);
-		border-color: var(--border-subtle);
-	}
-
-	.category-header.active {
-		background: color-mix(in oklch, var(--accent-primary) 12%, transparent);
-		color: var(--accent-primary);
-		border-color: color-mix(in oklch, var(--accent-primary) 25%, transparent);
-		box-shadow: var(--shadow-xs), var(--shadow-glow-soft);
-	}
-
-	.sidebar-sections {
-		margin-left: var(--space-5);
-		padding-left: var(--space-3);
-		border-left: 1px solid var(--border-subtle);
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-1);
-		margin-top: var(--space-1);
-		margin-bottom: var(--space-2);
-	}
-
-	.section-btn {
-		padding: var(--space-2) var(--space-3);
+		gap: 8px;
+		padding: 8px 16px;
 		background: transparent;
 		border: none;
-		border-radius: var(--radius-sm);
-		color: var(--text-tertiary);
-		font-family: var(--font-display);
-		font-size: var(--text-sm);
+		border-radius: var(--radius);
+		color: var(--muted-foreground);
+		font-size: 0.875rem;
 		font-weight: 500;
 		cursor: pointer;
-		transition: all var(--transition-base);
-		text-align: left;
-		position: relative;
+		transition: all 150ms ease;
 	}
 
-	.section-btn:hover {
-		color: var(--text-primary);
-		background: var(--surface-1);
+	.tab-btn:hover {
+		background: var(--accent);
+		color: var(--accent-foreground);
 	}
 
-	.section-btn.active {
-		color: var(--accent-primary);
-		font-weight: 600;
+	.tab-btn.active {
+		background: var(--primary);
+		color: var(--primary-foreground);
+		box-shadow: var(--shadow-s);
 	}
 
-	.section-btn.active::before {
-		content: '';
-		position: absolute;
-		left: calc(-1 * var(--space-3) - 1px);
-		top: 50%;
-		transform: translateY(-50%);
-		width: 3px;
-		height: 16px;
-		background: var(--accent-primary);
-		border-radius: var(--radius-full);
-		box-shadow: 0 0 8px var(--accent-primary);
+	.tab-btn svg {
+		width: 18px;
+		height: 18px;
 	}
 
-	/* ═══════════════════════════════════════════════════════════════════════════════
-	   CONTENT AREA - Floating Panel Design
-	   ═══════════════════════════════════════════════════════════════════════════════ */
-
-	.settings-content {
+	/* Content Area */
+	.content {
 		flex: 1;
 		overflow-y: auto;
-		padding: var(--space-5) var(--space-6);
-		scrollbar-width: thin;
-		scrollbar-color: var(--border-default) transparent;
-		/* Match floating sidebar style */
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-lg);
-		box-shadow: var(--shadow-sm);
-		backdrop-filter: blur(12px);
-		-webkit-backdrop-filter: blur(12px);
-		position: relative;
+		padding: 16px;
 	}
 
-	/* Subtle inner glow at top */
-	.settings-content::before {
-		content: '';
-		position: absolute;
-		top: 0;
-		left: 0;
-		right: 0;
-		height: 1px;
-		background: linear-gradient(
-			90deg,
-			transparent 0%,
-			color-mix(in oklch, var(--foreground) 10%, transparent) 30%,
-			color-mix(in oklch, var(--foreground) 15%, transparent) 50%,
-			color-mix(in oklch, var(--foreground) 10%, transparent) 70%,
-			transparent 100%
-		);
-		border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-		z-index: 1;
+	.tab-content {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
 	}
 
-	.settings-content::-webkit-scrollbar {
-		width: 6px;
+	/* Sections */
+	.section {
+		background: var(--card);
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		overflow: hidden;
 	}
 
-	.settings-content::-webkit-scrollbar-track {
-		background: transparent;
-	}
-
-	.settings-content::-webkit-scrollbar-thumb {
-		background: var(--border-default);
-		border-radius: 3px;
-	}
-
-	.settings-content::-webkit-scrollbar-thumb:hover {
-		background: var(--text-tertiary);
-	}
-
-	.section-content {
-		width: 100%;
-		max-width: 720px;
-	}
-
-	/* Section header */
 	.section-header {
-		margin-bottom: var(--space-6);
-		padding-bottom: var(--space-4);
-		border-bottom: 1px solid var(--border-subtle);
-		position: relative;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		width: 100%;
+		padding: 12px 16px;
+		background: transparent;
+		border: none;
+		cursor: pointer;
+		transition: background 150ms ease;
 	}
 
-	.section-header::after {
-		content: '';
-		position: absolute;
-		bottom: -1px;
-		left: 0;
-		width: 60px;
-		height: 2px;
-		background: linear-gradient(
-			90deg,
-			var(--accent-primary) 0%,
-			transparent 100%
-		);
+	.section-header:hover {
+		background: var(--accent);
 	}
 
 	.section-header h3 {
-		font-family: var(--font-display);
-		font-size: var(--text-xl);
-		font-weight: 600;
-		color: var(--text-primary);
-		letter-spacing: -0.02em;
 		margin: 0;
-	}
-
-	.section-header p {
-		font-family: var(--font-display);
-		font-size: var(--text-sm);
-		color: var(--text-secondary);
-		margin-top: var(--space-2);
-		line-height: 1.5;
-	}
-
-	.section-header .btn {
-		margin-top: var(--space-3);
-	}
-
-	/* ═══════════════════════════════════════════════════════════════════════════════
-	   SETTINGS GROUPS
-	   ═══════════════════════════════════════════════════════════════════════════════ */
-
-	.settings-group {
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-lg);
-		padding: var(--space-5);
-		margin-bottom: var(--space-5);
-		box-shadow: var(--shadow-inset), var(--shadow-xs);
-		transition: all var(--transition-smooth);
-		position: relative;
-	}
-
-	/* Subtle corner gradient */
-	.settings-group::before {
-		content: '';
-		position: absolute;
-		top: 0;
-		left: 0;
-		width: 60px;
-		height: 60px;
-		background: linear-gradient(
-			135deg,
-			color-mix(in oklch, var(--accent-primary) 8%, transparent) 0%,
-			transparent 70%
-		);
-		border-radius: var(--radius-lg) 0 0 0;
-		pointer-events: none;
-	}
-
-	.settings-group:hover {
-		border-color: var(--border-default);
-		box-shadow: var(--shadow-inset), var(--shadow-sm);
-	}
-
-	.settings-group h4 {
-		font-family: var(--font-display);
-		font-size: var(--text-md);
+		font-size: 0.9375rem;
 		font-weight: 600;
-		color: var(--text-primary);
-		margin-bottom: var(--space-4);
+		color: var(--foreground);
+	}
+
+	.chevron {
+		width: 20px;
+		height: 20px;
+		color: var(--muted-foreground);
+		transition: transform 200ms ease;
+	}
+
+	.chevron.expanded {
+		transform: rotate(180deg);
+	}
+
+	.section-content {
+		padding: 8px 16px 16px;
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	/* Setting Rows */
+	.setting-row {
 		display: flex;
 		align-items: center;
-		gap: var(--space-2);
+		justify-content: space-between;
+		gap: 16px;
+		padding: 8px 0;
 	}
 
-	.settings-group h4 svg {
-		width: 16px;
-		height: 16px;
-		color: var(--accent-primary);
+	.setting-row.vertical {
+		flex-direction: column;
+		align-items: stretch;
 	}
 
-	/* ═══════════════════════════════════════════════════════════════════════════════
-	   FORM ELEMENTS
-	   ═══════════════════════════════════════════════════════════════════════════════ */
+	.setting-info {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
 
+	.setting-info label,
+	.setting-label {
+		font-size: 0.875rem;
+		font-weight: 500;
+		color: var(--foreground);
+	}
+
+	.setting-desc {
+		font-size: 0.75rem;
+		color: var(--muted-foreground);
+	}
+
+	/* Inputs */
 	.input {
-		width: 100%;
-		padding: var(--space-3) var(--space-4);
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md);
-		color: var(--text-primary);
-		font-family: var(--font-mono);
-		font-size: var(--text-base);
-		outline: none;
-		transition: all var(--transition-smooth);
-		box-shadow: var(--shadow-inset);
-	}
-
-	.input::placeholder {
-		color: var(--text-tertiary);
-		font-family: var(--font-display);
-	}
-
-	.input:hover {
-		border-color: var(--border-default);
-		background: var(--surface-2);
+		padding: 8px 12px;
+		background-color: var(--input);
+		border: 1px solid var(--border);
+		border-radius: calc(var(--radius) - 2px);
+		color: var(--foreground);
+		font-size: 0.875rem;
+		transition: border-color 150ms ease, box-shadow 150ms ease;
 	}
 
 	.input:focus {
-		border-color: var(--accent-primary);
-		background: var(--surface-0);
-		box-shadow: var(--shadow-inset), 0 0 0 3px color-mix(in oklch, var(--accent-primary) 15%, transparent);
+		outline: none;
+		border-color: var(--ring);
+		box-shadow: 0 0 0 2px var(--primary-20);
 	}
 
-	.input.small {
+	.input::placeholder {
+		color: var(--muted-foreground);
+	}
+
+	.input.compact {
+		padding: 6px 10px;
+		font-size: 0.8125rem;
+	}
+
+	.input.number {
 		width: 70px;
 		text-align: center;
-		padding: var(--space-2) var(--space-2);
 	}
 
-	/* Select/dropdown styling */
-	select.input {
-		cursor: pointer;
-		appearance: none;
-		-webkit-appearance: none;
-		-moz-appearance: none;
-		background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7a99' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
-		background-position: right 0.75rem center;
-		background-repeat: no-repeat;
-		background-size: 1.25em 1.25em;
-		padding-right: 2.75rem;
+	/* Note: Select styling is handled by global select.input in app.css */
+	/* Do NOT add appearance/background-image here to avoid duplicate arrows */
+
+	.input.textarea {
+		resize: vertical;
+		min-height: 60px;
 	}
 
-	select.input option {
-		background-color: var(--surface-0);
-		color: var(--text-primary);
-		padding: var(--space-2);
-	}
-
-	.input-row {
+	.input-group {
 		display: flex;
-		gap: var(--space-3);
+		gap: 8px;
 		align-items: center;
 	}
 
-	.form-stack {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-4);
+	.input-group .input {
+		flex: 1;
 	}
 
-	.form-stack label {
-		font-family: var(--font-display);
-		font-size: var(--text-sm);
-		font-weight: 500;
-		color: var(--text-secondary);
-		margin-bottom: var(--space-2);
-		display: block;
-	}
-
-	.form-row {
-		display: grid;
-		grid-template-columns: 1fr 1fr;
-		gap: var(--space-4);
-	}
-
-	.checkbox-row {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-2);
-	}
-
-	.checkbox-label {
-		display: flex;
-		align-items: center;
-		gap: var(--space-3);
-		cursor: pointer;
-		font-family: var(--font-display);
-		color: var(--text-secondary);
-		font-size: var(--text-md);
-	}
-
-	.checkbox-label input[type="checkbox"] {
-		width: 18px;
-		height: 18px;
-		cursor: pointer;
-		accent-color: var(--accent-primary);
-	}
-
-	.info-box {
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-left: 3px solid var(--accent-primary);
-		border-radius: var(--radius-sm);
-		padding: var(--space-3) var(--space-4);
-	}
-
-	.badge.info {
-		background: color-mix(in oklch, var(--accent-info) 12%, transparent);
-		color: var(--accent-info);
-		border: 1px solid color-mix(in oklch, var(--accent-info) 25%, transparent);
-	}
-
-	/* ═══════════════════════════════════════════════════════════════════════════════
-	   BUTTONS
-	   ═══════════════════════════════════════════════════════════════════════════════ */
-
+	/* Buttons */
 	.btn {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		gap: var(--space-2);
-		padding: var(--space-3) var(--space-4);
-		border-radius: var(--radius-md);
-		font-family: var(--font-display);
-		font-size: var(--text-md);
+		gap: 6px;
+		padding: 8px 16px;
+		border: none;
+		border-radius: calc(var(--radius) - 2px);
+		font-size: 0.875rem;
 		font-weight: 500;
 		cursor: pointer;
-		transition: all var(--transition-smooth);
-		border: none;
+		transition: all 150ms ease;
 	}
 
 	.btn:disabled {
@@ -3029,172 +2029,61 @@
 		cursor: not-allowed;
 	}
 
-	.btn:focus-visible {
-		outline: 2px solid var(--accent-primary);
-		outline-offset: 2px;
+	.btn.primary {
+		background: var(--primary);
+		color: var(--primary-foreground);
 	}
 
-	.btn-primary {
-		background: linear-gradient(
-			135deg,
-			var(--accent-primary) 0%,
-			color-mix(in oklch, var(--accent-primary) 85%, oklch(0.5 0.15 200)) 100%
-		);
-		color: var(--primary-foreground, oklch(0.15 0.02 180));
-		box-shadow: var(--shadow-sm), var(--shadow-glow-soft);
+	.btn.primary:hover:not(:disabled) {
+		filter: brightness(1.1);
 	}
 
-	.btn-primary:hover:not(:disabled) {
-		transform: translateY(-1px);
-		box-shadow: var(--shadow-md), var(--shadow-glow);
-		filter: brightness(1.08);
+	.btn.secondary {
+		background: var(--secondary);
+		color: var(--secondary-foreground);
+		border: 1px solid var(--border);
 	}
 
-	.btn-primary:active:not(:disabled) {
-		transform: translateY(0);
-		box-shadow: var(--shadow-sm);
+	.btn.secondary:hover:not(:disabled) {
+		background: var(--accent);
 	}
 
-	.btn-secondary {
-		background: var(--surface-1);
-		color: var(--text-primary);
-		border: 1px solid var(--border-default);
-		box-shadow: var(--shadow-inset), var(--shadow-xs);
+	.btn.danger {
+		background: var(--destructive);
+		color: var(--destructive-foreground);
 	}
 
-	.btn-secondary:hover:not(:disabled) {
-		background: var(--surface-2);
-		border-color: var(--border-emphasis);
-		box-shadow: var(--shadow-inset), var(--shadow-sm);
+	.btn.compact {
+		padding: 6px 12px;
+		font-size: 0.8125rem;
 	}
 
-	.btn-sm {
-		padding: var(--space-2) var(--space-3);
-		font-size: var(--text-sm);
-	}
-
-	.icon-btn {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 32px;
-		height: 32px;
-		padding: 0;
-		background: transparent;
-		border: none;
-		border-radius: var(--radius-sm);
-		color: var(--text-secondary);
-		cursor: pointer;
-		transition: all var(--transition-fast);
-	}
-
-	.icon-btn:hover {
-		background: var(--surface-2);
-		color: var(--text-primary);
-	}
-
-	.icon-btn.danger:hover {
-		background: color-mix(in oklch, var(--accent-danger) 12%, transparent);
-		color: var(--accent-danger);
-	}
-
-	/* ═══════════════════════════════════════════════════════════════════════════════
-	   THEME SELECTOR
-	   ═══════════════════════════════════════════════════════════════════════════════ */
-
-	.theme-options {
-		display: flex;
-		gap: var(--space-3);
-	}
-
-	.theme-btn {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: var(--space-2);
-		padding: var(--space-4);
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md);
-		cursor: pointer;
-		transition: all var(--transition-smooth);
-		color: var(--text-primary);
-		font-family: var(--font-display);
-	}
-
-	.theme-btn:hover {
-		background: var(--surface-hover);
-		border-color: var(--border-default);
-		transform: translateY(-2px);
-		box-shadow: var(--shadow-md);
-	}
-
-	.theme-btn.active {
-		background: color-mix(in oklch, var(--accent-primary) 12%, transparent);
-		border-color: var(--accent-primary);
-		box-shadow: var(--shadow-sm), var(--shadow-glow-soft);
-	}
-
-	.theme-preview {
-		width: 48px;
-		height: 48px;
-		border-radius: var(--radius-md);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		font-size: 1.5rem;
-		background: var(--surface-2);
-		border: 1px solid var(--border-subtle);
-	}
-
-	.theme-preview.light {
-		background: oklch(0.95 0.005 60);
-		border-color: oklch(0.85 0.01 60);
-	}
-
-	.theme-preview.dark {
-		background: oklch(0.15 0.01 260);
-		border-color: oklch(0.25 0.01 260);
-	}
-
-	.theme-preview.system {
-		background: linear-gradient(135deg, oklch(0.95 0.005 60) 50%, oklch(0.15 0.01 260) 50%);
-	}
-
-	.theme-btn span:not(.theme-preview) {
-		font-size: var(--text-sm);
-		font-weight: 500;
-		color: var(--text-primary);
-	}
-
-	.theme-btn.active span:not(.theme-preview) {
-		color: var(--accent-primary);
-	}
-
-	/* ═══════════════════════════════════════════════════════════════════════════════
-	   TOGGLES
-	   ═══════════════════════════════════════════════════════════════════════════════ */
-
+	/* Toggle Switch */
 	.toggle {
 		position: relative;
 		width: 44px;
 		height: 24px;
-		background: var(--surface-2);
-		border-radius: var(--radius-full);
+		background: var(--muted);
+		border: 1px solid var(--border);
+		border-radius: 12px;
 		cursor: pointer;
-		transition: all var(--transition-smooth);
-		border: 1px solid var(--border-subtle);
+		transition: all 200ms ease;
+		flex-shrink: 0;
 	}
 
 	.toggle:hover {
-		border-color: var(--border-default);
+		border-color: var(--ring);
 	}
 
 	.toggle.active {
-		background: var(--accent-primary);
-		border-color: var(--accent-primary);
-		box-shadow: var(--shadow-glow-soft);
+		background: var(--primary);
+		border-color: var(--primary);
+	}
+
+	.toggle.small {
+		width: 36px;
+		height: 20px;
+		border-radius: 10px;
 	}
 
 	.toggle-knob {
@@ -3205,2058 +2094,582 @@
 		height: 18px;
 		background: white;
 		border-radius: 50%;
-		transition: all var(--transition-spring);
-		box-shadow: var(--shadow-sm);
+		transition: transform 200ms ease;
+		box-shadow: var(--shadow-s);
 	}
 
 	.toggle.active .toggle-knob {
 		transform: translateX(20px);
 	}
 
-	.toggle-sm {
-		position: relative;
-		width: 36px;
-		height: 20px;
-		background: var(--surface-2);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-full);
-		cursor: pointer;
-		transition: all var(--transition-smooth);
-	}
-
-	.toggle-sm.active {
-		background: var(--accent-primary);
-		border-color: var(--accent-primary);
-		box-shadow: var(--shadow-glow-soft);
-	}
-
-	.toggle-knob-sm {
-		position: absolute;
-		top: 2px;
-		left: 2px;
+	.toggle.small .toggle-knob {
 		width: 14px;
 		height: 14px;
-		background: white;
-		border-radius: 50%;
-		transition: all var(--transition-spring);
-		box-shadow: var(--shadow-xs);
 	}
 
-	.toggle-sm.active .toggle-knob-sm {
+	.toggle.small.active .toggle-knob {
 		transform: translateX(16px);
 	}
 
-	.toggle-row {
+	/* Theme Switcher */
+	.theme-switcher {
 		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--space-4);
+		gap: 4px;
+		background: var(--muted);
+		padding: 4px;
+		border-radius: var(--radius);
 	}
 
-	/* ═══════════════════════════════════════════════════════════════════════════════
-	   BADGES
-	   ═══════════════════════════════════════════════════════════════════════════════ */
+	.theme-option {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 36px;
+		height: 32px;
+		background: transparent;
+		border: none;
+		border-radius: calc(var(--radius) - 4px);
+		color: var(--muted-foreground);
+		cursor: pointer;
+		transition: all 150ms ease;
+	}
 
+	.theme-option:hover {
+		background: var(--accent);
+		color: var(--accent-foreground);
+	}
+
+	.theme-option.active {
+		background: var(--card);
+		color: var(--primary);
+		box-shadow: var(--shadow-s);
+	}
+
+	.theme-option svg {
+		width: 18px;
+		height: 18px;
+	}
+
+	/* Badges */
 	.badge {
 		display: inline-flex;
 		align-items: center;
-		gap: 4px;
-		padding: 3px 8px;
-		font-size: var(--text-xs);
+		padding: 2px 8px;
+		font-size: 0.6875rem;
 		font-weight: 600;
-		letter-spacing: 0.02em;
-		border-radius: var(--radius-sm);
-		white-space: nowrap;
+		border-radius: 9999px;
+		text-transform: uppercase;
+		letter-spacing: 0.025em;
 	}
 
 	.badge.success {
-		background: color-mix(in oklch, var(--accent-success) 12%, transparent);
-		color: var(--accent-success);
-		border: 1px solid color-mix(in oklch, var(--accent-success) 25%, transparent);
-	}
-
-	.badge.error {
-		background: color-mix(in oklch, var(--accent-danger) 12%, transparent);
-		color: var(--accent-danger);
-		border: 1px solid color-mix(in oklch, var(--accent-danger) 25%, transparent);
+		background: color-mix(in oklch, var(--success) 15%, transparent);
+		color: var(--success);
 	}
 
 	.badge.muted {
-		background: var(--surface-1);
-		color: var(--text-secondary);
-		border: 1px solid var(--border-subtle);
+		background: var(--muted);
+		color: var(--muted-foreground);
 	}
 
 	.badge.primary {
-		background: color-mix(in oklch, var(--accent-primary) 12%, transparent);
-		color: var(--accent-primary);
-		border: 1px solid color-mix(in oklch, var(--accent-primary) 25%, transparent);
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		color: var(--primary);
 	}
 
-	.badge.warning {
-		background: color-mix(in oklch, var(--accent-warning) 12%, transparent);
-		color: var(--accent-warning);
-		border: 1px solid color-mix(in oklch, var(--accent-warning) 25%, transparent);
-	}
-
-	/* ═══════════════════════════════════════════════════════════════════════════════
-	   BANNERS
-	   ═══════════════════════════════════════════════════════════════════════════════ */
-
-	.error-banner {
+	/* Alerts & Messages */
+	.alert {
 		display: flex;
 		align-items: center;
-		gap: var(--space-3);
-		padding: var(--space-3) var(--space-4);
-		background: color-mix(in oklch, var(--accent-danger) 10%, transparent);
-		border: 1px solid color-mix(in oklch, var(--accent-danger) 25%, transparent);
-		border-radius: var(--radius-md);
-		color: var(--accent-danger);
-		font-size: var(--text-sm);
-		margin-bottom: var(--space-4);
+		justify-content: space-between;
+		padding: 10px 14px;
+		border-radius: var(--radius);
+		font-size: 0.875rem;
+		margin-bottom: 12px;
 	}
 
-	.success-banner {
-		display: flex;
-		align-items: center;
-		gap: var(--space-3);
-		padding: var(--space-3) var(--space-4);
-		background: color-mix(in oklch, var(--accent-success) 10%, transparent);
-		border: 1px solid color-mix(in oklch, var(--accent-success) 25%, transparent);
-		border-radius: var(--radius-md);
-		color: var(--accent-success);
-		font-size: var(--text-sm);
-		margin-bottom: var(--space-4);
+	.alert.error {
+		background: color-mix(in oklch, var(--destructive) 12%, transparent);
+		color: var(--destructive);
+		border: 1px solid color-mix(in oklch, var(--destructive) 25%, transparent);
 	}
 
 	.close-btn {
-		background: transparent;
+		background: none;
 		border: none;
-		border-radius: var(--radius-sm);
 		font-size: 1.25rem;
-		line-height: 1;
 		cursor: pointer;
 		opacity: 0.7;
-		padding: var(--space-1);
-		transition: all var(--transition-fast);
 		color: inherit;
+		line-height: 1;
 	}
 
 	.close-btn:hover {
 		opacity: 1;
-		background: color-mix(in oklch, currentColor 10%, transparent);
 	}
 
-	/* ============================================
-	   UTILITY CLASSES
-	   ============================================ */
-	.text-muted { color: var(--text-tertiary); }
-	:global(.light) .text-muted { color: var(--text-tertiary); }
-	.text-success { color: var(--accent-success); }
-	.text-error { color: var(--accent-danger); }
-	.text-primary { color: var(--accent-glow); }
-	.text-sm { font-size: 0.875rem; }
-	.font-medium { font-weight: 500; }
-	.font-mono { font-family: var(--font-mono); }
-	.flex-1 { flex: 1; }
-	.w-full { width: 100%; }
-
-	/* ============================================
-	   CONNECTION CARDS - Neo-Glass Style
-	   ============================================ */
-	.connection-card {
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-lg);
-		padding: var(--space-5);
-		margin-bottom: var(--space-4);
-		transition: all var(--transition-smooth);
-		position: relative;
+	.success-msg {
+		font-size: 0.8125rem;
+		color: var(--success);
 	}
 
-	.connection-card:hover {
-		border-color: var(--border-default);
-		box-shadow: var(--shadow-md), var(--shadow-glow-soft);
+	.error-msg {
+		font-size: 0.8125rem;
+		color: var(--destructive);
 	}
 
-	/* Connected state */
-	.connection-card.connected {
-		border-color: color-mix(in oklch, var(--accent-success) 40%, transparent);
-		box-shadow: var(--shadow-sm), 0 0 12px color-mix(in oklch, var(--accent-success) 15%, transparent);
+	.inline-success {
+		font-size: 0.75rem;
+		color: var(--success);
+		margin-left: 8px;
 	}
 
-	.connection-header {
+	.inline-error {
+		font-size: 0.75rem;
+		color: var(--destructive);
+		margin-left: 8px;
+	}
+
+	.validation-result {
+		font-size: 0.8125rem;
+		padding: 6px 10px;
+		border-radius: calc(var(--radius) - 2px);
+		background: color-mix(in oklch, var(--destructive) 10%, transparent);
+		color: var(--destructive);
+	}
+
+	.validation-result.valid {
+		background: color-mix(in oklch, var(--success) 10%, transparent);
+		color: var(--success);
+	}
+
+	/* Password Form */
+	.password-form {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	/* Connections */
+	.connection-row {
 		display: flex;
 		align-items: center;
-		gap: var(--space-4);
-		margin-bottom: var(--space-4);
+		justify-content: space-between;
+		gap: 16px;
+		padding: 12px;
+		background: var(--muted);
+		border-radius: var(--radius);
+	}
+
+	.connection-info {
+		display: flex;
+		align-items: center;
+		gap: 12px;
 	}
 
 	.connection-icon {
-		width: 44px;
-		height: 44px;
-		border-radius: var(--radius-md);
-		background: var(--surface-2);
-		border: 1px solid var(--border-subtle);
+		width: 36px;
+		height: 36px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		font-size: 1.25rem;
-		position: relative;
-		box-shadow: var(--shadow-inset), var(--shadow-xs);
-	}
-
-	/* Status indicator on icon */
-	.connection-icon::after {
-		content: '';
-		position: absolute;
-		top: -3px;
-		right: -3px;
-		width: 10px;
-		height: 10px;
-		border-radius: 50%;
-		background: var(--text-tertiary);
-		border: 2px solid var(--surface-0);
-		transition: all var(--transition-smooth);
-	}
-
-	.connection-card.connected .connection-icon::after {
-		background: var(--accent-success);
-		box-shadow: 0 0 8px color-mix(in oklch, var(--accent-success) 50%, transparent);
-	}
-
-	/* Service-specific icon colors */
-	.connection-icon.github {
-		background: linear-gradient(135deg, oklch(0.20 0.01 250) 0%, oklch(0.15 0.01 250) 100%);
-		border-color: oklch(0.30 0.02 250);
-		color: oklch(0.95 0 0);
+		border-radius: 8px;
+		color: white;
 	}
 
 	.connection-icon.claude {
-		background: linear-gradient(135deg, oklch(0.22 0.08 25) 0%, oklch(0.16 0.06 25) 100%);
-		border-color: oklch(0.35 0.10 25);
+		background: linear-gradient(135deg, #d97706, #b45309);
 	}
 
-	.connection-icon.orange {
-		background: linear-gradient(135deg, color-mix(in oklch, var(--accent-warning) 20%, transparent), color-mix(in oklch, var(--accent-warning) 12%, transparent));
-		border-color: color-mix(in oklch, var(--accent-warning) 35%, transparent);
+	.connection-icon.github {
+		background: #24292e;
 	}
 
-	.connection-icon.docker {
-		background: linear-gradient(135deg, oklch(0.50 0.15 230) 0%, oklch(0.40 0.12 230) 100%);
-		border-color: oklch(0.50 0.14 230);
+	.connection-icon svg {
+		width: 20px;
+		height: 20px;
 	}
 
-	.connection-title {
-		display: flex;
-		align-items: center;
-		gap: var(--space-3);
-		font-family: var(--font-display);
-		font-weight: 600;
-		color: var(--text-primary);
-	}
-
-	.connection-info p {
-		color: var(--text-secondary);
-		font-family: var(--font-display);
-		font-size: var(--text-sm);
+	.connection-name {
+		font-weight: 500;
+		font-size: 0.875rem;
 	}
 
 	.connection-actions {
 		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
+		align-items: center;
+		gap: 8px;
 	}
 
 	.oauth-flow {
 		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
+		gap: 6px;
+		align-items: center;
 	}
 
-	/* Docker info */
-	.docker-info {
+	.connected-text {
+		font-size: 0.8125rem;
+		color: var(--success);
+	}
+
+	/* API Keys */
+	.api-key-row {
 		display: flex;
-		align-items: flex-start;
-		gap: var(--space-4);
-		padding: var(--space-4);
-		background: color-mix(in oklch, var(--accent-primary) 8%, transparent);
-		border: 1px solid color-mix(in oklch, var(--accent-primary) 20%, transparent);
-		border-radius: var(--radius-md);
+		flex-direction: column;
+		gap: 8px;
+		padding: 12px;
+		background: var(--muted);
+		border-radius: var(--radius);
 	}
 
-	.docker-info p {
-		color: var(--text-primary);
-		font-family: var(--font-display);
-	}
-
-	.docker-info code {
-		background: var(--surface-2);
-		padding: 2px var(--space-2);
-		border-radius: var(--radius-sm);
-		font-family: var(--font-mono);
-		font-size: var(--text-xs);
-		color: var(--accent-primary);
-	}
-
-	/* Info card */
-	.info-card {
+	.api-key-info {
 		display: flex;
 		align-items: center;
-		gap: var(--space-4);
-		padding: var(--space-4);
-		border-radius: var(--radius-md);
+		gap: 12px;
 	}
 
-	.info-card.success {
-		background: color-mix(in oklch, var(--accent-success) 10%, transparent);
-		border: 1px solid color-mix(in oklch, var(--accent-success) 25%, transparent);
+	.api-key-name {
+		font-weight: 500;
+		font-size: 0.875rem;
 	}
 
-	.info-card .icon {
-		font-size: 1.5rem;
+	.masked-key {
+		font-size: 0.75rem;
+		color: var(--muted-foreground);
+		background: var(--secondary);
+		padding: 2px 6px;
+		border-radius: 4px;
 	}
 
-	.info-card h4 {
-		font-family: var(--font-display);
-		font-size: var(--text-base);
-		font-weight: 600;
-		margin: 0;
-		color: var(--text-primary);
-	}
-
-	.info-card p {
-		font-family: var(--font-display);
-		font-size: var(--text-sm);
-		color: var(--text-secondary);
-		margin: 2px 0 0;
-	}
-
-	/* ============================================
-	   USER LIST - Neo-Glass Style
-	   ============================================ */
-	.user-list {
+	.api-key-input {
 		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
+		gap: 6px;
 	}
 
-	.user-card {
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-lg);
-		padding: var(--space-4);
-		display: flex;
-		justify-content: space-between;
-		align-items: flex-start;
-		gap: var(--space-4);
-		transition: all var(--transition-smooth);
-		position: relative;
-	}
-
-	.user-card:hover {
-		border-color: var(--border-default);
-		box-shadow: var(--shadow-sm), var(--shadow-glow-soft);
-	}
-
-	/* Active user status */
-	.user-card.active {
-		border-color: color-mix(in oklch, var(--accent-success) 30%, transparent);
-	}
-
-	/* Inactive/disabled user */
-	.user-card.inactive {
-		opacity: 0.7;
-	}
-
-	.user-info {
+	.api-key-input .input {
 		flex: 1;
-		min-width: 0;
 	}
 
-	.user-header {
+	/* Model Selectors */
+	.model-selector {
 		display: flex;
 		align-items: center;
-		gap: var(--space-3);
-		flex-wrap: wrap;
+		gap: 8px;
 	}
 
-	.user-name {
-		font-family: var(--font-display);
-		font-weight: 600;
-		font-size: var(--text-base);
-		color: var(--text-primary);
-	}
-
-	.user-desc {
-		font-family: var(--font-display);
-		font-size: var(--text-sm);
-		color: var(--text-secondary);
-		margin: var(--space-2) 0;
-		line-height: 1.5;
-	}
-
-	.user-meta {
-		display: flex;
-		gap: var(--space-4);
-		font-family: var(--font-mono);
-		font-size: var(--text-xs);
-		color: var(--text-tertiary);
-		letter-spacing: 0.02em;
-		text-transform: uppercase;
-	}
-
-	.user-meta span {
-		display: flex;
-		align-items: center;
-		gap: var(--space-1);
-	}
-
-	.user-actions {
-		display: flex;
-		gap: var(--space-2);
-	}
-
-	.user-actions button {
-		background: var(--surface-2);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-sm);
-		padding: var(--space-2) var(--space-3);
-		font-family: var(--font-display);
-		font-size: var(--text-xs);
-		font-weight: 500;
-		color: var(--text-secondary);
-		cursor: pointer;
-		transition: all var(--transition-fast);
-	}
-
-	.user-actions button:hover {
-		background: var(--surface-3);
-		border-color: var(--border-default);
-		color: var(--text-primary);
-	}
-
-	.user-actions button.danger:hover {
-		background: color-mix(in oklch, var(--accent-danger) 15%, transparent);
-		border-color: color-mix(in oklch, var(--accent-danger) 40%, transparent);
-		color: var(--accent-danger);
-	}
-
-	.loading, .empty-state {
-		text-align: center;
-		padding: var(--space-8);
-		color: var(--text-secondary);
-		font-family: var(--font-display);
-	}
-
-	/* ============================================
-	   API KEY CARDS - Neo-Glass Style
-	   ============================================ */
-	.api-key-card {
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-lg);
-		padding: var(--space-5);
-		margin-bottom: var(--space-4);
-		transition: all var(--transition-smooth);
-		position: relative;
-	}
-
-	.api-key-card:hover {
-		border-color: var(--border-default);
-		box-shadow: var(--shadow-sm), var(--shadow-glow-soft);
-	}
-
-	/* Configured state */
-	.api-key-card.configured {
-		border-color: color-mix(in oklch, var(--accent-success) 30%, transparent);
-	}
-
-	/* Provider-specific hover accents */
-	.api-key-card.openai:hover {
-		border-color: color-mix(in oklch, var(--accent-success) 40%, transparent);
-		box-shadow: var(--shadow-sm), 0 0 12px color-mix(in oklch, var(--accent-success) 15%, transparent);
-	}
-
-	.api-key-card.google:hover {
-		border-color: color-mix(in oklch, var(--accent-primary) 40%, transparent);
-		box-shadow: var(--shadow-sm), 0 0 12px color-mix(in oklch, var(--accent-primary) 15%, transparent);
-	}
-
-	.api-key-card.meshy:hover {
-		border-color: oklch(0.55 0.18 300 / 0.4);
-		box-shadow: var(--shadow-sm), 0 0 12px oklch(0.55 0.18 300 / 0.15);
-	}
-
-	.api-key-header {
-		display: flex;
-		align-items: center;
-		gap: var(--space-4);
-		margin-bottom: var(--space-4);
-	}
-
-	.api-icon {
-		width: 44px;
-		height: 44px;
-		border-radius: var(--radius-md);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		font-size: 1.25rem;
-		border: 1px solid transparent;
-		position: relative;
-		box-shadow: var(--shadow-inset), var(--shadow-xs);
-	}
-
-	/* Secured indicator on icon */
-	.api-icon.secured::after {
-		content: '';
-		position: absolute;
-		bottom: -3px;
-		right: -3px;
-		width: 12px;
-		height: 12px;
-		border-radius: 50%;
-		background: var(--accent-success);
-		border: 2px solid var(--surface-0);
-		box-shadow: 0 0 6px color-mix(in oklch, var(--accent-success) 50%, transparent);
-	}
-
-	.api-icon.openai {
-		background: linear-gradient(135deg, color-mix(in oklch, var(--accent-success) 18%, transparent), color-mix(in oklch, var(--accent-success) 10%, transparent));
-		border-color: color-mix(in oklch, var(--accent-success) 30%, transparent);
-	}
-
-	.api-icon.google {
-		background: linear-gradient(135deg, color-mix(in oklch, var(--accent-primary) 18%, transparent), color-mix(in oklch, var(--accent-primary) 10%, transparent));
-		border-color: color-mix(in oklch, var(--accent-primary) 30%, transparent);
-	}
-
-	.api-icon.meshy {
-		background: linear-gradient(135deg, oklch(0.55 0.18 300 / 0.18), oklch(0.55 0.18 300 / 0.10));
-		border-color: oklch(0.55 0.18 300 / 0.30);
-	}
-
-	.api-icon.elevenlabs {
-		background: linear-gradient(135deg, oklch(0.60 0.14 45 / 0.18), oklch(0.60 0.14 45 / 0.10));
-		border-color: oklch(0.60 0.14 45 / 0.30);
-	}
-
-	.api-icon.anthropic {
-		background: linear-gradient(135deg, oklch(0.55 0.14 25 / 0.18), oklch(0.55 0.14 25 / 0.10));
-		border-color: oklch(0.55 0.14 25 / 0.30);
-	}
-
-	.api-title {
-		display: flex;
-		align-items: center;
-		gap: var(--space-3);
-		font-family: var(--font-display);
-		font-weight: 600;
-		color: var(--text-primary);
-	}
-
-	.api-key-form {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
-	}
-
-	/* Masked key display styling */
-	.api-key-masked {
-		font-family: var(--font-mono);
-		font-size: var(--text-xs);
-		letter-spacing: 0.08em;
-		color: var(--text-tertiary);
-		background: var(--surface-2);
-		padding: var(--space-2) var(--space-3);
-		border-radius: var(--radius-sm);
-		border: 1px solid var(--border-subtle);
-	}
-
-	/* ============================================
-	   MODEL GRID / CARDS - Neo-Glass Style
-	   ============================================ */
-	.model-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
-		gap: var(--space-3);
-	}
-
-	.model-btn {
-		display: flex;
-		flex-direction: column;
-		padding: var(--space-3);
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md);
-		cursor: pointer;
-		transition: all var(--transition-fast);
-		text-align: left;
-		font-family: var(--font-display);
-	}
-
-	.model-btn:hover:not(:disabled) {
-		border-color: color-mix(in oklch, var(--accent-primary) 50%, transparent);
-		background: var(--surface-2);
-		box-shadow: var(--shadow-sm);
-	}
-
-	.model-btn.active {
-		border-color: var(--accent-primary);
-		background: color-mix(in oklch, var(--accent-primary) 10%, transparent);
-		box-shadow: 0 0 0 1px color-mix(in oklch, var(--accent-primary) 20%, transparent);
-	}
-
-	.model-btn.disabled {
-		opacity: 0.4;
-		cursor: not-allowed;
-	}
-
-	.model-name {
-		font-family: var(--font-display);
-		font-size: var(--text-sm);
-		font-weight: 600;
-		color: var(--text-primary);
-	}
-
-	.model-price {
-		font-family: var(--font-mono);
-		font-size: var(--text-xs);
-		color: var(--accent-primary);
-		margin-top: auto;
-		padding-top: var(--space-2);
-	}
-
-	.model-provider {
-		font-family: var(--font-mono);
-		font-size: var(--text-xs);
-		color: var(--text-tertiary);
-		text-transform: uppercase;
-		letter-spacing: 0.02em;
-	}
-
-	/* Audio models */
-	.audio-models {
-		display: grid;
-		grid-template-columns: 1fr 1fr;
-		gap: var(--space-4);
-	}
-
-	.audio-model-list {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-2);
-	}
-
-	.audio-btn {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		padding: var(--space-3) var(--space-4);
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-sm);
-		cursor: pointer;
-		font-family: var(--font-display);
-		font-size: var(--text-sm);
-		transition: all var(--transition-fast);
-	}
-
-	.audio-btn:hover:not(:disabled) {
-		border-color: color-mix(in oklch, var(--accent-primary) 50%, transparent);
-		box-shadow: var(--shadow-xs);
-	}
-
-	.audio-btn.active {
-		border-color: var(--accent-primary);
-		background: color-mix(in oklch, var(--accent-primary) 10%, transparent);
-	}
-
-	.audio-btn .price {
-		font-family: var(--font-mono);
-		color: var(--accent-primary);
-		font-size: var(--text-xs);
-	}
-
-	/* ============================================
-	   CLEANUP SECTION - Neo-Glass Style
-	   ============================================ */
-	.cleanup-status {
-		display: flex;
-		align-items: center;
-		gap: var(--space-4);
-		padding: var(--space-4) var(--space-5);
-		border-radius: var(--radius-lg);
-		margin-bottom: var(--space-5);
-	}
-
-	.cleanup-status.active {
-		background: color-mix(in oklch, var(--accent-success) 10%, transparent);
-		border: 1px solid color-mix(in oklch, var(--accent-success) 25%, transparent);
-	}
-
-	.cleanup-status.sleeping {
-		background: color-mix(in oklch, var(--accent-warning) 10%, transparent);
-		border: 1px solid color-mix(in oklch, var(--accent-warning) 25%, transparent);
-	}
-
-	.cleanup-status p {
-		color: var(--text-primary);
-		font-family: var(--font-display);
-		font-weight: 500;
-	}
-
-	.status-icon {
-		font-size: 1.5rem;
-	}
-
-	.cleanup-inputs {
-		display: grid;
-		grid-template-columns: 1fr 1fr;
-		gap: var(--space-4);
-		margin-top: var(--space-4);
-	}
-
-	.cleanup-inputs.three-col {
-		grid-template-columns: repeat(3, 1fr);
-	}
-
-	.cleanup-inputs label {
-		font-family: var(--font-mono);
-		font-size: var(--text-xs);
-		font-weight: 500;
-		letter-spacing: 0.03em;
-		text-transform: uppercase;
-		color: var(--text-secondary);
-		display: block;
-		margin-bottom: var(--space-2);
-	}
-
-	.cleanup-items {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
-	}
-
-	.cleanup-item {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		padding: var(--space-4);
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md);
-		color: var(--text-primary);
-		font-family: var(--font-display);
-		font-weight: 500;
-		transition: all var(--transition-smooth);
-	}
-
-	.cleanup-item:hover {
-		border-color: var(--border-default);
-		box-shadow: var(--shadow-xs);
-	}
-
-	.cleanup-controls {
-		display: flex;
-		align-items: center;
-		gap: var(--space-3);
-	}
-
-	.cleanup-controls .toggle-sm {
-		background: var(--surface-2);
-		border: 1px solid var(--border-subtle);
-		box-shadow: var(--shadow-inset);
-	}
-
-	.cleanup-controls .toggle-sm.active {
-		background: var(--accent-primary);
-		box-shadow: 0 0 8px color-mix(in oklch, var(--accent-primary) 40%, transparent);
-	}
-
-	.cleanup-actions {
-		display: flex;
-		gap: var(--space-4);
-		margin-top: var(--space-5);
-	}
-
-	/* Cleanup Item Label with Preview Count */
-	.cleanup-item-label {
-		display: flex;
-		align-items: center;
-		gap: var(--space-3);
-	}
-
-	.preview-count {
-		font-size: var(--text-xs);
-		font-family: var(--font-mono);
-		color: var(--accent-warning);
-		background: color-mix(in oklch, var(--accent-warning) 15%, transparent);
-		padding: var(--space-1) var(--space-2);
-		border-radius: var(--radius-sm);
-		animation: fadeIn 0.2s ease-out;
-	}
-
-	@keyframes fadeIn {
-		from { opacity: 0; transform: scale(0.9); }
-		to { opacity: 1; transform: scale(1); }
-	}
-
-	/* Inline Preview Summary */
-	.cleanup-preview-inline {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: var(--space-3) var(--space-4);
-		border-radius: var(--radius-md);
-		margin-bottom: var(--space-4);
-		font-size: var(--text-sm);
-		animation: fadeIn 0.2s ease-out;
-	}
-
-	.cleanup-preview-inline.no-files {
-		background: color-mix(in oklch, var(--accent-success) 10%, transparent);
-		border: 1px solid color-mix(in oklch, var(--accent-success) 25%, transparent);
-	}
-
-	.cleanup-preview-inline.has-files {
-		background: color-mix(in oklch, var(--accent-warning) 10%, transparent);
-		border: 1px solid color-mix(in oklch, var(--accent-warning) 25%, transparent);
-	}
-
-	.cleanup-preview-inline .preview-status {
-		color: var(--text-primary);
-		font-family: var(--font-display);
-	}
-
-	.cleanup-preview-inline .preview-clear {
-		background: none;
-		border: none;
-		color: var(--text-muted);
-		cursor: pointer;
-		padding: var(--space-1) var(--space-2);
-		font-size: var(--text-sm);
-		border-radius: var(--radius-sm);
-		transition: all var(--transition-smooth);
-	}
-
-	.cleanup-preview-inline .preview-clear:hover {
-		background: var(--surface-2);
-		color: var(--text-primary);
-	}
-
-	.btn-danger {
-		background: linear-gradient(135deg,
-			color-mix(in oklch, var(--accent-danger) 15%, transparent),
-			color-mix(in oklch, var(--accent-danger) 8%, transparent));
-		border: 1px solid color-mix(in oklch, var(--accent-danger) 40%, transparent);
-		color: var(--accent-danger);
-	}
-
-	.btn-danger:hover:not(:disabled) {
-		background: color-mix(in oklch, var(--accent-danger) 20%, transparent);
-		border-color: var(--accent-danger);
-		box-shadow: 0 0 12px color-mix(in oklch, var(--accent-danger) 30%, transparent);
-	}
-
-	/* Key display - Neo-Glass Style */
-	.key-display {
-		background: color-mix(in oklch, var(--accent-success) 10%, transparent);
-		border: 1px solid color-mix(in oklch, var(--accent-success) 25%, transparent);
-		border-radius: var(--radius-lg);
-		padding: var(--space-4);
-		margin-top: var(--space-4);
-	}
-
-	.key-display p {
-		color: var(--text-primary);
-		font-family: var(--font-display);
-		font-weight: 500;
-	}
-
-	.key-display code {
-		background: var(--surface-2);
-		padding: var(--space-3) var(--space-4);
-		border-radius: var(--radius-sm);
-		font-family: var(--font-mono);
-		font-size: var(--text-xs);
-		word-break: break-all;
-		color: var(--accent-success);
-		display: block;
-		margin-top: var(--space-2);
-	}
-
-	/* ============================================
-	   MOBILE STYLES - Neo-Glass
-	   ============================================ */
-	.mobile-header {
-		padding: var(--space-4);
-		border-bottom: 1px solid var(--border-subtle);
-		background: var(--surface-1);
-	}
-
-	.menu-toggle {
-		display: flex;
-		align-items: center;
-		gap: var(--space-3);
-		background: none;
-		border: none;
-		color: var(--text-primary);
-		font-family: var(--font-display);
-		font-size: var(--text-base);
-		font-weight: 600;
-		cursor: pointer;
-	}
-
-	.mobile-menu {
-		padding: var(--space-3);
-		border-bottom: 1px solid var(--border-subtle);
-		background: var(--surface-1);
-	}
-
-	.mobile-category {
-		margin-bottom: var(--space-2);
-	}
-
-	.mobile-category .category-btn {
-		display: flex;
-		align-items: center;
-		gap: var(--space-3);
-		width: 100%;
-		padding: var(--space-3) var(--space-4);
-		background: transparent;
-		border: none;
-		color: var(--text-secondary);
-		font-family: var(--font-display);
-		font-size: var(--text-base);
-		font-weight: 600;
-		border-radius: var(--radius-sm);
-		cursor: pointer;
-		text-align: left;
-	}
-
-	.mobile-category .category-btn.active {
-		color: var(--accent-primary);
-		background: color-mix(in oklch, var(--accent-primary) 10%, transparent);
-	}
-
-	.mobile-sections {
-		margin-left: var(--space-6);
-		padding: var(--space-2) 0;
-	}
-
-	.mobile-content {
+	.model-selector .input {
 		flex: 1;
-		overflow-y: auto;
-		padding: var(--space-5);
 	}
 
-	/* ============================================
-	   MODELS SECTION - Neo-Glass
-	   ============================================ */
-	.models-section {
-		max-width: 860px;
-	}
-
-	.group-description {
-		font-family: var(--font-display);
-		font-size: var(--text-sm);
-		color: var(--text-secondary);
-		margin-bottom: var(--space-5);
-		line-height: 1.5;
-	}
-
-	.provider-section {
-		margin-bottom: var(--space-5);
-	}
-
-	.provider-section:last-child {
-		margin-bottom: 0;
-	}
-
-	.provider-header {
-		font-family: var(--font-mono);
-		font-size: var(--text-xs);
-		font-weight: 500;
-		color: var(--text-tertiary);
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		margin-bottom: var(--space-3);
-		padding-bottom: var(--space-2);
-		border-bottom: 1px solid var(--border-subtle);
-	}
-
-	.model-cards {
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
-		gap: var(--space-3);
-	}
-
-	.model-cards.tts-cards,
-	.model-cards.stt-cards {
-		grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-	}
-
-	.model-card {
-		display: flex;
-		flex-direction: column;
-		padding: var(--space-4);
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-lg);
-		cursor: pointer;
-		transition: all var(--transition-smooth);
-		text-align: left;
-		gap: var(--space-2);
-		box-shadow: var(--shadow-inset);
-	}
-
-	.model-card:hover:not(:disabled) {
-		border-color: color-mix(in oklch, var(--accent-primary) 50%, transparent);
-		background: var(--surface-2);
-		box-shadow: var(--shadow-sm);
-	}
-
-	.model-card.active {
-		border-color: var(--accent-primary);
-		background: color-mix(in oklch, var(--accent-primary) 10%, transparent);
-		box-shadow: 0 0 0 1px color-mix(in oklch, var(--accent-primary) 30%, transparent),
-			var(--shadow-glow-soft);
-	}
-
-	.model-card.deprecated {
-		opacity: 0.65;
-	}
-
-	.model-card.deprecated:hover {
-		border-color: color-mix(in oklch, var(--accent-warning) 50%, transparent);
-	}
-
-	.model-card:disabled {
-		opacity: 0.45;
-		cursor: not-allowed;
-	}
-
-	.model-card-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--space-3);
-		position: relative;
-	}
-
-	.model-card-name {
-		font-family: var(--font-display);
-		font-size: var(--text-base);
-		font-weight: 600;
-		color: var(--text-primary);
-		transition: color var(--transition-fast);
-	}
-
-	.model-card.active .model-card-name {
-		color: var(--accent-primary);
-	}
-
-	.model-card-desc {
-		font-family: var(--font-display);
-		font-size: var(--text-sm);
-		color: var(--text-secondary);
-		line-height: 1.5;
-		margin: 0;
-		max-height: 3em;
-		overflow: hidden;
-		transition: max-height var(--transition-smooth);
-	}
-
-	.model-card:hover .model-card-desc {
-		max-height: 6em;
-	}
-
-	.model-card-capabilities {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-1);
-		margin-top: var(--space-2);
-	}
-
-	.capability-badge {
-		font-family: var(--font-mono);
-		font-size: var(--text-xs);
-		font-weight: 500;
-		padding: 2px var(--space-2);
-		border-radius: var(--radius-sm);
-		background: var(--surface-2);
-		color: var(--text-tertiary);
-		letter-spacing: 0.02em;
-		text-transform: uppercase;
-		border: 1px solid var(--border-subtle);
-		transition: all var(--transition-fast);
-	}
-
-	.model-card:hover .capability-badge {
-		border-color: var(--border-default);
-	}
-
-	.capability-badge.highlight {
-		background: color-mix(in oklch, var(--accent-primary) 15%, transparent);
-		color: var(--accent-primary);
-		border-color: color-mix(in oklch, var(--accent-primary) 25%, transparent);
-	}
-
-	.capability-badge.audio {
-		background: oklch(0.60 0.15 300 / 0.15);
-		color: oklch(0.70 0.18 300);
-		border-color: oklch(0.60 0.15 300 / 0.25);
-	}
-
-	.capability-badge.text-excellent {
-		background: color-mix(in oklch, var(--accent-success) 15%, transparent);
-		color: var(--accent-success);
-		border-color: color-mix(in oklch, var(--accent-success) 25%, transparent);
-	}
-
-	.capability-badge.text-good {
-		background: color-mix(in oklch, var(--accent-primary) 15%, transparent);
-		color: var(--accent-primary);
-		border-color: color-mix(in oklch, var(--accent-primary) 25%, transparent);
-	}
-
-	.capability-badge.text-basic {
-		background: color-mix(in oklch, var(--accent-warning) 15%, transparent);
-		color: var(--accent-warning);
-		border-color: color-mix(in oklch, var(--accent-warning) 25%, transparent);
-	}
-
-	.model-card-footer {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		margin-top: auto;
-		padding-top: var(--space-3);
-		border-top: 1px solid var(--border-subtle);
-	}
-
-	.model-card-price {
-		font-family: var(--font-mono);
-		font-size: var(--text-sm);
-		font-weight: 600;
-		color: var(--accent-primary);
-	}
-
-	.model-card-resolution {
-		font-family: var(--font-mono);
-		font-size: var(--text-xs);
-		color: var(--text-tertiary);
-	}
-
-	.model-card-formats {
-		font-family: var(--font-mono);
-		font-size: var(--text-xs);
-		color: var(--text-tertiary);
-		text-transform: uppercase;
-		letter-spacing: 0.02em;
-	}
-
-	.badge.warning {
-		background: color-mix(in oklch, var(--accent-warning) 15%, transparent);
-		color: var(--accent-warning);
-	}
-
-	/* ============================================
-	   TTS SETTINGS - Neo-Glass Style
-	   ============================================ */
-	.tts-settings {
-		margin-top: var(--space-5);
-		padding: var(--space-5);
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-lg);
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-5);
-	}
-
-	.tts-setting-row {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
-	}
-
-	.tts-setting-row label {
-		font-family: var(--font-mono);
-		font-size: var(--text-xs);
-		font-weight: 500;
-		letter-spacing: 0.03em;
-		text-transform: uppercase;
-		color: var(--text-secondary);
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-	}
-
-	.tts-setting-row label span {
-		font-weight: 600;
-		color: var(--accent-primary);
-		font-size: var(--text-sm);
+	.loading-indicator {
+		font-size: 0.75rem;
+		color: var(--muted-foreground);
 	}
 
 	/* Slider */
 	.slider {
 		width: 100%;
 		height: 6px;
-		-webkit-appearance: none;
+		border-radius: 3px;
+		background: var(--muted);
 		appearance: none;
-		background: var(--surface-2);
-		border-radius: var(--radius-sm);
-		outline: none;
-		border: 1px solid var(--border-subtle);
+		cursor: pointer;
 	}
 
 	.slider::-webkit-slider-thumb {
-		-webkit-appearance: none;
 		appearance: none;
-		width: 18px;
-		height: 18px;
+		width: 16px;
+		height: 16px;
 		border-radius: 50%;
-		background: var(--accent-primary);
+		background: var(--primary);
 		cursor: pointer;
-		border: 2px solid var(--surface-0);
-		box-shadow: var(--shadow-sm);
-		transition: all var(--transition-fast);
-	}
-
-	.slider::-webkit-slider-thumb:hover {
-		transform: scale(1.1);
-		box-shadow: var(--shadow-md), var(--shadow-glow-soft);
+		box-shadow: var(--shadow-s);
 	}
 
 	.slider::-moz-range-thumb {
-		width: 18px;
-		height: 18px;
+		width: 16px;
+		height: 16px;
 		border-radius: 50%;
-		background: var(--accent-primary);
+		background: var(--primary);
 		cursor: pointer;
-		border: 2px solid var(--surface-0);
-		box-shadow: var(--shadow-sm);
+		border: none;
 	}
 
-	.tts-settings select.input {
-		background: var(--surface-2);
-		border: 1px solid var(--border-subtle);
-		font-family: var(--font-mono);
-		font-size: var(--text-sm);
-		font-weight: 500;
+	/* Dividers */
+	.divider {
+		border: none;
+		border-top: 1px solid var(--border);
+		margin: 12px 0;
 	}
 
-	.tts-settings select.input:focus {
-		border-color: var(--accent-primary);
-		box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent-primary) 15%, transparent);
+	.subsection-title {
+		font-size: 0.8125rem;
+		font-weight: 600;
+		color: var(--muted-foreground);
+		margin: 8px 0 4px;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
 	}
 
-	/* ============================================
-	   RESPONSIVE / MOBILE
-	   ============================================ */
-	@media (max-width: 640px) {
-		.audio-models {
-			grid-template-columns: 1fr;
-		}
-
-		.cleanup-inputs.three-col {
-			grid-template-columns: 1fr;
-		}
-
-		.form-row {
-			grid-template-columns: 1fr;
-		}
-
-		.model-cards {
-			grid-template-columns: 1fr;
-		}
-
-		.model-cards.tts-cards,
-		.model-cards.stt-cards {
-			grid-template-columns: 1fr;
-		}
-
-		.settings-content {
-			padding: 16px;
-		}
-
-		.section-content {
-			max-width: 100%;
-		}
-	}
-
-	/* ═══════════════════════════════════════════════════════════════════════════════
-	   API USERS SECTION - Inline Form & Merged Policies
-	   ═══════════════════════════════════════════════════════════════════════════════ */
-
-	.api-users-section {
+	/* Users */
+	.users-list {
 		display: flex;
 		flex-direction: column;
-		height: 100%;
-		overflow: hidden;
+		gap: 8px;
 	}
 
-	.api-users-section .section-header {
-		flex-shrink: 0;
-	}
-
-	.section-title-row {
-		flex: 1;
-	}
-
-	/* Scrollable content area */
-	.api-users-scroll-area {
-		flex: 1;
-		overflow-y: auto;
-		overflow-x: hidden;
-		padding-right: var(--space-2);
-		margin-right: calc(var(--space-2) * -1);
-	}
-
-	/* Custom scrollbar for scroll area */
-	.api-users-scroll-area::-webkit-scrollbar {
-		width: 6px;
-	}
-
-	.api-users-scroll-area::-webkit-scrollbar-track {
-		background: transparent;
-	}
-
-	.api-users-scroll-area::-webkit-scrollbar-thumb {
-		background: var(--border-subtle);
-		border-radius: var(--radius-full);
-	}
-
-	.api-users-scroll-area::-webkit-scrollbar-thumb:hover {
-		background: var(--border-default);
-	}
-
-	/* Glow button effect */
-	.btn-glow {
-		position: relative;
-		overflow: hidden;
-	}
-
-	.btn-glow::before {
-		content: '';
-		position: absolute;
-		inset: 0;
-		background: linear-gradient(
-			135deg,
-			transparent 0%,
-			color-mix(in oklch, white 20%, transparent) 50%,
-			transparent 100%
-		);
-		transform: translateX(-100%);
-		transition: transform 0.6s ease;
-	}
-
-	.btn-glow:hover::before {
-		transform: translateX(100%);
-	}
-
-	.btn-icon {
-		font-size: 1.1em;
-		font-weight: 300;
-		margin-right: var(--space-2);
-	}
-
-	/* ────────────────────────────────────────────────────────────────
-	   Compact Key Policies Grid
-	   ──────────────────────────────────────────────────────────────── */
-
-	.policies-compact {
-		margin-bottom: var(--space-5);
-		background: linear-gradient(
-			135deg,
-			color-mix(in oklch, var(--surface-1) 80%, var(--accent-primary) 3%),
-			var(--surface-1)
-		);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-lg);
-		overflow: hidden;
-	}
-
-	.policies-toggle {
-		width: 100%;
+	.user-row {
 		display: flex;
 		align-items: center;
-		gap: var(--space-3);
-		padding: var(--space-4);
+		justify-content: space-between;
+		padding: 10px 12px;
+		background: var(--muted);
+		border-radius: var(--radius);
+		transition: opacity 150ms ease;
+	}
+
+	.user-row.inactive {
+		opacity: 0.6;
+	}
+
+	.user-info {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+
+	.user-name {
+		font-weight: 500;
+		font-size: 0.875rem;
+	}
+
+	.user-desc {
+		font-size: 0.75rem;
+		color: var(--muted-foreground);
+	}
+
+	.user-actions {
+		display: flex;
+		gap: 4px;
+	}
+
+	.icon-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 32px;
+		height: 32px;
 		background: transparent;
 		border: none;
+		border-radius: 6px;
+		color: var(--muted-foreground);
 		cursor: pointer;
-		font-family: var(--font-display);
-		color: var(--text-primary);
-		transition: all var(--transition-smooth);
+		transition: all 150ms ease;
 	}
 
-	.policies-toggle:hover {
-		background: var(--surface-hover);
+	.icon-btn:hover {
+		background: var(--accent);
+		color: var(--accent-foreground);
 	}
 
-	.toggle-icon {
-		font-size: 0.75rem;
-		color: var(--text-tertiary);
-		transition: transform var(--transition-spring);
+	.icon-btn.danger:hover {
+		background: color-mix(in oklch, var(--destructive) 15%, transparent);
+		color: var(--destructive);
 	}
 
-	.toggle-icon.rotated {
-		transform: rotate(90deg);
+	.icon-btn svg {
+		width: 16px;
+		height: 16px;
 	}
 
-	.toggle-label {
-		font-weight: 600;
-		font-size: var(--text-base);
-	}
-
-	.policies-summary {
-		margin-left: auto;
-		font-family: var(--font-mono);
-		font-size: var(--text-xs);
-		color: var(--text-tertiary);
-		padding: var(--space-1) var(--space-3);
-		background: var(--surface-2);
-		border-radius: var(--radius-full);
-	}
-
-	.policies-grid {
-		display: grid;
-		grid-template-columns: repeat(2, 1fr);
-		gap: var(--space-3);
-		padding: 0 var(--space-4) var(--space-4);
-	}
-
-	@media (min-width: 600px) {
-		.policies-grid {
-			grid-template-columns: repeat(4, 1fr);
-		}
-	}
-
-	.policy-compact-item {
-		position: relative;
+	.user-form {
+		padding: 16px;
+		background: var(--muted);
+		border-radius: var(--radius);
 		display: flex;
 		flex-direction: column;
-		gap: var(--space-2);
-		padding: var(--space-3);
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md);
-		transition: all var(--transition-smooth);
-		animation: fadeSlideUp 0.3s ease-out backwards;
+		gap: 10px;
+		margin-bottom: 12px;
 	}
 
-	@keyframes fadeSlideUp {
-		from {
-			opacity: 0;
-			transform: translateY(8px);
-		}
-		to {
-			opacity: 1;
-			transform: translateY(0);
-		}
-	}
-
-	.policy-compact-item:hover {
-		border-color: var(--border-default);
-		box-shadow: var(--shadow-sm);
-	}
-
-	.policy-compact-item.status-green {
-		border-left: 2px solid var(--accent-success);
-	}
-
-	.policy-compact-item.status-yellow {
-		border-left: 2px solid var(--accent-warning);
-	}
-
-	.policy-compact-item.status-red {
-		border-left: 2px solid var(--accent-danger);
-	}
-
-	.policy-compact-item.status-blue {
-		border-left: 2px solid var(--accent-info);
-	}
-
-	.policy-compact-header {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-	}
-
-	.status-indicator {
-		width: 6px;
-		height: 6px;
-		border-radius: 50%;
-		background: var(--text-tertiary);
-		flex-shrink: 0;
-	}
-
-	.policy-compact-item.status-green .status-indicator {
-		background: var(--accent-success);
-		box-shadow: 0 0 6px color-mix(in oklch, var(--accent-success) 50%, transparent);
-	}
-
-	.policy-compact-item.status-yellow .status-indicator {
-		background: var(--accent-warning);
-		box-shadow: 0 0 6px color-mix(in oklch, var(--accent-warning) 50%, transparent);
-	}
-
-	.policy-compact-item.status-red .status-indicator {
-		background: var(--accent-danger);
-		box-shadow: 0 0 6px color-mix(in oklch, var(--accent-danger) 50%, transparent);
-	}
-
-	.policy-compact-item.status-blue .status-indicator {
-		background: var(--accent-info);
-		box-shadow: 0 0 6px color-mix(in oklch, var(--accent-info) 50%, transparent);
-	}
-
-	.policy-name {
-		font-family: var(--font-display);
-		font-size: var(--text-xs);
+	.user-form h4 {
+		margin: 0 0 4px;
+		font-size: 0.9375rem;
 		font-weight: 600;
-		color: var(--text-primary);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.policy-select-compact {
-		width: 100%;
-		padding: var(--space-2) var(--space-3);
-		font-family: var(--font-mono);
-		font-size: 10px;
-		font-weight: 500;
-		border-radius: var(--radius-sm);
-		background: var(--surface-2);
-		border: 1px solid var(--border-subtle);
-		color: var(--text-secondary);
-		cursor: pointer;
-		transition: all var(--transition-fast);
-		appearance: none;
-		-webkit-appearance: none;
-		background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7a99' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
-		background-position: right 0.5rem center;
-		background-repeat: no-repeat;
-		background-size: 1em 1em;
-		padding-right: 2rem;
-	}
-
-	.policy-select-compact:hover {
-		border-color: var(--border-default);
-	}
-
-	.policy-select-compact:focus {
-		outline: none;
-		border-color: var(--accent-primary);
-	}
-
-	.saving-dot {
-		position: absolute;
-		top: var(--space-2);
-		right: var(--space-2);
-		width: 8px;
-		height: 8px;
-		background: var(--accent-primary);
-		border-radius: 50%;
-		animation: pulse 1s ease-in-out infinite;
-	}
-
-	@keyframes pulse {
-		0%, 100% { opacity: 1; transform: scale(1); }
-		50% { opacity: 0.5; transform: scale(0.8); }
-	}
-
-	/* ────────────────────────────────────────────────────────────────
-	   Inline Form Panel
-	   ──────────────────────────────────────────────────────────────── */
-
-	.inline-form-panel {
-		margin-bottom: var(--space-5);
-		background: linear-gradient(
-			145deg,
-			color-mix(in oklch, var(--accent-primary) 5%, var(--surface-1)),
-			var(--surface-1) 60%
-		);
-		border: 1px solid color-mix(in oklch, var(--accent-primary) 20%, var(--border-subtle));
-		border-radius: var(--radius-xl);
-		padding: var(--space-5);
-		position: relative;
-		overflow: hidden;
-	}
-
-	/* Decorative gradient line at top */
-	.inline-form-panel::before {
-		content: '';
-		position: absolute;
-		top: 0;
-		left: 0;
-		right: 0;
-		height: 2px;
-		background: linear-gradient(
-			90deg,
-			var(--accent-primary) 0%,
-			color-mix(in oklch, var(--accent-primary) 50%, var(--accent-info)) 50%,
-			var(--accent-info) 100%
-		);
-	}
-
-	.form-panel-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		margin-bottom: var(--space-5);
-	}
-
-	.form-panel-header h4 {
-		font-family: var(--font-display);
-		font-size: var(--text-lg);
-		font-weight: 700;
-		color: var(--text-primary);
-		margin: 0;
-		background: linear-gradient(135deg, var(--text-primary), var(--accent-primary));
-		-webkit-background-clip: text;
-		-webkit-text-fill-color: transparent;
-		background-clip: text;
-	}
-
-	.close-form {
-		opacity: 0.6;
-		transition: all var(--transition-fast);
-	}
-
-	.close-form:hover {
-		opacity: 1;
-		transform: rotate(90deg);
-	}
-
-	.form-grid {
-		display: grid;
-		grid-template-columns: 1fr 1fr;
-		gap: var(--space-4);
-	}
-
-	.form-field {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-2);
-	}
-
-	.form-field.full-width {
-		grid-column: 1 / -1;
-	}
-
-	.form-field label {
-		font-family: var(--font-display);
-		font-size: var(--text-sm);
-		font-weight: 600;
-		color: var(--text-secondary);
-	}
-
-	.required {
-		color: var(--accent-danger);
-	}
-
-	.input-lg {
-		font-size: var(--text-md);
-		padding: var(--space-4);
-	}
-
-	.field-hint {
-		font-size: var(--text-xs);
-		color: var(--text-tertiary);
-		margin: 0;
 	}
 
 	.form-actions {
 		display: flex;
+		gap: 8px;
 		justify-content: flex-end;
-		gap: var(--space-3);
-		margin-top: var(--space-5);
-		padding-top: var(--space-4);
-		border-top: 1px solid var(--border-subtle);
+		margin-top: 4px;
 	}
 
-	/* ────────────────────────────────────────────────────────────────
-	   Success State - Key Display
-	   ──────────────────────────────────────────────────────────────── */
-
-	.key-success-panel {
-		text-align: center;
-		padding: var(--space-5);
-	}
-
-	.success-icon {
-		font-size: 3rem;
-		margin-bottom: var(--space-4);
-		animation: bounceIn 0.5s ease-out;
-	}
-
-	@keyframes bounceIn {
-		0% { transform: scale(0); opacity: 0; }
-		50% { transform: scale(1.2); }
-		100% { transform: scale(1); opacity: 1; }
-	}
-
-	.key-success-panel h5 {
-		font-family: var(--font-display);
-		font-size: var(--text-lg);
-		font-weight: 700;
-		color: var(--accent-success);
-		margin: 0 0 var(--space-2) 0;
-	}
-
-	.key-warning {
-		font-size: var(--text-sm);
-		color: var(--accent-warning);
-		margin-bottom: var(--space-4);
-	}
-
-	.key-display-inline {
+	.checkbox-label {
 		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
 		align-items: center;
+		gap: 8px;
+		font-size: 0.875rem;
+		cursor: pointer;
 	}
 
-	.key-display-inline code {
+	.checkbox-label input {
+		width: 16px;
+		height: 16px;
+		accent-color: var(--primary);
+	}
+
+	.api-key-display {
+		padding: 12px;
+		background: color-mix(in oklch, var(--warning) 10%, transparent);
+		border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
+		border-radius: var(--radius);
+		font-size: 0.8125rem;
+	}
+
+	.api-key-display code {
 		display: block;
-		width: 100%;
-		padding: var(--space-4);
-		background: var(--surface-0);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md);
-		font-family: var(--font-mono);
-		font-size: var(--text-xs);
-		color: var(--accent-success);
+		margin-top: 6px;
+		padding: 8px;
+		background: var(--muted);
+		border-radius: 4px;
+		font-family: monospace;
+		font-size: 0.75rem;
 		word-break: break-all;
-		text-align: left;
 	}
 
-	/* ────────────────────────────────────────────────────────────────
-	   Enhanced User Cards
-	   ──────────────────────────────────────────────────────────────── */
-
-	.user-card {
-		animation: fadeSlideUp 0.3s ease-out backwards;
-	}
-
-	.user-card.editing {
-		border-color: var(--accent-primary);
-		box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent-primary) 20%, transparent);
-	}
-
-	/* ────────────────────────────────────────────────────────────────
-	   Atmospheric Empty State
-	   ──────────────────────────────────────────────────────────────── */
-
-	.empty-state.atmospheric {
-		padding: var(--space-8);
-		background: linear-gradient(
-			145deg,
-			color-mix(in oklch, var(--accent-primary) 3%, transparent),
-			transparent
-		);
-		border: 1px dashed var(--border-subtle);
-		border-radius: var(--radius-xl);
-		text-align: center;
-	}
-
-	.empty-icon {
-		font-size: 3rem;
-		opacity: 0.5;
-		margin-bottom: var(--space-4);
-	}
-
-	.empty-title {
-		font-family: var(--font-display);
-		font-size: var(--text-lg);
-		font-weight: 600;
-		color: var(--text-primary);
-		margin: 0 0 var(--space-2) 0;
-	}
-
-	.empty-desc {
-		color: var(--text-tertiary);
-		margin: 0;
-	}
-
-	/* ────────────────────────────────────────────────────────────────
-	   Loading State
-	   ──────────────────────────────────────────────────────────────── */
-
-	.loading-state {
+	/* Cleanup */
+	.cleanup-status {
 		display: flex;
 		align-items: center;
-		justify-content: center;
-		gap: var(--space-3);
-		padding: var(--space-8);
-		color: var(--text-secondary);
+		gap: 12px;
+		padding: 12px;
+		background: color-mix(in oklch, var(--success) 10%, transparent);
+		border-radius: var(--radius);
+		margin-bottom: 8px;
 	}
 
-	.loading-spinner {
-		width: 20px;
-		height: 20px;
-		border: 2px solid var(--border-subtle);
-		border-top-color: var(--accent-primary);
-		border-radius: 50%;
-		animation: spin 0.8s linear infinite;
+	.cleanup-status.sleeping {
+		background: var(--muted);
 	}
 
-	@keyframes spin {
-		to { transform: rotate(360deg); }
+	.status-icon {
+		font-size: 1.5rem;
 	}
 
-	/* Floating key display for regenerated keys */
-	.key-display.floating {
-		position: sticky;
-		bottom: var(--space-4);
-		margin-top: var(--space-4);
-		box-shadow: var(--shadow-lg), var(--shadow-glow);
-	}
-
-	/* ────────────────────────────────────────────────────────────────
-	   Per-User Credential Policies (Below Card)
-	   ──────────────────────────────────────────────────────────────── */
-
-	.user-card-main {
+	.status-info {
 		display: flex;
 		flex-direction: column;
+		gap: 2px;
 	}
 
-	.user-policies-below {
-		margin-top: var(--space-3);
-		padding: var(--space-4);
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-lg);
-		border-left: 3px solid var(--accent-primary);
+	.status-info strong {
+		font-size: 0.875rem;
 	}
 
-	.policies-below-header {
-		display: flex;
-		align-items: baseline;
-		gap: var(--space-3);
-		margin-bottom: var(--space-4);
-		padding-bottom: var(--space-3);
-		border-bottom: 1px solid var(--border-subtle);
+	.status-info span {
+		font-size: 0.75rem;
+		color: var(--muted-foreground);
 	}
 
-	.policies-below-title {
-		font-family: var(--font-display);
-		font-size: var(--text-base);
-		font-weight: 600;
-		color: var(--text-primary);
-	}
-
-	.policies-below-hint {
-		font-size: var(--text-xs);
-		color: var(--text-tertiary);
-	}
-
-	.policies-loading {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: var(--space-2);
-		padding: var(--space-4);
-		color: var(--text-secondary);
-		font-size: var(--text-sm);
-	}
-
-	.loading-spinner.small {
-		width: 14px;
-		height: 14px;
-		border-width: 1.5px;
-	}
-
-	.policies-below-list {
+	.cleanup-grid {
 		display: flex;
 		flex-direction: column;
-		gap: var(--space-2);
+		gap: 8px;
 	}
 
-	.policy-row {
+	.cleanup-item {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: var(--space-4);
-		padding: var(--space-3) var(--space-4);
-		background: var(--surface-2);
-		border-radius: var(--radius-md);
-		transition: all var(--transition-fast);
+		padding: 8px 0;
 	}
 
-	.policy-row:hover {
-		background: var(--surface-3);
+	.cleanup-item span {
+		font-size: 0.875rem;
 	}
 
-	.policy-row.has-override {
-		background: color-mix(in oklch, var(--accent-primary) 8%, var(--surface-2));
-		border: 1px solid color-mix(in oklch, var(--accent-primary) 20%, transparent);
-	}
-
-	.policy-row-info {
+	.cleanup-controls {
 		display: flex;
 		align-items: center;
-		gap: var(--space-3);
-		min-width: 0;
-		flex: 1;
+		gap: 8px;
 	}
 
-	.policy-row-name {
-		font-family: var(--font-display);
-		font-size: var(--text-sm);
-		font-weight: 500;
-		color: var(--text-primary);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
+	.unit {
+		font-size: 0.75rem;
+		color: var(--muted-foreground);
+		min-width: 28px;
 	}
 
-	.policy-custom-badge {
-		font-size: 10px;
-		font-family: var(--font-mono);
-		font-weight: 600;
-		padding: 2px 8px;
-		border-radius: var(--radius-full);
-		background: color-mix(in oklch, var(--accent-primary) 15%, transparent);
-		color: var(--accent-primary);
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		flex-shrink: 0;
+	.timeout-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+		gap: 12px;
 	}
 
-	.policy-row-control {
+	.timeout-item {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.timeout-item label {
+		font-size: 0.8125rem;
+		color: var(--muted-foreground);
+	}
+
+	.timeout-input {
 		display: flex;
 		align-items: center;
-		gap: var(--space-2);
-		flex-shrink: 0;
+		gap: 6px;
 	}
 
-	.policy-row-select {
-		min-width: 160px;
-		padding: var(--space-2) var(--space-3);
-		font-family: var(--font-mono);
-		font-size: var(--text-xs);
-		font-weight: 500;
-		border-radius: var(--radius-md);
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		color: var(--text-secondary);
-		cursor: pointer;
-		transition: all var(--transition-fast);
-		appearance: none;
-		-webkit-appearance: none;
-		background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7a99' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
-		background-position: right 0.75rem center;
-		background-repeat: no-repeat;
-		background-size: 1em 1em;
-		padding-right: 2.5rem;
-	}
-
-	.policy-row-select:hover {
-		border-color: var(--border-default);
-		background-color: var(--surface-2);
-	}
-
-	.policy-row-select:focus {
-		outline: none;
-		border-color: var(--accent-primary);
-	}
-
-	.saving-indicator {
-		width: 8px;
-		height: 8px;
-		border-radius: 50%;
-		background: var(--accent-primary);
-		animation: pulse 1s ease-in-out infinite;
-	}
-
-	@keyframes pulse {
-		0%, 100% { opacity: 0.4; transform: scale(0.8); }
-		50% { opacity: 1; transform: scale(1); }
-	}
-
-	.policies-empty {
+	/* Utility */
+	.loading-text {
 		text-align: center;
-		padding: var(--space-4);
-		color: var(--text-tertiary);
-		font-size: var(--text-sm);
+		padding: 20px;
+		color: var(--muted-foreground);
 	}
 
-	/* Active state for the key policies toggle button */
-	.icon-btn.active {
-		background: color-mix(in oklch, var(--accent-primary) 15%, transparent);
-		color: var(--accent-primary);
+	.mb-3 {
+		margin-bottom: 12px;
 	}
 
-	.icon-btn.active:hover {
-		background: color-mix(in oklch, var(--accent-primary) 25%, transparent);
+	.mt-3 {
+		margin-top: 12px;
 	}
 
-	/* ────────────────────────────────────────────────────────────────
-	   Profile Multi-Select
-	   ──────────────────────────────────────────────────────────────── */
-
-	.profile-multiselect {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-2);
-		padding: var(--space-3);
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md);
-		max-height: 180px;
-		overflow-y: auto;
+	/* Mobile adjustments */
+	.settings.mobile .tab-bar {
+		padding: 8px 12px;
 	}
 
-	.profile-checkbox-item {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-		padding: var(--space-2) var(--space-3);
-		background: var(--surface-2);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-full);
-		cursor: pointer;
-		transition: all var(--transition-fast);
-		user-select: none;
+	.settings.mobile .tab-btn {
+		padding: 6px 12px;
+		font-size: 0.8125rem;
 	}
 
-	.profile-checkbox-item:hover {
-		border-color: var(--accent-primary);
-		background: color-mix(in oklch, var(--accent-primary) 5%, var(--surface-2));
+	.settings.mobile .tab-btn span {
+		display: none;
 	}
 
-	.profile-checkbox-item:has(input:checked) {
-		background: color-mix(in oklch, var(--accent-primary) 15%, var(--surface-2));
-		border-color: var(--accent-primary);
+	.settings.mobile .content {
+		padding: 12px;
 	}
 
-	.profile-checkbox-item input[type="checkbox"] {
-		width: 14px;
-		height: 14px;
-		accent-color: var(--accent-primary);
-		cursor: pointer;
+	.settings.mobile .connection-row,
+	.settings.mobile .api-key-row {
+		flex-direction: column;
+		align-items: stretch;
 	}
 
-	.profile-checkbox-item .profile-name {
-		font-size: var(--text-sm);
-		font-weight: 500;
-		color: var(--text-primary);
-		white-space: nowrap;
+	.settings.mobile .connection-actions,
+	.settings.mobile .api-key-input {
+		flex-direction: column;
 	}
 
-	.empty-profiles-hint {
-		width: 100%;
-		text-align: center;
-		color: var(--text-tertiary);
-		font-size: var(--text-sm);
-		margin: 0;
+	.settings.mobile .oauth-flow {
+		flex-direction: column;
 	}
 </style>

@@ -184,6 +184,8 @@
 				return 'plugins';
 			case 'hooks':
 				return 'hooks';
+			case 'notes':
+				return 'notes';
 			default:
 				return 'chat';
 		}
@@ -525,16 +527,23 @@
 	// Responsive Handling
 	// ============================================
 	function checkMobile() {
-		// Check if device is touch-only (no fine pointer like mouse/trackpad)
-		// This ensures foldables like Z Fold 6 (678px unfolded) still get mobile UI
-		// because desktop UI doesn't work well with touch input
-		const isTouchOnly = window.matchMedia('(pointer: coarse)').matches &&
-			!window.matchMedia('(any-pointer: fine)').matches;
+		// Detect touch-primary devices for mobile UI
+		//
+		// Known issues with media queries:
+		// - Samsung devices (including Z Fold) incorrectly report hover:hover to Chrome
+		//   even though they're touchscreens (Chromium bug)
+		// - any-pointer:fine is true on foldables due to Samsung Flex Mode
+		//
+		// Solution: Use pointer:coarse (reliable) + width cap to exclude laptops
+		// - pointer:coarse = primary input is touch (works on Samsung)
+		// - Width < 1024px = reasonable tablet/phone size (laptops typically 1366px+)
+		const isTouchDevice = window.matchMedia('(pointer: coarse)').matches;
+		const isReasonableMobileSize = window.innerWidth < 1024;
 
-		// Use mobile UI if either:
+		// Use mobile UI if:
 		// 1. Screen is narrow (< 640px) - traditional mobile breakpoint
-		// 2. Device is touch-only - ensures foldables/tablets get touch-friendly UI
-		isMobile = window.innerWidth < 640 || isTouchOnly;
+		// 2. Touch device under 1024px - catches foldables/tablets, excludes laptops
+		isMobile = window.innerWidth < 640 || (isTouchDevice && isReasonableMobileSize);
 		deck.setIsMobile(isMobile);
 	}
 
@@ -671,6 +680,17 @@
 				}
 				deckCardType = 'hooks';
 				title = 'Hooks';
+				break;
+			}
+			case 'notes': {
+				// Singleton - only one notes card at a time
+				const existingNotes = $allCards.find(c => c.type === 'notes');
+				if (existingNotes) {
+					deck.focusCard(existingNotes.id);
+					return;
+				}
+				deckCardType = 'notes';
+				title = 'Notes';
 				break;
 			}
 			default:
@@ -1287,6 +1307,7 @@
 		onOpenSettings={() => handleCreateCard('settings')}
 		onOpenPlugins={() => handleCreateCard('plugins')}
 		onOpenHooks={() => handleCreateCard('hooks')}
+		onOpenNotes={() => handleCreateCard('notes')}
 		onOpenUserSettings={() => handleCreateCard('user-settings')}
 		isAdmin={$isAdmin}
 		isApiUser={!!$apiUser}

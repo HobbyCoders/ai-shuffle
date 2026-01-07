@@ -64,7 +64,12 @@
 	let isLayoutPanelOpen = $state(false);
 
 	function checkMobile() {
-		isMobile = window.innerWidth < 640;
+		// Match the detection logic from +page.svelte
+		// pointer:coarse = touch device, width < 1024 excludes laptops with touchscreens
+		// (hover:none is broken on Samsung, any-pointer:fine broken due to Flex Mode)
+		const isTouchDevice = window.matchMedia('(pointer: coarse)').matches;
+		const isReasonableMobileSize = window.innerWidth < 1024;
+		isMobile = window.innerWidth < 640 || (isTouchDevice && isReasonableMobileSize);
 	}
 
 	function handleIndicatorEnter() {
@@ -342,10 +347,10 @@
 	.menu-button {
 		--btn-bg: var(--glass-bg, rgba(255, 255, 255, 0.05));
 		--btn-border: var(--glass-border, rgba(255, 255, 255, 0.1));
-		--btn-border-hover: #22d3ee;
+		--btn-border-hover: var(--primary);
 		--btn-text: var(--muted-foreground);
-		--btn-text-hover: #22d3ee;
-		--btn-glow: rgba(34, 211, 238, 0.25);
+		--btn-text-hover: var(--primary);
+		--btn-glow: color-mix(in srgb, var(--primary) 25%, transparent);
 
 		display: flex;
 		align-items: center;
@@ -376,7 +381,7 @@
 
 	.menu-button.expanded {
 		background: var(--card, rgba(255, 255, 255, 0.08));
-		border-color: var(--primary, #22d3ee);
+		border-color: var(--primary);
 	}
 
 	.menu-button:active {

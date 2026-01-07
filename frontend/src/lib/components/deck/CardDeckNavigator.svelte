@@ -22,7 +22,7 @@
 		MessageSquare, Terminal, Clock,
 		Settings, FolderOpen, X, Files, User, Users, Pencil, Check,
 		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronRight, Bot, Puzzle,
-		List, GitBranch, Key, Zap
+		List, GitBranch, Key, Zap, StickyNote
 	} from 'lucide-svelte';
 	import { tabs, type ApiUser } from '$lib/stores/tabs';
 	import type { Session } from '$lib/api/client';
@@ -48,6 +48,7 @@
 		onOpenSettings?: () => void;
 		onOpenPlugins?: () => void;
 		onOpenHooks?: () => void;
+		onOpenNotes?: () => void;
 		onOpenUserSettings?: () => void;
 		isAdmin?: boolean;
 		isApiUser?: boolean;
@@ -68,6 +69,7 @@
 		onOpenSettings,
 		onOpenPlugins,
 		onOpenHooks,
+		onOpenNotes,
 		onOpenUserSettings,
 		isAdmin = false,
 		isApiUser = false,
@@ -147,7 +149,7 @@
 	let renameDeckName = $state('');
 
 	// Card types for main deck
-	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins' | 'hooks' | 'user-settings';
+	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins' | 'hooks' | 'notes' | 'user-settings';
 
 	// Cards that API users are allowed to see (whitelist approach)
 	const API_USER_ALLOWED_CARDS = new Set(['new-chat', 'recent', 'file-browser', 'user-settings']);
@@ -297,6 +299,14 @@
 				title: 'Hooks',
 				subtitle: 'Event automation',
 				icon: Zap
+			},
+			{
+				id: 'notes',
+				type: 'action',
+				action: 'notes',
+				title: 'Notes',
+				subtitle: 'Project notes & ideas',
+				icon: StickyNote
 			}
 		];
 
@@ -567,6 +577,7 @@
 			case 'settings': onOpenSettings?.(); break;
 			case 'plugins': onOpenPlugins?.(); break;
 			case 'hooks': onOpenHooks?.(); break;
+			case 'notes': onOpenNotes?.(); break;
 			case 'user-settings': onOpenUserSettings?.(); break;
 		}
 	}
@@ -1832,15 +1843,15 @@
 		--border-default: rgba(255, 255, 255, 0.1);
 		--border-strong: rgba(255, 255, 255, 0.15);
 
-		--text-primary: #f4f4f5;
-		--text-secondary: #a1a1aa;
+		--text-primary: var(--foreground, #f4f4f5);
+		--text-secondary: var(--muted-foreground, #a1a1aa);
 		--text-muted: #71717a;
 		--text-dim: #52525b;
 
-		--ai-primary: #22d3ee;
-		--ai-secondary: #06b6d4;
-		--ai-glow: rgba(34, 211, 238, 0.25);
-		--ai-subtle: rgba(34, 211, 238, 0.08);
+		--ai-primary: var(--primary);
+		--ai-secondary: var(--primary);
+		--ai-glow: color-mix(in srgb, var(--primary) 25%, transparent);
+		--ai-subtle: color-mix(in srgb, var(--primary) 8%, transparent);
 
 		--backdrop-bg: rgba(0, 0, 0, 0.85);
 		--shadow-color: rgba(0, 0, 0, 0.4);
@@ -1852,9 +1863,10 @@
 		--card-width: 220px;
 		--card-height: 160px;
 		--card-gap: 16px;
-		--radius-sm: 8px;
-		--radius-md: 12px;
-		--radius-lg: 16px;
+		/* Inherit from theme --radius, scale accordingly */
+		--radius-sm: calc(var(--radius, 0.75rem) * 0.67);
+		--radius-md: var(--radius, 0.75rem);
+		--radius-lg: calc(var(--radius, 0.75rem) * 1.33);
 	}
 
 	/* Light mode overrides */
@@ -1869,15 +1881,15 @@
 		--border-default: rgba(0, 0, 0, 0.1);
 		--border-strong: rgba(0, 0, 0, 0.15);
 
-		--text-primary: #18181b;
-		--text-secondary: #52525b;
+		--text-primary: var(--foreground, #18181b);
+		--text-secondary: var(--muted-foreground, #52525b);
 		--text-muted: #71717a;
 		--text-dim: #a1a1aa;
 
-		--ai-primary: #0891b2;
-		--ai-secondary: #0e7490;
-		--ai-glow: rgba(8, 145, 178, 0.2);
-		--ai-subtle: rgba(8, 145, 178, 0.08);
+		--ai-primary: var(--primary);
+		--ai-secondary: var(--primary);
+		--ai-glow: color-mix(in srgb, var(--primary) 20%, transparent);
+		--ai-subtle: color-mix(in srgb, var(--primary) 8%, transparent);
 
 		--backdrop-bg: rgba(255, 255, 255, 0.85);
 		--shadow-color: rgba(0, 0, 0, 0.1);
@@ -2010,7 +2022,7 @@
 		align-items: center;
 		background: var(--bg-elevated);
 		border: 1px solid var(--border-default);
-		border-radius: 8px;
+		border-radius: var(--radius-sm);
 		padding: 3px;
 		gap: 2px;
 	}
@@ -2023,7 +2035,7 @@
 		justify-content: center;
 		background: transparent;
 		border: none;
-		border-radius: 6px;
+		border-radius: calc(var(--radius-sm) * 0.75);
 		color: var(--text-muted);
 		cursor: pointer;
 		transition: all 0.15s ease;
@@ -2257,7 +2269,7 @@
 		height: auto;
 		background: var(--bg-card);
 		border: 2px solid var(--ai-primary);
-		border-radius: 20px;
+		border-radius: calc(var(--radius-lg) * 1.25);
 		padding: 1.5rem 1rem;
 		display: flex;
 		flex-direction: column;
@@ -2276,7 +2288,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		border-radius: 16px;
+		border-radius: var(--radius-lg);
 		background: var(--ai-subtle);
 		border: 1px solid var(--ai-primary);
 		color: var(--icon-color, var(--ai-primary));
@@ -2495,7 +2507,7 @@
 		padding: 3px 8px;
 		background: var(--ai-subtle);
 		border: 1px solid rgba(34, 211, 238, 0.2);
-		border-radius: 4px;
+		border-radius: calc(var(--radius-sm) * 0.5);
 		font-family: ui-monospace, monospace;
 		font-size: 0.625rem;
 		font-weight: 500;
@@ -2559,7 +2571,7 @@
 		padding: 10px 18px;
 		background: var(--bg-elevated);
 		border: 1px solid var(--border-subtle);
-		border-radius: 20px;
+		border-radius: calc(var(--radius-lg) * 1.67);
 		z-index: 20;
 	}
 
@@ -2584,7 +2596,7 @@
 
 	.scroll-dot.active {
 		width: 16px;
-		border-radius: 3px;
+		border-radius: calc(var(--radius-sm) * 0.375);
 		background: var(--ai-primary);
 	}
 
@@ -2639,12 +2651,12 @@
 	}
 
 	.context-menu-item.danger {
-		color: #f87171;
+		color: var(--destructive);
 	}
 
 	.context-menu-item.danger:hover {
-		background: rgba(248, 113, 113, 0.1);
-		color: #ef4444;
+		background: color-mix(in srgb, var(--destructive) 10%, transparent);
+		color: var(--destructive);
 	}
 
 	.context-menu-divider {
@@ -2868,7 +2880,7 @@
 
 		background: var(--bg-card);
 		border: 1px solid var(--border-default);
-		border-radius: 20px;
+		border-radius: calc(var(--radius-lg) * 1.67);
 
 		display: flex;
 		flex-direction: column;
@@ -2964,7 +2976,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		border-radius: 16px;
+		border-radius: var(--radius-lg);
 		background: var(--bg-elevated);
 		border: 1px solid var(--border-subtle);
 		color: var(--icon-color, var(--text-secondary));
@@ -3043,7 +3055,7 @@
 		padding: 4px 10px;
 		background: var(--ai-subtle);
 		border: 1px solid rgba(34, 211, 238, 0.2);
-		border-radius: 6px;
+		border-radius: calc(var(--radius-sm) * 0.75);
 		font-family: ui-monospace, monospace;
 		font-size: 0.65rem;
 		font-weight: 500;

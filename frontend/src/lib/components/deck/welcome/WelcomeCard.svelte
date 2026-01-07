@@ -82,9 +82,10 @@
 		height: 200px;
 		padding: 1.25rem 1rem;
 
-		background: oklch(0.17 0.01 260);
-		border: 1px solid rgba(255, 255, 255, 0.08);
-		border-radius: 16px;
+		/* Use theme card color instead of hardcoded dark value */
+		background: var(--card-surface-welcome, var(--card));
+		border: 1px solid var(--border);
+		border-radius: var(--radius, 0.75rem);
 
 		display: flex;
 		flex-direction: column;
@@ -108,9 +109,7 @@
 		transition-duration: 0.4s, 0.2s, 0.3s !important;
 		transition-timing-function: cubic-bezier(0.34, 1.56, 0.64, 1), ease, ease !important;
 
-		box-shadow:
-			0 8px 24px rgba(0, 0, 0, 0.4),
-			0 4px 8px rgba(0, 0, 0, 0.3);
+		box-shadow: var(--shadow-m);
 	}
 
 	.welcome-card:hover {
@@ -120,13 +119,12 @@
 			rotateX(var(--mouse-y))
 			translateY(-14px)
 			scale(1.04);
-		border-color: var(--accent-cyan);
+		/* Use theme primary color for hover border */
+		border-color: var(--primary);
 
 		box-shadow:
-			0 24px 48px rgba(0, 0, 0, 0.5),
-			0 12px 24px rgba(0, 0, 0, 0.4),
-			0 0 40px var(--accent-glow),
-			inset 0 1px 0 rgba(255, 255, 255, 0.06);
+			var(--shadow-l),
+			0 0 40px var(--glow-color-soft);
 
 		z-index: 10;
 	}
@@ -180,18 +178,20 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		border-radius: 14px;
-		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid rgba(255, 255, 255, 0.06);
+		border-radius: calc(var(--radius, 0.75rem) * 1.17);
+		/* Use theme-aware subtle background */
+		background: color-mix(in oklch, var(--muted) 30%, transparent);
+		border: 1px solid var(--border);
 		color: var(--muted-foreground);
 		transition: all 0.25s ease-out;
 	}
 
 	.welcome-card:hover .card-icon {
-		background: var(--accent-glow);
-		border-color: var(--accent-cyan);
-		color: var(--accent-cyan);
-		box-shadow: 0 0 20px var(--accent-glow);
+		/* Use theme primary color for hover state */
+		background: var(--glow-color-soft);
+		border-color: var(--primary);
+		color: var(--primary);
+		box-shadow: 0 0 20px var(--glow-color-soft);
 	}
 
 	.card-label {
@@ -218,9 +218,10 @@
 		font-family: ui-monospace, 'Monaco', 'Menlo', monospace;
 		font-size: 0.6rem;
 		padding: 0.25rem 0.5rem;
-		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid rgba(255, 255, 255, 0.06);
-		border-radius: 6px;
+		/* Use theme-aware colors */
+		background: color-mix(in oklch, var(--muted) 40%, transparent);
+		border: 1px solid var(--border);
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		color: var(--muted-foreground);
 		opacity: 0;
 		transform: translateY(4px);
@@ -230,7 +231,7 @@
 	.welcome-card:hover .card-shortcut {
 		opacity: 1;
 		transform: translateY(0);
-		border-color: rgba(255, 255, 255, 0.1);
+		border-color: color-mix(in oklch, var(--primary) 30%, var(--border));
 	}
 
 	/* Mobile adjustments */

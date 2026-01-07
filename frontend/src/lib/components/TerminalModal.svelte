@@ -51,34 +51,48 @@
     cleanup();
   });
 
+  // Get CSS variable value as computed color
+  function getCssVar(name: string, fallback: string): string {
+    if (typeof document === 'undefined') return fallback;
+    const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return value || fallback;
+  }
+
+  // Build terminal theme from CSS variables
+  function getTerminalTheme() {
+    const bg = getCssVar('--terminal-bg', '#1a1a2e');
+    const fg = getCssVar('--terminal-fg', '#eaeaea');
+    return {
+      background: bg,
+      foreground: fg,
+      cursor: getCssVar('--terminal-cursor', '#f5f5f5'),
+      cursorAccent: bg,
+      selectionBackground: getCssVar('--accent', '#3d3d5c'),
+      black: bg,
+      red: getCssVar('--terminal-red', '#ff6b6b'),
+      green: getCssVar('--terminal-green', '#4ade80'),
+      yellow: getCssVar('--terminal-yellow', '#fbbf24'),
+      blue: getCssVar('--terminal-blue', '#60a5fa'),
+      magenta: getCssVar('--terminal-magenta', '#c084fc'),
+      cyan: getCssVar('--terminal-cyan', '#22d3ee'),
+      white: fg,
+      brightBlack: getCssVar('--muted-foreground', '#4a4a6a'),
+      brightRed: getCssVar('--terminal-red', '#ff8a8a'),
+      brightGreen: getCssVar('--terminal-green', '#6ee7a0'),
+      brightYellow: getCssVar('--terminal-yellow', '#fcd34d'),
+      brightBlue: getCssVar('--terminal-blue', '#93c5fd'),
+      brightMagenta: getCssVar('--terminal-magenta', '#d8b4fe'),
+      brightCyan: getCssVar('--terminal-cyan', '#67e8f9'),
+      brightWhite: '#ffffff'
+    };
+  }
+
   function initTerminal() {
     terminal = new Terminal({
       cursorBlink: true,
       fontSize: 14,
-      fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-      theme: {
-        background: '#1a1a2e',
-        foreground: '#eaeaea',
-        cursor: '#f5f5f5',
-        cursorAccent: '#1a1a2e',
-        selectionBackground: '#3d3d5c',
-        black: '#1a1a2e',
-        red: '#ff6b6b',
-        green: '#4ade80',
-        yellow: '#fbbf24',
-        blue: '#60a5fa',
-        magenta: '#c084fc',
-        cyan: '#22d3ee',
-        white: '#eaeaea',
-        brightBlack: '#4a4a6a',
-        brightRed: '#ff8a8a',
-        brightGreen: '#6ee7a0',
-        brightYellow: '#fcd34d',
-        brightBlue: '#93c5fd',
-        brightMagenta: '#d8b4fe',
-        brightCyan: '#67e8f9',
-        brightWhite: '#ffffff'
-      },
+      fontFamily: getCssVar('--font-mono', 'Menlo, Monaco, "Courier New", monospace'),
+      theme: getTerminalTheme(),
       allowProposedApi: true
     });
 

@@ -165,8 +165,14 @@ const tabPingTimers: Map<string, ReturnType<typeof setInterval>> = new Map();
 const tabReconnectTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 // Track tabs waiting for history response - queue sync events until history arrives
 const tabsWaitingForHistory: Map<string, Array<Record<string, unknown>>> = new Map();
+// Track expected session ID for each tab - prevents race conditions when switching sessions
+const tabExpectedSessionId: Map<string, string> = new Map();
 // Track stop confirmation timeouts - prevents UI freeze if 'stopped' message never arrives
 const stopTimeouts: Map<string, ReturnType<typeof setTimeout>> = new Map();
+// Track last received message timestamp for connection health monitoring
+const tabLastMessageTime: Map<string, number> = new Map();
+// Connection health check - if no message for 90s (3 missed pings), force reconnect
+const CONNECTION_HEALTH_TIMEOUT_MS = 90000;
 
 // Interface for persisted tab state (only what we need to restore tabs)
 interface PersistedTab {
@@ -570,6 +576,9 @@ function createTabsStore() {
 			if (tab?.sessionId) {
 				console.log(`[Tab ${tabId}] Registering with session via load_session:`, tab.sessionId);
 
+				// Track expected session ID to prevent race conditions when switching sessions
+				tabExpectedSessionId.set(tabId, tab.sessionId);
+
 				// Mark tab as waiting for history - queue sync events until history arrives
 				// This prevents race conditions where sync events arrive before history
 				tabsWaitingForHistory.set(tabId, []);
@@ -583,14 +592,27 @@ function createTabsStore() {
 				}));
 			}
 
-			// Start ping timer
+			// Start ping timer with connection health monitoring
 			const existingPing = tabPingTimers.get(tabId);
 			if (existingPing) clearInterval(existingPing);
+
+			// Initialize last message time
+			tabLastMessageTime.set(tabId, Date.now());
 
 			const pingTimer = setInterval(() => {
 				const currentWs = tabConnections.get(tabId);
 				if (currentWs?.readyState === WebSocket.OPEN) {
+					// Send pong to keep connection alive
 					currentWs.send(JSON.stringify({ type: 'pong' }));
+
+					// Check connection health - if no message received for too long, connection may be dead
+					const lastMessageTime = tabLastMessageTime.get(tabId) || 0;
+					const timeSinceLastMessage = Date.now() - lastMessageTime;
+					if (timeSinceLastMessage > CONNECTION_HEALTH_TIMEOUT_MS) {
+						console.warn(`[Tab ${tabId}] Connection appears stale (${Math.round(timeSinceLastMessage / 1000)}s since last message), forcing reconnect`);
+						// Force close to trigger reconnect
+						currentWs.close(4000, 'Connection health timeout');
+					}
 				}
 			}, 25000);
 			tabPingTimers.set(tabId, pingTimer);
@@ -659,6 +681,9 @@ function createTabsStore() {
 		};
 
 		ws.onmessage = (event) => {
+			// Update last message time for connection health monitoring
+			tabLastMessageTime.set(tabId, Date.now());
+
 			try {
 				const data = JSON.parse(event.data);
 				handleTabMessage(tabId, data);
@@ -684,8 +709,10 @@ function createTabsStore() {
 			tabPingTimers.delete(tabId);
 		}
 
-		// Clear any waiting for history state
+		// Clear any waiting for history state, expected session tracking, and health monitoring
 		tabsWaitingForHistory.delete(tabId);
+		tabExpectedSessionId.delete(tabId);
+		tabLastMessageTime.delete(tabId);
 
 		const ws = tabConnections.get(tabId);
 		if (ws) {
@@ -1415,6 +1442,18 @@ function createTabsStore() {
 
 		switch (msgType) {
 			case 'history': {
+				// Validate session_id to prevent race conditions when switching sessions
+				const receivedSessionId = data.session_id as string;
+				const expectedSessionId = tabExpectedSessionId.get(tabId);
+				if (expectedSessionId && receivedSessionId !== expectedSessionId) {
+					console.log(`[Tab ${tabId}] Ignoring stale history for session ${receivedSessionId}, expected ${expectedSessionId}`);
+					// Clear the waiting state for this stale response
+					tabsWaitingForHistory.delete(tabId);
+					break;
+				}
+				// Clear expected session ID now that we received it
+				tabExpectedSessionId.delete(tabId);
+
 				// Handle both JSONL format (with explicit type) and legacy DB format
 				const rawMessages = (data.messages as Array<Record<string, unknown>>) || [];
 

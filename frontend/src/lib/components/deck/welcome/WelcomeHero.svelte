@@ -34,13 +34,13 @@
 		align-items: center;
 		justify-content: center;
 
-		/* Dark workspace gradient - subtle depth */
+		/* Use theme-aware background gradient */
 		background:
 			radial-gradient(
 				ellipse 80% 60% at 50% 40%,
-				oklch(0.18 0.01 260) 0%,
-				oklch(0.14 0.008 260) 60%,
-				oklch(0.12 0.006 260) 100%
+				color-mix(in oklch, var(--card) 100%, var(--background)) 0%,
+				var(--background) 60%,
+				color-mix(in oklch, var(--background) 95%, black) 100%
 			);
 
 		overflow: hidden;
@@ -50,9 +50,10 @@
 	.grid-pattern {
 		position: absolute;
 		inset: 0;
+		/* Use theme-aware grid color */
 		background-image:
-			linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
-			linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+			linear-gradient(color-mix(in oklch, var(--border) 20%, transparent) 1px, transparent 1px),
+			linear-gradient(90deg, color-mix(in oklch, var(--border) 20%, transparent) 1px, transparent 1px);
 		background-size: 40px 40px;
 		opacity: 0.5;
 		pointer-events: none;

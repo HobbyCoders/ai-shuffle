@@ -77,22 +77,22 @@
 		}
 	}
 
-	// Tool colors for queue badges
+	// Tool colors for queue badges - using CSS class names that map to CSS variables
 	const toolColors: Record<string, string> = {
-		'Bash': 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
-		'Read': 'bg-blue-500/20 text-blue-400 border-blue-500/30',
-		'Write': 'bg-amber-500/20 text-amber-400 border-amber-500/30',
-		'Edit': 'bg-orange-500/20 text-orange-400 border-orange-500/30',
-		'Glob': 'bg-purple-500/20 text-purple-400 border-purple-500/30',
-		'Grep': 'bg-violet-500/20 text-violet-400 border-violet-500/30',
-		'WebFetch': 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30',
-		'WebSearch': 'bg-sky-500/20 text-sky-400 border-sky-500/30',
-		'Task': 'bg-indigo-500/20 text-indigo-400 border-indigo-500/30',
-		'NotebookEdit': 'bg-rose-500/20 text-rose-400 border-rose-500/30'
+		'Bash': 'tool-bash',
+		'Read': 'tool-read',
+		'Write': 'tool-write',
+		'Edit': 'tool-edit',
+		'Glob': 'tool-glob',
+		'Grep': 'tool-grep',
+		'WebFetch': 'tool-web',
+		'WebSearch': 'tool-web',
+		'Task': 'tool-task',
+		'NotebookEdit': 'tool-notebook'
 	};
 
 	function getToolColor(name: string): string {
-		return toolColors[name] || 'bg-gray-500/20 text-gray-400 border-gray-500/30';
+		return toolColors[name] || 'tool-default';
 	}
 </script>
 
@@ -226,5 +226,57 @@
 			opacity: 1;
 			transform: scale(1);
 		}
+	}
+
+	/* Tool color classes using CSS variables */
+	:global(.tool-bash) {
+		background: color-mix(in oklch, var(--tool-bash) 20%, transparent);
+		color: var(--tool-bash);
+		border-color: color-mix(in oklch, var(--tool-bash) 30%, transparent);
+	}
+	:global(.tool-read) {
+		background: color-mix(in oklch, var(--tool-read) 20%, transparent);
+		color: var(--tool-read);
+		border-color: color-mix(in oklch, var(--tool-read) 30%, transparent);
+	}
+	:global(.tool-write) {
+		background: color-mix(in oklch, var(--tool-write) 20%, transparent);
+		color: var(--tool-write);
+		border-color: color-mix(in oklch, var(--tool-write) 30%, transparent);
+	}
+	:global(.tool-edit) {
+		background: color-mix(in oklch, var(--tool-edit) 20%, transparent);
+		color: var(--tool-edit);
+		border-color: color-mix(in oklch, var(--tool-edit) 30%, transparent);
+	}
+	:global(.tool-glob) {
+		background: color-mix(in oklch, var(--tool-glob) 20%, transparent);
+		color: var(--tool-glob);
+		border-color: color-mix(in oklch, var(--tool-glob) 30%, transparent);
+	}
+	:global(.tool-grep) {
+		background: color-mix(in oklch, var(--tool-grep) 20%, transparent);
+		color: var(--tool-grep);
+		border-color: color-mix(in oklch, var(--tool-grep) 30%, transparent);
+	}
+	:global(.tool-web) {
+		background: color-mix(in oklch, var(--tool-web) 20%, transparent);
+		color: var(--tool-web);
+		border-color: color-mix(in oklch, var(--tool-web) 30%, transparent);
+	}
+	:global(.tool-task) {
+		background: color-mix(in oklch, var(--tool-task) 20%, transparent);
+		color: var(--tool-task);
+		border-color: color-mix(in oklch, var(--tool-task) 30%, transparent);
+	}
+	:global(.tool-notebook) {
+		background: color-mix(in oklch, var(--tool-notebook) 20%, transparent);
+		color: var(--tool-notebook);
+		border-color: color-mix(in oklch, var(--tool-notebook) 30%, transparent);
+	}
+	:global(.tool-default) {
+		background: color-mix(in oklch, var(--tool-default) 20%, transparent);
+		color: var(--tool-default);
+		border-color: color-mix(in oklch, var(--tool-default) 30%, transparent);
 	}
 </style>

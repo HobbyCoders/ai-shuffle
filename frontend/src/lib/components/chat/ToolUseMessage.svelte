@@ -15,15 +15,45 @@
 	let { name, input, partialInput, result, status, streaming = false }: Props = $props();
 
 	// Extract field from partial JSON string using regex (for streaming)
+	// Handles multiline content with escaped characters
 	function extractFieldFromPartial(partial: string, fieldName: string): string {
-		// Match "fieldName": "value" patterns, handling escaped quotes
-		const regex = new RegExp(`"${fieldName}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`);
-		const match = partial.match(regex);
-		if (match) {
-			// Unescape the value
-			return match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+		// Find the start of the field
+		const fieldPattern = new RegExp(`"${fieldName}"\\s*:\\s*"`);
+		const fieldMatch = partial.match(fieldPattern);
+		if (!fieldMatch || fieldMatch.index === undefined) {
+			return '';
 		}
-		return '';
+
+		// Find the start of the string value (after the opening quote)
+		const valueStart = fieldMatch.index + fieldMatch[0].length;
+
+		// Manually parse the JSON string, handling escapes
+		let result = '';
+		let i = valueStart;
+		while (i < partial.length) {
+			const char = partial[i];
+			if (char === '\\' && i + 1 < partial.length) {
+				// Handle escape sequences
+				const nextChar = partial[i + 1];
+				switch (nextChar) {
+					case 'n': result += '\n'; break;
+					case 'r': result += '\r'; break;
+					case 't': result += '\t'; break;
+					case '"': result += '"'; break;
+					case '\\': result += '\\'; break;
+					default: result += nextChar; break;
+				}
+				i += 2;
+			} else if (char === '"') {
+				// End of string
+				break;
+			} else {
+				result += char;
+				i++;
+			}
+		}
+
+		return result;
 	}
 
 	// Extract Edit tool fields - works with both complete input and streaming partialInput

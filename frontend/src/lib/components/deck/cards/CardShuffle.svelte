@@ -33,7 +33,12 @@
 	let isMobile = $state(false);
 
 	function checkMobile() {
-		isMobile = window.innerWidth < 640;
+		// Match the detection logic from +page.svelte
+		// pointer:coarse = touch device, width < 1024 excludes laptops with touchscreens
+		// (hover:none is broken on Samsung, any-pointer:fine broken due to Flex Mode)
+		const isTouchDevice = window.matchMedia('(pointer: coarse)').matches;
+		const isReasonableMobileSize = window.innerWidth < 1024;
+		isMobile = window.innerWidth < 640 || (isTouchDevice && isReasonableMobileSize);
 	}
 
 	onMount(() => {

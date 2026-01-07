@@ -63,10 +63,26 @@ export default {
 			},
 			backgroundColor: {
 				'hover-overlay': 'var(--hover-overlay)',
-				'active-overlay': 'var(--active-overlay)'
+				'active-overlay': 'var(--active-overlay)',
+				'input-bg': 'var(--input-bg)',
+				'input-hover': 'var(--input-bg-hover)',
+				'input-focus': 'var(--input-bg-focus)',
+				'status-success': 'var(--status-success-bg)',
+				'status-warning': 'var(--status-warning-bg)',
+				'status-error': 'var(--status-error-bg)',
+				'status-info': 'var(--status-info-bg)'
 			},
 			borderColor: {
-				'subtle': 'var(--border-subtle)'
+				'subtle': 'var(--border-subtle)',
+				'input-border': 'var(--input-border)',
+				'input-hover': 'var(--input-border-hover)',
+				'status-success': 'var(--status-success-border)',
+				'status-warning': 'var(--status-warning-border)',
+				'status-error': 'var(--status-error-border)',
+				'status-info': 'var(--status-info-border)'
+			},
+			textColor: {
+				'placeholder': 'var(--input-placeholder)'
 			}
 		}
 	},

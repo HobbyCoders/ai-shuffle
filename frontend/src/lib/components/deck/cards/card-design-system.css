@@ -108,13 +108,15 @@
 
 /* ═══════════════════════════════════════════════════════════════════════════════
    BORDER RADIUS SYSTEM
+   Inherits from theme --radius variable. When theme radius is 0, all corners square.
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 .card-system {
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
-  --radius-xl: 18px;
+  /* Scale factor based on theme radius (0.75rem = 12px default) */
+  --radius-sm: calc(var(--radius, 0.75rem) * 0.5);
+  --radius-md: calc(var(--radius, 0.75rem) * 0.833);
+  --radius-lg: calc(var(--radius, 0.75rem) * 1.167);
+  --radius-xl: calc(var(--radius, 0.75rem) * 1.5);
   --radius-full: 9999px;
 }
 
@@ -139,10 +141,11 @@
   justify-content: space-between;
   padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--border-subtle);
+  /* Use neutral muted color - stays gray regardless of theme secondary color */
   background: linear-gradient(
     135deg,
-    color-mix(in oklch, var(--primary) 6%, transparent) 0%,
-    transparent 60%
+    color-mix(in oklch, var(--muted) 80%, transparent) 0%,
+    color-mix(in oklch, var(--muted) 40%, transparent) 60%
   );
   position: relative;
   flex-shrink: 0;
@@ -155,10 +158,11 @@
   left: 0;
   right: 0;
   height: 1px;
+  /* Use neutral border color instead of primary */
   background: linear-gradient(
     90deg,
     transparent 0%,
-    color-mix(in oklch, var(--primary) 20%, transparent) 50%,
+    var(--border-subtle) 50%,
     transparent 100%
   );
 }

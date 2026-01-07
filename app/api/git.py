@@ -130,6 +130,10 @@ class WorktreeCreate(BaseModel):
     create_new_branch: bool = False
     base_branch: Optional[str] = None
     profile_id: Optional[str] = None
+    copy_uncommitted: bool = Field(
+        default=False,
+        description="Copy uncommitted files (modified and untracked) from main repo to worktree"
+    )
 
 
 class SessionInfo(BaseModel):
@@ -181,6 +185,7 @@ class WorktreeCreateResponse(BaseModel):
     message: str
     worktree: Optional[WorktreeInfo] = None
     session: Optional[dict] = None
+    errors: Optional[List[str]] = None  # Errors from copy_uncommitted operation
 
 
 class WorktreeSyncResponse(BaseModel):
@@ -719,6 +724,95 @@ class WorktreeCreateStandalone(BaseModel):
     base_branch: Optional[str] = None
 
 
+def _copy_uncommitted_files(main_dir: str, worktree_path: str) -> dict:
+    """
+    Copy uncommitted files (modified and untracked) from main repo to worktree.
+
+    This allows users to continue working on uncommitted changes in a worktree
+    without having to commit or stash first.
+
+    Args:
+        main_dir: Path to the main repository
+        worktree_path: Path to the worktree
+
+    Returns:
+        Dict with copied file counts and any errors
+    """
+    import shutil
+    from pathlib import Path
+
+    result = {
+        "modified_copied": 0,
+        "untracked_copied": 0,
+        "errors": []
+    }
+
+    try:
+        # Get git status to find uncommitted files
+        status = git_service.get_status(main_dir)
+
+        main_path = Path(main_dir)
+        worktree_abs_path = Path(worktree_path)
+
+        # Copy modified files (staged and unstaged)
+        modified_files = status.get("modified", [])
+        # Also include staged files that might be renamed or added
+        staged_files = [s.get("file") for s in status.get("staged", []) if s.get("file")]
+        all_modified = set(modified_files + staged_files)
+
+        for file_path in all_modified:
+            try:
+                src = main_path / file_path
+                dest = worktree_abs_path / file_path
+
+                if src.exists():
+                    # Ensure parent directory exists
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+
+                    if src.is_file():
+                        shutil.copy2(src, dest)
+                        result["modified_copied"] += 1
+                    elif src.is_dir():
+                        if dest.exists():
+                            shutil.rmtree(dest)
+                        shutil.copytree(src, dest)
+                        result["modified_copied"] += 1
+            except Exception as e:
+                result["errors"].append(f"Failed to copy modified file {file_path}: {str(e)}")
+
+        # Copy untracked files
+        untracked_files = status.get("untracked", [])
+        for file_path in untracked_files:
+            try:
+                src = main_path / file_path
+                dest = worktree_abs_path / file_path
+
+                if src.exists():
+                    # Ensure parent directory exists
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+
+                    if src.is_file():
+                        shutil.copy2(src, dest)
+                        result["untracked_copied"] += 1
+                    elif src.is_dir():
+                        if dest.exists():
+                            shutil.rmtree(dest)
+                        shutil.copytree(src, dest)
+                        result["untracked_copied"] += 1
+            except Exception as e:
+                result["errors"].append(f"Failed to copy untracked file {file_path}: {str(e)}")
+
+        logger.info(
+            f"Copied uncommitted files to worktree: "
+            f"{result['modified_copied']} modified, {result['untracked_copied']} untracked"
+        )
+
+    except Exception as e:
+        result["errors"].append(f"Failed to get git status: {str(e)}")
+
+    return result
+
+
 @router.post("/worktrees", response_model=WorktreeCreateResponse)
 async def create_worktree(
     request: Request,
@@ -790,14 +884,31 @@ async def create_worktree(
                 detail="Failed to create worktree. Branch may already be in use or doesn't exist."
             )
 
+    # Copy uncommitted files if requested
+    copy_result = None
+    if body.copy_uncommitted and worktree:
+        worktree_abs_path = str(settings.workspace_dir / worktree["worktree_path"])
+        copy_result = _copy_uncommitted_files(working_dir, worktree_abs_path)
+
     # Get full worktree details for response
     worktree_details = worktree_manager.get_worktree_details(worktree["id"])
 
+    # Build message
+    message = f"Created worktree for branch '{body.branch_name}'"
+    if copy_result:
+        total_copied = copy_result["modified_copied"] + copy_result["untracked_copied"]
+        if total_copied > 0:
+            message += f" with {total_copied} uncommitted file(s) copied"
+
+    # Surface any copy errors to the user
+    copy_errors = copy_result.get("errors") if copy_result else None
+
     return WorktreeCreateResponse(
         success=True,
-        message=f"Created worktree for branch '{body.branch_name}'",
+        message=message,
         worktree=_convert_worktree_to_info(worktree_details) if worktree_details else None,
-        session=session
+        session=session,
+        errors=copy_errors if copy_errors else None
     )
 
 
@@ -909,4 +1020,163 @@ async def sync_worktrees(
         orphaned=result.get("orphaned", 0),
         cleaned_up=result.get("cleaned_up", 0),
         errors=result.get("errors", [])
+    )
+
+
+# =============================================================================
+# Worktree File Browsing
+# =============================================================================
+
+class WorktreeFileInfo(BaseModel):
+    """File information within a worktree"""
+    name: str
+    type: str  # 'file' or 'directory'
+    size: Optional[int] = None
+    sizeFormatted: Optional[str] = None
+    path: str
+    extension: Optional[str] = None
+    modifiedAt: str
+    createdAt: str
+
+
+class WorktreeFilesResponse(BaseModel):
+    """Response for worktree file listing"""
+    files: List[WorktreeFileInfo]
+    path: str
+    worktreeId: str
+    worktreePath: str
+
+
+def _get_file_extension(name: str) -> str:
+    """Get lowercase file extension without the dot"""
+    from pathlib import Path as PathLib
+    ext = PathLib(name).suffix.lower()
+    return ext[1:] if ext else ""
+
+
+def _format_file_size(size_bytes: int) -> str:
+    """Format file size in human-readable format."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    else:
+        return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+
+
+@router.get("/worktrees/{worktree_id}/files", response_model=WorktreeFilesResponse)
+async def list_worktree_files(
+    request: Request,
+    project_id: str,
+    worktree_id: str,
+    path: str = "",
+    show_hidden: bool = False,
+    token: str = Depends(require_auth)
+):
+    """
+    List files within a worktree directory.
+
+    This allows browsing files in a worktree's working directory,
+    which is separate from the main project directory.
+
+    Args:
+        project_id: Project ID
+        worktree_id: Worktree ID to browse files in
+        path: Relative path within the worktree (empty for root)
+        show_hidden: Whether to show hidden files (starting with .)
+
+    Returns:
+        List of files in the specified directory within the worktree
+    """
+    from datetime import datetime
+
+    check_project_access(request, project_id)
+
+    # Get worktree details
+    worktree = database.get_worktree(worktree_id)
+    if not worktree:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Worktree not found: {worktree_id}"
+        )
+
+    # Verify worktree belongs to this project
+    repo = database.get_git_repository_by_project(project_id)
+    if not repo or worktree["repository_id"] != repo["id"]:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Worktree not found in this project: {worktree_id}"
+        )
+
+    # Build full path to worktree directory
+    worktree_base = settings.workspace_dir / worktree["worktree_path"]
+
+    if not worktree_base.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Worktree directory not found on disk"
+        )
+
+    # Build target path within worktree
+    if path:
+        # Validate path doesn't escape worktree boundary
+        target_path = (worktree_base / path).resolve()
+        try:
+            target_path.relative_to(worktree_base.resolve())
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Path escapes worktree boundary"
+            )
+    else:
+        target_path = worktree_base
+
+    if not target_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Directory not found"
+        )
+
+    if not target_path.is_dir():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Path is not a directory"
+        )
+
+    # List directory contents
+    files = []
+    for item in target_path.iterdir():
+        # Skip hidden files unless requested
+        if item.name.startswith('.') and not show_hidden:
+            continue
+
+        try:
+            stat_info = item.stat()
+            is_dir = item.is_dir()
+
+            file_info = WorktreeFileInfo(
+                name=item.name,
+                type="directory" if is_dir else "file",
+                size=stat_info.st_size if not is_dir else None,
+                sizeFormatted=_format_file_size(stat_info.st_size) if not is_dir else None,
+                path=str(item.relative_to(worktree_base)),
+                extension=_get_file_extension(item.name) if not is_dir else None,
+                modifiedAt=datetime.fromtimestamp(stat_info.st_mtime).isoformat(),
+                createdAt=datetime.fromtimestamp(stat_info.st_ctime).isoformat(),
+            )
+            files.append(file_info)
+        except (OSError, PermissionError):
+            # Skip files we can't access
+            continue
+
+    # Sort: directories first, then files alphabetically
+    files.sort(key=lambda x: (x.type != "directory", x.name.lower()))
+
+    return WorktreeFilesResponse(
+        files=files,
+        path=path,
+        worktreeId=worktree_id,
+        worktreePath=worktree["worktree_path"]
     )

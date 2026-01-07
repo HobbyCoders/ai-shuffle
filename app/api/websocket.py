@@ -155,13 +155,33 @@ async def chat_websocket(
     current_session_id: Optional[str] = None
     query_task: Optional[asyncio.Task] = None
 
-    async def send_json(data: dict):
-        """Safe JSON send with connection check"""
-        if websocket.client_state == WebSocketState.CONNECTED:
-            try:
-                await websocket.send_json(data)
-            except Exception as e:
-                logger.warning(f"Failed to send WebSocket message: {e}")
+    # Track if connection is healthy (for detecting silent disconnects during streaming)
+    connection_healthy = True
+
+    async def send_json(data: dict) -> bool:
+        """
+        Safe JSON send with connection check.
+
+        Returns True if send succeeded, False if connection is dead.
+        Callers should check return value and abort operations if False.
+        """
+        nonlocal connection_healthy
+
+        if not connection_healthy:
+            return False
+
+        if websocket.client_state != WebSocketState.CONNECTED:
+            connection_healthy = False
+            logger.warning(f"WebSocket disconnected, cannot send message type: {data.get('type')}")
+            return False
+
+        try:
+            await websocket.send_json(data)
+            return True
+        except Exception as e:
+            connection_healthy = False
+            logger.warning(f"Failed to send WebSocket message (type={data.get('type')}): {e}")
+            return False
 
     async def run_query(prompt: str, session_id: str, profile_id: str, project_id: Optional[str], overrides: Optional[Dict[str, Any]] = None):
         """Execute query and stream results directly to WebSocket"""
@@ -184,7 +204,9 @@ async def chat_websocket(
 
         try:
             logger.info(f"Starting query for session {session_id}, profile={profile_id}, project={project_id}, overrides={overrides}")
-            await send_json({"type": "start", "session_id": session_id, "message_id": message_id})
+            if not await send_json({"type": "start", "session_id": session_id, "message_id": message_id}):
+                logger.warning(f"Connection lost before query could start for session {session_id}")
+                return  # Exit early - connection is dead
 
             logger.info(f"Calling stream_to_websocket for session {session_id}, api_user_id={api_user_id}")
             async for event in stream_to_websocket(
@@ -199,8 +221,14 @@ async def chat_websocket(
                 event_type = event.get('type')
                 logger.debug(f"Streaming event for session {session_id}: {event_type}")
 
-                # Send to this websocket
-                await send_json(event)
+                # Send to this websocket - check if connection is still alive
+                if not await send_json(event):
+                    # Connection died during streaming - let query continue for other devices
+                    # but stop sending to this one
+                    logger.warning(f"Connection lost during streaming for session {session_id}, continuing for other devices")
+                    # Don't break the loop - the query continues and other devices still get events
+                    # Just stop trying to send to this dead connection
+                    continue
 
                 # Broadcast to other devices via SyncEngine
                 # Start streaming on first content event
@@ -596,7 +624,7 @@ async def chat_websocket(
                                 # If no project specified, use the worktree's project
                                 if not project_id:
                                     project_id = repo["project_id"]
-                            
+
                             # Create new session, optionally linked to a worktree
                             session_id = str(uuid.uuid4())
                             database.create_session(
