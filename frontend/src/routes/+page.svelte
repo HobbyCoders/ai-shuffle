@@ -313,21 +313,12 @@
 	}
 
 	// Handle rewind completion from RewindModal V2
-	async function handleRewindCompleteV2(success: boolean, messagesRemoved: number, restoredMessageText?: string) {
-		console.log('Rewind V2 complete:', { success, messagesRemoved, restoredMessageText });
+	async function handleRewindCompleteV2(success: boolean, messagesRemoved: number) {
+		console.log('Rewind V2 complete:', { success, messagesRemoved });
 
 		if (success && messagesRemoved > 0 && $activeTabId && rewindSessionId) {
 			// Reload the session to reflect changes
 			await tabs.loadSessionInTab($activeTabId, rewindSessionId);
-
-			// Populate the input field with the restored message text
-			if (restoredMessageText) {
-				tabInputs[$activeTabId] = restoredMessageText;
-				tabInputs = tabInputs; // Trigger Svelte reactivity
-
-				// Auto-resize the textarea
-				setTimeout(() => autoResize($activeTabId), 0);
-			}
 		}
 
 		rewindSessionId = '';
@@ -687,13 +678,6 @@
 	function setTabProject(tabId: string, projectId: string) {
 		tabs.setTabProject(tabId, projectId);
 		tabs.setDefaultProject(projectId);
-	}
-
-	// Check if the project assigned to a tab is still available
-	function isProjectAvailable(tab: typeof $activeTab): boolean {
-		if (!tab) return true;
-		if (!tab.project) return true; // Default/empty project is always available
-		return $projects.some(p => p.id === tab.project);
 	}
 </script>
 
@@ -1086,26 +1070,14 @@
 					<select
 						value={currentTab.project}
 						on:change={(e) => setTabProject(tabId, e.currentTarget.value)}
-						class="bg-muted text-xs sm:text-sm text-foreground border-0 rounded px-2 py-1 focus:ring-2 focus:ring-ring max-w-[100px] sm:max-w-none disabled:opacity-60 disabled:cursor-not-allowed"
+						class="bg-muted text-xs sm:text-sm text-foreground border-0 rounded px-2 py-1 focus:ring-2 focus:ring-ring max-w-[100px] sm:max-w-none"
 						aria-label="Project"
-						disabled={currentTab.projectLocked}
-						title={currentTab.projectLocked ? 'Project is locked for this session' : 'Select project'}
 					>
 						<option value="">Default</option>
 						{#each $projects as project}
 							<option value={project.id}>{project.name}</option>
 						{/each}
-						{#if currentTab.project && !isProjectAvailable(currentTab)}
-							<option value={currentTab.project} disabled>{currentTab.project} (unavailable)</option>
-						{/if}
 					</select>
-					{#if currentTab.projectLocked}
-						<span class="text-xs text-muted-foreground" title="Project is locked for this session">
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-							</svg>
-						</span>
-					{/if}
 					<button on:click={() => (showProjectModal = true)} class="text-muted-foreground hover:text-foreground p-1" aria-label="Project settings">
 						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path
@@ -1345,21 +1317,6 @@
 			<!-- Input Area -->
 			<div class="border-t border-border bg-background p-4">
 				<div class="max-w-5xl mx-auto">
-					<!-- Project Unavailable Warning -->
-					{#if currentTab.projectLocked && currentTab.project && !isProjectAvailable(currentTab)}
-						<div class="mb-3 bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-amber-600 dark:text-amber-400">
-							<div class="flex items-start gap-2">
-								<svg class="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-								</svg>
-								<div class="text-sm">
-									<p class="font-medium">Project "{currentTab.project}" is no longer available</p>
-									<p class="mt-1 text-xs opacity-80">This session was created with a project that has been deleted or is no longer accessible. You can view the chat history but cannot send new messages. Start a new chat to continue.</p>
-								</div>
-							</div>
-						</div>
-					{/if}
-
 					<!-- Uploaded Files -->
 					{#if (tabUploadedFiles[tabId] || []).length > 0}
 						<div class="mb-3 flex flex-wrap gap-2">
@@ -1389,8 +1346,8 @@
 							type="button"
 							on:click={triggerFileUpload}
 							class="flex-shrink-0 w-10 h-10 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors disabled:opacity-50"
-							disabled={currentTab.isStreaming || !$claudeAuthenticated || isUploading || !isProjectAvailable(currentTab)}
-							title={!isProjectAvailable(currentTab) ? 'Project unavailable' : currentTab.project ? 'Upload file' : 'Select a project to upload files'}
+							disabled={currentTab.isStreaming || !$claudeAuthenticated || isUploading}
+							title={currentTab.project ? 'Upload file' : 'Select a project to upload files'}
 						>
 							{#if isUploading}
 								<svg class="w-5 h-5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1424,10 +1381,10 @@
 								bind:value={tabInputs[tabId]}
 								on:input={() => handleInputChange(tabId)}
 								on:keydown={(e) => handleKeyDown(e, tabId)}
-								placeholder={!isProjectAvailable(currentTab) ? "Project unavailable - cannot send messages" : currentTab.isStreaming ? "Type to queue message..." : "Message Claude... (type / for commands)"}
-								class="w-full bg-card border border-border rounded-lg px-4 py-2.5 text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:ring-2 focus:ring-ring min-h-[40px] max-h-[200px] leading-normal shadow-s disabled:opacity-60 disabled:cursor-not-allowed"
+								placeholder={currentTab.isStreaming ? "Type to queue message..." : "Message Claude... (type / for commands)"}
+								class="w-full bg-card border border-border rounded-lg px-4 py-2.5 text-foreground placeholder-muted-foreground resize-none focus:outline-none focus:ring-2 focus:ring-ring min-h-[40px] max-h-[200px] leading-normal shadow-s"
 								rows="1"
-								disabled={!$claudeAuthenticated || !isProjectAvailable(currentTab)}
+								disabled={!$claudeAuthenticated}
 							></textarea>
 						</div>
 
@@ -1451,8 +1408,8 @@
 							<button
 								type="submit"
 								class="flex-shrink-0 w-10 h-10 flex items-center justify-center bg-primary hover:opacity-90 text-primary-foreground rounded-lg transition-colors disabled:opacity-50 shadow-s"
-								disabled={!(tabInputs[tabId] || '').trim() || !$claudeAuthenticated || !isProjectAvailable(currentTab)}
-								title={!isProjectAvailable(currentTab) ? "Project unavailable" : currentTab.isStreaming ? "Queue message" : "Send message"}
+								disabled={!(tabInputs[tabId] || '').trim() || !$claudeAuthenticated}
+								title={currentTab.isStreaming ? "Queue message" : "Send message"}
 							>
 								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
