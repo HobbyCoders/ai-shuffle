@@ -29,9 +29,12 @@ else
 fi
 
 # Ensure config directory exists with correct permissions
-mkdir -p /home/appuser/.config/claude
-chown -R appuser:appuser /home/appuser/.config
+mkdir -p /home/appuser/.config/claude /home/appuser/.claude
+chown -R appuser:appuser /home/appuser/.config /home/appuser/.claude
+
+# Ensure data and workspace directories are writable
+chown -R appuser:appuser /data /workspace
 
 # Switch to appuser and run the application with proper HOME
-echo "Starting application as appuser (${PUID}:${PGID})"
-exec gosu appuser env HOME=/home/appuser python main.py
+echo "Starting AI Hub as appuser (${PUID}:${PGID})"
+exec gosu appuser env HOME=/home/appuser python -m app.main

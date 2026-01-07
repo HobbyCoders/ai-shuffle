@@ -1,0 +1,361 @@
+/**
+ * Git API client for AI Hub
+ */
+
+import { api } from './client';
+
+const BASE = '/projects';
+
+// ============================================================================
+// Git Status Types
+// ============================================================================
+
+export interface GitStatus {
+    is_git_repo: boolean;
+    current_branch: string | null;
+    remote_url: string | null;
+    has_changes: boolean;
+    staged: number;
+    modified: number;
+    untracked: number;
+}
+
+// ============================================================================
+// Branch Types
+// ============================================================================
+
+// Raw branch data from API (snake_case)
+interface RawBranch {
+    name: string;
+    is_current: boolean;
+    is_remote: boolean;
+    upstream?: string;
+    ahead?: number;
+    behind?: number;
+    commit?: string;
+    commit_message?: string;
+    has_worktree?: boolean;
+    worktree_id?: string;
+}
+
+// Transformed branch for frontend (camelCase)
+export interface Branch {
+    name: string;
+    current: boolean;
+    remote: boolean;
+    upstream?: string;
+    ahead?: number;
+    behind?: number;
+    lastCommit?: string;
+    // Worktree association
+    hasWorktree?: boolean;
+    worktreeId?: string;
+}
+
+// Transform raw branch to frontend format
+function transformBranch(raw: RawBranch): Branch {
+    return {
+        name: raw.name,
+        current: raw.is_current,
+        remote: raw.is_remote,
+        upstream: raw.upstream,
+        ahead: raw.ahead,
+        behind: raw.behind,
+        lastCommit: raw.commit_message,
+        hasWorktree: raw.has_worktree,
+        worktreeId: raw.worktree_id
+    };
+}
+
+export interface CreateBranchRequest {
+    name: string;
+    start_point?: string;
+}
+
+// ============================================================================
+// Commit Types
+// ============================================================================
+
+export interface CommitNode {
+    sha: string;
+    shortSha: string;
+    message: string;
+    author: string;
+    email: string;
+    date: string;
+    parents: string[];
+    branches: string[];
+    tags: string[];
+    x?: number;  // Calculated for graph
+    y?: number;
+}
+
+// Raw commit from API (different field names)
+interface RawCommitNode {
+    sha: string;
+    short_sha: string;
+    message: string;
+    author: string;
+    author_email: string;
+    timestamp: string;
+    parents: string[];
+    refs: string[];
+}
+
+// Transform raw commit to CommitNode
+function transformCommit(raw: RawCommitNode): CommitNode {
+    // Parse refs into branches and tags
+    const branches: string[] = [];
+    const tags: string[] = [];
+
+    for (const ref of raw.refs || []) {
+        // Skip HEAD pointer references like "HEAD -> main"
+        const cleanRef = ref.replace(/^HEAD -> /, '');
+
+        if (ref.startsWith('tag: ')) {
+            tags.push(ref.replace('tag: ', ''));
+        } else if (cleanRef.startsWith('origin/')) {
+            // Skip remote refs for display (or include them if desired)
+            // branches.push(cleanRef);
+        } else if (cleanRef && cleanRef !== 'HEAD') {
+            branches.push(cleanRef);
+        }
+    }
+
+    return {
+        sha: raw.sha,
+        shortSha: raw.short_sha,
+        message: raw.message,
+        author: raw.author,
+        email: raw.author_email,
+        date: raw.timestamp,
+        parents: raw.parents || [],
+        branches,
+        tags
+    };
+}
+
+export interface CommitGraphResponse {
+    commits: CommitNode[];
+    total: number;
+}
+
+// ============================================================================
+// Worktree Types
+// ============================================================================
+
+export interface Worktree {
+    id: string;
+    repository_id: string;
+    session_id: string | null;
+    branch_name: string;
+    worktree_path: string;
+    base_branch: string | null;
+    status: string;
+    created_at: string;
+    // New fields from worktree-session decoupling
+    exists?: boolean;  // Whether worktree folder exists on disk
+    session_count?: number;  // Number of sessions that have used this worktree
+}
+
+export interface CreateWorktreeRequest {
+    branch_name: string;
+    create_new?: boolean;
+    base_branch?: string;
+    profile_id?: string;
+    copy_uncommitted?: boolean;  // Copy uncommitted files from main repo to worktree
+}
+
+// ============================================================================
+// Git Status API
+// ============================================================================
+
+/**
+ * Get the git status for a project
+ */
+export async function getGitStatus(projectId: string): Promise<GitStatus> {
+    return api.get<GitStatus>(`${BASE}/${projectId}/git/status`);
+}
+
+// ============================================================================
+// Branch API
+// ============================================================================
+
+interface RawBranchListResponse {
+    branches: RawBranch[];
+    current_branch: string | null;
+}
+
+export interface BranchListResponse {
+    branches: Branch[];
+    current_branch: string | null;
+}
+
+/**
+ * Get all branches for a project
+ * @param projectId - The project ID
+ * @param includeRemote - Whether to include remote tracking branches (default: false for cleaner UI)
+ */
+export async function getBranches(projectId: string, includeRemote: boolean = false): Promise<Branch[]> {
+    const params = includeRemote ? '' : '?include_remote=false';
+    const response = await api.get<RawBranchListResponse>(`${BASE}/${projectId}/git/branches${params}`);
+    return response.branches.map(transformBranch);
+}
+
+/**
+ * Create a new branch
+ */
+export async function createBranch(projectId: string, name: string, startPoint?: string): Promise<Branch> {
+    const body: CreateBranchRequest = { name };
+    if (startPoint) {
+        body.start_point = startPoint;
+    }
+    return api.post<Branch>(`${BASE}/${projectId}/git/branches`, body);
+}
+
+/**
+ * Delete a branch
+ */
+export async function deleteBranch(projectId: string, name: string): Promise<void> {
+    await api.delete(`${BASE}/${projectId}/git/branches/${encodeURIComponent(name)}`);
+}
+
+/**
+ * Checkout a branch or ref
+ */
+export async function checkout(projectId: string, ref: string): Promise<{ success: boolean; message: string }> {
+    return api.post<{ success: boolean; message: string }>(`${BASE}/${projectId}/git/checkout`, { ref });
+}
+
+/**
+ * Fetch from remote
+ */
+export async function fetchRemote(projectId: string): Promise<{ success: boolean; message: string }> {
+    return api.post<{ success: boolean; message: string }>(`${BASE}/${projectId}/git/fetch`);
+}
+
+// ============================================================================
+// Commit Graph API
+// ============================================================================
+
+/**
+ * Get the commit graph for a project
+ */
+// Raw response from API
+interface RawCommitGraphResponse {
+    commits: RawCommitNode[];
+    total: number;
+}
+
+export async function getCommitGraph(projectId: string, limit?: number): Promise<CommitGraphResponse> {
+    const params = limit ? `?limit=${limit}` : '';
+    const raw = await api.get<RawCommitGraphResponse>(`${BASE}/${projectId}/git/graph${params}`);
+
+    // Transform raw commits to frontend format
+    return {
+        commits: raw.commits.map(transformCommit),
+        total: raw.total
+    };
+}
+
+// ============================================================================
+// Worktree API
+// ============================================================================
+
+export interface WorktreeListResponse {
+    worktrees: Worktree[];
+    total: number;
+}
+
+/**
+ * Get all worktrees for a project
+ */
+export async function getWorktrees(projectId: string): Promise<Worktree[]> {
+    const response = await api.get<WorktreeListResponse>(`${BASE}/${projectId}/git/worktrees`);
+    return response.worktrees;
+}
+
+/**
+ * Create a new worktree
+ */
+export async function createWorktree(projectId: string, data: CreateWorktreeRequest): Promise<Worktree> {
+    return api.post<Worktree>(`${BASE}/${projectId}/git/worktrees`, data);
+}
+
+/**
+ * Delete a worktree
+ */
+export async function deleteWorktree(projectId: string, worktreeId: string): Promise<void> {
+    await api.delete(`${BASE}/${projectId}/git/worktrees/${worktreeId}`);
+}
+
+// ============================================================================
+// Worktree Sync API
+// ============================================================================
+
+export interface WorktreeSyncResult {
+    is_git_repo: boolean;
+    active_worktrees: number;
+    cleaned_up: Array<{
+        id: string;
+        branch_name: string;
+        reason: string;
+    }>;
+}
+
+/**
+ * Sync worktree database records with actual state on disk.
+ * Cleans up stale records where worktrees were deleted outside the app.
+ * Should be called when loading a chat card for a project.
+ */
+export async function syncWorktrees(projectId: string): Promise<WorktreeSyncResult> {
+    return api.post<WorktreeSyncResult>(`${BASE}/${projectId}/sync-worktrees`);
+}
+
+// ============================================================================
+// Worktree File Browsing API
+// ============================================================================
+
+export interface WorktreeFileItem {
+    name: string;
+    type: 'file' | 'directory';
+    size: number | null;
+    sizeFormatted: string | null;
+    path: string;
+    extension: string | null;
+    modifiedAt: string;
+    createdAt: string;
+}
+
+export interface WorktreeFilesResponse {
+    files: WorktreeFileItem[];
+    path: string;
+    worktreeId: string;
+    worktreePath: string;
+}
+
+/**
+ * List files within a worktree directory.
+ * This allows browsing files in the worktree's working directory,
+ * which is separate from the main project directory.
+ *
+ * @param projectId - The project ID
+ * @param worktreeId - The worktree ID to browse files in
+ * @param path - Relative path within the worktree (empty for root)
+ * @param showHidden - Whether to show hidden files
+ */
+export async function getWorktreeFiles(
+    projectId: string,
+    worktreeId: string,
+    path: string = '',
+    showHidden: boolean = false
+): Promise<WorktreeFilesResponse> {
+    const params = new URLSearchParams();
+    if (path) params.set('path', path);
+    if (showHidden) params.set('show_hidden', 'true');
+
+    const queryString = params.toString();
+    const url = `${BASE}/${projectId}/git/worktrees/${worktreeId}/files${queryString ? `?${queryString}` : ''}`;
+
+    return api.get<WorktreeFilesResponse>(url);
+}

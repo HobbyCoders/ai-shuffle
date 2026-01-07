@@ -7,14 +7,7 @@ export default defineConfig({
 		proxy: {
 			'/api': {
 				target: 'http://localhost:8000',
-				changeOrigin: true,
-				secure: false,
-				cookieDomainRewrite: {
-					'*': ''
-				},
-				cookiePathRewrite: {
-					'*': '/'
-				}
+				changeOrigin: true
 			},
 			'/health': {
 				target: 'http://localhost:8000',
