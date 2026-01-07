@@ -367,14 +367,18 @@ async def get_session_state(
     token: str = Depends(require_auth)
 ):
     """
-    Get full session state for initial sync.
-    Called when a device first connects to get caught up.
+    Get current session state for client reconnection.
+
+    This endpoint is used by clients to check the session state when reconnecting,
+    including whether work is in progress and if there are buffered streaming messages.
 
     Returns:
-        - session: Session metadata
-        - messages: All messages in the session
-        - is_streaming: Whether the session is currently streaming
-        - latest_sync_id: Current sync ID for subsequent polling
+        - session_id: The session ID
+        - title: Session title
+        - status: Session status (active, archived, etc.)
+        - is_streaming: Whether work is currently in progress
+        - connected_devices: Number of devices watching this session
+        - streaming_messages: Buffered messages if streaming (for late-joiners)
     """
     session = database.get_session(session_id)
     if not session:
@@ -385,16 +389,16 @@ async def get_session_state(
 
     check_session_access(request, session)
 
-    messages = database.get_session_messages(session_id)
-    latest_id = database.get_latest_sync_id(session_id)
-
+    # Get current streaming state from SyncEngine
     from app.core.sync_engine import sync_engine
-    is_streaming = sync_engine.is_session_streaming(session_id)
+    sync_state = await sync_engine.get_session_state(session_id)
 
+    # Combine session metadata with streaming state
     return {
-        "session": session,
-        "messages": messages,
-        "is_streaming": is_streaming,
-        "latest_sync_id": latest_id,
-        "connected_devices": sync_engine.get_device_count(session_id)
+        "session_id": session_id,
+        "title": session.get("title"),
+        "status": session.get("status"),
+        "is_streaming": sync_state["is_streaming"],
+        "connected_devices": sync_state["connected_devices"],
+        "streaming_messages": sync_state.get("streaming_messages", [])
     }

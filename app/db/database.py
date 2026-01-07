@@ -493,13 +493,21 @@ def update_profile(
 
 
 def delete_profile(profile_id: str) -> bool:
-    """Delete a profile"""
+    """Delete a profile and handle foreign key references.
+
+    Note: Sessions using this profile will also be deleted (along with their messages
+    due to CASCADE). This is necessary because sessions.profile_id is NOT NULL and
+    the FK constraint doesn't have ON DELETE SET NULL.
+    """
     existing = get_profile(profile_id)
     if not existing:
         return False
 
     with get_db() as conn:
         cursor = conn.cursor()
+        # Delete sessions using this profile (session_messages will cascade delete)
+        cursor.execute("DELETE FROM sessions WHERE profile_id = ?", (profile_id,))
+        # Now delete the profile
         cursor.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
         return cursor.rowcount > 0
 
@@ -1526,4 +1534,15 @@ def delete_subagent(subagent_id: str) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM subagents WHERE id = ?", (subagent_id,))
+        return cursor.rowcount > 0
+
+
+def set_subagent_builtin(subagent_id: str, is_builtin: bool) -> bool:
+    """Set the is_builtin flag for a subagent"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE subagents SET is_builtin = ?, updated_at = ? WHERE id = ?",
+            (is_builtin, datetime.utcnow().isoformat(), subagent_id)
+        )
         return cursor.rowcount > 0

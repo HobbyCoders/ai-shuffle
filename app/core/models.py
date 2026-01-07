@@ -260,6 +260,7 @@ class SessionWithMessages(Session):
 class QueryOverrides(BaseModel):
     """Optional overrides for a query"""
     model: Optional[str] = None
+    permission_mode: Optional[str] = None  # default, acceptEdits, plan, bypassPermissions
     system_prompt_append: Optional[str] = None
     max_turns: Optional[int] = None
 

@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Depends, Request, status
+from fastapi import APIRouter, HTTPException, Depends, status
 from fastapi.responses import StreamingResponse
 
 from app.core.models import (
@@ -14,7 +14,7 @@ from app.core.models import (
 )
 from app.core.query_engine import execute_query, stream_query, interrupt_session, get_active_sessions, start_background_query
 from app.core.auth import auth_service
-from app.api.auth import require_auth, get_api_user_from_request
+from app.api.auth import require_api_key, require_auth
 
 logger = logging.getLogger(__name__)
 
@@ -33,13 +33,24 @@ def require_claude_auth():
 @router.post("/query", response_model=QueryResponse)
 async def one_shot_query(
     request: QueryRequest,
-    token: str = Depends(require_auth),
+    api_user: dict = Depends(require_api_key),
     _: None = Depends(require_claude_auth)
 ):
     """
     One-shot query - stateless, creates a new session each time.
     Best for simple queries that don't need conversation history.
+    Requires API key authentication. Uses the API user's configured project and profile.
     """
+    # Use API user's configured profile/project, fall back to request values
+    profile_id = api_user.get("profile_id") or request.profile
+    project_id = api_user.get("project_id") or request.project
+
+    if not profile_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No profile configured. Set profile_id on API user or provide 'profile' in request."
+        )
+
     try:
         overrides = None
         if request.overrides:
@@ -47,9 +58,10 @@ async def one_shot_query(
 
         result = await execute_query(
             prompt=request.prompt,
-            profile_id=request.profile,
-            project_id=request.project,
-            overrides=overrides
+            profile_id=profile_id,
+            project_id=project_id,
+            overrides=overrides,
+            api_user_id=api_user.get("id")
         )
 
         return {
@@ -74,12 +86,23 @@ async def one_shot_query(
 @router.post("/query/stream")
 async def stream_one_shot_query(
     request: QueryRequest,
-    token: str = Depends(require_auth),
+    api_user: dict = Depends(require_api_key),
     _: None = Depends(require_claude_auth)
 ):
     """
     SSE streaming one-shot query.
+    Requires API key authentication. Uses the API user's configured project and profile.
     """
+    # Use API user's configured profile/project, fall back to request values
+    profile_id = api_user.get("profile_id") or request.profile
+    project_id = api_user.get("project_id") or request.project
+
+    if not profile_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No profile configured. Set profile_id on API user or provide 'profile' in request."
+        )
+
     async def event_generator():
         try:
             overrides = None
@@ -88,9 +111,10 @@ async def stream_one_shot_query(
 
             async for event in stream_query(
                 prompt=request.prompt,
-                profile_id=request.profile,
-                project_id=request.project,
-                overrides=overrides
+                profile_id=profile_id,
+                project_id=project_id,
+                overrides=overrides,
+                api_user_id=api_user.get("id")
             ):
                 event_type = event.get("type", "message")
                 data = json.dumps(event)
@@ -115,14 +139,25 @@ async def stream_one_shot_query(
 @router.post("/conversation", response_model=QueryResponse)
 async def conversation(
     request: ConversationRequest,
-    token: str = Depends(require_auth),
+    api_user: dict = Depends(require_api_key),
     _: None = Depends(require_claude_auth)
 ):
     """
     Multi-turn conversation - maintains context across messages.
     If session_id is provided, continues that session.
     Otherwise creates a new session.
+    Requires API key authentication. Uses the API user's configured project and profile.
     """
+    # Use API user's configured profile/project, fall back to request values
+    profile_id = api_user.get("profile_id") or request.profile
+    project_id = api_user.get("project_id") or request.project
+
+    if not profile_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No profile configured. Set profile_id on API user or provide 'profile' in request."
+        )
+
     try:
         overrides = None
         if request.overrides:
@@ -130,10 +165,11 @@ async def conversation(
 
         result = await execute_query(
             prompt=request.prompt,
-            profile_id=request.profile or "claude-code",
-            project_id=request.project,
+            profile_id=profile_id,
+            project_id=project_id,
             overrides=overrides,
-            session_id=request.session_id
+            session_id=request.session_id,
+            api_user_id=api_user.get("id")
         )
 
         return {
@@ -158,27 +194,23 @@ async def conversation(
 @router.post("/conversation/stream")
 async def stream_conversation(
     request: ConversationRequest,
-    http_request: Request,
-    token: str = Depends(require_auth),
+    api_user: dict = Depends(require_api_key),
     _: None = Depends(require_claude_auth)
 ):
     """
     SSE streaming conversation.
-    When authenticated via API key, uses the API user's configured project and profile.
+    Requires API key authentication. Uses the API user's configured project and profile.
     """
-    # Get API user if authenticated via API key
-    api_user = get_api_user_from_request(http_request)
+    # Use API user's configured profile/project, fall back to request values
+    profile_id = api_user.get("profile_id") or request.profile
+    project_id = api_user.get("project_id") or request.project
+    api_user_id = api_user.get("id")
 
-    # Determine profile and project - API user config overrides request
-    if api_user:
-        # API users use their configured project/profile, request values ignored
-        profile_id = api_user.get("profile_id") or request.profile or "claude-code"
-        project_id = api_user.get("project_id") or request.project
-        api_user_id = api_user.get("id")
-    else:
-        profile_id = request.profile or "claude-code"
-        project_id = request.project
-        api_user_id = None
+    if not profile_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No profile configured. Set profile_id on API user or provide 'profile' in request."
+        )
 
     async def event_generator():
         try:
@@ -218,8 +250,7 @@ async def stream_conversation(
 @router.post("/conversation/start")
 async def start_conversation(
     request: ConversationRequest,
-    http_request: Request,
-    token: str = Depends(require_auth),
+    api_user: dict = Depends(require_api_key),
     _: None = Depends(require_claude_auth)
 ):
     """
@@ -234,22 +265,22 @@ async def start_conversation(
     - Browser tab can be backgrounded
     - Use /session/{session_id}/interrupt to stop
 
+    Requires API key authentication. Uses the API user's configured project and profile.
+
     Returns:
         session_id: The ID of the session (new or existing)
         status: "started" if the query was launched successfully
     """
-    # Get API user if authenticated via API key
-    api_user = get_api_user_from_request(http_request)
+    # Use API user's configured profile/project, fall back to request values
+    profile_id = api_user.get("profile_id") or request.profile
+    project_id = api_user.get("project_id") or request.project
+    api_user_id = api_user.get("id")
 
-    # Determine profile and project
-    if api_user:
-        profile_id = api_user.get("profile_id") or request.profile or "claude-code"
-        project_id = api_user.get("project_id") or request.project
-        api_user_id = api_user.get("id")
-    else:
-        profile_id = request.profile or "claude-code"
-        project_id = request.project
-        api_user_id = None
+    if not profile_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No profile configured. Set profile_id on API user or provide 'profile' in request."
+        )
 
     try:
         overrides = None

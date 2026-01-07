@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, onDestroy, tick } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { auth, username, claudeAuthenticated, isAuthenticated, isAdmin } from '$lib/stores/auth';
+	import { auth, username, claudeAuthenticated, isAuthenticated, isAdmin, apiUser } from '$lib/stores/auth';
 	import {
 		tabs,
 		allTabs,
@@ -33,7 +33,10 @@
 	import SubagentMessage from '$lib/components/SubagentMessage.svelte';
 	import QuickActions from '$lib/components/QuickActions.svelte';
 	import SubagentManager from '$lib/components/SubagentManager.svelte';
+	import SessionCard from '$lib/components/SessionCard.svelte';
+	import ConnectionStatus from '$lib/components/ConnectionStatus.svelte';
 	import { executeCommand, isSlashCommand, syncAfterRewind, listCommands, type Command } from '$lib/api/commands';
+	import { groupSessionsByDate, type DateGroup } from '$lib/utils/dateGroups';
 
 	// Configure marked for better code highlighting
 	marked.setOptions({
@@ -70,9 +73,44 @@
 	let sidebarTab: 'my-chats' | 'admin' = 'my-chats';
 
 	// Icon Rail state
-	type SidebarSection = 'none' | 'sessions' | 'projects';
+	type SidebarSection = 'none' | 'sessions' | 'projects' | 'profiles' | 'subagents';
 	let activeSidebarSection: SidebarSection = 'none';
 	let sidebarPinned = false;
+
+	// Session sidebar state
+	let sessionSearchQuery = '';
+	let sessionSearchExpanded = false;
+	let collapsedGroups: Set<string> = new Set(['yesterday', 'week', 'month', 'older']); // Only 'today' expanded by default
+
+	// Computed: filtered and grouped sessions
+	$: filteredSessions = sessionSearchQuery
+		? $sessions.filter(s =>
+			s.title?.toLowerCase().includes(sessionSearchQuery.toLowerCase())
+		)
+		: $sessions;
+	$: groupedSessions = groupSessionsByDate(filteredSessions);
+
+	// Admin sessions grouped
+	$: filteredAdminSessions = sessionSearchQuery
+		? $adminSessions.filter(s =>
+			s.title?.toLowerCase().includes(sessionSearchQuery.toLowerCase())
+		)
+		: $adminSessions;
+	$: groupedAdminSessions = groupSessionsByDate(filteredAdminSessions);
+
+	function toggleGroupCollapse(key: string) {
+		if (collapsedGroups.has(key)) {
+			collapsedGroups.delete(key);
+		} else {
+			collapsedGroups.add(key);
+		}
+		collapsedGroups = collapsedGroups; // Trigger reactivity
+	}
+
+	function clearSearch() {
+		sessionSearchQuery = '';
+		sessionSearchExpanded = false;
+	}
 
 	function toggleSidebarSection(section: SidebarSection) {
 		if (activeSidebarSection === section) {
@@ -169,6 +207,13 @@
 
 	// Subagent manager state
 	let showSubagentManager = false;
+
+	// Mobile tools menu state
+	let showToolsMenu = false;
+
+	// Override popup menu state
+	let showModelPopup = false;
+	let showModePopup = false;
 
 	// Command autocomplete state
 	let showCommandAutocomplete: Record<string, boolean> = {};
@@ -321,9 +366,34 @@
 		}
 	}
 
+	// Auto-set profile and project for API users based on their API key restrictions
+	$: if ($apiUser && $activeTabId && $activeTab) {
+		// If API user has a locked profile and current tab doesn't have it set
+		if ($apiUser.profile_id && $activeTab.profile !== $apiUser.profile_id) {
+			tabs.setTabProfile($activeTabId, $apiUser.profile_id);
+		}
+		// If API user has a locked project and current tab doesn't have it set
+		if ($apiUser.project_id && $activeTab.project !== $apiUser.project_id) {
+			tabs.setTabProject($activeTabId, $apiUser.project_id);
+		}
+	}
+
 	async function handleSubmit(tabId: string) {
 		const prompt = tabInputs[tabId] || '';
 		if (!prompt.trim() || !$activeTab || $activeTab.isStreaming) return;
+
+		// API users use their API key restrictions - skip profile/project validation if they have restrictions
+		const isApiUserWithRestrictions = $apiUser && ($apiUser.profile_id || $apiUser.project_id);
+
+		// Require profile and project to be selected before sending messages (unless API user with restrictions)
+		if (!$activeTab.profile && !($apiUser?.profile_id)) {
+			tabs.setTabError(tabId, 'Please select a profile before starting a chat');
+			return;
+		}
+		if (!$activeTab.project && !($apiUser?.project_id)) {
+			tabs.setTabError(tabId, 'Please select a project before starting a chat');
+			return;
+		}
 
 		tabInputs[tabId] = '';
 		tabInputs = tabInputs; // Trigger Svelte reactivity
@@ -672,8 +742,8 @@
 		// Auto-scroll is handled by the autoScroll action on the messages container
 	}
 
-	async function deleteSession(e: Event, sessionId: string) {
-		e.stopPropagation();
+	async function deleteSession(e: Event | null, sessionId: string) {
+		e?.stopPropagation();
 		if (confirm('Delete this session?')) {
 			await tabs.deleteSession(sessionId);
 		}
@@ -960,26 +1030,35 @@
 					<span class="absolute -top-1 -right-1 w-4 h-4 bg-primary text-primary-foreground text-[10px] font-bold rounded-full flex items-center justify-center">{$allTabs.length}</span>
 				{/if}
 			</button>
-			<button on:click={() => toggleSidebarSection('projects')} class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors {activeSidebarSection === 'projects' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}" title="Projects">
-				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-				</svg>
-			</button>
-			<button on:click={() => showSubagentManager = true} class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors {showSubagentManager ? 'bg-primary text-primary-foreground' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}" title="Subagents">
-				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-				</svg>
-			</button>
+			{#if $isAdmin}
+				<button on:click={() => toggleSidebarSection('projects')} class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors {activeSidebarSection === 'projects' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}" title="Projects">
+					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+					</svg>
+				</button>
+				<button on:click={() => toggleSidebarSection('profiles')} class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors {activeSidebarSection === 'profiles' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}" title="Profiles">
+					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+					</svg>
+				</button>
+				<button on:click={() => toggleSidebarSection('subagents')} class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors {activeSidebarSection === 'subagents' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}" title="Subagents">
+					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+					</svg>
+				</button>
+			{/if}
 		</div>
 		<div class="mt-auto flex flex-col items-center pb-3 gap-1">
-			<a href="/settings" class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors hover:bg-accent text-muted-foreground hover:text-foreground" title="Settings">
-				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-				</svg>
-			</a>
-			<button on:click={handleLogout} class="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center hover:bg-primary/30 transition-colors" title="Logout ({$username})">
-				<span class="text-sm font-medium text-primary">{$username?.[0]?.toUpperCase() || 'U'}</span>
+			{#if $isAdmin}
+				<a href="/settings" class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors hover:bg-accent text-muted-foreground hover:text-foreground" title="Settings">
+					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+					</svg>
+				</a>
+			{/if}
+			<button on:click={handleLogout} class="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center hover:bg-primary/30 transition-colors" title="Logout ({$apiUser ? $apiUser.name : $username})">
+				<span class="text-sm font-medium text-primary">{($apiUser?.name || $username)?.[0]?.toUpperCase() || 'U'}</span>
 			</button>
 		</div>
 	</nav>
@@ -989,20 +1068,50 @@
 		<button class="hidden lg:block fixed inset-0 z-30 bg-black/20" on:click={closeSidebar} aria-label="Close sidebar"></button>
 		<aside class="hidden lg:flex fixed inset-y-0 left-12 z-40 w-72 bg-card border-r border-border flex-col shadow-l sidebar-slide-in">
 			<div class="p-4 border-b border-border flex items-center justify-between">
-				<span class="font-semibold text-foreground">{activeSidebarSection === 'sessions' ? 'Sessions' : 'Projects'}</span>
+				<span class="font-semibold text-foreground">{activeSidebarSection === 'sessions' ? 'Sessions' : activeSidebarSection === 'projects' ? 'Projects' : activeSidebarSection === 'profiles' ? 'Profiles' : 'Subagents'}</span>
 				<div class="flex items-center gap-1">
+					{#if activeSidebarSection === 'sessions'}
+						<button on:click={() => sessionSearchExpanded = !sessionSearchExpanded} class="p-1.5 rounded-md transition-colors {sessionSearchExpanded ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}" title="Search sessions">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+							</svg>
+						</button>
+					{/if}
 					<button on:click={toggleSidebarPin} class="p-1.5 rounded-md transition-colors {sidebarPinned ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}" title={sidebarPinned ? 'Unpin sidebar' : 'Pin sidebar open'}>
 						<svg class="w-4 h-4" fill={sidebarPinned ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
 						</svg>
 					</button>
-					<button on:click={() => { activeSidebarSection = 'none'; sidebarPinned = false; }} class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors" title="Close">
+					<button on:click={() => { activeSidebarSection = 'none'; sidebarPinned = false; clearSearch(); }} class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors" title="Close">
 						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 						</svg>
 					</button>
 				</div>
 			</div>
+			<!-- Search Bar (Desktop) -->
+			{#if activeSidebarSection === 'sessions' && sessionSearchExpanded}
+				<div class="px-3 py-2 border-b border-border">
+					<div class="relative">
+						<svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+						</svg>
+						<input
+							type="text"
+							bind:value={sessionSearchQuery}
+							placeholder="Search sessions..."
+							class="w-full pl-9 pr-8 py-1.5 text-sm bg-accent border border-border rounded-md text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+						/>
+						{#if sessionSearchQuery}
+							<button on:click={clearSearch} class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-muted-foreground hover:text-foreground">
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+								</svg>
+							</button>
+						{/if}
+					</div>
+				</div>
+			{/if}
 
 			<!-- Sessions Panel Content -->
 			{#if activeSidebarSection === 'sessions'}
@@ -1027,64 +1136,32 @@
 						{#if $allTabs.length > 0}
 							<div class="mb-4">
 								<div class="flex items-center justify-between px-2 mb-2">
-									<div class="text-xs text-muted-foreground uppercase tracking-wider">Open ({$allTabs.length})</div>
+									<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">Open ({$allTabs.length})</div>
 								</div>
 								<div class="space-y-1">
 									{#each $allTabs as tab}
-										<div
-											class="group flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors {tab.id === $activeTabId ? 'bg-primary/20 border border-primary/30' : 'hover:bg-accent'}"
+										{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
+										{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
+										<SessionCard
+											session={tabSession}
+											isOpen={true}
+											isActive={tab.id === $activeTabId}
+											isStreaming={tab.isStreaming}
+											showCloseButton={$allTabs.length > 1}
 											on:click={() => { tabs.setActiveTab(tab.id); closeSidebar(); }}
-											on:keypress={(e) => e.key === 'Enter' && (tabs.setActiveTab(tab.id), closeSidebar())}
-											role="button"
-											tabindex="0"
-										>
-											{#if tab.isStreaming}
-												<span class="w-2 h-2 bg-primary rounded-full animate-pulse flex-shrink-0"></span>
-											{:else if tab.id === $activeTabId}
-												<span class="w-2 h-2 bg-primary rounded-full flex-shrink-0"></span>
-											{:else}
-												<span class="w-2 h-2 bg-muted-foreground/30 rounded-full flex-shrink-0"></span>
-											{/if}
-											<div class="flex-1 min-w-0">
-												<p class="text-sm text-foreground truncate">{tab.title}</p>
-											</div>
-											{#if $allTabs.length > 1}
-												<button
-													on:click|stopPropagation={(e) => handleCloseTab(e, tab.id)}
-													class="opacity-0 group-hover:opacity-100 p-1 text-muted-foreground hover:text-destructive transition-opacity"
-													title="Close tab"
-												>
-													<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-													</svg>
-												</button>
-											{/if}
-										</div>
+											on:close={(e) => handleCloseTab(e, tab.id)}
+										/>
 									{/each}
 								</div>
 							</div>
 						{/if}
 
-						<!-- Header with History label and selection toggle -->
-						<div class="flex items-center justify-between px-2 mb-2">
-							<div class="text-xs text-muted-foreground uppercase tracking-wider">History</div>
-							{#if $sessions.length > 0}
-								<button
-									on:click={() => tabs.toggleSelectionMode(false)}
-									class="text-xs text-muted-foreground hover:text-foreground transition-colors"
-									title={$selectionMode ? 'Exit selection mode' : 'Select multiple'}
-								>
-									{$selectionMode ? 'Cancel' : 'Select'}
-								</button>
-							{/if}
-						</div>
-
 						<!-- Selection Actions Bar -->
-						{#if $selectionMode && $sessions.length > 0}
+						{#if $selectionMode && filteredSessions.length > 0}
 							<div class="flex items-center gap-2 px-2 py-2 mb-2 bg-accent rounded-lg">
 								<button
 									on:click={() => {
-										if ($selectedSessionIds.size === $sessions.length) {
+										if ($selectedSessionIds.size === filteredSessions.length) {
 											tabs.deselectAllSessions(false);
 										} else {
 											tabs.selectAllSessions(false);
@@ -1092,7 +1169,7 @@
 									}}
 									class="text-xs text-muted-foreground hover:text-foreground transition-colors"
 								>
-									{$selectedSessionIds.size === $sessions.length ? 'Deselect All' : 'Select All'}
+									{$selectedSessionIds.size === filteredSessions.length ? 'Deselect All' : 'Select All'}
 								</button>
 								<span class="text-xs text-muted-foreground">
 									{$selectedSessionIds.size} selected
@@ -1108,47 +1185,79 @@
 							</div>
 						{/if}
 
-						<div class="space-y-1" class:opacity-50={$sessionsLoading} class:pointer-events-none={$sessionsLoading}>
-							{#each $sessions as session}
-								<div
-									class="group flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-accent cursor-pointer transition-colors {$selectionMode && $selectedSessionIds.has(session.id) ? 'bg-accent/50' : ''}"
-									on:click={() => $selectionMode ? tabs.toggleSessionSelection(session.id, false) : openSession(session.id)}
-									on:keypress={(e) => e.key === 'Enter' && ($selectionMode ? tabs.toggleSessionSelection(session.id, false) : openSession(session.id))}
-									role="button"
-									tabindex="0"
+						<!-- History Header -->
+						<div class="flex items-center justify-between px-2 mb-2">
+							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">History</div>
+							<div class="flex items-center gap-2">
+								<button
+									on:click={() => tabs.loadSessions()}
+									class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+									title="Refresh sessions"
+									disabled={$sessionsLoading}
 								>
-									<!-- Checkbox for selection mode -->
-									{#if $selectionMode}
-										<input
-											type="checkbox"
-											checked={$selectedSessionIds.has(session.id)}
-											on:click|stopPropagation={(e) => handleToggleSelection(e, session.id, false)}
-											class="w-4 h-4 rounded border-border text-primary focus:ring-primary cursor-pointer"
-										/>
-									{/if}
-									<div class="flex-1 min-w-0">
-										<p class="text-sm text-foreground truncate">{truncateTitle(session.title)}</p>
-										<p class="text-xs text-muted-foreground">
-											{formatDate(session.updated_at)}{#if session.total_cost_usd}<span class="text-green-500 ml-2">{formatSessionCost(session.total_cost_usd)}</span>{/if}
-										</p>
-									</div>
-									{#if !$selectionMode}
-										<button
-											on:click|stopPropagation={(e) => deleteSession(e, session.id)}
-											class="opacity-0 group-hover:opacity-100 p-1 text-muted-foreground hover:text-destructive transition-opacity"
-											title="Delete session"
+									<svg
+										class="w-3.5 h-3.5 {$sessionsLoading ? 'animate-spin' : ''}"
+										fill="none"
+										stroke="currentColor"
+										viewBox="0 0 24 24"
+									>
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+									</svg>
+								</button>
+								{#if filteredSessions.length > 0}
+									<button
+										on:click={() => tabs.toggleSelectionMode(false)}
+										class="text-xs text-muted-foreground hover:text-foreground transition-colors"
+										title={$selectionMode ? 'Exit selection mode' : 'Select multiple'}
+									>
+										{$selectionMode ? 'Cancel' : 'Select'}
+									</button>
+								{/if}
+							</div>
+						</div>
+
+						<!-- Grouped Sessions -->
+						<div class="space-y-3" class:opacity-50={$sessionsLoading} class:pointer-events-none={$sessionsLoading}>
+							{#each groupedSessions as group}
+								<div>
+									<!-- Group Header -->
+									<button
+										on:click={() => toggleGroupCollapse(group.key)}
+										class="flex items-center gap-2 px-2 py-1 w-full text-left hover:bg-accent/50 rounded transition-colors"
+									>
+										<svg
+											class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
+											fill="none"
+											stroke="currentColor"
+											viewBox="0 0 24 24"
 										>
-											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-											</svg>
-										</button>
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+										</svg>
+										<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
+										<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
+									</button>
+
+									<!-- Group Content -->
+									{#if !collapsedGroups.has(group.key)}
+										<div class="mt-1 space-y-1">
+											{#each group.sessions as session}
+												<SessionCard
+													{session}
+													selectionMode={$selectionMode}
+													isSelected={$selectedSessionIds.has(session.id)}
+													on:click={() => { openSession(session.id); closeSidebar(); }}
+													on:delete={() => deleteSession(null, session.id)}
+													on:select={() => tabs.toggleSessionSelection(session.id, false)}
+												/>
+											{/each}
+										</div>
 									{/if}
 								</div>
 							{/each}
 							{#if $sessionsLoading}
 								<p class="text-xs text-muted-foreground px-2 animate-pulse">Loading sessions...</p>
-							{:else if $sessions.length === 0}
-								<p class="text-xs text-muted-foreground px-2">No chat history yet</p>
+							{:else if filteredSessions.length === 0}
+								<p class="text-xs text-muted-foreground px-2">{sessionSearchQuery ? 'No matching sessions' : 'No chat history yet'}</p>
 							{/if}
 						</div>
 					</div>
@@ -1157,6 +1266,30 @@
 				<!-- Admin Tab Content -->
 				{#if sidebarTab === 'admin' && $isAdmin}
 					<div class="flex-1 overflow-y-auto px-3 pb-3 pt-2">
+						<!-- Open Tabs Section (Admin) -->
+						{#if $allTabs.length > 0}
+							<div class="mb-4">
+								<div class="flex items-center justify-between px-2 mb-2">
+									<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">Open ({$allTabs.length})</div>
+								</div>
+								<div class="space-y-1">
+									{#each $allTabs as tab}
+										{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
+										{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
+										<SessionCard
+											session={tabSession}
+											isOpen={true}
+											isActive={tab.id === $activeTabId}
+											isStreaming={tab.isStreaming}
+											showCloseButton={$allTabs.length > 1}
+											on:click={() => { tabs.setActiveTab(tab.id); closeSidebar(); }}
+											on:close={(e) => handleCloseTab(e, tab.id)}
+										/>
+									{/each}
+								</div>
+							</div>
+						{/if}
+
 						<!-- API User Filter -->
 						<div class="mb-3">
 							<label class="text-xs text-muted-foreground uppercase tracking-wider px-2 block mb-1">Filter by User</label>
@@ -1172,26 +1305,12 @@
 							</select>
 						</div>
 
-						<!-- Header with label and selection toggle -->
-						<div class="flex items-center justify-between px-2 mb-2">
-							<div class="text-xs text-muted-foreground uppercase tracking-wider">API User Sessions</div>
-							{#if $adminSessions.length > 0}
-								<button
-									on:click={() => tabs.toggleSelectionMode(true)}
-									class="text-xs text-muted-foreground hover:text-foreground transition-colors"
-									title={$adminSelectionMode ? 'Exit selection mode' : 'Select multiple'}
-								>
-									{$adminSelectionMode ? 'Cancel' : 'Select'}
-								</button>
-							{/if}
-						</div>
-
 						<!-- Selection Actions Bar -->
-						{#if $adminSelectionMode && $adminSessions.length > 0}
+						{#if $adminSelectionMode && filteredAdminSessions.length > 0}
 							<div class="flex items-center gap-2 px-2 py-2 mb-2 bg-accent rounded-lg">
 								<button
 									on:click={() => {
-										if ($selectedAdminSessionIds.size === $adminSessions.length) {
+										if ($selectedAdminSessionIds.size === filteredAdminSessions.length) {
 											tabs.deselectAllSessions(true);
 										} else {
 											tabs.selectAllSessions(true);
@@ -1199,7 +1318,7 @@
 									}}
 									class="text-xs text-muted-foreground hover:text-foreground transition-colors"
 								>
-									{$selectedAdminSessionIds.size === $adminSessions.length ? 'Deselect All' : 'Select All'}
+									{$selectedAdminSessionIds.size === filteredAdminSessions.length ? 'Deselect All' : 'Select All'}
 								</button>
 								<span class="text-xs text-muted-foreground">
 									{$selectedAdminSessionIds.size} selected
@@ -1215,45 +1334,76 @@
 							</div>
 						{/if}
 
-						<div class="space-y-1">
-							{#each $adminSessions as session}
-								<div
-									class="group flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-accent cursor-pointer transition-colors {$adminSelectionMode && $selectedAdminSessionIds.has(session.id) ? 'bg-accent/50' : ''}"
-									on:click={() => $adminSelectionMode ? tabs.toggleSessionSelection(session.id, true) : openSession(session.id)}
-									on:keypress={(e) => e.key === 'Enter' && ($adminSelectionMode ? tabs.toggleSessionSelection(session.id, true) : openSession(session.id))}
-									role="button"
-									tabindex="0"
+						<!-- Header with label and selection toggle -->
+						<div class="flex items-center justify-between px-2 mb-2">
+							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">API User Sessions</div>
+							<div class="flex items-center gap-2">
+								<button
+									on:click={() => tabs.loadAdminSessions($adminSessionsFilter)}
+									class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+									title="Refresh sessions"
 								>
-									<!-- Checkbox for selection mode -->
-									{#if $adminSelectionMode}
-										<input
-											type="checkbox"
-											checked={$selectedAdminSessionIds.has(session.id)}
-											on:click|stopPropagation={(e) => handleToggleSelection(e, session.id, true)}
-											class="w-4 h-4 rounded border-border text-primary focus:ring-primary cursor-pointer"
-										/>
-									{/if}
-									<div class="flex-1 min-w-0">
-										<p class="text-sm text-foreground truncate">{truncateTitle(session.title)}</p>
-										<p class="text-xs text-muted-foreground">
-											{formatDate(session.updated_at)}{#if session.total_cost_usd}<span class="text-green-500 ml-2">{formatSessionCost(session.total_cost_usd)}</span>{/if}
-										</p>
-									</div>
-									{#if !$adminSelectionMode}
-										<button
-											on:click|stopPropagation={(e) => deleteSession(e, session.id)}
-											class="opacity-0 group-hover:opacity-100 p-1 text-muted-foreground hover:text-destructive transition-opacity"
-											title="Delete session"
+									<svg
+										class="w-3.5 h-3.5"
+										fill="none"
+										stroke="currentColor"
+										viewBox="0 0 24 24"
+									>
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+									</svg>
+								</button>
+								{#if filteredAdminSessions.length > 0}
+									<button
+										on:click={() => tabs.toggleSelectionMode(true)}
+										class="text-xs text-muted-foreground hover:text-foreground transition-colors"
+										title={$adminSelectionMode ? 'Exit selection mode' : 'Select multiple'}
+									>
+										{$adminSelectionMode ? 'Cancel' : 'Select'}
+									</button>
+								{/if}
+							</div>
+						</div>
+
+						<!-- Grouped Admin Sessions -->
+						<div class="space-y-3">
+							{#each groupedAdminSessions as group}
+								<div>
+									<!-- Group Header -->
+									<button
+										on:click={() => toggleGroupCollapse(group.key)}
+										class="flex items-center gap-2 px-2 py-1 w-full text-left hover:bg-accent/50 rounded transition-colors"
+									>
+										<svg
+											class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
+											fill="none"
+											stroke="currentColor"
+											viewBox="0 0 24 24"
 										>
-											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-											</svg>
-										</button>
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+										</svg>
+										<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
+										<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
+									</button>
+
+									<!-- Group Content -->
+									{#if !collapsedGroups.has(group.key)}
+										<div class="mt-1 space-y-1">
+											{#each group.sessions as session}
+												<SessionCard
+													{session}
+													selectionMode={$adminSelectionMode}
+													isSelected={$selectedAdminSessionIds.has(session.id)}
+													on:click={() => { openSession(session.id); closeSidebar(); }}
+													on:delete={() => deleteSession(null, session.id)}
+													on:select={() => tabs.toggleSessionSelection(session.id, true)}
+												/>
+											{/each}
+										</div>
 									{/if}
 								</div>
 							{/each}
-							{#if $adminSessions.length === 0}
-								<p class="text-xs text-muted-foreground px-2">No API user sessions found</p>
+							{#if filteredAdminSessions.length === 0}
+								<p class="text-xs text-muted-foreground px-2">{sessionSearchQuery ? 'No matching sessions' : 'No API user sessions found'}</p>
 							{/if}
 						</div>
 					</div>
@@ -1286,6 +1436,73 @@
 					<button on:click={() => showProjectModal = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">+ New Project</button>
 				</div>
 			{/if}
+
+			<!-- Profiles Panel Content -->
+			{#if activeSidebarSection === 'profiles'}
+				<div class="flex-1 overflow-y-auto p-3">
+					<div class="space-y-2 mb-4">
+						{#each $profiles as profile}
+							<button
+								class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg hover:bg-accent/80 transition-colors text-left {$activeTab?.profile === profile.id ? 'ring-2 ring-primary' : ''}"
+								on:click={() => { if ($activeTabId) setTabProfile($activeTabId, profile.id); closeSidebar(); }}
+							>
+								<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+								</svg>
+								<div class="flex-1 min-w-0">
+									<p class="text-sm text-foreground font-medium truncate">{profile.name}</p>
+									<p class="text-xs text-muted-foreground truncate">{profile.description || 'No description'}</p>
+								</div>
+								{#if profile.is_builtin}
+									<span class="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded">Built-in</span>
+								{/if}
+							</button>
+						{/each}
+						{#if $profiles.length === 0}
+							<p class="text-xs text-muted-foreground px-2">No profiles yet</p>
+						{/if}
+					</div>
+					<button on:click={() => showProfileModal = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">+ New Profile</button>
+				</div>
+			{/if}
+
+			<!-- Subagents Panel Content -->
+			{#if activeSidebarSection === 'subagents'}
+				<div class="flex-1 overflow-y-auto p-3">
+					<div class="space-y-2 mb-4">
+						{#each allSubagents as agent}
+							<div class="w-full p-3 bg-accent rounded-lg">
+								<div class="flex items-start gap-3">
+									<svg class="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+									</svg>
+									<div class="flex-1 min-w-0">
+										<div class="flex items-center gap-2">
+											<p class="text-sm text-foreground font-medium truncate">{agent.name}</p>
+											{#if agent.is_builtin}
+												<span class="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded">Built-in</span>
+											{/if}
+										</div>
+										<p class="text-xs text-muted-foreground line-clamp-2">{agent.description}</p>
+										{#if agent.model}
+											<span class="text-[10px] text-primary mt-1 inline-block">{agent.model}</span>
+										{/if}
+									</div>
+								</div>
+							</div>
+						{/each}
+						{#if allSubagents.length === 0}
+							<div class="text-center py-8">
+								<svg class="w-12 h-12 mx-auto text-muted-foreground/30 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+								</svg>
+								<p class="text-xs text-muted-foreground">No subagents configured</p>
+							</div>
+						{/if}
+					</div>
+					<button on:click={() => showSubagentManager = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">+ Manage Subagents</button>
+				</div>
+			{/if}
 		</aside>
 	{/if}
 
@@ -1307,77 +1524,236 @@
 					</svg>
 				</button>
 			</div>
-			<div class="p-3">
+			<div class="p-3 space-y-2">
 				<button on:click={() => { handleNewTab(); sidebarOpen = false; }} class="w-full flex items-center gap-2 px-4 py-2.5 bg-primary hover:opacity-90 text-primary-foreground rounded-lg transition-colors shadow-s">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
 					</svg>
 					<span class="font-medium">New Chat</span>
 				</button>
-			</div>
-			<div class="flex-1 overflow-y-auto px-3 pb-3">
-				<!-- Open Tabs Section (Mobile) -->
-				{#if $allTabs.length > 0}
-					<div class="mb-4">
-						<div class="text-xs text-muted-foreground uppercase tracking-wider px-2 mb-2">Open ({$allTabs.length})</div>
-						<div class="space-y-1">
-							{#each $allTabs as tab}
-								<div
-									class="group flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors {tab.id === $activeTabId ? 'bg-primary/20 border border-primary/30' : 'hover:bg-accent'}"
-									on:click={() => { tabs.setActiveTab(tab.id); sidebarOpen = false; }}
-									on:keypress={(e) => e.key === 'Enter' && (tabs.setActiveTab(tab.id), sidebarOpen = false)}
-									role="button"
-									tabindex="0"
-								>
-									{#if tab.isStreaming}
-										<span class="w-2 h-2 bg-primary rounded-full animate-pulse flex-shrink-0"></span>
-									{:else if tab.id === $activeTabId}
-										<span class="w-2 h-2 bg-primary rounded-full flex-shrink-0"></span>
-									{:else}
-										<span class="w-2 h-2 bg-muted-foreground/30 rounded-full flex-shrink-0"></span>
-									{/if}
-									<div class="flex-1 min-w-0">
-										<p class="text-sm text-foreground truncate">{tab.title}</p>
-									</div>
-									{#if $allTabs.length > 1}
-										<button
-											on:click|stopPropagation={(e) => handleCloseTab(e, tab.id)}
-											class="p-1 text-muted-foreground hover:text-destructive transition-colors"
-											title="Close tab"
-										>
-											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-											</svg>
-										</button>
-									{/if}
-								</div>
-							{/each}
-						</div>
+				<!-- Mobile Search (tap to expand) -->
+				{#if sessionSearchExpanded}
+					<div class="relative">
+						<svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+						</svg>
+						<input
+							type="text"
+							bind:value={sessionSearchQuery}
+							placeholder="Search sessions..."
+							class="w-full pl-9 pr-8 py-2 text-sm bg-accent border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+						/>
+						<button on:click={clearSearch} class="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-muted-foreground hover:text-foreground">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+							</svg>
+						</button>
 					</div>
+				{:else}
+					<button
+						on:click={() => sessionSearchExpanded = true}
+						class="w-full flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground bg-accent/50 hover:bg-accent rounded-lg transition-colors"
+					>
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+						</svg>
+						<span>Search sessions...</span>
+					</button>
 				{/if}
+			</div>
+			<!-- Mobile Tab Toggle (My Chats / Admin) -->
+			{#if $isAdmin}
+				<div class="px-3 pb-2">
+					<div class="flex bg-muted rounded-lg p-0.5">
+						<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}">My Chats</button>
+						<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}">Admin</button>
+					</div>
+				</div>
+			{/if}
 
-				<div class="text-xs text-muted-foreground uppercase tracking-wider px-2 mb-2">History</div>
-				<div class="space-y-1">
-					{#each $sessions as session}
-						<div
-							class="group flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-accent cursor-pointer transition-colors"
-							on:click={() => { openSession(session.id); sidebarOpen = false; }}
-							on:keypress={(e) => e.key === 'Enter' && openSession(session.id)}
-							role="button"
-							tabindex="0"
-						>
-							<div class="flex-1 min-w-0">
-								<p class="text-sm text-foreground truncate">{truncateTitle(session.title)}</p>
-								<p class="text-xs text-muted-foreground">
-									{formatDate(session.updated_at)}{#if session.total_cost_usd}<span class="text-green-500 ml-2">{formatSessionCost(session.total_cost_usd)}</span>{/if}
-								</p>
+			<div class="flex-1 overflow-y-auto px-3 pb-3">
+				{#if sidebarTab === 'my-chats'}
+					<!-- Open Tabs Section (Mobile) -->
+					{#if $allTabs.length > 0}
+						<div class="mb-4">
+							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium px-2 mb-2">Open ({$allTabs.length})</div>
+							<div class="space-y-1">
+								{#each $allTabs as tab}
+									{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
+									{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
+									<SessionCard
+										session={tabSession}
+										isOpen={true}
+										isActive={tab.id === $activeTabId}
+										isStreaming={tab.isStreaming}
+										showCloseButton={$allTabs.length > 1}
+										abbreviated={true}
+										on:click={() => { tabs.setActiveTab(tab.id); sidebarOpen = false; }}
+										on:close={(e) => handleCloseTab(e, tab.id)}
+									/>
+								{/each}
 							</div>
 						</div>
-					{/each}
-					{#if $sessions.length === 0}
-						<p class="text-xs text-muted-foreground px-2">No chat history yet</p>
 					{/if}
-				</div>
+
+					<!-- History Header (Mobile) -->
+					<div class="flex items-center justify-between px-2 mb-2">
+						<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">History</div>
+						<button
+							on:click={() => tabs.loadSessions()}
+							class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+							title="Refresh sessions"
+							disabled={$sessionsLoading}
+						>
+							<svg
+								class="w-3.5 h-3.5 {$sessionsLoading ? 'animate-spin' : ''}"
+								fill="none"
+								stroke="currentColor"
+								viewBox="0 0 24 24"
+							>
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+							</svg>
+						</button>
+					</div>
+
+					<!-- Grouped Sessions (Mobile) -->
+					<div class="space-y-3">
+						{#each groupedSessions as group}
+							<div>
+								<!-- Group Header -->
+								<button
+									on:click={() => toggleGroupCollapse(group.key)}
+									class="flex items-center gap-2 px-2 py-1.5 w-full text-left active:bg-accent/50 rounded transition-colors"
+								>
+									<svg
+										class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
+										fill="none"
+										stroke="currentColor"
+										viewBox="0 0 24 24"
+									>
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+									</svg>
+									<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
+									<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
+								</button>
+
+								<!-- Group Content -->
+								{#if !collapsedGroups.has(group.key)}
+									<div class="mt-1 space-y-1">
+										{#each group.sessions as session}
+											<SessionCard
+												{session}
+												abbreviated={true}
+												on:click={() => { openSession(session.id); sidebarOpen = false; }}
+												on:delete={() => deleteSession(null, session.id)}
+											/>
+										{/each}
+									</div>
+								{/if}
+							</div>
+						{/each}
+						{#if filteredSessions.length === 0}
+							<p class="text-xs text-muted-foreground px-2">{sessionSearchQuery ? 'No matching sessions' : 'No chat history yet'}</p>
+						{/if}
+					</div>
+				{:else if sidebarTab === 'admin'}
+					<!-- Admin Tab Content (Mobile) -->
+					<!-- Open Tabs Section (Mobile Admin) -->
+					{#if $allTabs.length > 0}
+						<div class="mb-4">
+							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium px-2 mb-2">Open ({$allTabs.length})</div>
+							<div class="space-y-1">
+								{#each $allTabs as tab}
+									{@const realSession = tab.sessionId ? $sessions.find(s => s.id === tab.sessionId) : null}
+									{@const tabSession = realSession || { id: tab.sessionId || tab.id, title: tab.title, status: 'active', total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0, cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: tab.messages.filter(m => m.role === 'user').length, profile_id: '', project_id: null, created_at: '', updated_at: new Date().toISOString() }}
+									<SessionCard
+										session={tabSession}
+										isOpen={true}
+										isActive={tab.id === $activeTabId}
+										isStreaming={tab.isStreaming}
+										showCloseButton={$allTabs.length > 1}
+										abbreviated={true}
+										on:click={() => { tabs.setActiveTab(tab.id); sidebarOpen = false; }}
+										on:close={(e) => handleCloseTab(e, tab.id)}
+									/>
+								{/each}
+							</div>
+						</div>
+					{/if}
+
+					<!-- API User Filter -->
+					<div class="flex items-center justify-between px-2 mb-2">
+						<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">API User Sessions</div>
+						<button
+							on:click={() => tabs.loadAdminSessions($adminSessionsFilter)}
+							class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+							title="Refresh sessions"
+						>
+							<svg
+								class="w-3.5 h-3.5"
+								fill="none"
+								stroke="currentColor"
+								viewBox="0 0 24 24"
+							>
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+							</svg>
+						</button>
+					</div>
+					<div class="mb-3">
+						<label class="text-xs text-muted-foreground uppercase tracking-wider px-2 block mb-1">Filter by User</label>
+						<select
+							class="w-full bg-accent border border-border rounded-md px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+							value={$adminSessionsFilter ?? ''}
+							on:change={(e) => tabs.setAdminSessionsFilter(e.currentTarget.value || null)}
+						>
+							<option value="">All API Users</option>
+							{#each $apiUsers as user}
+								<option value={user.id}>{user.name}</option>
+							{/each}
+						</select>
+					</div>
+
+					<!-- Grouped Admin Sessions (Mobile) -->
+					<div class="space-y-3">
+						{#each groupedAdminSessions as group}
+							<div>
+								<!-- Group Header -->
+								<button
+									on:click={() => toggleGroupCollapse(group.key)}
+									class="flex items-center gap-2 px-2 py-1.5 w-full text-left active:bg-accent/50 rounded transition-colors"
+								>
+									<svg
+										class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
+										fill="none"
+										stroke="currentColor"
+										viewBox="0 0 24 24"
+									>
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+									</svg>
+									<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
+									<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
+								</button>
+
+								<!-- Group Content -->
+								{#if !collapsedGroups.has(group.key)}
+									<div class="mt-1 space-y-1">
+										{#each group.sessions as session}
+											<SessionCard
+												{session}
+												abbreviated={true}
+												on:click={() => { openSession(session.id); sidebarOpen = false; }}
+												on:delete={() => deleteSession(null, session.id)}
+											/>
+										{/each}
+									</div>
+								{/if}
+							</div>
+						{/each}
+						{#if filteredAdminSessions.length === 0}
+							<p class="text-xs text-muted-foreground px-2">{sessionSearchQuery ? 'No matching sessions' : 'No API user sessions found'}</p>
+						{/if}
+					</div>
+				{/if}
 			</div>
 			<div class="p-3 border-t border-border">
 				<div class="flex items-center justify-between">
@@ -1398,6 +1774,42 @@
 		<button class="lg:hidden fixed inset-0 z-40 bg-black/50" on:click={() => (sidebarOpen = false)} aria-label="Close sidebar"></button>
 	{/if}
 
+	<!-- Mobile Tools Menu Popup -->
+	{#if showToolsMenu}
+		<button class="lg:hidden fixed inset-0 z-50 bg-black/30" on:click={() => showToolsMenu = false} aria-label="Close tools menu"></button>
+		<div class="lg:hidden fixed bottom-16 left-1/2 -translate-x-1/2 z-50 bg-card border border-border rounded-xl shadow-lg p-2 min-w-[200px]">
+			<div class="flex flex-col gap-1">
+				<button
+					on:click={() => { showToolsMenu = false; showProjectModal = true; }}
+					class="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-accent transition-colors text-left"
+				>
+					<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+					</svg>
+					<span class="text-sm font-medium">Projects</span>
+				</button>
+				<button
+					on:click={() => { showToolsMenu = false; showProfileModal = true; }}
+					class="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-accent transition-colors text-left"
+				>
+					<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+					</svg>
+					<span class="text-sm font-medium">Profiles</span>
+				</button>
+				<button
+					on:click={() => { showToolsMenu = false; showSubagentManager = true; }}
+					class="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-accent transition-colors text-left"
+				>
+					<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+					</svg>
+					<span class="text-sm font-medium">Subagents</span>
+				</button>
+			</div>
+		</div>
+	{/if}
+
 	<!-- Mobile Bottom Navigation -->
 	<nav class="lg:hidden fixed bottom-0 left-0 right-0 z-50 bg-card border-t border-border safe-bottom">
 		<div class="flex items-center justify-around h-14">
@@ -1416,19 +1828,21 @@
 					<span class="absolute top-1 right-2 w-4 h-4 bg-primary text-primary-foreground text-[10px] font-bold rounded-full flex items-center justify-center">{$allTabs.length}</span>
 				{/if}
 			</button>
-			<button on:click={() => showSubagentManager = true} class="flex flex-col items-center justify-center w-16 h-full text-muted-foreground hover:text-foreground transition-colors">
-				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-				</svg>
-				<span class="text-xs mt-0.5">Agents</span>
-			</button>
-			<a href="/settings" class="flex flex-col items-center justify-center w-16 h-full text-muted-foreground hover:text-foreground transition-colors">
-				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-				</svg>
-				<span class="text-xs mt-0.5">Settings</span>
-			</a>
+			{#if $isAdmin}
+				<button on:click={() => showToolsMenu = !showToolsMenu} class="relative flex flex-col items-center justify-center w-16 h-full text-muted-foreground hover:text-foreground transition-colors">
+					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+					</svg>
+					<span class="text-xs mt-0.5">Tools</span>
+				</button>
+				<a href="/settings" class="flex flex-col items-center justify-center w-16 h-full text-muted-foreground hover:text-foreground transition-colors">
+					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+					</svg>
+					<span class="text-xs mt-0.5">Settings</span>
+				</a>
+			{/if}
 		</div>
 	</nav>
 
@@ -1447,93 +1861,121 @@
 				</button>
 
 				<!-- Profile Selector (clickable text style with dropdown) -->
-				<div class="relative group">
-					<button
-						class="flex items-center gap-1 px-2 py-1 text-sm text-foreground hover:bg-accent rounded-md transition-colors"
-					>
+				{#if $apiUser?.profile_id}
+					<!-- API user with locked profile - show as locked indicator -->
+					<div class="flex items-center gap-1 px-2 py-1 text-sm text-foreground opacity-75">
 						<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
 						</svg>
-						<span class="hidden sm:inline max-w-[120px] truncate">{$profiles.find((p) => p.id === currentTab.profile)?.name || 'Profile'}</span>
-						<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+						<span class="hidden sm:inline max-w-[120px] truncate">{$profiles.find((p) => p.id === $apiUser.profile_id)?.name || $apiUser.profile_id}</span>
+						<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24" title="Profile locked by API key">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
 						</svg>
-					</button>
-					<!-- Profile dropdown -->
-					<div class="absolute left-0 top-full mt-1 w-48 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
-						<div class="py-1">
-							{#each $profiles as profile}
+					</div>
+				{:else}
+					<div class="relative group">
+						<button
+							class="flex items-center gap-1 px-2 py-1 text-sm text-foreground hover:bg-accent rounded-md transition-colors"
+						>
+							<svg class="w-4 h-4 {currentTab.profile ? 'text-muted-foreground' : 'text-amber-500'}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+							</svg>
+							<span class="hidden sm:inline max-w-[120px] truncate {!currentTab.profile ? 'text-amber-500' : ''}">{$profiles.find((p) => p.id === currentTab.profile)?.name || 'Select Profile'}</span>
+							<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+							</svg>
+						</button>
+						<!-- Profile dropdown -->
+						<div class="absolute left-0 top-full mt-1 w-48 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+							<div class="py-1">
+								{#if $profiles.length === 0}
+									<p class="px-3 py-2 text-sm text-muted-foreground">No profiles yet</p>
+								{:else}
+									{#each $profiles as profile}
+										<button
+											on:click={() => setTabProfile(tabId, profile.id)}
+											class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.profile === profile.id ? 'text-primary' : 'text-foreground'}"
+										>
+											{profile.name}
+										</button>
+									{/each}
+								{/if}
+								<div class="border-t border-border my-1"></div>
 								<button
-									on:click={() => setTabProfile(tabId, profile.id)}
-									class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.profile === profile.id ? 'text-primary' : 'text-foreground'}"
+									on:click={() => (showProfileModal = true)}
+									class="w-full px-3 py-2 text-left text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
 								>
-									{profile.name}
+									{$profiles.length === 0 ? 'Create Profile...' : 'Manage Profiles...'}
 								</button>
-							{/each}
-							<div class="border-t border-border my-1"></div>
-							<button
-								on:click={() => (showProfileModal = true)}
-								class="w-full px-3 py-2 text-left text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-							>
-								Manage Profiles...
-							</button>
+							</div>
 						</div>
 					</div>
-				</div>
+				{/if}
 
 				<!-- Breadcrumb separator -->
 				<span class="text-muted-foreground/50 mx-1 hidden sm:inline">/</span>
 
-				<!-- Project Selector (locked when session exists) -->
-				<div class="relative group">
-					<button
-						class="flex items-center gap-1 px-2 py-1 text-sm text-foreground {currentTab.sessionId ? 'cursor-default opacity-75' : 'hover:bg-accent'} rounded-md transition-colors"
-						title={currentTab.sessionId ? 'Project is locked for this chat' : 'Select project'}
-					>
+				<!-- Project Selector (locked when session exists or for API users) -->
+				{#if $apiUser?.project_id}
+					<!-- API user with locked project - show as locked indicator -->
+					<div class="flex items-center gap-1 px-2 py-1 text-sm text-foreground opacity-75">
 						<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 						</svg>
-						<span class="hidden sm:inline max-w-[120px] truncate">{$projects.find((p) => p.id === currentTab.project)?.name || 'Default'}</span>
-						{#if currentTab.sessionId}
-							<!-- Lock icon when session exists -->
-							<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+						<span class="hidden sm:inline max-w-[120px] truncate">{$projects.find((p) => p.id === $apiUser.project_id)?.name || $apiUser.project_id}</span>
+						<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24" title="Project locked by API key">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+						</svg>
+					</div>
+				{:else}
+					<div class="relative group">
+						<button
+							class="flex items-center gap-1 px-2 py-1 text-sm text-foreground {currentTab.sessionId ? 'cursor-default opacity-75' : 'hover:bg-accent'} rounded-md transition-colors"
+							title={currentTab.sessionId ? 'Project is locked for this chat' : 'Select project'}
+						>
+							<svg class="w-4 h-4 {currentTab.project ? 'text-muted-foreground' : 'text-amber-500'}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 							</svg>
-						{:else}
-							<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-							</svg>
-						{/if}
-					</button>
-					<!-- Project dropdown (only show when no session) -->
-					{#if !currentTab.sessionId}
-						<div class="absolute left-0 top-full mt-1 w-48 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
-							<div class="py-1">
-								<button
-									on:click={() => setTabProject(tabId, '')}
-									class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {!currentTab.project ? 'text-primary' : 'text-foreground'}"
-								>
-									Default
-								</button>
-								{#each $projects as project}
+							<span class="hidden sm:inline max-w-[120px] truncate {!currentTab.project ? 'text-amber-500' : ''}">{$projects.find((p) => p.id === currentTab.project)?.name || 'Select Project'}</span>
+							{#if currentTab.sessionId}
+								<!-- Lock icon when session exists -->
+								<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+								</svg>
+							{:else}
+								<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+								</svg>
+							{/if}
+						</button>
+						<!-- Project dropdown (only show when no session) -->
+						{#if !currentTab.sessionId}
+							<div class="absolute left-0 top-full mt-1 w-48 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+								<div class="py-1">
+									{#if $projects.length === 0}
+										<p class="px-3 py-2 text-sm text-muted-foreground">No projects yet</p>
+									{:else}
+										{#each $projects as project}
+											<button
+												on:click={() => setTabProject(tabId, project.id)}
+												class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.project === project.id ? 'text-primary' : 'text-foreground'}"
+											>
+												{project.name}
+											</button>
+										{/each}
+									{/if}
+									<div class="border-t border-border my-1"></div>
 									<button
-										on:click={() => setTabProject(tabId, project.id)}
-										class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.project === project.id ? 'text-primary' : 'text-foreground'}"
+										on:click={() => (showProjectModal = true)}
+										class="w-full px-3 py-2 text-left text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
 									>
-										{project.name}
+										{$projects.length === 0 ? 'Create Project...' : 'Manage Projects...'}
 									</button>
-								{/each}
-								<div class="border-t border-border my-1"></div>
-								<button
-									on:click={() => (showProjectModal = true)}
-									class="w-full px-3 py-2 text-left text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-								>
-									Manage Projects...
-								</button>
+								</div>
 							</div>
-						</div>
-					{/if}
-				</div>
+						{/if}
+					</div>
+				{/if}
 
 				<!-- Rewind Button (after breadcrumb, only when session is active) -->
 				{#if currentTab.sessionId}
@@ -1637,17 +2079,7 @@
 					{/if}
 
 					<!-- Connection Status (always far right) -->
-					{#if currentTab.wsConnected}
-						<span class="flex items-center gap-1.5 text-xs text-green-500" title="Connected">
-							<span class="w-2 h-2 bg-green-500 rounded-full"></span>
-							<span class="hidden sm:inline">Connected</span>
-						</span>
-					{:else}
-						<span class="flex items-center gap-1.5 text-xs text-yellow-500" title="Connecting...">
-							<span class="w-2 h-2 bg-yellow-500 rounded-full animate-pulse"></span>
-							<span class="hidden sm:inline">Connecting</span>
-						</span>
-					{/if}
+					<ConnectionStatus wsConnected={currentTab.wsConnected} />
 				</div>
 			</div>
 		{:else}
@@ -1929,6 +2361,125 @@
 
 					<!-- Hidden file input -->
 					<input type="file" bind:this={fileInput} on:change={handleFileUpload} class="hidden" multiple />
+
+					<!-- Session Overrides (Model & Permission Mode) -->
+					{#if currentTab}
+					{@const currentProfile = $profiles.find(p => p.id === currentTab.profile)}
+					{@const profileModel = currentProfile?.config?.model || 'sonnet'}
+					{@const profilePermissionMode = currentProfile?.config?.permission_mode || 'default'}
+					{@const effectiveModel = currentTab.modelOverride || profileModel}
+					{@const effectiveMode = currentTab.permissionModeOverride || profilePermissionMode}
+					{@const modelLabels = { sonnet: 'Sonnet', opus: 'Opus', haiku: 'Haiku' } as Record<string, string>}
+					{@const modeLabels = { default: 'Ask', acceptEdits: 'Auto-Accept', plan: 'Plan', bypassPermissions: 'Bypass' } as Record<string, string>}
+					<div class="mb-2 flex flex-wrap items-center justify-center gap-2">
+						<!-- Model Selector (Popup) -->
+						<div class="relative inline-block">
+							<button
+								type="button"
+								on:click={() => { showModelPopup = !showModelPopup; showModePopup = false; }}
+								class="flex items-center gap-1.5 bg-card border border-border rounded-lg px-2.5 py-1.5 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer hover:bg-accent transition-colors {currentTab.modelOverride ? 'border-primary bg-primary/10 font-medium' : ''}"
+								disabled={currentTab.isStreaming}
+								title="Select model for next message"
+							>
+								<span>{modelLabels[effectiveModel] || effectiveModel}</span>
+								<svg class="w-3 h-3 text-muted-foreground transition-transform {showModelPopup ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7" />
+								</svg>
+							</button>
+							<!-- Popup Menu (appears above) -->
+							{#if showModelPopup}
+								<!-- Invisible backdrop to catch outside clicks -->
+								<div class="fixed inset-0 z-40" on:click={() => showModelPopup = false}></div>
+								<div class="absolute bottom-full left-0 mb-1 bg-card border border-border rounded-lg shadow-lg overflow-hidden z-50 min-w-[100px]">
+									{#each [['sonnet', 'Sonnet'], ['opus', 'Opus'], ['haiku', 'Haiku']] as [value, label]}
+										<button
+											type="button"
+											on:click={() => {
+												if (value === profileModel) {
+													tabs.setTabModelOverride(tabId, null);
+												} else {
+													tabs.setTabModelOverride(tabId, value);
+												}
+												showModelPopup = false;
+											}}
+											class="w-full px-3 py-2 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-2 {effectiveModel === value ? 'bg-accent text-foreground font-medium' : 'text-muted-foreground'}"
+										>
+											<span>{label}</span>
+											{#if effectiveModel === value}
+												<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+												</svg>
+											{/if}
+										</button>
+									{/each}
+								</div>
+							{/if}
+						</div>
+
+						<!-- Permission Mode Selector (Popup) -->
+						<div class="relative inline-block">
+							<button
+								type="button"
+								on:click={() => { showModePopup = !showModePopup; showModelPopup = false; }}
+								class="flex items-center gap-1.5 bg-card border border-border rounded-lg px-2.5 py-1.5 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer hover:bg-accent transition-colors {currentTab.permissionModeOverride ? 'border-primary bg-primary/10 font-medium' : ''}"
+								disabled={currentTab.isStreaming}
+								title="Select permission mode for next message"
+							>
+								<span>{modeLabels[effectiveMode] || effectiveMode}</span>
+								<svg class="w-3 h-3 text-muted-foreground transition-transform {showModePopup ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7" />
+								</svg>
+							</button>
+							<!-- Popup Menu (appears above) -->
+							{#if showModePopup}
+								<!-- Invisible backdrop to catch outside clicks -->
+								<div class="fixed inset-0 z-40" on:click={() => showModePopup = false}></div>
+								<div class="absolute bottom-full left-0 mb-1 bg-card border border-border rounded-lg shadow-lg overflow-hidden z-50 min-w-[120px]">
+									{#each [['default', 'Ask'], ['acceptEdits', 'Auto-Accept'], ['plan', 'Plan'], ['bypassPermissions', 'Bypass']] as [value, label]}
+										<button
+											type="button"
+											on:click={() => {
+												if (value === profilePermissionMode) {
+													tabs.setTabPermissionModeOverride(tabId, null);
+												} else {
+													tabs.setTabPermissionModeOverride(tabId, value);
+												}
+												showModePopup = false;
+											}}
+											class="w-full px-3 py-2 text-left text-xs hover:bg-accent transition-colors flex items-center justify-between gap-2 {effectiveMode === value ? 'bg-accent text-foreground font-medium' : 'text-muted-foreground'}"
+										>
+											<span>{label}</span>
+											{#if effectiveMode === value}
+												<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+												</svg>
+											{/if}
+										</button>
+									{/each}
+								</div>
+							{/if}
+						</div>
+
+						<!-- Reset to defaults button (only show if any override is set) -->
+						{#if currentTab.modelOverride || currentTab.permissionModeOverride}
+							<button
+								type="button"
+								on:click={() => {
+									tabs.setTabModelOverride(tabId, null);
+									tabs.setTabPermissionModeOverride(tabId, null);
+								}}
+								class="text-xs text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1 px-1.5 py-1 rounded hover:bg-accent"
+								title="Reset to profile defaults"
+								disabled={currentTab.isStreaming}
+							>
+								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+								</svg>
+								<span class="hidden sm:inline">Reset</span>
+							</button>
+						{/if}
+					</div>
+					{/if}
 
 					<!-- Input Form -->
 					<form on:submit|preventDefault={() => handleSubmit(tabId)} class="flex items-center gap-2">

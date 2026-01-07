@@ -201,6 +201,41 @@ def get_api_user_from_request(request: Request) -> Optional[dict]:
     return getattr(request.state, "api_user", None)
 
 
+def require_api_key(request: Request) -> dict:
+    """
+    Dependency that requires API key authentication only.
+    Use this for /api/v1/ endpoints that should only be accessible via API keys,
+    not admin sessions. Returns the API user dict.
+    """
+    # First check for Bearer token (direct API key)
+    api_key = get_api_key(request)
+    if api_key:
+        key_hash = hash_api_key(api_key)
+        api_user = db.get_api_user_by_key_hash(key_hash)
+        if api_user and api_user.get("is_active", True):
+            db.update_api_user_last_used(api_user["id"])
+            request.state.is_admin = False
+            request.state.api_user = api_user
+            return api_user
+
+    # Then check for API key web session (cookie-based API key login)
+    token = get_session_token(request)
+    if token:
+        api_key_session = db.get_api_key_session(token)
+        if api_key_session:
+            api_user = db.get_api_user(api_key_session["api_user_id"])
+            if api_user and api_user.get("is_active", True):
+                db.update_api_user_last_used(api_user["id"])
+                request.state.is_admin = False
+                request.state.api_user = api_user
+                return api_user
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="API key required. Use Bearer token or login with API key."
+    )
+
+
 def is_admin_request(request: Request) -> bool:
     """Check if the current request is from an admin user"""
     return getattr(request.state, "is_admin", False)
@@ -394,6 +429,20 @@ async def claude_auth_status():
     return auth_service.get_claude_auth_info()
 
 
+@router.get("/claude/validate")
+async def validate_claude_credentials(token: str = Depends(require_admin)):
+    """
+    Validate Claude credentials by testing the CLI.
+    Use this to check if OAuth token is still valid (not just if file exists).
+
+    Returns:
+        - valid: boolean - True if credentials work
+        - authenticated: boolean - True if credentials file exists
+        - error: string - Error message if validation failed
+    """
+    return auth_service.validate_claude_credentials()
+
+
 @router.get("/claude/login-instructions")
 async def claude_login_instructions():
     """Get Claude CLI login instructions"""
@@ -401,12 +450,23 @@ async def claude_login_instructions():
 
 
 @router.post("/claude/login")
-async def claude_login(token: str = Depends(require_admin)):
+async def claude_login(request: Request, token: str = Depends(require_admin)):
     """
     Start Claude Code OAuth login process.
     Returns an OAuth URL that the user should open in their browser.
+
+    Accepts optional JSON body with:
+    - force_reauth: boolean - If true, delete existing credentials and force re-authentication.
+                             Use when OAuth token has expired or user wants to reconnect.
     """
-    return auth_service.start_claude_oauth_login()
+    force_reauth = False
+    try:
+        body = await request.json()
+        force_reauth = body.get("force_reauth", False)
+    except Exception:
+        pass  # No body or invalid JSON, use defaults
+
+    return auth_service.start_claude_oauth_login(force_reauth=force_reauth)
 
 
 @router.get("/claude/login/poll")

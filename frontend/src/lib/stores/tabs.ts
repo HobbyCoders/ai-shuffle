@@ -87,6 +87,9 @@ export interface ChatTab {
 	// Actual context window usage from /context command (source of truth)
 	contextUsed: number | null;
 	contextMax: number;
+	// Session overrides (override profile settings for this session)
+	modelOverride: string | null;  // null = use profile default
+	permissionModeOverride: string | null;  // null = use profile default
 }
 
 interface TabsState {
@@ -186,12 +189,12 @@ async function loadTabsFromServer(): Promise<PersistedTabsState | null> {
 	return null;
 }
 
-// Load persisted values
+// Load persisted values - empty string means no selection (user must choose)
 function getPersistedProfile(): string {
 	if (typeof window !== 'undefined') {
-		return localStorage.getItem('aihub_selectedProfile') || 'claude-code';
+		return localStorage.getItem('aihub_selectedProfile') || '';
 	}
-	return 'claude-code';
+	return '';
 }
 
 function getPersistedProject(): string {
@@ -224,7 +227,9 @@ function createTabsStore() {
 			totalCacheCreationTokens: 0,
 			totalCacheReadTokens: 0,
 			contextUsed: null,
-			contextMax: 200000
+			contextMax: 200000,
+			modelOverride: null,
+			permissionModeOverride: null
 		}],
 		activeTabId: initialTabId,
 		profiles: [],
@@ -289,7 +294,7 @@ function createTabsStore() {
 	/**
 	 * Connect WebSocket for a specific tab
 	 */
-	function connectTab(tabId: string) {
+	function connectTab(tabId: string, isReconnect = false) {
 		const existingWs = tabConnections.get(tabId);
 		if (existingWs && (existingWs.readyState === WebSocket.OPEN || existingWs.readyState === WebSocket.CONNECTING)) {
 			return;
@@ -302,7 +307,7 @@ function createTabsStore() {
 		if (token) {
 			url = `${url}?token=${encodeURIComponent(token)}`;
 		}
-		console.log(`[Tab ${tabId}] Connecting to WebSocket...`);
+		console.log(`[Tab ${tabId}] ${isReconnect ? 'Reconnecting' : 'Connecting'} to WebSocket...`);
 
 		const ws = new WebSocket(url);
 		tabConnections.set(tabId, ws);
@@ -310,6 +315,22 @@ function createTabsStore() {
 		ws.onopen = () => {
 			console.log(`[Tab ${tabId}] WebSocket connected`);
 			updateTab(tabId, { wsConnected: true, error: null });
+
+			// If reconnecting and tab has a session, reload it to get latest messages
+			// But only if not currently streaming (don't interrupt active streams)
+			if (isReconnect) {
+				const tab = getTab(tabId);
+				if (tab?.sessionId && !tab.isStreaming) {
+					console.log(`[Tab ${tabId}] Reloading session after reconnect:`, tab.sessionId);
+					// Use the WebSocket to request session reload
+					ws.send(JSON.stringify({
+						type: 'load_session',
+						session_id: tab.sessionId
+					}));
+				} else if (tab?.isStreaming) {
+					console.log(`[Tab ${tabId}] Skipping session reload - streaming in progress`);
+				}
+			}
 
 			// Start ping timer
 			const existingPing = tabPingTimers.get(tabId);
@@ -344,7 +365,7 @@ function createTabsStore() {
 					const tab = getTab(tabId);
 					if (tab) {
 						console.log(`[Tab ${tabId}] Attempting reconnect...`);
-						connectTab(tabId);
+						connectTab(tabId, true); // Pass isReconnect flag
 					}
 				}, 3000);
 				tabReconnectTimers.set(tabId, reconnectTimer);
@@ -1345,7 +1366,9 @@ function createTabsStore() {
 						totalCacheCreationTokens: 0,
 						totalCacheReadTokens: 0,
 						contextUsed: null,
-						contextMax: 200000
+						contextMax: 200000,
+						modelOverride: null,
+						permissionModeOverride: null
 					}));
 
 					update(s => ({
@@ -1414,7 +1437,9 @@ function createTabsStore() {
 				totalCacheCreationTokens: 0,
 				totalCacheReadTokens: 0,
 				contextUsed: null,
-				contextMax: 200000
+				contextMax: 200000,
+				modelOverride: null,
+				permissionModeOverride: null
 			};
 
 			update(s => ({
@@ -1539,13 +1564,23 @@ function createTabsStore() {
 				})
 			}));
 
+			// Build overrides object only if there are actual overrides
+			const overrides: Record<string, string> = {};
+			if (tab.modelOverride) {
+				overrides.model = tab.modelOverride;
+			}
+			if (tab.permissionModeOverride) {
+				overrides.permission_mode = tab.permissionModeOverride;
+			}
+
 			// Send query
 			ws.send(JSON.stringify({
 				type: 'query',
 				prompt,
 				session_id: tab.sessionId,
 				profile: tab.profile,
-				project: tab.project || undefined
+				project: tab.project || undefined,
+				overrides: Object.keys(overrides).length > 0 ? overrides : undefined
 			}));
 		},
 
@@ -1688,6 +1723,26 @@ function createTabsStore() {
 			updateTab(tabId, { project: projectId });
 		},
 
+		/**
+		 * Set model override for a tab (null = use profile default)
+		 */
+		setTabModelOverride(tabId: string, model: string | null) {
+			updateTab(tabId, { modelOverride: model });
+		},
+
+		/**
+		 * Set permission mode override for a tab (null = use profile default)
+		 */
+		setTabPermissionModeOverride(tabId: string, permissionMode: string | null) {
+			updateTab(tabId, { permissionModeOverride: permissionMode });
+		},
+
+		/**
+		 * Set error for a tab
+		 */
+		setTabError(tabId: string, error: string) {
+			updateTab(tabId, { error });
+		},
 
 		/**
 		 * Clear error for a tab
@@ -1713,7 +1768,9 @@ function createTabsStore() {
 				totalCacheCreationTokens: 0,
 				totalCacheReadTokens: 0,
 				contextUsed: null,
-				contextMax: 200000
+				contextMax: 200000,
+				modelOverride: null,
+				permissionModeOverride: null
 			});
 			connectTab(tabId);
 			// Save tabs state (debounced)

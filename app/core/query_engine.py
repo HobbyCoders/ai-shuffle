@@ -24,7 +24,7 @@ from claude_agent_sdk.types import StreamEvent
 
 from app.db import database
 from app.core.config import settings
-from app.core.profiles import get_profile_or_builtin
+from app.core.profiles import get_profile
 from app.core.sync_engine import sync_engine
 from app.core.checkpoint_manager import checkpoint_manager
 
@@ -176,7 +176,7 @@ def build_options_from_profile(
     options = ClaudeAgentOptions(
         # Core settings
         model=overrides.get("model") or config.get("model"),
-        permission_mode=config.get("permission_mode", "default"),
+        permission_mode=overrides.get("permission_mode") or config.get("permission_mode", "default"),
         max_turns=overrides.get("max_turns") or config.get("max_turns"),
 
         # Tool configuration
@@ -234,12 +234,13 @@ async def execute_query(
     profile_id: str,
     project_id: Optional[str] = None,
     overrides: Optional[Dict[str, Any]] = None,
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None,
+    api_user_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """Execute a non-streaming query"""
 
     # Get profile
-    profile = get_profile_or_builtin(profile_id)
+    profile = get_profile(profile_id)
     if not profile:
         raise ValueError(f"Profile not found: {profile_id}")
 
@@ -266,7 +267,8 @@ async def execute_query(
             session_id=session_id,
             profile_id=profile_id,
             project_id=project_id,
-            title=title
+            title=title,
+            api_user_id=api_user_id
         )
         resume_id = None
 
@@ -424,7 +426,7 @@ async def stream_query(
     """
 
     # Get profile
-    profile = get_profile_or_builtin(profile_id)
+    profile = get_profile(profile_id)
     if not profile:
         yield {"type": "error", "message": f"Profile not found: {profile_id}"}
         return
@@ -1147,7 +1149,7 @@ async def start_background_query(
     Use interrupt_session() to stop.
     """
     # Get profile
-    profile = get_profile_or_builtin(profile_id)
+    profile = get_profile(profile_id)
     if not profile:
         raise ValueError(f"Profile not found: {profile_id}")
 
@@ -1305,7 +1307,7 @@ async def stream_to_websocket(
     - {"type": "error", "message": "..."}
     """
     # Get profile
-    profile = get_profile_or_builtin(profile_id)
+    profile = get_profile(profile_id)
     if not profile:
         yield {"type": "error", "message": f"Profile not found: {profile_id}"}
         return
