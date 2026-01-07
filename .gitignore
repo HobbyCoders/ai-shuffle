@@ -70,3 +70,10 @@ PLAN.md
 !tools/dist/
 tools/node_modules/
 /uploads
+
+# Development files - not for public repo
+/generated-images/
+/generated-videos/
+/docs/Claude Agent SDK Documentation/
+/docs/API_DOCUMENTATION.md
+CLAUDE.md

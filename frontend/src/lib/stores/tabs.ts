@@ -1295,12 +1295,36 @@ function createTabsStore() {
 				}
 
 				console.log(`[Tab ${tabId}] Updating tab state - isStreaming:`, isStreaming, 'messageCount:', finalMessages.length, 'todoCount:', latestTodos.length);
+
+				// Extract token counts from session data if available (for context pill)
+				const session = data.session as Record<string, unknown> | undefined;
+				const tokenUpdates: Partial<ChatTab> = {};
+				if (session) {
+					if (typeof session.total_tokens_in === 'number') {
+						tokenUpdates.totalTokensIn = session.total_tokens_in;
+					}
+					if (typeof session.total_tokens_out === 'number') {
+						tokenUpdates.totalTokensOut = session.total_tokens_out;
+					}
+					if (typeof session.cache_creation_tokens === 'number') {
+						tokenUpdates.totalCacheCreationTokens = session.cache_creation_tokens;
+					}
+					if (typeof session.cache_read_tokens === 'number') {
+						tokenUpdates.totalCacheReadTokens = session.cache_read_tokens;
+					}
+					if (typeof session.context_tokens === 'number') {
+						tokenUpdates.contextUsed = session.context_tokens;
+					}
+					console.log(`[Tab ${tabId}] Token counts from session:`, tokenUpdates);
+				}
+
 				updateTab(tabId, {
 					sessionId: data.session_id as string,
 					messages: finalMessages,
 					isStreaming: isStreaming,
 					todos: latestTodos,
-					error: null  // Clear any previous error
+					error: null,  // Clear any previous error
+					...tokenUpdates
 				});
 
 				// Update tab title based on first message
@@ -2388,6 +2412,11 @@ function createTabsStore() {
 				const persistedState = await loadTabsFromServer();
 
 				if (persistedState && persistedState.tabs) {
+					// Get localStorage defaults for profile/project
+					// This ensures tabs without saved selections fall back to last-used values
+					const defaultProfile = getPersistedProfile();
+					const defaultProject = getPersistedProject();
+
 					// Restore tabs from server (could be empty array)
 					const restoredTabs: ChatTab[] = persistedState.tabs.map(pt => ({
 						id: pt.id,
@@ -2397,8 +2426,9 @@ function createTabsStore() {
 						isStreaming: false,
 						wsConnected: false,
 						error: null,
-						profile: pt.profile,
-						project: pt.project,
+						// Fall back to localStorage if server-saved profile/project is empty
+						profile: pt.profile || defaultProfile,
+						project: pt.project || defaultProject,
 						totalTokensIn: 0,
 						totalTokensOut: 0,
 						totalCacheCreationTokens: 0,
@@ -2582,8 +2612,8 @@ function createTabsStore() {
 
 		/**
 		 * Send message in a specific tab.
-		 * If the tab is currently streaming, this will queue the message to be
-		 * processed after Claude finishes the current response (streaming input).
+		 * If the tab is currently streaming, this will interrupt the current response
+		 * and then send the new message.
 		 */
 		sendMessage(tabId: string, prompt: string) {
 			const tab = getTab(tabId);
@@ -2615,14 +2645,16 @@ function createTabsStore() {
 				})
 			}));
 
-			// If currently streaming, queue the message instead of starting a new query
-			// This enables "streaming input" - user can send messages while Claude is working
+			// If currently streaming, send interrupt_and_query to stop current response
+			// and immediately process the new message
 			if (tab.isStreaming && tab.sessionId) {
-				console.log(`[Tab ${tabId}] Queueing message while streaming: ${prompt.substring(0, 50)}...`);
+				console.log(`[Tab ${tabId}] Interrupting and sending new message: ${prompt.substring(0, 50)}...`);
 				ws.send(JSON.stringify({
-					type: 'queue_message',
+					type: 'interrupt_and_query',
 					prompt,
-					session_id: tab.sessionId
+					session_id: tab.sessionId,
+					profile: tab.profile,
+					project: tab.project || undefined
 				}));
 				return;
 			}

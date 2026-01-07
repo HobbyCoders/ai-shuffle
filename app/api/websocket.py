@@ -587,11 +587,14 @@ async def chat_websocket(
                                     except (asyncio.CancelledError, asyncio.TimeoutError):
                                         pass
 
-                    elif msg_type == "queue_message":
-                        # Queue a message to be sent to Claude while streaming
-                        # This supports "streaming input" - user can send messages while Claude works
+                    elif msg_type == "interrupt_and_query":
+                        # Interrupt current streaming and immediately send a new query
+                        # This is the proper way to handle user input during streaming
                         session_id = data.get("session_id") or current_session_id
                         prompt = data.get("prompt", "").strip()
+                        profile_id = data.get("profile", "claude-code")
+                        project_id = data.get("project")
+                        overrides = data.get("overrides")
 
                         if not prompt:
                             await send_json({"type": "error", "message": "Empty prompt"})
@@ -601,42 +604,45 @@ async def chat_websocket(
                             await send_json({"type": "error", "message": "No active session"})
                             continue
 
-                        from app.core.query_engine import queue_user_message, get_queued_message_count
+                        from app.core.query_engine import interrupt_session
 
-                        # Queue the message
-                        success = await queue_user_message(session_id, prompt)
+                        # Step 1: Interrupt the SDK-level streaming
+                        interrupted = await interrupt_session(session_id)
+                        logger.info(f"Interrupt session {session_id} before new query: {interrupted}")
 
-                        if success:
-                            # Store user message in database
-                            database.add_session_message(
-                                session_id=session_id,
-                                role="user",
-                                content=prompt
-                            )
+                        # Step 2: Cancel the asyncio task
+                        if session_id in _active_chat_sessions:
+                            task = _active_chat_sessions[session_id]
+                            if not task.done():
+                                task.cancel()
+                                try:
+                                    await asyncio.wait_for(task, timeout=2.0)
+                                except (asyncio.CancelledError, asyncio.TimeoutError):
+                                    pass
 
-                            # Broadcast user message to other devices
-                            await sync_engine.broadcast_message_added(
-                                session_id=session_id,
-                                message={
-                                    "role": "user",
-                                    "content": prompt
-                                },
-                                source_device_id=device_id
-                            )
+                        # Step 3: Store user message
+                        database.add_session_message(
+                            session_id=session_id,
+                            role="user",
+                            content=prompt
+                        )
 
-                            # Notify frontend of successful queue
-                            await send_json({
-                                "type": "message_queued",
-                                "session_id": session_id,
-                                "prompt": prompt,
-                                "queue_position": get_queued_message_count(session_id)
-                            })
-                            logger.info(f"Queued message for session {session_id}")
-                        else:
-                            await send_json({
-                                "type": "error",
-                                "message": "Cannot queue message - session not streaming or not found"
-                            })
+                        # Step 4: Broadcast user message to other devices
+                        await sync_engine.broadcast_message_added(
+                            session_id=session_id,
+                            message={
+                                "role": "user",
+                                "content": prompt
+                            },
+                            source_device_id=device_id
+                        )
+
+                        # Step 5: Start new query task
+                        query_task = asyncio.create_task(
+                            run_query(prompt, session_id, profile_id, project_id, overrides)
+                        )
+                        _active_chat_sessions[session_id] = query_task
+                        logger.info(f"Started new query after interrupt for session {session_id}")
 
                     elif msg_type == "load_session":
                         # Load a session's message history from JSONL file
@@ -656,20 +662,39 @@ async def chat_websocket(
                                 sdk_session_id = session.get("sdk_session_id")
                                 messages = []
 
+                                # Get working dir from project if available
+                                working_dir = "/workspace"
+                                project_id = session.get("project_id")
+                                if project_id:
+                                    project = database.get_project(project_id)
+                                    if project:
+                                        from app.core.config import settings
+                                        working_dir = str(settings.workspace_dir / project["path"])
+
                                 if sdk_session_id:
                                     try:
-                                        from app.core.jsonl_parser import parse_session_history
-                                        # Get working dir from project if available
-                                        working_dir = "/workspace"
-                                        project_id = session.get("project_id")
-                                        if project_id:
-                                            project = database.get_project(project_id)
-                                            if project:
-                                                from app.core.config import settings
-                                                working_dir = str(settings.workspace_dir / project["path"])
+                                        from app.core.jsonl_parser import parse_session_history, get_session_cost_from_jsonl
 
                                         messages = parse_session_history(sdk_session_id, working_dir)
                                         logger.info(f"Loaded {len(messages)} messages from JSONL for session {session_id}")
+
+                                        # Load context tokens from JSONL (same as sessions.py HTTP endpoint)
+                                        usage_data = get_session_cost_from_jsonl(sdk_session_id, working_dir)
+                                        if usage_data:
+                                            cache_creation = usage_data.get("cache_creation_tokens", 0)
+                                            cache_read = usage_data.get("cache_read_tokens", 0)
+                                            last_input = usage_data.get("last_input_tokens", 0)
+
+                                            session["cache_creation_tokens"] = cache_creation
+                                            session["cache_read_tokens"] = cache_read
+                                            session["context_tokens"] = last_input + cache_creation + cache_read
+
+                                            # Also update total tokens if DB doesn't have them
+                                            if session.get("total_tokens_in", 0) == 0 and session.get("total_tokens_out", 0) == 0:
+                                                session["total_tokens_in"] = usage_data.get("total_tokens_in", 0)
+                                                session["total_tokens_out"] = usage_data.get("total_tokens_out", 0)
+
+                                            logger.info(f"Loaded context tokens for session {session_id}: context={session['context_tokens']}")
                                     except Exception as e:
                                         logger.error(f"Failed to parse JSONL for session {session_id}: {e}")
                                         messages = []

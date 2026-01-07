@@ -37,6 +37,8 @@
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import TodoList from '$lib/components/TodoList.svelte';
+	import SettingsModal from '$lib/components/SettingsModal.svelte';
+	import ProfileModal from '$lib/components/ProfileModal.svelte';
 	import { groups, organizeByGroups } from '$lib/stores/groups';
 	import { executeCommand, isSlashCommand, listCommands, type Command } from '$lib/api/commands';
 	import { groupSessionsByDate, type DateGroup } from '$lib/utils/dateGroups';
@@ -259,7 +261,6 @@
 
 	let showProfileModal = false;
 	let showProjectModal = false;
-	let showNewProfileForm = false;
 	let showNewProjectForm = false;
 	let editingProfile: any = null;
 	let fileInput: HTMLInputElement;
@@ -284,6 +285,9 @@
 	// Subagent manager state
 	let showSubagentManager = false;
 
+	// Settings modal state
+	let showSettingsModal = false;
+
 	// Mobile tools menu state
 	let showToolsMenu = false;
 
@@ -298,261 +302,6 @@
 	// File autocomplete state (@ mentions)
 	let showFileAutocomplete: Record<string, boolean> = {};
 	let fileAutocompleteRefs: Record<string, FileAutocomplete> = {};
-
-	// Accordion states for profile form sections
-	let expandedSections: Record<string, boolean> = {
-		toolConfig: false,
-		aiTools: false,
-		behavior: false,
-		enabledAgents: false,
-		systemPrompt: false,
-		settingSources: false,
-		advanced: false
-	};
-
-	function toggleSection(section: string) {
-		expandedSections[section] = !expandedSections[section];
-		expandedSections = expandedSections; // Trigger reactivity
-	}
-
-	// Profile form state
-	let profileForm = {
-		id: '',
-		name: '',
-		description: '',
-		model: 'sonnet',
-		permission_mode: 'default',
-		max_turns: null as number | null,
-		allowed_tools: [] as string[],
-		disallowed_tools: [] as string[],
-		enabled_agents: [] as string[],
-		include_partial_messages: true,
-		continue_conversation: false,
-		fork_session: false,
-		system_prompt_type: 'preset',
-		system_prompt_preset: 'claude_code',
-		system_prompt_append: '',
-		system_prompt_content: '',
-		system_prompt_inject_env: false,
-		// AI tools - array of enabled tool IDs
-		enabled_ai_tools: [] as string[],
-		setting_sources: [] as string[],
-		cwd: '',
-		add_dirs: '',
-		user: '',
-		max_buffer_size: null as number | null
-	};
-
-	// Tool selection mode: 'all' = all tools allowed, 'allow' = whitelist mode, 'disallow' = blacklist mode
-	let toolSelectionMode: 'all' | 'allow' | 'disallow' = 'all';
-
-	// AI Tool selection mode: 'all' = all enabled, 'custom' = individually selected
-	let aiToolSelectionMode: 'all' | 'custom' = 'custom';
-
-	// AI Tool categories - dynamically loaded from backend based on configured providers
-	interface AITool {
-		id: string;
-		name: string;
-		description: string;
-		category: string;
-		available: boolean;
-		providers: string[];
-		active_provider: string | null;
-	}
-
-	interface AIToolCategory {
-		id: string;
-		name: string;
-		tools: AITool[];
-	}
-
-	interface AIToolsResponse {
-		tools: AITool[];
-		categories: AIToolCategory[];
-		available_providers: string[];
-		current_image_provider: string | null;
-		current_video_provider: string | null;
-	}
-
-	// Dynamically loaded AI tools from backend
-	let aiToolCategories: AIToolCategory[] = [];
-	let aiToolsLoading = false;
-	let availableProviders: string[] = [];
-
-	// Load available AI tools from backend (based on configured API keys)
-	async function loadAvailableAITools() {
-		aiToolsLoading = true;
-		try {
-			const response = await api.get<AIToolsResponse>('/settings/ai-tools/available');
-			aiToolCategories = response.categories;
-			availableProviders = response.available_providers;
-		} catch (e) {
-			console.error('Failed to load AI tools:', e);
-			// Fallback to empty - tools will show as unavailable
-			aiToolCategories = [];
-			availableProviders = [];
-		}
-		aiToolsLoading = false;
-	}
-
-	// Track expanded state for AI tool categories
-	let aiToolCategoriesExpanded: Record<string, boolean> = {};
-
-	// Toggle AI tool category expansion
-	function toggleAIToolCategoryExpansion(categoryId: string) {
-		aiToolCategoriesExpanded[categoryId] = !aiToolCategoriesExpanded[categoryId];
-		aiToolCategoriesExpanded = aiToolCategoriesExpanded;
-	}
-
-	// Toggle individual AI tool
-	function toggleAITool(toolId: string) {
-		if (profileForm.enabled_ai_tools.includes(toolId)) {
-			profileForm.enabled_ai_tools = profileForm.enabled_ai_tools.filter(t => t !== toolId);
-		} else {
-			profileForm.enabled_ai_tools = [...profileForm.enabled_ai_tools, toolId];
-		}
-	}
-
-	// Toggle all AI tools in a category
-	function toggleAIToolCategory(category: AIToolCategory) {
-		const categoryToolIds = category.tools.map(t => t.id);
-		const allSelected = categoryToolIds.every(id => profileForm.enabled_ai_tools.includes(id));
-
-		if (allSelected) {
-			// Deselect all in category
-			profileForm.enabled_ai_tools = profileForm.enabled_ai_tools.filter(t => !categoryToolIds.includes(t));
-		} else {
-			// Select all in category
-			const newTools = categoryToolIds.filter(id => !profileForm.enabled_ai_tools.includes(id));
-			profileForm.enabled_ai_tools = [...profileForm.enabled_ai_tools, ...newTools];
-		}
-	}
-
-	// Check if all AI tools in a category are selected
-	function isAIToolCategoryFullySelected(category: AIToolCategory): boolean {
-		const categoryToolIds = category.tools.map(t => t.id);
-		return categoryToolIds.length > 0 && categoryToolIds.every(id => profileForm.enabled_ai_tools.includes(id));
-	}
-
-	// Check if some (but not all) AI tools in a category are selected
-	function isAIToolCategoryPartiallySelected(category: AIToolCategory): boolean {
-		const categoryToolIds = category.tools.map(t => t.id);
-		const selectedCount = categoryToolIds.filter(id => profileForm.enabled_ai_tools.includes(id)).length;
-		return selectedCount > 0 && selectedCount < categoryToolIds.length;
-	}
-
-	// Get all available AI tool IDs
-	function getAllAIToolIds(): string[] {
-		return aiToolCategories.flatMap(cat => cat.tools.map(t => t.id));
-	}
-
-	// Toggle agent selection
-	function toggleAgent(agentId: string) {
-		if (profileForm.enabled_agents.includes(agentId)) {
-			profileForm.enabled_agents = profileForm.enabled_agents.filter(id => id !== agentId);
-		} else {
-			profileForm.enabled_agents = [...profileForm.enabled_agents, agentId];
-		}
-	}
-
-	// Toggle tool selection
-	function toggleTool(toolName: string) {
-		if (toolSelectionMode === 'allow') {
-			if (profileForm.allowed_tools.includes(toolName)) {
-				profileForm.allowed_tools = profileForm.allowed_tools.filter(t => t !== toolName);
-			} else {
-				profileForm.allowed_tools = [...profileForm.allowed_tools, toolName];
-			}
-		} else if (toolSelectionMode === 'disallow') {
-			if (profileForm.disallowed_tools.includes(toolName)) {
-				profileForm.disallowed_tools = profileForm.disallowed_tools.filter(t => t !== toolName);
-			} else {
-				profileForm.disallowed_tools = [...profileForm.disallowed_tools, toolName];
-			}
-		}
-	}
-
-	// Check if a tool is selected based on current mode
-	function isToolSelected(toolName: string): boolean {
-		if (toolSelectionMode === 'all') return true;
-		if (toolSelectionMode === 'allow') return profileForm.allowed_tools.includes(toolName);
-		if (toolSelectionMode === 'disallow') return !profileForm.disallowed_tools.includes(toolName);
-		return true;
-	}
-
-	// Toggle all tools in a category
-	function toggleCategory(category: ToolCategory) {
-		const categoryToolNames = category.tools.map(t => t.name);
-
-		if (toolSelectionMode === 'allow') {
-			const allSelected = categoryToolNames.every(name => profileForm.allowed_tools.includes(name));
-			if (allSelected) {
-				// Deselect all in category
-				profileForm.allowed_tools = profileForm.allowed_tools.filter(t => !categoryToolNames.includes(t));
-			} else {
-				// Select all in category
-				const newTools = categoryToolNames.filter(name => !profileForm.allowed_tools.includes(name));
-				profileForm.allowed_tools = [...profileForm.allowed_tools, ...newTools];
-			}
-		} else if (toolSelectionMode === 'disallow') {
-			const allDisabled = categoryToolNames.every(name => profileForm.disallowed_tools.includes(name));
-			if (allDisabled) {
-				// Enable all in category (remove from disallowed)
-				profileForm.disallowed_tools = profileForm.disallowed_tools.filter(t => !categoryToolNames.includes(t));
-			} else {
-				// Disable all in category (add to disallowed)
-				const newTools = categoryToolNames.filter(name => !profileForm.disallowed_tools.includes(name));
-				profileForm.disallowed_tools = [...profileForm.disallowed_tools, ...newTools];
-			}
-		}
-	}
-
-	// Check if all tools in a category are selected
-	function isCategoryFullySelected(category: ToolCategory): boolean {
-		const categoryToolNames = category.tools.map(t => t.name);
-		if (toolSelectionMode === 'all') return true;
-		if (toolSelectionMode === 'allow') {
-			return categoryToolNames.length > 0 && categoryToolNames.every(name => profileForm.allowed_tools.includes(name));
-		}
-		if (toolSelectionMode === 'disallow') {
-			return categoryToolNames.every(name => profileForm.disallowed_tools.includes(name));
-		}
-		return true;
-	}
-
-	// Check if some (but not all) tools in a category are selected
-	function isCategoryPartiallySelected(category: ToolCategory): boolean {
-		const categoryToolNames = category.tools.map(t => t.name);
-		if (toolSelectionMode === 'all') return false;
-		if (toolSelectionMode === 'allow') {
-			const selectedCount = categoryToolNames.filter(name => profileForm.allowed_tools.includes(name)).length;
-			return selectedCount > 0 && selectedCount < categoryToolNames.length;
-		}
-		if (toolSelectionMode === 'disallow') {
-			const disabledCount = categoryToolNames.filter(name => profileForm.disallowed_tools.includes(name)).length;
-			return disabledCount > 0 && disabledCount < categoryToolNames.length;
-		}
-		return false;
-	}
-
-	// Check if no tools in a category are selected
-	function isCategoryNoneSelected(category: ToolCategory): boolean {
-		const categoryToolNames = category.tools.map(t => t.name);
-		if (toolSelectionMode === 'all') return false;
-		if (toolSelectionMode === 'allow') {
-			return categoryToolNames.every(name => !profileForm.allowed_tools.includes(name));
-		}
-		if (toolSelectionMode === 'disallow') {
-			return categoryToolNames.every(name => !profileForm.disallowed_tools.includes(name));
-		}
-		return false;
-	}
-
-	// Toggle tool category expansion
-	function toggleToolCategoryExpansion(categoryId: string) {
-		toolsExpanded[categoryId] = !toolsExpanded[categoryId];
-		toolsExpanded = toolsExpanded; // Trigger reactivity
-	}
 
 	function getModelDisplay(model?: string): string {
 		switch (model) {
@@ -743,8 +492,11 @@
 		}
 
 		// Normal textarea behavior - on desktop, Enter sends; on mobile, let Enter create newlines
-		// Mobile detection: touch device with narrow screen
-		const isMobile = window.matchMedia('(max-width: 640px)').matches && ('ontouchstart' in window);
+		// Mobile detection: check for touch-primary device (no mouse/fine pointer)
+		// This is more reliable than screen width since it detects actual input capability
+		const isTouchDevice = window.matchMedia('(pointer: coarse)').matches;
+		const hasNoFinePointer = !window.matchMedia('(any-pointer: fine)').matches;
+		const isMobile = isTouchDevice || (hasNoFinePointer && ('ontouchstart' in window));
 
 		if (e.key === 'Enter' && !e.shiftKey && !isMobile) {
 			e.preventDefault();
@@ -939,27 +691,49 @@
 		return `$${cost.toFixed(4)}`;
 	}
 
-	function renderMarkdown(content: string): string {
-		// Process base64 images with download capability
-		// Match data URLs in image tags or standalone base64 image data
+	function renderMarkdown(content: string, isStreaming: boolean = false): string {
+		// If streaming, hide media content to prevent flickering - show placeholder instead
+		if (isStreaming) {
+			// Replace image markdown with placeholder
+			let processedContent = content.replace(/!\[([^\]]*)\]\((data:image\/[^;]+;base64,[^)]+)\)/g,
+				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">Image loading...</div>');
+			processedContent = processedContent.replace(/!\[([^\]]*)\]\((\/api\/generated-images\/[^)]+)\)/g,
+				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">Image loading...</div>');
+			processedContent = processedContent.replace(/\[([^\]]*)\]\((\/api\/generated-videos\/[^)]+)\)/g,
+				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">Video loading...</div>');
+			processedContent = processedContent.replace(/"image_base64"\s*:\s*"([A-Za-z0-9+/=]{100,})"/g,
+				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">Image loading...</div>');
+			return marked(processedContent, { breaks: true }) as string;
+		}
+
+		// Process base64 images with download capability and overlay buttons
 		const base64ImagePattern = /!\[([^\]]*)\]\((data:image\/[^;]+;base64,[^)]+)\)/g;
 
-		// Replace base64 image markdown with custom HTML that includes download button
+		// Replace base64 image markdown with custom HTML that includes overlay buttons
 		let processedContent = content.replace(base64ImagePattern, (match, alt, dataUrl) => {
-			const downloadId = `img-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-			return `<div class="generated-image-container my-4">
+			return `<div class="generated-media-container relative my-4 inline-block">
 				<img src="${dataUrl}" alt="${alt || 'Generated image'}" class="max-w-full rounded-lg shadow-md border border-border" />
-				<div class="flex gap-2 mt-2">
+				<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
 					<button onclick="(function(){
 						const link = document.createElement('a');
 						link.href = '${dataUrl}';
 						link.download = '${alt || 'generated-image'}.png';
 						link.click();
-					})()" class="text-xs px-3 py-1 bg-primary text-primary-foreground rounded hover:opacity-90 flex items-center gap-1">
-						<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					})()" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download image">
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 						</svg>
-						Download
+					</button>
+					<button onclick="(function(btn){
+						navigator.clipboard.writeText('${dataUrl}');
+						btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
+						setTimeout(function() {
+							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
+						}, 2000);
+					})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy image URL">
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+						</svg>
 					</button>
 				</div>
 			</div>`;
@@ -970,19 +744,30 @@
 		processedContent = processedContent.replace(jsonImagePattern, (match, base64Data) => {
 			// Only replace if it looks like substantial base64 data (not a short string)
 			if (base64Data.length > 100) {
-				return `<div class="generated-image-container my-4">
-					<img src="data:image/png;base64,${base64Data}" alt="Generated image" class="max-w-full rounded-lg shadow-md border border-border" />
-					<div class="flex gap-2 mt-2">
+				const dataUrl = `data:image/png;base64,${base64Data}`;
+				return `<div class="generated-media-container relative my-4 inline-block">
+					<img src="${dataUrl}" alt="Generated image" class="max-w-full rounded-lg shadow-md border border-border" />
+					<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
 						<button onclick="(function(){
 							const link = document.createElement('a');
-							link.href = 'data:image/png;base64,${base64Data}';
+							link.href = '${dataUrl}';
 							link.download = 'generated-image.png';
 							link.click();
-						})()" class="text-xs px-3 py-1 bg-primary text-primary-foreground rounded hover:opacity-90 flex items-center gap-1">
-							<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						})()" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download image">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 							</svg>
-							Download
+						</button>
+						<button onclick="(function(btn){
+							navigator.clipboard.writeText('${dataUrl}');
+							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
+							setTimeout(function() {
+								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
+							}, 2000);
+						})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy image URL">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+							</svg>
 						</button>
 					</div>
 				</div>`;
@@ -990,21 +775,59 @@
 			return match;
 		});
 
-		// Render generated-images markdown as clean image display (buttons are in message header)
+		// Render generated-images markdown with overlay buttons
 		const generatedImagePattern = /!\[([^\]]*)\]\((\/api\/generated-images\/[^)]+)\)/g;
 		processedContent = processedContent.replace(generatedImagePattern, (match, alt, imageUrl) => {
-			return `<div class="generated-image-container my-4">
+			const filename = imageUrl.split('/').pop() || 'generated-image.png';
+			return `<div class="generated-media-container relative my-4 inline-block">
 				<img src="${imageUrl}" alt="${alt || 'Generated image'}" class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border" />
+				<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
+					<a href="${imageUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download image">
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+						</svg>
+					</a>
+					<button onclick="(function(btn){
+						navigator.clipboard.writeText(window.location.origin + '${imageUrl}');
+						btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
+						setTimeout(function() {
+							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
+						}, 2000);
+					})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy image URL">
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+						</svg>
+					</button>
+				</div>
 			</div>`;
 		});
 
-		// Render generated-videos markdown links as video player (buttons are in message header)
+		// Render generated-videos markdown links as video player with overlay buttons
 		const generatedVideoPattern = /\[([^\]]*)\]\((\/api\/generated-videos\/[^)]+)\)/g;
 		processedContent = processedContent.replace(generatedVideoPattern, (match, text, videoUrl) => {
-			return `<div class="generated-video-container my-4">
+			const filename = videoUrl.split('/').pop() || 'generated-video.mp4';
+			return `<div class="generated-media-container relative my-4 inline-block">
 				<video src="${videoUrl}" controls class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border">
 					Your browser does not support the video tag.
 				</video>
+				<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
+					<a href="${videoUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download video">
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+						</svg>
+					</a>
+					<button onclick="(function(btn){
+						navigator.clipboard.writeText(window.location.origin + '${videoUrl}');
+						btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
+						setTimeout(function() {
+							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
+						}, 2000);
+					})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy video URL">
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+						</svg>
+					</button>
+				</div>
 			</div>`;
 		});
 
@@ -1023,24 +846,26 @@
 				const filename = data.filename || 'generated-image.png';
 				return `<div class="generated-image-result">
 					<div class="mb-2 text-xs text-green-500">✓ Image generated successfully</div>
-					<img src="${imageUrl}" alt="Generated image" class="max-w-full max-h-96 rounded-lg shadow-md border border-border" />
-					<div class="flex gap-2 mt-3">
-						<a href="${imageUrl}" download="${filename}" class="text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 flex items-center gap-1.5 font-medium no-underline">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-							</svg>
-							Download Image
-						</a>
-						<button onclick="(function(){
-							navigator.clipboard.writeText(window.location.origin + '${imageUrl}');
-							this.textContent = 'Copied!';
-							setTimeout(() => this.textContent = 'Copy URL', 2000);
-						}).call(this)" class="text-xs px-3 py-1.5 bg-muted text-foreground rounded-md hover:bg-accent flex items-center gap-1.5">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-							</svg>
-							Copy URL
-						</button>
+					<div class="generated-media-container relative inline-block">
+						<img src="${imageUrl}" alt="Generated image" class="max-w-full max-h-96 rounded-lg shadow-md border border-border" />
+						<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
+							<a href="${imageUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download image">
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+								</svg>
+							</a>
+							<button onclick="(function(btn){
+								navigator.clipboard.writeText(window.location.origin + '${imageUrl}');
+								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
+								setTimeout(function() {
+									btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
+								}, 2000);
+							})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy image URL">
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+								</svg>
+							</button>
+						</div>
 					</div>
 				</div>`;
 			}
@@ -1052,29 +877,31 @@
 				const dataUrl = `data:${mimeType};base64,${data.image_base64}`;
 				return `<div class="generated-image-result">
 					<div class="mb-2 text-xs text-green-500">✓ Image generated successfully</div>
-					<img src="${dataUrl}" alt="Generated image" class="max-w-full max-h-96 rounded-lg shadow-md border border-border" />
-					<div class="flex gap-2 mt-3">
-						<button onclick="(function(){
-							const link = document.createElement('a');
-							link.href = '${dataUrl}';
-							link.download = 'generated-image.png';
-							link.click();
-						})()" class="text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 flex items-center gap-1.5 font-medium">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-							</svg>
-							Download Image
-						</button>
-						<button onclick="(function(){
-							navigator.clipboard.writeText('${dataUrl}');
-							this.textContent = 'Copied!';
-							setTimeout(() => this.textContent = 'Copy Data URL', 2000);
-						}).call(this)" class="text-xs px-3 py-1.5 bg-muted text-foreground rounded-md hover:bg-accent flex items-center gap-1.5">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-							</svg>
-							Copy Data URL
-						</button>
+					<div class="generated-media-container relative inline-block">
+						<img src="${dataUrl}" alt="Generated image" class="max-w-full max-h-96 rounded-lg shadow-md border border-border" />
+						<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
+							<button onclick="(function(){
+								const link = document.createElement('a');
+								link.href = '${dataUrl}';
+								link.download = 'generated-image.png';
+								link.click();
+							})()" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download image">
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+								</svg>
+							</button>
+							<button onclick="(function(btn){
+								navigator.clipboard.writeText('${dataUrl}');
+								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
+								setTimeout(function() {
+									btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
+								}, 2000);
+							})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy image URL">
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+								</svg>
+							</button>
+						</div>
 					</div>
 				</div>`;
 			}
@@ -1086,26 +913,28 @@
 				const duration = data.duration_seconds ? `${data.duration_seconds}s` : '';
 				return `<div class="generated-video-result">
 					<div class="mb-2 text-xs text-green-500">✓ Video generated successfully${duration ? ` (${duration})` : ''}</div>
-					<video src="${videoUrl}" controls class="max-w-full max-h-96 rounded-lg shadow-md border border-border">
-						Your browser does not support the video tag.
-					</video>
-					<div class="flex gap-2 mt-3">
-						<a href="${videoUrl}" download="${filename}" class="text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 flex items-center gap-1.5 font-medium no-underline">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-							</svg>
-							Download Video
-						</a>
-						<button onclick="(function(){
-							navigator.clipboard.writeText(window.location.origin + '${videoUrl}');
-							this.textContent = 'Copied!';
-							setTimeout(() => this.textContent = 'Copy URL', 2000);
-						}).call(this)" class="text-xs px-3 py-1.5 bg-muted text-foreground rounded-md hover:bg-accent flex items-center gap-1.5">
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-							</svg>
-							Copy URL
-						</button>
+					<div class="generated-media-container relative inline-block">
+						<video src="${videoUrl}" controls class="max-w-full max-h-96 rounded-lg shadow-md border border-border">
+							Your browser does not support the video tag.
+						</video>
+						<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
+							<a href="${videoUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download video">
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+								</svg>
+							</a>
+							<button onclick="(function(btn){
+								navigator.clipboard.writeText(window.location.origin + '${videoUrl}');
+								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
+								setTimeout(function() {
+									btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
+								}, 2000);
+							})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy video URL">
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+								</svg>
+							</button>
+						</div>
 					</div>
 				</div>`;
 			}
@@ -1151,38 +980,24 @@
 			if (data.success && data.image_url) {
 				const imageUrl = data.image_url;
 				const filename = data.filename || 'generated-image.png';
-				return `<div class="generated-image-standalone mt-3">
+				return `<div class="generated-media-container relative mt-3 inline-block">
 					<img src="${imageUrl}" alt="Generated image" class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border" />
-					<div class="flex items-center gap-2 mt-2">
-						<a href="${imageUrl}" download="${filename}" class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors no-underline" title="Download image">
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
+						<a href="${imageUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download image">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 							</svg>
-							<span>Download</span>
 						</a>
 						<button onclick="(function(btn){
 							navigator.clipboard.writeText(window.location.origin + '${imageUrl}');
-							var iconSpan = btn.querySelector('.copy-icon');
-							var checkSpan = btn.querySelector('.check-icon');
-							var textSpan = btn.querySelector('.btn-text');
-							iconSpan.style.display = 'none';
-							checkSpan.style.display = 'block';
-							textSpan.textContent = 'Copied';
-							textSpan.classList.add('text-green-500');
+							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
 							setTimeout(function() {
-								iconSpan.style.display = 'block';
-								checkSpan.style.display = 'none';
-								textSpan.textContent = 'Copy URL';
-								textSpan.classList.remove('text-green-500');
+								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
 							}, 2000);
-						})(this)" class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors" title="Copy image URL">
-							<svg class="w-3.5 h-3.5 copy-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy image URL">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
 							</svg>
-							<svg class="w-3.5 h-3.5 check-icon text-green-500" style="display:none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-							</svg>
-							<span class="btn-text">Copy URL</span>
 						</button>
 					</div>
 				</div>`;
@@ -1192,43 +1007,29 @@
 			if (data.success && data.image_base64 && data.mime_type) {
 				const mimeType = data.mime_type || 'image/png';
 				const dataUrl = `data:${mimeType};base64,${data.image_base64}`;
-				return `<div class="generated-image-standalone mt-3">
+				return `<div class="generated-media-container relative mt-3 inline-block">
 					<img src="${dataUrl}" alt="Generated image" class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border" />
-					<div class="flex items-center gap-2 mt-2">
+					<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
 						<button onclick="(function(){
 							const link = document.createElement('a');
 							link.href = '${dataUrl}';
 							link.download = 'generated-image.png';
 							link.click();
-						})()" class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors" title="Download image">
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						})()" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download image">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 							</svg>
-							<span>Download</span>
 						</button>
 						<button onclick="(function(btn){
 							navigator.clipboard.writeText('${dataUrl}');
-							var iconSpan = btn.querySelector('.copy-icon');
-							var checkSpan = btn.querySelector('.check-icon');
-							var textSpan = btn.querySelector('.btn-text');
-							iconSpan.style.display = 'none';
-							checkSpan.style.display = 'block';
-							textSpan.textContent = 'Copied';
-							textSpan.classList.add('text-green-500');
+							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
 							setTimeout(function() {
-								iconSpan.style.display = 'block';
-								checkSpan.style.display = 'none';
-								textSpan.textContent = 'Copy URL';
-								textSpan.classList.remove('text-green-500');
+								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
 							}, 2000);
-						})(this)" class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors" title="Copy image URL">
-							<svg class="w-3.5 h-3.5 copy-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy image URL">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
 							</svg>
-							<svg class="w-3.5 h-3.5 check-icon text-green-500" style="display:none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-							</svg>
-							<span class="btn-text">Copy URL</span>
 						</button>
 					</div>
 				</div>`;
@@ -1247,42 +1048,26 @@
 			if (data.success && data.video_url) {
 				const videoUrl = data.video_url;
 				const filename = data.filename || 'generated-video.mp4';
-				const duration = data.duration_seconds ? `${data.duration_seconds}s` : '';
-				return `<div class="generated-video-standalone mt-3">
+				return `<div class="generated-media-container relative mt-3 inline-block">
 					<video src="${videoUrl}" controls class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border">
 						Your browser does not support the video tag.
 					</video>
-					<div class="flex items-center gap-2 mt-2">
-						${duration ? `<span class="text-xs text-muted-foreground">${duration}</span>` : ''}
-						<a href="${videoUrl}" download="${filename}" class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors no-underline" title="Download video">
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
+						<a href="${videoUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download video">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 							</svg>
-							<span>Download</span>
 						</a>
 						<button onclick="(function(btn){
 							navigator.clipboard.writeText(window.location.origin + '${videoUrl}');
-							var iconSpan = btn.querySelector('.copy-icon');
-							var checkSpan = btn.querySelector('.check-icon');
-							var textSpan = btn.querySelector('.btn-text');
-							iconSpan.style.display = 'none';
-							checkSpan.style.display = 'block';
-							textSpan.textContent = 'Copied';
-							textSpan.classList.add('text-green-500');
+							btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\' /></svg>';
 							setTimeout(function() {
-								iconSpan.style.display = 'block';
-								checkSpan.style.display = 'none';
-								textSpan.textContent = 'Copy URL';
-								textSpan.classList.remove('text-green-500');
+								btn.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\' /></svg>';
 							}, 2000);
-						})(this)" class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors" title="Copy video URL">
-							<svg class="w-3.5 h-3.5 copy-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						})(this)" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Copy video URL">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
 							</svg>
-							<svg class="w-3.5 h-3.5 check-icon text-green-500" style="display:none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-							</svg>
-							<span class="btn-text">Copy URL</span>
 						</button>
 					</div>
 				</div>`;
@@ -1306,7 +1091,6 @@
 
 	// Copy text to clipboard with feedback
 	let copiedMessageId: string | null = null;
-	let copiedUrlMessageId: string | null = null;
 
 	async function copyToClipboard(text: string, messageId: string) {
 		try {
@@ -1318,51 +1102,6 @@
 		} catch (e) {
 			console.error('Failed to copy to clipboard:', e);
 		}
-	}
-
-	async function copyUrlToClipboard(url: string, messageId: string) {
-		try {
-			const fullUrl = window.location.origin + url;
-			await navigator.clipboard.writeText(fullUrl);
-			copiedUrlMessageId = messageId;
-			setTimeout(() => {
-				copiedUrlMessageId = null;
-			}, 2000);
-		} catch (e) {
-			console.error('Failed to copy URL to clipboard:', e);
-		}
-	}
-
-	// Extract generated image URL from message content
-	function extractGeneratedImageUrl(content: string): string | null {
-		const match = content.match(/!\[[^\]]*\]\((\/api\/generated-images\/[^)]+)\)/);
-		return match ? match[1] : null;
-	}
-
-	// Extract generated video URL from message content
-	function extractGeneratedVideoUrl(content: string): string | null {
-		const match = content.match(/\[[^\]]*\]\((\/api\/generated-videos\/[^)]+)\)/);
-		return match ? match[1] : null;
-	}
-
-	// Get filename from generated image URL
-	function getFilenameFromUrl(url: string): string {
-		const pathMatch = url.match(/path=([^&]+)/);
-		if (pathMatch) {
-			const path = decodeURIComponent(pathMatch[1]);
-			return path.split('/').pop() || 'generated-image.png';
-		}
-		return url.split('/').pop() || 'generated-image.png';
-	}
-
-	// Get filename from generated video URL
-	function getVideoFilenameFromUrl(url: string): string {
-		const pathMatch = url.match(/path=([^&]+)/);
-		if (pathMatch) {
-			const path = decodeURIComponent(pathMatch[1]);
-			return path.split('/').pop() || 'generated-video.mp4';
-		}
-		return url.split('/').pop() || 'generated-video.mp4';
 	}
 
 	function formatTime(date?: Date): string {
@@ -1457,212 +1196,13 @@
 		}
 	}
 
-	// Profile management functions
-	function resetProfileForm() {
-		profileForm = {
-			id: '',
-			name: '',
-			description: '',
-			model: 'sonnet',
-			permission_mode: 'default',
-			max_turns: null,
-			allowed_tools: [],
-			disallowed_tools: [],
-			enabled_agents: [],
-			include_partial_messages: true,
-			continue_conversation: false,
-			fork_session: false,
-			system_prompt_type: 'preset',
-			system_prompt_preset: 'claude_code',
-			system_prompt_append: '',
-			system_prompt_content: '',
-			system_prompt_inject_env: false,
-			enabled_ai_tools: [],
-			setting_sources: [],
-			cwd: '',
-			add_dirs: '',
-			user: '',
-			max_buffer_size: null
-		};
-		toolSelectionMode = 'all';
-		aiToolSelectionMode = 'custom';
-		editingProfile = null;
-	}
-
-	function openNewProfileForm() {
-		resetProfileForm();
-		showNewProfileForm = true;
-	}
-
-	function editProfile(profile: any) {
-		editingProfile = profile;
-		const config = profile.config || {};
-		const sp = config.system_prompt || {};
-		const aiTools = config.ai_tools || {};
-
-		const allowedTools = config.allowed_tools || [];
-		const disallowedTools = config.disallowed_tools || [];
-
-		// Build enabled AI tools array from config
-		const enabledAITools: string[] = [];
-		// Image tools (Nano Banana)
-		if (aiTools.image_generation || sp.enable_ai_tools) enabledAITools.push('image_generation');
-		if (aiTools.image_editing) enabledAITools.push('image_editing');
-		if (aiTools.image_reference) enabledAITools.push('image_reference');
-		// Video tools (Veo)
-		if (aiTools.video_generation) enabledAITools.push('video_generation');
-		if (aiTools.video_with_audio) enabledAITools.push('video_with_audio');
-		if (aiTools.image_to_video) enabledAITools.push('image_to_video');
-		if (aiTools.video_extend) enabledAITools.push('video_extend');
-		if (aiTools.video_bridge) enabledAITools.push('video_bridge');
-		// Analysis tools
-		if (aiTools.video_understanding) enabledAITools.push('video_understanding');
-
-		// Determine AI tool selection mode
-		const allAIToolIds = getAllAIToolIds();
-		if (enabledAITools.length === allAIToolIds.length && allAIToolIds.every(id => enabledAITools.includes(id))) {
-			aiToolSelectionMode = 'all';
-		} else {
-			aiToolSelectionMode = 'custom';
-		}
-
-		// Determine tool selection mode based on what's configured
-		if (allowedTools.length > 0) {
-			toolSelectionMode = 'allow';
-		} else if (disallowedTools.length > 0) {
-			toolSelectionMode = 'disallow';
-		} else {
-			toolSelectionMode = 'all';
-		}
-
-		profileForm = {
-			id: profile.id,
-			name: profile.name,
-			description: profile.description || '',
-			model: config.model || 'sonnet',
-			permission_mode: config.permission_mode || 'default',
-			max_turns: config.max_turns || null,
-			allowed_tools: allowedTools,
-			disallowed_tools: disallowedTools,
-			enabled_agents: config.enabled_agents || [],
-			include_partial_messages: config.include_partial_messages !== false,
-			continue_conversation: config.continue_conversation || false,
-			fork_session: config.fork_session || false,
-			system_prompt_type: sp.type || 'preset',
-			system_prompt_preset: sp.preset || 'claude_code',
-			system_prompt_append: sp.append || '',
-			system_prompt_content: sp.content || '',
-			system_prompt_inject_env: sp.inject_env_details || false,
-			// AI tools - array of enabled tool IDs
-			enabled_ai_tools: enabledAITools,
-			setting_sources: config.setting_sources || [],
-			cwd: config.cwd || '',
-			add_dirs: (config.add_dirs || []).join(', '),
-			user: config.user || '',
-			max_buffer_size: config.max_buffer_size || null
-		};
-		showNewProfileForm = true;
-	}
-
-	async function saveProfile() {
-		if (!profileForm.id || !profileForm.name) return;
-
-		const config: any = {
-			model: profileForm.model,
-			permission_mode: profileForm.permission_mode,
-			include_partial_messages: profileForm.include_partial_messages,
-			continue_conversation: profileForm.continue_conversation,
-			fork_session: profileForm.fork_session
-		};
-
-		if (profileForm.max_turns) config.max_turns = profileForm.max_turns;
-
-		// Handle tool configuration based on selection mode
-		if (toolSelectionMode === 'allow' && profileForm.allowed_tools.length > 0) {
-			config.allowed_tools = profileForm.allowed_tools;
-		}
-		if (toolSelectionMode === 'disallow' && profileForm.disallowed_tools.length > 0) {
-			config.disallowed_tools = profileForm.disallowed_tools;
-		}
-		if (profileForm.enabled_agents.length > 0) {
-			config.enabled_agents = profileForm.enabled_agents;
-		}
-		if (profileForm.setting_sources.length > 0) {
-			config.setting_sources = profileForm.setting_sources;
-		}
-		if (profileForm.cwd.trim()) config.cwd = profileForm.cwd;
-		if (profileForm.add_dirs.trim()) {
-			config.add_dirs = profileForm.add_dirs.split(',').map((d) => d.trim()).filter(Boolean);
-		}
-		if (profileForm.user.trim()) config.user = profileForm.user;
-		if (profileForm.max_buffer_size) config.max_buffer_size = profileForm.max_buffer_size;
-
-		// AI tools configuration - convert array to individual toggles
-		// If 'all' mode, enable all available tools; otherwise use the selected ones
-		const effectiveAITools = aiToolSelectionMode === 'all' ? getAllAIToolIds() : profileForm.enabled_ai_tools;
-		if (effectiveAITools.length > 0) {
-			config.ai_tools = {
-				// Image tools (Nano Banana)
-				image_generation: effectiveAITools.includes('image_generation'),
-				image_editing: effectiveAITools.includes('image_editing'),
-				image_reference: effectiveAITools.includes('image_reference'),
-				// Video tools (Veo)
-				video_generation: effectiveAITools.includes('video_generation'),
-				video_with_audio: effectiveAITools.includes('video_with_audio'),
-				image_to_video: effectiveAITools.includes('image_to_video'),
-				video_extend: effectiveAITools.includes('video_extend'),
-				video_bridge: effectiveAITools.includes('video_bridge'),
-				// Analysis tools
-				video_understanding: effectiveAITools.includes('video_understanding')
-			};
-		}
-
-		if (profileForm.system_prompt_type === 'preset') {
-			config.system_prompt = {
-				type: 'preset',
-				preset: 'claude_code'  // Always use claude_code preset
-			};
-			if (profileForm.system_prompt_append.trim()) {
-				config.system_prompt.append = profileForm.system_prompt_append;
-			}
-		} else {
-			// Custom system prompt - allow blank content
-			config.system_prompt = {
-				type: 'custom',
-				content: profileForm.system_prompt_content,
-				inject_env_details: profileForm.system_prompt_inject_env
-			};
-		}
-
-		if (editingProfile) {
-			await tabs.updateProfile(profileForm.id, {
-				name: profileForm.name,
-				description: profileForm.description || undefined,
-				config
-			});
-		} else {
-			await tabs.createProfile({
-				id: profileForm.id.toLowerCase().replace(/[^a-z0-9-]/g, '-'),
-				name: profileForm.name,
-				description: profileForm.description || undefined,
-				config
-			});
-		}
-
-		resetProfileForm();
-		showNewProfileForm = false;
-	}
-
 	async function deleteProfile(profileId: string) {
 		if (confirm('Delete this profile?')) {
 			await tabs.deleteProfile(profileId);
 		}
 	}
 
-	// Profile import/export
-	let profileImportInput: HTMLInputElement;
-	let profileImporting = false;
-
+	// Profile export
 	async function exportProfile(profileId: string) {
 		try {
 			const data = await api.get<any>(`/export-import/profiles/${profileId}`);
@@ -1678,43 +1218,6 @@
 		} catch (e: any) {
 			alert('Export failed: ' + (e.detail || 'Unknown error'));
 		}
-	}
-
-	function triggerProfileImport() {
-		profileImportInput?.click();
-	}
-
-	async function handleProfileImport(event: Event) {
-		const input = event.target as HTMLInputElement;
-		const file = input.files?.[0];
-		if (!file) return;
-		input.value = '';
-
-		profileImporting = true;
-		try {
-			const content = await file.text();
-			const data = JSON.parse(content);
-
-			if (!data.profiles || data.profiles.length === 0) {
-				alert('No profiles found in file');
-				profileImporting = false;
-				return;
-			}
-
-			const result = await api.post<any>('/export-import/import/json?overwrite_existing=false', data);
-
-			if (result.profiles_imported > 0) {
-				alert(`Imported ${result.profiles_imported} profile(s)`);
-				await tabs.loadProfiles();
-			} else if (result.profiles_skipped > 0) {
-				alert(`Profile already exists. Use a different ID or delete the existing one first.`);
-			} else if (result.errors?.length > 0) {
-				alert('Import failed: ' + result.errors.join(', '));
-			}
-		} catch (e: any) {
-			alert('Import failed: ' + (e.detail || e.message || 'Invalid JSON file'));
-		}
-		profileImporting = false;
 	}
 
 	async function createProject() {
@@ -1882,14 +1385,6 @@
 		}
 	}
 
-	function toggleSettingSource(source: string) {
-		if (profileForm.setting_sources.includes(source)) {
-			profileForm.setting_sources = profileForm.setting_sources.filter((s) => s !== source);
-		} else {
-			profileForm.setting_sources = [...profileForm.setting_sources, source];
-		}
-	}
-
 	function setTabProfile(tabId: string, profileId: string) {
 		tabs.setTabProfile(tabId, profileId);
 	}
@@ -1917,7 +1412,7 @@
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
 				</svg>
-				{#if $allTabs.length > 1}
+				{#if $allTabs.length > 0}
 					<span class="absolute -top-1 -right-1 w-4 h-4 bg-primary text-primary-foreground text-[10px] font-bold rounded-full flex items-center justify-center shadow-glow">{$allTabs.length}</span>
 				{/if}
 			</button>
@@ -1941,12 +1436,12 @@
 		</div>
 		<div class="mt-auto flex flex-col items-center pb-3 gap-1">
 			{#if $isAdmin}
-				<a href="/settings" class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-white/10 text-muted-foreground hover:text-foreground" title="Settings">
+				<button on:click={() => showSettingsModal = true} class="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-white/10 text-muted-foreground hover:text-foreground" title="Settings">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
 					</svg>
-				</a>
+				</button>
 			{/if}
 			<button on:click={handleLogout} class="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center hover:bg-primary/30 transition-all" title="Logout ({$apiUser ? $apiUser.name : $username})">
 				<span class="text-sm font-medium text-primary">{($apiUser?.name || $username)?.[0]?.toUpperCase() || 'U'}</span>
@@ -2412,19 +1907,21 @@
 				<!-- User Profile Footer -->
 				<div class="mt-auto p-3 border-t border-white/5">
 					<div class="flex items-center gap-3">
-						<div class="w-10 h-10 rounded-full bg-gradient-to-br from-primary/80 to-primary flex items-center justify-center text-primary-foreground font-semibold shadow-glow">
-							{($apiUser?.name || $username)?.[0]?.toUpperCase() || 'U'}
+						<div class="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center font-semibold">
+							<span class="text-sm text-primary">{($apiUser?.name || $username)?.[0]?.toUpperCase() || 'U'}</span>
 						</div>
 						<div class="flex-1 min-w-0">
 							<p class="text-sm font-medium text-foreground truncate">{$apiUser?.name || $username || 'User'}</p>
 							<p class="text-xs text-muted-foreground truncate">{$isAdmin ? 'Administrator' : 'User'}</p>
 						</div>
-						<a href="/settings" class="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/10 transition-all" title="Settings">
-							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-							</svg>
-						</a>
+						{#if $isAdmin}
+							<button on:click={() => showSettingsModal = true} class="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/10 transition-all" title="Settings">
+								<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+								</svg>
+							</button>
+						{/if}
 					</div>
 				</div>
 			{/if}
@@ -2447,16 +1944,64 @@
 							{@const groupProjects = projectsOrganized.grouped.get(group.name) || []}
 							{#if groupProjects.length > 0}
 								<div class="mb-2">
-									<button
-										class="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
-										on:click={() => groups.toggleGroupCollapsed('projects', group.name)}
-									>
-										<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-										</svg>
-										<span class="uppercase tracking-wide">{group.name}</span>
-										<span class="text-muted-foreground/60">({groupProjects.length})</span>
-									</button>
+									<div class="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground group/groupheader">
+										<button
+											class="flex items-center gap-2 flex-1 hover:text-foreground transition-colors"
+											on:click={() => groups.toggleGroupCollapsed('projects', group.name)}
+										>
+											<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+											</svg>
+											<span class="uppercase tracking-wide">{group.name}</span>
+											<span class="text-muted-foreground/60">({groupProjects.length})</span>
+										</button>
+										<div class="relative">
+											<button
+												class="p-1 rounded opacity-0 group-hover/groupheader:opacity-100 hover:bg-accent transition-all"
+												on:click|stopPropagation={(e) => {
+													const menu = e.currentTarget.nextElementSibling;
+													document.querySelectorAll('[data-group-menu]').forEach(m => m !== menu && m.classList.add('hidden'));
+													menu?.classList.toggle('hidden');
+												}}
+												title="Group options"
+											>
+												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
+												</svg>
+											</button>
+											<div data-group-menu class="hidden absolute right-0 top-full mt-1 w-32 bg-card border border-border rounded-lg shadow-lg z-50">
+												<div class="py-1">
+													<button
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
+														on:click|stopPropagation={() => {
+															const newName = prompt('Rename group:', group.name);
+															if (newName?.trim() && newName.trim() !== group.name) {
+																groups.renameGroup('projects', group.name, newName.trim());
+															}
+														}}
+													>
+														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+														</svg>
+														Rename
+													</button>
+													<button
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2 text-destructive"
+														on:click|stopPropagation={() => {
+															if (confirm(`Delete group "${group.name}"? Items will be moved to ungrouped.`)) {
+																groups.deleteGroup('projects', group.name);
+															}
+														}}
+													>
+														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+														</svg>
+														Delete
+													</button>
+												</div>
+											</div>
+										</div>
+									</div>
 									{#if !group.collapsed}
 										<div class="space-y-1 ml-2">
 											{#each groupProjects as project}
@@ -2522,16 +2067,64 @@
 							{@const groupProfiles = profilesOrganized.grouped.get(group.name) || []}
 							{#if groupProfiles.length > 0}
 								<div class="mb-2">
-									<button
-										class="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
-										on:click={() => groups.toggleGroupCollapsed('profiles', group.name)}
-									>
-										<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-										</svg>
-										<span class="uppercase tracking-wide">{group.name}</span>
-										<span class="text-muted-foreground/60">({groupProfiles.length})</span>
-									</button>
+									<div class="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground group/groupheader">
+										<button
+											class="flex items-center gap-2 flex-1 hover:text-foreground transition-colors"
+											on:click={() => groups.toggleGroupCollapsed('profiles', group.name)}
+										>
+											<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+											</svg>
+											<span class="uppercase tracking-wide">{group.name}</span>
+											<span class="text-muted-foreground/60">({groupProfiles.length})</span>
+										</button>
+										<div class="relative">
+											<button
+												class="p-1 rounded opacity-0 group-hover/groupheader:opacity-100 hover:bg-accent transition-all"
+												on:click|stopPropagation={(e) => {
+													const menu = e.currentTarget.nextElementSibling;
+													document.querySelectorAll('[data-group-menu]').forEach(m => m !== menu && m.classList.add('hidden'));
+													menu?.classList.toggle('hidden');
+												}}
+												title="Group options"
+											>
+												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
+												</svg>
+											</button>
+											<div data-group-menu class="hidden absolute right-0 top-full mt-1 w-32 bg-card border border-border rounded-lg shadow-lg z-50">
+												<div class="py-1">
+													<button
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
+														on:click|stopPropagation={() => {
+															const newName = prompt('Rename group:', group.name);
+															if (newName?.trim() && newName.trim() !== group.name) {
+																groups.renameGroup('profiles', group.name, newName.trim());
+															}
+														}}
+													>
+														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+														</svg>
+														Rename
+													</button>
+													<button
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2 text-destructive"
+														on:click|stopPropagation={() => {
+															if (confirm(`Delete group "${group.name}"? Items will be moved to ungrouped.`)) {
+																groups.deleteGroup('profiles', group.name);
+															}
+														}}
+													>
+														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+														</svg>
+														Delete
+													</button>
+												</div>
+											</div>
+										</div>
+									</div>
 									{#if !group.collapsed}
 										<div class="space-y-1 ml-2">
 											{#each groupProfiles as profile}
@@ -2601,16 +2194,64 @@
 							{@const groupAgents = subagentsOrganized.grouped.get(group.name) || []}
 							{#if groupAgents.length > 0}
 								<div class="mb-2">
-									<button
-										class="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
-										on:click={() => groups.toggleGroupCollapsed('subagents', group.name)}
-									>
-										<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-										</svg>
-										<span class="uppercase tracking-wide">{group.name}</span>
-										<span class="text-muted-foreground/60">({groupAgents.length})</span>
-									</button>
+									<div class="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground group/groupheader">
+										<button
+											class="flex items-center gap-2 flex-1 hover:text-foreground transition-colors"
+											on:click={() => groups.toggleGroupCollapsed('subagents', group.name)}
+										>
+											<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+											</svg>
+											<span class="uppercase tracking-wide">{group.name}</span>
+											<span class="text-muted-foreground/60">({groupAgents.length})</span>
+										</button>
+										<div class="relative">
+											<button
+												class="p-1 rounded opacity-0 group-hover/groupheader:opacity-100 hover:bg-accent transition-all"
+												on:click|stopPropagation={(e) => {
+													const menu = e.currentTarget.nextElementSibling;
+													document.querySelectorAll('[data-group-menu]').forEach(m => m !== menu && m.classList.add('hidden'));
+													menu?.classList.toggle('hidden');
+												}}
+												title="Group options"
+											>
+												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
+												</svg>
+											</button>
+											<div data-group-menu class="hidden absolute right-0 top-full mt-1 w-32 bg-card border border-border rounded-lg shadow-lg z-50">
+												<div class="py-1">
+													<button
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
+														on:click|stopPropagation={() => {
+															const newName = prompt('Rename group:', group.name);
+															if (newName?.trim() && newName.trim() !== group.name) {
+																groups.renameGroup('subagents', group.name, newName.trim());
+															}
+														}}
+													>
+														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+														</svg>
+														Rename
+													</button>
+													<button
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2 text-destructive"
+														on:click|stopPropagation={() => {
+															if (confirm(`Delete group "${group.name}"? Items will be moved to ungrouped.`)) {
+																groups.deleteGroup('subagents', group.name);
+															}
+														}}
+													>
+														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+														</svg>
+														Delete
+													</button>
+												</div>
+											</div>
+										</div>
+									</div>
 									{#if !group.collapsed}
 										<div class="space-y-1 ml-2">
 											{#each groupAgents as agent}
@@ -2761,66 +2402,127 @@
 						</div>
 					{/if}
 
-					<!-- History Header (Mobile) -->
-					<div class="flex items-center justify-between px-2 mb-2">
-						<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">History</div>
-						<button
-							on:click={() => tabs.loadSessions()}
-							class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
-							title="Refresh sessions"
-							disabled={$sessionsLoading}
-						>
-							<svg
-								class="w-3.5 h-3.5 {$sessionsLoading ? 'animate-spin' : ''}"
-								fill="none"
-								stroke="currentColor"
-								viewBox="0 0 24 24"
-							>
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-							</svg>
-						</button>
-					</div>
-
-					<!-- Grouped Sessions (Mobile) -->
-					<div class="space-y-3">
-						{#each groupedSessions as group}
-							<div>
-								<!-- Group Header -->
-								<button
-									on:click={() => toggleGroupCollapse(group.key)}
-									class="flex items-center gap-2 px-2 py-1.5 w-full text-left active:bg-accent/50 rounded transition-colors"
-								>
-									<svg
-										class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
-										fill="none"
-										stroke="currentColor"
-										viewBox="0 0 24 24"
-									>
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-									</svg>
-									<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
-									<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
-								</button>
-
-								<!-- Group Content -->
-								{#if !collapsedGroups.has(group.key)}
-									<div class="mt-1 space-y-1">
-										{#each group.sessions as session}
-											<SessionCard
-												{session}
-												abbreviated={true}
-												on:click={() => { openSession(session.id); sidebarOpen = false; }}
-												on:delete={() => deleteSession(null, session.id)}
-											/>
-										{/each}
-									</div>
-								{/if}
+					<!-- Search Results (when searching - Mobile) -->
+					{#if sessionSearchQuery.trim()}
+						<div class="flex items-center justify-between px-2 mb-2">
+							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">
+								{isSearching ? 'Searching...' : `Results (${searchResults.length})`}
 							</div>
-						{/each}
-						{#if filteredSessions.length === 0}
-							<p class="text-xs text-muted-foreground px-2">{sessionSearchQuery ? 'No matching sessions' : 'No chat history yet'}</p>
-						{/if}
-					</div>
+							<button
+								on:click={clearSearch}
+								class="text-xs text-muted-foreground hover:text-foreground transition-colors"
+							>
+								Clear
+							</button>
+						</div>
+
+						<div class="space-y-1">
+							{#if isSearching}
+								<div class="flex items-center justify-center py-8">
+									<svg class="w-5 h-5 animate-spin text-muted-foreground" fill="none" viewBox="0 0 24 24">
+										<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+										<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+									</svg>
+								</div>
+							{:else if searchResults.length === 0}
+								<p class="text-xs text-muted-foreground px-2 py-4 text-center">No sessions found matching "{sessionSearchQuery}"</p>
+							{:else}
+								{#each searchResults as result}
+									<button
+										on:click={() => { openSession(result.id); sidebarOpen = false; }}
+										class="w-full text-left px-3 py-2.5 rounded-lg hover:bg-accent active:bg-accent/70 transition-colors group"
+									>
+										<div class="flex items-start gap-2">
+											<div class="flex-1 min-w-0">
+												<div class="text-sm font-medium text-foreground truncate">
+													{result.title || 'Untitled session'}
+												</div>
+												{#if result.match_type === 'content' && result.match_snippet}
+													<div class="text-xs text-muted-foreground mt-1 line-clamp-2">
+														{result.match_snippet}
+													</div>
+												{/if}
+												<div class="flex items-center gap-2 mt-1">
+													<span class="text-xs text-muted-foreground/70">
+														{new Date(result.updated_at).toLocaleDateString()}
+													</span>
+													{#if result.match_type === 'content'}
+														<span class="text-xs bg-accent px-1.5 py-0.5 rounded text-muted-foreground">
+															Content match
+														</span>
+													{/if}
+												</div>
+											</div>
+											<svg class="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+											</svg>
+										</div>
+									</button>
+								{/each}
+							{/if}
+						</div>
+					{:else}
+						<!-- History Header (Mobile) -->
+						<div class="flex items-center justify-between px-2 mb-2">
+							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">History</div>
+							<button
+								on:click={() => tabs.loadSessions()}
+								class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+								title="Refresh sessions"
+								disabled={$sessionsLoading}
+							>
+								<svg
+									class="w-3.5 h-3.5 {$sessionsLoading ? 'animate-spin' : ''}"
+									fill="none"
+									stroke="currentColor"
+									viewBox="0 0 24 24"
+								>
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+								</svg>
+							</button>
+						</div>
+
+						<!-- Grouped Sessions (Mobile) -->
+						<div class="space-y-3">
+							{#each groupedSessions as group}
+								<div>
+									<!-- Group Header -->
+									<button
+										on:click={() => toggleGroupCollapse(group.key)}
+										class="flex items-center gap-2 px-2 py-1.5 w-full text-left active:bg-accent/50 rounded transition-colors"
+									>
+										<svg
+											class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
+											fill="none"
+											stroke="currentColor"
+											viewBox="0 0 24 24"
+										>
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+										</svg>
+										<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
+										<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
+									</button>
+
+									<!-- Group Content -->
+									{#if !collapsedGroups.has(group.key)}
+										<div class="mt-1 space-y-1">
+											{#each group.sessions as session}
+												<SessionCard
+													{session}
+													abbreviated={true}
+													on:click={() => { openSession(session.id); sidebarOpen = false; }}
+													on:delete={() => deleteSession(null, session.id)}
+												/>
+											{/each}
+										</div>
+									{/if}
+								</div>
+							{/each}
+							{#if filteredSessions.length === 0}
+								<p class="text-xs text-muted-foreground px-2">No chat history yet</p>
+							{/if}
+						</div>
+					{/if}
 				{:else if sidebarTab === 'admin'}
 					<!-- Admin Tab Content (Mobile) -->
 					<!-- Open Tabs Section (Mobile Admin) -->
@@ -2846,78 +2548,139 @@
 						</div>
 					{/if}
 
-					<!-- API User Filter -->
-					<div class="flex items-center justify-between px-2 mb-2">
-						<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">API User Sessions</div>
-						<button
-							on:click={() => tabs.loadAdminSessions($adminSessionsFilter)}
-							class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
-							title="Refresh sessions"
-						>
-							<svg
-								class="w-3.5 h-3.5"
-								fill="none"
-								stroke="currentColor"
-								viewBox="0 0 24 24"
-							>
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-							</svg>
-						</button>
-					</div>
-					<div class="mb-3">
-						<label class="text-xs text-muted-foreground uppercase tracking-wider px-2 block mb-1">Filter by User</label>
-						<select
-							class="w-full bg-accent border border-border rounded-md px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-							value={$adminSessionsFilter ?? ''}
-							on:change={(e) => tabs.setAdminSessionsFilter(e.currentTarget.value || null)}
-						>
-							<option value="">All API Users</option>
-							{#each $apiUsers as user}
-								<option value={user.id}>{user.name}</option>
-							{/each}
-						</select>
-					</div>
-
-					<!-- Grouped Admin Sessions (Mobile) -->
-					<div class="space-y-3">
-						{#each groupedAdminSessions as group}
-							<div>
-								<!-- Group Header -->
-								<button
-									on:click={() => toggleGroupCollapse(group.key)}
-									class="flex items-center gap-2 px-2 py-1.5 w-full text-left active:bg-accent/50 rounded transition-colors"
-								>
-									<svg
-										class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
-										fill="none"
-										stroke="currentColor"
-										viewBox="0 0 24 24"
-									>
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-									</svg>
-									<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
-									<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
-								</button>
-
-								<!-- Group Content -->
-								{#if !collapsedGroups.has(group.key)}
-									<div class="mt-1 space-y-1">
-										{#each group.sessions as session}
-											<SessionCard
-												{session}
-												abbreviated={true}
-												on:click={() => { openSession(session.id); sidebarOpen = false; }}
-												on:delete={() => deleteSession(null, session.id)}
-											/>
-										{/each}
-									</div>
-								{/if}
+					<!-- Search Results (when searching - Mobile Admin) -->
+					{#if sessionSearchQuery.trim()}
+						<div class="flex items-center justify-between px-2 mb-2">
+							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">
+								{isSearching ? 'Searching...' : `Results (${searchResults.length})`}
 							</div>
-						{/each}
-						{#if filteredAdminSessions.length === 0}
-							<p class="text-xs text-muted-foreground px-2">{sessionSearchQuery ? 'No matching sessions' : 'No API user sessions found'}</p>
-						{/if}
-					</div>
+							<button
+								on:click={clearSearch}
+								class="text-xs text-muted-foreground hover:text-foreground transition-colors"
+							>
+								Clear
+							</button>
+						</div>
+
+						<div class="space-y-1">
+							{#if isSearching}
+								<div class="flex items-center justify-center py-8">
+									<svg class="w-5 h-5 animate-spin text-muted-foreground" fill="none" viewBox="0 0 24 24">
+										<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+										<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+									</svg>
+								</div>
+							{:else if searchResults.length === 0}
+								<p class="text-xs text-muted-foreground px-2 py-4 text-center">No sessions found matching "{sessionSearchQuery}"</p>
+							{:else}
+								{#each searchResults as result}
+									<button
+										on:click={() => { openSession(result.id); sidebarOpen = false; }}
+										class="w-full text-left px-3 py-2.5 rounded-lg hover:bg-accent active:bg-accent/70 transition-colors group"
+									>
+										<div class="flex items-start gap-2">
+											<div class="flex-1 min-w-0">
+												<div class="text-sm font-medium text-foreground truncate">
+													{result.title || 'Untitled session'}
+												</div>
+												{#if result.match_type === 'content' && result.match_snippet}
+													<div class="text-xs text-muted-foreground mt-1 line-clamp-2">
+														{result.match_snippet}
+													</div>
+												{/if}
+												<div class="flex items-center gap-2 mt-1">
+													<span class="text-xs text-muted-foreground/70">
+														{new Date(result.updated_at).toLocaleDateString()}
+													</span>
+													{#if result.match_type === 'content'}
+														<span class="text-xs bg-accent px-1.5 py-0.5 rounded text-muted-foreground">
+															Content match
+														</span>
+													{/if}
+												</div>
+											</div>
+											<svg class="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+											</svg>
+										</div>
+									</button>
+								{/each}
+							{/if}
+						</div>
+					{:else}
+						<!-- API User Filter -->
+						<div class="flex items-center justify-between px-2 mb-2">
+							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">API User Sessions</div>
+							<button
+								on:click={() => tabs.loadAdminSessions($adminSessionsFilter)}
+								class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+								title="Refresh sessions"
+							>
+								<svg
+									class="w-3.5 h-3.5"
+									fill="none"
+									stroke="currentColor"
+									viewBox="0 0 24 24"
+								>
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+								</svg>
+							</button>
+						</div>
+						<div class="mb-3">
+							<label class="text-xs text-muted-foreground uppercase tracking-wider px-2 block mb-1">Filter by User</label>
+							<select
+								class="w-full bg-accent border border-border rounded-md px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+								value={$adminSessionsFilter ?? ''}
+								on:change={(e) => tabs.setAdminSessionsFilter(e.currentTarget.value || null)}
+							>
+								<option value="">All API Users</option>
+								{#each $apiUsers as user}
+									<option value={user.id}>{user.name}</option>
+								{/each}
+							</select>
+						</div>
+
+						<!-- Grouped Admin Sessions (Mobile) -->
+						<div class="space-y-3">
+							{#each groupedAdminSessions as group}
+								<div>
+									<!-- Group Header -->
+									<button
+										on:click={() => toggleGroupCollapse(group.key)}
+										class="flex items-center gap-2 px-2 py-1.5 w-full text-left active:bg-accent/50 rounded transition-colors"
+									>
+										<svg
+											class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
+											fill="none"
+											stroke="currentColor"
+											viewBox="0 0 24 24"
+										>
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+										</svg>
+										<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
+										<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
+									</button>
+
+									<!-- Group Content -->
+									{#if !collapsedGroups.has(group.key)}
+										<div class="mt-1 space-y-1">
+											{#each group.sessions as session}
+												<SessionCard
+													{session}
+													abbreviated={true}
+													on:click={() => { openSession(session.id); sidebarOpen = false; }}
+													on:delete={() => deleteSession(null, session.id)}
+												/>
+											{/each}
+										</div>
+									{/if}
+								</div>
+							{/each}
+							{#if filteredAdminSessions.length === 0}
+								<p class="text-xs text-muted-foreground px-2">No API user sessions found</p>
+							{/if}
+						</div>
+					{/if}
 				{/if}
 			</div>
 
@@ -2926,9 +2689,9 @@
 			<div class="flex items-center justify-between">
 				<div class="flex items-center gap-2">
 					<div class="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
-						<span class="text-sm text-primary">{$username?.[0]?.toUpperCase() || 'U'}</span>
+						<span class="text-sm font-medium text-primary">{($apiUser?.name || $username)?.[0]?.toUpperCase() || 'U'}</span>
 					</div>
-					<span class="text-sm text-muted-foreground">{$username}</span>
+					<span class="text-sm text-foreground">{$apiUser?.name || $username}</span>
 				</div>
 				<button on:click={handleLogout} class="text-xs text-muted-foreground hover:text-foreground px-3 py-1.5 rounded-lg hover:bg-white/10 transition-colors">Logout</button>
 			</div>
@@ -2979,16 +2742,16 @@
 	<!-- Mobile Bottom Navigation - Floating Dock -->
 	<nav class="lg:hidden fixed bottom-3 left-3 right-3 z-50 floating-panel rounded-2xl safe-bottom">
 		<div class="flex items-center justify-around h-12">
-			<button on:click={() => { sidebarOpen = false; handleNewTab(); }} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="New Chat">
+			<button on:click={() => { sidebarOpen = false; showToolsMenu = false; handleNewTab(); }} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="New Chat">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
 				</svg>
 			</button>
-			<button on:click={() => sidebarOpen = !sidebarOpen} class="relative flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Chats">
+			<button on:click={() => { showToolsMenu = false; sidebarOpen = !sidebarOpen; }} class="relative flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Chats">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
 				</svg>
-				{#if $allTabs.length > 1}
+				{#if $allTabs.length > 0}
 					<span class="absolute -top-1 -right-1 w-4 h-4 bg-primary text-primary-foreground text-[10px] font-bold rounded-full flex items-center justify-center">{$allTabs.length}</span>
 				{/if}
 			</button>
@@ -2998,12 +2761,12 @@
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
 					</svg>
 				</button>
-				<a href="/settings" on:click={() => sidebarOpen = false} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Settings">
+				<button on:click={() => { sidebarOpen = false; showToolsMenu = false; showSettingsModal = true; }} class="flex items-center justify-center w-12 h-10 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-xl transition-colors" title="Settings">
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
 					</svg>
-				</a>
+				</button>
 			{/if}
 		</div>
 	</nav>
@@ -3014,7 +2777,8 @@
 		{#if $activeTab}
 			{@const currentTab = $activeTab}
 			{@const tabId = currentTab.id}
-			<div class="h-14 flex items-center px-3 sm:px-4 gap-2 relative">
+			<div class="h-14 flex items-center justify-center relative">
+				<div class="w-full max-w-5xl mx-auto px-4 sm:px-8 flex items-center gap-2">
 				<!-- Left: Context Pill -->
 				<div class="flex items-center gap-2">
 					<!-- Context usage dropdown (always show) -->
@@ -3041,9 +2805,6 @@
 									/>
 								</svg>
 								<span>{Math.round(contextPercent)}%</span>
-								<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-								</svg>
 							</button>
 							<!-- Token dropdown -->
 							<div class="absolute left-0 top-full mt-1 w-52 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
@@ -3298,14 +3059,15 @@
 
 				<!-- Right: Connection Status -->
 				<div class="flex items-center gap-2">
-					<div class="floating-pill px-3 py-1.5">
-						<ConnectionStatus wsConnected={currentTab.wsConnected} />
-					</div>
+					<ConnectionStatus wsConnected={currentTab.wsConnected} />
+				</div>
 				</div>
 			</div>
 		{:else}
 			<!-- Empty state context bar (no active tab) -->
-			<div class="h-14 flex items-center px-3 sm:px-4">
+			<div class="h-14 flex items-center justify-center">
+				<div class="w-full max-w-5xl mx-auto px-4 sm:px-8">
+				</div>
 			</div>
 		{/if}
 
@@ -3379,74 +3141,6 @@
 											{#if message.content && !message.streaming}
 												<!-- Action buttons container -->
 												<div class="ml-auto flex items-center gap-1">
-													<!-- Download and Copy URL buttons for generated images -->
-													{#if extractGeneratedImageUrl(message.content)}
-														{@const imageUrl = extractGeneratedImageUrl(message.content)}
-														{@const filename = getFilenameFromUrl(imageUrl || '')}
-														<a
-															href={imageUrl}
-															download={filename}
-															class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors no-underline"
-															title="Download image"
-														>
-															<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-															</svg>
-															<span>Download</span>
-														</a>
-														<button
-															class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
-															on:click={() => copyUrlToClipboard(imageUrl || '', message.id)}
-															title="Copy image URL"
-														>
-															{#if copiedUrlMessageId === message.id}
-																<svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-																</svg>
-																<span class="text-green-500">Copied</span>
-															{:else}
-																<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-																</svg>
-																<span>Copy URL</span>
-															{/if}
-														</button>
-														<span class="w-px h-4 bg-border"></span>
-													{/if}
-													<!-- Download and Copy URL buttons for generated videos -->
-													{#if extractGeneratedVideoUrl(message.content)}
-														{@const videoUrl = extractGeneratedVideoUrl(message.content)}
-														{@const filename = getVideoFilenameFromUrl(videoUrl || '')}
-														<a
-															href={videoUrl}
-															download={filename}
-															class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors no-underline"
-															title="Download video"
-														>
-															<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-															</svg>
-															<span>Download</span>
-														</a>
-														<button
-															class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
-															on:click={() => copyUrlToClipboard(videoUrl || '', message.id)}
-															title="Copy video URL"
-														>
-															{#if copiedUrlMessageId === message.id}
-																<svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-																</svg>
-																<span class="text-green-500">Copied</span>
-															{:else}
-																<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-																</svg>
-																<span>Copy URL</span>
-															{/if}
-														</button>
-														<span class="w-px h-4 bg-border"></span>
-													{/if}
 													<!-- Copy response button -->
 													<button
 														class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
@@ -3471,7 +3165,7 @@
 										<div class="overflow-hidden">
 											<div class="prose prose-sm max-w-none break-words overflow-x-auto">
 												{#if message.content}
-													{@html renderMarkdown(message.content)}
+													{@html renderMarkdown(message.content, message.streaming)}
 													{#if message.streaming}
 														<span class="inline-block w-2 h-4 ml-0.5 bg-primary animate-pulse"></span>
 													{/if}
@@ -3660,7 +3354,7 @@
 			{/if}
 
 			<!-- Input Area - Floating Island -->
-			<div class="p-3 sm:p-4">
+			<div class="px-3 py-1.5 sm:p-4">
 				<div class="max-w-4xl mx-auto">
 					<!-- Hidden file input -->
 					<input type="file" bind:this={fileInput} on:change={handleFileUpload} class="hidden" multiple accept="*/*" />
@@ -3674,136 +3368,8 @@
 					{/if}
 
 					<form on:submit|preventDefault={() => handleSubmit(tabId)} class="relative">
-						<!-- Floating Island Input Container -->
-						<div class="floating-island transition-all duration-200 focus-within:border-primary/40 focus-within:shadow-primary/10 focus-within:shadow-xl">
-
-							<!-- Uploaded Files (inside container) -->
-							{#if (tabUploadedFiles[tabId] || []).length > 0}
-								<div class="px-3 pt-3 pb-0 flex flex-wrap gap-1.5">
-									{#each tabUploadedFiles[tabId] as file, index}
-										<div class="flex items-center gap-1.5 bg-accent/50 text-xs px-2 py-1 rounded-lg group">
-											<svg class="w-3.5 h-3.5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-											</svg>
-											<span class="text-foreground truncate max-w-[100px]" title={file.path}>{file.filename}</span>
-											<button
-												type="button"
-												on:click={() => removeUploadedFile(tabId, index)}
-												class="text-muted-foreground hover:text-destructive opacity-60 group-hover:opacity-100 transition-opacity"
-											>
-												<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-												</svg>
-											</button>
-										</div>
-									{/each}
-								</div>
-							{/if}
-
-							<!-- Main Input Row -->
-							<div class="flex items-center gap-1 p-2 sm:p-2.5">
-								<!-- Textarea Container -->
-								<div class="flex-1 relative min-w-0">
-									<!-- Command Autocomplete -->
-									<CommandAutocomplete
-										bind:this={commandAutocompleteRefs[tabId]}
-										inputValue={tabInputs[tabId] || ''}
-										projectId={currentTab.project}
-										visible={showCommandAutocomplete[tabId] || false}
-										onSelect={(cmd) => handleCommandSelect(tabId, cmd)}
-										onClose={() => {
-											showCommandAutocomplete[tabId] = false;
-											showCommandAutocomplete = showCommandAutocomplete;
-										}}
-									/>
-
-									<!-- File Autocomplete (@ mentions) -->
-									<FileAutocomplete
-										bind:this={fileAutocompleteRefs[tabId]}
-										inputValue={tabInputs[tabId] || ''}
-										projectId={currentTab.project}
-										visible={showFileAutocomplete[tabId] || false}
-										onSelect={(file) => handleFileSelect(tabId, file)}
-										onClose={() => {
-											showFileAutocomplete[tabId] = false;
-											showFileAutocomplete = showFileAutocomplete;
-										}}
-									/>
-
-									<textarea
-										bind:this={textareas[tabId]}
-										bind:value={tabInputs[tabId]}
-										on:input={() => handleInputChange(tabId)}
-										on:keydown={(e) => handleKeyDown(e, tabId)}
-										placeholder={currentTab.isStreaming ? "Queue a message while Claude works..." : "Message Claude... (/ commands, @ files)"}
-										class="w-full bg-transparent border-0 px-2 sm:px-3 py-2 text-foreground placeholder-muted-foreground/60 resize-none focus:outline-none focus:ring-0 min-h-[44px] max-h-[200px] leading-relaxed text-sm sm:text-base"
-										rows="1"
-										disabled={!$claudeAuthenticated}
-									></textarea>
-								</div>
-
-								<!-- Voice/Send/Stop/Queue Buttons -->
-								<div class="flex items-center gap-1">
-									<!-- Voice Recording Button - always available -->
-									<button
-										type="button"
-										on:click={toggleRecording}
-										disabled={!$claudeAuthenticated || isUploading || isTranscribing}
-										class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center rounded-xl transition-all disabled:opacity-30 disabled:cursor-not-allowed {isRecording ? 'bg-destructive/20 text-destructive animate-pulse' : isTranscribing ? 'bg-primary/15 text-primary' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}"
-										title={isRecording ? 'Stop recording' : isTranscribing ? 'Transcribing...' : 'Voice input'}
-									>
-										{#if isTranscribing}
-											<svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
-											</svg>
-										{:else}
-											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-											</svg>
-										{/if}
-									</button>
-									{#if currentTab.isStreaming}
-										<!-- When streaming: show queue button if text entered, always show stop button -->
-										{#if (tabInputs[tabId] || '').trim()}
-											<button
-												type="submit"
-												class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-amber-500/15 text-amber-600 hover:bg-amber-500/25 rounded-xl transition-all"
-												title="Queue message (will be sent when Claude finishes)"
-											>
-												<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-												</svg>
-											</button>
-										{/if}
-										<button
-											type="button"
-											on:click={() => tabs.stopGeneration(tabId)}
-											class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-destructive/15 text-destructive hover:bg-destructive/25 rounded-xl transition-all"
-											title="Stop generating"
-										>
-											<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-												<rect x="6" y="6" width="12" height="12" rx="2" />
-											</svg>
-										</button>
-									{:else}
-										<!-- Send Button -->
-										<button
-											type="submit"
-											class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-primary hover:bg-primary/90 text-primary-foreground rounded-xl transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-											disabled={!(tabInputs[tabId] || '').trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing}
-											title={isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : "Send message"}
-										>
-											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
-											</svg>
-										</button>
-									{/if}
-								</div>
-							</div>
-						</div>
-
-						<!-- Bottom Controls Row (Pills + Attach) -->
-						<div class="mt-2 flex flex-wrap items-center justify-center gap-1.5">
+						<!-- Top Controls Row (Pills + Attach) -->
+						<div class="mb-2 flex flex-wrap items-center justify-center gap-1.5">
 							<!-- Model/Mode Pills (Admin only) -->
 							{#if currentTab && $isAdmin}
 								{@const currentProfile = $profiles.find(p => p.id === currentTab.profile)}
@@ -3822,7 +3388,7 @@
 										disabled={currentTab.isStreaming}
 									>
 										<span>{modelLabels[effectiveModel] || effectiveModel}</span>
-										<svg class="w-2.5 h-2.5 opacity-60 transition-transform {showModelPopup ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<svg class="w-2.5 h-2.5 opacity-60 transition-transform rotate-180 {showModelPopup ? 'rotate-0' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
 										</svg>
 									</button>
@@ -3863,7 +3429,7 @@
 										disabled={currentTab.isStreaming}
 									>
 										<span>{modeLabels[effectiveMode] || effectiveMode}</span>
-										<svg class="w-2.5 h-2.5 opacity-60 transition-transform {showModePopup ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<svg class="w-2.5 h-2.5 opacity-60 transition-transform rotate-180 {showModePopup ? 'rotate-0' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
 										</svg>
 									</button>
@@ -3936,6 +3502,135 @@
 								</button>
 							{/if}
 						</div>
+
+						<!-- Floating Island Input Container -->
+						<div class="floating-island transition-all duration-200 focus-within:border-primary/40 focus-within:shadow-primary/10 focus-within:shadow-xl">
+
+							<!-- Uploaded Files (inside container) -->
+							{#if (tabUploadedFiles[tabId] || []).length > 0}
+								<div class="px-3 pt-3 pb-0 flex flex-wrap gap-1.5">
+									{#each tabUploadedFiles[tabId] as file, index}
+										<div class="flex items-center gap-1.5 bg-accent/50 text-xs px-2 py-1 rounded-lg group">
+											<svg class="w-3.5 h-3.5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+											</svg>
+											<span class="text-foreground truncate max-w-[100px]" title={file.path}>{file.filename}</span>
+											<button
+												type="button"
+												on:click={() => removeUploadedFile(tabId, index)}
+												class="text-muted-foreground hover:text-destructive opacity-60 group-hover:opacity-100 transition-opacity"
+											>
+												<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+												</svg>
+											</button>
+										</div>
+									{/each}
+								</div>
+							{/if}
+
+							<!-- Main Input Row -->
+							<div class="flex items-center gap-1 p-2 sm:p-2.5">
+								<!-- Textarea Container -->
+								<div class="flex-1 relative min-w-0">
+									<!-- Command Autocomplete -->
+									<CommandAutocomplete
+										bind:this={commandAutocompleteRefs[tabId]}
+										inputValue={tabInputs[tabId] || ''}
+										projectId={currentTab.project}
+										visible={showCommandAutocomplete[tabId] || false}
+										onSelect={(cmd) => handleCommandSelect(tabId, cmd)}
+										onClose={() => {
+											showCommandAutocomplete[tabId] = false;
+											showCommandAutocomplete = showCommandAutocomplete;
+										}}
+									/>
+
+									<!-- File Autocomplete (@ mentions) -->
+									<FileAutocomplete
+										bind:this={fileAutocompleteRefs[tabId]}
+										inputValue={tabInputs[tabId] || ''}
+										projectId={currentTab.project}
+										visible={showFileAutocomplete[tabId] || false}
+										onSelect={(file) => handleFileSelect(tabId, file)}
+										onClose={() => {
+											showFileAutocomplete[tabId] = false;
+											showFileAutocomplete = showFileAutocomplete;
+										}}
+									/>
+
+									<textarea
+										bind:this={textareas[tabId]}
+										bind:value={tabInputs[tabId]}
+										on:input={() => handleInputChange(tabId)}
+										on:keydown={(e) => handleKeyDown(e, tabId)}
+										placeholder="Message Claude..."
+										class="w-full bg-transparent border-0 px-2 sm:px-3 py-2 text-foreground placeholder-muted-foreground/60 resize-none focus:outline-none focus:ring-0 min-h-[44px] max-h-[200px] leading-relaxed text-sm sm:text-base"
+										rows="1"
+										disabled={!$claudeAuthenticated}
+									></textarea>
+								</div>
+
+								<!-- Voice/Send/Stop/Queue Buttons -->
+								<div class="flex items-center gap-1">
+									<!-- Voice Recording Button - always available -->
+									<button
+										type="button"
+										on:click={toggleRecording}
+										disabled={!$claudeAuthenticated || isUploading || isTranscribing}
+										class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center rounded-xl transition-all disabled:opacity-30 disabled:cursor-not-allowed {isRecording ? 'bg-destructive/20 text-destructive animate-pulse' : isTranscribing ? 'bg-primary/15 text-primary' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}"
+										title={isRecording ? 'Stop recording' : isTranscribing ? 'Transcribing...' : 'Voice input'}
+									>
+										{#if isTranscribing}
+											<svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
+											</svg>
+										{:else}
+											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+											</svg>
+										{/if}
+									</button>
+									{#if currentTab.isStreaming}
+										<!-- When streaming: show send button if text entered (interrupts then sends), otherwise show stop button -->
+										{#if (tabInputs[tabId] || '').trim()}
+											<button
+												type="submit"
+												class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-primary hover:bg-primary/90 text-primary-foreground rounded-xl transition-all"
+												title="Send message (interrupts current response)"
+											>
+												<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
+												</svg>
+											</button>
+										{:else}
+											<button
+												type="button"
+												on:click={() => tabs.stopGeneration(tabId)}
+												class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-destructive/15 text-destructive hover:bg-destructive/25 rounded-xl transition-all"
+												title="Stop generating"
+											>
+												<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+													<rect x="6" y="6" width="12" height="12" rx="2" />
+												</svg>
+											</button>
+										{/if}
+									{:else}
+										<!-- Send Button -->
+										<button
+											type="submit"
+											class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-primary hover:bg-primary/90 text-primary-foreground rounded-xl transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+											disabled={!(tabInputs[tabId] || '').trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing}
+											title={isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : "Send message"}
+										>
+											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
+											</svg>
+										</button>
+									{/if}
+								</div>
+							</div>
+						</div>
 					</form>
 				</div>
 			</div>
@@ -3999,696 +3694,69 @@
 	<SubagentManager onClose={() => showSubagentManager = false} onUpdate={() => loadSubagents()} />
 {/if}
 
+<!-- Settings Modal -->
+<SettingsModal open={showSettingsModal} onClose={() => showSettingsModal = false} />
+
 <!-- Profile Modal -->
-{#if showProfileModal}
-	<div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" on:click={() => (showProfileModal = false)}>
-		<div class="bg-card rounded-xl w-full max-w-lg max-h-[80vh] overflow-y-auto shadow-l border border-border" on:click|stopPropagation>
-			<div class="p-4 border-b border-border flex items-center justify-between">
-				<h2 class="text-lg font-semibold text-foreground">
-					{showNewProfileForm ? (editingProfile ? 'Edit Profile' : 'New Profile') : 'Profiles'}
-				</h2>
-				<button
-					class="text-muted-foreground hover:text-foreground"
-					on:click={() => {
-						showProfileModal = false;
-						showNewProfileForm = false;
-						resetProfileForm();
-					}}
-				>
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-					</svg>
-				</button>
-			</div>
-
-			<div class="p-4">
-				{#if showNewProfileForm}
-					<div class="space-y-4">
-						<div class="grid grid-cols-2 gap-4">
-							<div>
-								<label class="block text-xs text-muted-foreground mb-1">ID</label>
-								<input
-									bind:value={profileForm.id}
-									disabled={!!editingProfile}
-									class="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground disabled:opacity-50"
-									placeholder="my-profile"
-								/>
-							</div>
-							<div>
-								<label class="block text-xs text-muted-foreground mb-1">Name</label>
-								<input bind:value={profileForm.name} class="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground" placeholder="My Profile" />
-							</div>
-						</div>
-
-						<div>
-							<label class="block text-xs text-muted-foreground mb-1">Description</label>
-							<input bind:value={profileForm.description} class="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground" placeholder="Optional" />
-						</div>
-
-						<div class="grid grid-cols-3 gap-4">
-							<div>
-								<label class="block text-xs text-muted-foreground mb-1">Model</label>
-								<select bind:value={profileForm.model} class="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground">
-									<option value="sonnet">Sonnet</option>
-									<option value="sonnet-1m">Sonnet 1M</option>
-									<option value="opus">Opus</option>
-									<option value="haiku">Haiku</option>
-								</select>
-							</div>
-							<div>
-								<label class="block text-xs text-muted-foreground mb-1">Permission</label>
-								<select bind:value={profileForm.permission_mode} class="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground">
-									<option value="default">Default</option>
-									<option value="acceptEdits">Accept Edits</option>
-									<option value="plan">Plan</option>
-									<option value="bypassPermissions">Bypass</option>
-								</select>
-							</div>
-							<div>
-								<label class="block text-xs text-muted-foreground mb-1">Max Turns</label>
-								<input type="number" bind:value={profileForm.max_turns} class="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground" placeholder="Unlimited" />
-							</div>
-						</div>
-
-						<!-- Tool Configuration Accordion -->
-						<div class="border border-border rounded-lg overflow-hidden">
-							<button
-								type="button"
-								on:click={() => toggleSection('toolConfig')}
-								class="w-full px-3 py-2 bg-accent flex items-center justify-between text-sm text-foreground hover:bg-muted"
-							>
-								<div class="flex items-center gap-2">
-									<span>Tool Configuration</span>
-									{#if availableTools.all_tools.length > 0}
-										<span class="text-xs px-1.5 py-0.5 bg-primary/20 text-primary rounded">
-											{availableTools.all_tools.length}
-										</span>
-									{/if}
-								</div>
-								<svg class="w-4 h-4 transition-transform {expandedSections.toolConfig ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-								</svg>
-							</button>
-							{#if expandedSections.toolConfig}
-								<div class="p-3 space-y-3 bg-card">
-									<!-- Tool selection mode -->
-									<div>
-										<label class="block text-xs text-muted-foreground mb-2">Tool Access Mode</label>
-										<div class="flex gap-2">
-											<button
-												type="button"
-												on:click={() => { toolSelectionMode = 'all'; profileForm.allowed_tools = []; profileForm.disallowed_tools = []; }}
-												class="px-3 py-1.5 text-xs rounded-lg transition-colors {toolSelectionMode === 'all' ? 'bg-violet-600 text-white' : 'bg-muted text-foreground hover:bg-muted/80'}"
-											>
-												All Tools
-											</button>
-											<button
-												type="button"
-												on:click={() => { toolSelectionMode = 'allow'; profileForm.disallowed_tools = []; }}
-												class="px-3 py-1.5 text-xs rounded-lg transition-colors {toolSelectionMode === 'allow' ? 'bg-violet-600 text-white' : 'bg-muted text-foreground hover:bg-muted/80'}"
-											>
-												Allow Only
-											</button>
-											<button
-												type="button"
-												on:click={() => { toolSelectionMode = 'disallow'; profileForm.allowed_tools = []; }}
-												class="px-3 py-1.5 text-xs rounded-lg transition-colors {toolSelectionMode === 'disallow' ? 'bg-violet-600 text-white' : 'bg-muted text-foreground hover:bg-muted/80'}"
-											>
-												Disallow
-											</button>
-										</div>
-										<p class="text-xs text-muted-foreground mt-1">
-											{#if toolSelectionMode === 'all'}
-												Agent can use all available tools.
-											{:else if toolSelectionMode === 'allow'}
-												Agent can ONLY use checked tools.
-											{:else}
-												Agent can use all tools EXCEPT checked ones.
-											{/if}
-										</p>
-									</div>
-
-									<!-- Tool categories and individual tools -->
-									{#if toolSelectionMode !== 'all'}
-										<div class="border-t border-border pt-3 space-y-2">
-											{#each availableTools.categories as category}
-												{#if category.tools.length > 0}
-													{@const categoryToolNames = category.tools.map(t => t.name)}
-													{@const selectedInCategory = toolSelectionMode === 'allow'
-														? categoryToolNames.filter(name => profileForm.allowed_tools.includes(name)).length
-														: categoryToolNames.filter(name => profileForm.disallowed_tools.includes(name)).length}
-													{@const isFullySelected = selectedInCategory === categoryToolNames.length}
-													{@const isPartiallySelected = selectedInCategory > 0 && selectedInCategory < categoryToolNames.length}
-													<div class="border border-border rounded-lg overflow-hidden">
-														<!-- Category header -->
-														<div class="w-full px-3 py-2 bg-muted/50 flex items-center gap-2 text-sm text-foreground">
-															<!-- Custom checkbox with indeterminate state -->
-															<button
-																type="button"
-																on:click|stopPropagation={() => toggleCategory(category)}
-																class="w-4 h-4 rounded flex items-center justify-center transition-colors {isFullySelected ? 'bg-violet-600' : isPartiallySelected ? 'bg-violet-600' : 'bg-muted border border-border'}"
-															>
-																{#if isFullySelected}
-																	<!-- Checkmark icon -->
-																	<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																		<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
-																	</svg>
-																{:else if isPartiallySelected}
-																	<!-- Minus/dash icon for partial selection -->
-																	<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																		<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" />
-																	</svg>
-																{/if}
-															</button>
-															<button
-																type="button"
-																on:click={() => toggleToolCategoryExpansion(category.id)}
-																class="flex-1 flex items-center gap-2 text-left hover:text-foreground/80"
-															>
-																<span class="flex-1">{category.name}</span>
-																<span class="text-xs text-muted-foreground">({category.tools.length} tools)</span>
-																<svg class="w-4 h-4 transition-transform {toolsExpanded[category.id] ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-																</svg>
-															</button>
-														</div>
-														<!-- Individual tools -->
-														{#if toolsExpanded[category.id]}
-															<div class="p-2 space-y-1 bg-card">
-																{#each category.tools as tool}
-																	{@const isSelected = toolSelectionMode === 'allow'
-																		? profileForm.allowed_tools.includes(tool.name)
-																		: profileForm.disallowed_tools.includes(tool.name)}
-																	<label class="flex items-center gap-2 px-2 py-1 rounded hover:bg-muted/50 cursor-pointer">
-																		<input
-																			type="checkbox"
-																			checked={isSelected}
-																			on:change={() => toggleTool(tool.name)}
-																			class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring"
-																		/>
-																		<span class="text-sm text-foreground">{tool.name}</span>
-																		<span class="text-xs text-muted-foreground">- {tool.description}</span>
-																	</label>
-																{/each}
-															</div>
-														{/if}
-													</div>
-												{/if}
-											{/each}
-										</div>
-
-										<!-- Summary of selected tools -->
-										<div class="text-xs text-muted-foreground pt-2 border-t border-border">
-											{#if toolSelectionMode === 'allow'}
-												{profileForm.allowed_tools.length} tool{profileForm.allowed_tools.length !== 1 ? 's' : ''} allowed
-												{#if profileForm.allowed_tools.length > 0}
-													<span class="text-foreground">: {profileForm.allowed_tools.join(', ')}</span>
-												{/if}
-											{:else if toolSelectionMode === 'disallow'}
-												{profileForm.disallowed_tools.length} tool{profileForm.disallowed_tools.length !== 1 ? 's' : ''} blocked
-												{#if profileForm.disallowed_tools.length > 0}
-													<span class="text-foreground">: {profileForm.disallowed_tools.join(', ')}</span>
-												{/if}
-											{/if}
-										</div>
-									{/if}
-
-								</div>
-							{/if}
-						</div>
-
-						<!-- AI Tools Accordion -->
-						<div class="border border-border rounded-lg overflow-hidden">
-							<button
-								type="button"
-								on:click={() => toggleSection('aiTools')}
-								class="w-full px-3 py-2 bg-accent flex items-center justify-between text-sm text-foreground hover:bg-muted"
-							>
-								<div class="flex items-center gap-2">
-									<span>AI Tools</span>
-									{#if aiToolSelectionMode === 'all' || profileForm.enabled_ai_tools.length > 0}
-										<span class="text-xs px-1.5 py-0.5 bg-primary/20 text-primary rounded">
-											{aiToolSelectionMode === 'all' ? getAllAIToolIds().length : profileForm.enabled_ai_tools.length}
-										</span>
-									{/if}
-								</div>
-								<svg class="w-4 h-4 transition-transform {expandedSections.aiTools ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-								</svg>
-							</button>
-							{#if expandedSections.aiTools}
-								<div class="p-3 space-y-3 bg-card">
-									<!-- AI Tool selection mode -->
-									<div>
-										<label class="block text-xs text-muted-foreground mb-2">AI Tool Access Mode</label>
-										<div class="flex gap-2">
-											<button
-												type="button"
-												on:click={() => { aiToolSelectionMode = 'all'; }}
-												class="px-3 py-1.5 text-xs rounded-lg transition-colors {aiToolSelectionMode === 'all' ? 'bg-violet-600 text-white' : 'bg-muted text-foreground hover:bg-muted/80'}"
-											>
-												All Tools
-											</button>
-											<button
-												type="button"
-												on:click={() => { aiToolSelectionMode = 'custom'; }}
-												class="px-3 py-1.5 text-xs rounded-lg transition-colors {aiToolSelectionMode === 'custom' ? 'bg-violet-600 text-white' : 'bg-muted text-foreground hover:bg-muted/80'}"
-											>
-												Custom
-											</button>
-										</div>
-										<p class="text-xs text-muted-foreground mt-1">
-											{#if aiToolSelectionMode === 'all'}
-												All AI tools are enabled. Configure API keys in Settings → Integrations.
-											{:else}
-												Select which AI tools to enable for this profile.
-											{/if}
-										</p>
-									</div>
-
-									<!-- AI Tool categories and individual tools -->
-									{#if aiToolSelectionMode === 'custom'}
-										<div class="border-t border-border pt-3 space-y-2">
-											{#if aiToolsLoading}
-												<div class="text-sm text-muted-foreground text-center py-4">Loading available AI tools...</div>
-											{:else if aiToolCategories.length === 0}
-												<div class="text-sm text-muted-foreground text-center py-4">
-													No AI tools available. Configure API keys in Settings → Integrations.
-												</div>
-											{:else}
-												{#each aiToolCategories as category}
-													{#if category.tools.length > 0}
-														{@const availableTools = category.tools.filter(t => t.available)}
-														{@const categoryToolIds = category.tools.map(t => t.id)}
-														{@const selectedInCategory = categoryToolIds.filter(id => profileForm.enabled_ai_tools.includes(id)).length}
-														{@const isFullySelected = selectedInCategory === categoryToolIds.length}
-														{@const isPartiallySelected = selectedInCategory > 0 && selectedInCategory < categoryToolIds.length}
-														<div class="border border-border rounded-lg overflow-hidden">
-															<!-- Category header -->
-															<div class="w-full px-3 py-2 bg-muted/50 flex items-center gap-2 text-sm text-foreground">
-																<!-- Custom checkbox with indeterminate state -->
-																<button
-																	type="button"
-																	on:click|stopPropagation={() => toggleAIToolCategory(category)}
-																	class="w-4 h-4 rounded flex items-center justify-center transition-colors {isFullySelected ? 'bg-violet-600' : isPartiallySelected ? 'bg-violet-600' : 'bg-muted border border-border'}"
-																>
-																	{#if isFullySelected}
-																		<!-- Checkmark icon -->
-																		<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
-																		</svg>
-																	{:else if isPartiallySelected}
-																		<!-- Minus/dash icon for partial selection -->
-																		<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" />
-																		</svg>
-																	{/if}
-																</button>
-																<button
-																	type="button"
-																	on:click={() => toggleAIToolCategoryExpansion(category.id)}
-																	class="flex-1 flex items-center gap-2 text-left hover:text-foreground/80"
-																>
-																	<span class="flex-1">{category.name}</span>
-																	<span class="text-xs text-muted-foreground">
-																		({availableTools.length}/{category.tools.length} available)
-																	</span>
-																	<svg class="w-4 h-4 transition-transform {aiToolCategoriesExpanded[category.id] ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																		<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-																	</svg>
-																</button>
-															</div>
-															<!-- Individual tools -->
-															{#if aiToolCategoriesExpanded[category.id]}
-																<div class="p-2 space-y-1 bg-card">
-																	{#each category.tools as tool}
-																		{@const isSelected = profileForm.enabled_ai_tools.includes(tool.id)}
-																		<label class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted/50 {tool.available ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'}">
-																			<input
-																				type="checkbox"
-																				checked={isSelected}
-																				disabled={!tool.available}
-																				on:change={() => toggleAITool(tool.id)}
-																				class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring disabled:opacity-50"
-																			/>
-																			<div class="flex-1">
-																				<div class="flex items-center gap-2">
-																					<span class="text-sm text-foreground">{tool.name}</span>
-																					{#if !tool.available}
-																						<span class="text-xs px-1.5 py-0.5 bg-amber-500/20 text-amber-600 rounded">No API key</span>
-																					{:else if tool.active_provider}
-																						<span class="text-xs px-1.5 py-0.5 bg-green-500/20 text-green-600 rounded">{tool.active_provider}</span>
-																					{/if}
-																				</div>
-																				<p class="text-xs text-muted-foreground">{tool.description}</p>
-																			</div>
-																		</label>
-																	{/each}
-																</div>
-															{/if}
-														</div>
-													{/if}
-												{/each}
-											{/if}
-										</div>
-
-										<!-- Summary of selected AI tools -->
-										<div class="text-xs text-muted-foreground pt-2 border-t border-border">
-											{profileForm.enabled_ai_tools.length} AI tool{profileForm.enabled_ai_tools.length !== 1 ? 's' : ''} enabled
-											{#if profileForm.enabled_ai_tools.length > 0}
-												{@const toolNames = profileForm.enabled_ai_tools.map(id => {
-													for (const cat of aiToolCategories) {
-														const tool = cat.tools.find(t => t.id === id);
-														if (tool) return tool.name;
-													}
-													return id;
-												})}
-												<span class="text-foreground">: {toolNames.join(', ')}</span>
-											{/if}
-										</div>
-									{/if}
-								</div>
-							{/if}
-						</div>
-
-						<!-- Behavior Settings Accordion -->
-						<div class="border border-border rounded-lg overflow-hidden">
-							<button
-								type="button"
-								on:click={() => toggleSection('behavior')}
-								class="w-full px-3 py-2 bg-accent flex items-center justify-between text-sm text-foreground hover:bg-muted"
-							>
-								<span>Behavior Settings</span>
-								<svg class="w-4 h-4 transition-transform {expandedSections.behavior ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-								</svg>
-							</button>
-							{#if expandedSections.behavior}
-								<div class="p-3 space-y-3 bg-card">
-									<label class="flex items-center gap-2 cursor-pointer">
-										<input type="checkbox" bind:checked={profileForm.include_partial_messages} class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring" />
-										<div>
-											<span class="text-sm text-foreground">Include Partial Messages</span>
-											<p class="text-xs text-muted-foreground">Stream partial text as it's being generated</p>
-										</div>
-									</label>
-									<label class="flex items-center gap-2 cursor-pointer">
-										<input type="checkbox" bind:checked={profileForm.continue_conversation} class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring" />
-										<div>
-											<span class="text-sm text-foreground">Continue Conversation</span>
-											<p class="text-xs text-muted-foreground">Automatically continue most recent conversation</p>
-										</div>
-									</label>
-									<label class="flex items-center gap-2 cursor-pointer">
-										<input type="checkbox" bind:checked={profileForm.fork_session} class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring" />
-										<div>
-											<span class="text-sm text-foreground">Fork Session</span>
-											<p class="text-xs text-muted-foreground">Create new session ID when resuming</p>
-										</div>
-									</label>
-								</div>
-							{/if}
-						</div>
-
-						<!-- Enabled Subagents Accordion -->
-						<div class="border border-border rounded-lg overflow-hidden">
-							<button
-								type="button"
-								on:click={() => toggleSection('enabledAgents')}
-								class="w-full px-3 py-2 bg-accent flex items-center justify-between text-sm text-foreground hover:bg-muted"
-							>
-								<div class="flex items-center gap-2">
-									<span>Enabled Subagents</span>
-									{#if profileForm.enabled_agents.length > 0}
-										<span class="text-xs px-1.5 py-0.5 bg-primary/20 text-primary rounded">{profileForm.enabled_agents.length}</span>
-									{/if}
-								</div>
-								<svg class="w-4 h-4 transition-transform {expandedSections.enabledAgents ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-								</svg>
-							</button>
-							{#if expandedSections.enabledAgents}
-								<div class="p-3 bg-card">
-									{#if allSubagents.length === 0}
-										<p class="text-sm text-muted-foreground text-center py-2">No subagents configured. Create subagents from the Agents menu.</p>
-									{:else}
-										<p class="text-xs text-muted-foreground mb-3">Select which subagents this profile can use</p>
-										<div class="space-y-2 max-h-48 overflow-y-auto">
-											{#each allSubagents as agent (agent.id)}
-												<label class="flex items-start gap-3 p-2 rounded-lg border border-border hover:border-primary/50 cursor-pointer transition-colors">
-													<input
-														type="checkbox"
-														checked={profileForm.enabled_agents.includes(agent.id)}
-														on:change={() => toggleAgent(agent.id)}
-														class="mt-0.5 w-4 h-4 rounded bg-muted border-0 text-primary focus:ring-ring"
-													/>
-													<div class="flex-1 min-w-0">
-														<div class="flex items-center gap-2">
-															<span class="text-sm font-medium text-foreground">{agent.name}</span>
-															<span class="text-xs px-1.5 py-0.5 rounded bg-primary/10 text-primary">{getModelDisplay(agent.model)}</span>
-														</div>
-														<p class="text-xs text-muted-foreground mt-0.5 line-clamp-1">{agent.description}</p>
-													</div>
-												</label>
-											{/each}
-										</div>
-										<div class="flex items-center justify-between mt-3 pt-2 border-t border-border">
-											<span class="text-xs text-muted-foreground">{profileForm.enabled_agents.length} of {allSubagents.length} enabled</span>
-											<div class="flex gap-2">
-												<button type="button" on:click={() => profileForm.enabled_agents = []} class="text-xs text-primary hover:underline">Clear</button>
-												<button type="button" on:click={() => profileForm.enabled_agents = allSubagents.map(a => a.id)} class="text-xs text-primary hover:underline">All</button>
-											</div>
-										</div>
-									{/if}
-								</div>
-							{/if}
-						</div>
-
-						<!-- System Prompt Accordion -->
-						<div class="border border-border rounded-lg overflow-hidden">
-							<button
-								type="button"
-								on:click={() => toggleSection('systemPrompt')}
-								class="w-full px-3 py-2 bg-accent flex items-center justify-between text-sm text-foreground hover:bg-muted"
-							>
-								<span>System Prompt</span>
-								<svg class="w-4 h-4 transition-transform {expandedSections.systemPrompt ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-								</svg>
-							</button>
-							{#if expandedSections.systemPrompt}
-								<div class="p-3 space-y-3 bg-card">
-									<div>
-										<label class="block text-xs text-muted-foreground mb-1">Prompt Type</label>
-										<select bind:value={profileForm.system_prompt_type} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground">
-											<option value="preset">Claude Code + Appended Instructions</option>
-											<option value="custom">Custom System Prompt</option>
-										</select>
-									</div>
-									{#if profileForm.system_prompt_type === 'preset'}
-										<div>
-											<label class="block text-xs text-muted-foreground mb-1">Append Instructions</label>
-											<textarea bind:value={profileForm.system_prompt_append} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-y" rows="3" placeholder="Additional instructions to append to Claude Code's system prompt..."></textarea>
-											<p class="text-xs text-muted-foreground mt-1">These instructions will be added after Claude Code's built-in system prompt.</p>
-										</div>
-									{:else}
-										<div>
-											<label class="block text-xs text-muted-foreground mb-1">Custom System Prompt</label>
-											<textarea bind:value={profileForm.system_prompt_content} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-y" rows="4" placeholder="Enter your custom system prompt (can be blank)..."></textarea>
-										</div>
-										<label class="flex items-center gap-2 cursor-pointer">
-											<input type="checkbox" bind:checked={profileForm.system_prompt_inject_env} class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring" />
-											<span class="text-sm text-foreground">Inject Environment Details</span>
-										</label>
-										<p class="text-xs text-muted-foreground">Adds working directory, platform, git status, and today's date to the system prompt.</p>
-									{/if}
-								</div>
-							{/if}
-						</div>
-
-						<!-- Settings Sources Accordion -->
-						<div class="border border-border rounded-lg overflow-hidden">
-							<button
-								type="button"
-								on:click={() => toggleSection('settingSources')}
-								class="w-full px-3 py-2 bg-accent flex items-center justify-between text-sm text-foreground hover:bg-muted"
-							>
-								<span>Settings Sources</span>
-								<svg class="w-4 h-4 transition-transform {expandedSections.settingSources ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-								</svg>
-							</button>
-							{#if expandedSections.settingSources}
-								<div class="p-3 bg-card">
-									<p class="text-xs text-muted-foreground mb-2">Load settings from filesystem locations</p>
-									<div class="flex flex-wrap gap-3">
-										<label class="flex items-center gap-2 cursor-pointer">
-											<input type="checkbox" checked={profileForm.setting_sources.includes('user')} on:change={() => toggleSettingSource('user')} class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring" />
-											<span class="text-sm text-foreground">User (~/.claude)</span>
-										</label>
-										<label class="flex items-center gap-2 cursor-pointer">
-											<input type="checkbox" checked={profileForm.setting_sources.includes('project')} on:change={() => toggleSettingSource('project')} class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring" />
-											<span class="text-sm text-foreground">Project (.claude)</span>
-										</label>
-										<label class="flex items-center gap-2 cursor-pointer">
-											<input type="checkbox" checked={profileForm.setting_sources.includes('local')} on:change={() => toggleSettingSource('local')} class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring" />
-											<span class="text-sm text-foreground">Local</span>
-										</label>
-									</div>
-								</div>
-							{/if}
-						</div>
-
-						<!-- Advanced Settings Accordion -->
-						<div class="border border-border rounded-lg overflow-hidden">
-							<button
-								type="button"
-								on:click={() => toggleSection('advanced')}
-								class="w-full px-3 py-2 bg-accent flex items-center justify-between text-sm text-foreground hover:bg-muted"
-							>
-								<span>Advanced Settings</span>
-								<svg class="w-4 h-4 transition-transform {expandedSections.advanced ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-								</svg>
-							</button>
-							{#if expandedSections.advanced}
-								<div class="p-3 space-y-3 bg-card">
-									<div class="grid grid-cols-2 gap-3">
-										<div>
-											<label class="block text-xs text-muted-foreground mb-1">Working Directory</label>
-											<input bind:value={profileForm.cwd} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground" placeholder="/workspace/my-project" />
-										</div>
-										<div>
-											<label class="block text-xs text-muted-foreground mb-1">User Identifier</label>
-											<input bind:value={profileForm.user} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground" placeholder="user@example.com" />
-										</div>
-									</div>
-									<div>
-										<label class="block text-xs text-muted-foreground mb-1">Additional Directories</label>
-										<input bind:value={profileForm.add_dirs} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground" placeholder="/extra/dir1, /extra/dir2 (comma-separated)" />
-									</div>
-									<div>
-										<label class="block text-xs text-muted-foreground mb-1">Max Buffer Size (bytes)</label>
-										<input type="number" bind:value={profileForm.max_buffer_size} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground" placeholder="Default" />
-									</div>
-								</div>
-							{/if}
-						</div>
-
-						<div class="flex gap-2 pt-4">
-							<button
-								on:click={() => {
-									showNewProfileForm = false;
-									resetProfileForm();
-								}}
-								class="flex-1 px-4 py-2 bg-muted text-foreground rounded-lg hover:bg-accent"
-							>
-								Cancel
-							</button>
-							<button on:click={saveProfile} class="flex-1 px-4 py-2 bg-primary text-foreground rounded-lg hover:opacity-90"> Save </button>
-						</div>
-					</div>
-				{:else}
-					<!-- Hidden file input for import -->
-					<input type="file" accept=".json" bind:this={profileImportInput} on:change={handleProfileImport} class="hidden" />
-
-					<div class="space-y-2 mb-4">
-						{#each $profiles as profile}
-							<div class="flex items-center justify-between p-3 bg-accent rounded-lg">
-								<div class="flex-1 min-w-0">
-									<div class="flex items-center gap-2">
-										<p class="text-sm text-foreground font-medium">{profile.name}</p>
-										{#if $groups.profiles.assignments[profile.id]}
-											<span class="text-[10px] px-1.5 py-0.5 bg-primary/10 text-primary rounded">{$groups.profiles.assignments[profile.id]}</span>
-										{/if}
-									</div>
-									<p class="text-xs text-muted-foreground">{profile.id}</p>
-								</div>
-								<div class="flex gap-1">
-									<!-- Group button -->
-									<div class="relative group/dropdown">
-										<button class="p-1.5 text-muted-foreground hover:text-foreground" title="Assign to group">
-											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
-											</svg>
-										</button>
-										<div class="absolute right-0 top-full mt-1 w-40 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover/dropdown:opacity-100 group-hover/dropdown:visible transition-all z-50">
-											<div class="py-1 max-h-48 overflow-y-auto">
-												{#each $groups.profiles.groups as group}
-													<button
-														on:click={() => groups.assignToGroup('profiles', profile.id, group.name)}
-														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
-													>
-														{#if $groups.profiles.assignments[profile.id] === group.name}
-															<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-															</svg>
-														{:else}
-															<span class="w-3"></span>
-														{/if}
-														{group.name}
-													</button>
-												{/each}
-												{#if $groups.profiles.assignments[profile.id]}
-													<button
-														on:click={() => groups.removeFromGroup('profiles', profile.id)}
-														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
-													>
-														<span class="ml-5">Remove</span>
-													</button>
-												{/if}
-												<div class="border-t border-border my-1"></div>
-												<button
-													on:click={() => { const name = prompt('New group name:'); if (name?.trim()) { groups.createGroup('profiles', name.trim()); groups.assignToGroup('profiles', profile.id, name.trim()); } }}
-													class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
-												>
-													<span class="ml-5">+ New group</span>
-												</button>
-											</div>
-										</div>
-									</div>
-									<!-- Export button (always visible) -->
-									<button on:click={() => exportProfile(profile.id)} class="p-1.5 text-muted-foreground hover:text-foreground" title="Export profile">
-										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-										</svg>
-									</button>
-									{#if !profile.is_builtin}
-										<button on:click={() => editProfile(profile)} class="p-1.5 text-muted-foreground hover:text-foreground" title="Edit profile">
-											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-											</svg>
-										</button>
-										<button on:click={() => deleteProfile(profile.id)} class="p-1.5 text-muted-foreground hover:text-destructive" title="Delete profile">
-											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-											</svg>
-										</button>
-									{/if}
-								</div>
-							</div>
-						{/each}
-					</div>
-					<div class="flex gap-2">
-						<button on:click={openNewProfileForm} class="flex-1 py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-gray-500">
-							+ New Profile
-						</button>
-						<button on:click={triggerProfileImport} disabled={profileImporting} class="px-4 py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-gray-500 flex items-center gap-2" title="Import profile from file">
-							{#if profileImporting}
-								<span class="animate-spin inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full"></span>
-							{:else}
-								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-								</svg>
-							{/if}
-							Import
-						</button>
-					</div>
-				{/if}
-			</div>
-		</div>
-	</div>
-{/if}
+<ProfileModal
+	show={showProfileModal}
+	editingProfile={editingProfile}
+	profiles={$profiles}
+	allSubagents={allSubagents}
+	availableTools={availableTools}
+	groups={$groups}
+	on:close={() => {
+		showProfileModal = false;
+		editingProfile = null;
+	}}
+	on:save={async (e) => {
+		const { isNew, data } = e.detail;
+		if (isNew) {
+			await tabs.createProfile(data);
+		} else {
+			await tabs.updateProfile(data.id, {
+				name: data.name,
+				description: data.description,
+				config: data.config
+			});
+		}
+	}}
+	on:delete={async (e) => {
+		const profileId = e.detail;
+		if (confirm('Delete this profile?')) {
+			await tabs.deleteProfile(profileId);
+		}
+	}}
+	on:export={(e) => exportProfile(e.detail)}
+	on:import={async (e) => {
+		const file = e.detail;
+		try {
+			const content = await file.text();
+			const data = JSON.parse(content);
+			if (!data.profiles || data.profiles.length === 0) {
+				alert('No profiles found in file');
+				return;
+			}
+			const result = await api.post<any>('/export-import/import/json?overwrite_existing=false', data);
+			if (result.profiles_imported > 0) {
+				alert(`Imported ${result.profiles_imported} profile(s)`);
+				await tabs.loadProfiles();
+			} else if (result.profiles_skipped > 0) {
+				alert('Profile already exists. Use a different ID or delete the existing one first.');
+			} else if (result.errors?.length > 0) {
+				alert('Import failed: ' + result.errors.join(', '));
+			}
+		} catch (err: any) {
+			alert('Import failed: ' + (err.detail || err.message || 'Invalid JSON file'));
+		}
+	}}
+	on:assignGroup={(e) => groups.assignToGroup('profiles', e.detail.profileId, e.detail.groupName)}
+	on:removeGroup={(e) => groups.removeFromGroup('profiles', e.detail)}
+	on:createGroup={(e) => {
+		groups.createGroup('profiles', e.detail.groupName);
+		groups.assignToGroup('profiles', e.detail.profileId, e.detail.groupName);
+	}}
+/>
 
 <!-- Project Modal -->
 {#if showProjectModal}
@@ -4823,6 +3891,14 @@
 	.scrollbar-hide {
 		-ms-overflow-style: none;
 		scrollbar-width: none;
+	}
+
+	/* Media overlay buttons - show on hover */
+	:global(.generated-media-container:hover .media-overlay-buttons) {
+		opacity: 1 !important;
+	}
+	:global(.media-overlay-buttons) {
+		transition: opacity 0.2s ease-in-out;
 	}
 
 	/* Floating Panel Styles */

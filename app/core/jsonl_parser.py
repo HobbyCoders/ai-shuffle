@@ -28,6 +28,35 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Maximum display size for tool output content (matches streaming behavior)
+MAX_DISPLAY_OUTPUT_SIZE = 2000
+
+
+def _truncate_for_display(content: str, max_size: int = MAX_DISPLAY_OUTPUT_SIZE) -> str:
+    """
+    Truncate content for display purposes.
+
+    Large content like base64-encoded images or file contents should be truncated
+    early in the parsing process to avoid memory issues when sending via WebSocket.
+    """
+    if not content or len(content) <= max_size:
+        return content
+
+    # Check if it looks like base64 image data
+    is_likely_base64 = (
+        'data:image/' in content[:100] or
+        content[:10].startswith('iVBOR') or  # PNG base64 signature
+        content[:10].startswith('/9j/') or   # JPEG base64 signature
+        content[:10].startswith('R0lGOD') or # GIF base64 signature
+        (len(content) > 10000 and sum(c.isalnum() or c in '+/=' for c in content[:1000]) > 950)
+    )
+
+    if is_likely_base64:
+        original_size_kb = int(len(content) * 0.75 / 1024)
+        return f"[Image/binary content - {original_size_kb}KB - truncated for display]"
+
+    return f"{content[:max_size]}\n\n[... truncated - {len(content) // 1024}KB total]"
+
 
 def get_project_dir_name(working_dir: str) -> str:
     """
@@ -464,6 +493,8 @@ def parse_session_history(
                                     file_info = tool_result.get("file", {})
                                     file_content = file_info.get("content", "")
                                     file_path = file_info.get("filePath", "")
+                                    # Truncate file content early - images/large files can be huge
+                                    file_content = _truncate_for_display(file_content)
                                     # Format like the streaming version does
                                     if file_path and file_content:
                                         output = f"File: {file_path}\n{file_content}"
@@ -474,16 +505,16 @@ def parse_session_history(
                                     tr_content = tool_result.get("content", "")
                                     # Content can be string or list of content blocks
                                     if isinstance(tr_content, list):
-                                        output = extract_text_from_content(tr_content)
+                                        output = _truncate_for_display(extract_text_from_content(tr_content))
                                     elif isinstance(tr_content, str):
-                                        output = tr_content
+                                        output = _truncate_for_display(tr_content)
                                     else:
-                                        output = str(tr_content)
+                                        output = _truncate_for_display(str(tr_content))
                                 elif tool_result.get("result"):
-                                    output = str(tool_result.get("result", ""))
+                                    output = _truncate_for_display(str(tool_result.get("result", "")))
                             elif tool_result and isinstance(tool_result, str):
                                 # Sometimes toolUseResult is just a string (error messages)
-                                output = tool_result
+                                output = _truncate_for_display(tool_result)
 
                             # Check if this is a result for a Task tool (subagent)
                             if tool_use_id in task_tool_uses:

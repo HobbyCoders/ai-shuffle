@@ -1134,16 +1134,6 @@
 										<p class="text-xs text-muted-foreground">Your API keys are encrypted at rest using your admin password.</p>
 									</div>
 								</div>
-
-								<div class="bg-muted/30 rounded-lg p-4 text-sm text-muted-foreground">
-									<p class="mb-2"><strong class="text-foreground">How it works:</strong></p>
-									<ul class="list-disc list-inside space-y-1">
-										<li>API keys (OpenAI, Gemini, etc.) are encrypted using a key derived from your password</li>
-										<li>The encryption key is never stored - it's generated when you log in</li>
-										<li>If you change your password, all keys are automatically re-encrypted</li>
-										<li>Even if the database is accessed, keys cannot be decrypted without your password</li>
-									</ul>
-								</div>
 							</div>
 						</div>
 					{/if}
