@@ -1636,11 +1636,26 @@ def build_options_from_profile(
         # Log all stderr at INFO level for debugging subagent issues
         logger.info(f"[Claude CLI stderr] {line}")
         # If a queue is provided, put the line for forwarding to frontend
+        # BUT only forward actual errors - not informational messages like compaction summaries
         if stderr_queue is not None:
-            try:
-                stderr_queue.put_nowait(line)
-            except asyncio.QueueFull:
-                logger.warning(f"[Claude CLI stderr] Queue full, dropping: {line}")
+            # Filter out non-error stderr - Claude SDK outputs some informational content to stderr
+            # Only forward lines that look like actual errors
+            line_lower = line.lower()
+            is_error = (
+                "error" in line_lower or
+                "failed" in line_lower or
+                "exception" in line_lower or
+                "traceback" in line_lower or
+                "fatal" in line_lower or
+                "panic" in line_lower or
+                line.startswith("Error:") or
+                line.startswith("error:")
+            )
+            if is_error:
+                try:
+                    stderr_queue.put_nowait(line)
+                except asyncio.QueueFull:
+                    logger.warning(f"[Claude CLI stderr] Queue full, dropping: {line}")
 
     # Process model selection - handle special 1M context models
     # Models ending in "-1m" use the base model with 1M context beta header
