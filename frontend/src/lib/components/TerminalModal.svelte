@@ -24,20 +24,18 @@
   let isReady = $state(false);
   let error = $state<string | null>(null);
 
-  onMount(() => {
+  onMount(async () => {
     // Dynamic import xterm modules only on client side
-    (async () => {
-      const xtermModule = await import('@xterm/xterm');
-      const fitModule = await import('@xterm/addon-fit');
-      const webLinksModule = await import('@xterm/addon-web-links');
+    const xtermModule = await import('@xterm/xterm');
+    const fitModule = await import('@xterm/addon-fit');
+    const webLinksModule = await import('@xterm/addon-web-links');
 
-      Terminal = xtermModule.Terminal;
-      FitAddon = fitModule.FitAddon;
-      WebLinksAddon = webLinksModule.WebLinksAddon;
+    Terminal = xtermModule.Terminal;
+    FitAddon = fitModule.FitAddon;
+    WebLinksAddon = webLinksModule.WebLinksAddon;
 
-      initTerminal();
-      connectWebSocket();
-    })();
+    initTerminal();
+    connectWebSocket();
 
     // Handle window resize
     window.addEventListener('resize', handleResize);
@@ -90,14 +88,14 @@
     fitAddon.fit();
 
     // Handle keyboard input
-    terminal.onData((data: string) => {
+    terminal.onData((data) => {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'input', data }));
       }
     });
 
     // Handle special keys
-    terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+    terminal.attachCustomKeyEventHandler((event) => {
       // Handle Escape to close
       if (event.key === 'Escape' && event.type === 'keydown') {
         // Send escape to terminal first
