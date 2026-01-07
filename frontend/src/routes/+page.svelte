@@ -55,8 +55,32 @@
 		model?: string;
 	}
 
+	// Tool interfaces for tool configuration
+	interface ToolInfo {
+		name: string;
+		category: string;
+		description: string;
+		mcp_server?: string;
+	}
+
+	interface ToolCategory {
+		id: string;
+		name: string;
+		description: string;
+		tools: ToolInfo[];
+	}
+
+	interface ToolsResponse {
+		categories: ToolCategory[];
+		all_tools: ToolInfo[];
+	}
+
 	// Subagents list for profile config
 	let allSubagents: Subagent[] = [];
+
+	// Available tools for profile config
+	let availableTools: ToolsResponse = { categories: [], all_tools: [] };
+	let toolsExpanded: Record<string, boolean> = {}; // Track expanded categories
 
 	// Load subagents
 	async function loadSubagents() {
@@ -65,6 +89,16 @@
 		} catch (e) {
 			console.error('Failed to load subagents:', e);
 			allSubagents = [];
+		}
+	}
+
+	// Load available tools
+	async function loadTools() {
+		try {
+			availableTools = await api.get<ToolsResponse>('/tools');
+		} catch (e) {
+			console.error('Failed to load tools:', e);
+			availableTools = { categories: [], all_tools: [] };
 		}
 	}
 
@@ -196,6 +230,13 @@
 	let isUploading = false;
 	let textareas: Record<string, HTMLTextAreaElement> = {};
 
+	// Voice recording state
+	let isRecording = false;
+	let isTranscribing = false;
+	let mediaRecorder: MediaRecorder | null = null;
+	let audioChunks: Blob[] = [];
+	let recordingError = '';
+
 	// Terminal modal state for /resume and other interactive commands
 	let showTerminalModal = false;
 	let terminalCommand = '/resume';
@@ -249,8 +290,8 @@
 		model: 'sonnet',
 		permission_mode: 'default',
 		max_turns: null as number | null,
-		allowed_tools: '',
-		disallowed_tools: '',
+		allowed_tools: [] as string[],
+		disallowed_tools: [] as string[],
 		enabled_agents: [] as string[],
 		include_partial_messages: true,
 		continue_conversation: false,
@@ -259,12 +300,16 @@
 		system_prompt_preset: 'claude_code',
 		system_prompt_append: '',
 		system_prompt_content: '',
+		system_prompt_inject_env: false,
 		setting_sources: [] as string[],
 		cwd: '',
 		add_dirs: '',
 		user: '',
 		max_buffer_size: null as number | null
 	};
+
+	// Tool selection mode: 'all' = all tools allowed, 'allow' = whitelist mode, 'disallow' = blacklist mode
+	let toolSelectionMode: 'all' | 'allow' | 'disallow' = 'all';
 
 	// Toggle agent selection
 	function toggleAgent(agentId: string) {
@@ -273,6 +318,105 @@
 		} else {
 			profileForm.enabled_agents = [...profileForm.enabled_agents, agentId];
 		}
+	}
+
+	// Toggle tool selection
+	function toggleTool(toolName: string) {
+		if (toolSelectionMode === 'allow') {
+			if (profileForm.allowed_tools.includes(toolName)) {
+				profileForm.allowed_tools = profileForm.allowed_tools.filter(t => t !== toolName);
+			} else {
+				profileForm.allowed_tools = [...profileForm.allowed_tools, toolName];
+			}
+		} else if (toolSelectionMode === 'disallow') {
+			if (profileForm.disallowed_tools.includes(toolName)) {
+				profileForm.disallowed_tools = profileForm.disallowed_tools.filter(t => t !== toolName);
+			} else {
+				profileForm.disallowed_tools = [...profileForm.disallowed_tools, toolName];
+			}
+		}
+	}
+
+	// Check if a tool is selected based on current mode
+	function isToolSelected(toolName: string): boolean {
+		if (toolSelectionMode === 'all') return true;
+		if (toolSelectionMode === 'allow') return profileForm.allowed_tools.includes(toolName);
+		if (toolSelectionMode === 'disallow') return !profileForm.disallowed_tools.includes(toolName);
+		return true;
+	}
+
+	// Toggle all tools in a category
+	function toggleCategory(category: ToolCategory) {
+		const categoryToolNames = category.tools.map(t => t.name);
+
+		if (toolSelectionMode === 'allow') {
+			const allSelected = categoryToolNames.every(name => profileForm.allowed_tools.includes(name));
+			if (allSelected) {
+				// Deselect all in category
+				profileForm.allowed_tools = profileForm.allowed_tools.filter(t => !categoryToolNames.includes(t));
+			} else {
+				// Select all in category
+				const newTools = categoryToolNames.filter(name => !profileForm.allowed_tools.includes(name));
+				profileForm.allowed_tools = [...profileForm.allowed_tools, ...newTools];
+			}
+		} else if (toolSelectionMode === 'disallow') {
+			const allDisabled = categoryToolNames.every(name => profileForm.disallowed_tools.includes(name));
+			if (allDisabled) {
+				// Enable all in category (remove from disallowed)
+				profileForm.disallowed_tools = profileForm.disallowed_tools.filter(t => !categoryToolNames.includes(t));
+			} else {
+				// Disable all in category (add to disallowed)
+				const newTools = categoryToolNames.filter(name => !profileForm.disallowed_tools.includes(name));
+				profileForm.disallowed_tools = [...profileForm.disallowed_tools, ...newTools];
+			}
+		}
+	}
+
+	// Check if all tools in a category are selected
+	function isCategoryFullySelected(category: ToolCategory): boolean {
+		const categoryToolNames = category.tools.map(t => t.name);
+		if (toolSelectionMode === 'all') return true;
+		if (toolSelectionMode === 'allow') {
+			return categoryToolNames.length > 0 && categoryToolNames.every(name => profileForm.allowed_tools.includes(name));
+		}
+		if (toolSelectionMode === 'disallow') {
+			return categoryToolNames.every(name => !profileForm.disallowed_tools.includes(name));
+		}
+		return true;
+	}
+
+	// Check if some (but not all) tools in a category are selected
+	function isCategoryPartiallySelected(category: ToolCategory): boolean {
+		const categoryToolNames = category.tools.map(t => t.name);
+		if (toolSelectionMode === 'all') return false;
+		if (toolSelectionMode === 'allow') {
+			const selectedCount = categoryToolNames.filter(name => profileForm.allowed_tools.includes(name)).length;
+			return selectedCount > 0 && selectedCount < categoryToolNames.length;
+		}
+		if (toolSelectionMode === 'disallow') {
+			const disabledCount = categoryToolNames.filter(name => profileForm.disallowed_tools.includes(name)).length;
+			return disabledCount > 0 && disabledCount < categoryToolNames.length;
+		}
+		return false;
+	}
+
+	// Check if no tools in a category are selected
+	function isCategoryNoneSelected(category: ToolCategory): boolean {
+		const categoryToolNames = category.tools.map(t => t.name);
+		if (toolSelectionMode === 'all') return false;
+		if (toolSelectionMode === 'allow') {
+			return categoryToolNames.every(name => !profileForm.allowed_tools.includes(name));
+		}
+		if (toolSelectionMode === 'disallow') {
+			return categoryToolNames.every(name => profileForm.disallowed_tools.includes(name));
+		}
+		return false;
+	}
+
+	// Toggle tool category expansion
+	function toggleToolCategoryExpansion(categoryId: string) {
+		toolsExpanded[categoryId] = !toolsExpanded[categoryId];
+		toolsExpanded = toolsExpanded; // Trigger reactivity
 	}
 
 	function getModelDisplay(model?: string): string {
@@ -316,7 +460,8 @@
 				tabs.loadProfiles(),
 				tabs.loadSessions(),
 				tabs.loadProjects(),
-				loadSubagents()
+				loadSubagents(),
+				loadTools()
 			];
 			// Load admin-specific data if user is admin
 			if ($isAdmin) {
@@ -404,7 +549,8 @@
 
 	async function handleSubmit(tabId: string) {
 		const prompt = tabInputs[tabId] || '';
-		if (!prompt.trim() || !$activeTab || $activeTab.isStreaming || isUploading) return;
+		// Allow sending while streaming (streaming input) - tabs.sendMessage will queue the message
+		if (!prompt.trim() || !$activeTab || isUploading) return;
 
 		// API users use their API key restrictions - skip profile/project validation if they have restrictions
 		const isApiUserWithRestrictions = $apiUser && ($apiUser.profile_id || $apiUser.project_id);
@@ -833,8 +979,8 @@
 			model: 'sonnet',
 			permission_mode: 'default',
 			max_turns: null,
-			allowed_tools: '',
-			disallowed_tools: '',
+			allowed_tools: [],
+			disallowed_tools: [],
 			enabled_agents: [],
 			include_partial_messages: true,
 			continue_conversation: false,
@@ -843,12 +989,14 @@
 			system_prompt_preset: 'claude_code',
 			system_prompt_append: '',
 			system_prompt_content: '',
+			system_prompt_inject_env: false,
 			setting_sources: [],
 			cwd: '',
 			add_dirs: '',
 			user: '',
 			max_buffer_size: null
 		};
+		toolSelectionMode = 'all';
 		editingProfile = null;
 	}
 
@@ -862,6 +1010,18 @@
 		const config = profile.config || {};
 		const sp = config.system_prompt || {};
 
+		const allowedTools = config.allowed_tools || [];
+		const disallowedTools = config.disallowed_tools || [];
+
+		// Determine tool selection mode based on what's configured
+		if (allowedTools.length > 0) {
+			toolSelectionMode = 'allow';
+		} else if (disallowedTools.length > 0) {
+			toolSelectionMode = 'disallow';
+		} else {
+			toolSelectionMode = 'all';
+		}
+
 		profileForm = {
 			id: profile.id,
 			name: profile.name,
@@ -869,8 +1029,8 @@
 			model: config.model || 'sonnet',
 			permission_mode: config.permission_mode || 'default',
 			max_turns: config.max_turns || null,
-			allowed_tools: (config.allowed_tools || []).join(', '),
-			disallowed_tools: (config.disallowed_tools || []).join(', '),
+			allowed_tools: allowedTools,
+			disallowed_tools: disallowedTools,
 			enabled_agents: config.enabled_agents || [],
 			include_partial_messages: config.include_partial_messages !== false,
 			continue_conversation: config.continue_conversation || false,
@@ -879,6 +1039,7 @@
 			system_prompt_preset: sp.preset || 'claude_code',
 			system_prompt_append: sp.append || '',
 			system_prompt_content: sp.content || '',
+			system_prompt_inject_env: sp.inject_env_details || false,
 			setting_sources: config.setting_sources || [],
 			cwd: config.cwd || '',
 			add_dirs: (config.add_dirs || []).join(', '),
@@ -900,11 +1061,13 @@
 		};
 
 		if (profileForm.max_turns) config.max_turns = profileForm.max_turns;
-		if (profileForm.allowed_tools.trim()) {
-			config.allowed_tools = profileForm.allowed_tools.split(',').map((t) => t.trim()).filter(Boolean);
+
+		// Handle tool configuration based on selection mode
+		if (toolSelectionMode === 'allow' && profileForm.allowed_tools.length > 0) {
+			config.allowed_tools = profileForm.allowed_tools;
 		}
-		if (profileForm.disallowed_tools.trim()) {
-			config.disallowed_tools = profileForm.disallowed_tools.split(',').map((t) => t.trim()).filter(Boolean);
+		if (toolSelectionMode === 'disallow' && profileForm.disallowed_tools.length > 0) {
+			config.disallowed_tools = profileForm.disallowed_tools;
 		}
 		if (profileForm.enabled_agents.length > 0) {
 			config.enabled_agents = profileForm.enabled_agents;
@@ -927,10 +1090,12 @@
 			if (profileForm.system_prompt_append.trim()) {
 				config.system_prompt.append = profileForm.system_prompt_append;
 			}
-		} else if (profileForm.system_prompt_content.trim()) {
+		} else {
+			// Custom system prompt - allow blank content
 			config.system_prompt = {
 				type: 'custom',
-				content: profileForm.system_prompt_content
+				content: profileForm.system_prompt_content,
+				inject_env_details: profileForm.system_prompt_inject_env
 			};
 		}
 
@@ -957,6 +1122,64 @@
 		if (confirm('Delete this profile?')) {
 			await tabs.deleteProfile(profileId);
 		}
+	}
+
+	// Profile import/export
+	let profileImportInput: HTMLInputElement;
+	let profileImporting = false;
+
+	async function exportProfile(profileId: string) {
+		try {
+			const data = await api.get<any>(`/export-import/profiles/${profileId}`);
+			const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			a.href = url;
+			a.download = `profile-${profileId}-${new Date().toISOString().split('T')[0]}.json`;
+			document.body.appendChild(a);
+			a.click();
+			document.body.removeChild(a);
+			URL.revokeObjectURL(url);
+		} catch (e: any) {
+			alert('Export failed: ' + (e.detail || 'Unknown error'));
+		}
+	}
+
+	function triggerProfileImport() {
+		profileImportInput?.click();
+	}
+
+	async function handleProfileImport(event: Event) {
+		const input = event.target as HTMLInputElement;
+		const file = input.files?.[0];
+		if (!file) return;
+		input.value = '';
+
+		profileImporting = true;
+		try {
+			const content = await file.text();
+			const data = JSON.parse(content);
+
+			if (!data.profiles || data.profiles.length === 0) {
+				alert('No profiles found in file');
+				profileImporting = false;
+				return;
+			}
+
+			const result = await api.post<any>('/export-import/import/json?overwrite_existing=false', data);
+
+			if (result.profiles_imported > 0) {
+				alert(`Imported ${result.profiles_imported} profile(s)`);
+				await tabs.loadProfiles();
+			} else if (result.profiles_skipped > 0) {
+				alert(`Profile already exists. Use a different ID or delete the existing one first.`);
+			} else if (result.errors?.length > 0) {
+				alert('Import failed: ' + result.errors.join(', '));
+			}
+		} catch (e: any) {
+			alert('Import failed: ' + (e.detail || e.message || 'Invalid JSON file'));
+		}
+		profileImporting = false;
 	}
 
 	async function createProject() {
@@ -1016,6 +1239,110 @@
 		if (!files[index]) return;
 		// File references are shown as chips only, just remove from the array
 		tabUploadedFiles[tabId] = files.filter((_, i) => i !== index);
+	}
+
+	// Voice recording functions
+	async function startRecording() {
+		recordingError = '';
+		try {
+			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+			mediaRecorder = new MediaRecorder(stream, {
+				mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4'
+			});
+			audioChunks = [];
+
+			mediaRecorder.ondataavailable = (event) => {
+				if (event.data.size > 0) {
+					audioChunks.push(event.data);
+				}
+			};
+
+			mediaRecorder.onstop = async () => {
+				// Stop all tracks to release the microphone
+				stream.getTracks().forEach(track => track.stop());
+
+				if (audioChunks.length === 0) {
+					recordingError = 'No audio recorded';
+					return;
+				}
+
+				const audioBlob = new Blob(audioChunks, { type: mediaRecorder?.mimeType || 'audio/webm' });
+				await transcribeAudio(audioBlob);
+			};
+
+			mediaRecorder.start();
+			isRecording = true;
+		} catch (error: any) {
+			console.error('Failed to start recording:', error);
+			if (error.name === 'NotAllowedError') {
+				recordingError = 'Microphone access denied. Please allow microphone access in your browser settings.';
+			} else if (error.name === 'NotFoundError') {
+				recordingError = 'No microphone found. Please connect a microphone and try again.';
+			} else {
+				recordingError = `Failed to start recording: ${error.message || 'Unknown error'}`;
+			}
+		}
+	}
+
+	function stopRecording() {
+		if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+			mediaRecorder.stop();
+		}
+		isRecording = false;
+	}
+
+	async function transcribeAudio(audioBlob: Blob) {
+		if (!$activeTabId) return;
+
+		isTranscribing = true;
+		recordingError = '';
+
+		try {
+			const formData = new FormData();
+			formData.append('file', audioBlob, 'recording.webm');
+
+			const response = await fetch('/api/v1/settings/transcribe', {
+				method: 'POST',
+				credentials: 'include',
+				body: formData
+			});
+
+			if (!response.ok) {
+				const error = await response.json().catch(() => ({ detail: 'Transcription failed' }));
+				throw new Error(error.detail || 'Transcription failed');
+			}
+
+			const result = await response.json();
+			const transcribedText = result.text?.trim();
+
+			if (transcribedText) {
+				// Append to current input
+				const tabId = $activeTabId;
+				const currentInput = tabInputs[tabId] || '';
+				tabInputs[tabId] = currentInput ? `${currentInput} ${transcribedText}` : transcribedText;
+
+				// Focus the textarea and trigger auto-resize
+				await tick();
+				const textarea = textareas[tabId];
+				if (textarea) {
+					textarea.focus();
+					autoResizeTextarea(textarea);
+				}
+			}
+		} catch (error: any) {
+			console.error('Transcription failed:', error);
+			recordingError = error.message || 'Failed to transcribe audio';
+		} finally {
+			isTranscribing = false;
+		}
+	}
+
+	function toggleRecording() {
+		if (isRecording) {
+			stopRecording();
+		} else {
+			startRecording();
+		}
 	}
 
 	function toggleSettingSource(source: string) {
@@ -1441,11 +1768,20 @@
 			<!-- Projects Panel Content -->
 			{#if activeSidebarSection === 'projects'}
 				<div class="flex-1 overflow-y-auto p-3">
+					{#if $activeTab?.sessionId}
+						<div class="flex items-center gap-2 p-3 mb-4 bg-muted/50 rounded-lg border border-border">
+							<svg class="w-4 h-4 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+							</svg>
+							<p class="text-xs text-muted-foreground">Project is locked for this chat</p>
+						</div>
+					{/if}
 					<div class="space-y-2 mb-4">
 						{#each $projects as project}
 							<button
-								class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg hover:bg-accent/80 transition-colors text-left {$activeTab?.project === project.id ? 'ring-2 ring-primary' : ''}"
-								on:click={() => { if ($activeTabId) setTabProject($activeTabId, project.id); closeSidebar(); }}
+								class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg transition-colors text-left {$activeTab?.project === project.id ? 'ring-2 ring-primary' : ''} {$activeTab?.sessionId ? 'opacity-50 cursor-not-allowed' : 'hover:bg-accent/80'}"
+								on:click={() => { if ($activeTabId && !$activeTab?.sessionId) { setTabProject($activeTabId, project.id); closeSidebar(); } }}
+								disabled={!!$activeTab?.sessionId}
 							>
 								<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
@@ -1460,7 +1796,7 @@
 							<p class="text-xs text-muted-foreground px-2">No projects yet</p>
 						{/if}
 					</div>
-					<button on:click={() => showProjectModal = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">+ New Project</button>
+					<button on:click={() => showProjectModal = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">{$projects.length === 0 ? '+ Create Project' : 'Manage Projects'}</button>
 				</div>
 			{/if}
 
@@ -1489,7 +1825,7 @@
 							<p class="text-xs text-muted-foreground px-2">No profiles yet</p>
 						{/if}
 					</div>
-					<button on:click={() => showProfileModal = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">+ New Profile</button>
+					<button on:click={() => showProfileModal = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">{$profiles.length === 0 ? '+ Create Profile' : 'Manage Profiles'}</button>
 				</div>
 			{/if}
 
@@ -1527,7 +1863,7 @@
 							</div>
 						{/if}
 					</div>
-					<button on:click={() => showSubagentManager = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">+ Manage Subagents</button>
+					<button on:click={() => showSubagentManager = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">{allSubagents.length === 0 ? '+ Create Subagent' : 'Manage Subagents'}</button>
 				</div>
 			{/if}
 		</aside>
@@ -2428,10 +2764,18 @@
 			<div class="border-t border-border/50 bg-background/80 backdrop-blur-sm p-3 sm:p-4">
 				<div class="max-w-5xl mx-auto">
 					<!-- Hidden file input -->
-					<input type="file" bind:this={fileInput} on:change={handleFileUpload} class="hidden" multiple />
+					<input type="file" bind:this={fileInput} on:change={handleFileUpload} class="hidden" multiple accept="*/*" />
 
 					<!-- Cursor-Style Unified Input Container -->
-					<form on:submit|preventDefault={() => handleSubmit(tabId)} class="relative">
+					<!-- Recording Error Message -->
+						{#if recordingError}
+							<div class="mb-2 px-3 py-2 bg-destructive/10 border border-destructive/30 rounded-lg text-sm text-destructive flex items-center justify-between">
+								<span>{recordingError}</span>
+								<button type="button" on:click={() => recordingError = ''} class="ml-2 hover:opacity-70">&times;</button>
+							</div>
+						{/if}
+
+						<form on:submit|preventDefault={() => handleSubmit(tabId)} class="relative">
 						<div class="bg-card/80 backdrop-blur border border-border/60 rounded-2xl shadow-lg transition-all duration-200 focus-within:border-primary/50 focus-within:shadow-primary/5 focus-within:shadow-xl">
 
 							<!-- Uploaded Files (inside container) -->
@@ -2492,16 +2836,28 @@
 										bind:value={tabInputs[tabId]}
 										on:input={() => handleInputChange(tabId)}
 										on:keydown={(e) => handleKeyDown(e, tabId)}
-										placeholder="Message Claude... (/ commands, @ files)"
+										placeholder={currentTab.isStreaming ? "Queue a message while Claude works..." : "Message Claude... (/ commands, @ files)"}
 										class="w-full bg-transparent border-0 px-2 sm:px-3 py-2 text-foreground placeholder-muted-foreground/60 resize-none focus:outline-none focus:ring-0 min-h-[44px] max-h-[200px] leading-relaxed text-sm sm:text-base"
 										rows="1"
-										disabled={currentTab.isStreaming || !$claudeAuthenticated}
+										disabled={!$claudeAuthenticated}
 									></textarea>
 								</div>
 
-								<!-- Send/Stop Button -->
-								<div>
+								<!-- Voice/Send/Stop/Queue Buttons -->
+								<div class="flex items-center gap-1">
 									{#if currentTab.isStreaming}
+										<!-- When streaming: show queue button if text entered, always show stop button -->
+										{#if (tabInputs[tabId] || '').trim()}
+											<button
+												type="submit"
+												class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-amber-500/15 text-amber-600 hover:bg-amber-500/25 rounded-xl transition-all"
+												title="Queue message (will be sent when Claude finishes)"
+											>
+												<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+												</svg>
+											</button>
+										{/if}
 										<button
 											type="button"
 											on:click={() => tabs.stopGeneration(tabId)}
@@ -2513,11 +2869,30 @@
 											</svg>
 										</button>
 									{:else}
+										<!-- Voice Recording Button -->
+										<button
+											type="button"
+											on:click={toggleRecording}
+											disabled={!$claudeAuthenticated || isUploading || isTranscribing}
+											class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center rounded-xl transition-all disabled:opacity-30 disabled:cursor-not-allowed {isRecording ? 'bg-destructive/20 text-destructive animate-pulse' : isTranscribing ? 'bg-primary/15 text-primary' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}"
+											title={isRecording ? 'Stop recording' : isTranscribing ? 'Transcribing...' : 'Voice input'}
+										>
+											{#if isTranscribing}
+												<svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
+												</svg>
+											{:else}
+												<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+												</svg>
+											{/if}
+										</button>
+										<!-- Send Button -->
 										<button
 											type="submit"
 											class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center bg-primary hover:bg-primary/90 text-primary-foreground rounded-xl transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-											disabled={!(tabInputs[tabId] || '').trim() || !$claudeAuthenticated || isUploading}
-											title={isUploading ? "Uploading files..." : "Send message"}
+											disabled={!(tabInputs[tabId] || '').trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing}
+											title={isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : "Send message"}
 										>
 											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
@@ -2683,7 +3058,7 @@
 
 <!-- Subagent Manager Panel -->
 {#if showSubagentManager}
-	<SubagentManager onClose={() => showSubagentManager = false} />
+	<SubagentManager onClose={() => showSubagentManager = false} onUpdate={() => loadSubagents()} />
 {/if}
 
 <!-- Profile Modal -->
@@ -2770,15 +3145,127 @@
 							</button>
 							{#if expandedSections.toolConfig}
 								<div class="p-3 space-y-3 bg-card">
+									<!-- Tool selection mode -->
 									<div>
-										<label class="block text-xs text-muted-foreground mb-1">Allowed Tools</label>
-										<input bind:value={profileForm.allowed_tools} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground" placeholder="Read, Write, Bash (comma-separated)" />
-										<p class="text-xs text-muted-foreground mt-1">Empty = all tools allowed</p>
+										<label class="block text-xs text-muted-foreground mb-2">Tool Access Mode</label>
+										<div class="flex gap-2">
+											<button
+												type="button"
+												on:click={() => { toolSelectionMode = 'all'; profileForm.allowed_tools = []; profileForm.disallowed_tools = []; }}
+												class="px-3 py-1.5 text-xs rounded-lg transition-colors {toolSelectionMode === 'all' ? 'bg-violet-600 text-white' : 'bg-muted text-foreground hover:bg-muted/80'}"
+											>
+												All Tools
+											</button>
+											<button
+												type="button"
+												on:click={() => { toolSelectionMode = 'allow'; profileForm.disallowed_tools = []; }}
+												class="px-3 py-1.5 text-xs rounded-lg transition-colors {toolSelectionMode === 'allow' ? 'bg-violet-600 text-white' : 'bg-muted text-foreground hover:bg-muted/80'}"
+											>
+												Allow Only
+											</button>
+											<button
+												type="button"
+												on:click={() => { toolSelectionMode = 'disallow'; profileForm.allowed_tools = []; }}
+												class="px-3 py-1.5 text-xs rounded-lg transition-colors {toolSelectionMode === 'disallow' ? 'bg-violet-600 text-white' : 'bg-muted text-foreground hover:bg-muted/80'}"
+											>
+												Disallow
+											</button>
+										</div>
+										<p class="text-xs text-muted-foreground mt-1">
+											{#if toolSelectionMode === 'all'}
+												Agent can use all available tools.
+											{:else if toolSelectionMode === 'allow'}
+												Agent can ONLY use checked tools.
+											{:else}
+												Agent can use all tools EXCEPT checked ones.
+											{/if}
+										</p>
 									</div>
-									<div>
-										<label class="block text-xs text-muted-foreground mb-1">Disallowed Tools</label>
-										<input bind:value={profileForm.disallowed_tools} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground" placeholder="Write, Edit (comma-separated)" />
-									</div>
+
+									<!-- Tool categories and individual tools -->
+									{#if toolSelectionMode !== 'all'}
+										<div class="border-t border-border pt-3 space-y-2">
+											{#each availableTools.categories as category}
+												{#if category.tools.length > 0}
+													{@const categoryToolNames = category.tools.map(t => t.name)}
+													{@const selectedInCategory = toolSelectionMode === 'allow'
+														? categoryToolNames.filter(name => profileForm.allowed_tools.includes(name)).length
+														: categoryToolNames.filter(name => !profileForm.disallowed_tools.includes(name)).length}
+													{@const isFullySelected = selectedInCategory === categoryToolNames.length}
+													{@const isPartiallySelected = selectedInCategory > 0 && selectedInCategory < categoryToolNames.length}
+													<div class="border border-border rounded-lg overflow-hidden">
+														<!-- Category header -->
+														<div class="w-full px-3 py-2 bg-muted/50 flex items-center gap-2 text-sm text-foreground">
+															<!-- Custom checkbox with indeterminate state -->
+															<button
+																type="button"
+																on:click|stopPropagation={() => toggleCategory(category)}
+																class="w-4 h-4 rounded flex items-center justify-center transition-colors {isFullySelected ? 'bg-violet-600' : isPartiallySelected ? 'bg-violet-600' : 'bg-muted border border-border'}"
+															>
+																{#if isFullySelected}
+																	<!-- Checkmark icon -->
+																	<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																		<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
+																	</svg>
+																{:else if isPartiallySelected}
+																	<!-- Minus/dash icon for partial selection -->
+																	<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																		<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" />
+																	</svg>
+																{/if}
+															</button>
+															<button
+																type="button"
+																on:click={() => toggleToolCategoryExpansion(category.id)}
+																class="flex-1 flex items-center gap-2 text-left hover:text-foreground/80"
+															>
+																<span class="flex-1">{category.name}</span>
+																<span class="text-xs text-muted-foreground">({category.tools.length} tools)</span>
+																<svg class="w-4 h-4 transition-transform {toolsExpanded[category.id] ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																	<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+																</svg>
+															</button>
+														</div>
+														<!-- Individual tools -->
+														{#if toolsExpanded[category.id]}
+															<div class="p-2 space-y-1 bg-card">
+																{#each category.tools as tool}
+																	{@const isSelected = toolSelectionMode === 'allow'
+																		? profileForm.allowed_tools.includes(tool.name)
+																		: !profileForm.disallowed_tools.includes(tool.name)}
+																	<label class="flex items-center gap-2 px-2 py-1 rounded hover:bg-muted/50 cursor-pointer">
+																		<input
+																			type="checkbox"
+																			checked={isSelected}
+																			on:change={() => toggleTool(tool.name)}
+																			class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring"
+																		/>
+																		<span class="text-sm text-foreground">{tool.name}</span>
+																		<span class="text-xs text-muted-foreground">- {tool.description}</span>
+																	</label>
+																{/each}
+															</div>
+														{/if}
+													</div>
+												{/if}
+											{/each}
+										</div>
+
+										<!-- Summary of selected tools -->
+										<div class="text-xs text-muted-foreground pt-2 border-t border-border">
+											{#if toolSelectionMode === 'allow'}
+												{profileForm.allowed_tools.length} tool{profileForm.allowed_tools.length !== 1 ? 's' : ''} allowed
+												{#if profileForm.allowed_tools.length > 0}
+													<span class="text-foreground">: {profileForm.allowed_tools.join(', ')}</span>
+												{/if}
+											{:else if toolSelectionMode === 'disallow'}
+												{profileForm.disallowed_tools.length} tool{profileForm.disallowed_tools.length !== 1 ? 's' : ''} blocked
+												{#if profileForm.disallowed_tools.length > 0}
+													<span class="text-foreground">: {profileForm.disallowed_tools.join(', ')}</span>
+												{/if}
+											{/if}
+										</div>
+									{/if}
 								</div>
 							{/if}
 						</div>
@@ -2912,8 +3399,13 @@
 									{:else}
 										<div>
 											<label class="block text-xs text-muted-foreground mb-1">Custom System Prompt</label>
-											<textarea bind:value={profileForm.system_prompt_content} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-none" rows="4" placeholder="Enter your custom system prompt..."></textarea>
+											<textarea bind:value={profileForm.system_prompt_content} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-none" rows="4" placeholder="Enter your custom system prompt (can be blank)..."></textarea>
 										</div>
+										<label class="flex items-center gap-2 cursor-pointer">
+											<input type="checkbox" bind:checked={profileForm.system_prompt_inject_env} class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring" />
+											<span class="text-sm text-foreground">Inject Environment Details</span>
+										</label>
+										<p class="text-xs text-muted-foreground">Adds working directory, platform, git status, and today's date to the system prompt.</p>
 									{/if}
 								</div>
 							{/if}
@@ -3002,6 +3494,9 @@
 						</div>
 					</div>
 				{:else}
+					<!-- Hidden file input for import -->
+					<input type="file" accept=".json" bind:this={profileImportInput} on:change={handleProfileImport} class="hidden" />
+
 					<div class="space-y-2 mb-4">
 						{#each $profiles as profile}
 							<div class="flex items-center justify-between p-3 bg-accent rounded-lg">
@@ -3009,26 +3504,44 @@
 									<p class="text-sm text-foreground font-medium">{profile.name}</p>
 									<p class="text-xs text-muted-foreground">{profile.id}</p>
 								</div>
-								{#if !profile.is_builtin}
-									<div class="flex gap-1">
-										<button on:click={() => editProfile(profile)} class="p-1.5 text-muted-foreground hover:text-foreground">
+								<div class="flex gap-1">
+									<!-- Export button (always visible) -->
+									<button on:click={() => exportProfile(profile.id)} class="p-1.5 text-muted-foreground hover:text-foreground" title="Export profile">
+										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+										</svg>
+									</button>
+									{#if !profile.is_builtin}
+										<button on:click={() => editProfile(profile)} class="p-1.5 text-muted-foreground hover:text-foreground" title="Edit profile">
 											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
 											</svg>
 										</button>
-										<button on:click={() => deleteProfile(profile.id)} class="p-1.5 text-muted-foreground hover:text-destructive">
+										<button on:click={() => deleteProfile(profile.id)} class="p-1.5 text-muted-foreground hover:text-destructive" title="Delete profile">
 											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
 											</svg>
 										</button>
-									</div>
-								{/if}
+									{/if}
+								</div>
 							</div>
 						{/each}
 					</div>
-					<button on:click={openNewProfileForm} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-gray-500">
-						+ New Profile
-					</button>
+					<div class="flex gap-2">
+						<button on:click={openNewProfileForm} class="flex-1 py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-gray-500">
+							+ New Profile
+						</button>
+						<button on:click={triggerProfileImport} disabled={profileImporting} class="px-4 py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-gray-500 flex items-center gap-2" title="Import profile from file">
+							{#if profileImporting}
+								<span class="animate-spin inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full"></span>
+							{:else}
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+								</svg>
+							{/if}
+							Import
+						</button>
+					</div>
 				{/if}
 			</div>
 		</div>

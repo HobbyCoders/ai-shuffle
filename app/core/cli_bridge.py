@@ -10,28 +10,45 @@ See: app/core/jsonl_rewind.py and app/core/checkpoint_manager.py
 
 This module is still used for /resume and other interactive commands that
 genuinely require terminal interaction.
+
+NOTE: PTY functionality is only available on Unix-like systems.
+On Windows, interactive CLI commands are not supported.
 """
 
 import asyncio
 import logging
 import os
-import pty
-import select
-import struct
-import fcntl
-import termios
-import signal
-import pwd
+import sys
 from typing import Optional, Dict, Any, Callable, Awaitable
 from dataclasses import dataclass, field
 from datetime import datetime
 import re
 import uuid
 
+# PTY-related imports are Unix-only
+PTY_AVAILABLE = False
+if sys.platform != 'win32':
+    try:
+        import pty
+        import select
+        import struct
+        import fcntl
+        import termios
+        import signal
+        import pwd
+        PTY_AVAILABLE = True
+    except ImportError:
+        pass
+
 logger = logging.getLogger(__name__)
 
 # Pattern for validating UUID format (used for SDK session IDs)
 UUID_PATTERN = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', re.IGNORECASE)
+
+
+def is_pty_available() -> bool:
+    """Check if PTY functionality is available on this platform."""
+    return PTY_AVAILABLE
 
 
 def validate_session_id(session_id: str) -> bool:
@@ -68,6 +85,9 @@ class CLIBridge:
 
     This allows running interactive commands like /rewind that require
     terminal input (arrow keys, Enter, etc.).
+
+    NOTE: PTY functionality is only available on Unix-like systems.
+    On Windows, this class will return errors for all operations.
     """
 
     def __init__(
@@ -105,6 +125,15 @@ class CLIBridge:
         Returns:
             True if started successfully, False otherwise
         """
+        # Check if PTY is available (Unix only)
+        if not PTY_AVAILABLE:
+            logger.error("PTY not available on this platform (Windows). Interactive CLI commands are not supported.")
+            if self.on_output:
+                await self.on_output("\n[ERROR] Interactive CLI commands are not supported on Windows.\n")
+            if self.on_exit:
+                await self.on_exit(1)
+            return False
+
         if self._is_running:
             logger.warning(f"CLI bridge already running for session {self.session_id}")
             return False

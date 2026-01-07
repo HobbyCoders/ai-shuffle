@@ -7,11 +7,25 @@
 	 */
 	import { api } from '$lib/api/client';
 
-	// Available tools
-	const AVAILABLE_TOOLS = [
-		'Read', 'Write', 'Edit', 'Grep', 'Glob', 'Bash',
-		'WebFetch', 'WebSearch', 'Task', 'NotebookEdit'
-	];
+	// Tool interfaces
+	interface ToolInfo {
+		name: string;
+		category: string;
+		description: string;
+		mcp_server?: string;
+	}
+
+	interface ToolCategory {
+		id: string;
+		name: string;
+		description: string;
+		tools: ToolInfo[];
+	}
+
+	interface ToolsResponse {
+		categories: ToolCategory[];
+		all_tools: ToolInfo[];
+	}
 
 	const MODEL_OPTIONS = [
 		{ value: '', label: 'Inherit' },
@@ -34,9 +48,10 @@
 
 	interface Props {
 		onClose: () => void;
+		onUpdate?: () => void;
 	}
 
-	let { onClose }: Props = $props();
+	let { onClose, onUpdate }: Props = $props();
 
 	// State
 	let subagents = $state<Subagent[]>([]);
@@ -63,6 +78,69 @@
 	// Expanded view
 	let expandedId = $state<string | null>(null);
 
+	// Import/Export state
+	let importInput: HTMLInputElement;
+	let importing = $state(false);
+
+	// Available tools from API
+	let availableTools = $state<ToolsResponse>({ categories: [], all_tools: [] });
+	let toolCategoriesExpanded = $state<Record<string, boolean>>({});
+
+	// Tool selection mode for editor: 'all' = inherit all, 'select' = only selected tools
+	let toolSelectionMode = $state<'all' | 'select'>('all');
+
+	// Load available tools
+	async function loadTools() {
+		try {
+			availableTools = await api.get<ToolsResponse>('/tools');
+		} catch (e) {
+			console.error('Failed to load tools:', e);
+		}
+	}
+
+	// Toggle tool selection
+	function toggleFormTool(toolName: string) {
+		if (formTools.includes(toolName)) {
+			formTools = formTools.filter(t => t !== toolName);
+		} else {
+			formTools = [...formTools, toolName];
+		}
+	}
+
+	// Check if all tools in a category are selected
+	function isCategoryFullySelected(category: ToolCategory): boolean {
+		const categoryToolNames = category.tools.map(t => t.name);
+		return categoryToolNames.length > 0 && categoryToolNames.every(name => formTools.includes(name));
+	}
+
+	// Check if some (but not all) tools in a category are selected
+	function isCategoryPartiallySelected(category: ToolCategory): boolean {
+		const categoryToolNames = category.tools.map(t => t.name);
+		const selectedCount = categoryToolNames.filter(name => formTools.includes(name)).length;
+		return selectedCount > 0 && selectedCount < categoryToolNames.length;
+	}
+
+	// Toggle all tools in a category
+	function toggleFormCategory(category: ToolCategory) {
+		const categoryToolNames = category.tools.map(t => t.name);
+		const allSelected = categoryToolNames.every(name => formTools.includes(name));
+
+		if (allSelected) {
+			// Deselect all in category
+			formTools = formTools.filter(t => !categoryToolNames.includes(t));
+		} else {
+			// Select all in category
+			const newTools = categoryToolNames.filter(name => !formTools.includes(name));
+			formTools = [...formTools, ...newTools];
+		}
+	}
+
+	// Toggle tool category expansion
+	function toggleToolCategoryExpansion(categoryId: string) {
+		toolCategoriesExpanded[categoryId] = !toolCategoriesExpanded[categoryId];
+		toolCategoriesExpanded = toolCategoriesExpanded;
+	}
+
 	// Load subagents
 	async function loadSubagents() {
 		loading = true;
@@ -79,6 +157,7 @@
 
 	$effect(() => {
 		loadSubagents();
+		loadTools();
 	});
 
 	// Open editor for new subagent
@@ -90,6 +169,7 @@
 		formPrompt = '';
 		formTools = [];
 		formModel = '';
+		toolSelectionMode = 'all';
 		showEditor = true;
 	}
 
@@ -102,16 +182,9 @@
 		formPrompt = agent.prompt;
 		formTools = agent.tools || [];
 		formModel = agent.model || '';
+		// Set tool selection mode based on whether tools are restricted
+		toolSelectionMode = (agent.tools && agent.tools.length > 0) ? 'select' : 'all';
 		showEditor = true;
-	}
-
-	// Toggle tool selection
-	function toggleTool(tool: string) {
-		if (formTools.includes(tool)) {
-			formTools = formTools.filter(t => t !== tool);
-		} else {
-			formTools = [...formTools, tool];
-		}
 	}
 
 	// Form validation
@@ -136,7 +209,10 @@
 				description: formDescription,
 				prompt: formPrompt,
 			};
-			if (formTools.length > 0) body.tools = formTools;
+			// Only include tools if in 'select' mode and tools are selected
+			if (toolSelectionMode === 'select' && formTools.length > 0) {
+				body.tools = formTools;
+			}
 			if (formModel) body.model = formModel;
 
 			if (editingSubagent) {
@@ -148,6 +224,7 @@
 
 			showEditor = false;
 			await loadSubagents();
+			onUpdate?.();
 		} catch (e: unknown) {
 			const err = e as { detail?: string; message?: string };
 			error = err.detail || err.message || 'Failed to save subagent';
@@ -168,6 +245,7 @@
 			await api.delete(`/subagents/${deletingId}`);
 			deletingId = null;
 			await loadSubagents();
+			onUpdate?.();
 		} catch (e: unknown) {
 			const err = e as { detail?: string; message?: string };
 			error = err.detail || err.message || 'Failed to delete subagent';
@@ -183,6 +261,68 @@
 			case 'opus': return 'Opus';
 			default: return 'Inherit';
 		}
+	}
+
+	// Export a single subagent
+	async function exportSubagent(agentId: string) {
+		try {
+			const data = await api.get<any>(`/export-import/subagents/${agentId}`);
+			const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			a.href = url;
+			a.download = `subagent-${agentId}-${new Date().toISOString().split('T')[0]}.json`;
+			document.body.appendChild(a);
+			a.click();
+			document.body.removeChild(a);
+			URL.revokeObjectURL(url);
+		} catch (e: unknown) {
+			const err = e as { detail?: string; message?: string };
+			error = 'Export failed: ' + (err.detail || err.message || 'Unknown error');
+		}
+	}
+
+	// Trigger import file dialog
+	function triggerImport() {
+		importInput?.click();
+	}
+
+	// Handle import file selection
+	async function handleImport(event: Event) {
+		const input = event.target as HTMLInputElement;
+		const file = input.files?.[0];
+		if (!file) return;
+		input.value = '';
+
+		importing = true;
+		error = null;
+
+		try {
+			const content = await file.text();
+			const data = JSON.parse(content);
+
+			if (!data.subagents || data.subagents.length === 0) {
+				error = 'No subagents found in file';
+				importing = false;
+				return;
+			}
+
+			const result = await api.post<any>('/export-import/import/json?overwrite_existing=false', data);
+
+			if (result.subagents_imported > 0) {
+				await loadSubagents();
+				onUpdate?.();
+			} else if (result.subagents_skipped > 0) {
+				error = 'Subagent already exists. Use a different ID or delete the existing one first.';
+			} else if (result.errors?.length > 0) {
+				error = 'Import failed: ' + result.errors.join(', ');
+			}
+		} catch (e: unknown) {
+			const err = e as { detail?: string; message?: string };
+			error = 'Import failed: ' + (err.detail || err.message || 'Invalid JSON file');
+		}
+
+		importing = false;
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
@@ -219,6 +359,27 @@
 				<span class="text-sm text-muted-foreground">({subagents.length})</span>
 			</div>
 			<div class="flex items-center gap-2">
+				<!-- Hidden file input for import -->
+				<input type="file" accept=".json" bind:this={importInput} onchange={handleImport} class="hidden" />
+
+				<button
+					onclick={triggerImport}
+					disabled={importing}
+					class="flex items-center gap-1 px-2.5 py-1.5 text-sm font-medium text-foreground bg-muted border border-border rounded-md hover:bg-accent transition-colors"
+					title="Import subagent from file"
+				>
+					{#if importing}
+						<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+							<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+							<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+						</svg>
+					{:else}
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+						</svg>
+					{/if}
+					<span>Import</span>
+				</button>
 				<button
 					onclick={handleCreate}
 					class="flex items-center gap-1 px-2.5 py-1.5 text-sm font-medium text-primary-foreground bg-primary rounded-md hover:bg-primary/90 transition-colors"
@@ -329,6 +490,16 @@
 								<!-- Actions -->
 								<div class="flex items-center gap-2 pt-1">
 									<button
+										onclick={() => exportSubagent(agent.id)}
+										class="px-3 py-1.5 text-sm font-medium text-foreground bg-muted rounded-md hover:bg-muted/80 transition-colors flex items-center gap-1"
+										title="Export subagent"
+									>
+										<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+										</svg>
+										Export
+									</button>
+									<button
 										onclick={() => handleEdit(agent)}
 										class="flex-1 px-3 py-1.5 text-sm font-medium text-foreground bg-muted rounded-md hover:bg-muted/80 transition-colors"
 									>
@@ -438,31 +609,100 @@
 				</div>
 
 				<!-- Tools -->
-				<div class="space-y-2">
-					<div class="flex items-center justify-between">
-						<label class="block text-sm font-medium text-foreground">Allowed Tools</label>
-						<div class="flex gap-2 text-xs">
-							<button type="button" onclick={() => formTools = [...AVAILABLE_TOOLS]} class="text-primary hover:underline">All</button>
-							<span class="text-muted-foreground">|</span>
-							<button type="button" onclick={() => formTools = []} class="text-primary hover:underline">Clear</button>
-						</div>
-					</div>
-					<div class="flex flex-wrap gap-2">
-						{#each AVAILABLE_TOOLS as tool}
-							<button
-								type="button"
-								onclick={() => toggleTool(tool)}
-								class="px-2.5 py-1 text-sm rounded-md border transition-colors {formTools.includes(tool)
-									? 'bg-primary text-primary-foreground border-primary'
-									: 'bg-background text-foreground border-border hover:bg-muted'}"
-							>
-								{tool}
-							</button>
-						{/each}
+				<div class="space-y-3">
+					<label class="block text-sm font-medium text-foreground">Tool Access</label>
+
+					<!-- Tool selection mode -->
+					<div class="flex gap-2">
+						<button
+							type="button"
+							onclick={() => { toolSelectionMode = 'all'; formTools = []; }}
+							class="px-3 py-1.5 text-xs rounded-lg transition-colors {toolSelectionMode === 'all' ? 'bg-primary text-primary-foreground' : 'bg-muted text-foreground hover:bg-muted/80'}"
+						>
+							All Tools
+						</button>
+						<button
+							type="button"
+							onclick={() => toolSelectionMode = 'select'}
+							class="px-3 py-1.5 text-xs rounded-lg transition-colors {toolSelectionMode === 'select' ? 'bg-primary text-primary-foreground' : 'bg-muted text-foreground hover:bg-muted/80'}"
+						>
+							Select Tools
+						</button>
 					</div>
 					<p class="text-xs text-muted-foreground">
-						{formTools.length === 0 ? 'All tools available (inherits from profile)' : `${formTools.length} tool(s) selected`}
+						{#if toolSelectionMode === 'all'}
+							Subagent can use all tools available to the profile.
+						{:else}
+							Subagent can ONLY use the selected tools below.
+						{/if}
 					</p>
+
+					<!-- Tool categories (only shown in select mode) -->
+					{#if toolSelectionMode === 'select'}
+						<div class="space-y-2 border-t border-border pt-3">
+							{#each availableTools.categories as category}
+								{#if category.tools.length > 0}
+									<div class="border border-border rounded-lg overflow-hidden">
+										<!-- Category header -->
+										<div class="w-full px-3 py-2 bg-muted/50 flex items-center gap-2 text-sm text-foreground">
+											<!-- Custom checkbox with indeterminate state -->
+											<button
+												type="button"
+												onclick={() => toggleFormCategory(category)}
+												class="w-4 h-4 rounded flex items-center justify-center transition-colors {isCategoryFullySelected(category) ? 'bg-primary' : isCategoryPartiallySelected(category) ? 'bg-primary' : 'bg-background border border-border'}"
+											>
+												{#if isCategoryFullySelected(category)}
+													<svg class="w-3 h-3 text-primary-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
+													</svg>
+												{:else if isCategoryPartiallySelected(category)}
+													<svg class="w-3 h-3 text-primary-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" />
+													</svg>
+												{/if}
+											</button>
+											<button
+												type="button"
+												onclick={() => toggleToolCategoryExpansion(category.id)}
+												class="flex-1 flex items-center gap-2 text-left hover:text-foreground/80"
+											>
+												<span class="flex-1">{category.name}</span>
+												<span class="text-xs text-muted-foreground">({category.tools.length})</span>
+												<svg class="w-4 h-4 transition-transform {toolCategoriesExpanded[category.id] ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+												</svg>
+											</button>
+										</div>
+										<!-- Individual tools -->
+										{#if toolCategoriesExpanded[category.id]}
+											<div class="p-2 space-y-1 bg-card">
+												{#each category.tools as tool}
+													<label class="flex items-center gap-2 px-2 py-1 rounded hover:bg-muted/50 cursor-pointer">
+														<input
+															type="checkbox"
+															checked={formTools.includes(tool.name)}
+															onchange={() => toggleFormTool(tool.name)}
+															class="w-4 h-4 rounded bg-muted border-0 text-primary focus:ring-ring"
+														/>
+														<span class="text-sm text-foreground">{tool.name}</span>
+														<span class="text-xs text-muted-foreground">- {tool.description}</span>
+													</label>
+												{/each}
+											</div>
+										{/if}
+									</div>
+								{/if}
+							{/each}
+						</div>
+
+						<!-- Summary -->
+						<div class="text-xs text-muted-foreground pt-2 border-t border-border">
+							{formTools.length} tool{formTools.length !== 1 ? 's' : ''} selected
+							{#if formTools.length > 0}
+								<span class="text-foreground">: {formTools.join(', ')}</span>
+							{/if}
+						</div>
+					{/if}
 				</div>
 
 				<!-- Prompt -->

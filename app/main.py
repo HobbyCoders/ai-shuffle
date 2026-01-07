@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app.core.config import settings, ensure_directories
+from app.core.config import settings, ensure_directories, load_workspace_from_database
 from app.db import database
 from app.db.database import init_database
 from app.core.profiles import run_migrations
@@ -23,7 +23,7 @@ from app.core.query_engine import cleanup_stale_sessions
 from app.core.sync_engine import sync_engine
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules
+from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -126,6 +126,12 @@ async def lifespan(app: FastAPI):
 
     # Run database migrations
     run_migrations()
+
+    # Load user-configured workspace path from database (for local mode)
+    load_workspace_from_database()
+
+    # Re-ensure workspace directory exists (in case it was just configured)
+    settings.effective_workspace_dir.mkdir(parents=True, exist_ok=True)
 
     # Check Claude CLI authentication
     if auth_service.is_claude_authenticated():
@@ -230,6 +236,8 @@ app.include_router(commands.router)
 app.include_router(preferences.router)
 app.include_router(subagents.router)
 app.include_router(permission_rules.router)
+app.include_router(import_export.router)
+app.include_router(settings_api.router)
 
 # Serve static files (Svelte build) if they exist
 static_dir = Path(__file__).parent / "static"

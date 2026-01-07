@@ -44,3 +44,16 @@ export async function getClaudeLoginInstructions(): Promise<{
 }> {
 	return api.get('/auth/claude/login-instructions');
 }
+
+// Workspace configuration (for local mode setup)
+export async function getWorkspaceConfig(): Promise<import('./client').WorkspaceConfig> {
+	return api.get('/workspace/config');
+}
+
+export async function setWorkspaceConfig(workspace_path: string): Promise<import('./client').WorkspaceConfig> {
+	return api.post('/workspace/config', { workspace_path });
+}
+
+export async function validateWorkspacePath(workspace_path: string): Promise<import('./client').WorkspaceValidation> {
+	return api.post('/workspace/validate', { workspace_path });
+}

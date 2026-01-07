@@ -91,7 +91,13 @@ class AuthService:
     def __init__(self):
         """Initialize auth service"""
         # Use HOME environment variable for config directories
-        home = Path(os.environ.get('HOME', '/home/appuser'))
+        # On Windows, fall back to USERPROFILE if HOME is not set
+        home = os.environ.get('HOME') or os.environ.get('USERPROFILE')
+        if home:
+            home = Path(home)
+        else:
+            # Last resort fallback
+            home = Path.home() if sys.platform == 'win32' else Path('/home/appuser')
         self.config_dir = home / '.claude'
         self.gh_config_dir = home / '.config' / 'gh'
 

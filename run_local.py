@@ -346,7 +346,7 @@ Examples:
         if not run_setup():
             sys.exit(1)
         print(f"\n{Colors.BOLD}Ready to start!{Colors.END}")
-        print("Run: python run_local.py")
+        print(f"Run: python run_local.py")
         sys.exit(0)
 
     # Normal startup

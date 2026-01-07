@@ -8,9 +8,16 @@ Based on patterns from Anvil's SessionManager:
 """
 
 import logging
+import os
+import platform
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 import uuid
 import asyncio
+from pathlib import Path
 from typing import Optional, Dict, Any, AsyncGenerator
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -28,9 +35,140 @@ from app.core.profiles import get_profile
 from app.core.sync_engine import sync_engine
 from app.core.checkpoint_manager import checkpoint_manager
 from app.core.permission_handler import permission_handler
+from app.core.platform import detect_deployment_mode, DeploymentMode
 from app.core.user_question_handler import user_question_handler
 
 logger = logging.getLogger(__name__)
+
+
+def write_agents_to_filesystem(agents_dict: Dict[str, AgentDefinition], cwd: str) -> Optional[Path]:
+    """
+    Write subagent definitions to .claude/agents/ directory in the working directory.
+
+    WINDOWS-ONLY WORKAROUND: The Claude Code CLI has a known bug where --agents flag
+    doesn't work properly on Windows. Instead, we write agent files to .claude/agents/
+    which the CLI discovers on startup.
+
+    On Docker/Linux, agents are passed directly via the SDK's --agents flag (which works
+    correctly there) and this function should NOT be called.
+
+    Args:
+        agents_dict: Dict mapping agent IDs to AgentDefinition objects
+        cwd: Working directory where .claude/agents/ will be created
+
+    Returns:
+        Path to the agents directory if created, None if no agents
+    """
+    if not agents_dict:
+        return None
+
+    # Create .claude/agents directory in the working directory
+    agents_dir = Path(cwd) / ".claude" / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+
+    written_files = []
+
+    for agent_id, agent_def in agents_dict.items():
+        # Build YAML frontmatter
+        frontmatter_lines = [
+            "---",
+            f"name: {agent_id}",
+            f"description: {agent_def.description}",
+        ]
+
+        # Add tools if specified
+        if agent_def.tools:
+            tools_str = ", ".join(agent_def.tools)
+            frontmatter_lines.append(f"tools: {tools_str}")
+
+        # Add model if specified
+        if agent_def.model:
+            frontmatter_lines.append(f"model: {agent_def.model}")
+
+        frontmatter_lines.append("---")
+        frontmatter_lines.append("")  # Empty line after frontmatter
+
+        # Build full file content
+        content = "\n".join(frontmatter_lines) + agent_def.prompt
+
+        # Write to file
+        agent_file = agents_dir / f"{agent_id}.md"
+        agent_file.write_text(content, encoding="utf-8")
+        written_files.append(agent_file)
+        logger.info(f"Wrote subagent file: {agent_file}")
+
+    logger.info(f"Wrote {len(written_files)} subagent files to {agents_dir}")
+    return agents_dir
+
+
+def cleanup_agents_directory(agents_dir: Path, agent_ids: list) -> None:
+    """
+    Clean up subagent files that were written for this session.
+
+    Only removes files that match the agent IDs we wrote, to avoid
+    removing user-created agents.
+
+    Args:
+        agents_dir: Path to .claude/agents/ directory
+        agent_ids: List of agent IDs to remove
+    """
+    if not agents_dir or not agents_dir.exists():
+        return
+
+    for agent_id in agent_ids:
+        agent_file = agents_dir / f"{agent_id}.md"
+        if agent_file.exists():
+            try:
+                agent_file.unlink()
+                logger.debug(f"Removed subagent file: {agent_file}")
+            except Exception as e:
+                logger.warning(f"Failed to remove subagent file {agent_file}: {e}")
+
+
+def _build_plugins_list(enabled_plugins: Optional[list]) -> Optional[list]:
+    """
+    Build the plugins list for ClaudeAgentOptions from profile's enabled_plugins.
+
+    According to the Claude Agent SDK documentation, plugins are specified as:
+    [{"type": "local", "path": "./my-plugin"}, ...]
+
+    Paths can be:
+    - Relative paths: Resolved relative to workspace directory
+    - Absolute paths: Used as-is
+
+    Args:
+        enabled_plugins: List of plugin paths from profile config
+
+    Returns:
+        List of plugin dicts for SDK, or None if no plugins enabled
+    """
+    if not enabled_plugins:
+        return None
+
+    plugins = []
+    for plugin_path in enabled_plugins:
+        if not plugin_path:
+            continue
+
+        # Resolve path - if relative, resolve from workspace_dir
+        path = Path(plugin_path)
+        if not path.is_absolute():
+            resolved_path = settings.workspace_dir / plugin_path
+        else:
+            resolved_path = path
+
+        # Convert to string for SDK
+        plugins.append({
+            "type": "local",
+            "path": str(resolved_path)
+        })
+        logger.info(f"Adding plugin: {resolved_path}")
+
+    if not plugins:
+        return None
+
+    logger.info(f"Built plugins list with {len(plugins)} plugin(s)")
+    return plugins
 
 
 @dataclass
@@ -43,10 +181,57 @@ class SessionState:
     interrupt_requested: bool = False  # Flag to signal interrupt request
     last_activity: datetime = field(default_factory=datetime.now)
     background_task: Optional[asyncio.Task] = None  # Track background streaming task
+    written_agent_ids: list = field(default_factory=list)  # Track agents written to filesystem
+    agents_dir: Optional[Path] = None  # Path to .claude/agents/ directory
+    # Streaming input support - queue for messages to send while Claude is working
+    message_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
 
 
 # Track active sessions - key is our session_id, value is SessionState
 _active_sessions: Dict[str, SessionState] = {}
+
+
+def get_session_state(session_id: str) -> Optional[SessionState]:
+    """Get the active session state for a session ID"""
+    return _active_sessions.get(session_id)
+
+
+async def queue_user_message(session_id: str, message: str) -> bool:
+    """
+    Queue a user message to be sent to Claude while streaming.
+
+    This supports "streaming input" - allowing users to send additional messages
+    while Claude is still working on the previous response. The message will be
+    delivered to Claude when it finishes the current turn.
+
+    Args:
+        session_id: The session ID to queue the message for
+        message: The user message to queue
+
+    Returns:
+        True if the message was queued successfully, False if session not found or not streaming
+    """
+    state = _active_sessions.get(session_id)
+    if not state:
+        logger.warning(f"Cannot queue message - session {session_id} not found")
+        return False
+
+    if not state.is_streaming:
+        logger.warning(f"Cannot queue message - session {session_id} is not streaming")
+        return False
+
+    # Queue the message
+    await state.message_queue.put(message)
+    logger.info(f"Queued user message for session {session_id}: {message[:50]}...")
+    return True
+
+
+def get_queued_message_count(session_id: str) -> int:
+    """Get the number of queued messages for a session"""
+    state = _active_sessions.get(session_id)
+    if not state:
+        return 0
+    return state.message_queue.qsize()
 
 
 async def cleanup_stale_sessions(max_age_seconds: int = 3600):
@@ -106,6 +291,55 @@ You ARE allowed full access to:
 """
 
 
+def _is_git_repo(working_dir: str) -> bool:
+    """Check if a directory is a git repository."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=working_dir,
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _get_os_version() -> str:
+    """Get the OS version string."""
+    try:
+        if sys.platform == "linux":
+            return f"Linux {platform.release()}"
+        elif sys.platform == "darwin":
+            return f"macOS {platform.mac_ver()[0]}"
+        elif sys.platform == "win32":
+            return f"Windows {platform.release()}"
+        else:
+            return f"{sys.platform} {platform.release()}"
+    except Exception:
+        return sys.platform
+
+
+def generate_environment_details(working_dir: str) -> str:
+    """
+    Generate environment details block for custom system prompts.
+    Similar to Claude Code's dynamic environment injection.
+    """
+    is_git = _is_git_repo(working_dir)
+    os_version = _get_os_version()
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    return f"""Here is useful information about the environment you are running in:
+<env>
+Working directory: {working_dir}
+Is directory a git repo: {"Yes" if is_git else "No"}
+Platform: {sys.platform}
+OS Version: {os_version}
+Today's date: {today}
+</env>"""
+
+
 def build_options_from_profile(
     profile: Dict[str, Any],
     project: Optional[Dict[str, Any]] = None,
@@ -113,10 +347,29 @@ def build_options_from_profile(
     resume_session_id: Optional[str] = None,
     can_use_tool: Optional[callable] = None,
     hooks: Optional[Dict[str, list]] = None
-) -> ClaudeAgentOptions:
-    """Convert a profile to ClaudeAgentOptions with all available options"""
+) -> tuple[ClaudeAgentOptions, Optional[Dict[str, AgentDefinition]]]:
+    """
+    Convert a profile to ClaudeAgentOptions with all available options.
+
+    Returns:
+        Tuple of (ClaudeAgentOptions, agents_dict)
+        - ClaudeAgentOptions: SDK options with agents included for Docker/Linux, excluded for Windows
+        - agents_dict: Dict of agent_id -> AgentDefinition, or None if no agents
+
+    Note: On Windows local mode, --agents CLI flag has a bug where agents are not discovered.
+    Callers should use write_agents_to_filesystem() on Windows only. On Docker/Linux, agents
+    are passed directly via the SDK's --agents flag (which works correctly).
+    """
     config = profile["config"]
     overrides = overrides or {}
+
+    # Determine working directory first (needed for env details injection)
+    if project:
+        working_dir = str(settings.workspace_dir / project["path"])
+    elif config.get("cwd"):
+        working_dir = config.get("cwd")
+    else:
+        working_dir = str(settings.workspace_dir)
 
     # Build system prompt
     system_prompt = config.get("system_prompt")
@@ -130,11 +383,28 @@ def build_options_from_profile(
     elif isinstance(system_prompt, dict):
         prompt_type = system_prompt.get("type", "preset")
 
-        if prompt_type == "custom" and system_prompt.get("content"):
+        if prompt_type == "custom":
             # Custom system prompt - use content directly with security instructions
-            final_system_prompt = SECURITY_INSTRUCTIONS + "\n\n" + system_prompt["content"]
+            # Content can be empty/blank
+            custom_content = system_prompt.get("content", "") or ""
+            inject_env = system_prompt.get("inject_env_details", False)
+
+            # Start building the prompt
+            prompt_parts = [SECURITY_INSTRUCTIONS]
+
+            # Add environment details if enabled
+            if inject_env:
+                prompt_parts.append(generate_environment_details(working_dir))
+
+            # Add custom content if provided
+            if custom_content:
+                prompt_parts.append(custom_content)
+
+            # Add override append if provided
             if override_append:
-                final_system_prompt += "\n\n" + override_append
+                prompt_parts.append(override_append)
+
+            final_system_prompt = "\n\n".join(prompt_parts)
         else:
             # Preset system prompt - pass to SDK with append
             existing_append = system_prompt.get("append", "")
@@ -160,6 +430,7 @@ def build_options_from_profile(
     # The SDK expects AgentDefinition dataclass instances, not raw dicts
     enabled_agent_ids = config.get("enabled_agents", [])
     agents_dict = None
+    logger.info(f"Building agents from enabled_agent_ids: {enabled_agent_ids}")
     if enabled_agent_ids:
         agents_dict = {}
         for agent_id in enabled_agent_ids:
@@ -167,19 +438,29 @@ def build_options_from_profile(
             subagent = database.get_subagent(agent_id)
             if subagent:
                 # Create AgentDefinition dataclass instance
-                agents_dict[agent_id] = AgentDefinition(
+                agent_def = AgentDefinition(
                     description=subagent.get("description", ""),
                     prompt=subagent.get("prompt", ""),
                     tools=subagent.get("tools"),
                     model=subagent.get("model")
                 )
+                agents_dict[agent_id] = agent_def
+                logger.info(f"Loaded subagent '{agent_id}': description='{agent_def.description[:50]}...', tools={agent_def.tools}, model={agent_def.model}")
             else:
-                logger.warning(f"Subagent not found: {agent_id}")
+                logger.warning(f"Subagent not found in database: {agent_id}")
+        logger.info(f"Final agents_dict keys: {list(agents_dict.keys()) if agents_dict else 'None'}")
 
     # Determine permission mode
     permission_mode = overrides.get("permission_mode") or config.get("permission_mode", "default")
 
+    # Create stderr callback to capture CLI errors
+    def stderr_callback(line: str):
+        # Log all stderr at INFO level for debugging subagent issues
+        logger.info(f"[Claude CLI stderr] {line}")
+
     # Build options with all ClaudeAgentOptions fields
+    # Note: We don't set cli_path - let the SDK use its bundled CLI or find system CLI automatically
+    # The SDK handles finding Claude properly on all platforms
     options = ClaudeAgentOptions(
         # Core settings
         model=overrides.get("model") or config.get("model"),
@@ -213,24 +494,33 @@ def build_options_from_profile(
         # User identification
         user=config.get("user"),
 
-        # Subagents
-        agents=agents_dict,
+        # Subagents - On Docker/Linux, pass via --agents (works correctly)
+        # On Windows, agents=None because --agents CLI flag has a bug - must write to filesystem instead
+        agents=agents_dict if detect_deployment_mode() != DeploymentMode.LOCAL else None,
 
         # Permission callback - only set if permission_mode is 'default' and callback provided
         can_use_tool=can_use_tool if permission_mode == "default" and can_use_tool else None,
 
         # Hooks - for interactive tool handling like AskUserQuestion
         hooks=hooks,
+
+        # Stderr callback for debugging
+        stderr=stderr_callback,
+
+        # Plugins - load from enabled_plugins in profile config
+        # Each plugin path is resolved relative to workspace_dir if relative
+        plugins=_build_plugins_list(config.get("enabled_plugins")),
     )
 
-    logger.info(f"Built options with permission_mode={permission_mode}, can_use_tool={options.can_use_tool is not None}, hooks={hooks is not None}")
+    deployment_mode = detect_deployment_mode()
+    logger.info(f"Built options with permission_mode={permission_mode}, can_use_tool={options.can_use_tool is not None}, hooks={hooks is not None}, deployment_mode={deployment_mode}")
+    if deployment_mode == DeploymentMode.LOCAL:
+        logger.info(f"Windows local mode: Agents to write to filesystem: {list(agents_dict.keys()) if agents_dict else 'None'}")
+    else:
+        logger.info(f"Docker mode: Agents passed via SDK: {list(agents_dict.keys()) if agents_dict else 'None'}")
 
-    # Apply working directory - project overrides profile cwd
-    if project:
-        project_path = settings.workspace_dir / project["path"]
-        options.cwd = str(project_path)
-    elif config.get("cwd"):
-        options.cwd = config.get("cwd")
+    # Apply working directory (already computed above for env details)
+    options.cwd = working_dir
 
     # Additional directories
     add_dirs = config.get("add_dirs")
@@ -241,7 +531,7 @@ def build_options_from_profile(
     if resume_session_id:
         options.resume = resume_session_id
 
-    return options
+    return options, agents_dict
 
 
 async def execute_query(
@@ -295,12 +585,18 @@ async def execute_query(
     )
 
     # Build options
-    options = build_options_from_profile(
+    options, agents_dict = build_options_from_profile(
         profile=profile,
         project=project,
         overrides=overrides,
         resume_session_id=resume_id
     )
+
+    # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
+    # On Docker/Linux, agents are already passed via SDK's --agents flag
+    agents_dir = None
+    if agents_dict and options.cwd and detect_deployment_mode() == DeploymentMode.LOCAL:
+        agents_dir = write_agents_to_filesystem(agents_dict, options.cwd)
 
     # Execute query and collect response
     response_text = []
@@ -505,12 +801,20 @@ async def stream_query(
     )
 
     # Build options
-    options = build_options_from_profile(
+    options, agents_dict = build_options_from_profile(
         profile=profile,
         project=project,
         overrides=overrides,
         resume_session_id=resume_id
     )
+
+    # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
+    # On Docker/Linux, agents are already passed via SDK's --agents flag
+    agents_dir = None
+    written_agent_ids = []
+    if agents_dict and options.cwd and detect_deployment_mode() == DeploymentMode.LOCAL:
+        agents_dir = write_agents_to_filesystem(agents_dict, options.cwd)
+        written_agent_ids = list(agents_dict.keys())
 
     # Yield init event
     yield {"type": "init", "session_id": session_id}
@@ -528,25 +832,36 @@ async def stream_query(
             await state.client.disconnect()
         except Exception:
             pass
+        # Clean up agent files from previous session
+        if state.agents_dir and state.written_agent_ids:
+            cleanup_agents_directory(state.agents_dir, state.written_agent_ids)
         del _active_sessions[session_id]
 
     # Always create new client
     logger.info(f"Creating new ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
+    logger.info(f"Options cwd: {options.cwd}")
+    logger.info(f"Agents written to filesystem: {written_agent_ids if written_agent_ids else None}")
     client = ClaudeSDKClient(options=options)
+    logger.info(f"ClaudeSDKClient created, attempting connect...")
 
     # Connect without timeout - Anvil doesn't use timeout for connect()
     try:
         await client.connect()
         logger.info(f"Connected to Claude SDK for session {session_id}")
     except Exception as e:
+        import traceback
         logger.error(f"Failed to connect to Claude SDK for session {session_id}: {e}")
+        logger.error(f"Exception type: {type(e).__name__}")
+        logger.error(f"Full traceback:\n{traceback.format_exc()}")
         yield {"type": "error", "message": f"Connection failed: {e}"}
         return
 
     state = SessionState(
         client=client,
         sdk_session_id=resume_id,
-        is_connected=True
+        is_connected=True,
+        written_agent_ids=written_agent_ids,
+        agents_dir=agents_dir
     )
     _active_sessions[session_id] = state
 
@@ -859,12 +1174,20 @@ async def _run_background_query(
     )
 
     # Build options
-    options = build_options_from_profile(
+    options, agents_dict = build_options_from_profile(
         profile=profile,
         project=project,
         overrides=overrides,
         resume_session_id=resume_id
     )
+
+    # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
+    # On Docker/Linux, agents are already passed via SDK's --agents flag
+    agents_dir = None
+    written_agent_ids = []
+    if agents_dict and options.cwd and detect_deployment_mode() == DeploymentMode.LOCAL:
+        agents_dir = write_agents_to_filesystem(agents_dict, options.cwd)
+        written_agent_ids = list(agents_dict.keys())
 
     # Clean up any existing state for this session
     state = _active_sessions.get(session_id)
@@ -874,10 +1197,14 @@ async def _run_background_query(
             await state.client.disconnect()
         except Exception:
             pass
+        # Clean up agent files from previous session
+        if state.agents_dir and state.written_agent_ids:
+            cleanup_agents_directory(state.agents_dir, state.written_agent_ids)
         del _active_sessions[session_id]
 
     # Always create new client
     logger.info(f"[Background] Creating new ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
+    logger.info(f"[Background] Agents written to filesystem: {written_agent_ids if written_agent_ids else None}")
     client = ClaudeSDKClient(options=options)
 
     # Connect
@@ -899,7 +1226,9 @@ async def _run_background_query(
     state = SessionState(
         client=client,
         sdk_session_id=resume_id,
-        is_connected=True
+        is_connected=True,
+        written_agent_ids=written_agent_ids,
+        agents_dir=agents_dir
     )
     _active_sessions[session_id] = state
 
@@ -1447,7 +1776,7 @@ async def stream_to_websocket(
         logger.info(f"[WS] Created AskUserQuestion hook for session {session_id}")
 
     # Build options with the callback and hooks
-    options = build_options_from_profile(
+    options, agents_dict = build_options_from_profile(
         profile=profile,
         project=project,
         overrides=overrides,
@@ -1455,6 +1784,14 @@ async def stream_to_websocket(
         can_use_tool=can_use_tool_callback,
         hooks=hooks_config
     )
+
+    # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
+    # On Docker/Linux, agents are already passed via SDK's --agents flag
+    agents_dir = None
+    written_agent_ids = []
+    if agents_dict and options.cwd and detect_deployment_mode() == DeploymentMode.LOCAL:
+        agents_dir = write_agents_to_filesystem(agents_dict, options.cwd)
+        written_agent_ids = list(agents_dict.keys())
 
     # Clean up any existing state for this session
     state = _active_sessions.get(session_id)
@@ -1464,25 +1801,36 @@ async def stream_to_websocket(
             await state.client.disconnect()
         except Exception:
             pass
+        # Clean up agent files from previous session
+        if state.agents_dir and state.written_agent_ids:
+            cleanup_agents_directory(state.agents_dir, state.written_agent_ids)
         del _active_sessions[session_id]
 
     # Create new client
     logger.info(f"[WS] Creating ClaudeSDKClient for session {session_id} (resume={resume_id is not None}, include_partial={options.include_partial_messages})")
+    logger.info(f"[WS] Options cwd: {options.cwd}")
+    logger.info(f"[WS] Agents written to filesystem: {written_agent_ids if written_agent_ids else None}")
     client = ClaudeSDKClient(options=options)
+    logger.info(f"[WS] ClaudeSDKClient created, attempting connect...")
 
     # Connect
     try:
         await client.connect()
         logger.info(f"[WS] Connected to Claude SDK for session {session_id}")
     except Exception as e:
+        import traceback
         logger.error(f"[WS] Failed to connect for session {session_id}: {e}")
+        logger.error(f"[WS] Exception type: {type(e).__name__}")
+        logger.error(f"[WS] Full traceback:\n{traceback.format_exc()}")
         yield {"type": "error", "message": f"Connection failed: {e}"}
         return
 
     state = SessionState(
         client=client,
         sdk_session_id=resume_id,
-        is_connected=True
+        is_connected=True,
+        written_agent_ids=written_agent_ids,
+        agents_dir=agents_dir
     )
     _active_sessions[session_id] = state
 
@@ -1816,6 +2164,106 @@ async def stream_to_websocket(
                     metadata["tokens_out"] = message.usage.get("output_tokens", 0)
                     metadata["cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                     metadata["cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
+
+        # Streaming input: After completing the receive_response loop, check for queued messages
+        # This allows users to send messages while Claude is working
+        while not state.message_queue.empty() and not interrupted and not state.interrupt_requested:
+            try:
+                next_prompt = state.message_queue.get_nowait()
+                logger.info(f"[WS] Processing queued message for session {session_id}: {next_prompt[:50]}...")
+
+                # Notify frontend that we're processing a queued message
+                yield {
+                    "type": "queued_message_processing",
+                    "prompt": next_prompt
+                }
+
+                # Send the queued message to Claude and process the response
+                await state.client.query(next_prompt)
+
+                # Process the response for this queued message
+                async for queued_message in state.client.receive_response():
+                    # Check for interrupt
+                    if state.interrupt_requested:
+                        logger.info(f"[WS] Interrupt during queued message processing for session {session_id}")
+                        interrupted = True
+                        break
+
+                    # Handle the same message types as the main loop
+                    if isinstance(queued_message, AssistantMessage):
+                        for block in queued_message.content:
+                            if isinstance(block, TextBlock):
+                                response_text.append(block.text)
+                                if not include_partial:
+                                    yield {"type": "chunk", "content": block.text}
+                            elif isinstance(block, ToolUseBlock):
+                                tool_id = getattr(block, 'id', None)
+                                tool_input = block.input or {}
+                                tool_messages.append({
+                                    "type": "tool_use",
+                                    "name": block.name,
+                                    "tool_id": tool_id,
+                                    "input": tool_input
+                                })
+                                yield {
+                                    "type": "tool_use",
+                                    "name": block.name,
+                                    "id": tool_id,
+                                    "input": tool_input
+                                }
+                            elif isinstance(block, ToolResultBlock):
+                                output = str(block.content)[:2000]
+                                tool_use_id = getattr(block, 'tool_use_id', None)
+                                tool_messages.append({
+                                    "type": "tool_result",
+                                    "name": getattr(block, 'name', 'unknown'),
+                                    "tool_id": tool_use_id,
+                                    "output": output
+                                })
+                                yield {
+                                    "type": "tool_result",
+                                    "name": getattr(block, 'name', 'unknown'),
+                                    "tool_use_id": tool_use_id,
+                                    "output": output,
+                                    "is_error": getattr(block, 'is_error', False)
+                                }
+
+                    elif isinstance(queued_message, StreamEvent):
+                        event = queued_message.event
+                        event_type = event.get("type") if event else None
+                        if event_type == "content_block_delta":
+                            delta = event.get("delta", {})
+                            delta_type = delta.get("type")
+                            if delta_type == "text_delta" and delta.get("text"):
+                                yield {
+                                    "type": "stream_delta",
+                                    "delta_type": "text",
+                                    "content": delta["text"],
+                                    "index": event.get("index", 0)
+                                }
+                            elif delta_type == "input_json_delta" and delta.get("partial_json"):
+                                yield {
+                                    "type": "stream_delta",
+                                    "delta_type": "tool_input",
+                                    "content": delta["partial_json"],
+                                    "index": event.get("index", 0)
+                                }
+
+                    elif isinstance(queued_message, ResultMessage):
+                        # Accumulate metadata from queued message processing
+                        metadata["duration_ms"] = metadata.get("duration_ms", 0) + queued_message.duration_ms
+                        metadata["num_turns"] = metadata.get("num_turns", 0) + queued_message.num_turns
+                        if queued_message.total_cost_usd:
+                            metadata["total_cost_usd"] = metadata.get("total_cost_usd", 0) + queued_message.total_cost_usd
+                        if queued_message.usage:
+                            metadata["tokens_in"] = metadata.get("tokens_in", 0) + queued_message.usage.get("input_tokens", 0)
+                            metadata["tokens_out"] = metadata.get("tokens_out", 0) + queued_message.usage.get("output_tokens", 0)
+                            metadata["cache_creation_tokens"] = metadata.get("cache_creation_tokens", 0) + queued_message.usage.get("cache_creation_input_tokens", 0)
+                            metadata["cache_read_tokens"] = metadata.get("cache_read_tokens", 0) + queued_message.usage.get("cache_read_input_tokens", 0)
+                        break  # Exit inner loop on ResultMessage
+
+            except asyncio.QueueEmpty:
+                break  # No more queued messages
 
     except asyncio.CancelledError:
         interrupted = True

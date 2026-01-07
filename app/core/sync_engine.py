@@ -64,7 +64,7 @@ class StreamingBuffer:
     messages: List[Dict[str, Any]] = field(default_factory=list)
     started_at: datetime = field(default_factory=datetime.utcnow)
 
-    def add_chunk(self, chunk_type: str, content: str, tool_name: str = None, tool_id: str = None, tool_input: Dict = None):
+    def add_chunk(self, chunk_type: str, content: str, tool_name: str = None, tool_id: str = None, tool_input: Dict = None, subtype: str = None, data: Dict = None):
         """Add a streaming chunk to the buffer"""
         # Find or create message for this chunk type
         if chunk_type == 'text':
@@ -104,6 +104,17 @@ class StreamingBuffer:
                 'role': 'assistant',
                 'content': content,
                 'tool_id': tool_id,
+                'streaming': False
+            })
+        elif chunk_type == 'system':
+            # System message (e.g., /context output, local commands)
+            # These need to be buffered so late-joining devices see them
+            self.messages.append({
+                'type': 'system',
+                'role': 'system',
+                'content': content,
+                'subtype': subtype,
+                'data': data,
                 'streaming': False
             })
 
@@ -292,7 +303,9 @@ class SyncEngine:
                 content=chunk_data.get('content', ''),
                 tool_name=chunk_data.get('tool_name'),
                 tool_id=chunk_data.get('tool_id'),
-                tool_input=chunk_data.get('tool_input')
+                tool_input=chunk_data.get('tool_input'),
+                subtype=chunk_data.get('subtype'),
+                data=chunk_data.get('data')
             )
 
         event = SyncEvent(

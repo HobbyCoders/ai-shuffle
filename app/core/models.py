@@ -68,6 +68,7 @@ class SystemPromptConfig(BaseModel):
     preset: Optional[str] = "claude_code"
     content: Optional[str] = None
     append: Optional[str] = None
+    inject_env_details: bool = False  # Inject environment info (working dir, platform, date, etc.)
 
 
 class ProfileConfig(BaseModel):
@@ -110,6 +111,11 @@ class ProfileConfig(BaseModel):
 
     # Enabled subagent IDs - references global subagents by ID
     enabled_agents: Optional[List[str]] = None
+
+    # Plugins - list of plugin paths to load
+    # Each entry should be a path to a plugin directory containing .claude-plugin/plugin.json
+    # Paths can be relative (resolved from workspace) or absolute
+    enabled_plugins: Optional[List[str]] = None
 
 
 class ProfileBase(BaseModel):
