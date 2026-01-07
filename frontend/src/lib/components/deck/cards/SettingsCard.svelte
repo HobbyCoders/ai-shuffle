@@ -27,13 +27,12 @@
 	import WebhookManager from '$lib/components/WebhookManager.svelte';
 	import TwoFactorSetup from '$lib/components/TwoFactorSetup.svelte';
 	import RateLimitManager from '$lib/components/RateLimitManager.svelte';
+	import { slide, fade, fly } from 'svelte/transition';
+	import { quintOut } from 'svelte/easing';
 	import {
-		getCredentialPoliciesSummary,
-		updateCredentialPolicy,
-		getPolicyLabel,
-		getEffectiveStatusLabel,
-		getEffectiveStatusColor,
-		type CredentialPolicySummary,
+		getUserCredentialPolicies,
+		setUserCredentialPolicy,
+		type UserCredentialPolicy,
 		type CredentialPolicyType
 	} from '$lib/api/credentialPolicies';
 	import {
@@ -103,7 +102,6 @@
 			icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z',
 			sections: [
 				{ id: 'users', label: 'API Users' },
-				{ id: 'credential-policies', label: 'Key Policies' },
 				{ id: 'rate-limits', label: 'Rate Limits' }
 			]
 		},
@@ -147,17 +145,17 @@
 	let loading = $state(true);
 	let error = $state('');
 
-	// Form state for API Users
-	let showCreateForm = $state(false);
+	// Form state for API Users - inline form mode
+	let formMode: 'closed' | 'create' | 'edit' = $state('closed');
 	let editingUser: ApiUser | null = $state(null);
 	let newlyCreatedKey: string | null = $state(null);
 	let regeneratedKey: string | null = $state(null);
 
-	// Credential policies state
-	let credentialPolicies: CredentialPolicySummary[] = $state([]);
-	let loadingPolicies = $state(false);
-	let savingPolicy = $state<string | null>(null);
-	let policyError = $state('');
+	// Per-user credential policies state (shown within each user card)
+	let userPolicies: Map<string, UserCredentialPolicy[]> = $state(new Map());
+	let loadingUserPolicies = $state<string | null>(null);
+	let savingUserPolicy = $state<string | null>(null); // format: "userId:credentialType"
+	let expandedUserPolicies = $state<string | null>(null); // userId of expanded policies section
 
 	// Workspace state
 	let workspaceConfig: WorkspaceConfig | null = $state(null);
@@ -397,7 +395,7 @@
 		name: '',
 		description: '',
 		project_id: '',
-		profile_id: '',
+		profile_ids: [] as string[],
 		web_login_allowed: true
 	});
 
@@ -443,8 +441,7 @@
 			loadAuthStatus(),
 			loadWorkspaceConfig(),
 			loadIntegrationSettings(),
-			loadCleanupSettings(),
-			loadCredentialPolicies()
+			loadCleanupSettings()
 		]);
 	}
 
@@ -466,28 +463,40 @@
 		loading = false;
 	}
 
-	async function loadCredentialPolicies() {
-		loadingPolicies = true;
-		policyError = '';
+	// Per-user credential policy functions
+	async function loadUserPolicies(userId: string) {
+		loadingUserPolicies = userId;
 		try {
-			const response = await getCredentialPoliciesSummary();
-			credentialPolicies = response.policies;
+			const response = await getUserCredentialPolicies(userId);
+			userPolicies.set(userId, response.policies);
+			userPolicies = new Map(userPolicies); // Trigger reactivity
 		} catch (e: any) {
-			policyError = e.detail || 'Failed to load credential policies';
+			console.error('Failed to load user policies:', e);
 		}
-		loadingPolicies = false;
+		loadingUserPolicies = null;
 	}
 
-	async function handlePolicyChange(policyId: string, newPolicy: CredentialPolicyType) {
-		savingPolicy = policyId;
-		policyError = '';
+	async function handleUserPolicyChange(userId: string, credentialType: string, newPolicy: CredentialPolicyType) {
+		savingUserPolicy = `${userId}:${credentialType}`;
 		try {
-			await updateCredentialPolicy(policyId, newPolicy);
-			await loadCredentialPolicies();
+			await setUserCredentialPolicy(userId, credentialType, newPolicy);
+			await loadUserPolicies(userId);
 		} catch (e: any) {
-			policyError = e.detail || 'Failed to update policy';
+			error = e.detail || 'Failed to update policy';
 		}
-		savingPolicy = null;
+		savingUserPolicy = null;
+	}
+
+	function toggleUserPolicies(userId: string) {
+		if (expandedUserPolicies === userId) {
+			expandedUserPolicies = null;
+		} else {
+			expandedUserPolicies = userId;
+			// Load policies if not already loaded
+			if (!userPolicies.has(userId)) {
+				loadUserPolicies(userId);
+			}
+		}
 	}
 
 	async function loadAuthStatus() {
@@ -1090,11 +1099,12 @@
 		}
 	}
 
-	// API User functions
+	// API User functions - inline form mode
 	function openCreateForm() {
 		editingUser = null;
-		formData = { name: '', description: '', project_id: '', profile_id: '', web_login_allowed: true };
-		showCreateForm = true;
+		formData = { name: '', description: '', project_id: '', profile_ids: [], web_login_allowed: true };
+		newlyCreatedKey = null;
+		formMode = 'create';
 	}
 
 	function openEditForm(user: ApiUser) {
@@ -1103,18 +1113,18 @@
 			name: user.name,
 			description: user.description || '',
 			project_id: user.project_id || '',
-			profile_id: user.profile_id || '',
+			profile_ids: user.profile_ids || [],
 			web_login_allowed: user.web_login_allowed
 		};
-		showCreateForm = true;
+		formMode = 'edit';
 	}
 
-	function resetForm() {
-		showCreateForm = false;
+	function closeForm() {
+		formMode = 'closed';
 		editingUser = null;
 		newlyCreatedKey = null;
 		regeneratedKey = null;
-		formData = { name: '', description: '', project_id: '', profile_id: '', web_login_allowed: true };
+		formData = { name: '', description: '', project_id: '', profile_ids: [], web_login_allowed: true };
 	}
 
 	async function saveApiUser() {
@@ -1126,11 +1136,12 @@
 			if (editingUser) {
 				await api.put(`/api-users/${editingUser.id}`, formData);
 				await loadData();
-				resetForm();
+				closeForm();
 			} else {
 				const result = await api.post<ApiUserWithKey>('/api-users', formData);
 				newlyCreatedKey = result.api_key;
 				await loadData();
+				// Stay in form mode to show the key
 			}
 		} catch (e: any) {
 			error = e.detail || 'Failed to save API user';
@@ -1469,135 +1480,249 @@
 		</div>
 	{/if}
 
-	<!-- API & USERS > USERS -->
+	<!-- API & USERS > USERS (with inline Key Policies) -->
 	{#if activeSection === 'users'}
-		<div class="section-content">
+		<div class="section-content api-users-section">
+			<!-- Section Header -->
 			<div class="section-header">
-				<h3>API Users</h3>
-				<p>Create users for programmatic access.</p>
-				<button onclick={openCreateForm} class="btn btn-primary btn-sm">+ Create</button>
+				<div class="section-title-row">
+					<h3>API Users</h3>
+					<p>Manage programmatic access and credential policies.</p>
+				</div>
+				{#if formMode === 'closed'}
+					<button onclick={openCreateForm} class="btn btn-primary btn-glow">
+						<span class="btn-icon">+</span>
+						Create User
+					</button>
+				{/if}
 			</div>
 
-			{#if loading}
-				<div class="loading">Loading...</div>
-			{:else if apiUsers.length === 0}
-				<div class="empty-state">
-					<p>No API users yet</p>
-					<p class="text-muted">Create one to enable external access.</p>
-				</div>
-			{:else}
-				<div class="user-list">
-					{#each apiUsers as user}
-						<div class="user-card">
-							<div class="user-info">
-								<div class="user-header">
-									<span class="user-name">{user.name}</span>
-									{#if user.username}
-										<span class="badge primary">@{user.username}</span>
-									{/if}
-									<span class="badge {user.is_active ? 'success' : 'error'}">{user.is_active ? 'Active' : 'Inactive'}</span>
-									{#if user.web_login_allowed}
-										<span class="badge info" title="Can login via web with username/password">🌐 Web</span>
-									{/if}
-								</div>
-								{#if user.description}
-									<p class="user-desc">{user.description}</p>
-								{/if}
-								<div class="user-meta">
-									<span>Profile: {profiles.find(p => p.id === user.profile_id)?.name || 'Any'}</span>
-									{#if user.username}
-										<span>Web Login: ✓ Registered</span>
-									{:else if user.web_login_allowed}
-										<span>Web Login: Pending registration</span>
-									{:else}
-										<span>Web Login: Disabled</span>
-									{/if}
-									<span>Last used: {formatDate(user.last_used_at)}</span>
+			<!-- Scrollable Content Area -->
+			<div class="api-users-scroll-area">
+				<!-- Inline Form Panel -->
+				{#if formMode !== 'closed'}
+					<div class="inline-form-panel" transition:slide={{ duration: 300, easing: quintOut }}>
+						<div class="form-panel-header">
+							<h4>{formMode === 'edit' ? 'Edit API User' : 'Create API User'}</h4>
+							<button onclick={closeForm} class="icon-btn close-form" title="Close">✕</button>
+						</div>
+
+						{#if newlyCreatedKey}
+							<div class="key-success-panel" transition:fade={{ duration: 200 }}>
+								<div class="success-icon">🔑</div>
+								<h5>API User Created Successfully</h5>
+								<p class="key-warning">Copy this key now — it won't be shown again:</p>
+								<div class="key-display-inline">
+									<code>{newlyCreatedKey}</code>
+									<button
+										onclick={() => { copyToClipboard(newlyCreatedKey || ''); closeForm(); }}
+										class="btn btn-primary btn-glow"
+									>
+										Copy & Close
+									</button>
 								</div>
 							</div>
-							<div class="user-actions">
-								<button onclick={() => openEditForm(user)} class="icon-btn" title="Edit">✏️</button>
-								<button onclick={() => regenerateKey(user.id)} class="icon-btn" title="Regenerate Key">🔄</button>
-								<button onclick={() => toggleActive(user)} class="icon-btn" title={user.is_active ? 'Deactivate' : 'Activate'}>
-									{user.is_active ? '⏸️' : '▶️'}
+						{:else}
+							<div class="form-grid">
+								<div class="form-field full-width">
+									<label>Name <span class="required">*</span></label>
+									<input
+										bind:value={formData.name}
+										class="input input-lg"
+										placeholder="My Application"
+									/>
+								</div>
+								<div class="form-field full-width">
+									<label>Description</label>
+									<textarea
+										bind:value={formData.description}
+										class="input"
+										rows="2"
+										placeholder="Optional description"
+									></textarea>
+								</div>
+								<div class="form-field">
+									<label>Project</label>
+									<select bind:value={formData.project_id} class="input">
+										<option value="">Default</option>
+										{#each projects as project}
+											<option value={project.id}>{project.name}</option>
+										{/each}
+									</select>
+								</div>
+								<div class="form-field full-width">
+									<label>Allowed Profiles</label>
+									<p class="field-hint" style="margin-top: 0; margin-bottom: var(--space-2);">
+										{formData.profile_ids.length === 0 ? 'No restriction - user can access any profile' : `${formData.profile_ids.length} profile${formData.profile_ids.length !== 1 ? 's' : ''} selected`}
+									</p>
+									<div class="profile-multiselect">
+										{#each profiles as profile}
+											<label class="profile-checkbox-item">
+												<input
+													type="checkbox"
+													checked={formData.profile_ids.includes(profile.id)}
+													onchange={(e) => {
+														const target = e.target as HTMLInputElement;
+														if (target.checked) {
+															formData.profile_ids = [...formData.profile_ids, profile.id];
+														} else {
+															formData.profile_ids = formData.profile_ids.filter(id => id !== profile.id);
+														}
+													}}
+												/>
+												<span class="profile-name">{profile.name}</span>
+											</label>
+										{/each}
+										{#if profiles.length === 0}
+											<p class="empty-profiles-hint">No profiles available</p>
+										{/if}
+									</div>
+								</div>
+								<div class="form-field full-width">
+									<label class="checkbox-label">
+										<input type="checkbox" bind:checked={formData.web_login_allowed} />
+										<span>Allow web login</span>
+									</label>
+									<p class="field-hint">User can register with the API key and set credentials for web access</p>
+								</div>
+								{#if editingUser?.username}
+									<div class="info-box full-width">
+										<p><strong>Registered as:</strong> @{editingUser.username}</p>
+									</div>
+								{/if}
+							</div>
+							<div class="form-actions">
+								<button onclick={closeForm} class="btn btn-secondary">Cancel</button>
+								<button onclick={saveApiUser} class="btn btn-primary btn-glow">
+									{formMode === 'edit' ? 'Update User' : 'Create User'}
 								</button>
-								<button onclick={() => deleteUser(user.id)} class="icon-btn danger" title="Delete">🗑️</button>
 							</div>
-						</div>
-					{/each}
-				</div>
-			{/if}
-
-			{#if regeneratedKey}
-				<div class="key-display">
-					<p class="font-medium">New API Key (copy now):</p>
-					<div class="input-row">
-						<code class="flex-1">{regeneratedKey}</code>
-						<button onclick={() => { copyToClipboard(regeneratedKey || ''); regeneratedKey = null; }} class="btn btn-primary">Copy</button>
+						{/if}
 					</div>
-				</div>
-			{/if}
-		</div>
-	{/if}
+				{/if}
 
-	<!-- API & USERS > CREDENTIAL POLICIES -->
-	{#if activeSection === 'credential-policies'}
-		<div class="section-content">
-			<div class="section-header">
-				<h3>Key Policies</h3>
-				<p>Control which API keys are admin-provided vs user-provided.</p>
-			</div>
-
-			{#if loadingPolicies}
-				<div class="loading-state">Loading policies...</div>
-			{:else if policyError}
-				<div class="error-state">{policyError}</div>
-			{:else if credentialPolicies.length === 0}
-				<div class="empty-state">
-					<p>No credential types configured.</p>
-				</div>
-			{:else}
-				<div class="policies-list">
-					{#each credentialPolicies as policy (policy.id)}
-						<div class="policy-item">
-							<div class="policy-info">
-								<h4>{policy.name}</h4>
-								<p class="policy-description">{policy.description}</p>
-								<div class="policy-status" class:status-green={getEffectiveStatusColor(policy.effective_status) === 'green'}
-									 class:status-yellow={getEffectiveStatusColor(policy.effective_status) === 'yellow'}
-									 class:status-red={getEffectiveStatusColor(policy.effective_status) === 'red'}
-									 class:status-blue={getEffectiveStatusColor(policy.effective_status) === 'blue'}>
-									<span class="status-dot"></span>
-									<span class="status-text">{getEffectiveStatusLabel(policy.effective_status)}</span>
+				<!-- User List -->
+				{#if loading}
+					<div class="loading-state">
+						<div class="loading-spinner"></div>
+						<span>Loading users...</span>
+					</div>
+				{:else if apiUsers.length === 0}
+					<div class="empty-state atmospheric">
+						<div class="empty-icon">👤</div>
+						<p class="empty-title">No API users yet</p>
+						<p class="empty-desc">Create your first user to enable external access.</p>
+					</div>
+				{:else}
+					<div class="user-list">
+						{#each apiUsers as user, index}
+							<div
+								class="user-card"
+								class:active={user.is_active}
+								class:inactive={!user.is_active}
+								class:editing={editingUser?.id === user.id}
+								class:policies-expanded={expandedUserPolicies === user.id}
+								style="animation-delay: {index * 60}ms"
+							>
+								<div class="user-card-main">
+									<div class="user-info">
+										<div class="user-header">
+											<span class="user-name">{user.name}</span>
+											{#if user.username}
+												<span class="badge primary">@{user.username}</span>
+											{/if}
+											<span class="badge {user.is_active ? 'success' : 'error'}">{user.is_active ? 'Active' : 'Inactive'}</span>
+											{#if user.web_login_allowed}
+												<span class="badge info" title="Can login via web with username/password">🌐 Web</span>
+											{/if}
+										</div>
+										{#if user.description}
+											<p class="user-desc">{user.description}</p>
+										{/if}
+										<div class="user-meta">
+											<span>Profiles: {user.profile_ids?.length ? user.profile_ids.map(id => profiles.find(p => p.id === id)?.name || id).join(', ') : 'Any'}</span>
+											{#if user.username}
+												<span>Web Login: ✓ Registered</span>
+											{:else if user.web_login_allowed}
+												<span>Web Login: Pending registration</span>
+											{:else}
+												<span>Web Login: Disabled</span>
+											{/if}
+											<span>Last used: {formatDate(user.last_used_at)}</span>
+										</div>
+									</div>
+									<div class="user-actions">
+										<button onclick={() => toggleUserPolicies(user.id)} class="icon-btn" title="Key Policies" class:active={expandedUserPolicies === user.id}>🔑</button>
+										<button onclick={() => openEditForm(user)} class="icon-btn" title="Edit">✏️</button>
+										<button onclick={() => regenerateKey(user.id)} class="icon-btn" title="Regenerate Key">🔄</button>
+										<button onclick={() => toggleActive(user)} class="icon-btn" title={user.is_active ? 'Deactivate' : 'Activate'}>
+											{user.is_active ? '⏸️' : '▶️'}
+										</button>
+										<button onclick={() => deleteUser(user.id)} class="icon-btn danger" title="Delete">🗑️</button>
+									</div>
 								</div>
 							</div>
-							<div class="policy-control">
-								<select
-									value={policy.policy}
-									onchange={(e) => handlePolicyChange(policy.id, (e.target as HTMLSelectElement).value as CredentialPolicyType)}
-									disabled={savingPolicy === policy.id}
-								>
-									<option value="admin_provided">Admin Provides</option>
-									<option value="user_provided">User Must Provide</option>
-									<option value="optional">Optional (User Override)</option>
-								</select>
-								{#if savingPolicy === policy.id}
-									<span class="saving-indicator">Saving...</span>
-								{/if}
-							</div>
-						</div>
-					{/each}
-				</div>
 
-				<div class="policy-help">
-					<h4>Policy Explanations</h4>
-					<ul>
-						<li><strong>Admin Provides:</strong> All API users will use the admin-configured key. Users cannot override.</li>
-						<li><strong>User Must Provide:</strong> Each API user must configure their own key in "My Settings".</li>
-						<li><strong>Optional:</strong> Admin key is used by default, but users can override with their own key.</li>
-					</ul>
-				</div>
-			{/if}
+							<!-- Per-user Key Policies (below card) -->
+							{#if expandedUserPolicies === user.id}
+								<div class="user-policies-below" transition:slide={{ duration: 200, easing: quintOut }}>
+									<div class="policies-below-header">
+										<span class="policies-below-title">🔑 Key Policies</span>
+										<span class="policies-below-hint">Configure API key access for {user.name}</span>
+									</div>
+									{#if loadingUserPolicies === user.id}
+										<div class="policies-loading">
+											<div class="loading-spinner small"></div>
+											<span>Loading policies...</span>
+										</div>
+									{:else if userPolicies.has(user.id)}
+										<div class="policies-below-list">
+											{#each userPolicies.get(user.id) || [] as policy}
+												<div class="policy-row" class:has-override={policy.source === 'user'}>
+													<div class="policy-row-info">
+														<span class="policy-row-name">{policy.name}</span>
+														{#if policy.source === 'user'}
+															<span class="policy-custom-badge">Custom</span>
+														{/if}
+													</div>
+													<div class="policy-row-control">
+														<select
+															value={policy.policy}
+															onchange={(e) => handleUserPolicyChange(user.id, policy.credential_type, (e.currentTarget as HTMLSelectElement).value as CredentialPolicyType)}
+															disabled={savingUserPolicy === `${user.id}:${policy.credential_type}`}
+															class="policy-row-select"
+														>
+															<option value="admin_provided">Admin Provides</option>
+															<option value="user_provided">User Must Provide</option>
+															<option value="optional">Optional</option>
+														</select>
+														{#if savingUserPolicy === `${user.id}:${policy.credential_type}`}
+															<div class="saving-indicator"></div>
+														{/if}
+													</div>
+												</div>
+											{/each}
+										</div>
+									{:else}
+										<div class="policies-empty">No credential policies available</div>
+									{/if}
+								</div>
+							{/if}
+						{/each}
+					</div>
+				{/if}
+
+				<!-- Regenerated Key Display (floating) -->
+				{#if regeneratedKey}
+					<div class="key-display floating" transition:fly={{ y: 20, duration: 300 }}>
+						<p class="font-medium">New API Key Generated</p>
+						<div class="input-row">
+							<code class="flex-1">{regeneratedKey}</code>
+							<button onclick={() => { copyToClipboard(regeneratedKey || ''); regeneratedKey = null; }} class="btn btn-primary">Copy</button>
+						</div>
+					</div>
+				{/if}
+			</div>
 		</div>
 	{/if}
 
@@ -2226,82 +2351,6 @@
 		</div>
 	{/if}
 {/snippet}
-
-<!-- API User Form Modal -->
-{#if showCreateForm}
-	<div class="modal-overlay" onclick={resetForm}>
-		<div class="modal-content" onclick={(e) => e.stopPropagation()}>
-			<div class="modal-header">
-				<h3>{editingUser ? 'Edit API User' : 'Create API User'}</h3>
-				<button onclick={resetForm} class="icon-btn">✕</button>
-			</div>
-
-			<div class="modal-body">
-				{#if newlyCreatedKey}
-					<div class="key-display success">
-						<p class="font-medium">API User created!</p>
-						<p class="text-muted text-sm">Copy this key now - it won't be shown again:</p>
-						<div class="input-row">
-							<code class="flex-1">{newlyCreatedKey}</code>
-							<button onclick={() => copyToClipboard(newlyCreatedKey || '')} class="btn btn-primary">Copy</button>
-						</div>
-					</div>
-					<button onclick={resetForm} class="btn btn-primary w-full">Done</button>
-				{:else}
-					<div class="form-stack">
-						<div>
-							<label>Name *</label>
-							<input bind:value={formData.name} class="input" placeholder="My Application" />
-						</div>
-						<div>
-							<label>Description</label>
-							<textarea bind:value={formData.description} class="input" rows="2" placeholder="Optional description"></textarea>
-						</div>
-						<div class="form-row">
-							<div>
-								<label>Project</label>
-								<select bind:value={formData.project_id} class="input">
-									<option value="">Default</option>
-									{#each projects as project}
-										<option value={project.id}>{project.name}</option>
-									{/each}
-								</select>
-							</div>
-							<div>
-								<label>Profile</label>
-								<select bind:value={formData.profile_id} class="input">
-									<option value="">Any</option>
-									{#each profiles as profile}
-										<option value={profile.id}>{profile.name}</option>
-									{/each}
-								</select>
-							</div>
-						</div>
-						<div class="checkbox-row">
-							<label class="checkbox-label">
-								<input type="checkbox" bind:checked={formData.web_login_allowed} />
-								<span>Allow web login</span>
-							</label>
-							<p class="text-muted text-xs">User can register with the API key and set a username/password for web access</p>
-						</div>
-						{#if editingUser?.username}
-							<div class="info-box">
-								<p class="text-sm"><strong>Registered as:</strong> @{editingUser.username}</p>
-								<p class="text-xs text-muted">User has set up web login credentials</p>
-							</div>
-						{/if}
-						<div class="form-row">
-							<button onclick={resetForm} class="btn btn-secondary flex-1">Cancel</button>
-							<button onclick={saveApiUser} class="btn btn-primary flex-1">
-								{editingUser ? 'Update' : 'Create'}
-							</button>
-						</div>
-					</div>
-				{/if}
-			</div>
-		</div>
-	</div>
-{/if}
 
 <style>
 	/* ═══════════════════════════════════════════════════════════════════════════════
@@ -3930,56 +3979,6 @@
 	}
 
 	/* ============================================
-	   MODAL - Neo-Glass Style
-	   ============================================ */
-	.modal-overlay {
-		position: fixed;
-		inset: 0;
-		background: color-mix(in oklch, var(--surface-0) 85%, transparent);
-		backdrop-filter: blur(12px);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		padding: var(--space-5);
-		z-index: 100;
-	}
-
-	.modal-content {
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-xl);
-		width: 100%;
-		max-width: 480px;
-		max-height: 90vh;
-		overflow-y: auto;
-		box-shadow: var(--shadow-lg);
-	}
-
-	.modal-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		padding: var(--space-5);
-		border-bottom: 1px solid var(--border-subtle);
-	}
-
-	.modal-header h3 {
-		font-family: var(--font-display);
-		font-size: var(--text-lg);
-		font-weight: 600;
-		color: var(--text-primary);
-	}
-
-	.modal-body {
-		padding: var(--space-5);
-	}
-
-	.modal-body label {
-		color: var(--text-primary);
-		font-family: var(--font-display);
-	}
-
-	/* ============================================
 	   MOBILE STYLES - Neo-Glass
 	   ============================================ */
 	.mobile-header {
@@ -4380,201 +4379,775 @@
 		}
 	}
 
-	/* ============================================
-	   CREDENTIAL POLICIES - Neo-Glass Style
-	   ============================================ */
-	.policies-list {
+	/* ═══════════════════════════════════════════════════════════════════════════════
+	   API USERS SECTION - Inline Form & Merged Policies
+	   ═══════════════════════════════════════════════════════════════════════════════ */
+
+	.api-users-section {
 		display: flex;
 		flex-direction: column;
-		gap: var(--space-4);
+		height: 100%;
+		overflow: hidden;
 	}
 
-	.policy-item {
-		background: var(--surface-1);
+	.api-users-section .section-header {
+		flex-shrink: 0;
+	}
+
+	.section-title-row {
+		flex: 1;
+	}
+
+	/* Scrollable content area */
+	.api-users-scroll-area {
+		flex: 1;
+		overflow-y: auto;
+		overflow-x: hidden;
+		padding-right: var(--space-2);
+		margin-right: calc(var(--space-2) * -1);
+	}
+
+	/* Custom scrollbar for scroll area */
+	.api-users-scroll-area::-webkit-scrollbar {
+		width: 6px;
+	}
+
+	.api-users-scroll-area::-webkit-scrollbar-track {
+		background: transparent;
+	}
+
+	.api-users-scroll-area::-webkit-scrollbar-thumb {
+		background: var(--border-subtle);
+		border-radius: var(--radius-full);
+	}
+
+	.api-users-scroll-area::-webkit-scrollbar-thumb:hover {
+		background: var(--border-default);
+	}
+
+	/* Glow button effect */
+	.btn-glow {
+		position: relative;
+		overflow: hidden;
+	}
+
+	.btn-glow::before {
+		content: '';
+		position: absolute;
+		inset: 0;
+		background: linear-gradient(
+			135deg,
+			transparent 0%,
+			color-mix(in oklch, white 20%, transparent) 50%,
+			transparent 100%
+		);
+		transform: translateX(-100%);
+		transition: transform 0.6s ease;
+	}
+
+	.btn-glow:hover::before {
+		transform: translateX(100%);
+	}
+
+	.btn-icon {
+		font-size: 1.1em;
+		font-weight: 300;
+		margin-right: var(--space-2);
+	}
+
+	/* ────────────────────────────────────────────────────────────────
+	   Compact Key Policies Grid
+	   ──────────────────────────────────────────────────────────────── */
+
+	.policies-compact {
+		margin-bottom: var(--space-5);
+		background: linear-gradient(
+			135deg,
+			color-mix(in oklch, var(--surface-1) 80%, var(--accent-primary) 3%),
+			var(--surface-1)
+		);
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-lg);
-		padding: var(--space-5);
+		overflow: hidden;
+	}
+
+	.policies-toggle {
+		width: 100%;
 		display: flex;
-		justify-content: space-between;
-		align-items: flex-start;
-		gap: var(--space-5);
+		align-items: center;
+		gap: var(--space-3);
+		padding: var(--space-4);
+		background: transparent;
+		border: none;
+		cursor: pointer;
+		font-family: var(--font-display);
+		color: var(--text-primary);
 		transition: all var(--transition-smooth);
 	}
 
-	.policy-item:hover {
+	.policies-toggle:hover {
+		background: var(--surface-hover);
+	}
+
+	.toggle-icon {
+		font-size: 0.75rem;
+		color: var(--text-tertiary);
+		transition: transform var(--transition-spring);
+	}
+
+	.toggle-icon.rotated {
+		transform: rotate(90deg);
+	}
+
+	.toggle-label {
+		font-weight: 600;
+		font-size: var(--text-base);
+	}
+
+	.policies-summary {
+		margin-left: auto;
+		font-family: var(--font-mono);
+		font-size: var(--text-xs);
+		color: var(--text-tertiary);
+		padding: var(--space-1) var(--space-3);
+		background: var(--surface-2);
+		border-radius: var(--radius-full);
+	}
+
+	.policies-grid {
+		display: grid;
+		grid-template-columns: repeat(2, 1fr);
+		gap: var(--space-3);
+		padding: 0 var(--space-4) var(--space-4);
+	}
+
+	@media (min-width: 600px) {
+		.policies-grid {
+			grid-template-columns: repeat(4, 1fr);
+		}
+	}
+
+	.policy-compact-item {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-2);
+		padding: var(--space-3);
+		background: var(--surface-1);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md);
+		transition: all var(--transition-smooth);
+		animation: fadeSlideUp 0.3s ease-out backwards;
+	}
+
+	@keyframes fadeSlideUp {
+		from {
+			opacity: 0;
+			transform: translateY(8px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
+	}
+
+	.policy-compact-item:hover {
 		border-color: var(--border-default);
 		box-shadow: var(--shadow-sm);
 	}
 
-	/* Status-based border colors */
-	.policy-item.status-green {
-		border-left: 3px solid var(--accent-success);
+	.policy-compact-item.status-green {
+		border-left: 2px solid var(--accent-success);
 	}
-	.policy-item.status-yellow {
-		border-left: 3px solid var(--accent-warning);
+
+	.policy-compact-item.status-yellow {
+		border-left: 2px solid var(--accent-warning);
 	}
-	.policy-item.status-red {
-		border-left: 3px solid var(--accent-danger);
+
+	.policy-compact-item.status-red {
+		border-left: 2px solid var(--accent-danger);
 	}
-	.policy-item.status-blue {
+
+	.policy-compact-item.status-blue {
+		border-left: 2px solid var(--accent-info);
+	}
+
+	.policy-compact-header {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+	}
+
+	.status-indicator {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--text-tertiary);
+		flex-shrink: 0;
+	}
+
+	.policy-compact-item.status-green .status-indicator {
+		background: var(--accent-success);
+		box-shadow: 0 0 6px color-mix(in oklch, var(--accent-success) 50%, transparent);
+	}
+
+	.policy-compact-item.status-yellow .status-indicator {
+		background: var(--accent-warning);
+		box-shadow: 0 0 6px color-mix(in oklch, var(--accent-warning) 50%, transparent);
+	}
+
+	.policy-compact-item.status-red .status-indicator {
+		background: var(--accent-danger);
+		box-shadow: 0 0 6px color-mix(in oklch, var(--accent-danger) 50%, transparent);
+	}
+
+	.policy-compact-item.status-blue .status-indicator {
+		background: var(--accent-info);
+		box-shadow: 0 0 6px color-mix(in oklch, var(--accent-info) 50%, transparent);
+	}
+
+	.policy-name {
+		font-family: var(--font-display);
+		font-size: var(--text-xs);
+		font-weight: 600;
+		color: var(--text-primary);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.policy-select-compact {
+		width: 100%;
+		padding: var(--space-2) var(--space-3);
+		font-family: var(--font-mono);
+		font-size: 10px;
+		font-weight: 500;
+		border-radius: var(--radius-sm);
+		background: var(--surface-2);
+		border: 1px solid var(--border-subtle);
+		color: var(--text-secondary);
+		cursor: pointer;
+		transition: all var(--transition-fast);
+		appearance: none;
+		-webkit-appearance: none;
+		background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7a99' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+		background-position: right 0.5rem center;
+		background-repeat: no-repeat;
+		background-size: 1em 1em;
+		padding-right: 2rem;
+	}
+
+	.policy-select-compact:hover {
+		border-color: var(--border-default);
+	}
+
+	.policy-select-compact:focus {
+		outline: none;
+		border-color: var(--accent-primary);
+	}
+
+	.saving-dot {
+		position: absolute;
+		top: var(--space-2);
+		right: var(--space-2);
+		width: 8px;
+		height: 8px;
+		background: var(--accent-primary);
+		border-radius: 50%;
+		animation: pulse 1s ease-in-out infinite;
+	}
+
+	@keyframes pulse {
+		0%, 100% { opacity: 1; transform: scale(1); }
+		50% { opacity: 0.5; transform: scale(0.8); }
+	}
+
+	/* ────────────────────────────────────────────────────────────────
+	   Inline Form Panel
+	   ──────────────────────────────────────────────────────────────── */
+
+	.inline-form-panel {
+		margin-bottom: var(--space-5);
+		background: linear-gradient(
+			145deg,
+			color-mix(in oklch, var(--accent-primary) 5%, var(--surface-1)),
+			var(--surface-1) 60%
+		);
+		border: 1px solid color-mix(in oklch, var(--accent-primary) 20%, var(--border-subtle));
+		border-radius: var(--radius-xl);
+		padding: var(--space-5);
+		position: relative;
+		overflow: hidden;
+	}
+
+	/* Decorative gradient line at top */
+	.inline-form-panel::before {
+		content: '';
+		position: absolute;
+		top: 0;
+		left: 0;
+		right: 0;
+		height: 2px;
+		background: linear-gradient(
+			90deg,
+			var(--accent-primary) 0%,
+			color-mix(in oklch, var(--accent-primary) 50%, var(--accent-info)) 50%,
+			var(--accent-info) 100%
+		);
+	}
+
+	.form-panel-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		margin-bottom: var(--space-5);
+	}
+
+	.form-panel-header h4 {
+		font-family: var(--font-display);
+		font-size: var(--text-lg);
+		font-weight: 700;
+		color: var(--text-primary);
+		margin: 0;
+		background: linear-gradient(135deg, var(--text-primary), var(--accent-primary));
+		-webkit-background-clip: text;
+		-webkit-text-fill-color: transparent;
+		background-clip: text;
+	}
+
+	.close-form {
+		opacity: 0.6;
+		transition: all var(--transition-fast);
+	}
+
+	.close-form:hover {
+		opacity: 1;
+		transform: rotate(90deg);
+	}
+
+	.form-grid {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: var(--space-4);
+	}
+
+	.form-field {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-2);
+	}
+
+	.form-field.full-width {
+		grid-column: 1 / -1;
+	}
+
+	.form-field label {
+		font-family: var(--font-display);
+		font-size: var(--text-sm);
+		font-weight: 600;
+		color: var(--text-secondary);
+	}
+
+	.required {
+		color: var(--accent-danger);
+	}
+
+	.input-lg {
+		font-size: var(--text-md);
+		padding: var(--space-4);
+	}
+
+	.field-hint {
+		font-size: var(--text-xs);
+		color: var(--text-tertiary);
+		margin: 0;
+	}
+
+	.form-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: var(--space-3);
+		margin-top: var(--space-5);
+		padding-top: var(--space-4);
+		border-top: 1px solid var(--border-subtle);
+	}
+
+	/* ────────────────────────────────────────────────────────────────
+	   Success State - Key Display
+	   ──────────────────────────────────────────────────────────────── */
+
+	.key-success-panel {
+		text-align: center;
+		padding: var(--space-5);
+	}
+
+	.success-icon {
+		font-size: 3rem;
+		margin-bottom: var(--space-4);
+		animation: bounceIn 0.5s ease-out;
+	}
+
+	@keyframes bounceIn {
+		0% { transform: scale(0); opacity: 0; }
+		50% { transform: scale(1.2); }
+		100% { transform: scale(1); opacity: 1; }
+	}
+
+	.key-success-panel h5 {
+		font-family: var(--font-display);
+		font-size: var(--text-lg);
+		font-weight: 700;
+		color: var(--accent-success);
+		margin: 0 0 var(--space-2) 0;
+	}
+
+	.key-warning {
+		font-size: var(--text-sm);
+		color: var(--accent-warning);
+		margin-bottom: var(--space-4);
+	}
+
+	.key-display-inline {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-3);
+		align-items: center;
+	}
+
+	.key-display-inline code {
+		display: block;
+		width: 100%;
+		padding: var(--space-4);
+		background: var(--surface-0);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md);
+		font-family: var(--font-mono);
+		font-size: var(--text-xs);
+		color: var(--accent-success);
+		word-break: break-all;
+		text-align: left;
+	}
+
+	/* ────────────────────────────────────────────────────────────────
+	   Enhanced User Cards
+	   ──────────────────────────────────────────────────────────────── */
+
+	.user-card {
+		animation: fadeSlideUp 0.3s ease-out backwards;
+	}
+
+	.user-card.editing {
+		border-color: var(--accent-primary);
+		box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent-primary) 20%, transparent);
+	}
+
+	/* ────────────────────────────────────────────────────────────────
+	   Atmospheric Empty State
+	   ──────────────────────────────────────────────────────────────── */
+
+	.empty-state.atmospheric {
+		padding: var(--space-8);
+		background: linear-gradient(
+			145deg,
+			color-mix(in oklch, var(--accent-primary) 3%, transparent),
+			transparent
+		);
+		border: 1px dashed var(--border-subtle);
+		border-radius: var(--radius-xl);
+		text-align: center;
+	}
+
+	.empty-icon {
+		font-size: 3rem;
+		opacity: 0.5;
+		margin-bottom: var(--space-4);
+	}
+
+	.empty-title {
+		font-family: var(--font-display);
+		font-size: var(--text-lg);
+		font-weight: 600;
+		color: var(--text-primary);
+		margin: 0 0 var(--space-2) 0;
+	}
+
+	.empty-desc {
+		color: var(--text-tertiary);
+		margin: 0;
+	}
+
+	/* ────────────────────────────────────────────────────────────────
+	   Loading State
+	   ──────────────────────────────────────────────────────────────── */
+
+	.loading-state {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: var(--space-3);
+		padding: var(--space-8);
+		color: var(--text-secondary);
+	}
+
+	.loading-spinner {
+		width: 20px;
+		height: 20px;
+		border: 2px solid var(--border-subtle);
+		border-top-color: var(--accent-primary);
+		border-radius: 50%;
+		animation: spin 0.8s linear infinite;
+	}
+
+	@keyframes spin {
+		to { transform: rotate(360deg); }
+	}
+
+	/* Floating key display for regenerated keys */
+	.key-display.floating {
+		position: sticky;
+		bottom: var(--space-4);
+		margin-top: var(--space-4);
+		box-shadow: var(--shadow-lg), var(--shadow-glow);
+	}
+
+	/* ────────────────────────────────────────────────────────────────
+	   Per-User Credential Policies (Below Card)
+	   ──────────────────────────────────────────────────────────────── */
+
+	.user-card-main {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.user-policies-below {
+		margin-top: var(--space-3);
+		padding: var(--space-4);
+		background: var(--surface-1);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-lg);
 		border-left: 3px solid var(--accent-primary);
 	}
 
-	.policy-info {
-		flex: 1;
-		min-width: 0;
+	.policies-below-header {
+		display: flex;
+		align-items: baseline;
+		gap: var(--space-3);
+		margin-bottom: var(--space-4);
+		padding-bottom: var(--space-3);
+		border-bottom: 1px solid var(--border-subtle);
 	}
 
-	.policy-info h4 {
-		margin: 0 0 var(--space-2) 0;
+	.policies-below-title {
 		font-family: var(--font-display);
 		font-size: var(--text-base);
 		font-weight: 600;
 		color: var(--text-primary);
 	}
 
-	.policy-description {
-		margin: 0 0 var(--space-3) 0;
-		font-family: var(--font-display);
-		font-size: var(--text-sm);
-		color: var(--text-secondary);
-		line-height: 1.5;
+	.policies-below-hint {
+		font-size: var(--text-xs);
+		color: var(--text-tertiary);
 	}
 
-	.policy-status {
+	.policies-loading {
 		display: flex;
 		align-items: center;
+		justify-content: center;
 		gap: var(--space-2);
-		font-family: var(--font-mono);
-		font-size: var(--text-xs);
-		font-weight: 500;
-		letter-spacing: 0.02em;
-		text-transform: uppercase;
-		padding: var(--space-2) var(--space-3);
-		background: var(--surface-2);
-		border-radius: var(--radius-sm);
-		border: 1px solid var(--border-subtle);
+		padding: var(--space-4);
+		color: var(--text-secondary);
+		font-size: var(--text-sm);
 	}
 
-	.status-dot {
-		width: 6px;
-		height: 6px;
-		border-radius: 50%;
-		background: var(--text-tertiary);
-		transition: all var(--transition-smooth);
+	.loading-spinner.small {
+		width: 14px;
+		height: 14px;
+		border-width: 1.5px;
 	}
 
-	.policy-status.status-green .status-dot {
-		background: var(--accent-success);
-		box-shadow: 0 0 6px color-mix(in oklch, var(--accent-success) 50%, transparent);
-	}
-	.policy-status.status-yellow .status-dot {
-		background: var(--accent-warning);
-		box-shadow: 0 0 6px color-mix(in oklch, var(--accent-warning) 50%, transparent);
-	}
-	.policy-status.status-red .status-dot {
-		background: var(--accent-danger);
-		box-shadow: 0 0 6px color-mix(in oklch, var(--accent-danger) 50%, transparent);
-	}
-	.policy-status.status-blue .status-dot {
-		background: var(--accent-primary);
-		box-shadow: 0 0 6px color-mix(in oklch, var(--accent-primary) 50%, transparent);
-	}
-
-	.policy-status.status-green .status-text { color: var(--accent-success); }
-	.policy-status.status-yellow .status-text { color: var(--accent-warning); }
-	.policy-status.status-red .status-text { color: var(--accent-danger); }
-	.policy-status.status-blue .status-text { color: var(--accent-primary); }
-
-	.policy-control {
+	.policies-below-list {
 		display: flex;
 		flex-direction: column;
-		align-items: flex-end;
+		gap: var(--space-2);
+	}
+
+	.policy-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-4);
+		padding: var(--space-3) var(--space-4);
+		background: var(--surface-2);
+		border-radius: var(--radius-md);
+		transition: all var(--transition-fast);
+	}
+
+	.policy-row:hover {
+		background: var(--surface-3);
+	}
+
+	.policy-row.has-override {
+		background: color-mix(in oklch, var(--accent-primary) 8%, var(--surface-2));
+		border: 1px solid color-mix(in oklch, var(--accent-primary) 20%, transparent);
+	}
+
+	.policy-row-info {
+		display: flex;
+		align-items: center;
+		gap: var(--space-3);
+		min-width: 0;
+		flex: 1;
+	}
+
+	.policy-row-name {
+		font-family: var(--font-display);
+		font-size: var(--text-sm);
+		font-weight: 500;
+		color: var(--text-primary);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.policy-custom-badge {
+		font-size: 10px;
+		font-family: var(--font-mono);
+		font-weight: 600;
+		padding: 2px 8px;
+		border-radius: var(--radius-full);
+		background: color-mix(in oklch, var(--accent-primary) 15%, transparent);
+		color: var(--accent-primary);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		flex-shrink: 0;
+	}
+
+	.policy-row-control {
+		display: flex;
+		align-items: center;
 		gap: var(--space-2);
 		flex-shrink: 0;
 	}
 
-	.policy-control select {
-		padding: var(--space-3) var(--space-8) var(--space-3) var(--space-4);
+	.policy-row-select {
+		min-width: 160px;
+		padding: var(--space-2) var(--space-3);
 		font-family: var(--font-mono);
 		font-size: var(--text-xs);
 		font-weight: 500;
-		border-radius: var(--radius-sm);
-		background: var(--surface-2);
+		border-radius: var(--radius-md);
+		background: var(--surface-1);
 		border: 1px solid var(--border-subtle);
-		color: var(--text-primary);
+		color: var(--text-secondary);
 		cursor: pointer;
-		min-width: 160px;
 		transition: all var(--transition-fast);
 		appearance: none;
 		-webkit-appearance: none;
-		-moz-appearance: none;
-		background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7a99' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
-		background-position: right 10px center;
+		background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7a99' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+		background-position: right 0.75rem center;
 		background-repeat: no-repeat;
-		background-size: 14px;
+		background-size: 1em 1em;
+		padding-right: 2.5rem;
 	}
 
-	.policy-control select:hover {
+	.policy-row-select:hover {
 		border-color: var(--border-default);
+		background-color: var(--surface-2);
 	}
 
-	.policy-control select:focus {
+	.policy-row-select:focus {
 		outline: none;
 		border-color: var(--accent-primary);
-		box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent-primary) 15%, transparent);
-	}
-
-	.policy-control select:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
 	}
 
 	.saving-indicator {
-		font-family: var(--font-mono);
-		font-size: var(--text-xs);
-		color: var(--accent-primary);
-		text-transform: uppercase;
-		letter-spacing: 0.03em;
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: var(--accent-primary);
+		animation: pulse 1s ease-in-out infinite;
 	}
 
-	.policy-help {
-		margin-top: var(--space-6);
-		padding: var(--space-5);
-		background: var(--surface-1);
-		border-radius: var(--radius-md);
-		border: 1px solid var(--border-subtle);
+	@keyframes pulse {
+		0%, 100% { opacity: 0.4; transform: scale(0.8); }
+		50% { opacity: 1; transform: scale(1); }
 	}
 
-	.policy-help h4 {
-		margin: 0 0 var(--space-4) 0;
-		font-family: var(--font-mono);
-		font-size: var(--text-xs);
-		font-weight: 500;
-		letter-spacing: 0.05em;
-		text-transform: uppercase;
+	.policies-empty {
+		text-align: center;
+		padding: var(--space-4);
 		color: var(--text-tertiary);
-	}
-
-	.policy-help ul {
-		margin: 0;
-		padding: 0 0 0 var(--space-5);
-		font-family: var(--font-display);
 		font-size: var(--text-sm);
-		color: var(--text-secondary);
-		line-height: 1.6;
 	}
 
-	.policy-help li {
-		margin-bottom: var(--space-3);
+	/* Active state for the key policies toggle button */
+	.icon-btn.active {
+		background: color-mix(in oklch, var(--accent-primary) 15%, transparent);
+		color: var(--accent-primary);
 	}
 
-	.policy-help li:last-child {
-		margin-bottom: 0;
+	.icon-btn.active:hover {
+		background: color-mix(in oklch, var(--accent-primary) 25%, transparent);
 	}
 
-	.policy-help strong {
+	/* ────────────────────────────────────────────────────────────────
+	   Profile Multi-Select
+	   ──────────────────────────────────────────────────────────────── */
+
+	.profile-multiselect {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--space-2);
+		padding: var(--space-3);
+		background: var(--surface-1);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md);
+		max-height: 180px;
+		overflow-y: auto;
+	}
+
+	.profile-checkbox-item {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		padding: var(--space-2) var(--space-3);
+		background: var(--surface-2);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-full);
+		cursor: pointer;
+		transition: all var(--transition-fast);
+		user-select: none;
+	}
+
+	.profile-checkbox-item:hover {
+		border-color: var(--accent-primary);
+		background: color-mix(in oklch, var(--accent-primary) 5%, var(--surface-2));
+	}
+
+	.profile-checkbox-item:has(input:checked) {
+		background: color-mix(in oklch, var(--accent-primary) 15%, var(--surface-2));
+		border-color: var(--accent-primary);
+	}
+
+	.profile-checkbox-item input[type="checkbox"] {
+		width: 14px;
+		height: 14px;
+		accent-color: var(--accent-primary);
+		cursor: pointer;
+	}
+
+	.profile-checkbox-item .profile-name {
+		font-size: var(--text-sm);
+		font-weight: 500;
 		color: var(--text-primary);
-		font-weight: 600;
+		white-space: nowrap;
+	}
+
+	.empty-profiles-hint {
+		width: 100%;
+		text-align: center;
+		color: var(--text-tertiary);
+		font-size: var(--text-sm);
+		margin: 0;
 	}
 </style>

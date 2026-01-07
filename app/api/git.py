@@ -150,15 +150,20 @@ class WorktreeInfo(BaseModel):
     """Worktree information"""
     id: str
     repository_id: str
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None  # Deprecated - use sessions list
     branch_name: str
     worktree_path: str
     base_branch: Optional[str] = None
     status: str
     created_at: str
-    session: Optional[SessionInfo] = None
-    exists: Optional[bool] = None
+    # New session relationship model
+    sessions: List[SessionInfo] = []  # All sessions that have used this worktree
+    session_count: int = 0
+    active_session: Optional[SessionInfo] = None  # Currently active session
+    exists: Optional[bool] = None  # Whether worktree folder exists on disk
     git_status: Optional[WorktreeGitStatus] = None
+    # Legacy - deprecated
+    session: Optional[SessionInfo] = None
 
 
 class WorktreeListResponse(BaseModel):
@@ -591,10 +596,37 @@ async def fetch_from_remote(
 # =============================================================================
 
 def _convert_worktree_to_info(wt: dict) -> WorktreeInfo:
-    """Convert worktree dict to WorktreeInfo model"""
-    session_info = None
+    """Convert worktree dict to WorktreeInfo model.
+
+    Supports both new session relationship model (sessions list) and
+    legacy single session model for backward compatibility.
+    """
+    # Convert sessions list (new model)
+    sessions_list = []
+    if wt.get("sessions"):
+        for s in wt["sessions"]:
+            sessions_list.append(SessionInfo(
+                id=s["id"],
+                title=s.get("title"),
+                status=s["status"],
+                updated_at=s.get("updated_at")
+            ))
+
+    # Active session (new model)
+    active_session_info = None
+    if wt.get("active_session"):
+        as_data = wt["active_session"]
+        active_session_info = SessionInfo(
+            id=as_data["id"],
+            title=as_data.get("title"),
+            status=as_data["status"],
+            updated_at=as_data.get("updated_at")
+        )
+
+    # Legacy single session (deprecated, for backward compat)
+    legacy_session_info = None
     if wt.get("session"):
-        session_info = SessionInfo(
+        legacy_session_info = SessionInfo(
             id=wt["session"]["id"],
             title=wt["session"].get("title"),
             status=wt["session"]["status"],
@@ -619,15 +651,20 @@ def _convert_worktree_to_info(wt: dict) -> WorktreeInfo:
     return WorktreeInfo(
         id=wt["id"],
         repository_id=wt["repository_id"],
-        session_id=wt.get("session_id"),
+        session_id=wt.get("session_id"),  # Deprecated
         branch_name=wt["branch_name"],
         worktree_path=wt["worktree_path"],
         base_branch=wt.get("base_branch"),
         status=wt["status"],
         created_at=wt["created_at"],
-        session=session_info,
+        # New model fields
+        sessions=sessions_list,
+        session_count=wt.get("session_count", len(sessions_list)),
+        active_session=active_session_info,
         exists=wt.get("exists"),
-        git_status=git_status_info
+        git_status=git_status_info,
+        # Legacy field
+        session=legacy_session_info
     )
 
 
@@ -661,6 +698,13 @@ async def list_worktrees(
     )
 
 
+class WorktreeCreateStandalone(BaseModel):
+    """Request to create a standalone worktree (no session)"""
+    branch_name: str = Field(..., min_length=1, max_length=255)
+    create_new_branch: bool = False
+    base_branch: Optional[str] = None
+
+
 @router.post("/worktrees", response_model=WorktreeCreateResponse)
 async def create_worktree(
     request: Request,
@@ -669,10 +713,14 @@ async def create_worktree(
     token: str = Depends(require_auth)
 ):
     """
-    Create a new worktree and associated chat session.
+    Create a new worktree.
 
-    This creates a git worktree for the specified branch and a new
-    chat session that will work in that worktree directory.
+    If profile_id is provided, also creates an associated chat session (legacy mode).
+    If profile_id is not provided, creates a standalone worktree that can be used
+    with any session later.
+
+    The new model allows worktrees to exist independently from sessions. Sessions
+    can be linked to worktrees via the sessions.worktree_id field.
 
     Args:
         project_id: Project ID
@@ -696,20 +744,37 @@ async def create_worktree(
                 detail=f"Invalid branch name: contains '{char}'"
             )
 
-    # Create worktree and session
-    worktree, session = worktree_manager.create_worktree_session(
-        project_id=project_id,
-        branch_name=body.branch_name,
-        create_new_branch=body.create_new_branch,
-        base_branch=body.base_branch,
-        profile_id=body.profile_id
-    )
+    session = None
 
-    if not worktree or not session:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Failed to create worktree. Branch may already be in use or doesn't exist."
+    if body.profile_id:
+        # Legacy mode: Create worktree and session together
+        worktree, session = worktree_manager.create_worktree_session(
+            project_id=project_id,
+            branch_name=body.branch_name,
+            create_new_branch=body.create_new_branch,
+            base_branch=body.base_branch,
+            profile_id=body.profile_id
         )
+
+        if not worktree:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to create worktree. Branch may already be in use or doesn't exist."
+            )
+    else:
+        # New mode: Create standalone worktree (no session)
+        worktree = worktree_manager.create_worktree(
+            project_id=project_id,
+            branch_name=body.branch_name,
+            create_new_branch=body.create_new_branch,
+            base_branch=body.base_branch
+        )
+
+        if not worktree:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to create worktree. Branch may already be in use or doesn't exist."
+            )
 
     # Get full worktree details for response
     worktree_details = worktree_manager.get_worktree_details(worktree["id"])

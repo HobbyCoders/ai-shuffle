@@ -5,8 +5,7 @@
 	 * Features:
 	 * - Swipeable card stack (touch gestures)
 	 * - Velocity-based animation
-	 * - Dot indicators (tappable)
-	 * - Minimal card header (back arrow, title, close)
+	 * - Minimal card header (plus, title, close)
 	 * - Empty state with create buttons
 	 */
 
@@ -22,6 +21,7 @@
 		onCloseCard: (id: string) => void;
 		onCreateCard: (type: CardType) => void;
 		onOpenNavigator?: () => void;
+		isApiUser?: boolean;
 		children?: Snippet<[DeckCard]>;
 	}
 
@@ -32,6 +32,7 @@
 		onCloseCard,
 		onCreateCard,
 		onOpenNavigator,
+		isApiUser = false,
 		children
 	}: Props = $props();
 
@@ -187,31 +188,27 @@
 			onCloseCard(activeCard.id);
 		}
 	}
-
-	// Go back (to previous card or close if first)
-	function handleBack() {
-		if (activeCardIndex > 0) {
-			onCardChange(activeCardIndex - 1);
-		}
-	}
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="mobile-workspace">
 	{#if cards.length === 0}
 		<!-- Mobile Welcome Screen with Carousel -->
-		<MobileWelcome {onCreateCard} />
+		<MobileWelcome {onCreateCard} {isApiUser} />
 	{:else}
 		<!-- Mobile Header -->
 		<header class="mobile-header">
-			<button
-				class="header-btn"
-				onclick={handleBack}
-				disabled={activeCardIndex === 0}
-				aria-label="Go back"
-			>
-				<ChevronLeft size={24} />
-			</button>
+			<div class="header-actions left">
+				{#if onOpenNavigator}
+					<button
+						class="header-btn add"
+						onclick={onOpenNavigator}
+						aria-label="Open card navigator"
+					>
+						<Plus size={20} />
+					</button>
+				{/if}
+			</div>
 
 			<div class="header-center">
 				{#if activeCard}
@@ -222,15 +219,6 @@
 			</div>
 
 			<div class="header-actions">
-				{#if onOpenNavigator}
-					<button
-						class="header-btn add"
-						onclick={onOpenNavigator}
-						aria-label="Open card navigator"
-					>
-						<Plus size={20} />
-					</button>
-				{/if}
 				<button
 					class="header-btn close"
 					onclick={handleClose}
@@ -376,6 +364,11 @@
 		display: flex;
 		align-items: center;
 		gap: 4px;
+		min-width: 44px; /* Ensure symmetry with left side */
+	}
+
+	.header-actions.left {
+		justify-content: flex-start;
 	}
 
 	.header-actions .badge {

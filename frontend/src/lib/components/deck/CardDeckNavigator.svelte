@@ -22,7 +22,7 @@
 		MessageSquare, Terminal, Clock, Image, Box, AudioLines,
 		Settings, FolderOpen, X, Files, User, Pencil, Check,
 		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronRight, Bot, Puzzle,
-		List, GitBranch
+		List, GitBranch, Key, Mic
 	} from 'lucide-svelte';
 	import { tabs, type Session } from '$lib/stores/tabs';
 	import { deck, type DeckCard as DeckCardType } from '$lib/stores/deck';
@@ -42,14 +42,18 @@
 		onOpenImageStudio?: () => void;
 		onOpenModelStudio?: () => void;
 		onOpenAudioStudio?: () => void;
+		onOpenConversation?: () => void;
 		onOpenFileBrowser?: () => void;
 		onOpenProjects?: () => void;
 		onOpenProfiles?: () => void;
 		onOpenSubagents?: () => void;
 		onOpenSettings?: () => void;
 		onOpenPlugins?: () => void;
+		onOpenUserSettings?: () => void;
 		isAdmin?: boolean;
+		isApiUser?: boolean;
 		isMobile?: boolean;
+		initialView?: 'main' | 'recent';
 	}
 
 	let {
@@ -61,14 +65,18 @@
 		onOpenImageStudio,
 		onOpenModelStudio,
 		onOpenAudioStudio,
+		onOpenConversation,
 		onOpenFileBrowser,
 		onOpenProjects,
 		onOpenProfiles,
 		onOpenSubagents,
 		onOpenSettings,
 		onOpenPlugins,
+		onOpenUserSettings,
 		isAdmin = false,
-		isMobile = false
+		isApiUser = false,
+		isMobile = false,
+		initialView = 'main'
 	}: Props = $props();
 
 	// Navigation stack for breadcrumb
@@ -143,7 +151,10 @@
 	let renameDeckName = $state('');
 
 	// Card types for main deck
-	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'image-studio' | 'model-studio' | 'audio-studio' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins';
+	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'image-studio' | 'model-studio' | 'audio-studio' | 'conversation' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins' | 'user-settings';
+
+	// Cards that API users are allowed to see (whitelist approach)
+	const API_USER_ALLOWED_CARDS = new Set(['new-chat', 'recent', 'file-browser', 'user-settings']);
 
 	interface NavigatorCard {
 		id: string;
@@ -169,6 +180,17 @@
 
 	// Get sessions from tabs store
 	const sessions = $derived($tabs.sessions);
+
+	// Navigate to initial view when opened
+	$effect(() => {
+		if (open && initialView === 'recent') {
+			currentView = 'recent';
+			navStack = [
+				{ id: 'root', name: 'AI Shuffle', type: 'root' },
+				{ id: 'recent', name: 'Recent', type: 'category' }
+			];
+		}
+	});
 
 	// Get active streaming cards
 	const activeCards = $derived($deck.cards.filter(c => c.type === 'chat'));
@@ -208,7 +230,8 @@
 
 	// Build base action cards (before filtering by deck membership)
 	const baseActionCards = $derived.by((): NavigatorCard[] => {
-		const cards: NavigatorCard[] = [
+		// Define all possible cards
+		const allCards: NavigatorCard[] = [
 			{
 				id: 'new-chat',
 				type: 'action',
@@ -259,6 +282,14 @@
 				icon: AudioLines
 			},
 			{
+				id: 'conversation',
+				type: 'action',
+				action: 'conversation',
+				title: 'Conversation',
+				subtitle: 'Voice chat with AI',
+				icon: Mic
+			},
+			{
 				id: 'file-browser',
 				type: 'action',
 				action: 'file-browser',
@@ -292,8 +323,9 @@
 			}
 		];
 
+		// Add admin-only cards
 		if (isAdmin) {
-			cards.push(
+			allCards.push(
 				{
 					id: 'subagents',
 					type: 'action',
@@ -313,7 +345,34 @@
 			);
 		}
 
-		return cards;
+		// Add user-settings card for API users
+		if (isApiUser) {
+			allCards.push({
+				id: 'user-settings',
+				type: 'action',
+				action: 'user-settings',
+				title: 'My Settings',
+				subtitle: 'API keys & profile',
+				icon: Key
+			});
+		}
+
+		// For API users, filter to only allowed cards
+		if (isApiUser) {
+			return allCards.filter(card => {
+				// Allow category cards (like 'recent') if their id is in the whitelist
+				if (card.type === 'category') {
+					return API_USER_ALLOWED_CARDS.has(card.id);
+				}
+				// For action cards, check if action is in whitelist
+				if (card.type === 'action' && card.action) {
+					return API_USER_ALLOWED_CARDS.has(card.action);
+				}
+				return false;
+			});
+		}
+
+		return allCards;
 	});
 
 	// Build main deck cards (filtered - excludes cards in custom decks)
@@ -518,12 +577,14 @@
 			case 'image-studio': onOpenImageStudio?.(); break;
 			case 'model-studio': onOpenModelStudio?.(); break;
 			case 'audio-studio': onOpenAudioStudio?.(); break;
+			case 'conversation': onOpenConversation?.(); break;
 			case 'file-browser': onOpenFileBrowser?.(); break;
 			case 'projects': onOpenProjects?.(); break;
 			case 'profiles': onOpenProfiles?.(); break;
 			case 'subagents': onOpenSubagents?.(); break;
 			case 'settings': onOpenSettings?.(); break;
 			case 'plugins': onOpenPlugins?.(); break;
+			case 'user-settings': onOpenUserSettings?.(); break;
 		}
 	}
 
@@ -570,10 +631,12 @@
 
 	// Reset state when closing
 	function handleClose() {
+		// In edit mode, close button just exits edit mode without closing the navigator
 		if (isEditMode) {
-			// Cancel edit mode without saving - revert any pending changes
 			cancelEditMode();
+			return;
 		}
+
 		contextMenuOpen = false;
 		showNewDeckDialog = false;
 
@@ -1721,6 +1784,7 @@
 	   ======================================== */
 
 	.navigator {
+		/* Dark mode (default) */
 		--bg-deep: oklch(0.08 0.01 260);
 		--bg-base: oklch(0.10 0.01 260);
 		--bg-elevated: oklch(0.13 0.01 260);
@@ -1741,6 +1805,10 @@
 		--ai-glow: rgba(34, 211, 238, 0.25);
 		--ai-subtle: rgba(34, 211, 238, 0.08);
 
+		--backdrop-bg: rgba(0, 0, 0, 0.85);
+		--shadow-color: rgba(0, 0, 0, 0.4);
+		--shadow-strong: rgba(0, 0, 0, 0.6);
+
 		--ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 		--ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 
@@ -1750,6 +1818,33 @@
 		--radius-sm: 8px;
 		--radius-md: 12px;
 		--radius-lg: 16px;
+	}
+
+	/* Light mode overrides */
+	:global(.light) .navigator {
+		--bg-deep: oklch(0.94 0.005 260);
+		--bg-base: oklch(0.96 0.005 260);
+		--bg-elevated: oklch(0.98 0.003 260);
+		--bg-card: oklch(1 0 0);
+		--bg-card-hover: oklch(0.97 0.005 260);
+
+		--border-subtle: rgba(0, 0, 0, 0.06);
+		--border-default: rgba(0, 0, 0, 0.1);
+		--border-strong: rgba(0, 0, 0, 0.15);
+
+		--text-primary: #18181b;
+		--text-secondary: #52525b;
+		--text-muted: #71717a;
+		--text-dim: #a1a1aa;
+
+		--ai-primary: #0891b2;
+		--ai-secondary: #0e7490;
+		--ai-glow: rgba(8, 145, 178, 0.2);
+		--ai-subtle: rgba(8, 145, 178, 0.08);
+
+		--backdrop-bg: rgba(255, 255, 255, 0.85);
+		--shadow-color: rgba(0, 0, 0, 0.1);
+		--shadow-strong: rgba(0, 0, 0, 0.15);
 	}
 
 	/* ========================================
@@ -1766,7 +1861,7 @@
 	.navigator-backdrop {
 		position: absolute;
 		inset: 0;
-		background: rgba(0, 0, 0, 0.85);
+		background: var(--backdrop-bg);
 		backdrop-filter: blur(20px);
 		-webkit-backdrop-filter: blur(20px);
 	}
@@ -2088,9 +2183,9 @@
 		display: flex;
 		flex-direction: column;
 		box-shadow:
-			0 20px 60px rgba(0, 0, 0, 0.6),
+			0 20px 60px var(--shadow-strong),
 			0 0 30px var(--ai-glow),
-			0 0 0 2px rgba(34, 211, 238, 0.3);
+			0 0 0 2px color-mix(in srgb, var(--ai-primary) 30%, transparent);
 	}
 
 	.floating-drag-card .card-icon {
@@ -2100,7 +2195,7 @@
 		align-items: center;
 		justify-content: center;
 		background: var(--ai-subtle);
-		border: 1px solid rgba(34, 211, 238, 0.3);
+		border: 1px solid color-mix(in srgb, var(--ai-primary) 30%, transparent);
 		border-radius: var(--radius-md);
 		margin-bottom: 16px;
 		color: var(--icon-color, var(--ai-primary));
@@ -2133,9 +2228,9 @@
 		justify-content: center;
 		gap: 0.75rem;
 		box-shadow:
-			0 20px 60px rgba(0, 0, 0, 0.6),
+			0 20px 60px var(--shadow-strong),
 			0 0 30px var(--ai-glow),
-			0 0 0 2px rgba(34, 211, 238, 0.3);
+			0 0 0 2px color-mix(in srgb, var(--ai-primary) 30%, transparent);
 	}
 
 	.floating-drag-card.mobile .mobile-card-icon {
@@ -2167,7 +2262,7 @@
 	@keyframes pickUp {
 		0% {
 			transform: rotate(0deg) scale(1);
-			box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+			box-shadow: 0 4px 16px var(--shadow-color);
 		}
 		100% {
 			transform: rotate(3deg) scale(1.08);
@@ -2183,7 +2278,7 @@
 		border-color: var(--deck-color, var(--ai-primary));
 		box-shadow:
 			0 0 20px color-mix(in srgb, var(--deck-color, var(--ai-primary)) 40%, transparent),
-			0 8px 32px rgba(0, 0, 0, 0.4);
+			0 8px 32px var(--shadow-color);
 		background: color-mix(in srgb, var(--deck-color, var(--ai-primary)) 10%, var(--bg-card));
 	}
 
@@ -2205,16 +2300,16 @@
 		background: var(--bg-card-hover);
 		border-color: var(--border-strong);
 		box-shadow:
-			0 8px 32px rgba(0, 0, 0, 0.4),
+			0 8px 32px var(--shadow-color),
 			0 0 0 1px var(--border-subtle);
 	}
 
 	/* AI-active card glow */
 	.card[data-ai-active="true"] .card-inner {
-		border-color: rgba(34, 211, 238, 0.3);
+		border-color: color-mix(in srgb, var(--ai-primary) 30%, transparent);
 		box-shadow:
 			0 0 20px var(--ai-glow),
-			0 8px 32px rgba(0, 0, 0, 0.3);
+			0 8px 32px var(--shadow-color);
 	}
 
 	/* Drag handle */
@@ -2260,7 +2355,7 @@
 
 	.card:hover .card-icon {
 		background: var(--ai-subtle);
-		border-color: rgba(34, 211, 238, 0.2);
+		border-color: color-mix(in srgb, var(--ai-primary) 20%, transparent);
 		color: var(--icon-color, var(--ai-primary));
 	}
 

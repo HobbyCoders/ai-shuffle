@@ -170,16 +170,6 @@
 						onmouseenter={handleMenuEnter}
 						onmouseleave={handleMenuLeave}
 					>
-						<!-- New Card Button -->
-						<button
-							class="menu-button"
-							onclick={handleDealerClick}
-							title="New Card"
-						>
-							<Plus size={18} strokeWidth={2} class="menu-icon" />
-							<span class="menu-label">New Card</span>
-						</button>
-
 						<!-- Card Layout Button -->
 						{#if hasOpenCards}
 							<button
@@ -196,31 +186,41 @@
 									class="chevron-icon {isLayoutPanelOpen ? 'rotated' : ''}"
 								/>
 							</button>
+
+							<!-- Layout Mode Panel - between Card Layout and New Card -->
+							{#if isLayoutPanelOpen}
+								<div class="layout-panel" role="menu">
+									{#each layoutModes as { mode, label, icon: Icon }}
+										<button
+											class="layout-option"
+											class:active={layoutMode === mode}
+											onclick={() => handleLayoutModeSelect(mode)}
+											role="menuitem"
+										>
+											<Icon size={16} strokeWidth={1.5} />
+											<span>{label}</span>
+											{#if layoutMode === mode}
+												<div class="check-mark">
+													<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+														<path d="M20 6L9 17l-5-5" />
+													</svg>
+												</div>
+											{/if}
+										</button>
+									{/each}
+								</div>
+							{/if}
 						{/if}
 
-						<!-- Layout Mode Panel -->
-						{#if isLayoutPanelOpen && hasOpenCards}
-							<div class="layout-panel" role="menu">
-								{#each layoutModes as { mode, label, icon: Icon }}
-									<button
-										class="layout-option"
-										class:active={layoutMode === mode}
-										onclick={() => handleLayoutModeSelect(mode)}
-										role="menuitem"
-									>
-										<Icon size={16} strokeWidth={1.5} />
-										<span>{label}</span>
-										{#if layoutMode === mode}
-											<div class="check-mark">
-												<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
-													<path d="M20 6L9 17l-5-5" />
-												</svg>
-											</div>
-										{/if}
-									</button>
-								{/each}
-							</div>
-						{/if}
+						<!-- New Card Button -->
+						<button
+							class="menu-button"
+							onclick={handleDealerClick}
+							title="New Card"
+						>
+							<Plus size={18} strokeWidth={2} class="menu-icon" />
+							<span class="menu-label">New Card</span>
+						</button>
 					</div>
 				{/if}
 			</div>
@@ -285,8 +285,8 @@
 	/* Hover indicator - bouncing arrow */
 	.menu-indicator {
 		padding: 6px 10px;
-		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		background: var(--hover-overlay);
+		border: 1px solid var(--border-subtle);
 		border-radius: 12px;
 		cursor: pointer;
 		opacity: 0.5;
@@ -295,8 +295,8 @@
 
 	.menu-indicator:hover {
 		opacity: 0.8;
-		background: rgba(255, 255, 255, 0.08);
-		border-color: rgba(255, 255, 255, 0.15);
+		background: var(--active-overlay);
+		border-color: var(--border);
 	}
 
 	.menu-indicator.hidden {
@@ -498,11 +498,6 @@
 	   =================================== */
 
 	.dealer-button-mobile {
-		--btn-bg: oklch(0.17 0.01 260);
-		--btn-bg-hover: oklch(0.20 0.01 260);
-		--btn-border: rgba(255, 255, 255, 0.1);
-		--btn-text: #a1a1aa;
-
 		position: absolute;
 		bottom: max(20px, env(safe-area-inset-bottom, 20px));
 		left: 50%;
@@ -511,22 +506,21 @@
 		width: 52px;
 		height: 52px;
 		border-radius: 16px;
-		border: 1px solid var(--btn-border);
+		border: 1px solid var(--border);
 		cursor: pointer;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		background: var(--btn-bg);
-		box-shadow:
-			0 4px 20px rgba(0, 0, 0, 0.4),
-			0 0 0 1px rgba(255, 255, 255, 0.06);
+		background: var(--card);
+		box-shadow: var(--shadow-m);
 		transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 		-webkit-tap-highlight-color: transparent;
 	}
 
 	.dealer-button-mobile:hover {
-		background: var(--btn-bg-hover);
+		background: var(--accent);
 		transform: translateX(-50%) translateY(-2px);
+		box-shadow: var(--shadow-l);
 	}
 
 	.dealer-button-mobile:active {
@@ -534,8 +528,12 @@
 	}
 
 	.dealer-button-mobile :global(.dealer-icon) {
-		color: var(--btn-text);
+		color: var(--muted-foreground);
 		transition: all 0.2s ease;
+	}
+
+	.dealer-button-mobile:hover :global(.dealer-icon) {
+		color: var(--foreground);
 	}
 
 	/* Reduced motion */

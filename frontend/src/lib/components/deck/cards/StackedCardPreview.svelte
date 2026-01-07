@@ -14,15 +14,18 @@
 
 	import {
 		MessageSquare,
+		Bot,
 		Terminal,
 		Settings,
 		User,
 		Users,
 		FolderKanban,
 		Puzzle,
+		Image,
+		Box,
+		AudioLines,
 		FolderOpen,
-		StickyNote,
-		Zap
+		Mic
 	} from 'lucide-svelte';
 	import { allTabs } from '$lib/stores/tabs';
 	import type { DeckCard, CardType } from './types';
@@ -50,6 +53,8 @@
 	// Icon mapping for card types
 	const cardIcons: Record<CardType, typeof MessageSquare> = {
 		chat: MessageSquare,
+		conversation: Mic,
+		agent: Bot,
 		terminal: Terminal,
 		settings: Settings,
 		profile: User,
@@ -57,9 +62,10 @@
 		project: FolderKanban,
 		plugins: Puzzle,
 		'user-settings': Settings,
-		'file-browser': FolderOpen,
-		notes: StickyNote,
-		hooks: Zap
+		'image-studio': Image,
+		'model-studio': Box,
+		'audio-studio': AudioLines,
+		'file-browser': FolderOpen
 	};
 
 	const CardIcon = $derived(cardIcons[card.type] || MessageSquare);
@@ -120,12 +126,18 @@
 				return 'Plugin manager';
 			case 'user-settings':
 				return 'User preferences';
+			case 'image-studio':
+				return 'Image generation';
+			case 'model-studio':
+				return '3D model creation';
+			case 'audio-studio':
+				return 'Audio & speech';
 			case 'file-browser':
 				return 'File explorer';
 			case 'subagent':
 				return 'Agent management';
-			case 'notes':
-				return 'Project notes';
+			case 'conversation':
+				return 'Voice conversation';
 			default:
 				return '';
 		}

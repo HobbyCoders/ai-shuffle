@@ -63,7 +63,7 @@ export class AudioService {
 
 	// Audio data
 	private audioChunks: Blob[] = [];
-	private analyserData: Uint8Array<ArrayBuffer> | null = null;
+	private analyserData: Uint8Array | null = null;
 
 	// VAD state
 	private vadState: VADState = {
@@ -174,9 +174,8 @@ export class AudioService {
 	 * Stop audio capture and cleanup
 	 */
 	stop(): void {
-		console.log('[AudioService] Stopping audio capture, isCapturing:', this.isCapturing);
+		if (!this.isCapturing) return;
 
-		// Set flag first to prevent any async callbacks from restarting things
 		this.isCapturing = false;
 
 		// Stop animation frame
@@ -185,47 +184,27 @@ export class AudioService {
 			this.animationFrameId = null;
 		}
 
-		// Stop TTS playback
-		this.stopTts();
-
-		// Stop MediaRecorder - clear callbacks first to prevent restart
-		if (this.mediaRecorder) {
-			this.mediaRecorder.ondataavailable = null;
-			this.mediaRecorder.onstop = null;
-			if (this.mediaRecorder.state !== 'inactive') {
-				try {
-					this.mediaRecorder.stop();
-				} catch (e) {
-					// Ignore errors from stopping already stopped recorder
-				}
-			}
-			this.mediaRecorder = null;
+		// Stop MediaRecorder
+		if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+			this.mediaRecorder.stop();
 		}
+		this.mediaRecorder = null;
 
-		// Stop media stream tracks - this is what releases the microphone
+		// Stop media stream tracks
 		if (this.mediaStream) {
-			this.mediaStream.getTracks().forEach((track) => {
-				console.log('[AudioService] Stopping track:', track.kind, track.readyState);
-				track.stop();
-			});
+			this.mediaStream.getTracks().forEach((track) => track.stop());
 			this.mediaStream = null;
 		}
 
 		// Disconnect audio nodes
 		if (this.sourceNode) {
-			try {
-				this.sourceNode.disconnect();
-			} catch (e) {
-				// Ignore disconnect errors
-			}
+			this.sourceNode.disconnect();
 			this.sourceNode = null;
 		}
 
 		// Close audio context
 		if (this.audioContext) {
-			this.audioContext.close().catch(() => {
-				// Ignore close errors
-			});
+			this.audioContext.close();
 			this.audioContext = null;
 		}
 
@@ -233,7 +212,7 @@ export class AudioService {
 		this.analyserData = null;
 		this.audioChunks = [];
 
-		console.log('[AudioService] Stopped audio capture completely');
+		console.log('[AudioService] Stopped audio capture');
 	}
 
 	/**
@@ -336,51 +315,44 @@ export class AudioService {
 		// Stop any playing TTS (interruption)
 		this.stopTts();
 
-		// Just clear chunks - we'll use whatever is recorded from now on
-		// Don't restart the recorder as that causes async state issues
+		// Clear and restart recording to capture this utterance fresh
 		this.audioChunks = [];
+		if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
+			// Request any buffered data, then we'll continue capturing
+			this.mediaRecorder.requestData();
+		}
 	}
 
 	/**
 	 * Handle speech end - collect audio and notify callback
 	 */
 	private handleSpeechEnd(): void {
-		const duration = this.vadState.speechDuration;
-		const chunkCount = this.audioChunks.length;
-		console.log('[AudioService] Speech ended, duration:', duration, 'ms, chunks:', chunkCount);
+		console.log('[AudioService] Speech ended, duration:', this.vadState.speechDuration, 'ms');
 
-		// IMMEDIATELY reset VAD state to prevent this being called again
-		this.resetVADState();
-
-		// Capture current chunks before they get modified
-		const chunksToSend = [...this.audioChunks];
-		this.audioChunks = [];
-
-		// Request any pending data from the recorder
+		// Stop recording to flush remaining data
 		if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
 			this.mediaRecorder.requestData();
-		}
 
-		// Use a small delay to ensure ondataavailable fires with the requested data
-		setTimeout(() => {
-			// Check if more chunks arrived after requestData
-			if (this.audioChunks.length > 0) {
-				chunksToSend.push(...this.audioChunks);
-				this.audioChunks = [];
-			}
+			// Small delay to ensure ondataavailable fires
+			setTimeout(() => {
+				if (this.audioChunks.length > 0) {
+					const mimeType = this.mediaRecorder?.mimeType || 'audio/webm';
+					const audioBlob = new Blob(this.audioChunks, { type: mimeType });
 
-			if (chunksToSend.length > 0) {
-				const mimeType = this.mediaRecorder?.mimeType || 'audio/webm';
-				const audioBlob = new Blob(chunksToSend, { type: mimeType });
-				console.log('[AudioService] Created audio blob:', audioBlob.size, 'bytes, type:', audioBlob.type);
-
-				if (this.onSpeechEnd && audioBlob.size > 0) {
-					this.onSpeechEnd(audioBlob);
+					if (this.onSpeechEnd) {
+						this.onSpeechEnd(audioBlob);
+					}
 				}
-			} else {
-				console.log('[AudioService] No audio chunks to send');
-			}
-		}, 150);
+
+				// Reset state
+				this.resetVADState();
+
+				// Clear chunks for next utterance
+				this.audioChunks = [];
+			}, 100);
+		} else {
+			this.resetVADState();
+		}
 	}
 
 	/**

@@ -56,13 +56,12 @@ export interface ImageTo3DInput {
 
   /**
    * AI model to use for generation.
-   * - "meshy-6": Latest model, best quality (20 credits)
+   * - "latest": Meshy 6 Preview, best quality (20 credits, 10 during promo)
    * - "meshy-5": Balanced quality and speed (5 credits)
    * - "meshy-4": Fast generation (5 credits)
-   * - "latest": Alias for the latest model
-   * @default "meshy-6"
+   * @default "latest"
    */
-  model?: 'meshy-4' | 'meshy-5' | 'meshy-6' | 'latest';
+  model?: 'meshy-4' | 'meshy-5' | 'latest';
 
   /**
    * Whether to generate textures for the model.
@@ -188,13 +187,17 @@ export async function imageTo3D(input: ImageTo3DInput): Promise<ImageTo3DRespons
   }
 
   // Get model from environment or use default
-  const model = input.model || process.env.MODEL3D_MODEL || 'meshy-6';
+  // Valid models: meshy-4, meshy-5, latest (Meshy 6 Preview)
+  const envModel = process.env.MODEL3D_MODEL;
+  // Map meshy-6 to latest for backwards compatibility
+  const normalizedEnvModel = envModel === 'meshy-6' ? 'latest' : envModel;
+  const model = input.model || normalizedEnvModel || 'latest';
 
   try {
     // Build request body
     const requestBody: Record<string, any> = {
       image_url: imageResult.dataUri,
-      ai_model: model === 'latest' ? 'meshy-6' : model,
+      ai_model: model,  // Valid: meshy-4, meshy-5, latest
       should_texture: input.should_texture !== false  // Default true
     };
 

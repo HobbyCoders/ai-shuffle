@@ -10,7 +10,8 @@
 	 */
 	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { isAuthenticated, isAdmin } from '$lib/stores/auth';
+	import { isAuthenticated, isAdmin, apiUser } from '$lib/stores/auth';
+	import { credentials } from '$lib/stores/credentials';
 	import {
 		tabs,
 		allTabs,
@@ -26,7 +27,9 @@
 		allCards,
 		focusedCardId,
 		mobileActiveCardIndex,
-		layoutMode
+		layoutMode,
+		isShuffling,
+		shufflingCards
 	} from '$lib/stores/deck';
 	import type { DeckCard, DeckCardType, LayoutMode } from '$lib/stores/deck';
 	import { groups } from '$lib/stores/groups';
@@ -52,7 +55,9 @@
 		ModelStudioCard,
 		AudioStudioCard,
 		FileBrowserCard,
-		PluginManagerCard
+		PluginManagerCard,
+		StackedCardPreview,
+		ConversationCard
 	} from '$lib/components/deck/cards';
 	import type { CardType, DeckCard as CardsDeckCard } from '$lib/components/deck/cards/types';
 
@@ -111,6 +116,14 @@
 	let showSpotlight = $state(false);
 	let showAdvancedSearch = $state(false);
 	let showCardNavigator = $state(false);
+	let cardNavigatorInitialView = $state<'main' | 'recent'>('main');
+
+	// Reorder drag state (for sidebyside/tile layouts)
+	let reorderDragCardId: string | null = $state(null);
+	let reorderDragPosition: { x: number; y: number } | null = $state(null);
+	let isReorderTransitioning = $state(false);
+	let lastReorderTargetIndex = $state(-1); // Track last target to avoid redundant reorders
+	let isProcessingReorder = $state(false); // Prevent re-entrant reorder calls
 
 	// Terminal modal state
 	let terminalCommand = $state('/resume');
@@ -269,6 +282,11 @@
 		if ($isAdmin) {
 			tabs.loadApiUsers();
 			tabs.loadAdminSessions();
+		}
+
+		// Load credentials for API users (needed for feature gating)
+		if ($apiUser) {
+			credentials.load();
 		}
 
 		// Sync deck state from server for cross-device sync
@@ -585,6 +603,11 @@
 				deckCardType = 'terminal';
 				title = 'Terminal';
 				break;
+			case 'recent-sessions':
+				// Open the card navigator directly to the recent sessions view
+				cardNavigatorInitialView = 'recent';
+				showCardNavigator = true;
+				return; // Don't create a card
 			case 'settings': {
 				// Singleton - check if already open
 				const existingSettings = $allCards.find(c => c.type === 'settings');
@@ -699,7 +722,40 @@
 
 		const { width, height } = card.size;
 
-		// Apply bounds clamping to prevent cards from going off-screen
+		// In managed grid layouts (sidebyside/tile/stack), use reorder behavior
+		if ($layoutMode === 'sidebyside' || $layoutMode === 'tile' || $layoutMode === 'stack') {
+			// In stack mode, don't allow reordering the main (focused) card
+			if ($layoutMode === 'stack' && id === $focusedCardId) {
+				return;
+			}
+
+			// Track drag position for the floating overlay (this is cheap, just local state)
+			reorderDragCardId = id;
+			reorderDragPosition = { x, y };
+
+			// Prevent re-entrant calls during reorder processing
+			if (isProcessingReorder) return;
+
+			// Calculate target slot - only reorder if slot actually changed
+			// This prevents calling reorderCard+applyLayout 60 times per second
+			const targetIndex = deck.calculateSlotIndex(x, y);
+			if (targetIndex !== lastReorderTargetIndex) {
+				lastReorderTargetIndex = targetIndex;
+				// Enable transitions for other cards to animate
+				isReorderTransitioning = true;
+
+				// Mark as processing and schedule reorder
+				isProcessingReorder = true;
+				try {
+					deck.reorderCard(id, targetIndex);
+				} finally {
+					isProcessingReorder = false;
+				}
+			}
+			return;
+		}
+
+		// Freeflow mode: Apply bounds clamping to prevent cards from going off-screen
 		const clampedPos = workspaceRef.clampToBounds(x, y, width, height);
 
 		// Update the card position
@@ -711,7 +767,20 @@
 	}
 
 	function handleCardDragEnd(_id: string) {
-		// No-op: snapping has been removed
+		// In managed layouts, commit the reorder and clear drag state
+		if ($layoutMode === 'sidebyside' || $layoutMode === 'tile' || $layoutMode === 'stack') {
+			deck.commitReorder();
+			reorderDragCardId = null;
+			reorderDragPosition = null;
+			lastReorderTargetIndex = -1; // Reset for next drag
+			isProcessingReorder = false; // Ensure flag is cleared
+
+			// Keep transitions briefly for snap animation, then disable
+			setTimeout(() => {
+				isReorderTransitioning = false;
+			}, 250);
+			return;
+		}
 	}
 
 	function handleCardResizeEnd(_id: string) {
@@ -747,6 +816,28 @@
 
 	function handleFocusNavigate(direction: 'prev' | 'next') {
 		deck.navigateFocusMode(direction);
+	}
+
+	/**
+	 * Handle clicking a stacked card to shuffle it to the main position
+	 * Triggers shuffle animation and swaps the cards
+	 */
+	function handleStackCardClick(cardId: string) {
+		if ($layoutMode !== 'stack') return;
+		if (cardId === $focusedCardId) return; // Already the main card
+
+		const outgoingId = $focusedCardId;
+
+		// Start shuffle animation
+		deck.startShuffle(outgoingId, cardId);
+
+		// Focus the new card (triggers layout recalculation)
+		deck.focusCard(cardId);
+
+		// End shuffle animation after it completes
+		setTimeout(() => {
+			deck.endShuffle();
+		}, 350); // Match animation duration
 	}
 
 	// ============================================
@@ -851,6 +942,7 @@
 					onCloseCard={handleCardClose}
 					onCreateCard={handleCreateCard}
 					onOpenNavigator={() => showCardNavigator = true}
+					isApiUser={!!$apiUser}
 				>
 					{#snippet children(card)}
 						{@const tabId = getTabIdForCard(card)}
@@ -979,6 +1071,16 @@
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
 							/>
+						{:else if card.type === 'conversation'}
+							<ConversationCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
 						{:else}
 							<div class="p-4">
 								<p class="text-muted-foreground">Unknown card type</p>
@@ -999,15 +1101,23 @@
 					onLayoutModeChange={handleLayoutModeChange}
 					onFocusNavigate={handleFocusNavigate}
 					focusedCardId={$focusedCardId}
+					isApiUser={!!$apiUser}
 				>
 					{#snippet children()}
 						<!-- Don't sort cards - z-index CSS handles visual stacking order -->
 						<!-- Sorting would cause DOM reordering which resets scroll positions -->
 						{#each workspaceCards as card (card.id)}
 							{@const tabId = getTabIdForCard(card)}
+							{@const isStackedCard = $layoutMode === 'stack' && card.id !== $focusedCardId}
+							{@const isShufflingCard = $isShuffling && ($shufflingCards.outgoingId === card.id || $shufflingCards.incomingId === card.id)}
 							<div
 									class="card-wrapper"
 									class:maximized={card.maximized}
+									class:reorder-transitioning={isReorderTransitioning}
+									class:is-reorder-dragging={reorderDragCardId === card.id}
+									class:stacked-card={isStackedCard}
+									class:main-card={$layoutMode === 'stack' && card.id === $focusedCardId}
+									class:shuffling={isShufflingCard}
 									style:position="absolute"
 									style:left={card.maximized ? '0' : `${card.x}px`}
 									style:top={card.maximized ? '0' : `${card.y}px`}
@@ -1015,7 +1125,21 @@
 									style:height={card.maximized ? '100%' : `${card.height}px`}
 									style:z-index={card.zIndex}
 								>
-									{#if card.type === 'chat'}
+									<!-- In stack layout, show compact preview for stacked cards -->
+									{#if isStackedCard}
+										<StackedCardPreview
+											{card}
+											{tabId}
+											onClick={() => handleStackCardClick(card.id)}
+											onDragStart={(e) => {
+												reorderDragCardId = card.id;
+												reorderDragPosition = { x: e.clientX, y: e.clientY };
+											}}
+											onDragMove={(e) => handleCardMove(card.id, e.clientX, e.clientY)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											isDragging={reorderDragCardId === card.id}
+										/>
+									{:else if card.type === 'chat'}
 										{#if tabId}
 											<ChatCard
 												{card}
@@ -1158,6 +1282,17 @@
 											onDragEnd={() => handleCardDragEnd(card.id)}
 											onResizeEnd={() => handleCardResizeEnd(card.id)}
 										/>
+									{:else if card.type === 'conversation'}
+										<ConversationCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
+										/>
 									{:else}
 										<!-- Other card types -->
 										<div class="card-placeholder">
@@ -1168,6 +1303,28 @@
 									{/if}
 								</div>
 						{/each}
+
+						<!-- Floating overlay for dragged card during reorder -->
+						{#if reorderDragCardId && reorderDragPosition}
+							{@const draggedCard = workspaceCards.find(c => c.id === reorderDragCardId)}
+							{#if draggedCard}
+								<div
+									class="reorder-drag-overlay"
+									style:left="{reorderDragPosition.x}px"
+									style:top="{reorderDragPosition.y}px"
+									style:width="{draggedCard.width}px"
+									style:height="{draggedCard.height}px"
+								>
+									<!-- Simplified preview of the card -->
+									<div class="h-full w-full flex flex-col rounded-xl overflow-hidden border border-primary/30 bg-card/95 backdrop-blur-md">
+										<div class="h-11 flex items-center gap-2 px-3 bg-secondary/80 border-b border-border">
+											<span class="text-sm font-medium text-foreground truncate">{draggedCard.title}</span>
+										</div>
+										<div class="flex-1 bg-card/50"></div>
+									</div>
+								</div>
+							{/if}
+						{/if}
 					{/snippet}
 				</Workspace>
 		{/if}
@@ -1180,21 +1337,28 @@
 	<!-- Card Deck Navigator (AI Shuffle themed) -->
 	<CardDeckNavigator
 		open={showCardNavigator}
-		onClose={() => showCardNavigator = false}
+		onClose={() => {
+			showCardNavigator = false;
+			cardNavigatorInitialView = 'main'; // Reset for next open
+		}}
 		onCreateChat={() => handleCreateCard('chat')}
 		onCreateTerminal={() => handleCreateCard('terminal')}
 		onOpenThread={handleNavigatorOpenThread}
 		onOpenImageStudio={() => handleCreateCard('image-studio')}
 		onOpenModelStudio={() => handleCreateCard('model-studio')}
 		onOpenAudioStudio={() => handleCreateCard('audio-studio')}
+		onOpenConversation={() => handleCreateCard('conversation')}
 		onOpenFileBrowser={() => handleCreateCard('file-browser')}
 		onOpenProjects={() => handleCreateCard('project')}
 		onOpenProfiles={() => handleCreateCard('profile')}
 		onOpenSubagents={() => handleCreateCard('subagent')}
 		onOpenSettings={() => handleCreateCard('settings')}
 		onOpenPlugins={() => handleCreateCard('plugins')}
+		onOpenUserSettings={() => handleCreateCard('user-settings')}
 		isAdmin={$isAdmin}
+		isApiUser={!!$apiUser}
 		{isMobile}
+		initialView={cardNavigatorInitialView}
 	/>
 
 
@@ -1315,6 +1479,73 @@
 		inset: 0 !important;
 		width: 100% !important;
 		height: 100% !important;
+	}
+
+	/* Smooth transitions during reorder drag for non-dragged cards */
+	.card-wrapper.reorder-transitioning:not(.is-reorder-dragging) {
+		transition: left 200ms cubic-bezier(0.4, 0, 0.2, 1),
+					top 200ms cubic-bezier(0.4, 0, 0.2, 1);
+	}
+
+	/* Hide the original card during reorder drag - the overlay shows it */
+	.card-wrapper.is-reorder-dragging {
+		opacity: 0;
+		pointer-events: none;
+	}
+
+	/* Floating drag overlay for reorder */
+	.reorder-drag-overlay {
+		position: absolute;
+		pointer-events: none;
+		z-index: 10000;
+		opacity: 0.9;
+		transform: scale(1.02);
+		box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3),
+					0 0 0 2px hsl(var(--primary) / 0.5);
+		border-radius: 12px;
+		overflow: hidden;
+	}
+
+	/* ========================================
+	   Stack Layout: Shuffle Animation
+	   ======================================== */
+
+	/* Stacked cards in stack layout */
+	.card-wrapper.stacked-card {
+		cursor: pointer;
+	}
+
+	/* Main card in stack layout */
+	.card-wrapper.main-card {
+		/* Main card has normal appearance */
+	}
+
+	/* Shuffle animation - smooth position/size transition */
+	.card-wrapper.shuffling {
+		transition:
+			left 350ms cubic-bezier(0.34, 1.56, 0.64, 1),
+			top 350ms cubic-bezier(0.34, 1.56, 0.64, 1),
+			width 350ms cubic-bezier(0.34, 1.56, 0.64, 1),
+			height 350ms cubic-bezier(0.34, 1.56, 0.64, 1),
+			transform 350ms cubic-bezier(0.34, 1.56, 0.64, 1);
+	}
+
+	/* Main card shrinking during shuffle (going to stack) */
+	.card-wrapper.main-card.shuffling {
+		transform: scale(0.98);
+	}
+
+	/* Stacked card growing during shuffle (becoming main) */
+	.card-wrapper.stacked-card.shuffling {
+		transform: scale(1.02);
+		z-index: 9999 !important; /* Ensure it's on top during animation */
+	}
+
+	/* Respect reduced motion preference */
+	@media (prefers-reduced-motion: reduce) {
+		.card-wrapper.shuffling {
+			transition: none;
+		}
 	}
 
 	.card-loading,

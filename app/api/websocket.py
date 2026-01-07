@@ -216,10 +216,18 @@ async def chat_websocket(
                 # disconnects and reconnects, its NEW websocket should receive sync events.
                 # The frontend handles any potential duplication.
                 if not stream_started and event_type in ('stream_start', 'stream_delta', 'chunk', 'tool_use'):
+                    # Extract usage data from stream_start event if available
+                    usage_data = None
+                    if event_type == 'stream_start':
+                        message_data = event.get('message', {})
+                        if isinstance(message_data, dict):
+                            usage_data = message_data.get('usage')
+
                     await sync_engine.broadcast_stream_start(
                         session_id=session_id,
                         message_id=message_id,
-                        source_device_id=None  # Don't exclude - let all registered devices receive
+                        source_device_id=None,  # Don't exclude - let all registered devices receive
+                        usage=usage_data
                     )
                     stream_started = True
 
@@ -410,6 +418,20 @@ async def chat_websocket(
                         chunk_data=chunk_data,
                         source_device_id=None
                     )
+                elif event_type == 'stream_message_delta':
+                    # Final message metadata with output token usage
+                    # Broadcast to sync output tokens across devices
+                    chunk_data = {
+                        'delta': event.get('delta', {}),
+                        'usage': event.get('usage', {})
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='stream_message_delta',
+                        chunk_data=chunk_data,
+                        source_device_id=None
+                    )
                 elif event_type == 'done':
                     # Store metadata for webhook dispatch
                     final_metadata = event.get('metadata', {})
@@ -541,6 +563,7 @@ async def chat_websocket(
                         profile_id = data.get("profile", "claude-code")
                         project_id = data.get("project")
                         overrides = data.get("overrides")  # Optional: {model, permission_mode}
+                        worktree_id = data.get("worktree_id")  # Optional: link session to existing worktree
 
                         if not prompt:
                             await send_json({"type": "error", "message": "Empty prompt"})
@@ -548,18 +571,40 @@ async def chat_websocket(
 
                         # Create or get session
                         if not session_id:
-                            # Create new session
+                            # Validate worktree access if provided
+                            if worktree_id:
+                                worktree = database.get_worktree(worktree_id)
+                                if not worktree:
+                                    await send_json({"type": "error", "message": f"Worktree not found: {worktree_id}"})
+                                    continue
+                                # Get repository to verify project ownership
+                                repo = database.get_git_repository(worktree["repository_id"])
+                                if not repo:
+                                    await send_json({"type": "error", "message": "Worktree repository not found"})
+                                    continue
+                                # Verify worktree belongs to the specified project
+                                if project_id and repo["project_id"] != project_id:
+                                    logger.warning(f"Authorization denied: worktree {worktree_id} belongs to project {repo['project_id']}, not {project_id}")
+                                    await send_json({"type": "error", "message": "Worktree does not belong to this project"})
+                                    continue
+                                # If no project specified, use the worktree's project
+                                if not project_id:
+                                    project_id = repo["project_id"]
+                            
+                            # Create new session, optionally linked to a worktree
                             session_id = str(uuid.uuid4())
                             database.create_session(
                                 session_id=session_id,
                                 profile_id=profile_id,
                                 project_id=project_id,
-                                api_user_id=api_user_id
+                                api_user_id=api_user_id,
+                                worktree_id=worktree_id  # Link to worktree if provided
                             )
                             # Immediately notify frontend of new session_id so it persists on refresh
                             await send_json({
                                 "type": "session_created",
-                                "session_id": session_id
+                                "session_id": session_id,
+                                "worktree_id": worktree_id  # Include worktree_id in response
                             })
 
                         # Register device with session if switching sessions
