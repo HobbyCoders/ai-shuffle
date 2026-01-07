@@ -53,6 +53,8 @@
 		CardShuffle,
 		FileBrowserCard,
 		PluginManagerCard,
+		NotesCard,
+		HooksCard,
 		StackedCardPreview
 	} from '$lib/components/deck/cards';
 	import type { CardType, DeckCard as CardsDeckCard } from '$lib/components/deck/cards/types';
@@ -180,6 +182,8 @@
 				return 'file-browser';
 			case 'plugins':
 				return 'plugins';
+			case 'hooks':
+				return 'hooks';
 			default:
 				return 'chat';
 		}
@@ -521,7 +525,16 @@
 	// Responsive Handling
 	// ============================================
 	function checkMobile() {
-		isMobile = window.innerWidth < 640;
+		// Check if device is touch-only (no fine pointer like mouse/trackpad)
+		// This ensures foldables like Z Fold 6 (678px unfolded) still get mobile UI
+		// because desktop UI doesn't work well with touch input
+		const isTouchOnly = window.matchMedia('(pointer: coarse)').matches &&
+			!window.matchMedia('(any-pointer: fine)').matches;
+
+		// Use mobile UI if either:
+		// 1. Screen is narrow (< 640px) - traditional mobile breakpoint
+		// 2. Device is touch-only - ensures foldables/tablets get touch-friendly UI
+		isMobile = window.innerWidth < 640 || isTouchOnly;
 		deck.setIsMobile(isMobile);
 	}
 
@@ -647,6 +660,17 @@
 				}
 				deckCardType = 'plugins';
 				title = 'Plugins';
+				break;
+			}
+			case 'hooks': {
+				// Singleton - only one hooks card at a time
+				const existingHooks = $allCards.find(c => c.type === 'hooks');
+				if (existingHooks) {
+					deck.focusCard(existingHooks.id);
+					return;
+				}
+				deckCardType = 'hooks';
+				title = 'Hooks';
 				break;
 			}
 			default:
@@ -998,6 +1022,26 @@
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
 							/>
+						{:else if card.type === 'notes'}
+							<NotesCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
+						{:else if card.type === 'hooks'}
+							<HooksCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
 						{:else}
 							<div class="p-4">
 								<p class="text-muted-foreground">Unknown card type</p>
@@ -1163,6 +1207,28 @@
 											onDragEnd={() => handleCardDragEnd(card.id)}
 											onResizeEnd={() => handleCardResizeEnd(card.id)}
 										/>
+									{:else if card.type === 'notes'}
+										<NotesCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
+										/>
+									{:else if card.type === 'hooks'}
+										<HooksCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
+										/>
 									{:else}
 										<!-- Other card types -->
 										<div class="card-placeholder">
@@ -1220,6 +1286,7 @@
 		onOpenSubagents={() => handleCreateCard('subagent')}
 		onOpenSettings={() => handleCreateCard('settings')}
 		onOpenPlugins={() => handleCreateCard('plugins')}
+		onOpenHooks={() => handleCreateCard('hooks')}
 		onOpenUserSettings={() => handleCreateCard('user-settings')}
 		isAdmin={$isAdmin}
 		isApiUser={!!$apiUser}

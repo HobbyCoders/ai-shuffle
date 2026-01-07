@@ -616,3 +616,74 @@ async def sync_project_worktrees(
         active_worktrees=result.get("active", 0),
         cleaned_up=result.get("cleaned_up", [])
     )
+
+
+# ============================================================================
+# Session Sync - Import Claude Code sessions
+# ============================================================================
+
+class SessionSyncResponse(BaseModel):
+    """Response from session sync operation"""
+    imported_count: int
+    skipped_count: int
+    errors: List[str]
+    sessions: List[dict]
+
+
+@router.post("/{project_id}/sync-sessions", response_model=SessionSyncResponse)
+async def sync_project_sessions(
+    request: Request,
+    project_id: str,
+    profile_id: str = Query("default", description="Profile to use for imported sessions"),
+    token: str = Depends(require_auth)
+):
+    """
+    Sync Claude Code sessions for a project.
+
+    Discovers and imports sessions from ~/.claude/projects/ that were created
+    directly in Claude Code but are not yet tracked in the AI Shuffle database.
+
+    This endpoint:
+    1. Finds the Claude projects directory matching this project's working dir
+    2. Discovers all JSONL session files not already in the database
+    3. Imports each session with metadata (title, message count, token usage)
+
+    Should be called when viewing a project's session list to ensure all
+    sessions are visible, regardless of whether they were created in
+    Claude Code or AI Shuffle.
+
+    Args:
+        project_id: The project to sync sessions for
+        profile_id: The profile to associate with imported sessions (default: 'default')
+
+    Returns:
+        imported_count: Number of sessions successfully imported
+        skipped_count: Number of sessions skipped (already imported or errors)
+        errors: List of error messages for failed imports
+        sessions: List of newly imported session objects
+    """
+    from app.core.session_sync import session_sync_service
+
+    # Check project access
+    check_project_access(request, project_id)
+
+    # Verify project exists
+    project = database.get_project(project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {project_id}"
+        )
+
+    # Run session sync
+    result = session_sync_service.sync_project_sessions(
+        project_id=project_id,
+        profile_id=profile_id
+    )
+
+    return SessionSyncResponse(
+        imported_count=result["imported_count"],
+        skipped_count=result["skipped_count"],
+        errors=result["errors"],
+        sessions=result["sessions"]
+    )

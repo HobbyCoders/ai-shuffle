@@ -20,7 +20,7 @@ env:
 jobs:
   # Job 1: Build frontend once (platform-agnostic static files)
   build-frontend:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -50,7 +50,7 @@ jobs:
   # Job 2: Create platform-specific release packages
   create-release-packages:
     needs: build-frontend
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -383,7 +383,7 @@ jobs:
   # Job 3: Create GitHub Release with all packages
   create-release:
     needs: create-release-packages
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Download release packages
         uses: actions/download-artifact@v4

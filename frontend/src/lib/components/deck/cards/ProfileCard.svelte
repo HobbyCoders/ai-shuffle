@@ -102,7 +102,7 @@
 					console.warn('Failed to load subagents:', err);
 					return [];
 				}),
-				api.get<ToolsResponse>('/tools').catch((err) => {
+				api.get<ToolsResponse>('/tools?refresh=true').catch((err) => {
 					console.warn('Failed to load tools:', err);
 					return { all_tools: [], categories: [] };
 				}),
@@ -1461,6 +1461,7 @@
 
 			<!-- Form Footer -->
 			<div class="card-footer">
+				<div class="card-footer-content">
 				<button type="button" class="card-btn-secondary" onclick={backToList}>Cancel</button>
 				<button
 					type="button"
@@ -1470,6 +1471,7 @@
 				>
 					{editingProfile ? 'Save Changes' : 'Create Profile'}
 				</button>
+				</div>
 			</div>
 		{:else}
 			<!-- List View -->
@@ -1648,6 +1650,7 @@
 
 			<!-- List Footer -->
 			<div class="card-footer">
+				<div class="card-footer-content">
 				<button class="card-btn-primary" onclick={openNewForm}>
 					<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
@@ -1668,6 +1671,7 @@
 						</svg>
 					{/if}
 				</button>
+				</div>
 			</div>
 		{/if}
 	</div>
@@ -1703,11 +1707,14 @@
 		height: 100%;
 		min-height: 0;
 		overflow: hidden;
+		/* Set footer max-width to match centered-content */
+		--card-footer-max-width: 900px;
 	}
 
 	/* Maximized state - constrain width and center content */
 	.profile-card.maximized {
 		--card-max-width: 900px;
+		--card-footer-max-width: var(--card-max-width);
 	}
 
 	.profile-card.maximized :global(.card-tabs),

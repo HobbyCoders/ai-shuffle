@@ -536,12 +536,25 @@
   flex-shrink: 0;
 }
 
+/* Footer content wrapper - matches centered-content width */
+.card-footer-content {
+  display: flex;
+  gap: var(--space-3);
+  width: 100%;
+  max-width: var(--card-footer-max-width, 100%);
+  margin: 0 auto;
+}
+
+/* Primary button in footer content should expand */
+.card-footer-content .card-btn-primary {
+  flex: 1;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════════
    PRIMARY BUTTON
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 .card-btn-primary {
-  flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;

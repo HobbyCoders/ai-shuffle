@@ -61,6 +61,8 @@ class StreamingBuffer:
     session_id: str
     messages: List[Dict[str, Any]] = field(default_factory=list)
     started_at: datetime = field(default_factory=datetime.utcnow)
+    # Store usage data from stream_start for late-joining devices
+    usage: Optional[Dict[str, Any]] = None
 
     def add_chunk(self, chunk_type: str, content: str, tool_name: str = None, tool_id: str = None, tool_input: Dict = None, subtype: str = None, data: Dict = None,
                   agent_id: str = None, agent_type: str = None, description: str = None, prompt: str = None,
@@ -367,7 +369,10 @@ class SyncEngine:
         # Only create buffer if not already streaming (idempotent)
         if session_id not in self._streaming_sessions:
             self._streaming_sessions.add(session_id)
-            self._streaming_buffers[session_id] = StreamingBuffer(session_id=session_id)
+            self._streaming_buffers[session_id] = StreamingBuffer(session_id=session_id, usage=usage)
+        elif usage and session_id in self._streaming_buffers:
+            # Update usage if buffer already exists (e.g., reconnection during streaming)
+            self._streaming_buffers[session_id].usage = usage
 
         data = {"message_id": message_id}
         if usage:
@@ -377,6 +382,35 @@ class SyncEngine:
             event_type="stream_start",
             session_id=session_id,
             data=data,
+            source_device_id=source_device_id
+        )
+        await self.broadcast_event(event, exclude_device_id=source_device_id)
+
+    async def broadcast_usage_update(
+        self,
+        session_id: str,
+        usage: Dict[str, Any],
+        source_device_id: Optional[str] = None
+    ):
+        """Broadcast a usage update during streaming (for agentic loops with multiple turns).
+
+        This is called when subsequent stream_start events occur during a single query,
+        such as when Claude uses tools and continues responding. Each new assistant turn
+        has updated token usage that synced devices and the buffer need to know about.
+
+        Args:
+            session_id: The session ID
+            usage: Token usage data (input_tokens, cache_creation_input_tokens, cache_read_input_tokens)
+            source_device_id: Device that originated the event (will be excluded from broadcast)
+        """
+        # Update the buffer's usage data for late-joining devices
+        if session_id in self._streaming_buffers:
+            self._streaming_buffers[session_id].usage = usage
+
+        event = SyncEvent(
+            event_type="usage_update",
+            session_id=session_id,
+            data={"usage": usage},
             source_device_id=source_device_id
         )
         await self.broadcast_event(event, exclude_device_id=source_device_id)
@@ -430,6 +464,17 @@ class SyncEngine:
         if buffer:
             return buffer.get_messages()
         return None
+
+    def get_streaming_buffer_with_usage(self, session_id: str) -> tuple[Optional[List[Dict[str, Any]]], Optional[Dict[str, Any]]]:
+        """Get the current streaming buffer and usage data for a session (for late-joining devices).
+
+        Returns:
+            Tuple of (messages, usage) where usage contains token usage data from stream_start
+        """
+        buffer = self._streaming_buffers.get(session_id)
+        if buffer:
+            return buffer.get_messages(), buffer.usage
+        return None, None
 
     async def broadcast_stream_end(
         self,

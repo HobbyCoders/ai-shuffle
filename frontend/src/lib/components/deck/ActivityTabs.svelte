@@ -4,12 +4,11 @@
 	 *
 	 * Tabs:
 	 * - Threads: Recent sessions, history
-	 * - Agents: Background agents (running + completed)
 	 * - Studio: Image/video generations
 	 * - Info: Session stats, costs, tokens
 	 */
 
-	import { MessageSquare, Bot, Palette, Info } from 'lucide-svelte';
+	import { MessageSquare, Palette, Info } from 'lucide-svelte';
 	import type { ActivityTabType } from './ActivityPanel.svelte';
 
 	interface TabConfig {
@@ -32,7 +31,6 @@
 
 	const tabs: TabConfig[] = [
 		{ id: 'threads', label: 'Threads', icon: MessageSquare },
-		{ id: 'agents', label: 'Agents', icon: Bot },
 		{ id: 'studio', label: 'Studio', icon: Palette },
 		{ id: 'info', label: 'Info', icon: Info }
 	];

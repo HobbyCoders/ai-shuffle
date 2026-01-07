@@ -639,6 +639,7 @@
 
 			<!-- Footer -->
 			<div class="card-footer">
+				<div class="card-footer-content">
 				<button
 					onclick={handleCreate}
 					class="card-btn-primary"
@@ -658,6 +659,7 @@
 						<Upload />
 					{/if}
 				</button>
+				</div>
 			</div>
 		{:else}
 			<!-- EDITOR VIEW -->
@@ -912,6 +914,7 @@
 
 			<!-- Footer -->
 			<div class="card-footer">
+				<div class="card-footer-content">
 				<button
 					onclick={handleBack}
 					class="card-btn-secondary"
@@ -930,6 +933,7 @@
 						{isEditMode ? 'Save Changes' : 'Create'}
 					{/if}
 				</button>
+				</div>
 			</div>
 		{/if}
 	</div>
@@ -961,11 +965,14 @@
 		height: 100%;
 		background: var(--card);
 		overflow: hidden;
+		/* Set footer max-width to match centered-content */
+		--card-footer-max-width: 800px;
 	}
 
 	/* Maximized state - constrain width and center content */
 	.subagent-card.maximized {
 		--card-max-width: 900px;
+		--card-footer-max-width: var(--card-max-width);
 	}
 
 	.subagent-card.maximized :global(.card-tabs),
@@ -1193,9 +1200,5 @@
 	/* Responsive footer */
 	.subagent-card :global(.card-footer) {
 		flex-wrap: wrap;
-	}
-
-	.subagent-card :global(.card-footer .card-btn-primary) {
-		flex: 1;
 	}
 </style>

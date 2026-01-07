@@ -22,16 +22,6 @@ export interface DeckSession {
 	unread?: boolean;
 }
 
-// Agent in the deck
-// Note: Maps from BackgroundAgent status: completed→idle, failed→error
-export interface DeckAgent {
-	id: string;
-	name: string;
-	status: 'running' | 'idle' | 'error' | 'paused' | 'queued';
-	task?: string;
-	progress?: number;
-}
-
 // Generation (media) in the deck
 export interface DeckGeneration {
 	id: string;
@@ -69,7 +59,7 @@ export interface CardGeometry {
 // Card state for workspace cards
 export interface CardState {
 	id: string;
-	type: 'chat' | 'agent' | 'generation' | 'file' | 'settings' | 'profile' | 'subagent' | 'project' | 'canvas' | 'terminal';
+	type: 'chat' | 'generation' | 'file' | 'settings' | 'profile' | 'subagent' | 'project' | 'canvas' | 'terminal';
 	title: string;
 	state: 'normal' | 'maximized';
 	geometry: CardGeometry;
@@ -82,9 +72,9 @@ export interface CardState {
 // Running process for the dock
 export interface RunningProcess {
 	id: string;
-	type: 'generation' | 'agent';
+	type: 'generation';
 	title: string;
-	status: DeckAgent['status'] | DeckGeneration['status'];
+	status: DeckGeneration['status'];
 	progress?: number;
 }
 

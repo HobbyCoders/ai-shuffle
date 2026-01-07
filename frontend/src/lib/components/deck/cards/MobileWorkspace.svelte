@@ -9,7 +9,7 @@
 	 * - Empty state with create buttons
 	 */
 
-	import { ChevronLeft, X, MessageSquare, Mic, Terminal, Plus, Settings, User, Users, FolderKanban, Image, Box, AudioLines, FolderOpen, Puzzle } from 'lucide-svelte';
+	import { ChevronLeft, X, MessageSquare, Terminal, Plus, Settings, User, Users, FolderKanban, FolderOpen, Puzzle, StickyNote, Zap } from 'lucide-svelte';
 	import type { DeckCard, CardType } from './types';
 	import type { Snippet } from 'svelte';
 	import { MobileWelcome } from '../welcome';
@@ -50,21 +50,19 @@
 	const DIRECTION_LOCK_THRESHOLD = 10;
 	const ANIMATION_DURATION = 300; // Match CSS transition duration
 
-	// Icon mapping - all 13 card types
+	// Icon mapping for card types
 	const cardIcons: Record<CardType, typeof MessageSquare> = {
 		chat: MessageSquare,
-		conversation: Mic,
 		terminal: Terminal,
 		settings: Settings,
 		profile: User,
 		subagent: Users,
 		project: FolderKanban,
 		'user-settings': Settings,
-		'image-studio': Image,
-		'model-studio': Box,
-		'audio-studio': AudioLines,
 		'file-browser': FolderOpen,
 		plugins: Puzzle,
+		notes: StickyNote,
+		hooks: Zap,
 	};
 
 	// Current card
@@ -92,14 +90,6 @@
 		return interactive !== null;
 	}
 
-	// Check if touch target is within a designated swipe zone
-	function isInSwipeZone(target: EventTarget | null): boolean {
-		if (!(target instanceof HTMLElement)) return false;
-		// Swipe zones: chat island, terminal input area, or any element with data-swipe-zone
-		const swipeZone = target.closest('.chat-island, .terminal-input, [data-swipe-zone]');
-		return swipeZone !== null;
-	}
-
 	// Touch handlers
 	function handleTouchStart(e: TouchEvent) {
 		if (cards.length <= 1) return;
@@ -109,9 +99,6 @@
 
 		// Don't initiate swipe if touching an interactive element
 		if (isInteractiveElement(e.target)) return;
-
-		// Only allow swipes from designated swipe zones (chat island, terminal input, etc.)
-		if (!isInSwipeZone(e.target)) return;
 
 		touchStartX = e.touches[0].clientX;
 		touchStartY = e.touches[0].clientY;

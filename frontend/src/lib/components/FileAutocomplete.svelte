@@ -1,7 +1,9 @@
 <script lang="ts">
+  import { getNotesAutocomplete } from '$lib/api/client';
+
   export interface FileItem {
     name: string;
-    type: 'file' | 'directory' | 'chat_history';
+    type: 'file' | 'directory' | 'chat_history' | 'note';
     path: string;
     size?: number | null;
     // Chat history specific fields
@@ -9,10 +11,14 @@
     preview?: string | null;
     message_count?: number;
     modified_at?: string;
+    // Note specific fields
+    note_id?: string;
+    note_tags?: string[];
   }
 
-  // Virtual folder name for chat history
+  // Virtual folder names
   const CHAT_HISTORY_FOLDER = 'Chat History';
+  const NOTES_FOLDER = 'Notes';
 
   interface Props {
     inputValue: string;
@@ -32,6 +38,7 @@
   let lastFetchedPath = $state<string | null>(null);
   let listElement = $state<HTMLUListElement | null>(null);
   let inChatHistoryFolder = $state(false);
+  let inNotesFolder = $state(false);
 
   // Extract the @ query from input - finds the last @ and text after it
   // Supports paths with spaces by capturing everything after @ until end of input
@@ -119,19 +126,24 @@
       );
     }
 
-    // Sort: Chat History first, then directories, then by match relevance
+    // Sort: Virtual folders first, then directories, then by match relevance
     filteredFiles = filtered.sort((a, b) => {
       // Chat History folder always first
       if (a.name === CHAT_HISTORY_FOLDER && b.name !== CHAT_HISTORY_FOLDER) return -1;
       if (b.name === CHAT_HISTORY_FOLDER && a.name !== CHAT_HISTORY_FOLDER) return 1;
 
-      // Directories before files (but not for chat_history items which have their own order)
-      if (a.type === 'directory' && b.type !== 'directory' && b.type !== 'chat_history') return -1;
-      if (b.type === 'directory' && a.type !== 'directory' && a.type !== 'chat_history') return 1;
+      // Notes folder second
+      if (a.name === NOTES_FOLDER && b.name !== NOTES_FOLDER) return -1;
+      if (b.name === NOTES_FOLDER && a.name !== NOTES_FOLDER) return 1;
 
-      // Chat history items: preserve backend order (most recent first by modified_at)
+      // Directories before files (but not for chat_history/note items which have their own order)
+      if (a.type === 'directory' && b.type !== 'directory' && b.type !== 'chat_history' && b.type !== 'note') return -1;
+      if (b.type === 'directory' && a.type !== 'directory' && a.type !== 'chat_history' && a.type !== 'note') return 1;
+
+      // Chat history and note items: preserve backend order (most recent first by updated_at)
       // Don't re-sort them - the backend already sorted by date
-      if (a.type === 'chat_history' && b.type === 'chat_history') {
+      if ((a.type === 'chat_history' && b.type === 'chat_history') ||
+          (a.type === 'note' && b.type === 'note')) {
         return 0; // Preserve original order from backend
       }
 
@@ -180,6 +192,21 @@
     return path.slice(CHAT_HISTORY_FOLDER.length + 1);
   }
 
+  /**
+   * Check if the path indicates we're in the Notes virtual folder
+   */
+  function isNotesPath(path: string): boolean {
+    return path === NOTES_FOLDER || path.startsWith(NOTES_FOLDER + '/');
+  }
+
+  /**
+   * Get the search filter from a Notes path
+   */
+  function getNotesFilter(path: string): string {
+    if (path === NOTES_FOLDER) return '';
+    return path.slice(NOTES_FOLDER.length + 1);
+  }
+
   async function fetchFiles(path: string) {
     if (!projectId) return;
 
@@ -190,11 +217,21 @@
     // Check if we're in the Chat History virtual folder
     if (isChatHistoryPath(path)) {
       inChatHistoryFolder = true;
+      inNotesFolder = false;
       await fetchChatHistory(getChatHistoryFilter(path));
       return;
     }
 
+    // Check if we're in the Notes virtual folder
+    if (isNotesPath(path)) {
+      inNotesFolder = true;
+      inChatHistoryFolder = false;
+      await fetchNotes(getNotesFilter(path));
+      return;
+    }
+
     inChatHistoryFolder = false;
+    inNotesFolder = false;
 
     try {
       const params = new URLSearchParams();
@@ -208,13 +245,19 @@
 
       if (response.ok) {
         const data = await response.json();
-        // Add Chat History virtual folder at root level
+        // Add virtual folders at root level
         if (!path) {
           files = [
             {
               name: CHAT_HISTORY_FOLDER,
               type: 'directory' as const,
               path: CHAT_HISTORY_FOLDER,
+              size: null
+            },
+            {
+              name: NOTES_FOLDER,
+              type: 'directory' as const,
+              path: NOTES_FOLDER,
               size: null
             },
             ...data.files
@@ -264,6 +307,27 @@
       }
     } catch (error) {
       console.error('Failed to fetch chat history:', error);
+      files = [];
+    } finally {
+      loading = false;
+    }
+  }
+
+  async function fetchNotes(search: string = '') {
+    if (!projectId) return;
+
+    try {
+      const notes = await getNotesAutocomplete(projectId, search || undefined, 30);
+      files = notes.map((note) => ({
+        name: note.title,
+        type: 'note' as const,
+        path: `${NOTES_FOLDER}/${note.id}`,
+        note_id: note.id,
+        preview: note.preview,
+        note_tags: note.tags
+      }));
+    } catch (error) {
+      console.error('Failed to fetch notes:', error);
       files = [];
     } finally {
       loading = false;
@@ -373,11 +437,16 @@
 
   function goToRoot() {
     inChatHistoryFolder = false;
+    inNotesFolder = false;
     fetchFiles('');
   }
 
   function goToChatHistory() {
     fetchFiles(CHAT_HISTORY_FOLDER);
+  }
+
+  function goToNotes() {
+    fetchFiles(NOTES_FOLDER);
   }
 
   function formatRelativeDate(isoDate: string): string {
@@ -406,9 +475,11 @@
     <div class="px-3 py-2 border-b border-border bg-muted flex items-center justify-between">
       <span class="text-xs text-muted-foreground">
         {#if loading}
-          {inChatHistoryFolder ? 'Loading chat history...' : 'Loading files...'}
+          {inChatHistoryFolder ? 'Loading chat history...' : inNotesFolder ? 'Loading notes...' : 'Loading files...'}
         {:else if inChatHistoryFolder}
           {filteredFiles.length} chat{filteredFiles.length !== 1 ? 's' : ''} in Chat History
+        {:else if inNotesFolder}
+          {filteredFiles.length} note{filteredFiles.length !== 1 ? 's' : ''} in Notes
         {:else}
           {filteredFiles.length} file{filteredFiles.length !== 1 ? 's' : ''}
           {#if currentPath}
@@ -440,10 +511,14 @@
               <!-- Icon -->
               <div class="flex-shrink-0">
                 {#if file.type === 'directory'}
-                  <!-- Special icon for Chat History folder -->
+                  <!-- Special icon for virtual folders -->
                   {#if file.name === CHAT_HISTORY_FOLDER}
                     <svg class="w-4 h-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                    </svg>
+                  {:else if file.name === NOTES_FOLDER}
+                    <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                     </svg>
                   {:else}
                     <svg class="w-4 h-4 text-warning" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -453,6 +528,10 @@
                 {:else if file.type === 'chat_history'}
                   <svg class="w-4 h-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                  </svg>
+                {:else if file.type === 'note'}
+                  <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                   </svg>
                 {:else}
                   <svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -464,6 +543,15 @@
               <!-- Name and details -->
               <div class="flex-1 min-w-0">
                 {#if file.type === 'chat_history'}
+                  <span class="text-sm text-foreground truncate block">
+                    {file.name}
+                  </span>
+                  {#if file.preview}
+                    <span class="text-xs text-muted-foreground truncate block">
+                      {file.preview}
+                    </span>
+                  {/if}
+                {:else if file.type === 'note'}
                   <span class="text-sm text-foreground truncate block">
                     {file.name}
                   </span>
@@ -488,6 +576,10 @@
                 <span class="text-xs text-muted-foreground flex-shrink-0">
                   {file.message_count} msgs · {file.modified_at ? formatRelativeDate(file.modified_at) : ''}
                 </span>
+              {:else if file.type === 'note' && file.note_tags && file.note_tags.length > 0}
+                <span class="text-xs text-muted-foreground flex-shrink-0 truncate max-w-24">
+                  {file.note_tags.slice(0, 2).join(', ')}{file.note_tags.length > 2 ? '...' : ''}
+                </span>
               {/if}
 
               <!-- Type badge -->
@@ -497,6 +589,10 @@
                     <span class="px-1.5 py-0.5 text-xs bg-purple-500/20 text-purple-400 rounded">
                       history
                     </span>
+                  {:else if file.name === NOTES_FOLDER}
+                    <span class="px-1.5 py-0.5 text-xs bg-green-500/20 text-green-400 rounded">
+                      notes
+                    </span>
                   {:else}
                     <span class="px-1.5 py-0.5 text-xs bg-warning/20 text-warning rounded">
                       folder
@@ -505,6 +601,10 @@
                 {:else if file.type === 'chat_history'}
                   <span class="px-1.5 py-0.5 text-xs bg-purple-500/20 text-purple-400 rounded">
                     chat
+                  </span>
+                {:else if file.type === 'note'}
+                  <span class="px-1.5 py-0.5 text-xs bg-green-500/20 text-green-400 rounded">
+                    note
                   </span>
                 {/if}
               </div>

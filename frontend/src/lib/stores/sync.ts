@@ -333,7 +333,7 @@ function createSyncStore() {
 	 */
 	function getCookieToken(): string | null {
 		if (typeof document === 'undefined') return null;
-		const match = document.cookie.match(/session_token=([^;]+)/);
+		const match = document.cookie.match(/session=([^;]+)/);
 		return match ? match[1] : null;
 	}
 

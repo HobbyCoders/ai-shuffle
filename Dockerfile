@@ -36,11 +36,8 @@ RUN gh --version
 # Verify Node.js and npm installation
 RUN node --version && npm --version
 
-# Install Claude Code globally
-RUN npm install -g @anthropic-ai/claude-code
-
-# Verify Claude Code installation
-RUN claude --version
+# Note: Claude Code CLI is bundled with claude-agent-sdk Python package
+# No need to install separately via npm
 
 # Copy requirements first for better caching
 COPY requirements.txt .

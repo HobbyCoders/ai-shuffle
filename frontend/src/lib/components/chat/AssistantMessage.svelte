@@ -1,10 +1,11 @@
 <script lang="ts">
 	/**
-	 * AssistantMessage - Assistant message with markdown rendering, copy, and read (TTS) buttons
+	 * AssistantMessage - Assistant message with markdown rendering and hover-only action buttons
 	 */
 	import { marked } from 'marked';
 	import { onDestroy } from 'svelte';
 	import StreamingIndicator from './StreamingIndicator.svelte';
+	import MessageActions from './MessageActions.svelte';
 
 	// Configure marked for markdown rendering
 	marked.setOptions({
@@ -38,11 +39,32 @@
 
 	// Show Read button on any non-streaming assistant message with content
 	// (The metadata-based approach doesn't work for history-loaded messages)
-	const canRead = $derived(!streaming && content && content.length > 0);
+	const canRead = $derived(Boolean(!streaming && content && content.length > 0));
 
-	let copiedMessageId = $state<string | null>(null);
+	let isHovered = $state(false);
+	let isTouchDevice = $state(false);
+	let showActionsOnMobile = $state(false);
 	let isReading = $state(false);
 	let currentAudio = $state<HTMLAudioElement | null>(null);
+
+	function handleTouchStart() {
+		isTouchDevice = true;
+	}
+
+	function handleMessageClick(e: MouseEvent) {
+		// Don't toggle if clicking on interactive elements (links, buttons, code blocks, etc.)
+		const target = e.target as HTMLElement;
+		if (target.closest('a, button, pre, code, video, .media-overlay-buttons')) {
+			return;
+		}
+		// Only toggle on touch devices - desktop uses hover
+		if (isTouchDevice) {
+			showActionsOnMobile = !showActionsOnMobile;
+		}
+	}
+
+	// Show actions if hovered (desktop) or tapped (mobile)
+	const showActions = $derived(isHovered || showActionsOnMobile);
 
 	function formatTime(date?: Date): string {
 		const d = date || new Date();
@@ -129,57 +151,6 @@
 		});
 
 		return marked(processedContent, { breaks: true }) as string;
-	}
-
-	/**
-	 * Strip markdown syntax but keep readable text for copying
-	 */
-	function prepareTextForCopy(text: string): string {
-		let cleaned = text;
-		// Remove code block markers but keep the code content
-		cleaned = cleaned.replace(/```\w*\n?/g, '');
-		// Remove inline code backticks but keep content
-		cleaned = cleaned.replace(/`([^`]+)`/g, '$1');
-		// Remove image markdown
-		cleaned = cleaned.replace(/!\[[^\]]*\]\([^)]+\)/g, '');
-		// Remove link markdown but keep text
-		cleaned = cleaned.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-		// Remove bold markers (** or __) but keep text - use non-greedy match
-		cleaned = cleaned.replace(/\*\*(.*?)\*\*/g, '$1');
-		cleaned = cleaned.replace(/__(.*?)__/g, '$1');
-		// Remove italic markers (* or _) but keep text - use non-greedy match
-		cleaned = cleaned.replace(/\*(.*?)\*/g, '$1');
-		cleaned = cleaned.replace(/_(.*?)_/g, '$1');
-		// Remove header markers but keep text
-		cleaned = cleaned.replace(/^#{1,6}\s+/gm, '');
-		// Remove horizontal rules
-		cleaned = cleaned.replace(/^[-*_]{3,}$/gm, '');
-		// Remove numbered list markers (e.g., "1. ", "2. ", "10. ")
-		cleaned = cleaned.replace(/^\d+\.\s+/gm, '');
-		// Remove bullet list markers (e.g., "- ", "* ", "+ ")
-		cleaned = cleaned.replace(/^[-*+]\s+/gm, '');
-		// Remove blockquote markers
-		cleaned = cleaned.replace(/^>\s*/gm, '');
-		// Clean up multiple blank lines
-		cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
-		return cleaned.trim();
-	}
-
-	async function handleCopy() {
-		const textToCopy = prepareTextForCopy(content);
-		if (onCopy) {
-			onCopy(textToCopy, messageId);
-		} else {
-			try {
-				await navigator.clipboard.writeText(textToCopy);
-				copiedMessageId = messageId;
-				setTimeout(() => {
-					copiedMessageId = null;
-				}, 2000);
-			} catch (e) {
-				console.error('Failed to copy to clipboard:', e);
-			}
-		}
 	}
 
 	/**
@@ -311,7 +282,15 @@
 	});
 </script>
 
-<div class="w-full overflow-hidden">
+<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
+<div
+	class="w-full overflow-hidden message-container"
+	onmouseenter={() => isHovered = true}
+	onmouseleave={() => { isHovered = false; showActionsOnMobile = false; }}
+	ontouchstart={handleTouchStart}
+	onclick={handleMessageClick}
+	role="article"
+>
 	<div class="min-w-0 max-w-full">
 		<div class="flex items-center gap-2 mb-1">
 			<span class="font-semibold text-sm text-orange-400">Claude</span>
@@ -319,48 +298,18 @@
 			{#if streaming}
 				<StreamingIndicator />
 			{/if}
-			{#if content && !streaming}
-				<!-- Action buttons container -->
-				<div class="ml-auto flex items-center gap-1">
-					<!-- Copy response button -->
-					<button
-						class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
-						onclick={handleCopy}
-						title="Copy response"
-					>
-						{#if copiedMessageId === messageId}
-							<svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-							</svg>
-							<span class="text-green-500">Copied</span>
-						{:else}
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-							</svg>
-							<span>Copy</span>
-						{/if}
-					</button>
-					<!-- Read aloud button (TTS) -->
-					{#if canRead}
-						<button
-							class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
-							onclick={handleRead}
-							title={isReading ? "Stop reading" : "Read aloud"}
-						>
-							{#if isReading}
-								<svg class="w-3.5 h-3.5 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
-								</svg>
-								<span class="text-orange-400">Stop</span>
-							{:else}
-								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
-								</svg>
-								<span>Read</span>
-							{/if}
-						</button>
-					{/if}
+			{#if showActions && content && !streaming}
+				<!-- Hover/touch action buttons -->
+				<div class="ml-auto">
+					<MessageActions
+						{sessionId}
+						messageContent={content}
+						messageRole="assistant"
+						{canRead}
+						isStreaming={streaming}
+						onRead={handleRead}
+						{isReading}
+					/>
 				</div>
 			{/if}
 		</div>
@@ -393,3 +342,9 @@
 		{/if}
 	</div>
 </div>
+
+<style>
+	.message-container {
+		position: relative;
+	}
+</style>

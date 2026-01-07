@@ -2,9 +2,12 @@
 System API routes - health, version, stats, workspace configuration, tools
 """
 
+import asyncio
+import json
+import logging
 import subprocess
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -14,6 +17,8 @@ from app.core.auth import auth_service
 from app.core.config import settings
 from app.db import database
 from app.api.auth import require_auth, require_admin
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -44,7 +49,7 @@ TOOL_CATEGORIES = {
     }
 }
 
-# Built-in Claude Code tools with their metadata
+# Built-in Claude Code tools with their metadata (fallback if dynamic discovery fails)
 BUILTIN_TOOLS = [
     # Read-only tools
     {"name": "Read", "category": "read_only", "description": "Read file contents"},
@@ -52,7 +57,7 @@ BUILTIN_TOOLS = [
     {"name": "Grep", "category": "read_only", "description": "Search file contents"},
     {"name": "WebFetch", "category": "read_only", "description": "Fetch and analyze web content"},
     {"name": "WebSearch", "category": "read_only", "description": "Search the web"},
-    {"name": "BashOutput", "category": "read_only", "description": "Get output from background shell"},
+    {"name": "TaskOutput", "category": "read_only", "description": "Get output from background task"},
 
     # Edit tools
     {"name": "Edit", "category": "edit", "description": "Edit file contents"},
@@ -70,9 +75,203 @@ BUILTIN_TOOLS = [
     {"name": "SlashCommand", "category": "other", "description": "Run slash commands"},
     {"name": "EnterPlanMode", "category": "other", "description": "Enter planning mode"},
     {"name": "ExitPlanMode", "category": "other", "description": "Exit planning mode"},
-    {"name": "ListMcpResources", "category": "other", "description": "List MCP resources"},
-    {"name": "ReadMcpResource", "category": "other", "description": "Read MCP resource"},
+    {"name": "AskUserQuestion", "category": "other", "description": "Ask user clarifying questions"},
+    {"name": "LSP", "category": "other", "description": "Language Server Protocol integration"},
 ]
+
+# Tool descriptions for categorization (used when discovering tools dynamically)
+TOOL_DESCRIPTIONS = {
+    "Read": "Read file contents",
+    "Glob": "Find files by pattern",
+    "Grep": "Search file contents",
+    "WebFetch": "Fetch and analyze web content",
+    "WebSearch": "Search the web",
+    "TaskOutput": "Get output from background task",
+    "Edit": "Edit file contents",
+    "Write": "Write new files",
+    "NotebookEdit": "Edit Jupyter notebooks",
+    "Bash": "Execute shell commands",
+    "Task": "Launch subagent tasks",
+    "KillShell": "Kill background shell",
+    "TodoWrite": "Manage task lists",
+    "Skill": "Execute skills",
+    "SlashCommand": "Run slash commands",
+    "EnterPlanMode": "Enter planning mode",
+    "ExitPlanMode": "Exit planning mode",
+    "AskUserQuestion": "Ask user clarifying questions",
+    "LSP": "Language Server Protocol integration",
+}
+
+# Categorization rules for tools
+TOOL_CATEGORY_RULES = {
+    "read_only": ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "TaskOutput"],
+    "edit": ["Edit", "Write", "NotebookEdit"],
+    "execution": ["Bash", "Task", "KillShell"],
+}
+
+# Cache for dynamically discovered tools
+# This cache persists until explicitly refreshed via ?refresh=true or POST /tools/discover
+_tools_cache: Dict[str, Any] = {
+    "tools": None,
+    "mcp_servers": None,
+    "loaded": False,  # Whether we've ever successfully loaded from CLI
+}
+
+
+async def discover_tools_from_cli(force_refresh: bool = False) -> Dict[str, Any]:
+    """
+    Query Claude CLI to discover available tools dynamically.
+
+    Runs a minimal query with --output-format json to get the init event
+    which contains all available tools, MCP servers, agents, etc.
+
+    The cache persists until explicitly refreshed - no automatic TTL expiry.
+    This ensures we only hit the CLI when the user opens the profile card
+    and requests a refresh.
+
+    Args:
+        force_refresh: If True, bypass cache and re-query CLI
+
+    Returns:
+        Dict with 'tools' list and 'mcp_servers' list, or None values on failure
+    """
+    global _tools_cache
+
+    # Return cached results if available and not forcing refresh
+    if not force_refresh and _tools_cache["loaded"]:
+        logger.debug("Using cached tool discovery results")
+        return {
+            "tools": _tools_cache["tools"],
+            "mcp_servers": _tools_cache["mcp_servers"]
+        }
+
+    logger.info("Discovering tools from Claude CLI...")
+
+    try:
+        # Run a minimal query to get the init event
+        # Use --tools "default" to get all tools, and a simple prompt that exits quickly
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: subprocess.run(
+                [
+                    'claude',
+                    '--tools', 'default',
+                    '--output-format', 'json',
+                    '-p',  # Print mode (non-interactive)
+                    'exit'  # Minimal prompt
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=str(settings.effective_workspace_dir)
+            )
+        )
+
+        if result.returncode != 0:
+            logger.warning(f"Claude CLI returned non-zero: {result.returncode}")
+            logger.debug(f"stderr: {result.stderr}")
+            # Mark as loaded even on failure so we don't retry automatically
+            _tools_cache["loaded"] = True
+            return {"tools": None, "mcp_servers": None}
+
+        # Parse JSON output - it's a JSON array with multiple events
+        output = result.stdout.strip()
+        if not output:
+            logger.warning("Empty output from Claude CLI")
+            _tools_cache["loaded"] = True
+            return {"tools": None, "mcp_servers": None}
+
+        # Parse the JSON array
+        events = json.loads(output)
+
+        # Find the init event
+        init_event = None
+        for event in events:
+            if event.get("type") == "system" and event.get("subtype") == "init":
+                init_event = event
+                break
+
+        if not init_event:
+            logger.warning("No init event found in Claude CLI output")
+            _tools_cache["loaded"] = True
+            return {"tools": None, "mcp_servers": None}
+
+        tools = init_event.get("tools", [])
+        mcp_servers = init_event.get("mcp_servers", [])
+
+        logger.info(f"Discovered {len(tools)} tools and {len(mcp_servers)} MCP servers from CLI")
+
+        # Update cache
+        _tools_cache["tools"] = tools
+        _tools_cache["mcp_servers"] = mcp_servers
+        _tools_cache["loaded"] = True
+
+        return {"tools": tools, "mcp_servers": mcp_servers}
+
+    except subprocess.TimeoutExpired:
+        logger.warning("Claude CLI timed out during tool discovery")
+        _tools_cache["loaded"] = True
+        return {"tools": None, "mcp_servers": None}
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse Claude CLI output as JSON: {e}")
+        _tools_cache["loaded"] = True
+        return {"tools": None, "mcp_servers": None}
+    except FileNotFoundError:
+        logger.warning("Claude CLI not found")
+        _tools_cache["loaded"] = True
+        return {"tools": None, "mcp_servers": None}
+    except Exception as e:
+        logger.warning(f"Error discovering tools from CLI: {e}")
+        _tools_cache["loaded"] = True
+        return {"tools": None, "mcp_servers": None}
+
+
+def categorize_tool(tool_name: str) -> str:
+    """
+    Determine the category for a tool based on its name.
+
+    Args:
+        tool_name: The tool name
+
+    Returns:
+        Category ID (read_only, edit, execution, mcp, or other)
+    """
+    # Check if it's an MCP tool
+    if tool_name.startswith("mcp__"):
+        return "mcp"
+
+    # Check predefined categories
+    for category, tools in TOOL_CATEGORY_RULES.items():
+        if tool_name in tools:
+            return category
+
+    # Default to 'other'
+    return "other"
+
+
+def get_tool_description(tool_name: str) -> str:
+    """
+    Get a description for a tool.
+
+    Args:
+        tool_name: The tool name
+
+    Returns:
+        Description string
+    """
+    # Check if we have a predefined description
+    if tool_name in TOOL_DESCRIPTIONS:
+        return TOOL_DESCRIPTIONS[tool_name]
+
+    # For MCP tools, extract a readable name
+    if tool_name.startswith("mcp__"):
+        # Format: mcp__server__tool -> "MCP tool from server"
+        parts = tool_name.split("__")
+        if len(parts) >= 2:
+            server = parts[1]
+            return f"MCP tool from {server}"
+
+    return f"Tool: {tool_name}"
 
 router = APIRouter(tags=["System"])
 
@@ -342,33 +541,71 @@ class ToolsResponse(BaseModel):
 
 
 @router.get("/api/v1/tools", response_model=ToolsResponse)
-async def list_available_tools(token: str = Depends(require_auth)):
+async def list_available_tools(
+    token: str = Depends(require_auth),
+    refresh: bool = False
+):
     """
     List all available tools organized by category.
+
+    Dynamically discovers tools from the Claude CLI if available,
+    falling back to a hardcoded list if discovery fails.
+
+    Query params:
+        refresh: If true, bypass cache and re-discover tools from CLI.
+                 Frontend should pass refresh=true when opening the profile card.
 
     Returns built-in Claude Code tools and any MCP tools from configured servers.
     Use this to populate tool selection UI in profile configuration.
     """
-    # Build the list of all tools
+    # Try dynamic discovery (will use cache unless refresh=True)
+    discovery_result = await discover_tools_from_cli(force_refresh=refresh)
+    discovered_tools = discovery_result.get("tools")
+
     all_tools = []
     tools_by_category = {}
 
-    # Add built-in tools
-    for tool in BUILTIN_TOOLS:
-        tool_info = ToolInfo(
-            name=tool["name"],
-            category=tool["category"],
-            description=tool["description"]
-        )
-        all_tools.append(tool_info)
+    if discovered_tools:
+        # Use dynamically discovered tools
+        logger.info(f"Using {len(discovered_tools)} dynamically discovered tools")
 
-        if tool["category"] not in tools_by_category:
-            tools_by_category[tool["category"]] = []
-        tools_by_category[tool["category"]].append(tool_info)
+        for tool_name in discovered_tools:
+            category = categorize_tool(tool_name)
+            description = get_tool_description(tool_name)
 
-    # TODO: Add MCP tools from configured MCP servers
-    # This would require reading MCP server configuration and querying for available tools
-    # For now, MCP tools need to be entered manually or added via setting_sources
+            # For MCP tools, try to get server info
+            mcp_server = None
+            if tool_name.startswith("mcp__"):
+                parts = tool_name.split("__")
+                if len(parts) >= 2:
+                    mcp_server = parts[1]
+
+            tool_info = ToolInfo(
+                name=tool_name,
+                category=category,
+                description=description,
+                mcp_server=mcp_server
+            )
+            all_tools.append(tool_info)
+
+            if category not in tools_by_category:
+                tools_by_category[category] = []
+            tools_by_category[category].append(tool_info)
+    else:
+        # Fall back to hardcoded tools
+        logger.info("Using hardcoded tool list (CLI discovery unavailable)")
+
+        for tool in BUILTIN_TOOLS:
+            tool_info = ToolInfo(
+                name=tool["name"],
+                category=tool["category"],
+                description=tool["description"]
+            )
+            all_tools.append(tool_info)
+
+            if tool["category"] not in tools_by_category:
+                tools_by_category[tool["category"]] = []
+            tools_by_category[tool["category"]].append(tool_info)
 
     # Build category list
     categories = []
@@ -390,9 +627,10 @@ async def list_available_tools(token: str = Depends(require_auth)):
 @router.get("/api/v1/tools/builtin", response_model=List[ToolInfo])
 async def list_builtin_tools(token: str = Depends(require_auth)):
     """
-    List only built-in Claude Code tools.
+    List only built-in Claude Code tools (hardcoded fallback list).
 
     Simpler endpoint that returns a flat list of built-in tools.
+    Does not use dynamic discovery.
     """
     return [
         ToolInfo(
@@ -402,3 +640,38 @@ async def list_builtin_tools(token: str = Depends(require_auth)):
         )
         for tool in BUILTIN_TOOLS
     ]
+
+
+class ToolDiscoveryResponse(BaseModel):
+    """Response from tool discovery"""
+    success: bool
+    tool_count: int
+    mcp_server_count: int
+    tools: List[str]
+    mcp_servers: List[dict]
+    cached: bool
+
+
+@router.post("/api/v1/tools/discover", response_model=ToolDiscoveryResponse)
+async def discover_tools(token: str = Depends(require_admin)):
+    """
+    Manually trigger tool discovery from Claude CLI (admin only).
+
+    This forces a fresh discovery, useful when:
+    - Claude Code has been updated
+    - MCP servers have been added/removed
+    - You want to refresh the tool list
+    """
+    # Run discovery with force_refresh=True
+    result = await discover_tools_from_cli(force_refresh=True)
+    tools = result.get("tools") or []
+    mcp_servers = result.get("mcp_servers") or []
+
+    return ToolDiscoveryResponse(
+        success=len(tools) > 0,
+        tool_count=len(tools),
+        mcp_server_count=len(mcp_servers),
+        tools=tools,
+        mcp_servers=mcp_servers,
+        cached=False
+    )

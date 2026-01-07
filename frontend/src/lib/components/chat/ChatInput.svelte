@@ -12,6 +12,7 @@
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
+	import ContextOverflowWarning from './ContextOverflowWarning.svelte';
 	import { AUTO_COMPACTION_BASE, CONTEXT_MAX } from '$lib/constants/chat';
 
 	interface Command {
@@ -153,6 +154,12 @@
 		$canUseOpenAI // API users need OpenAI key
 	);
 
+	// Context overflow warning state
+	let showOverflowWarning = $state(false);
+	let pendingMessage = $state('');
+	const MESSAGE_SIZE_WARNING = 50000; // 50KB
+	const CONTEXT_WARNING_PERCENT = 90;
+
 	// Autocomplete state
 	let showCommandAutocomplete = $state(false);
 	let showFileAutocomplete = $state(false);
@@ -171,6 +178,10 @@
 	// Get selected profile/project names for display
 	const selectedProfileName = $derived($profiles.find(p => p.id === liveTab.profile)?.name || 'Profile');
 	const selectedProjectName = $derived($projects.find(p => p.id === liveTab.project)?.name || 'Project');
+
+	// Mobile-optimized names: show only first word to save space
+	const selectedProfileNameMobile = $derived(selectedProfileName.split(' ')[0]);
+	const selectedProjectNameMobile = $derived(selectedProjectName.split(' ')[0]);
 
 	// Toggle profile dropdown
 	function handleProfileClick(e: MouseEvent) {
@@ -277,6 +288,23 @@
 			finalPrompt = inputValue.trim() + '\n\n' + fileRefs;
 		}
 
+		// Check for potential context overflow
+		const isLargeMessage = finalPrompt.length > MESSAGE_SIZE_WARNING;
+		const isContextNearFull = contextPercent > CONTEXT_WARNING_PERCENT;
+
+		if (isLargeMessage || isContextNearFull) {
+			// Show warning dialog
+			pendingMessage = finalPrompt;
+			showOverflowWarning = true;
+			return;
+		}
+
+		// Proceed with sending
+		sendMessage(finalPrompt);
+	}
+
+	// Actually send the message (called directly or after overflow warning confirmation)
+	function sendMessage(finalPrompt: string) {
 		inputValue = '';
 		uploadedFiles = [];
 
@@ -290,6 +318,27 @@
 		}
 
 		tabs.sendMessage(tab.id, finalPrompt);
+	}
+
+	// Handle overflow warning actions
+	function handleSendAnyway() {
+		showOverflowWarning = false;
+		sendMessage(pendingMessage);
+		pendingMessage = '';
+	}
+
+	function handleTruncate(length: number) {
+		showOverflowWarning = false;
+		const truncated = pendingMessage.substring(0, length) + '\n\n[Message truncated due to size]';
+		sendMessage(truncated);
+		pendingMessage = '';
+	}
+
+	function handleCancelOverflow() {
+		showOverflowWarning = false;
+		// Keep the message in input for editing
+		inputValue = pendingMessage;
+		pendingMessage = '';
 	}
 
 	// Handle keydown for textarea
@@ -331,7 +380,7 @@
 		}
 	}
 
-	// Handle file selection (including chat history items)
+	// Handle file selection (including chat history and note items)
 	function handleFileSelect(file: FileItem) {
 		const atStartIndex = findLastAtIndex(inputValue);
 		if (atStartIndex === -1) {
@@ -352,13 +401,13 @@
 			return;
 		}
 
-		// For files and chat history items, add to uploaded files list
+		// For files, chat history, and notes, add to uploaded files list
 		const fileRef: FileUploadResponse & { type?: string } = {
 			filename: file.name,
 			path: file.path,
 			full_path: file.path,
 			size: file.size || 0,
-			type: file.type // 'file' or 'chat_history'
+			type: file.type // 'file', 'chat_history', or 'note'
 		};
 
 		uploadedFiles = [...uploadedFiles, fileRef];
@@ -663,6 +712,16 @@
 	);
 </script>
 
+<!-- Context Overflow Warning Dialog -->
+<ContextOverflowWarning
+	show={showOverflowWarning}
+	messageLength={pendingMessage.length}
+	{contextPercent}
+	onSendAnyway={handleSendAnyway}
+	onTruncate={handleTruncate}
+	onCancel={handleCancelOverflow}
+/>
+
 <div class="chat-input-wrapper">
 	<div class="chat-input-container">
 		<!-- Hidden file input -->
@@ -692,11 +751,16 @@
 					{#if uploadedFiles.length > 0}
 						<div class="uploaded-files">
 							{#each uploadedFiles as file, index}
-								<div class="file-chip" class:chat-history-chip={(file as any).type === 'chat_history'}>
+								<div class="file-chip" class:chat-history-chip={(file as any).type === 'chat_history'} class:note-chip={(file as any).type === 'note'}>
 									{#if (file as any).type === 'chat_history'}
 										<!-- Chat history icon -->
 										<svg class="w-3 h-3 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+										</svg>
+									{:else if (file as any).type === 'note'}
+										<!-- Note icon -->
+										<svg class="w-3 h-3 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
 										</svg>
 									{:else}
 										<!-- File icon -->
@@ -817,7 +881,8 @@
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
 									</svg>
 								</div>
-								<span class="selector-text">{selectedProfileName}</span>
+								<span class="selector-text desktop">{selectedProfileName}</span>
+								<span class="selector-text mobile">{selectedProfileNameMobile}</span>
 								<svg class="w-3 h-3 opacity-50 chevron" class:open={showProfileDropdown} fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 								</svg>
@@ -864,7 +929,8 @@
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 									</svg>
 								</div>
-								<span class="selector-text">{selectedProjectName}</span>
+								<span class="selector-text desktop">{selectedProjectName}</span>
+								<span class="selector-text mobile">{selectedProjectNameMobile}</span>
 								<svg class="w-3 h-3 opacity-50 chevron" class:open={showProjectDropdown} fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 								</svg>
@@ -921,57 +987,60 @@
 						</button>
 
 						<!-- Voice Input Button with Rich Visual Feedback -->
-						<button
-							type="button"
-							onclick={toggleRecording}
-							disabled={!$claudeAuthenticated || isUploading || isTranscribing || isPreparing || !canRecord}
-							class="voice-btn"
-							class:preparing={isPreparing}
-							class:recording={isRecording}
-							class:transcribing={isTranscribing}
-							title={!canRecord ? 'Configure OpenAI API key in Settings to use voice input' : isPreparing ? 'Preparing...' : isRecording ? 'Tap to stop' : isTranscribing ? 'Transcribing...' : 'Voice input'}
-							style="--audio-level: {audioLevel}"
-						>
-							<!-- Audio level rings (visible when recording) -->
-							{#if isRecording}
-								<div class="voice-rings">
-									<div class="voice-ring voice-ring-1" style="transform: scale({1 + audioLevel * 0.5}); opacity: {0.3 + audioLevel * 0.4}"></div>
-									<div class="voice-ring voice-ring-2" style="transform: scale({1 + audioLevel * 0.8}); opacity: {0.2 + audioLevel * 0.3}"></div>
-									<div class="voice-ring voice-ring-3" style="transform: scale({1 + audioLevel * 1.2}); opacity: {0.1 + audioLevel * 0.2}"></div>
-								</div>
-							{/if}
-
-							<!-- Button content -->
-							<div class="voice-btn-content">
-								{#if isTranscribing}
-									<!-- Processing: animated dots -->
-									<div class="voice-processing">
-										<span class="processing-dot"></span>
-										<span class="processing-dot"></span>
-										<span class="processing-dot"></span>
+						<!-- Wrapper contains overflow:hidden to clip animation rings without affecting sibling dropdowns -->
+						<div class="voice-btn-wrapper">
+							<button
+								type="button"
+								onclick={toggleRecording}
+								disabled={!$claudeAuthenticated || isUploading || isTranscribing || isPreparing || !canRecord}
+								class="voice-btn"
+								class:preparing={isPreparing}
+								class:recording={isRecording}
+								class:transcribing={isTranscribing}
+								title={!canRecord ? 'Configure OpenAI API key in Settings to use voice input' : isPreparing ? 'Preparing...' : isRecording ? 'Tap to stop' : isTranscribing ? 'Transcribing...' : 'Voice input'}
+								style="--audio-level: {audioLevel}"
+							>
+								<!-- Audio level rings (visible when recording) -->
+								{#if isRecording}
+									<div class="voice-rings">
+										<div class="voice-ring voice-ring-1" style="transform: scale({1 + audioLevel * 0.3}); opacity: {0.3 + audioLevel * 0.4}"></div>
+										<div class="voice-ring voice-ring-2" style="transform: scale({1 + audioLevel * 0.5}); opacity: {0.2 + audioLevel * 0.3}"></div>
+										<div class="voice-ring voice-ring-3" style="transform: scale({1 + audioLevel * 0.7}); opacity: {0.1 + audioLevel * 0.2}"></div>
 									</div>
-								{:else if isPreparing}
-									<!-- Preparing: pulsing mic -->
-									<svg class="voice-icon voice-icon-preparing" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-									</svg>
-								{:else if isRecording}
-									<!-- Recording: live waveform indicator -->
-									<div class="voice-waveform">
-										<span class="waveform-bar" style="height: {20 + audioLevel * 60}%"></span>
-										<span class="waveform-bar" style="height: {40 + audioLevel * 50}%"></span>
-										<span class="waveform-bar" style="height: {30 + audioLevel * 70}%"></span>
-										<span class="waveform-bar" style="height: {50 + audioLevel * 40}%"></span>
-										<span class="waveform-bar" style="height: {25 + audioLevel * 55}%"></span>
-									</div>
-								{:else}
-									<!-- Idle: mic icon -->
-									<svg class="voice-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-									</svg>
 								{/if}
-							</div>
-						</button>
+
+								<!-- Button content -->
+								<div class="voice-btn-content">
+									{#if isTranscribing}
+										<!-- Processing: animated dots -->
+										<div class="voice-processing">
+											<span class="processing-dot"></span>
+											<span class="processing-dot"></span>
+											<span class="processing-dot"></span>
+										</div>
+									{:else if isPreparing}
+										<!-- Preparing: pulsing mic -->
+										<svg class="voice-icon voice-icon-preparing" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+										</svg>
+									{:else if isRecording}
+										<!-- Recording: live waveform indicator -->
+										<div class="voice-waveform">
+											<span class="waveform-bar" style="height: {20 + audioLevel * 60}%"></span>
+											<span class="waveform-bar" style="height: {40 + audioLevel * 50}%"></span>
+											<span class="waveform-bar" style="height: {30 + audioLevel * 70}%"></span>
+											<span class="waveform-bar" style="height: {50 + audioLevel * 40}%"></span>
+											<span class="waveform-bar" style="height: {25 + audioLevel * 55}%"></span>
+										</div>
+									{:else}
+										<!-- Idle: mic icon -->
+										<svg class="voice-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+										</svg>
+									{/if}
+								</div>
+							</button>
+						</div>
 					</div>
 				</div>
 			</div>
@@ -1054,6 +1123,11 @@
 	/* Chat history reference chip - purple theme */
 	.file-chip.chat-history-chip {
 		background: rgba(168, 85, 247, 0.15);
+	}
+
+	/* Note reference chip - green theme */
+	.file-chip.note-chip {
+		background: rgba(34, 197, 94, 0.15);
 	}
 
 	.file-name {
@@ -1285,6 +1359,8 @@
 		border-top: none;
 		border-radius: 0 0 16px 16px;
 		padding: 8px 12px;
+		/* Allow dropdowns to overflow - voice button wrapper handles its own clipping */
+		overflow: visible;
 	}
 
 	:global(.light) .controls-dock {
@@ -1450,13 +1526,31 @@
 		white-space: nowrap;
 	}
 
+	/* Mobile: show truncated first word only */
+	.selector-text.mobile {
+		display: block;
+	}
+
+	.selector-text.desktop {
+		display: none;
+	}
+
 	:global(.light) .selector-text {
 		color: rgba(0, 0, 0, 0.5);
 	}
 
+	/* Desktop: show full name */
 	@media (min-width: 640px) {
 		.selector-text {
 			max-width: 120px;
+		}
+
+		.selector-text.mobile {
+			display: none;
+		}
+
+		.selector-text.desktop {
+			display: block;
 		}
 	}
 
@@ -1684,6 +1778,19 @@
 	}
 
 	/* ===== VOICE BUTTON WITH RICH VISUAL FEEDBACK ===== */
+	/* Wrapper clips animation rings without affecting sibling dropdown menus */
+	.voice-btn-wrapper {
+		position: relative;
+		/* Clip voice animation rings within this wrapper only */
+		overflow: hidden;
+		/* Match voice button size plus a bit of padding for the glow */
+		border-radius: 50%;
+		/* Ensure the wrapper doesn't add extra size */
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+
 	.voice-btn {
 		position: relative;
 		display: flex;
@@ -1780,12 +1887,15 @@
 		justify-content: center;
 		pointer-events: none;
 		z-index: 1;
+		/* Contain rings within visible area */
+		overflow: visible;
 	}
 
 	.voice-ring {
 		position: absolute;
-		width: 100%;
-		height: 100%;
+		/* Smaller base size so expanded rings stay more contained */
+		width: 80%;
+		height: 80%;
 		border-radius: 50%;
 		border: 2px solid rgba(239, 68, 68, 0.5);
 		transition: transform 0.1s ease-out, opacity 0.1s ease-out;

@@ -60,6 +60,9 @@ export {
 
 // Studio store removed - components now use API directly
 
+// Hooks store
+export * from './hooks';
+
 // =============================================================================
 // Stores with overlapping exports - import directly from module if needed:
 // - ./device (deviceId also in chat)

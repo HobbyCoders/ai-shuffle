@@ -205,6 +205,25 @@ export interface SessionSearchResult extends Session {
 }
 
 /**
+ * Paginated response with total count for infinite scroll
+ */
+export interface PaginatedSessions {
+	items: Session[];
+	total: number;
+	offset: number;
+	limit: number;
+	has_more: boolean;
+}
+
+export interface PaginatedSessionSearchResults {
+	items: SessionSearchResult[];
+	total: number;
+	offset: number;
+	limit: number;
+	has_more: boolean;
+}
+
+/**
  * Search sessions by title and message content
  */
 export async function searchSessions(
@@ -223,6 +242,29 @@ export async function searchSessions(
 	if (options.limit) params.set('limit', options.limit.toString());
 
 	return api.get<SessionSearchResult[]>(`/sessions/search/query?${params.toString()}`);
+}
+
+/**
+ * Search sessions with pagination support
+ */
+export async function searchSessionsPaginated(
+	query: string,
+	options: {
+		projectId?: string;
+		profileId?: string;
+		adminOnly?: boolean;
+		limit?: number;
+		offset?: number;
+	} = {}
+): Promise<PaginatedSessionSearchResults> {
+	const params = new URLSearchParams({ q: query });
+	if (options.projectId) params.set('project_id', options.projectId);
+	if (options.profileId) params.set('profile_id', options.profileId);
+	if (options.adminOnly) params.set('admin_only', 'true');
+	if (options.limit) params.set('limit', options.limit.toString());
+	if (options.offset) params.set('offset', options.offset.toString());
+
+	return api.get<PaginatedSessionSearchResults>(`/sessions/search/paginated?${params.toString()}`);
 }
 
 // Query types
@@ -999,4 +1041,310 @@ export async function setPreference<T = unknown>(key: string, value: T): Promise
  */
 export async function deletePreference(key: string): Promise<{ deleted: boolean }> {
 	return api.delete<{ deleted: boolean }>(`/preferences/${key}`) as Promise<{ deleted: boolean }>;
+}
+
+// =============================================================================
+// Rewind API
+// =============================================================================
+
+export interface RewindCheckpoint {
+	uuid: string;
+	index: number;
+	message_preview: string;
+	full_message: string;
+	role: 'user' | 'assistant';
+	timestamp: string | null;
+}
+
+export interface RewindCheckpointsResponse {
+	success: boolean;
+	session_id: string;
+	sdk_session_id: string | null;
+	checkpoints: RewindCheckpoint[];
+	error: string | null;
+}
+
+export interface RewindExecuteResponse {
+	success: boolean;
+	message: string;
+	chat_rewound: boolean;
+	messages_removed: number;
+	error: string | null;
+}
+
+/**
+ * Get available rewind checkpoints for a session
+ */
+export async function getRewindCheckpoints(sessionId: string): Promise<RewindCheckpointsResponse> {
+	return api.get<RewindCheckpointsResponse>(`/commands/rewind/checkpoints/${sessionId}`);
+}
+
+/**
+ * Execute a rewind operation to a specific checkpoint
+ * @param sessionId - The session to rewind
+ * @param targetUuid - UUID of the checkpoint to rewind to
+ * @param includeResponse - If true, keep Claude's response to the target message
+ * @param targetRole - The role of the target message ("user" or "assistant")
+ */
+export async function executeRewind(
+	sessionId: string,
+	targetUuid: string,
+	includeResponse: boolean = true,
+	targetRole: 'user' | 'assistant' = 'user'
+): Promise<RewindExecuteResponse> {
+	return api.post<RewindExecuteResponse>(`/commands/rewind/execute/${sessionId}`, {
+		target_uuid: targetUuid,
+		restore_chat: true,
+		include_response: includeResponse,
+		target_role: targetRole
+	});
+}
+
+// =============================================================================
+// Notes API
+// =============================================================================
+
+export interface Note {
+	id: string;
+	project_id: string;
+	title: string;
+	content: string;
+	tags: string[];
+	linked_sessions: string[];
+	is_pinned: boolean;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface NoteCreate {
+	title: string;
+	content?: string;
+	tags?: string[];
+	linked_sessions?: string[];
+	is_pinned?: boolean;
+}
+
+export interface NoteUpdate {
+	title?: string;
+	content?: string;
+	tags?: string[];
+	linked_sessions?: string[];
+	is_pinned?: boolean;
+}
+
+export interface NoteTag {
+	name: string;
+	color: string | null;
+	count: number;
+}
+
+export interface NoteAutocomplete {
+	id: string;
+	title: string;
+	preview: string;
+	tags: string[];
+}
+
+/**
+ * Get all notes for a project
+ */
+export async function getProjectNotes(
+	projectId: string,
+	options: { search?: string; tag?: string; limit?: number; offset?: number } = {}
+): Promise<Note[]> {
+	const params = new URLSearchParams();
+	if (options.search) params.set('search', options.search);
+	if (options.tag) params.set('tag', options.tag);
+	if (options.limit) params.set('limit', options.limit.toString());
+	if (options.offset) params.set('offset', options.offset.toString());
+
+	const query = params.toString();
+	return api.get<Note[]>(`/projects/${projectId}/notes${query ? `?${query}` : ''}`);
+}
+
+/**
+ * Create a new note in a project
+ */
+export async function createNote(projectId: string, data: NoteCreate): Promise<Note> {
+	return api.post<Note>(`/projects/${projectId}/notes`, data);
+}
+
+/**
+ * Get a single note by ID
+ */
+export async function getNote(projectId: string, noteId: string): Promise<Note> {
+	return api.get<Note>(`/projects/${projectId}/notes/${noteId}`);
+}
+
+/**
+ * Update a note
+ */
+export async function updateNote(projectId: string, noteId: string, data: NoteUpdate): Promise<Note> {
+	return api.patch<Note>(`/projects/${projectId}/notes/${noteId}`, data);
+}
+
+/**
+ * Delete a note
+ */
+export async function deleteNote(projectId: string, noteId: string): Promise<void> {
+	await api.delete(`/projects/${projectId}/notes/${noteId}`);
+}
+
+/**
+ * Get all unique tags used in notes for a project
+ */
+export async function getNoteTags(projectId: string): Promise<NoteTag[]> {
+	return api.get<NoteTag[]>(`/projects/${projectId}/notes/tags`);
+}
+
+/**
+ * Get notes for autocomplete (simplified response with preview)
+ */
+export async function getNotesAutocomplete(
+	projectId: string,
+	search?: string,
+	limit: number = 20
+): Promise<NoteAutocomplete[]> {
+	const params = new URLSearchParams();
+	if (search) params.set('search', search);
+	params.set('limit', limit.toString());
+
+	return api.get<NoteAutocomplete[]>(`/projects/${projectId}/notes/autocomplete?${params.toString()}`);
+}
+
+// ============================================================================
+// Hooks API Types and Functions
+// ============================================================================
+
+/**
+ * Valid hook event types matching Claude Code events
+ */
+export const HOOK_EVENT_TYPES = [
+	'PreToolUse',
+	'PostToolUse',
+	'Stop',
+	'SessionStart',
+	'SessionEnd',
+	'UserPromptSubmit',
+	'PreCompact',
+	'SubagentStop',
+	'Notification'
+] as const;
+
+export type HookEventType = (typeof HOOK_EVENT_TYPES)[number];
+
+export type HookType = 'bash' | 'webhook';
+
+export interface Hook {
+	id: string;
+	project_id: string;
+	name: string;
+	event: HookEventType;
+	hook_type: HookType;
+	command: string | null;
+	timeout: number;
+	url: string | null;
+	secret: string | null;
+	enabled: boolean;
+	tool_matcher: string | null;
+	created_at: string;
+	updated_at: string;
+	last_triggered_at: string | null;
+	failure_count: number;
+}
+
+export interface HookCreate {
+	name: string;
+	event: HookEventType;
+	hook_type: HookType;
+	command?: string;
+	timeout?: number;
+	url?: string;
+	secret?: string;
+	enabled?: boolean;
+	tool_matcher?: string;
+}
+
+export interface HookUpdate {
+	name?: string;
+	event?: HookEventType;
+	hook_type?: HookType;
+	command?: string | null;
+	timeout?: number;
+	url?: string | null;
+	secret?: string | null;
+	enabled?: boolean;
+	tool_matcher?: string | null;
+}
+
+export interface HookTestResult {
+	success: boolean;
+	duration_ms: number | null;
+	output: string | null;
+	error: string | null;
+}
+
+export interface PluginHookInfo {
+	plugin_id: string;
+	plugin_name: string;
+	event: string;
+	hook_type: string;
+	description: string | null;
+	tool_matcher: string | null;
+}
+
+/**
+ * Get all valid hook event types
+ */
+export async function getHookEventTypes(): Promise<string[]> {
+	return api.get<string[]>('/hooks/events');
+}
+
+/**
+ * Get all hooks for a project
+ */
+export async function getProjectHooks(projectId: string): Promise<Hook[]> {
+	return api.get<Hook[]>(`/hooks/project/${projectId}`);
+}
+
+/**
+ * Create a new hook for a project
+ */
+export async function createHook(projectId: string, data: HookCreate): Promise<Hook> {
+	return api.post<Hook>(`/hooks/project/${projectId}`, data);
+}
+
+/**
+ * Get a single hook by ID
+ */
+export async function getHook(hookId: string): Promise<Hook> {
+	return api.get<Hook>(`/hooks/${hookId}`);
+}
+
+/**
+ * Update a hook
+ */
+export async function updateHook(hookId: string, data: HookUpdate): Promise<Hook> {
+	return api.patch<Hook>(`/hooks/${hookId}`, data);
+}
+
+/**
+ * Delete a hook
+ */
+export async function deleteHook(hookId: string): Promise<void> {
+	await api.delete(`/hooks/${hookId}`);
+}
+
+/**
+ * Test a hook with sample event data
+ */
+export async function testHook(hookId: string): Promise<HookTestResult> {
+	return api.post<HookTestResult>(`/hooks/${hookId}/test`);
+}
+
+/**
+ * Get all hooks contributed by installed plugins (read-only)
+ */
+export async function getPluginHooks(): Promise<PluginHookInfo[]> {
+	return api.get<PluginHookInfo[]>('/hooks/plugins/all');
 }

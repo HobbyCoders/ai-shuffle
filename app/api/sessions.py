@@ -7,7 +7,13 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends, Query, status, Request, UploadFile, File
 from pydantic import BaseModel
 
-from app.core.models import Session, SessionWithMessages, SessionSearchResult
+from app.core.models import (
+    Session,
+    SessionWithMessages,
+    SessionSearchResult,
+    PaginatedSessions,
+    PaginatedSessionSearchResults
+)
 from app.db import database
 from app.api.auth import require_auth, get_api_user_from_request
 
@@ -61,11 +67,22 @@ async def list_sessions(
     api_users_only: bool = Query(False, description="Show only API user sessions (exclude admin sessions)"),
     favorites_only: bool = Query(False, description="Show only favorited sessions"),
     tag_id: Optional[str] = Query(None, description="Filter by tag ID"),
+    sync_claude_sessions: bool = Query(True, description="Auto-import Claude Code sessions for project"),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
     token: str = Depends(require_auth)
 ):
-    """List sessions with optional filters. API users only see sessions for their assigned project/profile."""
+    """
+    List sessions with optional filters. API users only see sessions for their assigned project/profile.
+
+    When filtering by project_id and sync_claude_sessions=true (default), this endpoint will
+    automatically discover and import any Claude Code sessions that exist on disk but are not
+    yet in the database. This ensures users see all their sessions regardless of whether they
+    were created in Claude Code or AI Shuffle.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
     api_user = get_api_user_from_request(request)
 
     # Force API user restrictions
@@ -78,6 +95,26 @@ async def list_sessions(
         api_user_id = api_user["id"]
         admin_only = False
         api_users_only = False
+
+    # Auto-sync Claude Code sessions (only for specific project, not global)
+    # Global sync is too expensive to run synchronously on every request.
+    # Use POST /api/v1/projects/{id}/sync-sessions for explicit sync.
+    if sync_claude_sessions and project_id:
+        try:
+            from app.core.session_sync import session_sync_service
+            # Sync specific project only
+            sync_result = session_sync_service.sync_project_sessions(
+                project_id=project_id,
+                profile_id=profile_id or "default"
+            )
+            if sync_result["imported_count"] > 0:
+                logger.info(
+                    f"Auto-imported {sync_result['imported_count']} Claude Code sessions "
+                    f"for project {project_id}"
+                )
+        except Exception as e:
+            # Don't fail the request if sync fails - just log and continue
+            logger.warning(f"Failed to auto-sync Claude Code sessions: {e}")
 
     # Determine api_user_id filter value
     # - If admin_only=True, filter for sessions with api_user_id IS NULL
@@ -105,6 +142,91 @@ async def list_sessions(
         offset=offset
     )
     return enrich_sessions_with_tags(sessions)
+
+
+@router.get("/paginated", response_model=PaginatedSessions)
+async def list_sessions_paginated(
+    request: Request,
+    project_id: Optional[str] = Query(None, description="Filter by project"),
+    profile_id: Optional[str] = Query(None, description="Filter by profile"),
+    status_filter: Optional[str] = Query(None, alias="status", description="Filter by status"),
+    api_user_id: Optional[str] = Query(None, description="Filter by API user ID (admin only)"),
+    admin_only: bool = Query(False, description="Show only admin sessions (no API user)"),
+    api_users_only: bool = Query(False, description="Show only API user sessions (exclude admin sessions)"),
+    favorites_only: bool = Query(False, description="Show only favorited sessions"),
+    tag_id: Optional[str] = Query(None, description="Filter by tag ID"),
+    sync_claude_sessions: bool = Query(True, description="Auto-import Claude Code sessions for project"),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    token: str = Depends(require_auth)
+):
+    """
+    List sessions with pagination metadata (total count, has_more).
+    Use this endpoint for infinite scroll UIs that need to know the total count.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    api_user = get_api_user_from_request(request)
+
+    # Force API user restrictions
+    if api_user:
+        if api_user.get("project_id"):
+            project_id = api_user["project_id"]
+        if api_user.get("profile_id"):
+            profile_id = api_user["profile_id"]
+        api_user_id = api_user["id"]
+        admin_only = False
+        api_users_only = False
+
+    # Auto-sync Claude Code sessions
+    if sync_claude_sessions and project_id:
+        try:
+            from app.core.session_sync import session_sync_service
+            sync_result = session_sync_service.sync_project_sessions(
+                project_id=project_id,
+                profile_id=profile_id or "default"
+            )
+            if sync_result["imported_count"] > 0:
+                logger.info(
+                    f"Auto-imported {sync_result['imported_count']} Claude Code sessions "
+                    f"for project {project_id}"
+                )
+        except Exception as e:
+            logger.warning(f"Failed to auto-sync Claude Code sessions: {e}")
+
+    # Determine api_user_id filter value
+    filter_api_user_id = None
+    filter_api_users_only = False
+    if admin_only:
+        filter_api_user_id = ""
+    elif api_users_only:
+        filter_api_users_only = True
+    elif api_user_id:
+        filter_api_user_id = api_user_id
+
+    sessions, total = database.get_sessions_paginated(
+        project_id=project_id,
+        profile_id=profile_id,
+        status=status_filter,
+        api_user_id=filter_api_user_id,
+        api_users_only=filter_api_users_only,
+        favorites_only=favorites_only,
+        tag_id=tag_id,
+        limit=limit,
+        offset=offset
+    )
+
+    enriched = enrich_sessions_with_tags(sessions)
+    has_more = offset + len(sessions) < total
+
+    return PaginatedSessions(
+        items=enriched,
+        total=total,
+        offset=offset,
+        limit=limit,
+        has_more=has_more
+    )
 
 
 @router.get("/search/query", response_model=List[SessionSearchResult])
@@ -147,6 +269,65 @@ async def search_sessions(
     )
 
     return results
+
+
+def enrich_search_results_with_tags(results: list) -> list:
+    """Add tags array and has_forks field to each search result"""
+    for result in results:
+        result["tags"] = database.get_session_tags(result["id"])
+        result["has_forks"] = database.session_has_forks(result["id"])
+    return results
+
+
+@router.get("/search/paginated", response_model=PaginatedSessionSearchResults)
+async def search_sessions_paginated(
+    request: Request,
+    q: str = Query(..., min_length=1, description="Search query"),
+    project_id: Optional[str] = Query(None, description="Filter by project"),
+    profile_id: Optional[str] = Query(None, description="Filter by profile"),
+    admin_only: bool = Query(False, description="Show only admin sessions"),
+    limit: int = Query(20, ge=1, le=50),
+    offset: int = Query(0, ge=0),
+    token: str = Depends(require_auth)
+):
+    """
+    Search sessions by title and message content with pagination metadata.
+    Use this endpoint for infinite scroll search UIs.
+    """
+    api_user = get_api_user_from_request(request)
+
+    # Force API user restrictions
+    filter_api_user_id = None
+    if api_user:
+        if api_user.get("project_id"):
+            project_id = api_user["project_id"]
+        if api_user.get("profile_id"):
+            profile_id = api_user["profile_id"]
+        filter_api_user_id = api_user["id"]
+        admin_only = False
+    elif admin_only:
+        filter_api_user_id = None
+
+    results, total = database.search_sessions_paginated(
+        query=q,
+        project_id=project_id,
+        profile_id=profile_id,
+        api_user_id=filter_api_user_id,
+        admin_only=admin_only,
+        limit=limit,
+        offset=offset
+    )
+
+    enriched = enrich_search_results_with_tags(results)
+    has_more = offset + len(results) < total
+
+    return PaginatedSessionSearchResults(
+        items=enriched,
+        total=total,
+        offset=offset,
+        limit=limit,
+        has_more=has_more
+    )
 
 
 @router.get("/{session_id}", response_model=SessionWithMessages)

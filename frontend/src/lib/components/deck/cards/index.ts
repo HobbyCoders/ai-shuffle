@@ -23,6 +23,10 @@ export { default as StackedCardPreview } from './StackedCardPreview.svelte';
 
 // Utility Cards
 export { default as FileBrowserCard } from './FileBrowserCard.svelte';
+export { default as NotesCard } from './NotesCard.svelte';
 
 // Plugin Management
 export { default as PluginManagerCard } from './PluginManagerCard.svelte';
+
+// Hooks Management
+export { default as HooksCard } from './HooksCard.svelte';

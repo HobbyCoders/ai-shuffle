@@ -962,3 +962,116 @@ def clear_plugin_service_cache():
     """Clear the plugin service cache (useful for testing)"""
     global _plugin_services
     _plugin_services = {}
+
+
+def get_all_plugin_hooks() -> List[Dict[str, Any]]:
+    """
+    Get all hooks contributed by installed plugins.
+
+    Returns a list of hook info dicts with:
+    - plugin_id: Plugin ID
+    - plugin_name: Plugin display name
+    - event: Hook event type
+    - hook_type: 'prompt' or 'command'
+    - description: Optional description
+    - tool_matcher: Optional tool name pattern
+    """
+    result = []
+    service = get_plugin_service()
+
+    for plugin in service.get_installed_plugins():
+        plugin_dir = Path(plugin.install_path) if plugin.install_path else None
+        if not plugin_dir:
+            continue
+
+        # Check for hooks directory
+        hooks_dir = plugin_dir / "hooks"
+        if hooks_dir.exists() and hooks_dir.is_dir():
+            for hook_file in hooks_dir.glob("*.md"):
+                # Parse hook file to extract metadata
+                hook_info = _parse_plugin_hook_file(hook_file, plugin)
+                if hook_info:
+                    result.append(hook_info)
+
+        # Also check plugin.json for hooks section
+        plugin_json = plugin_dir / "plugin.json"
+        if plugin_json.exists():
+            try:
+                import json
+                with open(plugin_json) as f:
+                    data = json.load(f)
+
+                hooks = data.get("hooks", [])
+                for hook in hooks:
+                    result.append({
+                        "plugin_id": plugin.id,
+                        "plugin_name": plugin.name,
+                        "event": hook.get("event", "Unknown"),
+                        "hook_type": hook.get("type", "prompt"),
+                        "description": hook.get("description"),
+                        "tool_matcher": hook.get("toolMatcher"),
+                    })
+            except Exception:
+                pass
+
+    return result
+
+
+def _parse_plugin_hook_file(hook_file: Path, plugin: "PluginInfo") -> Optional[Dict[str, Any]]:
+    """
+    Parse a plugin hook markdown file and extract metadata.
+
+    Hook files use YAML frontmatter like:
+    ---
+    event: PreToolUse
+    toolMatcher: Bash|Edit
+    description: Validates tool usage
+    ---
+    Hook prompt content...
+    """
+    try:
+        content = hook_file.read_text()
+
+        # Check for frontmatter
+        if not content.startswith("---"):
+            return None
+
+        # Find end of frontmatter
+        end_marker = content.find("---", 3)
+        if end_marker == -1:
+            return None
+
+        frontmatter = content[3:end_marker].strip()
+
+        # Parse frontmatter
+        event = None
+        tool_matcher = None
+        description = None
+
+        for line in frontmatter.split("\n"):
+            if ":" in line:
+                key, value = line.split(":", 1)
+                key = key.strip().lower()
+                value = value.strip().strip('"').strip("'")
+
+                if key == "event":
+                    event = value
+                elif key in ("toolmatcher", "tool_matcher"):
+                    tool_matcher = value
+                elif key == "description":
+                    description = value
+
+        if not event:
+            return None
+
+        return {
+            "plugin_id": plugin.id,
+            "plugin_name": plugin.name,
+            "event": event,
+            "hook_type": "prompt",
+            "description": description,
+            "tool_matcher": tool_matcher,
+        }
+
+    except Exception:
+        return None

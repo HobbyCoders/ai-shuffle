@@ -22,6 +22,16 @@ from app.core.oauth import direct_oauth
 
 logger = logging.getLogger(__name__)
 
+# Import server instance ID from auth API for consistent logging
+# Will be set by auth.py module initialization
+_SERVER_INSTANCE_ID = "unknown"
+
+
+def set_server_instance_id(instance_id: str):
+    """Set the server instance ID for diagnostic logging"""
+    global _SERVER_INSTANCE_ID
+    _SERVER_INSTANCE_ID = instance_id
+
 
 def find_claude_executable() -> Optional[str]:
     """Find the claude executable, handling Windows/npm installations"""
@@ -163,6 +173,27 @@ class AuthService:
         if not token:
             return False
         session = database.get_auth_session(token)
+        if session is None:
+            # Diagnostic: check if token exists at all (ignoring expiry)
+            from datetime import datetime
+            with database.get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT token, expires_at FROM auth_sessions WHERE token = ?",
+                    (token,)
+                )
+                row = cursor.fetchone()
+                if row:
+                    now_str = datetime.utcnow().isoformat()
+                    logger.warning(
+                        f"[{_SERVER_INSTANCE_ID}] Session EXPIRED: "
+                        f"expires_at={row['expires_at']}, now={now_str}"
+                    )
+                else:
+                    logger.warning(
+                        f"[{_SERVER_INSTANCE_ID}] Session token NOT FOUND in database "
+                        f"(last4=...{token[-4:]})"
+                    )
         return session is not None
 
     def logout(self, token: str):

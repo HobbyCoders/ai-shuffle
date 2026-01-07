@@ -201,7 +201,7 @@
 		<div class="max-w-5xl mx-auto px-4 sm:px-8 py-4 space-y-4">
 			{#each tab.messages as message, messageIndex (message.id)}
 				{#if message.role === 'user'}
-					<UserMessage content={message.content} />
+					<UserMessage content={message.content} sessionId={tab.sessionId} />
 				{:else if message.type === 'text' || !message.type}
 					<AssistantMessage
 						content={message.content}

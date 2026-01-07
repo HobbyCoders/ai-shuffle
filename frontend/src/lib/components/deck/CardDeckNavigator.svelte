@@ -22,7 +22,7 @@
 		MessageSquare, Terminal, Clock,
 		Settings, FolderOpen, X, Files, User, Users, Pencil, Check,
 		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronRight, Bot, Puzzle,
-		List, GitBranch, Key
+		List, GitBranch, Key, Zap
 	} from 'lucide-svelte';
 	import { tabs, type ApiUser } from '$lib/stores/tabs';
 	import type { Session } from '$lib/api/client';
@@ -47,6 +47,7 @@
 		onOpenSubagents?: () => void;
 		onOpenSettings?: () => void;
 		onOpenPlugins?: () => void;
+		onOpenHooks?: () => void;
 		onOpenUserSettings?: () => void;
 		isAdmin?: boolean;
 		isApiUser?: boolean;
@@ -66,6 +67,7 @@
 		onOpenSubagents,
 		onOpenSettings,
 		onOpenPlugins,
+		onOpenHooks,
 		onOpenUserSettings,
 		isAdmin = false,
 		isApiUser = false,
@@ -145,7 +147,7 @@
 	let renameDeckName = $state('');
 
 	// Card types for main deck
-	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins' | 'user-settings';
+	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins' | 'hooks' | 'user-settings';
 
 	// Cards that API users are allowed to see (whitelist approach)
 	const API_USER_ALLOWED_CARDS = new Set(['new-chat', 'recent', 'file-browser', 'user-settings']);
@@ -287,6 +289,14 @@
 				title: 'Plugins',
 				subtitle: 'Manage extensions',
 				icon: Puzzle
+			},
+			{
+				id: 'hooks',
+				type: 'action',
+				action: 'hooks',
+				title: 'Hooks',
+				subtitle: 'Event automation',
+				icon: Zap
 			}
 		];
 
@@ -556,6 +566,7 @@
 			case 'subagents': onOpenSubagents?.(); break;
 			case 'settings': onOpenSettings?.(); break;
 			case 'plugins': onOpenPlugins?.(); break;
+			case 'hooks': onOpenHooks?.(); break;
 			case 'user-settings': onOpenUserSettings?.(); break;
 		}
 	}
@@ -1391,14 +1402,14 @@
 					>
 						{#if recentViewMode === 'list'}
 							<RecentSessionsList
-								sessions={sessions.slice(0, 30)}
+								{sessions}
 								onOpenThread={(sessionId) => { onOpenThread(sessionId); onClose(); }}
 								{isSessionStreaming}
 								{formatRelativeTime}
 							/>
 						{:else}
 							<RecentSessionsTimeline
-								sessions={sessions.slice(0, 30)}
+								{sessions}
 								onOpenThread={(sessionId) => { onOpenThread(sessionId); onClose(); }}
 								{isSessionStreaming}
 								{formatRelativeTime}

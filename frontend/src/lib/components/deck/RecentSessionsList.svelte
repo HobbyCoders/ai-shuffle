@@ -3,14 +3,17 @@
 	 * RecentSessionsList - Compact list view for recent sessions
 	 *
 	 * Displays sessions in a scannable vertical list with:
+	 * - Search bar at top for filtering
 	 * - Message count badge (left)
 	 * - Session title (center, full width)
 	 * - Relative timestamp (right)
 	 * - Streaming status indicator
+	 * - Infinite scroll for pagination
 	 */
 
-	import { MessageSquare, Zap } from 'lucide-svelte';
-	import type { Session } from '$lib/api/client';
+	import { MessageSquare, Zap, Search, X, Loader2 } from 'lucide-svelte';
+	import type { Session, SessionSearchResult } from '$lib/api/client';
+	import { tabs } from '$lib/stores/tabs';
 
 	interface Props {
 		sessions: Session[];
@@ -26,73 +29,290 @@
 		formatRelativeTime
 	}: Props = $props();
 
+	// Local search input state
+	let searchInput = $state('');
+	let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+	// Get search state from store
+	const searchQuery = $derived($tabs.searchQuery);
+	const searchResults = $derived($tabs.searchResults);
+	const searchLoading = $derived($tabs.searchLoading);
+	const searchLoadingMore = $derived($tabs.searchLoadingMore);
+	const searchHasMore = $derived($tabs.searchHasMore);
+	const searchTotal = $derived($tabs.searchTotal);
+
+	// Get pagination state from store
+	const sessionsLoading = $derived($tabs.sessionsLoading);
+	const sessionsLoadingMore = $derived($tabs.sessionsLoadingMore);
+	const sessionsHasMore = $derived($tabs.sessionsHasMore);
+	const sessionsTotal = $derived($tabs.sessionsTotal);
+
+	// Determine which items to display
+	const isSearchMode = $derived(searchQuery.length > 0);
+	const displayItems = $derived(isSearchMode ? searchResults : sessions);
+	const displayTotal = $derived(isSearchMode ? searchTotal : sessionsTotal);
+	const hasMore = $derived(isSearchMode ? searchHasMore : sessionsHasMore);
+	const isLoadingMore = $derived(isSearchMode ? searchLoadingMore : sessionsLoadingMore);
+
+	// Reference to the scrollable container for infinite scroll
+	let listContainer: HTMLDivElement | null = $state(null);
+
+	// Debounced search handler
+	function handleSearchInput(value: string) {
+		searchInput = value;
+
+		if (searchDebounceTimer) {
+			clearTimeout(searchDebounceTimer);
+		}
+
+		searchDebounceTimer = setTimeout(() => {
+			if (value.trim()) {
+				tabs.searchSessions(value.trim());
+			} else {
+				tabs.clearSearch();
+			}
+		}, 300);
+	}
+
+	// Clear search
+	function clearSearch() {
+		searchInput = '';
+		tabs.clearSearch();
+	}
+
+	// Handle scroll for infinite loading
+	function handleScroll(e: Event) {
+		const target = e.target as HTMLDivElement;
+		const { scrollTop, scrollHeight, clientHeight } = target;
+
+		// Load more when 200px from bottom
+		if (scrollHeight - scrollTop - clientHeight < 200) {
+			if (hasMore && !isLoadingMore) {
+				if (isSearchMode) {
+					tabs.loadMoreSearchResults();
+				} else {
+					tabs.loadMoreSessions();
+				}
+			}
+		}
+	}
+
 	function handleKeyDown(e: KeyboardEvent, sessionId: string) {
 		if (e.key === 'Enter' || e.key === ' ') {
 			e.preventDefault();
 			onOpenThread(sessionId);
 		}
 	}
+
+	// Check if item is a search result (has match_type)
+	function isSearchResult(item: Session | SessionSearchResult): item is SessionSearchResult {
+		return 'match_type' in item;
+	}
 </script>
 
-<div class="recent-list">
-	{#each sessions as session, index (session.id)}
-		<button
-			class="list-item"
-			class:is-streaming={isSessionStreaming(session.id)}
-			onclick={() => onOpenThread(session.id)}
-			onkeydown={(e) => handleKeyDown(e, session.id)}
-			style="animation-delay: {index * 25}ms"
-		>
-			<!-- Left accent bar -->
-			<div class="accent-bar"></div>
-
-			<!-- Message count (left) -->
-			<div class="msg-count" class:streaming={isSessionStreaming(session.id)}>
-				{#if isSessionStreaming(session.id)}
-					<Zap size={12} />
-				{:else}
-					<MessageSquare size={12} />
-				{/if}
-				<span>{session.turn_count || 0}</span>
-			</div>
-
-			<!-- Title (center) -->
-			<span class="item-title">
-				{session.title || 'Untitled conversation'}
+<div class="recent-container">
+	<!-- Search bar -->
+	<div class="search-bar">
+		<div class="search-input-wrapper">
+			<Search size={16} class="search-icon" />
+			<input
+				type="text"
+				placeholder="Search conversations..."
+				value={searchInput}
+				oninput={(e) => handleSearchInput(e.currentTarget.value)}
+				class="search-input"
+			/>
+			{#if searchInput}
+				<button class="clear-search" onclick={clearSearch} aria-label="Clear search">
+					<X size={14} />
+				</button>
+			{/if}
+		</div>
+		{#if displayTotal > 0}
+			<span class="results-count">
+				{displayTotal} {displayTotal === 1 ? 'conversation' : 'conversations'}
 			</span>
+		{/if}
+	</div>
 
-			<!-- Streaming indicator -->
-			{#if isSessionStreaming(session.id)}
-				<span class="streaming-badge">
-					<span class="streaming-dot"></span>
-				</span>
+	<!-- Sessions list -->
+	<div
+		class="recent-list"
+		bind:this={listContainer}
+		onscroll={handleScroll}
+	>
+		{#if searchLoading}
+			<div class="loading-state">
+				<Loader2 size={24} class="spinner" />
+				<p>Searching...</p>
+			</div>
+		{:else if sessionsLoading && !isSearchMode}
+			<div class="loading-state">
+				<Loader2 size={24} class="spinner" />
+				<p>Loading conversations...</p>
+			</div>
+		{:else}
+			{#each displayItems as item, index (item.id)}
+				<button
+					class="list-item"
+					class:is-streaming={isSessionStreaming(item.id)}
+					onclick={() => onOpenThread(item.id)}
+					onkeydown={(e) => handleKeyDown(e, item.id)}
+					style="animation-delay: {Math.min(index, 20) * 25}ms"
+				>
+					<!-- Left accent bar -->
+					<div class="accent-bar"></div>
+
+					<!-- Message count (left) -->
+					<div class="msg-count" class:streaming={isSessionStreaming(item.id)}>
+						{#if isSessionStreaming(item.id)}
+							<Zap size={12} />
+						{:else}
+							<MessageSquare size={12} />
+						{/if}
+						<span>{item.turn_count || 0}</span>
+					</div>
+
+					<!-- Content section -->
+					<div class="item-content">
+						<!-- Title -->
+						<span class="item-title">
+							{item.title || 'Untitled conversation'}
+						</span>
+
+						<!-- Search match snippet (if in search mode) -->
+						{#if isSearchResult(item) && item.match_snippet && item.match_type === 'content'}
+							<span class="match-snippet">
+								{item.match_snippet}
+							</span>
+						{/if}
+					</div>
+
+					<!-- Streaming indicator -->
+					{#if isSessionStreaming(item.id)}
+						<span class="streaming-badge">
+							<span class="streaming-dot"></span>
+						</span>
+					{/if}
+
+					<!-- Timestamp (right) -->
+					<span class="item-time">
+						{formatRelativeTime(item.updated_at)}
+					</span>
+				</button>
+			{/each}
+
+			<!-- Load more indicator -->
+			{#if isLoadingMore}
+				<div class="loading-more">
+					<Loader2 size={16} class="spinner" />
+					<span>Loading more...</span>
+				</div>
 			{/if}
 
-			<!-- Timestamp (right) -->
-			<span class="item-time">
-				{formatRelativeTime(session.updated_at)}
-			</span>
-		</button>
-	{/each}
-
-	{#if sessions.length === 0}
-		<div class="empty-state">
-			<p>No recent conversations</p>
-		</div>
-	{/if}
+			<!-- Empty state -->
+			{#if displayItems.length === 0}
+				<div class="empty-state">
+					{#if isSearchMode}
+						<p>No conversations found for "{searchQuery}"</p>
+					{:else}
+						<p>No recent conversations</p>
+					{/if}
+				</div>
+			{/if}
+		{/if}
+	</div>
 </div>
 
 <style>
+	.recent-container {
+		display: flex;
+		flex-direction: column;
+		height: 100%;
+		width: 100%;
+		max-width: 900px;
+		margin: 0 auto;
+	}
+
+	/* Search bar styles */
+	.search-bar {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding: 16px 32px 12px;
+		flex-shrink: 0;
+	}
+
+	.search-input-wrapper {
+		flex: 1;
+		position: relative;
+		display: flex;
+		align-items: center;
+	}
+
+	.search-input-wrapper :global(.search-icon) {
+		position: absolute;
+		left: 12px;
+		color: var(--text-muted, #71717a);
+		pointer-events: none;
+	}
+
+	.search-input {
+		width: 100%;
+		padding: 10px 36px 10px 40px;
+		background: var(--bg-card, oklch(0.15 0.01 260));
+		border: 1px solid var(--border-default, rgba(255, 255, 255, 0.08));
+		border-radius: 8px;
+		font-size: 0.875rem;
+		color: var(--text-primary, #f4f4f5);
+		outline: none;
+		transition: all 0.15s ease;
+	}
+
+	.search-input::placeholder {
+		color: var(--text-muted, #71717a);
+	}
+
+	.search-input:focus {
+		border-color: var(--ai-primary, #22d3ee);
+		box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.15);
+	}
+
+	.clear-search {
+		position: absolute;
+		right: 10px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 4px;
+		background: transparent;
+		border: none;
+		border-radius: 4px;
+		color: var(--text-muted, #71717a);
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.clear-search:hover {
+		background: rgba(255, 255, 255, 0.1);
+		color: var(--text-primary, #f4f4f5);
+	}
+
+	.results-count {
+		font-size: 0.75rem;
+		color: var(--text-muted, #71717a);
+		white-space: nowrap;
+	}
+
+	/* List styles */
 	.recent-list {
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
-		padding: 16px 32px;
+		padding: 4px 32px 16px;
 		width: 100%;
-		max-width: 900px;
-		margin: 0 auto;
 		overflow-y: auto;
-		max-height: 100%;
+		flex: 1;
 	}
 
 	.list-item {
@@ -193,14 +413,31 @@
 		color: var(--ai-primary, #22d3ee);
 	}
 
-	/* Title */
-	.item-title {
+	/* Content section with title and optional snippet */
+	.item-content {
 		flex: 1;
 		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+
+	/* Title */
+	.item-title {
 		font-size: 0.875rem;
 		font-weight: 450;
 		color: var(--text-primary, #f4f4f5);
 		line-height: 1.35;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	/* Search match snippet */
+	.match-snippet {
+		font-size: 0.75rem;
+		color: var(--text-muted, #71717a);
+		line-height: 1.3;
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -238,6 +475,31 @@
 		text-align: right;
 	}
 
+	/* Loading states */
+	.loading-state,
+	.loading-more {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 8px;
+		padding: 24px 20px;
+		color: var(--text-muted, #71717a);
+		font-size: 0.875rem;
+	}
+
+	.loading-more {
+		padding: 12px 20px;
+	}
+
+	:global(.spinner) {
+		animation: spin 1s linear infinite;
+	}
+
+	@keyframes spin {
+		from { transform: rotate(0deg); }
+		to { transform: rotate(360deg); }
+	}
+
 	/* Empty state */
 	.empty-state {
 		display: flex;
@@ -250,8 +512,21 @@
 
 	/* Mobile responsive */
 	@media (max-width: 640px) {
+		.search-bar {
+			padding: 12px 16px 8px;
+		}
+
+		.search-input {
+			padding: 8px 32px 8px 36px;
+			font-size: 0.8125rem;
+		}
+
+		.results-count {
+			display: none;
+		}
+
 		.recent-list {
-			padding: 12px 16px;
+			padding: 4px 16px 12px;
 			gap: 3px;
 		}
 
@@ -268,6 +543,10 @@
 
 		.item-title {
 			font-size: 0.8125rem;
+		}
+
+		.match-snippet {
+			font-size: 0.6875rem;
 		}
 
 		.item-time {

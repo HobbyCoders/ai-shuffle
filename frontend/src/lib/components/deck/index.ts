@@ -15,7 +15,6 @@ export type {
 	ActivityMode,
 	ActivityBadges,
 	DeckSession,
-	DeckAgent,
 	DeckGeneration,
 	SessionInfo,
 	CardGeometry,

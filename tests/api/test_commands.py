@@ -103,6 +103,7 @@ class MockCheckpoint:
     index: int
     message_preview: str
     full_message: str
+    role: str = "user"  # "user" or "assistant"
     timestamp: Optional[str] = None
     git_ref: Optional[str] = None
 
@@ -763,7 +764,8 @@ class TestExecuteRewindEndpoint:
             sdk_session_id="sdk-session-1",
             target_uuid="uuid-1",
             working_dir=mock_settings.workspace_dir.__truediv__.return_value.__str__.return_value if mock_database.get_project.return_value else str(mock_settings.workspace_dir),
-            include_response=True
+            include_response=True,
+            target_role="user"
         )
 
     @pytest.mark.asyncio

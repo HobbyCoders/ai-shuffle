@@ -113,7 +113,7 @@ class TestProviderKeyMap:
 
     def test_all_values_are_api_key_strings(self):
         """All values should be API key field names."""
-        valid_key_types = {"image_api_key", "openai_api_key", "meshy_api_key"}
+        valid_key_types = {"image_api_key", "openai_api_key", "meshy_api_key", "deepseek_api_key"}
 
         for provider, key_field in PROVIDER_KEY_MAP.items():
             assert isinstance(key_field, str), f"Key field for {provider} should be string"

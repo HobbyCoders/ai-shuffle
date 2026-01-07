@@ -35,8 +35,9 @@ class Checkpoint:
     """A checkpoint representing a point in conversation that can be rewound to"""
     uuid: str  # Message UUID from JSONL
     index: int  # Position in conversation (0-based)
-    message_preview: str  # First 100 chars of user message
-    full_message: str  # Complete user message
+    message_preview: str  # First 100 chars of message
+    full_message: str  # Complete message
+    role: str = "user"  # "user" or "assistant" - which type of message this is
     timestamp: Optional[str] = None
     git_ref: Optional[str] = None  # Git snapshot reference (if code checkpoint exists)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -154,9 +155,11 @@ class JSONLRewindService:
         working_dir: str = "/workspace"
     ) -> List[Checkpoint]:
         """
-        Get all available checkpoints (user messages) for a session.
+        Get all available checkpoints (user and assistant messages) for a session.
 
-        Each user message represents a potential rewind point.
+        Both user and assistant messages represent potential rewind points.
+        - Rewinding to a user message removes that message and everything after
+        - Rewinding to an assistant message keeps that response and removes everything after
 
         Args:
             sdk_session_id: The Claude SDK session ID
@@ -188,10 +191,10 @@ class JSONLRewindService:
             if entry.get('isSidechain'):
                 continue
 
-            # Only user messages are checkpoints (rewind points)
             message = entry.get('message', {})
             role = message.get('role')
 
+            # Handle user messages
             if entry_type == 'user' and role == 'user':
                 # Extract message text
                 text = self._extract_message_text(entry)
@@ -215,6 +218,38 @@ class JSONLRewindService:
                     index=checkpoint_index,
                     message_preview=text[:100] + ('...' if len(text) > 100 else ''),
                     full_message=text,
+                    role='user',
+                    timestamp=entry.get('timestamp')
+                )
+                checkpoints.append(checkpoint)
+                checkpoint_index += 1
+
+            # Handle assistant messages
+            elif entry_type == 'assistant' and role == 'assistant':
+                # Extract message text
+                text = self._extract_message_text(entry)
+
+                # Skip empty messages
+                if not text:
+                    continue
+
+                # Skip tool use messages (we want the final text response)
+                content = message.get('content', '')
+                if isinstance(content, list):
+                    # Check if this is purely tool_use blocks (no text)
+                    has_text = any(
+                        isinstance(block, dict) and block.get('type') == 'text'
+                        for block in content
+                    )
+                    if not has_text:
+                        continue
+
+                checkpoint = Checkpoint(
+                    uuid=entry.get('uuid', ''),
+                    index=checkpoint_index,
+                    message_preview=text[:100] + ('...' if len(text) > 100 else ''),
+                    full_message=text,
+                    role='assistant',
                     timestamp=entry.get('timestamp')
                 )
                 checkpoints.append(checkpoint)
@@ -228,21 +263,29 @@ class JSONLRewindService:
         sdk_session_id: str,
         target_uuid: str,
         working_dir: str = "/workspace",
-        include_response: bool = True
+        include_response: bool = True,
+        target_role: str = "user"
     ) -> RewindResult:
         """
-        Truncate the JSONL file to a specific checkpoint (user message).
+        Truncate the JSONL file to a specific checkpoint (user or assistant message).
 
         This is the core rewind operation. After truncation, the next SDK resume
-        will only see messages up to (and optionally including the response to)
-        the target checkpoint.
+        will only see messages up to the target checkpoint.
+
+        For user messages:
+        - If include_response=True: keeps the assistant's response, removes everything after
+        - If include_response=False: removes the user message and everything after
+
+        For assistant messages:
+        - Always keeps the assistant message and removes everything after
 
         Args:
             sdk_session_id: The Claude SDK session ID
-            target_uuid: The UUID of the user message to rewind to
+            target_uuid: The UUID of the message to rewind to
             working_dir: Working directory for the project
             include_response: If True, keep the assistant's response to the target message
-                            If False, truncate immediately after the user message
+                            (only applies to user messages)
+            target_role: The role of the target message ("user" or "assistant")
 
         Returns:
             RewindResult with success status and details
@@ -277,8 +320,39 @@ class JSONLRewindService:
                 error=f"Message with UUID {target_uuid} not found in JSONL"
             )
 
-        # Determine where to truncate
-        if include_response:
+        # Determine where to truncate based on target role
+        if target_role == 'assistant':
+            # For assistant messages: keep the assistant message and everything before it
+            # Find the next user message after this assistant message
+            truncate_before = None
+            for i in range(target_index + 1, len(entries)):
+                entry = entries[i]
+                if entry.get('type') == 'user' and entry.get('message', {}).get('role') == 'user':
+                    # Skip tool results
+                    content = entry.get('message', {}).get('content', '')
+                    if isinstance(content, list):
+                        has_tool_result = any(
+                            isinstance(block, dict) and block.get('type') == 'tool_result'
+                            for block in content
+                        )
+                        if has_tool_result:
+                            continue
+                    # Found the next user message
+                    truncate_before = i
+                    break
+
+            if truncate_before is None:
+                # Target assistant message is at the end, nothing to truncate
+                return RewindResult(
+                    success=True,
+                    message="Already at the target checkpoint (nothing to rewind)",
+                    checkpoint_uuid=target_uuid,
+                    messages_removed=0
+                )
+
+            keep_entries = entries[:truncate_before]
+        elif include_response:
+            # For user messages with include_response=True:
             # Find the next user message after target, truncate before it
             # This keeps the assistant's response to the target message
             truncate_before = None
@@ -309,6 +383,7 @@ class JSONLRewindService:
 
             keep_entries = entries[:truncate_before]
         else:
+            # For user messages with include_response=False:
             # Truncate BEFORE the target user message (remove it entirely)
             # This allows the user to re-prompt with the message content in the input field
             keep_entries = entries[:target_index]

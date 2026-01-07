@@ -11,7 +11,9 @@ export type CardType =
   | 'project'
   | 'user-settings'
   | 'file-browser'
-  | 'plugins';
+  | 'plugins'
+  | 'notes'
+  | 'hooks';
 
 export interface DeckCard {
   id: string;
@@ -27,6 +29,8 @@ export interface DeckCard {
   snappedTo?: 'left' | 'right' | 'top' | 'bottom' | 'topleft' | 'topright' | 'bottomleft' | 'bottomright';
   restoreGeometry?: { x: number; y: number; width: number; height: number };
   data?: any;
+  dataId?: string;
+  meta?: Record<string, any>;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -41,6 +45,8 @@ export const DEFAULT_CARD_SIZES: Record<CardType, { width: number; height: numbe
   'user-settings': { width: 650, height: 550 },
   'file-browser': { width: 600, height: 500 },
   plugins: { width: 650, height: 550 },
+  notes: { width: 600, height: 550 },
+  hooks: { width: 650, height: 550 },
 };
 
 export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }> = {
@@ -53,6 +59,8 @@ export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }>
   'user-settings': { width: 500, height: 400 },
   'file-browser': { width: 400, height: 350 },
   plugins: { width: 500, height: 450 },
+  notes: { width: 400, height: 350 },
+  hooks: { width: 500, height: 400 },
 };
 
 /**

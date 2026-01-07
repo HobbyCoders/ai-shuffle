@@ -109,11 +109,6 @@ class Settings(BaseSettings):
         return self.effective_data_dir / "db.sqlite"
 
     @property
-    def sessions_dir(self) -> Path:
-        """Get the sessions directory"""
-        return self.effective_data_dir / "sessions"
-
-    @property
     def get_claude_projects_dir(self) -> Path:
         """Get the Claude SDK projects directory"""
         if self.claude_projects_dir:
@@ -152,7 +147,6 @@ class Settings(BaseSettings):
             "data_dir": str(self.effective_data_dir),
             "workspace_dir": str(self.effective_workspace_dir),
             "db_path": str(self.db_path),
-            "sessions_dir": str(self.sessions_dir),
         }
 
 
@@ -164,7 +158,6 @@ settings = Settings()
 def ensure_directories():
     """Create required directories if they don't exist"""
     settings.effective_data_dir.mkdir(parents=True, exist_ok=True)
-    settings.sessions_dir.mkdir(parents=True, exist_ok=True)
     settings.effective_workspace_dir.mkdir(parents=True, exist_ok=True)
 
 

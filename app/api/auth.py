@@ -7,10 +7,12 @@ import hashlib
 import secrets
 import subprocess
 import logging
+import uuid as _uuid
 from pathlib import Path
 from typing import Optional
 from datetime import datetime, timedelta
 
+import bcrypt
 from fastapi import APIRouter, HTTPException, Response, Request, Depends, status
 
 from app.core.models import (
@@ -18,15 +20,21 @@ from app.core.models import (
     ApiUserRegisterRequest, ApiUserLoginRequest, ChangePasswordRequest,
     TwoFactorLoginRequest
 )
-import bcrypt
 from app.core.auth import auth_service
 from app.core.config import settings
 from app.core import encryption
 from app.core import totp_service
 from app.core import audit_service
+from app.core import auth as _auth_module
 from app.db import database as db
 
 logger = logging.getLogger(__name__)
+
+# Unique server instance ID to help debug multi-instance issues
+_SERVER_INSTANCE_ID = _uuid.uuid4().hex[:8]
+
+# Share instance ID with auth service for consistent logging
+_auth_module.set_server_instance_id(_SERVER_INSTANCE_ID)
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
 
@@ -169,6 +177,14 @@ def require_auth(request: Request) -> str:
                 db.update_api_user_last_used(api_user["id"])
                 return f"api_session:{api_user['id']}"
 
+        # Diagnostic logging - session token exists but validation failed
+        last4 = token[-4:] if len(token) >= 4 else token
+        logger.warning(
+            f"[{_SERVER_INSTANCE_ID}] Auth failed: token exists "
+            f"(len={len(token)}, last4=...{last4}) "
+            f"but validation failed. Path: {request.url.path}"
+        )
+
     # Then try API key auth (Bearer token)
     api_key = get_api_key(request)
     if api_key:
@@ -181,6 +197,15 @@ def require_auth(request: Request) -> str:
             request.state.is_admin = False
             request.state.api_user = api_user
             return f"api_key:{api_user['id']}"
+
+    # Log what auth methods were attempted
+    has_cookie = token is not None
+    has_bearer = api_key is not None
+    path = request.url.path
+    logger.warning(
+        f"[{_SERVER_INSTANCE_ID}] Auth failed completely: "
+        f"cookie={has_cookie}, bearer={has_bearer}, path={path}"
+    )
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,

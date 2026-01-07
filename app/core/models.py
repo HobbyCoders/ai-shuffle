@@ -306,6 +306,24 @@ class SessionSearchResult(Session):
     match_time: Optional[datetime] = None  # When the matching content was created
 
 
+class PaginatedSessions(BaseModel):
+    """Paginated sessions response with total count for infinite scroll"""
+    items: List[Session]
+    total: int
+    offset: int
+    limit: int
+    has_more: bool
+
+
+class PaginatedSessionSearchResults(BaseModel):
+    """Paginated session search results with total count"""
+    items: List[SessionSearchResult]
+    total: int
+    offset: int
+    limit: int
+    has_more: bool
+
+
 # ============================================================================
 # Query Models
 # ============================================================================
@@ -957,3 +975,133 @@ class QueueStatus(BaseModel):
     estimated_wait_seconds: int = 0
     total_queued: int = 0
     is_queued: bool = False
+
+
+# ============================================================================
+# Notes Models
+# ============================================================================
+
+class NoteBase(BaseModel):
+    """Base note fields"""
+    title: str = Field(..., min_length=1, max_length=255)
+    content: str = Field(default="")
+    tags: List[str] = Field(default_factory=list)  # User-defined tag names
+    linked_sessions: List[str] = Field(default_factory=list)  # Session IDs
+    is_pinned: bool = False
+
+
+class NoteCreate(NoteBase):
+    """Note creation request"""
+    pass
+
+
+class NoteUpdate(BaseModel):
+    """Note update request - all fields optional"""
+    title: Optional[str] = Field(None, min_length=1, max_length=255)
+    content: Optional[str] = None
+    tags: Optional[List[str]] = None
+    linked_sessions: Optional[List[str]] = None
+    is_pinned: Optional[bool] = None
+
+
+class Note(NoteBase):
+    """Full note response"""
+    id: str
+    project_id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class NoteTag(BaseModel):
+    """Aggregated tag information for notes"""
+    name: str
+    color: Optional[str] = None
+    count: int
+
+
+class NoteAutocomplete(BaseModel):
+    """Simplified note for chat autocomplete"""
+    id: str
+    title: str
+    preview: str  # First ~100 chars of content
+    tags: List[str]
+
+
+# ============================================================================
+# Hook Models
+# ============================================================================
+
+# Valid hook event types matching Claude Code events
+VALID_HOOK_EVENTS = [
+    "PreToolUse",
+    "PostToolUse",
+    "Stop",
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "PreCompact",
+    "SubagentStop",
+    "Notification",
+]
+
+
+class HookBase(BaseModel):
+    """Base hook fields"""
+    name: str = Field(..., min_length=1, max_length=100)
+    event: str = Field(..., description="Hook event type")
+    hook_type: str = Field(..., pattern=r'^(bash|webhook)$', description="Type: 'bash' or 'webhook'")
+    # For bash hooks
+    command: Optional[str] = Field(None, description="Shell command to execute")
+    timeout: int = Field(default=30000, ge=1000, le=300000, description="Timeout in ms (1-300 seconds)")
+    # For webhook hooks
+    url: Optional[str] = Field(None, description="Webhook URL to POST to")
+    secret: Optional[str] = Field(None, description="HMAC secret for webhook signing")
+    # Common
+    enabled: bool = True
+    tool_matcher: Optional[str] = Field(None, description="Tool name pattern for PreToolUse/PostToolUse (e.g., 'Bash|Edit')")
+
+
+class HookCreate(HookBase):
+    """Hook creation request"""
+    pass
+
+
+class HookUpdate(BaseModel):
+    """Hook update request - all fields optional"""
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    event: Optional[str] = None
+    hook_type: Optional[str] = Field(None, pattern=r'^(bash|webhook)$')
+    command: Optional[str] = None
+    timeout: Optional[int] = Field(None, ge=1000, le=300000)
+    url: Optional[str] = None
+    secret: Optional[str] = None
+    enabled: Optional[bool] = None
+    tool_matcher: Optional[str] = None
+
+
+class Hook(HookBase):
+    """Full hook response"""
+    id: str
+    project_id: str
+    created_at: datetime
+    updated_at: datetime
+    last_triggered_at: Optional[datetime] = None
+    failure_count: int = 0
+
+
+class HookTestResult(BaseModel):
+    """Result from testing a hook"""
+    success: bool
+    duration_ms: Optional[int] = None
+    output: Optional[str] = None
+    error: Optional[str] = None
+
+
+class PluginHookInfo(BaseModel):
+    """Read-only hook info from an installed plugin"""
+    plugin_id: str
+    plugin_name: str
+    event: str
+    hook_type: str  # 'prompt' or 'command'
+    description: Optional[str] = None
+    tool_matcher: Optional[str] = None

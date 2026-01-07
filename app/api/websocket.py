@@ -24,6 +24,7 @@ from app.core.webhook_service import dispatch_session_complete, dispatch_session
 from app.core.cli_bridge import CLIBridge, RewindParser
 from app.core.permission_handler import permission_handler
 from app.core.user_question_handler import user_question_handler
+from app.core.query_engine import cleanup_session
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +223,19 @@ async def chat_websocket(
                         usage=usage_data
                     )
                     stream_started = True
+                elif stream_started and event_type == 'stream_start':
+                    # Subsequent stream_start events (agentic loops with tool calls)
+                    # Each new assistant turn has updated token usage that should be broadcast
+                    message_data = event.get('message', {})
+                    if isinstance(message_data, dict):
+                        usage_data = message_data.get('usage')
+                        if usage_data:
+                            # Broadcast usage update to synced devices
+                            await sync_engine.broadcast_usage_update(
+                                session_id=session_id,
+                                usage=usage_data
+                            )
+                            logger.debug(f"Broadcast usage update for session {session_id}: {usage_data}")
 
                 # Broadcast stream chunks (source_device_id=None to not exclude any device)
                 if event_type == 'stream_delta':
@@ -805,6 +819,7 @@ async def chat_websocket(
                                 logger.info(f"Session {session_id} streaming status: {is_streaming}")
 
                                 # Validate streaming state - if marked streaming but no active task, it's stale
+                                streaming_usage = None
                                 if is_streaming:
                                     active_task = _active_chat_sessions.get(session_id)
                                     if active_task is None or active_task.done():
@@ -819,17 +834,22 @@ async def chat_websocket(
                                         )
                                         is_streaming = False
                                     else:
-                                        streaming_buffer = sync_engine.get_streaming_buffer(session_id)
-                                        logger.info(f"Session {session_id} is streaming, sending buffer with {len(streaming_buffer) if streaming_buffer else 0} messages")
+                                        # Get buffer with usage data for late-joining devices
+                                        streaming_buffer, streaming_usage = sync_engine.get_streaming_buffer_with_usage(session_id)
+                                        logger.info(f"Session {session_id} is streaming, sending buffer with {len(streaming_buffer) if streaming_buffer else 0} messages, usage: {streaming_usage}")
 
-                                await send_json({
+                                # Build response with optional streamingUsage for late-joiners
+                                history_response = {
                                     "type": "history",
                                     "session_id": session_id,
                                     "session": session,
                                     "messages": messages,
                                     "isStreaming": is_streaming,
                                     "streamingBuffer": streaming_buffer
-                                })
+                                }
+                                if streaming_usage:
+                                    history_response["streamingUsage"] = streaming_usage
+                                await send_json(history_response)
 
                                 # Broadcast to other devices that this session was opened
                                 await sync_engine.broadcast_session_opened(
@@ -850,6 +870,15 @@ async def chat_websocket(
                                 session_id=old_session_id,
                                 device_id=device_id
                             )
+
+                            # If no other devices are connected to this session,
+                            # cleanup the SDK session to release file locks
+                            remaining_devices = sync_engine.get_device_count(old_session_id)
+                            if remaining_devices == 0:
+                                cleaned = await cleanup_session(old_session_id)
+                                if cleaned:
+                                    logger.info(f"Cleaned up SDK session {old_session_id} (no devices remaining)")
+
                             current_session_id = None
                             logger.info(f"Device {device_id} closed session {old_session_id}")
                             await send_json({"type": "session_closed", "session_id": old_session_id})

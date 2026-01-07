@@ -249,6 +249,7 @@
 
 		<!-- Footer -->
 		<div class="card-footer">
+			<div class="card-footer-content">
 			{#if showCreateForm}
 				<div class="create-form">
 					<div class="form-row">
@@ -307,6 +308,7 @@
 					New Project
 				</button>
 			{/if}
+			</div>
 		</div>
 	</div>
 {/snippet}
@@ -337,11 +339,14 @@
 		height: 100%;
 		background: var(--card);
 		overflow: hidden;
+		/* Set footer max-width to match centered-content */
+		--card-footer-max-width: 600px;
 	}
 
 	/* Maximized state - constrain width and center content */
 	.project-card.maximized {
 		--card-max-width: 800px;
+		--card-footer-max-width: var(--card-max-width);
 	}
 
 	.project-card.maximized :global(.card-header),

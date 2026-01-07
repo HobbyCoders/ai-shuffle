@@ -24,7 +24,7 @@ from claude_agent_sdk import (
     AssistantMessage, UserMessage, TextBlock, ToolUseBlock, ToolResultBlock,
     ResultMessage, SystemMessage
 )
-from claude_agent_sdk.types import StreamEvent, HookMatcher, HookContext, HookInput
+from claude_agent_sdk.types import StreamEvent, PermissionResultAllow
 
 from app.db import database
 from app.core.config import settings
@@ -342,6 +342,50 @@ async def cleanup_stale_sessions(max_age_seconds: int = 3600):
                 logger.info(f"Cleaned up stale session {session_id}")
             except Exception as e:
                 logger.warning(f"Error cleaning up stale session {session_id}: {e}")
+
+
+async def cleanup_session(session_id: str) -> bool:
+    """
+    Explicitly cleanup a specific session's SDK resources.
+
+    This should be called when a tab is closed and no other devices are connected
+    to the session. It disconnects the SDK client, cancels any background tasks,
+    and cleans up agent files.
+
+    Args:
+        session_id: The session ID to cleanup
+
+    Returns:
+        True if a session was cleaned up, False if no session found
+    """
+    state = _active_sessions.pop(session_id, None)
+    if not state:
+        return False
+
+    # Cancel background task if running
+    if state.background_task and not state.background_task.done():
+        state.background_task.cancel()
+        try:
+            await state.background_task
+        except asyncio.CancelledError:
+            pass
+        logger.info(f"Cancelled background task for session {session_id}")
+
+    # Disconnect SDK client
+    if state.client:
+        try:
+            await state.client.disconnect()
+            logger.info(f"Disconnected SDK client for session {session_id}")
+        except Exception as e:
+            logger.warning(f"Error disconnecting SDK client for session {session_id}: {e}")
+
+    # Cleanup agent files
+    if state.agents_dir and state.written_agent_ids:
+        cleanup_agents_directory(state.agents_dir, state.written_agent_ids)
+        logger.info(f"Cleaned up agent files for session {session_id}")
+
+    logger.info(f"Session {session_id} fully cleaned up")
+    return True
 
 
 # Instructions for displaying media and files in chat
@@ -1650,8 +1694,8 @@ def build_options_from_profile(
         # On Windows, agents=None because --agents CLI flag has a bug - must write to filesystem instead
         agents=agents_dict if detect_deployment_mode() != DeploymentMode.LOCAL else None,
 
-        # Permission callback - only set if permission_mode is 'default' and callback provided
-        can_use_tool=can_use_tool if permission_mode == "default" and can_use_tool else None,
+        # Permission callback - set if callback provided (handles AskUserQuestion in all modes)
+        can_use_tool=can_use_tool if can_use_tool else None,
 
         # Hooks - for interactive tool handling like AskUserQuestion
         hooks=hooks,
@@ -2833,93 +2877,69 @@ async def stream_to_websocket(
     logger.info(f"[WS] Permission mode for session {session_id}: {permission_mode} (profile config: {config.get('permission_mode')}, override: {overrides.get('permission_mode') if overrides else None})")
     logger.info(f"[WS] broadcast_func provided: {broadcast_func is not None}")
 
-    # Create canUseTool callback if permission mode is 'default' and we have broadcast_func
+    # Create canUseTool callback if we have broadcast_func
+    # This handles both permission requests (in 'default' mode) and AskUserQuestion (in all modes)
     can_use_tool_callback = None
-    if permission_mode == "default" and broadcast_func:
+    if broadcast_func:
         logger.info(f"[WS] Creating canUseTool callback for session {session_id}")
 
         async def can_use_tool_callback(tool_name: str, tool_input: dict, context):
             """
-            Permission callback that routes tool requests through the permission handler.
-            This integrates with the frontend UI for user approval.
+            Permission callback that routes tool requests through the permission handler
+            and handles AskUserQuestion tool specially.
 
             Args:
                 tool_name: Name of the tool being requested
                 tool_input: Tool input parameters
                 context: ToolPermissionContext with signal and suggestions
             """
-            request_id = f"perm-{session_id}-{uuid.uuid4().hex[:8]}"
-            logger.info(f"[WS] Permission request for {tool_name}: {request_id}")
+            # Handle AskUserQuestion specially - this is how the SDK expects it
+            if tool_name == "AskUserQuestion":
+                questions = tool_input.get("questions", [])
+                if not questions:
+                    # No questions, allow the tool to proceed
+                    return PermissionResultAllow(updated_input=tool_input)
 
-            # Request permission through the handler
-            # The handler will broadcast to WebSocket and wait for response
-            result = await permission_handler.request_permission(
-                request_id=request_id,
-                session_id=session_id,
-                profile_id=profile_id,
-                tool_name=tool_name,
-                tool_input=tool_input,
-                broadcast_func=broadcast_func
-            )
+                request_id = f"question-{session_id}-{uuid.uuid4().hex[:8]}"
+                logger.info(f"[WS] AskUserQuestion canUseTool triggered: {request_id} with {len(questions)} questions")
 
-            return result
-
-    # Create AskUserQuestion hook if we have broadcast_func
-    hooks_config = None
-    if broadcast_func:
-        async def ask_user_question_hook(
-            input_data: HookInput,
-            tool_use_id: str | None,
-            context: HookContext
-        ) -> dict:
-            """
-            PreToolUse hook for AskUserQuestion tool.
-            Intercepts the tool call, sends questions to frontend, waits for answers,
-            and returns the answers to be injected into the tool input.
-            """
-            # Extract tool input from hook input
-            tool_input = input_data.get("tool_input", {})
-            questions = tool_input.get("questions", [])
-
-            if not questions:
-                # No questions, let it proceed normally
-                return {}
-
-            request_id = f"question-{session_id}-{uuid.uuid4().hex[:8]}"
-            logger.info(f"[WS] AskUserQuestion hook triggered: {request_id} with {len(questions)} questions")
-
-            # Get answers from user via WebSocket
-            answers = await user_question_handler.request_answers(
-                request_id=request_id,
-                tool_use_id=tool_use_id or "",
-                session_id=session_id,
-                questions=questions,
-                broadcast_func=broadcast_func
-            )
-
-            logger.info(f"[WS] Got answers for {request_id}: {list(answers.keys())}")
-
-            # Return updated input with answers filled in
-            updated_input = {**tool_input, "answers": answers}
-
-            return {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                    "updatedInput": updated_input
-                }
-            }
-
-        hooks_config = {
-            "PreToolUse": [
-                HookMatcher(
-                    matcher="AskUserQuestion",
-                    hooks=[ask_user_question_hook],
-                    timeout=600.0  # 10 minute timeout for user input
+                # Get answers from user via WebSocket
+                answers = await user_question_handler.request_answers(
+                    request_id=request_id,
+                    tool_use_id=request_id,  # Use request_id as tool_use_id placeholder
+                    session_id=session_id,
+                    questions=questions,
+                    broadcast_func=broadcast_func
                 )
-            ]
-        }
-        logger.info(f"[WS] Created AskUserQuestion hook for session {session_id}")
+
+                logger.info(f"[WS] Got answers for {request_id}: {list(answers.keys())}")
+
+                # Return updated input with answers - SDK expects PermissionResultAllow
+                return PermissionResultAllow(updated_input={**tool_input, "answers": answers})
+
+            # For other tools in default mode, route through permission handler
+            if permission_mode == "default":
+                request_id = f"perm-{session_id}-{uuid.uuid4().hex[:8]}"
+                logger.info(f"[WS] Permission request for {tool_name}: {request_id}")
+
+                # Request permission through the handler
+                # The handler will broadcast to WebSocket and wait for response
+                result = await permission_handler.request_permission(
+                    request_id=request_id,
+                    session_id=session_id,
+                    profile_id=profile_id,
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    broadcast_func=broadcast_func
+                )
+
+                return result
+            else:
+                # In non-default modes (bypassPermissions, acceptEdits), allow other tools
+                return PermissionResultAllow()
+
+    # No longer using hooks for AskUserQuestion - it's handled in canUseTool
+    hooks_config = None
 
     # Build options with the callback, hooks, and user-scoped credential resolution
     options, agents_dict = build_options_from_profile(

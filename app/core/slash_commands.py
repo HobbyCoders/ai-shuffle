@@ -139,6 +139,12 @@ def parse_command_file(file_path: Path, source: str, namespace: Optional[str] = 
     if isinstance(allowed_tools, str):
         allowed_tools = [t.strip() for t in allowed_tools.split(",")]
 
+    # Parse argument-hint (normalize to string if it's a list)
+    argument_hint = frontmatter.get("argument-hint")
+    if isinstance(argument_hint, list):
+        # Join list items with space - common format is [arg1] [arg2]
+        argument_hint = " ".join(f"[{item}]" if not item.startswith("[") else item for item in argument_hint)
+
     return SlashCommand(
         name=name,
         description=description,
@@ -147,7 +153,7 @@ def parse_command_file(file_path: Path, source: str, namespace: Optional[str] = 
         source=source,
         namespace=namespace,
         allowed_tools=allowed_tools,
-        argument_hint=frontmatter.get("argument-hint"),
+        argument_hint=argument_hint,
         model=frontmatter.get("model"),
         disable_model_invocation=frontmatter.get("disable-model-invocation", False)
     )

@@ -15,13 +15,15 @@ logger = logging.getLogger(__name__)
 
 
 # Schema version for migrations
-# v21: Force re-run to ensure agent_runs, agent_tasks, agent_logs tables exist
 # v22: Add credential_policies and api_user_credentials tables
 # v23: Worktree-session decoupling - add worktree_id to sessions, remove UNIQUE from worktrees.session_id
 # v24: Add unique index on active worktrees to prevent race conditions, fix N+1 queries
 # v25: Add api_user_profiles junction table for multi-profile support
 # v26: Add built-in subagent support with default values storage and protection
-SCHEMA_VERSION = 26
+# v27: Remove agent execution engine (agent_runs, agent_tasks, agent_logs tables)
+# v28: Add notes table for project-scoped notes feature
+# v29: Add project_hooks table for per-project Claude Code event hooks
+SCHEMA_VERSION = 29
 
 
 # =============================================================================
@@ -543,6 +545,22 @@ def _create_schema(cursor: sqlite3.Cursor):
     except sqlite3.OperationalError:
         pass  # Column already exists
 
+    # Drop agent execution engine tables (migration for v27)
+    # These tables are no longer used after removing the background agent feature
+    # Drop in correct order to respect foreign key constraints
+    try:
+        cursor.execute("DROP TABLE IF EXISTS agent_logs")
+    except sqlite3.OperationalError as e:
+        logger.debug(f"Could not drop agent_logs table: {e}")
+    try:
+        cursor.execute("DROP TABLE IF EXISTS agent_tasks")
+    except sqlite3.OperationalError as e:
+        logger.debug(f"Could not drop agent_tasks table: {e}")
+    try:
+        cursor.execute("DROP TABLE IF EXISTS agent_runs")
+    except sqlite3.OperationalError as e:
+        logger.debug(f"Could not drop agent_runs table: {e}")
+
     # Create indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_templates_category ON templates(category)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_templates_profile ON templates(profile_id)")
@@ -667,89 +685,57 @@ def _create_schema(cursor: sqlite3.Cursor):
     """)
 
     # =========================================================================
-    # Background Agent Runs (autonomous agent execution)
+    # Notes - Project-scoped notes for ideas, bugs, planning
     # =========================================================================
 
-    # Agent runs - tracks background agent executions
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS agent_runs (
+        CREATE TABLE IF NOT EXISTS notes (
             id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            prompt TEXT NOT NULL,
-            status TEXT DEFAULT 'queued',
-            progress REAL DEFAULT 0,
-            profile_id TEXT,
-            project_id TEXT,
-            worktree_id TEXT,
-            branch TEXT,
-            base_branch TEXT,
-            pr_url TEXT,
-            auto_branch BOOLEAN DEFAULT TRUE,
-            auto_pr BOOLEAN DEFAULT FALSE,
-            auto_merge BOOLEAN DEFAULT FALSE,
-            auto_review BOOLEAN DEFAULT FALSE,
-            max_duration_minutes INTEGER DEFAULT 30,
-            sdk_session_id TEXT,
-            started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            completed_at TIMESTAMP,
-            error TEXT,
-            result_summary TEXT,
-            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL,
-            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
-            FOREIGN KEY (worktree_id) REFERENCES worktrees(id) ON DELETE SET NULL
-        )
-    """)
-
-    # Migration: Add base_branch column to agent_runs (for existing DBs)
-    try:
-        cursor.execute("ALTER TABLE agent_runs ADD COLUMN base_branch TEXT")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-
-    # Migration: Add auto_merge column to agent_runs (for existing DBs)
-    try:
-        cursor.execute("ALTER TABLE agent_runs ADD COLUMN auto_merge BOOLEAN DEFAULT FALSE")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-
-    # Agent tasks - hierarchical task tracking within agent runs
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS agent_tasks (
-            id TEXT PRIMARY KEY,
-            agent_run_id TEXT NOT NULL,
-            parent_task_id TEXT,
-            name TEXT NOT NULL,
-            status TEXT DEFAULT 'pending',
-            order_index INTEGER DEFAULT 0,
+            project_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT DEFAULT '',
+            tags JSON DEFAULT '[]',
+            linked_sessions JSON DEFAULT '[]',
+            is_pinned BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (agent_run_id) REFERENCES agent_runs(id) ON DELETE CASCADE,
-            FOREIGN KEY (parent_task_id) REFERENCES agent_tasks(id) ON DELETE CASCADE
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         )
     """)
 
-    # Agent logs - detailed logs for agent runs
+    # Indexes for efficient queries
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_notes_project ON notes(project_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_notes_pinned ON notes(is_pinned DESC, updated_at DESC)")
+
+    # =========================================================================
+    # Project Hooks - For Claude Code event handling
+    # =========================================================================
+
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS agent_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            agent_run_id TEXT NOT NULL,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            level TEXT DEFAULT 'info',
-            message TEXT NOT NULL,
-            metadata JSON,
-            FOREIGN KEY (agent_run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
+        CREATE TABLE IF NOT EXISTS project_hooks (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            event TEXT NOT NULL,
+            hook_type TEXT NOT NULL,
+            command TEXT,
+            timeout INTEGER DEFAULT 30000,
+            url TEXT,
+            secret TEXT,
+            enabled BOOLEAN DEFAULT TRUE,
+            tool_matcher TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_triggered_at TIMESTAMP,
+            failure_count INTEGER DEFAULT 0,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         )
     """)
 
-    # Create agent run indexes
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_status ON agent_runs(status)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_project ON agent_runs(project_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_profile ON agent_runs(profile_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_started ON agent_runs(started_at)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_tasks_run ON agent_tasks(agent_run_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_tasks_parent ON agent_tasks(parent_task_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_logs_run ON agent_logs(agent_run_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_logs_timestamp ON agent_logs(timestamp)")
+    # Index for efficient project hooks lookup
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_project_hooks_project_id ON project_hooks(project_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_project_hooks_event ON project_hooks(event)")
 
     # =========================================================================
     # API User Credentials & Policies (per-user API keys and GitHub auth)
@@ -1098,6 +1084,10 @@ def clear_all_sessions():
     Called on app startup to force re-login, which is required
     to restore the encryption key to memory.
     """
+    import traceback
+    # Log the call stack to help diagnose unexpected session clearing
+    logger.warning(f"clear_all_sessions() called! Stack trace:\n{''.join(traceback.format_stack())}")
+
     with get_db() as conn:
         cursor = conn.cursor()
         # Clear admin sessions
@@ -1106,6 +1096,7 @@ def clear_all_sessions():
         # Clear API user web sessions
         cursor.execute("DELETE FROM api_key_sessions")
         api_count = cursor.rowcount
+        logger.warning(f"Cleared {admin_count} admin sessions and {api_count} API key sessions")
         return admin_count, api_count
 
 
@@ -1400,6 +1391,76 @@ def get_sessions(
         return rows_to_list(cursor.fetchall())
 
 
+def get_sessions_paginated(
+    project_id: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    status: Optional[str] = None,
+    api_user_id: Optional[str] = None,
+    api_users_only: bool = False,
+    favorites_only: bool = False,
+    tag_id: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+) -> tuple[List[Dict[str, Any]], int]:
+    """Get sessions with optional filters, returning items and total count.
+
+    Returns:
+        Tuple of (sessions list, total count)
+    """
+    # Build the WHERE clause (shared between count and data queries)
+    if tag_id:
+        base_query = """FROM sessions s
+                       INNER JOIN session_tags st ON s.id = st.session_id
+                       WHERE st.tag_id = ?"""
+        params: List[Any] = [tag_id]
+        col_prefix = "s."
+    else:
+        base_query = "FROM sessions WHERE 1=1"
+        params = []
+        col_prefix = ""
+
+    if project_id:
+        base_query += f" AND {col_prefix}project_id = ?"
+        params.append(project_id)
+    if profile_id:
+        base_query += f" AND {col_prefix}profile_id = ?"
+        params.append(profile_id)
+    if status:
+        base_query += f" AND {col_prefix}status = ?"
+        params.append(status)
+    if favorites_only:
+        base_query += f" AND {col_prefix}is_favorite = TRUE"
+    if api_users_only:
+        base_query += f" AND {col_prefix}api_user_id IS NOT NULL"
+    elif api_user_id is not None:
+        if api_user_id:
+            base_query += f" AND {col_prefix}api_user_id = ?"
+            params.append(api_user_id)
+        else:
+            base_query += f" AND {col_prefix}api_user_id IS NULL"
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # Get total count
+        if tag_id:
+            count_query = f"SELECT COUNT(DISTINCT s.id) {base_query}"
+        else:
+            count_query = f"SELECT COUNT(*) {base_query}"
+        cursor.execute(count_query, params)
+        total = cursor.fetchone()[0]
+
+        # Get paginated data
+        if tag_id:
+            data_query = f"SELECT DISTINCT s.* {base_query} ORDER BY s.updated_at DESC LIMIT ? OFFSET ?"
+        else:
+            data_query = f"SELECT * {base_query} ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+        cursor.execute(data_query, params + [limit, offset])
+        sessions = rows_to_list(cursor.fetchall())
+
+        return sessions, total
+
+
 def create_session(
     session_id: str,
     profile_id: str,
@@ -1429,6 +1490,51 @@ def create_session(
             """INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, now, now)
+        )
+    return get_session(session_id)
+
+
+def create_session_with_stats(
+    session_id: str,
+    profile_id: str,
+    project_id: Optional[str] = None,
+    title: Optional[str] = None,
+    api_user_id: Optional[str] = None,
+    sdk_session_id: Optional[str] = None,
+    total_cost_usd: float = 0.0,
+    total_tokens_in: int = 0,
+    total_tokens_out: int = 0,
+    turn_count: int = 0
+) -> Dict[str, Any]:
+    """Create a new session with all stats in a single atomic transaction.
+
+    This is used for importing sessions where all metadata is known upfront.
+    Using a single transaction ensures no orphaned sessions if any part fails.
+
+    Args:
+        session_id: Unique session identifier
+        profile_id: Agent profile to use
+        project_id: Optional project to work in
+        title: Optional session title
+        api_user_id: Optional API user owner
+        sdk_session_id: Optional Claude SDK session ID for imported sessions
+        total_cost_usd: Total cost in USD
+        total_tokens_in: Total input tokens
+        total_tokens_out: Total output tokens
+        turn_count: Number of conversation turns
+    """
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO sessions (
+                id, profile_id, project_id, title, api_user_id,
+                sdk_session_id, total_cost_usd, total_tokens_in, total_tokens_out, turn_count,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, profile_id, project_id, title, api_user_id,
+             sdk_session_id, total_cost_usd, total_tokens_in, total_tokens_out, turn_count,
+             now, now)
         )
     return get_session(session_id)
 
@@ -1780,6 +1886,198 @@ def search_sessions(
                 result['match_snippet'] = snippet.strip()
 
         return results
+
+
+def search_sessions_paginated(
+    query: str,
+    project_id: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    api_user_id: Optional[str] = None,
+    admin_only: bool = False,
+    limit: int = 20,
+    offset: int = 0
+) -> tuple[List[Dict[str, Any]], int]:
+    """
+    Search sessions by title and message content with pagination.
+    Returns sessions with matching snippets and total count.
+
+    Returns:
+        Tuple of (results list, total count)
+    """
+    if not query or not query.strip():
+        return [], 0
+
+    search_term = f"%{query.strip()}%"
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # Build the base query - search both session titles and message content
+        base_cte = """
+        WITH title_matches AS (
+            SELECT
+                s.id,
+                s.project_id,
+                s.profile_id,
+                s.api_user_id,
+                s.title,
+                s.status,
+                s.is_favorite,
+                s.total_cost_usd,
+                s.total_tokens_in,
+                s.total_tokens_out,
+                s.cache_creation_tokens,
+                s.cache_read_tokens,
+                s.context_tokens,
+                s.turn_count,
+                s.parent_session_id,
+                s.fork_point_message_index,
+                s.created_at,
+                s.updated_at,
+                'title' as match_type,
+                s.title as match_snippet,
+                s.updated_at as match_time
+            FROM sessions s
+            WHERE s.title LIKE ? COLLATE NOCASE
+            AND s.status != 'archived'
+        ),
+        content_matches AS (
+            SELECT DISTINCT
+                s.id,
+                s.project_id,
+                s.profile_id,
+                s.api_user_id,
+                s.title,
+                s.status,
+                s.is_favorite,
+                s.total_cost_usd,
+                s.total_tokens_in,
+                s.total_tokens_out,
+                s.cache_creation_tokens,
+                s.cache_read_tokens,
+                s.context_tokens,
+                s.turn_count,
+                s.parent_session_id,
+                s.fork_point_message_index,
+                s.created_at,
+                s.updated_at,
+                'content' as match_type,
+                (
+                    SELECT SUBSTR(
+                        sm2.content,
+                        MAX(1, INSTR(LOWER(sm2.content), LOWER(?)) - 40),
+                        120
+                    )
+                    FROM session_messages sm2
+                    WHERE sm2.session_id = s.id
+                    AND sm2.content LIKE ? COLLATE NOCASE
+                    AND sm2.role IN ('user', 'assistant')
+                    ORDER BY sm2.created_at DESC
+                    LIMIT 1
+                ) as match_snippet,
+                (
+                    SELECT sm3.created_at
+                    FROM session_messages sm3
+                    WHERE sm3.session_id = s.id
+                    AND sm3.content LIKE ? COLLATE NOCASE
+                    AND sm3.role IN ('user', 'assistant')
+                    ORDER BY sm3.created_at DESC
+                    LIMIT 1
+                ) as match_time
+            FROM sessions s
+            INNER JOIN session_messages sm ON sm.session_id = s.id
+            WHERE sm.content LIKE ? COLLATE NOCASE
+            AND sm.role IN ('user', 'assistant')
+            AND s.status != 'archived'
+        ),
+        all_matches AS (
+            SELECT * FROM title_matches
+            UNION ALL
+            SELECT * FROM content_matches
+        ),
+        grouped_matches AS (
+            SELECT
+                id,
+                project_id,
+                profile_id,
+                api_user_id,
+                title,
+                status,
+                is_favorite,
+                total_cost_usd,
+                total_tokens_in,
+                total_tokens_out,
+                cache_creation_tokens,
+                cache_read_tokens,
+                context_tokens,
+                turn_count,
+                parent_session_id,
+                fork_point_message_index,
+                created_at,
+                updated_at,
+                match_type,
+                match_snippet,
+                match_time
+            FROM all_matches
+            WHERE 1=1
+        """
+
+        # Base params for the search terms (used multiple times in query)
+        base_params = [search_term, query.strip(), search_term, search_term, search_term]
+
+        # Build filter conditions
+        filter_sql = ""
+        filter_params: List[Any] = []
+
+        if project_id:
+            filter_sql += " AND project_id = ?"
+            filter_params.append(project_id)
+        if profile_id:
+            filter_sql += " AND profile_id = ?"
+            filter_params.append(profile_id)
+        if admin_only:
+            filter_sql += " AND api_user_id IS NULL"
+        elif api_user_id:
+            filter_sql += " AND api_user_id = ?"
+            filter_params.append(api_user_id)
+
+        # Count query - count unique session IDs
+        count_sql = base_cte + filter_sql + """
+            GROUP BY id
+        )
+        SELECT COUNT(*) FROM grouped_matches
+        """
+        cursor.execute(count_sql, base_params + filter_params)
+        total = cursor.fetchone()[0]
+
+        # Data query with pagination
+        data_sql = base_cte + filter_sql + """
+            GROUP BY id
+            ORDER BY
+                CASE WHEN match_type = 'title' THEN 0 ELSE 1 END,
+                updated_at DESC
+            LIMIT ? OFFSET ?
+        )
+        SELECT * FROM grouped_matches
+        ORDER BY
+            CASE WHEN match_type = 'title' THEN 0 ELSE 1 END,
+            updated_at DESC
+        """
+        cursor.execute(data_sql, base_params + filter_params + [limit, offset])
+        results = rows_to_list(cursor.fetchall())
+
+        # Clean up snippets - add ellipsis if truncated
+        for result in results:
+            if result.get('match_snippet') and result.get('match_type') == 'content':
+                snippet = result['match_snippet']
+                # Add ellipsis if we truncated
+                if len(snippet) >= 118:
+                    if not snippet.startswith(' '):
+                        snippet = '...' + snippet
+                    snippet = snippet + '...'
+                result['match_snippet'] = snippet.strip()
+
+        return results, total
 
 
 # ============================================================================
@@ -4588,440 +4886,389 @@ def delete_worktrees_for_repository(repository_id: str) -> int:
 
 
 # ============================================================================
-# Agent Run Operations (Background Autonomous Agents)
+# Notes Operations
 # ============================================================================
 
-def create_agent_run(
-    agent_run_id: str,
-    name: str,
-    prompt: str,
-    profile_id: Optional[str] = None,
-    project_id: Optional[str] = None,
-    auto_branch: bool = True,
-    auto_pr: bool = False,
-    auto_merge: bool = False,
-    auto_review: bool = False,
-    max_duration_minutes: int = 30,
-    base_branch: Optional[str] = None
-) -> Optional[Dict[str, Any]]:
-    """Create a new agent run record"""
+def get_note(note_id: str) -> Optional[Dict[str, Any]]:
+    """Get a note by ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM notes WHERE id = ?", (note_id,))
+        row = row_to_dict(cursor.fetchone())
+        if row:
+            row["tags"] = json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
+            row["linked_sessions"] = json.loads(row["linked_sessions"]) if isinstance(row["linked_sessions"], str) else row["linked_sessions"]
+        return row
+
+
+def get_notes_for_project(
+    project_id: str,
+    search: Optional[str] = None,
+    tag: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0
+) -> List[Dict[str, Any]]:
+    """
+    Get all notes for a project with optional search and tag filtering.
+    Notes are ordered by pinned status (pinned first) then by updated_at descending.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # Build query with filters
+        query = """
+            SELECT * FROM notes
+            WHERE project_id = ?
+        """
+        params: List[Any] = [project_id]
+
+        if search:
+            query += " AND (title LIKE ? OR content LIKE ?)"
+            search_term = f"%{search}%"
+            params.extend([search_term, search_term])
+
+        if tag:
+            # JSON array contains check using JSON functions
+            query += " AND json_array_length(json_extract(tags, '$')) > 0 AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)"
+            params.append(tag)
+
+        query += " ORDER BY is_pinned DESC, updated_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        cursor.execute(query, params)
+        rows = rows_to_list(cursor.fetchall())
+
+        # Parse JSON fields
+        for row in rows:
+            row["tags"] = json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
+            row["linked_sessions"] = json.loads(row["linked_sessions"]) if isinstance(row["linked_sessions"], str) else row["linked_sessions"]
+
+        return rows
+
+
+def create_note(
+    note_id: str,
+    project_id: str,
+    title: str,
+    content: str = "",
+    tags: Optional[List[str]] = None,
+    linked_sessions: Optional[List[str]] = None,
+    is_pinned: bool = False
+) -> Dict[str, Any]:
+    """Create a new note"""
     now = datetime.utcnow().isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO agent_runs
-               (id, name, prompt, status, progress, profile_id, project_id,
-                auto_branch, auto_pr, auto_merge, auto_review, max_duration_minutes, base_branch, started_at)
-               VALUES (?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (agent_run_id, name, prompt, profile_id, project_id,
-             auto_branch, auto_pr, auto_merge, auto_review, max_duration_minutes, base_branch, now)
+            """INSERT INTO notes (id, project_id, title, content, tags, linked_sessions, is_pinned, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                note_id,
+                project_id,
+                title,
+                content,
+                json.dumps(tags or []),
+                json.dumps(linked_sessions or []),
+                is_pinned,
+                now,
+                now
+            )
         )
-    return get_agent_run(agent_run_id)
+    return get_note(note_id)
 
 
-def get_agent_run(agent_run_id: str) -> Optional[Dict[str, Any]]:
-    """Get an agent run by ID"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM agent_runs WHERE id = ?", (agent_run_id,))
-        return row_to_dict(cursor.fetchone())
-
-
-def get_agent_runs(
-    status: Optional[str] = None,
-    project_id: Optional[str] = None,
-    limit: int = 50,
-    offset: int = 0
-) -> List[Dict[str, Any]]:
-    """Get agent runs with optional filtering"""
-    query = "SELECT * FROM agent_runs WHERE 1=1"
-    params = []
-
-    if status:
-        query += " AND status = ?"
-        params.append(status)
-    if project_id:
-        query += " AND project_id = ?"
-        params.append(project_id)
-
-    query += " ORDER BY started_at DESC LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(query, params)
-        return rows_to_list(cursor.fetchall())
-
-
-def get_agent_runs_count(
-    status: Optional[str] = None,
-    project_id: Optional[str] = None
-) -> int:
-    """Get count of agent runs with optional filtering"""
-    query = "SELECT COUNT(*) as count FROM agent_runs WHERE 1=1"
-    params = []
-
-    if status:
-        query += " AND status = ?"
-        params.append(status)
-    if project_id:
-        query += " AND project_id = ?"
-        params.append(project_id)
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(query, params)
-        row = cursor.fetchone()
-        return row["count"]
-
-
-def get_running_agent_runs() -> List[Dict[str, Any]]:
-    """Get all currently running or paused agent runs"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM agent_runs WHERE status IN ('running', 'paused') ORDER BY started_at DESC"
-        )
-        return rows_to_list(cursor.fetchall())
-
-
-def get_queued_agent_runs() -> List[Dict[str, Any]]:
-    """Get all queued agent runs"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM agent_runs WHERE status = 'queued' ORDER BY started_at ASC"
-        )
-        return rows_to_list(cursor.fetchall())
-
-
-def update_agent_run(
-    agent_run_id: str,
-    status: Optional[str] = None,
-    progress: Optional[float] = None,
-    worktree_id: Optional[str] = None,
-    branch: Optional[str] = None,
-    pr_url: Optional[str] = None,
-    sdk_session_id: Optional[str] = None,
-    completed_at: Optional[str] = None,
-    error: Optional[str] = None,
-    result_summary: Optional[str] = None
+def update_note(
+    note_id: str,
+    title: Optional[str] = None,
+    content: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    linked_sessions: Optional[List[str]] = None,
+    is_pinned: Optional[bool] = None
 ) -> Optional[Dict[str, Any]]:
-    """Update an agent run"""
-    existing = get_agent_run(agent_run_id)
+    """Update a note"""
+    existing = get_note(note_id)
     if not existing:
         return None
 
     updates = []
     values = []
 
-    if status is not None:
-        updates.append("status = ?")
-        values.append(status)
-    if progress is not None:
-        updates.append("progress = ?")
-        values.append(progress)
-    if worktree_id is not None:
-        updates.append("worktree_id = ?")
-        values.append(worktree_id)
-    if branch is not None:
-        updates.append("branch = ?")
-        values.append(branch)
-    if pr_url is not None:
-        updates.append("pr_url = ?")
-        values.append(pr_url)
-    if sdk_session_id is not None:
-        updates.append("sdk_session_id = ?")
-        values.append(sdk_session_id)
-    if completed_at is not None:
-        updates.append("completed_at = ?")
-        values.append(completed_at)
-    if error is not None:
-        updates.append("error = ?")
-        values.append(error)
-    if result_summary is not None:
-        updates.append("result_summary = ?")
-        values.append(result_summary)
+    if title is not None:
+        updates.append("title = ?")
+        values.append(title)
+    if content is not None:
+        updates.append("content = ?")
+        values.append(content)
+    if tags is not None:
+        updates.append("tags = ?")
+        values.append(json.dumps(tags))
+    if linked_sessions is not None:
+        updates.append("linked_sessions = ?")
+        values.append(json.dumps(linked_sessions))
+    if is_pinned is not None:
+        updates.append("is_pinned = ?")
+        values.append(is_pinned)
 
     if updates:
-        values.append(agent_run_id)
+        updates.append("updated_at = ?")
+        values.append(datetime.utcnow().isoformat())
+        values.append(note_id)
+
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE agent_runs SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE notes SET {', '.join(updates)} WHERE id = ?",
                 values
             )
 
-    return get_agent_run(agent_run_id)
+    return get_note(note_id)
 
 
-def delete_agent_run(agent_run_id: str) -> bool:
-    """Delete an agent run and its associated tasks/logs"""
+def delete_note(note_id: str) -> bool:
+    """Delete a note"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM agent_runs WHERE id = ?", (agent_run_id,))
+        cursor.execute("DELETE FROM notes WHERE id = ?", (note_id,))
         return cursor.rowcount > 0
 
 
-# ============================================================================
-# Agent Task Operations
-# ============================================================================
-
-def create_agent_task(
-    task_id: str,
-    agent_run_id: str,
-    name: str,
-    parent_task_id: Optional[str] = None,
-    status: str = "pending",
-    order_index: int = 0
-) -> Optional[Dict[str, Any]]:
-    """Create a new agent task"""
-    now = datetime.utcnow().isoformat()
+def get_note_tags_for_project(project_id: str) -> List[Dict[str, Any]]:
+    """
+    Get all unique tags used in notes for a project with their counts.
+    Returns list of {name: str, count: int}.
+    """
     with get_db() as conn:
         cursor = conn.cursor()
+        # Get all notes for this project
         cursor.execute(
-            """INSERT INTO agent_tasks
-               (id, agent_run_id, parent_task_id, name, status, order_index, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (task_id, agent_run_id, parent_task_id, name, status, order_index, now, now)
+            "SELECT tags FROM notes WHERE project_id = ?",
+            (project_id,)
         )
-    return get_agent_task(task_id)
+        rows = cursor.fetchall()
+
+        # Count tags
+        tag_counts: Dict[str, int] = {}
+        for row in rows:
+            tags = json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
+            for tag in tags:
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+
+        # Sort by count descending, then name
+        return sorted(
+            [{"name": name, "color": None, "count": count} for name, count in tag_counts.items()],
+            key=lambda x: (-x["count"], x["name"])
+        )
 
 
-def get_agent_task(task_id: str) -> Optional[Dict[str, Any]]:
-    """Get an agent task by ID"""
+def get_notes_autocomplete(
+    project_id: str,
+    search: Optional[str] = None,
+    limit: int = 20
+) -> List[Dict[str, Any]]:
+    """
+    Get notes for autocomplete in chat.
+    Returns simplified note info with preview.
+    """
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM agent_tasks WHERE id = ?", (task_id,))
+
+        query = """
+            SELECT id, title, content, tags FROM notes
+            WHERE project_id = ?
+        """
+        params: List[Any] = [project_id]
+
+        if search:
+            query += " AND (title LIKE ? OR content LIKE ?)"
+            search_term = f"%{search}%"
+            params.extend([search_term, search_term])
+
+        query += " ORDER BY is_pinned DESC, updated_at DESC LIMIT ?"
+        params.append(limit)
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+
+        result = []
+        for row in rows:
+            content = row["content"] or ""
+            preview = content[:100] + "..." if len(content) > 100 else content
+            tags = json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
+            result.append({
+                "id": row["id"],
+                "title": row["title"],
+                "preview": preview,
+                "tags": tags
+            })
+
+        return result
+
+
+def count_notes_for_project(project_id: str) -> int:
+    """Count total notes for a project"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) as count FROM notes WHERE project_id = ?", (project_id,))
+        row = cursor.fetchone()
+        return row["count"] if row else 0
+
+
+# ============================================================================
+# Project Hook Operations
+# ============================================================================
+
+def get_hook(hook_id: str) -> Optional[Dict[str, Any]]:
+    """Get a project hook by ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM project_hooks WHERE id = ?", (hook_id,))
         return row_to_dict(cursor.fetchone())
 
 
-def get_agent_tasks(agent_run_id: str) -> List[Dict[str, Any]]:
-    """Get all tasks for an agent run"""
+def get_hooks_for_project(project_id: str) -> List[Dict[str, Any]]:
+    """Get all hooks for a project"""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM agent_tasks WHERE agent_run_id = ? ORDER BY order_index, created_at",
-            (agent_run_id,)
+            "SELECT * FROM project_hooks WHERE project_id = ? ORDER BY created_at DESC",
+            (project_id,)
         )
         return rows_to_list(cursor.fetchall())
 
 
-def get_agent_tasks_tree(agent_run_id: str) -> List[Dict[str, Any]]:
-    """Get tasks as a hierarchical tree structure"""
-    tasks = get_agent_tasks(agent_run_id)
-
-    # Build parent -> children map
-    children_map: Dict[Optional[str], List[Dict[str, Any]]] = {}
-    for task in tasks:
-        parent_id = task.get("parent_task_id")
-        if parent_id not in children_map:
-            children_map[parent_id] = []
-        children_map[parent_id].append(task)
-
-    def build_tree(parent_id: Optional[str]) -> List[Dict[str, Any]]:
-        children = children_map.get(parent_id, [])
-        result = []
-        for child in children:
-            child_copy = dict(child)
-            child_copy["children"] = build_tree(child["id"])
-            result.append(child_copy)
-        return result
-
-    return build_tree(None)
-
-
-def update_agent_task(
-    task_id: str,
-    name: Optional[str] = None,
-    status: Optional[str] = None
-) -> Optional[Dict[str, Any]]:
-    """Update an agent task"""
-    existing = get_agent_task(task_id)
-    if not existing:
-        return None
-
-    updates = ["updated_at = ?"]
-    values = [datetime.utcnow().isoformat()]
-
-    if name is not None:
-        updates.append("name = ?")
-        values.append(name)
-    if status is not None:
-        updates.append("status = ?")
-        values.append(status)
-
-    values.append(task_id)
+def get_enabled_hooks_for_project(project_id: str) -> List[Dict[str, Any]]:
+    """Get all enabled hooks for a project"""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            f"UPDATE agent_tasks SET {', '.join(updates)} WHERE id = ?",
-            values
+            "SELECT * FROM project_hooks WHERE project_id = ? AND enabled = TRUE ORDER BY created_at DESC",
+            (project_id,)
         )
+        return rows_to_list(cursor.fetchall())
 
-    return get_agent_task(task_id)
 
-
-def delete_agent_task(task_id: str) -> bool:
-    """Delete an agent task"""
+def get_hooks_for_project_and_event(project_id: str, event: str) -> List[Dict[str, Any]]:
+    """Get all enabled hooks for a project that match a specific event"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM agent_tasks WHERE id = ?", (task_id,))
-        return cursor.rowcount > 0
+        cursor.execute(
+            "SELECT * FROM project_hooks WHERE project_id = ? AND event = ? AND enabled = TRUE ORDER BY created_at",
+            (project_id, event)
+        )
+        return rows_to_list(cursor.fetchall())
 
 
-# ============================================================================
-# Agent Log Operations
-# ============================================================================
-
-def add_agent_log(
-    agent_run_id: str,
-    message: str,
-    level: str = "info",
-    metadata: Optional[Dict[str, Any]] = None
+def create_hook(
+    hook_id: str,
+    project_id: str,
+    name: str,
+    event: str,
+    hook_type: str,
+    command: Optional[str] = None,
+    timeout: int = 30000,
+    url: Optional[str] = None,
+    secret: Optional[str] = None,
+    enabled: bool = True,
+    tool_matcher: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
-    """Add a log entry for an agent run"""
+    """Create a new project hook"""
     now = datetime.utcnow().isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO agent_logs (agent_run_id, timestamp, level, message, metadata)
-               VALUES (?, ?, ?, ?, ?)""",
-            (agent_run_id, now, level, message, json.dumps(metadata) if metadata else None)
+            """INSERT INTO project_hooks
+               (id, project_id, name, event, hook_type, command, timeout, url, secret, enabled, tool_matcher, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (hook_id, project_id, name, event, hook_type, command, timeout, url, secret, enabled, tool_matcher, now, now)
         )
-        return {
-            "id": cursor.lastrowid,
-            "agent_run_id": agent_run_id,
-            "timestamp": now,
-            "level": level,
-            "message": message,
-            "metadata": metadata
-        }
+    return get_hook(hook_id)
 
 
-def get_agent_logs(
-    agent_run_id: str,
-    level: Optional[str] = None,
-    limit: int = 100,
-    offset: int = 0
-) -> List[Dict[str, Any]]:
-    """Get logs for an agent run"""
-    query = "SELECT * FROM agent_logs WHERE agent_run_id = ?"
-    params = [agent_run_id]
+def update_hook(
+    hook_id: str,
+    name: Optional[str] = None,
+    event: Optional[str] = None,
+    hook_type: Optional[str] = None,
+    command: Optional[str] = None,
+    timeout: Optional[int] = None,
+    url: Optional[str] = None,
+    secret: Optional[str] = None,
+    enabled: Optional[bool] = None,
+    tool_matcher: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Update a project hook"""
+    existing = get_hook(hook_id)
+    if not existing:
+        return None
 
-    if level:
-        query += " AND level = ?"
-        params.append(level)
+    updates = []
+    values = []
 
-    query += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
+    if name is not None:
+        updates.append("name = ?")
+        values.append(name)
+    if event is not None:
+        updates.append("event = ?")
+        values.append(event)
+    if hook_type is not None:
+        updates.append("hook_type = ?")
+        values.append(hook_type)
+    if command is not None:
+        updates.append("command = ?")
+        values.append(command if command else None)
+    if timeout is not None:
+        updates.append("timeout = ?")
+        values.append(timeout)
+    if url is not None:
+        updates.append("url = ?")
+        values.append(url if url else None)
+    if secret is not None:
+        updates.append("secret = ?")
+        values.append(secret if secret else None)
+    if enabled is not None:
+        updates.append("enabled = ?")
+        values.append(enabled)
+    if tool_matcher is not None:
+        updates.append("tool_matcher = ?")
+        values.append(tool_matcher if tool_matcher else None)
 
+    if updates:
+        updates.append("updated_at = ?")
+        values.append(datetime.utcnow().isoformat())
+        values.append(hook_id)
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE project_hooks SET {', '.join(updates)} WHERE id = ?",
+                values
+            )
+
+    return get_hook(hook_id)
+
+
+def delete_hook(hook_id: str) -> bool:
+    """Delete a project hook"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute(query, params)
-        rows = rows_to_list(cursor.fetchall())
-        # Parse JSON metadata
-        for row in rows:
-            if row.get("metadata") and isinstance(row["metadata"], str):
-                try:
-                    row["metadata"] = json.loads(row["metadata"])
-                except json.JSONDecodeError:
-                    pass
-        return rows
+        cursor.execute("DELETE FROM project_hooks WHERE id = ?", (hook_id,))
+        return cursor.rowcount > 0
 
 
-def get_agent_logs_count(agent_run_id: str, level: Optional[str] = None) -> int:
-    """Get count of logs for an agent run"""
-    query = "SELECT COUNT(*) as count FROM agent_logs WHERE agent_run_id = ?"
-    params = [agent_run_id]
-
-    if level:
-        query += " AND level = ?"
-        params.append(level)
-
+def update_hook_triggered(hook_id: str, success: bool) -> None:
+    """Update the last_triggered_at timestamp and failure_count for a hook"""
+    now = datetime.utcnow().isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute(query, params)
-        row = cursor.fetchone()
-        return row["count"]
+        if success:
+            # Reset failure count on success
+            cursor.execute(
+                "UPDATE project_hooks SET last_triggered_at = ?, failure_count = 0 WHERE id = ?",
+                (now, hook_id)
+            )
+        else:
+            # Increment failure count
+            cursor.execute(
+                "UPDATE project_hooks SET last_triggered_at = ?, failure_count = failure_count + 1 WHERE id = ?",
+                (now, hook_id)
+            )
 
-
-def clear_agent_logs(agent_run_id: str) -> int:
-    """Clear all logs for an agent run. Returns count of deleted logs."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM agent_logs WHERE agent_run_id = ?", (agent_run_id,))
-        return cursor.rowcount
-
-
-def get_agent_run_stats(
-    days: int = 7,
-    project_id: Optional[str] = None
-) -> Dict[str, Any]:
-    """Get statistics about agent runs for the specified period"""
-    from datetime import timedelta
-
-    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
-
-    base_where = "WHERE started_at >= ?"
-    params = [cutoff]
-
-    if project_id:
-        base_where += " AND project_id = ?"
-        params.append(project_id)
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        # Total count
-        cursor.execute(f"SELECT COUNT(*) as count FROM agent_runs {base_where}", params)
-        total = cursor.fetchone()["count"]
-
-        # By status
-        cursor.execute(
-            f"""SELECT status, COUNT(*) as count
-                FROM agent_runs {base_where}
-                GROUP BY status""",
-            params
-        )
-        by_status = {row["status"]: row["count"] for row in cursor.fetchall()}
-
-        # Calculate success rate
-        completed = by_status.get("completed", 0)
-        failed = by_status.get("failed", 0)
-        finished = completed + failed
-        success_rate = (completed / finished * 100) if finished > 0 else 0
-
-        # Average duration (for completed runs)
-        cursor.execute(
-            f"""SELECT AVG(
-                    (julianday(completed_at) - julianday(started_at)) * 24 * 60
-                ) as avg_minutes
-                FROM agent_runs
-                {base_where} AND status = 'completed' AND completed_at IS NOT NULL""",
-            params
-        )
-        row = cursor.fetchone()
-        avg_duration_minutes = row["avg_minutes"] if row["avg_minutes"] else 0
-
-        # Runs by day
-        cursor.execute(
-            f"""SELECT date(started_at) as day, COUNT(*) as count
-                FROM agent_runs {base_where}
-                GROUP BY date(started_at)
-                ORDER BY day""",
-            params
-        )
-        by_day = {row["day"]: row["count"] for row in cursor.fetchall()}
-
-        return {
-            "total": total,
-            "by_status": by_status,
-            "success_rate": round(success_rate, 1),
-            "avg_duration_minutes": round(avg_duration_minutes, 1),
-            "by_day": by_day,
-            "running": by_status.get("running", 0),
-            "queued": by_status.get("queued", 0),
-            "completed": completed,
-            "failed": failed
-        }

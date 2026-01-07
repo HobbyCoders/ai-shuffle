@@ -6,8 +6,8 @@
  */
 
 import { writable, derived, get } from 'svelte/store';
-import type { Session, Profile, PermissionRequest as PermissionRequestType, UserQuestionRequest } from '$lib/api/client';
-import { api } from '$lib/api/client';
+import type { Session, Profile, PermissionRequest as PermissionRequestType, UserQuestionRequest, PaginatedSessions, SessionSearchResult, PaginatedSessionSearchResults } from '$lib/api/client';
+import { api, searchSessionsPaginated } from '$lib/api/client';
 import { isNotificationsEnabled, notifySessionComplete, getPermission, type SessionCompleteInfo } from '$lib/services/notifications';
 
 export interface ApiUser {
@@ -144,6 +144,19 @@ interface TabsState {
 	// Tag filter state
 	sessionsTagFilter: string | null; // null = all, 'tag_id' = filter by tag
 	adminSessionsTagFilter: string | null;
+	// Pagination state for sessions
+	sessionsTotal: number;
+	sessionsOffset: number;
+	sessionsHasMore: boolean;
+	sessionsLoadingMore: boolean;
+	// Search state
+	searchQuery: string;
+	searchResults: SessionSearchResult[];
+	searchTotal: number;
+	searchOffset: number;
+	searchHasMore: boolean;
+	searchLoading: boolean;
+	searchLoadingMore: boolean;
 }
 
 // WebSocket connections per tab
@@ -465,7 +478,20 @@ function createTabsStore() {
 		sessionsLoading: false,
 		// Initialize tag filter state
 		sessionsTagFilter: null,
-		adminSessionsTagFilter: null
+		adminSessionsTagFilter: null,
+		// Pagination state
+		sessionsTotal: 0,
+		sessionsOffset: 0,
+		sessionsHasMore: false,
+		sessionsLoadingMore: false,
+		// Search state
+		searchQuery: '',
+		searchResults: [],
+		searchTotal: 0,
+		searchOffset: 0,
+		searchHasMore: false,
+		searchLoading: false,
+		searchLoadingMore: false
 	});
 
 	/**
@@ -1221,6 +1247,41 @@ function createTabsStore() {
 				break;
 			}
 
+			case 'usage_update': {
+				// Usage update during streaming (agentic loops with multiple turns)
+				// Each new assistant turn has updated token usage
+				const usage = eventData.usage as Record<string, number> | undefined;
+				if (usage) {
+					const inputTokens = usage.input_tokens || 0;
+					const cacheCreationTokens = usage.cache_creation_input_tokens || 0;
+					const cacheReadTokens = usage.cache_read_input_tokens || 0;
+					const newContextUsed = inputTokens + cacheCreationTokens + cacheReadTokens;
+
+					console.log(`[Tab ${tabId}] Sync usage_update:`, {
+						inputTokens,
+						cacheCreationTokens,
+						cacheReadTokens,
+						contextUsed: newContextUsed
+					});
+
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(t => {
+							if (t.id !== tabId) return t;
+
+							return {
+								...t,
+								totalTokensIn: t.totalTokensIn + inputTokens,
+								totalCacheCreationTokens: cacheCreationTokens,
+								totalCacheReadTokens: cacheReadTokens,
+								contextUsed: newContextUsed
+							};
+						})
+					}));
+				}
+				break;
+			}
+
 			case 'stream_end': {
 				// Another device finished streaming
 				console.log(`[Tab ${tabId}] Another device finished streaming`);
@@ -1541,6 +1602,27 @@ function createTabsStore() {
 							continue;
 						}
 
+						// Handle subagent messages from streaming buffer
+						if (bufferType === 'subagent') {
+							const subagentMsg: ChatMessage = {
+								id: `buffer-subagent-${m.agent_id || Date.now()}-${Math.random()}`,
+								role: 'assistant' as const,
+								content: bufferContent,
+								type: 'subagent' as const,
+								toolId: m.tool_id as string | undefined,
+								agentId: m.agent_id as string | undefined,
+								agentType: m.agent_type as string | undefined,
+								agentDescription: m.agent_description as string | undefined,
+								agentPrompt: m.agent_prompt as string | undefined,
+								agentStatus: (m.agent_status as 'pending' | 'running' | 'completed' | 'error') || 'running',
+								agentChildren: (m.agent_children as SubagentChildMessage[]) || [],
+								streaming: (m.streaming as boolean) ?? (m.agent_status === 'running')
+							};
+							finalMessages.push(subagentMsg);
+							existingContentHashes.add(hash);
+							continue;
+						}
+
 						// Build the buffer message
 						const bufferMsg: ChatMessage = {
 							id: `buffer-${Date.now()}-${Math.random()}`,
@@ -1598,6 +1680,31 @@ function createTabsStore() {
 						tokenUpdates.contextUsed = session.context_tokens;
 					}
 					console.log(`[Tab ${tabId}] Token counts from session:`, tokenUpdates);
+				}
+
+				// For late-joining devices during streaming, also update context from streamingUsage
+				// This provides real-time context usage even when joining mid-stream
+				const streamingUsage = data.streamingUsage as Record<string, number> | undefined;
+				if (isStreaming && streamingUsage) {
+					const inputTokens = streamingUsage.input_tokens || 0;
+					const cacheCreationTokens = streamingUsage.cache_creation_input_tokens || 0;
+					const cacheReadTokens = streamingUsage.cache_read_input_tokens || 0;
+					const streamContextUsed = inputTokens + cacheCreationTokens + cacheReadTokens;
+
+					console.log(`[Tab ${tabId}] Streaming usage for late-joiner:`, {
+						inputTokens,
+						cacheCreationTokens,
+						cacheReadTokens,
+						streamContextUsed
+					});
+
+					// Only update if streamingUsage provides more recent data than session
+					// (which it should during active streaming)
+					if (streamContextUsed > 0) {
+						tokenUpdates.contextUsed = streamContextUsed;
+						tokenUpdates.totalCacheCreationTokens = cacheCreationTokens;
+						tokenUpdates.totalCacheReadTokens = cacheReadTokens;
+					}
 				}
 
 				updateTab(tabId, {
@@ -2660,13 +2767,26 @@ function createTabsStore() {
 
 			case 'user_question': {
 				// User question request from backend (AskUserQuestion tool) - add to queue
+				// Ensure questions have the expected structure with options array
+				const rawQuestions = data.questions as Array<Record<string, unknown>>;
+				const normalizedQuestions = rawQuestions.map((q, idx) => ({
+					question: q.question as string || '',
+					header: q.header as string || `Question ${idx + 1}`,
+					options: Array.isArray(q.options) ? q.options.map(opt => ({
+						label: typeof opt === 'object' && opt !== null ? (opt as Record<string, unknown>).label as string || '' : String(opt),
+						description: typeof opt === 'object' && opt !== null ? (opt as Record<string, unknown>).description as string || '' : ''
+					})) : [],
+					multiSelect: Boolean(q.multiSelect)
+				}));
+
 				const request: UserQuestionRequest = {
 					request_id: data.request_id as string,
 					tool_use_id: data.tool_use_id as string,
-					questions: data.questions as UserQuestionRequest['questions']
+					questions: normalizedQuestions
 				};
 
 				console.log('[WS] User question request:', request.request_id, request.questions.length, 'questions');
+				console.log('[WS] User question data (full):', JSON.stringify(request.questions, null, 2));
 
 				update(s => ({
 					...s,
@@ -2719,8 +2839,12 @@ function createTabsStore() {
 		}
 	}
 
+	// Page size for sessions pagination
+	const SESSIONS_PAGE_SIZE = 50;
+	const SEARCH_PAGE_SIZE = 20;
+
 	/**
-	 * Load sessions list (user's own sessions)
+	 * Load sessions list (user's own sessions) with pagination
 	 * For admins: loads sessions where api_user_id IS NULL (their own chats)
 	 * For API users: the backend automatically filters to their sessions
 	 */
@@ -2728,12 +2852,20 @@ function createTabsStore() {
 		update(s => ({ ...s, sessionsLoading: true }));
 		try {
 			// Load user's own sessions (admin_only=true for admins gets sessions without api_user_id)
-			let url = '/sessions?limit=30&admin_only=true';
+			let url = `/sessions/paginated?limit=${SESSIONS_PAGE_SIZE}&offset=0&admin_only=true`;
 			if (tagId) {
 				url += `&tag_id=${encodeURIComponent(tagId)}`;
 			}
-			const sessions = await api.get<Session[]>(url);
-			update(s => ({ ...s, sessions, sessionsLoading: false, sessionsTagFilter: tagId ?? null }));
+			const result = await api.get<PaginatedSessions>(url);
+			update(s => ({
+				...s,
+				sessions: result.items,
+				sessionsTotal: result.total,
+				sessionsOffset: 0,
+				sessionsHasMore: result.has_more,
+				sessionsLoading: false,
+				sessionsTagFilter: tagId ?? null
+			}));
 		} catch (e) {
 			console.error('Failed to load sessions:', e);
 			update(s => ({ ...s, sessionsLoading: false }));
@@ -2741,11 +2873,122 @@ function createTabsStore() {
 	}
 
 	/**
+	 * Load more sessions (infinite scroll)
+	 */
+	async function loadMoreSessionsInternal() {
+		const state = get({ subscribe });
+		if (state.sessionsLoadingMore || !state.sessionsHasMore) return;
+
+		update(s => ({ ...s, sessionsLoadingMore: true }));
+		try {
+			const newOffset = state.sessionsOffset + SESSIONS_PAGE_SIZE;
+			let url = `/sessions/paginated?limit=${SESSIONS_PAGE_SIZE}&offset=${newOffset}&admin_only=true`;
+			if (state.sessionsTagFilter) {
+				url += `&tag_id=${encodeURIComponent(state.sessionsTagFilter)}`;
+			}
+			const result = await api.get<PaginatedSessions>(url);
+			update(s => ({
+				...s,
+				sessions: [...s.sessions, ...result.items],
+				sessionsOffset: newOffset,
+				sessionsHasMore: result.has_more,
+				sessionsLoadingMore: false
+			}));
+		} catch (e) {
+			console.error('Failed to load more sessions:', e);
+			update(s => ({ ...s, sessionsLoadingMore: false }));
+		}
+	}
+
+	/**
+	 * Search sessions with pagination
+	 */
+	async function searchSessionsInternal(query: string) {
+		if (!query.trim()) {
+			// Clear search results when query is empty
+			update(s => ({
+				...s,
+				searchQuery: '',
+				searchResults: [],
+				searchTotal: 0,
+				searchOffset: 0,
+				searchHasMore: false,
+				searchLoading: false
+			}));
+			return;
+		}
+
+		update(s => ({ ...s, searchLoading: true, searchQuery: query }));
+		try {
+			const result = await searchSessionsPaginated(query, {
+				adminOnly: true,
+				limit: SEARCH_PAGE_SIZE,
+				offset: 0
+			});
+			update(s => ({
+				...s,
+				searchResults: result.items,
+				searchTotal: result.total,
+				searchOffset: 0,
+				searchHasMore: result.has_more,
+				searchLoading: false
+			}));
+		} catch (e) {
+			console.error('Failed to search sessions:', e);
+			update(s => ({ ...s, searchLoading: false }));
+		}
+	}
+
+	/**
+	 * Load more search results (infinite scroll)
+	 */
+	async function loadMoreSearchResultsInternal() {
+		const state = get({ subscribe });
+		if (state.searchLoadingMore || !state.searchHasMore || !state.searchQuery) return;
+
+		update(s => ({ ...s, searchLoadingMore: true }));
+		try {
+			const newOffset = state.searchOffset + SEARCH_PAGE_SIZE;
+			const result = await searchSessionsPaginated(state.searchQuery, {
+				adminOnly: true,
+				limit: SEARCH_PAGE_SIZE,
+				offset: newOffset
+			});
+			update(s => ({
+				...s,
+				searchResults: [...s.searchResults, ...result.items],
+				searchOffset: newOffset,
+				searchHasMore: result.has_more,
+				searchLoadingMore: false
+			}));
+		} catch (e) {
+			console.error('Failed to load more search results:', e);
+			update(s => ({ ...s, searchLoadingMore: false }));
+		}
+	}
+
+	/**
+	 * Clear search state
+	 */
+	function clearSearchInternal() {
+		update(s => ({
+			...s,
+			searchQuery: '',
+			searchResults: [],
+			searchTotal: 0,
+			searchOffset: 0,
+			searchHasMore: false,
+			searchLoading: false,
+			searchLoadingMore: false
+		}));
+	}
+
+	/**
 	 * Load admin sessions (all API user sessions for admin view)
 	 */
 	async function loadAdminSessionsInternal(apiUserId?: string | null, tagId?: string | null) {
 		try {
-			let url = '/sessions?limit=30';
+			let url = `/sessions/paginated?limit=${SESSIONS_PAGE_SIZE}&offset=0`;
 			if (apiUserId) {
 				// Filter by specific API user
 				url += `&api_user_id=${encodeURIComponent(apiUserId)}`;
@@ -2756,8 +2999,13 @@ function createTabsStore() {
 			if (tagId) {
 				url += `&tag_id=${encodeURIComponent(tagId)}`;
 			}
-			const adminSessions = await api.get<Session[]>(url);
-			update(s => ({ ...s, adminSessions, adminSessionsFilter: apiUserId ?? null, adminSessionsTagFilter: tagId ?? null }));
+			const result = await api.get<PaginatedSessions>(url);
+			update(s => ({
+				...s,
+				adminSessions: result.items,
+				adminSessionsFilter: apiUserId ?? null,
+				adminSessionsTagFilter: tagId ?? null
+			}));
 		} catch (e) {
 			console.error('Failed to load admin sessions:', e);
 		}
@@ -3657,6 +3905,10 @@ function createTabsStore() {
 			await loadSessionsInternal(tagId);
 		},
 
+		async loadMoreSessions() {
+			await loadMoreSessionsInternal();
+		},
+
 		async loadAdminSessions(apiUserId?: string | null, tagId?: string | null) {
 			await loadAdminSessionsInternal(apiUserId, tagId);
 		},
@@ -3678,6 +3930,19 @@ function createTabsStore() {
 		setAdminSessionsTagFilter(tagId: string | null, apiUserId?: string | null) {
 			update(s => ({ ...s, adminSessionsTagFilter: tagId }));
 			loadAdminSessionsInternal(apiUserId, tagId);
+		},
+
+		// Search functions
+		async searchSessions(query: string) {
+			await searchSessionsInternal(query);
+		},
+
+		async loadMoreSearchResults() {
+			await loadMoreSearchResultsInternal();
+		},
+
+		clearSearch() {
+			clearSearchInternal();
 		},
 
 		// Profile/Project CRUD operations

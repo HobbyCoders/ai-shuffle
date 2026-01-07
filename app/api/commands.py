@@ -329,6 +329,7 @@ class CheckpointV2(BaseModel):
     index: int
     message_preview: str
     full_message: str
+    role: str = "user"  # "user" or "assistant"
     timestamp: Optional[str] = None
 
 
@@ -346,6 +347,7 @@ class RewindRequestV2(BaseModel):
     target_uuid: str  # UUID of the message to rewind to
     restore_chat: bool = True  # Truncate JSONL (rewind conversation)
     include_response: bool = True  # Keep Claude's response to target message
+    target_role: str = "user"  # Role of target message ("user" or "assistant")
 
 
 class RewindResponseV2(BaseModel):
@@ -415,6 +417,7 @@ async def get_rewind_checkpoints(session_id: str):
             index=cp.index,
             message_preview=cp.message_preview,
             full_message=cp.full_message,
+            role=cp.role,
             timestamp=cp.timestamp,
         )
         for cp in checkpoints
@@ -474,7 +477,8 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
             sdk_session_id=sdk_session_id,
             target_uuid=request.target_uuid,
             working_dir=working_dir,
-            include_response=request.include_response
+            include_response=request.include_response,
+            target_role=request.target_role
         )
     else:
         # If not restoring chat, nothing to do

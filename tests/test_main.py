@@ -377,8 +377,6 @@ class TestLifespan:
              patch("app.main.load_workspace_from_database") as mock_load_workspace, \
              patch("app.main.settings") as mock_settings, \
              patch("app.main.auth_service") as mock_auth, \
-             patch("app.main.start_agent_engine", new_callable=AsyncMock) as mock_start_engine, \
-             patch("app.main.stop_agent_engine", new_callable=AsyncMock) as mock_stop_engine, \
              patch("app.main.periodic_cleanup", new_callable=AsyncMock):
 
             mock_settings.version = "4.0.0"
@@ -396,9 +394,6 @@ class TestLifespan:
                 mock_init_db.assert_called_once()
                 mock_migrations.assert_called_once()
 
-            # Verify shutdown was called
-            mock_stop_engine.assert_called_once()
-
     @pytest.mark.asyncio
     async def test_lifespan_clears_sessions_when_no_env_password(self):
         """Lifespan should clear sessions when ADMIN_PASSWORD not set."""
@@ -414,8 +409,6 @@ class TestLifespan:
              patch("app.main.load_workspace_from_database"), \
              patch("app.main.settings") as mock_settings, \
              patch("app.main.auth_service") as mock_auth, \
-             patch("app.main.start_agent_engine", new_callable=AsyncMock), \
-             patch("app.main.stop_agent_engine", new_callable=AsyncMock), \
              patch("app.main.periodic_cleanup", new_callable=AsyncMock):
 
             mock_settings.version = "4.0.0"
@@ -446,8 +439,6 @@ class TestLifespan:
              patch("app.main.load_workspace_from_database"), \
              patch("app.main.settings") as mock_settings, \
              patch("app.main.auth_service") as mock_auth, \
-             patch("app.main.start_agent_engine", new_callable=AsyncMock), \
-             patch("app.main.stop_agent_engine", new_callable=AsyncMock), \
              patch("app.main.periodic_cleanup", new_callable=AsyncMock):
 
             mock_settings.version = "4.0.0"
@@ -546,7 +537,7 @@ class TestRouterRegistration:
             permission_rules, import_export, generated_images,
             generated_videos, shared_files, tags, analytics, search,
             templates, webhooks, security, knowledge, rate_limits,
-            github, git, canvas, agents, studio, plugins, user_self_service, meshy
+            github, git, studio, plugins, user_self_service, meshy
         )
         # All imports successful
         assert auth.router is not None
@@ -968,11 +959,6 @@ class TestRouterRegistrationAdditional:
         """Commands router should be registered."""
         from app.api import commands
         assert commands.router is not None
-
-    def test_agents_router_registered(self):
-        """Agents router should be registered."""
-        from app.api import agents
-        assert agents.router is not None
 
     def test_settings_router_registered(self):
         """Settings router should be registered."""

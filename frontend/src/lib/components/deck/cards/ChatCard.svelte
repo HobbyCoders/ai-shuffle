@@ -123,8 +123,8 @@
 
 				<!-- Permission Queue -->
 				{#if tab.pendingPermissions && tab.pendingPermissions.length > 0}
-					<div class="border-t border-warning/30 bg-warning/5 p-3">
-						<div class="max-w-full">
+					<div class="max-w-5xl mx-auto px-4 sm:px-8 py-3">
+						<div class="permission-panel rounded-xl border border-warning/30 bg-warning/5 p-3">
 							<PermissionQueue
 								requests={tab.pendingPermissions}
 								on:respond={handlePermissionResponse}
@@ -135,15 +135,13 @@
 
 				<!-- User Question Queue -->
 				{#if tab.pendingQuestions && tab.pendingQuestions.length > 0}
-					<div class="border-t border-info/30 bg-info/5 p-3">
-						<div class="max-w-full">
-							{#each tab.pendingQuestions as question (question.request_id)}
-								<UserQuestion
-									data={question}
-									on:respond={handleQuestionResponse}
-								/>
-							{/each}
-						</div>
+					<div class="max-w-5xl mx-auto px-4 sm:px-8 py-3 space-y-3">
+						{#each tab.pendingQuestions as question (question.request_id)}
+							<UserQuestion
+								data={question}
+								on:respond={handleQuestionResponse}
+							/>
+						{/each}
 					</div>
 				{/if}
 
@@ -188,8 +186,8 @@
 
 					<!-- Permission Queue -->
 					{#if tab.pendingPermissions && tab.pendingPermissions.length > 0}
-						<div class="border-t border-warning/30 bg-warning/5 p-3">
-							<div class="max-w-full">
+						<div class="max-w-5xl mx-auto px-4 sm:px-8 py-3">
+							<div class="permission-panel rounded-xl border border-warning/30 bg-warning/5 p-3">
 								<PermissionQueue
 									requests={tab.pendingPermissions}
 									on:respond={handlePermissionResponse}
@@ -200,15 +198,13 @@
 
 					<!-- User Question Queue -->
 					{#if tab.pendingQuestions && tab.pendingQuestions.length > 0}
-						<div class="border-t border-info/30 bg-info/5 p-3">
-							<div class="max-w-full">
-								{#each tab.pendingQuestions as question (question.request_id)}
-									<UserQuestion
-										data={question}
-										on:respond={handleQuestionResponse}
-									/>
-								{/each}
-							</div>
+						<div class="max-w-5xl mx-auto px-4 sm:px-8 py-3 space-y-3">
+							{#each tab.pendingQuestions as question (question.request_id)}
+								<UserQuestion
+									data={question}
+									on:respond={handleQuestionResponse}
+								/>
+							{/each}
 						</div>
 					{/if}
 
