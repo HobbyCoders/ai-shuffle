@@ -16,13 +16,13 @@ import re
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Callable, Set, Coroutine
+from typing import Optional, Dict, Any, List, Callable, Coroutine
 from dataclasses import dataclass, field
 from enum import Enum
 
-from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient, AgentDefinition
+from claude_agent_sdk import query, ClaudeSDKClient
 from claude_agent_sdk import (
-    AssistantMessage, UserMessage, TextBlock, ToolUseBlock, ToolResultBlock,
+    AssistantMessage, TextBlock, ToolUseBlock, ToolResultBlock,
     ResultMessage, SystemMessage
 )
 
@@ -35,9 +35,7 @@ from app.core.query_engine import (
     build_options_from_profile,
     write_agents_to_filesystem,
     cleanup_agents_directory,
-    truncate_large_payload,
-    SECURITY_INSTRUCTIONS,
-    DEFAULT_SDK_BUFFER_SIZE
+    truncate_large_payload
 )
 from app.core.platform import detect_deployment_mode, DeploymentMode
 
@@ -1201,7 +1199,6 @@ After resolving, I will attempt to push your changes again.
 
     async def _trigger_auto_review(self, agent_run_id: str, agent_run: Dict[str, Any]):
         """Trigger an automatic code review for the PR"""
-        import subprocess
 
         pr_url = agent_run.get("pr_url")
         if not pr_url:

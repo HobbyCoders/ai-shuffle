@@ -365,7 +365,7 @@ class TestJSONLRewindServiceGetCheckpoints:
             assert result == []
 
     def test_get_checkpoints_basic(self):
-        """Should extract both user and assistant message checkpoints."""
+        """Should extract user message checkpoints."""
         with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
             # User message (should be checkpoint)
             f.write(json.dumps({
@@ -373,7 +373,7 @@ class TestJSONLRewindServiceGetCheckpoints:
                 "type": "user",
                 "message": {"role": "user", "content": "First message"}
             }) + '\n')
-            # Assistant message (now also a checkpoint)
+            # Assistant message (not a checkpoint)
             f.write(json.dumps({
                 "uuid": "asst-1",
                 "type": "assistant",
@@ -392,17 +392,12 @@ class TestJSONLRewindServiceGetCheckpoints:
             with patch.object(service, '_get_jsonl_path', return_value=Path(f.name)):
                 checkpoints = service.get_checkpoints("test-session")
 
-                assert len(checkpoints) == 3  # Now includes assistant message
+                assert len(checkpoints) == 2
                 assert checkpoints[0].uuid == "user-1"
                 assert checkpoints[0].index == 0
                 assert checkpoints[0].full_message == "First message"
-                assert checkpoints[0].role == "user"
-                assert checkpoints[1].uuid == "asst-1"
+                assert checkpoints[1].uuid == "user-2"
                 assert checkpoints[1].index == 1
-                assert checkpoints[1].full_message == "Response"
-                assert checkpoints[1].role == "assistant"
-                assert checkpoints[2].uuid == "user-2"
-                assert checkpoints[2].role == "user"
 
         os.unlink(f.name)
 
@@ -944,13 +939,8 @@ class TestJSONLRewindServiceEdgeCases:
             with patch.object(service, '_get_jsonl_path', return_value=Path(f.name)):
                 checkpoints = service.get_checkpoints("session-id")
 
-                # Should have 1000 checkpoints (both user and assistant messages)
-                assert len(checkpoints) == 1000
-                # Verify first half are user messages, second half pattern alternates
-                user_checkpoints = [cp for cp in checkpoints if cp.role == "user"]
-                assistant_checkpoints = [cp for cp in checkpoints if cp.role == "assistant"]
-                assert len(user_checkpoints) == 500
-                assert len(assistant_checkpoints) == 500
+                # Should have 500 user message checkpoints
+                assert len(checkpoints) == 500
 
         os.unlink(f.name)
 

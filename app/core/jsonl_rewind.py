@@ -356,7 +356,7 @@ class JSONLRewindService:
                     messages_removed=messages_removed
                 )
 
-            except Exception as e:
+            except Exception:
                 # Clean up temp file on error
                 if os.path.exists(temp_path):
                     os.unlink(temp_path)

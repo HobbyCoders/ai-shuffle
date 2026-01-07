@@ -1,303 +1,183 @@
 # AI Shuffle
-A full-featured web interface and API server for Claude Code, providing a Claude.ai-like chat experience with multi-user support, API access, and advanced AI agent management.
 
-![Version](https://img.shields.io/badge/version-4.0.0-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
+> Your AI Workspace Awaits
 
-## ⚠️ Experimental Software Notice
+A sophisticated Claude Code web interface and workspace application that provides a rich, desktop-like experience for interacting with Claude AI.
 
-**This application is highly experimental and under active development.**
-
-- **Expect Bugs**: This software is in early development and will have bugs. Please report issues, but understand they may not be fixed immediately.
-- **Solo Developer**: This is a personal project maintained by a single developer in my spare time. There is no team or organization behind it.
-- **Use at Your Own Risk**: This software is provided as-is for educational and experimental purposes.
-
----
-
-## Screenshots
-
-<p align="center">
-  <img src="docs/images/chat-desktop.png" alt="Chat Interface - Desktop" width="800"/>
-</p>
-<p align="center"><em>Main chat interface with tool use visualization and todo tracking</em></p>
-
-<p align="center">
-  <img src="docs/images/sessions-sidebar.png" alt="Sessions Sidebar" width="800"/>
-</p>
-<p align="center"><em>Sessions sidebar with chat history and cost tracking</em></p>
-
-<p align="center">
-  <img src="docs/images/chat-mobile.png" alt="Chat Interface - Mobile" width="400"/>
-</p>
-<p align="center"><em>Responsive mobile view</em></p>
-
-<p align="center">
-  <img src="docs/images/profile-modal.png" alt="Profile Configuration" width="400"/>
-</p>
-<p align="center"><em>Profile configuration with model selection and tool settings</em></p>
+![AI Shuffle Demo](docs/images/ai-shuffle-demo.gif)
 
 ## Overview
 
-AI Shuffle lets you self-host a Claude Code web interface and access Claude's capabilities without the cost of API keys. It acts as a bridge between Claude Code CLI and your applications, exposing Claude through:
-
-- **Web UI** - Modern chat interface similar to Claude.ai
-- **REST API** - OpenAI-compatible endpoints for programmatic access
-- **WebSocket** - Real-time streaming and multi-device sync
-- **Agent Profiles** - Customizable tool sets and system prompts
-
-No API keys required (Can be used though *requires login from cli inside container*) - uses Claude Code's OAuth authentication.
+AI Shuffle is a full-stack application that bridges Claude's capabilities with a desktop-style workspace interface. It features a unique card-based UI system called "The Deck" that allows you to organize multiple tools and conversations in a flexible, intuitive layout.
 
 ## Features
 
-### Chat Interface
-- Real-time SSE streaming responses
-- Tool use visualization (file operations, code edits, bash commands)
-- Markdown rendering with syntax highlighting
-- Multi-tab conversations
-- Dark theme optimized for coding
-- File upload/attachments
-- Spotlight search (Cmd/Ctrl+K)
+### Chat & Conversation
+- **Multi-tab Chat System** - Independent chat sessions with WebSocket connections
+- **Profiles & Projects** - Context-aware configurations for different AI workflows
+- **Execution Modes** - Local execution and worktree-based execution for safer AI operations
+- **Token Tracking** - Real-time token counting and cost analysis
+- **Session Management** - Save, fork, export, tag, and search chat sessions
 
-### Agent System
-- **Profiles** - Configure tool access, models, and system prompts
-- **Subagents** - Delegate tasks to specialized Claude instances
-- **Slash Commands** - Built-in (`/compact`, `/context`) and custom commands
-- **Checkpoints** - Save and rewind conversation state
-- **Model Selection** - Choose between Sonnet, Opus, and Haiku
+### The Deck (Card-based Workspace)
+A novel window-management system with draggable, resizable cards:
+- **Card Types**: Chat, Terminal, Settings, Profile, Project, Subagent, Image Studio, Model Studio, Audio Studio, File Browser, Plugins
+- **Layout Modes**: Freeflow, Side-by-side, Tile, Stack, Focus
+- **Mobile Support**: Swipe-based navigation on small screens
 
-### Multi-Device Sync
-- Real-time message synchronization across devices
-- Cross-device session control
-- WebSocket-based event broadcasting
+### AI Agents & Automation
+- **Subagents** - Task-oriented AI agents that can be spawned for specific work
+- **Agent Engine** - Built on Claude Agent SDK for autonomous tool use
+- **Tool Integration** - System commands, file operations, Git commands, and more
+- **Plugin System** - Extensible architecture for custom tools and integrations
 
-### Session Management
-- Persistent conversation history
-- Resume, fork, or delete conversations
-- Project and profile-based filtering
+### Workspace & Project Management
+- **File Browser** - Navigate and edit project files
+- **Git Integration** - Repository info, branches, worktrees, diffs
+- **GitHub Integration** - Pull requests, issues, authentication
+- **Project Context** - Automatic workspace/repository binding
 
-### API Access
-- REST API with OpenAPI documentation
-- API key authentication (`aih_*` format)
-- Per-user project/profile restrictions
-- One-shot and streaming endpoints
+### Creative & Media Tools
+- **Image Generation & Editing** - Image studio with multiple providers
+- **Video Generation** - Text-to-video capabilities
+- **3D Model Generation** - Meshy integration for 3D model creation
+- **Audio Processing** - Text-to-speech, speech-to-text transcription
+
+### Analytics & Monitoring
+- **Usage Analytics** - Token counts, cost breakdown by profile/date
+- **Session Analytics** - Session duration, token usage trends
+- **Performance Monitoring** - WebSocket connection status, API health
+
+## Tech Stack
+
+### Frontend
+- **Svelte 5** + SvelteKit
+- **Tailwind CSS** for styling
+- **Vite** for fast builds
+- **xterm.js** for terminal emulation
+- **TypeScript** for type safety
+
+### Backend
+- **FastAPI** (Python async web framework)
+- **WebSockets** for real-time communication
+- **SQLite** database
+- **Claude Agent SDK** for AI integration
 
 ## Quick Start
 
-### Docker Compose (Recommended)
+### Prerequisites
+- Python 3.11+
+- Node.js 20+
+- Claude API access (OAuth or API key)
 
-# Pull and run
-docker pull ghcr.io/quickkill0/ai-shuffle:latest
-docker run -d -p 8000:8000 -v ai-shuffle-data:/data ghcr.io/quickkill0/ai-shuffle:latest
+### Local Setup
 
-### First-Time Setup
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/ai-shuffle.git
+cd ai-shuffle
+```
 
-1. Open http://localhost:8000
-2. Create your admin account
-3. Authenticate Claude in app on settings page.
-4. Start chatting
+2. Install backend dependencies:
+```bash
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+3. Install frontend dependencies:
+```bash
+cd frontend
+npm install
+```
+
+4. Configure environment:
+```bash
+cp .env.example .env
+# Edit .env with your settings
+```
+
+5. Run the application:
+```bash
+# Terminal 1: Backend
+python -m uvicorn app.main:app --reload --port 8000
+
+# Terminal 2: Frontend (development)
+cd frontend
+npm run dev
+```
+
+### Docker Setup
+
+```bash
+docker-compose up -d
+```
+
+The application will be available at `http://localhost:8000`
 
 ## Configuration
 
-### Environment Variables
+Key environment variables:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `HOST` | Server bind address | `0.0.0.0` |
-| `PORT` | Server port | `8000` |
-| `WORKSPACE_DIR` | Project workspace path | `./workspace` |
-| `PUID` / `PGID` | Process user/group ID | `1000` / `1000` |
-| `SESSION_EXPIRE_DAYS` | Admin session duration | `30` |
-| `COMMAND_TIMEOUT` | Claude command timeout (seconds) | `300` |
-| `AUTO_UPDATE` | Update Claude/gh CLI on startup | `true` |
+| `ANTHROPIC_API_KEY` | Claude API key (optional with OAuth) | - |
+| `DATABASE_URL` | SQLite database path | `sqlite:///./data/ai_shuffle.db` |
+| `SECRET_KEY` | Session encryption key | Generated |
+| `ENABLE_2FA` | Enable two-factor authentication | `false` |
 
-### Docker Volumes
-
-| Volume | Container Path | Purpose |
-|--------|----------------|---------|
-| `claude-auth` | `/home/appuser/.claude` | Claude OAuth credentials |
-| `gh-auth` | `/home/appuser/.config/gh` | GitHub CLI authentication |
-| `ai-shuffle-data` | `/data` | SQLite database |
-| `workspace` | `/workspace` | Project files |
+See `.env.example` for all available options.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Web Browser (Svelte SPA)                  │
-└──────────────────────────┬──────────────────────────────────┘
-                           │ HTTP / SSE / WebSocket
-┌──────────────────────────▼──────────────────────────────────┐
-│                      FastAPI Server                          │
-│  ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐   │
-│  │   Auth    │ │   Query   │ │  Session  │ │   Sync    │   │
-│  │  Service  │ │  Engine   │ │  Manager  │ │  Engine   │   │
-│  └───────────┘ └───────────┘ └───────────┘ └───────────┘   │
-│                        │                                     │
-│  ┌───────────┐ ┌───────▼───┐ ┌───────────┐ ┌───────────┐   │
-│  │ Profiles  │ │  Claude   │ │  SQLite   │ │ Subagents │   │
-│  │  Service  │ │ Agent SDK │ │    DB     │ │  Manager  │   │
-│  └───────────┘ └───────────┘ └───────────┘ └───────────┘   │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│               Claude Code CLI (OAuth authenticated)          │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│                      Anthropic API                           │
-└─────────────────────────────────────────────────────────────┘
-```
-
-## API Reference
-
-Full documentation available at `/docs` when running.
-
-### Authentication
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/v1/auth/setup` | Create admin account (first-run) |
-| POST | `/api/v1/auth/login` | Login |
-| POST | `/api/v1/auth/logout` | Logout |
-| GET | `/api/v1/auth/status` | Check auth status |
-
-### Query
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/v1/query` | One-shot query |
-| POST | `/api/v1/query/stream` | Streaming query (SSE) |
-| POST | `/api/v1/conversation` | Multi-turn conversation |
-| POST | `/api/v1/conversation/stream` | Streaming conversation |
-
-### Sessions
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/v1/sessions` | List sessions |
-| GET | `/api/v1/sessions/:id` | Get session with history |
-| DELETE | `/api/v1/sessions/:id` | Delete session |
-
-### Profiles
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/v1/profiles` | List all profiles |
-| POST | `/api/v1/profiles` | Create profile |
-| PUT | `/api/v1/profiles/:id` | Update profile |
-| DELETE | `/api/v1/profiles/:id` | Delete profile |
-
-### System
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/health` | Health check |
-| GET | `/api/v1/version` | Version info |
-| GET | `/api/v1/stats` | Usage statistics |
-
-## Development
-
-### Local Setup
-
-```bash
-# Backend
-pip install -r requirements.txt
-python -m app.main
-
-# Frontend (separate terminal)
-cd frontend
-npm install
-npm run dev
-```
-
-### Building
-
-```bash
-# Docker image
-docker-compose build
-
-# Frontend only
-cd frontend
-npm run build
-```
-
-### Project Structure
-
-```
 ai-shuffle/
-├── app/                    # FastAPI application
-│   ├── main.py             # Entry point
-│   ├── api/                # Route handlers
-│   ├── core/               # Business logic
-│   └── db/                 # Database layer
-├── frontend/               # Svelte SPA
+├── app/                    # Backend (FastAPI)
+│   ├── api/               # API routes
+│   ├── core/              # Business logic
+│   └── database.py        # Database models
+├── frontend/              # Frontend (SvelteKit)
 │   ├── src/
-│   │   ├── routes/         # Pages
-│   │   └── lib/            # Components, stores, API
-│   └── package.json
-├── docker-compose.yml
-├── Dockerfile
-└── requirements.txt
+│   │   ├── lib/          # Components & utilities
+│   │   └── routes/       # Pages
+│   └── static/           # Static assets
+├── agents/                # Subagent definitions
+├── plugins/               # Plugin system
+└── docs/                  # Documentation
 ```
 
-## Tech Stack
+## Usage
 
-**Backend:** Python 3.11, FastAPI, Claude Agent SDK, SQLite
+### Starting a Chat
+1. Click the **Chat** card from the landing page
+2. Select a profile and project (optional)
+3. Start typing your message to Claude
 
-**Frontend:** Svelte 5, SvelteKit, TypeScript, Tailwind CSS
+### Managing Cards
+- Click the floating menu button to open the card deck
+- Select any card type to add it to your workspace
+- Drag cards to reposition them
+- Use the navigation arrows to switch between cards
 
-**Container:** Docker, Claude Code CLI, GitHub CLI
+### File Browser
+1. Open the **Files** card
+2. Select a project from the dropdown
+3. Browse, upload, or manage project files
 
-## Unraid Installation
+### Keyboard Shortcuts
+- `Cmd/Ctrl + K` - Spotlight search
+- `Cmd/Ctrl + N` - New chat
+- `Cmd/Ctrl + /` - Keyboard shortcuts help
 
-1. Go to **Docker** tab → **Add Container**
-2. Set repository to your image
-3. Configure `PUID=99`, `PGID=100`
-4. Map port `8000`
-5. Add volumes for persistence
-6. Login on settings page after starting
+## Contributing
 
-## Troubleshooting
-
-### Claude Not Authenticated
-- Authenticate in app on settings page.
-
-### Check Diagnostics
-```bash
-curl http://localhost:8000/api/v1/auth/diagnostics
-```
-
-### PUID/PGID Issues
-- Unraid: `PUID=99`, `PGID=100`
-- Standard: `PUID=1000`, `PGID=1000`
+Contributions are welcome! Please read our contributing guidelines before submitting PRs.
 
 ## License
 
-This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
-
-### Third-Party Licenses
-
-This project uses the following open-source dependencies:
-
-| Package | License | Use |
-|---------|---------|-----|
-| [FastAPI](https://fastapi.tiangolo.com/) | MIT | Backend framework |
-| [Uvicorn](https://www.uvicorn.org/) | BSD-3-Clause | ASGI server |
-| [Pydantic](https://pydantic.dev/) | MIT | Data validation |
-| [Svelte](https://svelte.dev/) | MIT | Frontend framework |
-| [SvelteKit](https://kit.svelte.dev/) | MIT | Frontend meta-framework |
-| [Tailwind CSS](https://tailwindcss.com/) | MIT | CSS framework |
-| [bcrypt](https://github.com/pyca/bcrypt) | Apache-2.0 | Password hashing |
-| [httpx](https://www.python-httpx.org/) | BSD-3-Clause | HTTP client |
-| [xterm.js](https://xtermjs.org/) | MIT | Terminal emulator |
-
-### Claude Code CLI
-
-This application interacts with Claude Code CLI, which is provided by Anthropic. Claude Code CLI usage is subject to:
-- [Anthropic's Consumer Terms of Service](https://www.anthropic.com/legal/consumer-terms)
-- [Anthropic's Usage Policy](https://www.anthropic.com/legal/aup)
-- [Anthropic's Privacy Policy](https://www.anthropic.com/legal/privacy)
-
-**Claude Code CLI is NOT bundled with this software** - it is installed separately and authenticated with your own Anthropic account.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
 
-- [Anthropic](https://www.anthropic.com/) - Claude AI and Claude Code CLI
-- [FastAPI](https://fastapi.tiangolo.com/) - Excellent Python web framework
-- [Svelte](https://svelte.dev/) - Reactive frontend framework
-- [Claude Agent SDK](https://docs.anthropic.com/en/docs/claude-code/sdk) - Official SDK for Claude Code integration
+- Built with [Claude](https://anthropic.com/claude) by Anthropic
+- UI inspired by modern desktop workspace applications

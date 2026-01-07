@@ -250,24 +250,6 @@ export async function deleteWorktree(projectId: string, worktreeId: string): Pro
     await api.delete(`${BASE}/${projectId}/git/worktrees/${worktreeId}`);
 }
 
-/**
- * Link a worktree to a session
- */
-export async function linkWorktreeSession(
-    projectId: string,
-    worktreeId: string,
-    sessionId: string
-): Promise<Worktree> {
-    return api.patch<Worktree>(`${BASE}/${projectId}/git/worktrees/${worktreeId}`, { session_id: sessionId });
-}
-
-/**
- * Unlink a worktree from its session
- */
-export async function unlinkWorktreeSession(projectId: string, worktreeId: string): Promise<Worktree> {
-    return api.patch<Worktree>(`${BASE}/${projectId}/git/worktrees/${worktreeId}`, { session_id: null });
-}
-
 // ============================================================================
 // Worktree Sync API
 // ============================================================================

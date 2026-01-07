@@ -4,7 +4,7 @@ Project management API routes
 
 import shutil
 from datetime import datetime
-from typing import List, Optional
+from typing import List
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File, Request, Query, Form
@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from app.core.models import Project, ProjectCreate, ProjectUpdate
 from app.core.config import settings
 from app.db import database
-from app.api.auth import require_auth, require_admin, get_api_user_from_request, is_admin_request
+from app.api.auth import require_auth, require_admin, get_api_user_from_request
 
 
 # File operation request models

@@ -14,7 +14,7 @@
 	import { Mic, MicOff, Square, Volume2, VolumeX, Settings, Loader2, Phone, PhoneOff, MessageSquare } from 'lucide-svelte';
 	import BaseCard from './BaseCard.svelte';
 	import type { DeckCard } from './types';
-	import { conversation, type ConversationStatus, type ConversationTurn } from '$lib/stores/conversation';
+	import { conversation, getSessionStore, type ConversationStatus, type ConversationTurn } from '$lib/stores/conversation';
 	import { profiles, projects, tabs, allTabs, type ChatMessage } from '$lib/stores/tabs';
 	import { AudioService } from '$lib/services/audioService';
 	import { api } from '$lib/api/client';
@@ -37,13 +37,15 @@
 	// State
 	// ========================================================================
 
-	// Session state (reactive from store)
-	let session = $derived(conversation.getSession(card.id));
+	// Session state (reactive from store) - use derived store for proper reactivity
+	const sessionStore = getSessionStore(card.id);
+	let session = $derived($sessionStore);
 
 	// Local UI state
 	let selectedProfileId = $state<string>('');
 	let selectedProjectId = $state<string>('');
 	let audioLevel = $state(0);
+	let isUserSpeaking = $state(false);  // Track when VAD detects user speech
 	let isInitializing = $state(false);
 	let showSettings = $state(false);
 	let transcriptEl: HTMLDivElement | undefined = $state();
@@ -112,7 +114,10 @@
 		switch (status) {
 			case 'idle': return 'Ready';
 			case 'connecting': return 'Connecting...';
-			case 'listening': return isMuted ? 'Muted' : 'Listening...';
+			case 'listening':
+				if (isMuted) return 'Muted';
+				if (isUserSpeaking) return 'You\'re speaking...';
+				return 'Listening...';
 			case 'processing': return 'Processing...';
 			case 'speaking': return 'Speaking...';
 			case 'error': return 'Error';
@@ -136,17 +141,15 @@
 	// ========================================================================
 
 	onMount(async () => {
-		// Initialize with defaults from card meta if available
-		selectedProfileId = (card.meta?.profileId as string) ?? profileList[0]?.id ?? '';
-		selectedProjectId = (card.meta?.projectId as string) ?? projectList[0]?.id ?? '';
+		// Initialize with defaults from card data if available
+		// Only pre-select if explicitly saved in card data, otherwise leave empty for user to choose
+		selectedProfileId = (card.data?.profileId as string) ?? '';
+		selectedProjectId = (card.data?.projectId as string) ?? '';
 
 		// Load TTS settings from user preferences
 		await loadTtsSettings();
 
-		// Create session if not exists
-		if (!session && selectedProfileId && selectedProjectId) {
-			await initializeSession();
-		}
+		// Don't auto-create session - wait for user to click Start
 	});
 
 	/**
@@ -264,8 +267,28 @@
 	// ========================================================================
 
 	async function startConversation(): Promise<void> {
-		if (!session) {
+		// Prevent double-clicks while initializing
+		if (isInitializing) {
+			console.log('[ConversationCard] Already initializing, ignoring click');
+			return;
+		}
+
+		// Prevent starting if already started
+		if (audioService) {
+			console.log('[ConversationCard] Already started, ignoring click');
+			return;
+		}
+
+		// Initialize session if needed (check store directly, not derived)
+		const existingSession = conversation.getSession(card.id);
+		if (!existingSession) {
 			await initializeSession();
+			// Verify session was created
+			const newSession = conversation.getSession(card.id);
+			if (!newSession) {
+				console.error('[ConversationCard] Failed to create session');
+				return;
+			}
 		}
 
 		try {
@@ -280,6 +303,11 @@
 			// Set up callbacks
 			audioService.onAudioLevelChange((level) => {
 				audioLevel = level;
+			});
+
+			// Track VAD state for UI feedback
+			audioService.onVadStateChange((vadState) => {
+				isUserSpeaking = vadState.isSpeaking;
 			});
 
 			audioService.onSpeechEnded(async (audioBlob) => {
@@ -304,6 +332,7 @@
 		}
 
 		audioLevel = 0;
+		isUserSpeaking = false;
 		conversation.setStatus(card.id, 'idle');
 		console.log('[ConversationCard] Conversation stopped');
 	}
@@ -485,7 +514,8 @@
 		<!-- Header: Profile & Status -->
 		<div class="conversation-header">
 			<div class="profile-section">
-				{#if session}
+				{#if session && status !== 'idle'}
+					<!-- Show profile info only when conversation is active -->
 					<div class="profile-avatar">
 						<MessageSquare size={24} />
 					</div>
@@ -494,7 +524,7 @@
 						<div class="profile-project">{session.projectName}</div>
 					</div>
 				{:else}
-					<!-- Profile/Project Selection -->
+					<!-- Profile/Project Selection - always show when idle -->
 					<div class="selection-row">
 						<select
 							class="profile-select"

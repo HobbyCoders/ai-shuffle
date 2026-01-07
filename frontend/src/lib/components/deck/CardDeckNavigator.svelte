@@ -20,15 +20,17 @@
 	import { onMount } from 'svelte';
 	import {
 		MessageSquare, Terminal, Clock, Image, Box, AudioLines,
-		Settings, FolderOpen, X, Files, User, Pencil, Check,
+		Settings, FolderOpen, X, Files, User, Users, Pencil, Check,
 		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronRight, Bot, Puzzle,
 		List, GitBranch, Key, Mic
 	} from 'lucide-svelte';
-	import { tabs, type Session } from '$lib/stores/tabs';
+	import { tabs, type ApiUser } from '$lib/stores/tabs';
+	import type { Session } from '$lib/api/client';
 	import { deck, type DeckCard as DeckCardType } from '$lib/stores/deck';
 	import { navigator, type CustomDeck, DECK_COLORS, type RecentSessionsViewMode } from '$lib/stores/navigator';
 	import RecentSessionsList from './RecentSessionsList.svelte';
 	import RecentSessionsTimeline from './RecentSessionsTimeline.svelte';
+	import ApiUserSessionsList from './ApiUserSessionsList.svelte';
 	import { fly, fade, scale } from 'svelte/transition';
 	import { cubicOut } from 'svelte/easing';
 	import { flip } from 'svelte/animate';
@@ -87,7 +89,7 @@
 	}
 
 	let navStack = $state<NavItem[]>([{ id: 'root', name: 'AI Shuffle', type: 'root' }]);
-	let currentView = $state<'main' | 'recent' | 'deck'>('main');
+	let currentView = $state<'main' | 'recent' | 'deck' | 'api-users'>('main');
 	let currentDeckId = $state<string | null>(null);
 
 	// Carousel state (desktop)
@@ -180,6 +182,11 @@
 
 	// Get sessions from tabs store
 	const sessions = $derived($tabs.sessions);
+
+	// Get admin sessions and API users from tabs store (admin only)
+	const adminSessions = $derived($tabs.adminSessions);
+	const apiUsers = $derived($tabs.apiUsers);
+	const adminSessionsFilter = $derived($tabs.adminSessionsFilter);
 
 	// Navigate to initial view when opened
 	$effect(() => {
@@ -326,6 +333,15 @@
 		// Add admin-only cards
 		if (isAdmin) {
 			allCards.push(
+				{
+					id: 'api-users',
+					type: 'category',
+					category: 'api-users',
+					title: 'API User Sessions',
+					subtitle: `${apiUsers.length} user${apiUsers.length !== 1 ? 's' : ''}`,
+					icon: Users,
+					hasChildren: true
+				},
 				{
 					id: 'subagents',
 					type: 'action',
@@ -593,6 +609,12 @@
 		if (card.category === 'recent') {
 			currentView = 'recent';
 			navStack = [...navStack, { id: 'recent', name: 'Recent', type: 'category' }];
+		} else if (card.category === 'api-users') {
+			currentView = 'api-users';
+			navStack = [...navStack, { id: 'api-users', name: 'API User Sessions', type: 'category' }];
+			// Load API users and their sessions
+			tabs.loadApiUsers();
+			tabs.loadAdminSessions();
 		}
 		if (carouselRef) carouselRef.scrollLeft = 0;
 		resetMobileCarousel();
@@ -619,6 +641,9 @@
 			currentDeckId = null;
 		} else if (target.id === 'recent') {
 			currentView = 'recent';
+			currentDeckId = null;
+		} else if (target.id === 'api-users') {
+			currentView = 'api-users';
 			currentDeckId = null;
 		} else if (target.type === 'deck') {
 			currentView = 'deck';
@@ -1397,6 +1422,25 @@
 								{formatRelativeTime}
 							/>
 						{/if}
+					</div>
+				{/key}
+			{:else if currentView === 'api-users'}
+				<!-- API User Sessions View (Admin Only) -->
+				{#key `api-users-${adminSessionsFilter}`}
+					<div
+						class="recent-view-container"
+						in:fly={{ x: 50, duration: 250, easing: cubicOut }}
+						out:fly={{ x: -50, duration: 200, easing: cubicOut }}
+					>
+						<ApiUserSessionsList
+							sessions={adminSessions}
+							{apiUsers}
+							selectedApiUserId={adminSessionsFilter}
+							onApiUserChange={(userId) => tabs.setAdminSessionsFilter(userId)}
+							onOpenThread={(sessionId) => { onOpenThread(sessionId); onClose(); }}
+							{isSessionStreaming}
+							{formatRelativeTime}
+						/>
 					</div>
 				{/key}
 			{:else if isMobile}

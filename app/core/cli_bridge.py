@@ -6,7 +6,7 @@ for commands that require interactive terminal input (like /resume).
 
 NOTE: The /rewind command has been moved to a new bulletproof implementation
 that uses direct JSONL manipulation instead of PTY-based CLI interaction.
-See: app/core/jsonl_rewind.py and app/core/checkpoint_manager.py
+See: app/core/jsonl_rewind.py
 
 This module is still used for /resume and other interactive commands that
 genuinely require terminal interaction.
@@ -19,11 +19,10 @@ import asyncio
 import logging
 import os
 import sys
-from typing import Optional, Dict, Any, Callable, Awaitable
+from typing import Optional, Dict, Callable, Awaitable
 from dataclasses import dataclass, field
 from datetime import datetime
 import re
-import uuid
 
 # PTY-related imports are Unix-only
 PTY_AVAILABLE = False
@@ -336,7 +335,8 @@ class CLIBridge:
 
     async def _read_output(self):
         """Read output from the CLI process and send to callback"""
-        loop = asyncio.get_event_loop()
+        # Event loop reference available if needed for future async operations
+        _loop = asyncio.get_event_loop()
 
         try:
             while self._is_running and self._fd is not None:

@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
 from app.db import database
-from app.api.auth import require_auth, get_api_user_from_request, is_admin_request
+from app.api.auth import require_auth, get_api_user_from_request
 from app.core.auth import auth_service
 
 router = APIRouter(prefix="/api/v1/preferences", tags=["Preferences"])

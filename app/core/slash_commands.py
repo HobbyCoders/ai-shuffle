@@ -6,7 +6,6 @@ from .claude/commands/ directories in project working directories.
 """
 
 import logging
-import os
 import re
 from pathlib import Path
 from typing import Optional, Dict, Any, List

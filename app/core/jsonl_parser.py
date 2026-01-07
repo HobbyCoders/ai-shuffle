@@ -519,7 +519,8 @@ def parse_session_history(
                             # Check if this is a result for a Task tool (subagent)
                             if tool_use_id in task_tool_uses:
                                 # This is a subagent result - update the existing subagent message
-                                task_info = task_tool_uses[tool_use_id]
+                                # task_info available for future extended metadata handling
+                                _task_info = task_tool_uses[tool_use_id]
 
                                 # Extract agentId from toolUseResult if available
                                 tool_use_result = entry.get("toolUseResult", {})

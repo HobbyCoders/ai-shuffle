@@ -323,65 +323,69 @@ class TestGetClaudeExecutable:
             result = get_claude_executable()
             assert result == "/usr/bin/claude-code"
 
-    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path tests require Windows platform")
     def test_windows_npm_global_install(self):
         """Windows should check npm global install location."""
         def mock_exists(path_self):
             return str(path_self) == "C:\\Users\\Test\\AppData\\Roaming\\npm\\claude.cmd"
 
         with patch("shutil.which", return_value=None):
-            with patch.dict(os.environ, {
-                "APPDATA": "C:\\Users\\Test\\AppData\\Roaming",
-                "LOCALAPPDATA": "C:\\Users\\Test\\AppData\\Local"
-            }, clear=False):
-                with patch.object(Path, "exists", mock_exists):
-                    result = get_claude_executable()
-                    assert result == "C:\\Users\\Test\\AppData\\Roaming\\npm\\claude.cmd"
+            with patch("app.core.platform.sys") as mock_sys:
+                mock_sys.platform = "win32"
+                with patch.dict(os.environ, {
+                    "APPDATA": "C:\\Users\\Test\\AppData\\Roaming",
+                    "LOCALAPPDATA": "C:\\Users\\Test\\AppData\\Local"
+                }, clear=False):
+                    with patch.object(Path, "exists", mock_exists):
+                        result = get_claude_executable()
+                        assert result == "C:\\Users\\Test\\AppData\\Roaming\\npm\\claude.cmd"
 
-    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path tests require Windows platform")
     def test_windows_npm_global_install_no_ext(self):
         """Windows should also check npm/claude without .cmd extension."""
         def mock_exists(path_self):
             return str(path_self) == "C:\\Users\\Test\\AppData\\Roaming\\npm\\claude"
 
         with patch("shutil.which", return_value=None):
-            with patch.dict(os.environ, {
-                "APPDATA": "C:\\Users\\Test\\AppData\\Roaming",
-                "LOCALAPPDATA": "C:\\Users\\Test\\AppData\\Local"
-            }, clear=False):
-                with patch.object(Path, "exists", mock_exists):
-                    result = get_claude_executable()
-                    assert result == "C:\\Users\\Test\\AppData\\Roaming\\npm\\claude"
+            with patch("app.core.platform.sys") as mock_sys:
+                mock_sys.platform = "win32"
+                with patch.dict(os.environ, {
+                    "APPDATA": "C:\\Users\\Test\\AppData\\Roaming",
+                    "LOCALAPPDATA": "C:\\Users\\Test\\AppData\\Local"
+                }, clear=False):
+                    with patch.object(Path, "exists", mock_exists):
+                        result = get_claude_executable()
+                        assert result == "C:\\Users\\Test\\AppData\\Roaming\\npm\\claude"
 
-    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path tests require Windows platform")
     def test_windows_program_files(self):
         """Windows should check Program Files location."""
         def mock_exists(path_self):
             return str(path_self) == "C:\\Program Files\\nodejs\\claude.cmd"
 
         with patch("shutil.which", return_value=None):
-            with patch.dict(os.environ, {
-                "APPDATA": "C:\\Users\\Test\\AppData\\Roaming",
-                "LOCALAPPDATA": "C:\\Users\\Test\\AppData\\Local"
-            }, clear=False):
-                with patch.object(Path, "exists", mock_exists):
-                    result = get_claude_executable()
-                    assert result == "C:\\Program Files\\nodejs\\claude.cmd"
+            with patch("app.core.platform.sys") as mock_sys:
+                mock_sys.platform = "win32"
+                with patch.dict(os.environ, {
+                    "APPDATA": "C:\\Users\\Test\\AppData\\Roaming",
+                    "LOCALAPPDATA": "C:\\Users\\Test\\AppData\\Local"
+                }, clear=False):
+                    with patch.object(Path, "exists", mock_exists):
+                        result = get_claude_executable()
+                        assert result == "C:\\Program Files\\nodejs\\claude.cmd"
 
-    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path tests require Windows platform")
     def test_windows_localappdata_claude(self):
         """Windows should check LOCALAPPDATA for claude.exe."""
         def mock_exists(path_self):
             return str(path_self) == "C:\\Users\\Test\\AppData\\Local\\Programs\\claude\\claude.exe"
 
         with patch("shutil.which", return_value=None):
-            with patch.dict(os.environ, {
-                "APPDATA": "C:\\Users\\Test\\AppData\\Roaming",
-                "LOCALAPPDATA": "C:\\Users\\Test\\AppData\\Local"
-            }, clear=False):
-                with patch.object(Path, "exists", mock_exists):
-                    result = get_claude_executable()
-                    assert result == "C:\\Users\\Test\\AppData\\Local\\Programs\\claude\\claude.exe"
+            with patch("app.core.platform.sys") as mock_sys:
+                mock_sys.platform = "win32"
+                with patch.dict(os.environ, {
+                    "APPDATA": "C:\\Users\\Test\\AppData\\Roaming",
+                    "LOCALAPPDATA": "C:\\Users\\Test\\AppData\\Local"
+                }, clear=False):
+                    with patch.object(Path, "exists", mock_exists):
+                        result = get_claude_executable()
+                        assert result == "C:\\Users\\Test\\AppData\\Local\\Programs\\claude\\claude.exe"
 
     @pytest.mark.skipif(sys.platform == "win32", reason="Unix path tests require non-Windows platform")
     def test_unix_npm_global_bin(self):
@@ -451,27 +455,29 @@ class TestGetGhExecutable:
             result = get_gh_executable()
             assert result == "/usr/local/bin/gh"
 
-    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path tests require Windows platform")
     def test_windows_program_files(self):
         """Windows should check Program Files location."""
         def mock_exists(path_self):
             return str(path_self) == "C:\\Program Files\\GitHub CLI\\gh.exe"
 
         with patch("shutil.which", return_value=None):
-            with patch.object(Path, "exists", mock_exists):
-                result = get_gh_executable()
-                assert result == "C:\\Program Files\\GitHub CLI\\gh.exe"
+            with patch("app.core.platform.sys") as mock_sys:
+                mock_sys.platform = "win32"
+                with patch.object(Path, "exists", mock_exists):
+                    result = get_gh_executable()
+                    assert result == "C:\\Program Files\\GitHub CLI\\gh.exe"
 
-    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path tests require Windows platform")
     def test_windows_program_files_x86(self):
         """Windows should check Program Files (x86) location."""
         def mock_exists(path_self):
             return str(path_self) == "C:\\Program Files (x86)\\GitHub CLI\\gh.exe"
 
         with patch("shutil.which", return_value=None):
-            with patch.object(Path, "exists", mock_exists):
-                result = get_gh_executable()
-                assert result == "C:\\Program Files (x86)\\GitHub CLI\\gh.exe"
+            with patch("app.core.platform.sys") as mock_sys:
+                mock_sys.platform = "win32"
+                with patch.object(Path, "exists", mock_exists):
+                    result = get_gh_executable()
+                    assert result == "C:\\Program Files (x86)\\GitHub CLI\\gh.exe"
 
     @pytest.mark.skipif(sys.platform == "win32", reason="Unix path tests require non-Windows platform")
     def test_unix_usr_local_bin(self):

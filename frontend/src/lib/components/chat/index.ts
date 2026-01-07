@@ -11,7 +11,6 @@ export { default as ToolResultMessage } from './ToolResultMessage.svelte';
 export { default as StreamingIndicator } from './StreamingIndicator.svelte';
 
 // Container components
-export { default as ChatHeader } from './ChatHeader.svelte';
 export { default as MessageArea } from './MessageArea.svelte';
 export { default as ChatInput } from './ChatInput.svelte';
 export { default as ExecutionModeSelector } from './ExecutionModeSelector.svelte';

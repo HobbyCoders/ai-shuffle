@@ -194,6 +194,8 @@
 				return 'file-browser';
 			case 'plugins':
 				return 'plugins';
+			case 'conversation':
+				return 'conversation';
 			default:
 				return 'chat';
 		}
@@ -584,7 +586,7 @@
 	// ============================================
 	// Card Lifecycle Handlers
 	// ============================================
-	function handleCreateCard(type: CardType) {
+	function handleCreateCard(type: CardType | 'recent-sessions') {
 		let deckCardType: DeckCardType;
 		let title: string;
 		let dataId: string | null = null;
@@ -686,6 +688,11 @@
 				}
 				deckCardType = 'plugins';
 				title = 'Plugins';
+				break;
+			}
+			case 'conversation': {
+				deckCardType = 'conversation';
+				title = 'Conversation';
 				break;
 			}
 			default:

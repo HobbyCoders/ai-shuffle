@@ -15,7 +15,7 @@ import tempfile
 import pytest
 from pathlib import Path
 from typing import Generator
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from contextlib import contextmanager
 
 # Add the project root to the path
@@ -106,64 +106,35 @@ def create_test_schema(cursor: sqlite3.Cursor):
         )
     """)
 
-    # Git repositories (must be before worktrees for FK constraint)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS git_repositories (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL UNIQUE,
-            remote_url TEXT,
-            default_branch TEXT DEFAULT 'main',
-            github_repo_name TEXT,
-            last_synced_at TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Worktrees (must be before sessions for FK constraint)
-    # Note: session_id is deprecated - relationship is now tracked via sessions.worktree_id
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS worktrees (
-            id TEXT PRIMARY KEY,
-            repository_id TEXT NOT NULL,
-            session_id TEXT,
-            branch_name TEXT NOT NULL,
-            worktree_path TEXT NOT NULL,
-            base_branch TEXT,
-            status TEXT DEFAULT 'active',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (repository_id) REFERENCES git_repositories(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Worktree indexes
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_repository ON worktrees(repository_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_session ON worktrees(session_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_branch ON worktrees(branch_name)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_status ON worktrees(status)")
-
-    # Sessions (after worktrees for FK constraint)
+    # Sessions
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
-            project_id TEXT,
-            profile_id TEXT NOT NULL,
-            api_user_id TEXT,
-            sdk_session_id TEXT,
-            worktree_id TEXT,
             title TEXT,
+            profile_id TEXT REFERENCES agent_profiles(id) ON DELETE SET NULL,
+            project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+            worktree_id TEXT,
             status TEXT DEFAULT 'active',
-            is_favorite BOOLEAN DEFAULT FALSE,
-            total_cost_usd REAL DEFAULT 0,
-            total_tokens_in INTEGER DEFAULT 0,
-            total_tokens_out INTEGER DEFAULT 0,
-            turn_count INTEGER DEFAULT 0,
+            is_pinned INTEGER DEFAULT 0,
+            metadata TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
-            FOREIGN KEY (profile_id) REFERENCES profiles(id),
-            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,
-            FOREIGN KEY (worktree_id) REFERENCES worktrees(id) ON DELETE SET NULL
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Worktrees
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS worktrees (
+            id TEXT PRIMARY KEY,
+            session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            branch_name TEXT NOT NULL,
+            path TEXT NOT NULL,
+            status TEXT DEFAULT 'active',
+            base_branch TEXT DEFAULT 'main',
+            auto_created INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
@@ -257,56 +228,32 @@ def create_test_schema(cursor: sqlite3.Cursor):
         )
     """)
 
-    # Credential policies - admin controls which keys are admin-provided vs user-provided
+    # Credential policies
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS credential_policies (
             id TEXT PRIMARY KEY,
-            policy TEXT NOT NULL DEFAULT 'admin_provided',
-            description TEXT,
+            api_key_id TEXT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+            profile_id TEXT REFERENCES agent_profiles(id) ON DELETE SET NULL,
+            credential_type TEXT NOT NULL,
+            provider TEXT,
+            inherit_admin INTEGER DEFAULT 0,
+            allowed_models TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
-    # Per-user credentials (encrypted API keys, GitHub PAT)
+    # API user credentials
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS api_user_credentials (
             id TEXT PRIMARY KEY,
-            api_user_id TEXT NOT NULL,
+            api_user_id TEXT NOT NULL REFERENCES api_users(id) ON DELETE CASCADE,
             credential_type TEXT NOT NULL,
+            provider TEXT,
             encrypted_value TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE,
-            UNIQUE(api_user_id, credential_type)
-        )
-    """)
-
-    # Per-user GitHub configuration
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS api_user_github_config (
-            id TEXT PRIMARY KEY,
-            api_user_id TEXT NOT NULL UNIQUE,
-            github_username TEXT,
-            github_avatar_url TEXT,
-            default_repo TEXT,
-            default_branch TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Per-user credential policy overrides
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_credential_policies (
-            id TEXT PRIMARY KEY,
-            api_user_id TEXT NOT NULL,
-            credential_type TEXT NOT NULL,
-            policy TEXT NOT NULL DEFAULT 'optional',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE,
-            UNIQUE(api_user_id, credential_type)
+            UNIQUE(api_user_id, credential_type, provider)
         )
     """)
 
@@ -317,6 +264,44 @@ def create_test_schema(cursor: sqlite3.Cursor):
             profile_id TEXT NOT NULL REFERENCES agent_profiles(id) ON DELETE CASCADE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (api_user_id, profile_id)
+        )
+    """)
+
+    # Agent runs
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_runs (
+            id TEXT PRIMARY KEY,
+            session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+            status TEXT DEFAULT 'running',
+            started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            completed_at TIMESTAMP,
+            error TEXT
+        )
+    """)
+
+    # Agent tasks
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_tasks (
+            id TEXT PRIMARY KEY,
+            run_id TEXT REFERENCES agent_runs(id) ON DELETE CASCADE,
+            task_type TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            input_data TEXT,
+            output_data TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            completed_at TIMESTAMP
+        )
+    """)
+
+    # Agent logs
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT REFERENCES agent_runs(id) ON DELETE CASCADE,
+            level TEXT NOT NULL,
+            message TEXT NOT NULL,
+            metadata TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
@@ -342,11 +327,6 @@ def create_test_schema(cursor: sqlite3.Cursor):
             tools JSON,
             model TEXT,
             is_builtin BOOLEAN DEFAULT FALSE,
-            default_name TEXT,
-            default_description TEXT,
-            default_prompt TEXT,
-            default_tools JSON,
-            default_model TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -572,7 +552,7 @@ def create_test_schema(cursor: sqlite3.Cursor):
     """)
 
     # Insert schema version
-    cursor.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (26)")
+    cursor.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (25)")
 
 
 @pytest.fixture(scope="function")
@@ -772,6 +752,10 @@ def mock_workspace(temp_dir: Path):
     # Create .claude directory
     claude_dir = workspace / ".claude"
     claude_dir.mkdir()
+
+    # Create sessions directory
+    sessions_dir = workspace / "sessions"
+    sessions_dir.mkdir()
 
     return workspace
 

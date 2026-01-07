@@ -8,7 +8,6 @@ Security: Files must be within the workspace directory. The API validates
 that requested file paths don't escape the workspace boundary.
 """
 
-import os
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, status, Query
 from fastapi.responses import FileResponse

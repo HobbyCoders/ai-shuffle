@@ -416,6 +416,51 @@ class TestSessionUpdateExtended:
 
 
 # =============================================================================
+# Agent Run Extended Tests
+# =============================================================================
+
+
+class TestAgentRunExtended:
+    """Test extended agent run operations."""
+
+    def test_complete_agent_run(self, mock_db):
+        """update_agent_run should set completion status and timestamp."""
+        db.create_agent_run("run-1", "Test", "Prompt")
+
+        result = db.update_agent_run(
+            "run-1",
+            status="completed",
+            progress=1.0,
+            result_summary="Task completed successfully"
+        )
+
+        assert result["status"] == "completed"
+        assert result["progress"] == 1.0
+        assert result["result_summary"] == "Task completed successfully"
+
+    def test_fail_agent_run(self, mock_db):
+        """update_agent_run should set error status."""
+        db.create_agent_run("run-1", "Test", "Prompt")
+
+        result = db.update_agent_run(
+            "run-1",
+            status="failed",
+            error="Something went wrong"
+        )
+
+        assert result["status"] == "failed"
+        assert result["error"] == "Something went wrong"
+
+    def test_update_agent_run_with_pr_url(self, mock_db):
+        """update_agent_run should update PR URL."""
+        db.create_agent_run("run-1", "Test", "Prompt")
+
+        result = db.update_agent_run("run-1", pr_url="https://github.com/test/repo/pull/1")
+
+        assert result["pr_url"] == "https://github.com/test/repo/pull/1"
+
+
+# =============================================================================
 # Message Extended Tests
 # =============================================================================
 
@@ -431,6 +476,26 @@ class TestMessageExtended:
         result = db.update_message_content(msg["id"], "Updated content")
 
         assert result["version"] == 2
+
+
+# =============================================================================
+# Agent Task Hierarchy Tests
+# =============================================================================
+
+
+class TestAgentTaskHierarchy:
+    """Test agent task hierarchy operations."""
+
+    def test_create_child_task(self, mock_db):
+        """create_agent_task should support parent-child relationship."""
+        db.create_agent_run("run-1", "Run", "Prompt")
+        db.create_agent_task("task-parent", "run-1", "Parent Task")
+        child = db.create_agent_task(
+            "task-child", "run-1", "Child Task",
+            parent_task_id="task-parent"
+        )
+
+        assert child["parent_task_id"] == "task-parent"
 
 
 # =============================================================================

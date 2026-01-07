@@ -44,7 +44,3 @@ export async function getProviders(): Promise<ProvidersResponse> {
 	providersCache = response;
 	return response;
 }
-
-export function clearProvidersCache() {
-	providersCache = null;
-}

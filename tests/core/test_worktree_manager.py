@@ -512,7 +512,7 @@ class TestCreateWorktreeSession:
         assert "Project not found" in str(excinfo.value)
 
     def test_create_worktree_session_existing_worktree_error(self, manager, mock_database, mock_git_service, mock_settings, temp_dir):
-        """Test error when worktree directory already exists"""
+        """Test error when branch already has active worktree"""
         existing_worktree = {
             "id": "wt-existing",
             "branch_name": "develop",
@@ -520,14 +520,13 @@ class TestCreateWorktreeSession:
         }
         mock_database.get_active_worktrees_for_repository.return_value = [existing_worktree]
 
-        # Create the path so it's valid - this triggers the "already exists" error
+        # Create the path so it's valid
         (temp_dir / ".worktrees" / "proj-test123" / "develop").mkdir(parents=True)
 
         with pytest.raises(WorktreeError) as excinfo:
             manager.create_worktree_session("proj-test123", "develop")
 
-        # The error is about the directory existing, not the branch having an active worktree
-        assert "already exists" in str(excinfo.value)
+        assert "already has an active worktree" in str(excinfo.value)
 
     def test_create_worktree_session_cleanup_on_session_failure(self, manager, mock_database, mock_git_service, mock_settings, temp_dir):
         """Test cleanup when session creation fails"""
@@ -549,7 +548,6 @@ class TestCreateWorktreeSession:
 class TestIsWorktreeValid:
     """Tests for is_worktree_valid method"""
 
-    @pytest.mark.skip(reason="Flaky test - path resolution differs between environments")
     def test_is_worktree_valid_with_existing_path(self, manager, mock_settings, temp_dir):
         """Test returns True when worktree path exists"""
         # Create the worktree directory
@@ -742,7 +740,6 @@ class TestGetAvailableWorktrees:
 
         assert len(result) == 0
 
-    @pytest.mark.skip(reason="Flaky test - path resolution differs between environments")
     def test_get_available_worktrees_enriches_with_sessions(self, manager, mock_database, mock_settings, temp_dir):
         """Test enriches worktrees with session info"""
         # Create valid path
@@ -781,7 +778,6 @@ class TestGetWorktreesForProject:
 
         assert result == []
 
-    @pytest.mark.skip(reason="Flaky test - path resolution differs between environments")
     def test_get_worktrees_for_project_checks_exists(self, manager, mock_database, mock_settings, temp_dir):
         """Test adds exists flag to worktrees"""
         # Create one valid path
@@ -839,7 +835,6 @@ class TestGetWorktreeDetails:
 
         assert result is None
 
-    @pytest.mark.skip(reason="Flaky test - path resolution differs between environments")
     def test_get_worktree_details_with_git_status(self, manager, mock_database, mock_git_service, mock_settings, temp_dir):
         """Test includes git status when worktree exists"""
         # Create worktree path

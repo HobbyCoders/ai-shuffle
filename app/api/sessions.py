@@ -191,7 +191,8 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                 # Use camelCase for frontend compatibility (toolName, toolInput, toolId)
                 for i, m in enumerate(jsonl_messages):
                     # Get timestamp from metadata, ensuring it's properly formatted
-                    timestamp = m.get("metadata", {}).get("timestamp")
+                    # Note: timestamp extracted but not passed to Pydantic to avoid format issues
+                    _timestamp = m.get("metadata", {}).get("timestamp")
                     # Don't pass raw timestamp strings to Pydantic datetime field
                     # The frontend handles timestamp display from metadata anyway
                     msg_data = {
@@ -364,7 +365,8 @@ async def archive_session(request: Request, session_id: str, token: str = Depend
 
     check_session_access(request, existing)
 
-    session = database.update_session(
+    # Update session - result not needed for response
+    database.update_session(
         session_id=session_id,
         status="archived"
     )
@@ -699,9 +701,9 @@ async def export_session(
                 # Include system messages as notes
                 subtype = msg.get("subtype", "")
                 if content:
-                    md_lines.append(f"---")
+                    md_lines.append("---")
                     md_lines.append(f"*System ({subtype}):* {content[:500]}")
-                    md_lines.append(f"---")
+                    md_lines.append("---")
                     md_lines.append("")
 
         # Footer
@@ -758,7 +760,6 @@ async def import_session(
     import json
     import uuid
     from datetime import datetime
-    from pathlib import Path
     from app.core.config import settings
 
     logger = logging.getLogger(__name__)
@@ -836,9 +837,10 @@ async def import_session(
 
     # Create session in database
     title = session_data.get('title') or 'Imported Session'
-    now = datetime.utcnow().isoformat()
+    _now = datetime.utcnow().isoformat()  # Available for future metadata use
 
-    session = database.create_session(
+    # Create session - result used implicitly by subsequent operations
+    database.create_session(
         session_id=new_session_id,
         profile_id=profile_id,
         project_id=session_data.get('project_id'),
@@ -883,7 +885,7 @@ async def import_session(
                 role = msg.get('role', 'user')
                 content = msg.get('content', '')
                 msg_type = msg.get('type')
-                timestamp = msg.get('metadata', {}).get('timestamp') or now
+                timestamp = msg.get('metadata', {}).get('timestamp') or datetime.utcnow().isoformat()
                 msg_uuid = msg.get('id') or str(uuid.uuid4())
 
                 if role == 'user' and msg_type != 'tool_result':
@@ -1056,7 +1058,6 @@ async def fork_session(
     import logging
     import uuid
     import json
-    from pathlib import Path
     from app.core.config import settings
     from app.core.jsonl_parser import get_session_jsonl_path, parse_jsonl_file
 
@@ -1149,8 +1150,8 @@ async def fork_session(
     original_title = original_session.get('title') or 'Untitled'
     fork_title = f"Fork of {original_title}"
 
-    # Create the forked session in database
-    forked_session = database.create_session(
+    # Create the forked session in database - result used implicitly
+    database.create_session(
         session_id=new_session_id,
         profile_id=original_session.get('profile_id'),
         project_id=original_session.get('project_id'),

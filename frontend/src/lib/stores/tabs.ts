@@ -2685,7 +2685,7 @@ function createTabsStore() {
 		update(s => ({ ...s, sessionsLoading: true }));
 		try {
 			// Load user's own sessions (admin_only=true for admins gets sessions without api_user_id)
-			let url = '/sessions?limit=50&admin_only=true';
+			let url = '/sessions?limit=30&admin_only=true';
 			if (tagId) {
 				url += `&tag_id=${encodeURIComponent(tagId)}`;
 			}
@@ -2702,7 +2702,7 @@ function createTabsStore() {
 	 */
 	async function loadAdminSessionsInternal(apiUserId?: string | null, tagId?: string | null) {
 		try {
-			let url = '/sessions?limit=50';
+			let url = '/sessions?limit=30';
 			if (apiUserId) {
 				// Filter by specific API user
 				url += `&api_user_id=${encodeURIComponent(apiUserId)}`;

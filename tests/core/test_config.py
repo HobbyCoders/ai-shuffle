@@ -286,6 +286,15 @@ class TestDatabasePaths:
 
                 assert settings.db_path == Path("/mock/data/db.sqlite")
 
+    def test_sessions_dir_property(self):
+        """sessions_dir should return path to sessions directory."""
+        with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
+            with patch("app.core.config._get_default_workspace_dir", return_value=Path("/mock/workspace")):
+                from app.core.config import Settings
+                settings = Settings()
+
+                assert settings.sessions_dir == Path("/mock/data/sessions")
+
     def test_get_database_url_default(self):
         """get_database_url should return SQLite URL by default."""
         with patch("app.core.config._get_default_data_dir", return_value=Path("/mock/data")):
@@ -435,6 +444,7 @@ class TestGetDeploymentInfo:
                     assert "data_dir" in info
                     assert "workspace_dir" in info
                     assert "db_path" in info
+                    assert "sessions_dir" in info
 
     def test_get_deployment_info_includes_paths(self):
         """get_deployment_info should include all path information."""
@@ -452,6 +462,7 @@ class TestGetDeploymentInfo:
                     assert isinstance(info["data_dir"], str)
                     assert isinstance(info["workspace_dir"], str)
                     assert isinstance(info["db_path"], str)
+                    assert isinstance(info["sessions_dir"], str)
 
 
 class TestEnsureDirectories:
@@ -475,6 +486,7 @@ class TestEnsureDirectories:
 
                     # Check directories were created
                     assert config_module.settings.effective_data_dir.exists()
+                    assert config_module.settings.sessions_dir.exists()
                     assert config_module.settings.effective_workspace_dir.exists()
 
     def test_ensure_directories_idempotent(self):
@@ -497,7 +509,6 @@ class TestEnsureDirectories:
                     assert config_module.settings.effective_data_dir.exists()
 
 
-@pytest.mark.skip(reason="Module reload tests are flaky in CI due to import caching")
 class TestLoadWorkspaceFromDatabase:
     """Test load_workspace_from_database function."""
 
@@ -656,6 +667,7 @@ class TestGlobalSettingsInstance:
         _ = settings.effective_data_dir
         _ = settings.effective_workspace_dir
         _ = settings.db_path
+        _ = settings.sessions_dir
         _ = settings.get_claude_projects_dir
         _ = settings.effective_tools_dir
 

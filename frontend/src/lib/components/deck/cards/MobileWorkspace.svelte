@@ -9,7 +9,7 @@
 	 * - Empty state with create buttons
 	 */
 
-	import { ChevronLeft, X, MessageSquare, Terminal, Plus, Settings, User, Users, FolderKanban, Image, Box, AudioLines, FolderOpen, Puzzle } from 'lucide-svelte';
+	import { ChevronLeft, X, MessageSquare, Mic, Terminal, Plus, Settings, User, Users, FolderKanban, Image, Box, AudioLines, FolderOpen, Puzzle } from 'lucide-svelte';
 	import type { DeckCard, CardType } from './types';
 	import type { Snippet } from 'svelte';
 	import { MobileWelcome } from '../welcome';
@@ -50,9 +50,10 @@
 	const DIRECTION_LOCK_THRESHOLD = 10;
 	const ANIMATION_DURATION = 300; // Match CSS transition duration
 
-	// Icon mapping - all 12 card types
+	// Icon mapping - all 13 card types
 	const cardIcons: Record<CardType, typeof MessageSquare> = {
 		chat: MessageSquare,
+		conversation: Mic,
 		terminal: Terminal,
 		settings: Settings,
 		profile: User,

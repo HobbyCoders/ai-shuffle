@@ -3,11 +3,9 @@ Advanced search API routes with filters
 """
 
 import re
-import json
 import logging
 from datetime import datetime
 from typing import List, Optional, Dict, Any
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Depends, Query, status, Request
 from pydantic import BaseModel
@@ -19,7 +17,6 @@ from app.core.jsonl_parser import (
     get_session_jsonl_path,
     parse_jsonl_file,
     extract_text_from_content,
-    get_project_dir_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,7 +71,8 @@ def _highlight_snippet(text: str, query: str, is_regex: bool = False, context_ch
             if match:
                 start = match.start()
                 end = match.end()
-                matched_text = match.group()
+                # matched_text available for future highlighting features
+                _matched_text = match.group()
             else:
                 return text[:200] if len(text) > 200 else text
         else:
@@ -85,7 +83,8 @@ def _highlight_snippet(text: str, query: str, is_regex: bool = False, context_ch
             if start == -1:
                 return text[:200] if len(text) > 200 else text
             end = start + len(query)
-            matched_text = text[start:end]
+            # matched_text available for future use (e.g., highlighting)
+            _matched_text = text[start:end]
 
         # Extract snippet with context
         snippet_start = max(0, start - context_chars)

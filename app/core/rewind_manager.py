@@ -13,7 +13,7 @@ The new approach (jsonl_rewind.py) is bulletproof:
 3. No CLI interaction needed - SDK reads truncated JSONL on next resume
 
 Kept for backwards compatibility but should not be used for new code.
-See: app/core/jsonl_rewind.py and app/core/checkpoint_manager.py
+See: app/core/jsonl_rewind.py
 """
 
 import json

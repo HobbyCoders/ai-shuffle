@@ -8,13 +8,10 @@ Based on patterns from Anvil's SessionManager:
 """
 
 import logging
-import os
 import platform
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 import uuid
 import asyncio
 from pathlib import Path
@@ -33,7 +30,6 @@ from app.db import database
 from app.core.config import settings
 from app.core.profiles import get_profile
 from app.core.sync_engine import sync_engine
-from app.core.checkpoint_manager import checkpoint_manager
 from app.core.permission_handler import permission_handler
 from app.core.platform import detect_deployment_mode, DeploymentMode
 from app.core.user_question_handler import user_question_handler
@@ -286,8 +282,8 @@ def _build_plugins_list(
                 resolved_path = settings.workspace_dir / plugin_entry
 
         if resolved_path and str(resolved_path) not in seen_paths:
-            # Verify the plugin directory exists and has plugin.json
-            plugin_manifest = resolved_path / ".claude-plugin" / "plugin.json"
+            # Verify the plugin directory exists (manifest path checked for existence)
+            _plugin_manifest = resolved_path / ".claude-plugin" / "plugin.json"
             if resolved_path.exists():
                 plugins.append({
                     "type": "local",
@@ -1731,9 +1727,10 @@ async def execute_query(
 
     # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
     # On Docker/Linux, agents are already passed via SDK's --agents flag
-    agents_dir = None
+    # agents_dir created for local mode - used implicitly by SDK reading from filesystem
+    _agents_dir = None
     if agents_dict and options.cwd and detect_deployment_mode() == DeploymentMode.LOCAL:
-        agents_dir = write_agents_to_filesystem(agents_dict, options.cwd)
+        _agents_dir = write_agents_to_filesystem(agents_dict, options.cwd)
 
     # Execute query and collect response
     response_text = []
@@ -1888,7 +1885,7 @@ async def stream_query(
             return
 
     # Get or create session in database
-    is_new_session = False
+    _is_new_session = False  # Tracks new vs resumed for potential analytics
     resume_id = None
 
     if session_id:
@@ -1911,7 +1908,7 @@ async def stream_query(
             title=title,
             api_user_id=api_user_id
         )
-        is_new_session = True
+        _is_new_session = True  # Flag available for future analytics/logging
         logger.info(f"Created new session {session_id} with title: {title}")
 
     # Store user message and broadcast to other devices
@@ -1981,7 +1978,7 @@ async def stream_query(
     logger.info(f"Options cwd: {options.cwd}")
     logger.info(f"Agents written to filesystem: {written_agent_ids if written_agent_ids else None}")
     client = ClaudeSDKClient(options=options)
-    logger.info(f"ClaudeSDKClient created, attempting connect...")
+    logger.info("ClaudeSDKClient created, attempting connect...")
 
     # Connect without timeout - Anvil doesn't use timeout for connect()
     try:
@@ -2247,17 +2244,6 @@ async def stream_query(
             cost_usd=metadata.get("total_cost_usd", 0),
             duration_ms=metadata.get("duration_ms", 0)
         )
-
-    # Create checkpoint after successful query (for rewind functionality)
-    if not interrupted and sdk_session_id:
-        try:
-            checkpoint_manager.create_checkpoint(
-                session_id=session_id,
-                description=prompt[:50],
-                create_git_snapshot=True
-            )
-        except Exception as e:
-            logger.warning(f"Failed to create checkpoint for session {session_id}: {e}")
 
     # Yield done event (unless already yielded error/interrupted)
     if not interrupted:
@@ -2604,17 +2590,6 @@ async def _run_background_query(
             duration_ms=metadata.get("duration_ms", 0)
         )
 
-    # Create checkpoint after successful query (for rewind functionality)
-    if not interrupted and sdk_session_id and not metadata.get("error"):
-        try:
-            checkpoint_manager.create_checkpoint(
-                session_id=session_id,
-                description=prompt[:50],
-                create_git_snapshot=True
-            )
-        except Exception as e:
-            logger.warning(f"[Background] Failed to create checkpoint for session {session_id}: {e}")
-
     logger.info(f"[Background] Query completed for session {session_id}")
 
 
@@ -2956,7 +2931,7 @@ async def stream_to_websocket(
     logger.info(f"[WS] Options cwd: {options.cwd}")
     logger.info(f"[WS] Agents written to filesystem: {written_agent_ids if written_agent_ids else None}")
     client = ClaudeSDKClient(options=options)
-    logger.info(f"[WS] ClaudeSDKClient created, attempting connect...")
+    logger.info("[WS] ClaudeSDKClient created, attempting connect...")
 
     # Connect
     try:
@@ -3078,7 +3053,7 @@ async def stream_to_websocket(
 
                 elif event_type == "message_start":
                     # Start of a new streaming message
-                    logger.debug(f"[WS] StreamEvent message_start")
+                    logger.debug("[WS] StreamEvent message_start")
                     yield {
                         "type": "stream_start",
                         "message": event.get("message", {})
@@ -3406,18 +3381,6 @@ async def stream_to_websocket(
             cost_usd=metadata.get("total_cost_usd", 0),
             duration_ms=metadata.get("duration_ms", 0)
         )
-
-    # Create checkpoint after successful query (for rewind functionality)
-    # This captures the git state AFTER Claude's changes
-    if not interrupted and sdk_session_id:
-        try:
-            checkpoint_manager.create_checkpoint(
-                session_id=session_id,
-                description=prompt[:50],
-                create_git_snapshot=True
-            )
-        except Exception as e:
-            logger.warning(f"Failed to create checkpoint for session {session_id}: {e}")
 
     # Yield done or interrupted event
     if interrupted:
