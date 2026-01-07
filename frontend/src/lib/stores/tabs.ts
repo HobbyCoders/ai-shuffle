@@ -843,16 +843,24 @@ function createTabsStore() {
 					...s,
 					tabs: s.tabs.map(t => {
 						if (t.id !== tabId) return t;
+
+						// Calculate new context from server usage
+						const serverContextUsed = inputTokens + cacheCreationTokens + cacheReadTokens;
+
+						// Don't reset context to 0 if we already have a value and server returns 0
+						// This happens when polling starts before stream_start arrives with usage
+						const shouldUpdateContext = serverContextUsed > 0 || t.contextUsed === null || t.contextUsed === 0;
+
 						return {
 							...t,
 							messages,
 							isStreaming: data.is_streaming as boolean,
 							todos: latestTodos.length > 0 ? latestTodos : t.todos,
-							totalTokensIn: inputTokens,
-							totalTokensOut: outputTokens,
-							totalCacheCreationTokens: cacheCreationTokens,
-							totalCacheReadTokens: cacheReadTokens,
-							contextUsed: inputTokens + cacheCreationTokens + cacheReadTokens
+							totalTokensIn: shouldUpdateContext ? inputTokens : t.totalTokensIn,
+							totalTokensOut: shouldUpdateContext ? outputTokens : t.totalTokensOut,
+							totalCacheCreationTokens: shouldUpdateContext ? cacheCreationTokens : t.totalCacheCreationTokens,
+							totalCacheReadTokens: shouldUpdateContext ? cacheReadTokens : t.totalCacheReadTokens,
+							contextUsed: shouldUpdateContext ? serverContextUsed : t.contextUsed
 						};
 					})
 				}));
