@@ -197,7 +197,7 @@
 			</div>
 			<button
 				on:click={() => dispatch('close')}
-				class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
+				class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors" aria-label="Close"
 			>
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
@@ -317,7 +317,7 @@
 
 			<!-- Document list -->
 			<div class="space-y-2">
-				<label class="text-sm font-medium text-muted-foreground">Documents</label>
+				<span class="text-sm font-medium text-muted-foreground">Documents</span>
 				{#if loading}
 					<div class="flex items-center justify-center py-8">
 						<div class="animate-spin rounded-full h-6 w-6 border-2 border-primary border-t-transparent"></div>
@@ -344,6 +344,7 @@
 										on:click={() => showPreview(doc)}
 										class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
 										title="Preview"
+										aria-label="Preview"
 									>
 										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -356,6 +357,7 @@
 											on:click={() => handleDelete(doc.id)}
 											class="p-1.5 rounded-lg text-destructive hover:bg-destructive/10 transition-colors"
 											title="Confirm delete"
+											aria-label="Confirm delete"
 										>
 											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
@@ -365,6 +367,7 @@
 											on:click={() => confirmDelete = null}
 											class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
 											title="Cancel"
+											aria-label="Cancel"
 										>
 											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
@@ -375,6 +378,7 @@
 											on:click={() => confirmDelete = doc.id}
 											class="p-1.5 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
 											title="Delete"
+											aria-label="Delete"
 										>
 											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -419,7 +423,7 @@
 				<h3 class="font-medium text-foreground">{previewDocument.filename}</h3>
 				<button
 					on:click={() => previewDocument = null}
-					class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
+					class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors" aria-label="Close"
 				>
 					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />

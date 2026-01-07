@@ -2,7 +2,7 @@
  * Card types for The Deck - Draggable window system
  */
 
-export type CardType = 'chat' | 'agent' | 'studio' | 'terminal' | 'settings' | 'profile' | 'subagent' | 'project';
+export type CardType = 'chat' | 'agent' | 'terminal' | 'settings' | 'profile' | 'subagent' | 'project' | 'user-settings';
 
 export interface DeckCard {
   id: string;
@@ -13,7 +13,6 @@ export interface DeckCard {
   width: number;
   height: number;
   zIndex: number;
-  minimized: boolean;
   maximized: boolean;
   focused: boolean;
   snappedTo?: 'left' | 'right' | 'top' | 'bottom' | 'topleft' | 'topright' | 'bottomleft' | 'bottomright';
@@ -26,28 +25,24 @@ export interface DeckCard {
 export const DEFAULT_CARD_SIZES: Record<CardType, { width: number; height: number }> = {
   chat: { width: 480, height: 640 },
   agent: { width: 400, height: 500 },
-  studio: { width: 520, height: 580 },
   terminal: { width: 600, height: 400 },
   settings: { width: 700, height: 650 },
   profile: { width: 600, height: 620 },
   subagent: { width: 550, height: 580 },
   project: { width: 480, height: 520 },
+  'user-settings': { width: 650, height: 550 },
 };
 
 export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }> = {
   chat: { width: 360, height: 400 },
   agent: { width: 320, height: 300 },
-  studio: { width: 400, height: 450 },
   terminal: { width: 400, height: 200 },
   settings: { width: 500, height: 400 },
   profile: { width: 450, height: 400 },
   subagent: { width: 400, height: 350 },
   project: { width: 360, height: 300 },
+  'user-settings': { width: 500, height: 400 },
 };
-
-export const SNAP_THRESHOLD = 20;
-export const SNAP_GRID = 10;
-export const CARD_SNAP_THRESHOLD = 12; // Threshold for card-to-card snapping
 
 /**
  * Workspace padding to keep cards visible and accessible
@@ -60,22 +55,3 @@ export const WORKSPACE_PADDING = {
   right: 10,     // Small right padding
   minVisible: 100 // Minimum visible area of card (header must stay visible)
 };
-
-/**
- * Represents a snap guide line for card-to-card alignment
- */
-export interface SnapGuide {
-  type: 'horizontal' | 'vertical';
-  position: number; // x for vertical, y for horizontal
-  start: number;    // start of the line
-  end: number;      // end of the line
-}
-
-/**
- * Result of checking for card-to-card snap alignment
- */
-export interface SnapResult {
-  x: number;
-  y: number;
-  guides: SnapGuide[];
-}

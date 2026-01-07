@@ -176,13 +176,24 @@ def load_workspace_from_database():
     This should be called after database initialization to apply any
     user-configured workspace path from local mode setup.
     """
+    import logging
+    logger = logging.getLogger(__name__)
+
     try:
         from app.db import database
         configured_path = database.get_system_setting("workspace_path")
+        logger.info(f"Loading workspace from database: configured_path={configured_path}")
+
         if configured_path:
             path = Path(configured_path)
             if path.exists() or path.parent.exists():
                 object.__setattr__(settings, 'workspace_dir', path)
-    except Exception:
+                logger.info(f"Workspace directory set to: {path}")
+            else:
+                logger.warning(f"Configured workspace path does not exist: {path}")
+        else:
+            logger.info(f"No workspace path configured in database, using default: {settings.workspace_dir}")
+    except Exception as e:
+        logger.error(f"Failed to load workspace from database: {e}")
         # Database might not be initialized yet
         pass

@@ -73,7 +73,7 @@ async def get_internal_api_key(key_name: str):
 
     Only allows specific key names to prevent arbitrary setting access.
     """
-    allowed_keys = ["openai_api_key", "image_api_key", "gemini_api_key", "video_api_key"]
+    allowed_keys = ["openai_api_key", "image_api_key", "gemini_api_key", "video_api_key", "meshy_api_key"]
 
     if key_name not in allowed_keys:
         raise HTTPException(status_code=400, detail=f"Invalid key name. Allowed: {allowed_keys}")
@@ -150,6 +150,11 @@ class IntegrationSettingsResponse(BaseModel):
     # Audio settings (TTS/STT)
     tts_model: Optional[str] = None  # "gpt-4o-mini-tts", "tts-1", "tts-1-hd"
     stt_model: Optional[str] = None  # "gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"
+    # 3D Model generation settings (Meshy)
+    meshy_api_key_set: bool = False
+    meshy_api_key_masked: str = ""
+    model3d_provider: Optional[str] = None  # "meshy"
+    model3d_model: Optional[str] = None  # "meshy-6", etc.
 
 
 class OpenAIKeyRequest(BaseModel):
@@ -295,6 +300,7 @@ async def get_integration_settings(token: str = Depends(require_auth)):
     # Get decrypted API keys for masking display
     openai_key = get_decrypted_api_key("openai_api_key")
     image_api_key = get_decrypted_api_key("image_api_key")
+    meshy_api_key = get_decrypted_api_key("meshy_api_key")
 
     # Non-sensitive settings
     image_provider = database.get_system_setting("image_provider")
@@ -303,6 +309,8 @@ async def get_integration_settings(token: str = Depends(require_auth)):
     video_model = database.get_system_setting("video_model")
     tts_model = database.get_system_setting("tts_model") or "gpt-4o-mini-tts"
     stt_model = database.get_system_setting("stt_model") or "whisper-1"
+    model3d_provider = database.get_system_setting("model3d_provider")
+    model3d_model = database.get_system_setting("model3d_model")
 
     return IntegrationSettingsResponse(
         openai_api_key_set=bool(openai_key),
@@ -314,7 +322,11 @@ async def get_integration_settings(token: str = Depends(require_auth)):
         video_provider=video_provider,
         video_model=video_model,
         tts_model=tts_model,
-        stt_model=stt_model
+        stt_model=stt_model,
+        meshy_api_key_set=bool(meshy_api_key),
+        meshy_api_key_masked=mask_api_key(meshy_api_key) if meshy_api_key else "",
+        model3d_provider=model3d_provider,
+        model3d_model=model3d_model
     )
 
 
@@ -1347,6 +1359,37 @@ AI_TOOLS = {
         "description": "Analyze videos up to 2 hours and answer questions about content",
         "category": "video",
         "providers": ["google-gemini-video"]
+    },
+    # 3D Model tools (Meshy)
+    "text_to_3d": {
+        "name": "Text to 3D",
+        "description": "Generate 3D models from text descriptions",
+        "category": "3d",
+        "providers": ["meshy"]
+    },
+    "image_to_3d": {
+        "name": "Image to 3D",
+        "description": "Generate 3D models from reference images",
+        "category": "3d",
+        "providers": ["meshy"]
+    },
+    "retexture_3d": {
+        "name": "3D Retexturing",
+        "description": "Apply new textures to existing 3D models",
+        "category": "3d",
+        "providers": ["meshy"]
+    },
+    "rig_3d": {
+        "name": "3D Rigging",
+        "description": "Add animation skeleton to 3D models",
+        "category": "3d",
+        "providers": ["meshy"]
+    },
+    "animate_3d": {
+        "name": "3D Animation",
+        "description": "Animate rigged 3D models with preset animations",
+        "category": "3d",
+        "providers": ["meshy"]
     }
 }
 
@@ -1357,7 +1400,8 @@ PROVIDER_KEY_MAP = {
     "openai-gpt-image": "openai_api_key",
     "google-veo": "image_api_key",
     "openai-sora": "openai_api_key",
-    "google-gemini-video": "image_api_key"
+    "google-gemini-video": "image_api_key",
+    "meshy": "meshy_api_key"
 }
 
 
@@ -1372,6 +1416,7 @@ async def get_available_ai_tools(token: str = Depends(require_auth)):
     # Check which API keys are configured
     openai_key = get_decrypted_api_key("openai_api_key")
     image_api_key = get_decrypted_api_key("image_api_key")
+    meshy_api_key = get_decrypted_api_key("meshy_api_key")
 
     # Determine which providers are available (for model tools only)
     available_providers = set()
@@ -1383,10 +1428,13 @@ async def get_available_ai_tools(token: str = Depends(require_auth)):
     if openai_key:
         available_providers.add("openai-gpt-image")
         available_providers.add("openai-sora")
+    if meshy_api_key:
+        available_providers.add("meshy")
 
     # Get current configured providers
     current_image_provider = database.get_system_setting("image_provider")
     current_video_provider = database.get_system_setting("video_provider")
+    current_model3d_provider = database.get_system_setting("model3d_provider")
 
     # Build tools list with availability
     tools = []
@@ -1403,6 +1451,8 @@ async def get_available_ai_tools(token: str = Depends(require_auth)):
             active_provider = current_image_provider
         elif tool_info["category"] == "video" and current_video_provider in tool_providers:
             active_provider = current_video_provider
+        elif tool_info["category"] == "3d" and current_model3d_provider in tool_providers:
+            active_provider = current_model3d_provider
         elif is_available:
             # Use first available provider
             for p in tool_providers:
@@ -1766,3 +1816,235 @@ async def wake_from_sleep(token: str = Depends(require_auth)):
     """
     cleanup_manager.record_activity()
     return {"success": True, "is_sleeping": cleanup_manager.is_sleeping()}
+
+
+# ============================================================================
+# Credential Policies (Admin control over which keys users must provide)
+# ============================================================================
+
+class CredentialPolicyResponse(BaseModel):
+    """A credential policy"""
+    id: str
+    policy: str  # 'admin_provided', 'user_provided', 'optional'
+    description: Optional[str]
+    updated_at: str
+
+
+class UpdateCredentialPolicyRequest(BaseModel):
+    """Request to update a credential policy"""
+    policy: str  # 'admin_provided', 'user_provided', 'optional'
+
+
+class AllCredentialPoliciesResponse(BaseModel):
+    """All credential policies"""
+    policies: list[CredentialPolicyResponse]
+
+
+CREDENTIAL_POLICY_INFO = {
+    "openai_api_key": {
+        "name": "OpenAI API Key",
+        "description": "For TTS, STT, GPT Image, and Sora video generation",
+        "admin_has_key": lambda: bool(get_decrypted_api_key("openai_api_key"))
+    },
+    "gemini_api_key": {
+        "name": "Google Gemini API Key",
+        "description": "For Nano Banana image generation, Imagen, and Veo video",
+        "admin_has_key": lambda: bool(get_decrypted_api_key("image_api_key"))
+    },
+    "github_pat": {
+        "name": "GitHub Personal Access Token",
+        "description": "For accessing GitHub repositories",
+        "admin_has_key": lambda: False  # Admin can't provide this for users
+    }
+}
+
+
+@router.get("/credential-policies", response_model=AllCredentialPoliciesResponse)
+async def get_credential_policies(token: str = Depends(require_auth)):
+    """
+    Get all credential policies.
+
+    Returns policies that control whether users must provide their own API keys
+    or can use admin-provided keys.
+    """
+    policies = database.get_all_credential_policies()
+    enriched = []
+    for policy in policies:
+        info = CREDENTIAL_POLICY_INFO.get(policy["id"], {})
+        enriched.append({
+            **policy,
+            "name": info.get("name", policy["id"]),
+            "admin_has_key": info.get("admin_has_key", lambda: False)()
+        })
+    return AllCredentialPoliciesResponse(
+        policies=[CredentialPolicyResponse(**p) for p in policies]
+    )
+
+
+@router.put("/credential-policies/{policy_id}")
+async def update_credential_policy(
+    policy_id: str,
+    request: UpdateCredentialPolicyRequest,
+    token: str = Depends(require_admin)
+):
+    """
+    Update a credential policy (admin only).
+
+    Policy options:
+    - 'admin_provided': All users use admin's key, users cannot set their own
+    - 'user_provided': Each user must provide their own key
+    - 'optional': Users can optionally provide their own key, falls back to admin's
+    """
+    valid_policies = ['admin_provided', 'user_provided', 'optional']
+    if request.policy not in valid_policies:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid policy. Must be one of: {', '.join(valid_policies)}"
+        )
+
+    # Special case: github_pat cannot be admin_provided (doesn't make sense)
+    if policy_id == "github_pat" and request.policy == "admin_provided":
+        raise HTTPException(
+            status_code=400,
+            detail="GitHub PAT cannot be admin-provided. Each user must use their own GitHub account."
+        )
+
+    # Special case: can't set to admin_provided if admin doesn't have the key
+    if request.policy == "admin_provided" and policy_id in CREDENTIAL_POLICY_INFO:
+        info = CREDENTIAL_POLICY_INFO[policy_id]
+        if not info.get("admin_has_key", lambda: False)():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot set to 'admin_provided' - admin has not configured this key yet"
+            )
+
+    updated = database.update_credential_policy(policy_id, request.policy)
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Policy '{policy_id}' not found")
+
+    return {
+        "success": True,
+        "id": policy_id,
+        "policy": request.policy
+    }
+
+
+@router.get("/credential-policies/summary")
+async def get_credential_policies_summary(token: str = Depends(require_admin)):
+    """
+    Get a summary of credential policies with admin key status.
+
+    Used by admin UI to show which keys are configured and policy status.
+    """
+    policies = database.get_all_credential_policies()
+    summary = []
+
+    for policy in policies:
+        info = CREDENTIAL_POLICY_INFO.get(policy["id"], {})
+        admin_has_key = info.get("admin_has_key", lambda: False)()
+
+        summary.append({
+            "id": policy["id"],
+            "name": info.get("name", policy["id"]),
+            "description": info.get("description", policy.get("description", "")),
+            "policy": policy["policy"],
+            "admin_has_key": admin_has_key,
+            # Compute effective status
+            "effective_status": _compute_effective_status(policy["policy"], admin_has_key),
+            "updated_at": policy["updated_at"]
+        })
+
+    return {"policies": summary}
+
+
+def _compute_effective_status(policy: str, admin_has_key: bool) -> str:
+    """Compute the effective status for a credential policy"""
+    if policy == "admin_provided":
+        return "admin_provides" if admin_has_key else "needs_admin_key"
+    elif policy == "user_provided":
+        return "user_must_provide"
+    else:  # optional
+        return "optional_with_fallback" if admin_has_key else "optional_no_fallback"
+
+
+# ============================================================================
+# Credential Resolution (for internal use by AI tools)
+# ============================================================================
+
+@router.get("/internal/resolve-credential/{credential_type}")
+async def resolve_credential(
+    credential_type: str,
+    user_id: Optional[str] = None,
+    _: str = Depends(require_admin)
+):
+    """
+    Internal endpoint to resolve which API key to use.
+
+    Resolution order based on policy:
+    1. If policy is 'user_provided' or 'optional': check user's credential first
+    2. If not found and policy is 'admin_provided' or 'optional': use admin's key
+    3. If not found: return error
+
+    This endpoint is for internal use by AI tools only.
+    Requires admin authentication as it returns decrypted API keys.
+    """
+    from app.core import encryption as enc
+
+    # Map credential types to admin settings
+    admin_setting_map = {
+        "openai_api_key": "openai_api_key",
+        "gemini_api_key": "image_api_key",
+        "github_pat": None  # No admin fallback
+    }
+
+    if credential_type not in admin_setting_map:
+        raise HTTPException(status_code=400, detail=f"Unknown credential type: {credential_type}")
+
+    # Get policy
+    policy_obj = database.get_credential_policy(credential_type)
+    policy = policy_obj.get("policy", "optional") if policy_obj else "optional"
+
+    resolved_key = None
+    source = None
+
+    # Try user's credential if applicable
+    if user_id and policy in ["user_provided", "optional"]:
+        user_cred = database.get_user_credential(user_id, credential_type)
+        if user_cred:
+            encrypted = user_cred.get("encrypted_value")
+            if encrypted:
+                if enc.is_encrypted(encrypted) and enc.is_encryption_ready():
+                    try:
+                        resolved_key = enc.decrypt_value(encrypted)
+                        source = "user"
+                    except Exception:
+                        pass
+                elif not enc.is_encrypted(encrypted):
+                    resolved_key = encrypted
+                    source = "user"
+
+    # Try admin's key if applicable
+    if not resolved_key and policy in ["admin_provided", "optional"]:
+        admin_setting = admin_setting_map.get(credential_type)
+        if admin_setting:
+            resolved_key = get_decrypted_api_key(admin_setting)
+            if resolved_key:
+                source = "admin"
+
+    if not resolved_key:
+        if policy == "user_provided":
+            raise HTTPException(
+                status_code=404,
+                detail=f"Credential '{credential_type}' not configured. User must provide this key."
+            )
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Credential '{credential_type}' not configured."
+            )
+
+    return {
+        "key": resolved_key,
+        "source": source,
+        "credential_type": credential_type
+    }

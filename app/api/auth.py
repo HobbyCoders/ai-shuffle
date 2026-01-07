@@ -248,6 +248,43 @@ def is_admin_request(request: Request) -> bool:
     return getattr(request.state, "is_admin", False)
 
 
+def get_current_api_user(request: Request) -> dict:
+    """
+    Dependency that requires an API user to be authenticated.
+    Works with both API key authentication and API user web sessions.
+    Does NOT work for admin users - admin must be an API user to use /me endpoints.
+
+    Returns the API user dict.
+    """
+    # First check for Bearer token (direct API key)
+    api_key = get_api_key(request)
+    if api_key:
+        key_hash = hash_api_key(api_key)
+        api_user = db.get_api_user_by_key_hash(key_hash)
+        if api_user and api_user.get("is_active", True):
+            db.update_api_user_last_used(api_user["id"])
+            request.state.is_admin = False
+            request.state.api_user = api_user
+            return api_user
+
+    # Then check for API key web session (cookie-based API user login)
+    token = get_session_token(request)
+    if token:
+        api_key_session = db.get_api_key_session(token)
+        if api_key_session:
+            api_user = db.get_api_user(api_key_session["api_user_id"])
+            if api_user and api_user.get("is_active", True):
+                db.update_api_user_last_used(api_user["id"])
+                request.state.is_admin = False
+                request.state.api_user = api_user
+                return api_user
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="API user authentication required. This endpoint is for API users only."
+    )
+
+
 @router.get("/status")
 async def get_auth_status(request: Request):
     """Get complete authentication status"""

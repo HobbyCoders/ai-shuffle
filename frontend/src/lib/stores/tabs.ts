@@ -2562,7 +2562,7 @@ function createTabsStore() {
 						backgroundTaskName: '',
 						backgroundBranch: 'main',
 						backgroundCreateNewBranch: false,
-						backgroundAutoPR: false,
+						backgroundAutoPR: true,  // Default to true - auto-create PR when background agent completes
 						backgroundAutoMerge: false,
 						backgroundMaxDurationMinutes: 30
 					}));
@@ -2614,6 +2614,14 @@ function createTabsStore() {
 		createTab(sessionId?: string) {
 			const newTabId = generateTabId();
 
+			// Get the current state to access the last used profile/project
+			const currentState = get({ subscribe });
+			const activeTab = currentState.tabs.find(t => t.id === currentState.activeTabId);
+
+			// Priority: active tab's selection > localStorage (which syncs from backend)
+			const profile = activeTab?.profile || getPersistedProfile();
+			const project = activeTab?.project || getPersistedProject();
+
 			const newTab: ChatTab = {
 				id: newTabId,
 				title: 'New Chat',
@@ -2622,8 +2630,8 @@ function createTabsStore() {
 				isStreaming: false,
 				wsConnected: false,
 				error: null,
-				profile: getPersistedProfile(),
-				project: getPersistedProject(),
+				profile,
+				project,
 				totalTokensIn: 0,
 				totalTokensOut: 0,
 				totalCacheCreationTokens: 0,
@@ -2641,7 +2649,7 @@ function createTabsStore() {
 				backgroundTaskName: '',
 				backgroundBranch: 'main',
 				backgroundCreateNewBranch: false,
-				backgroundAutoPR: false,
+				backgroundAutoPR: true,  // Default to true - auto-create PR when background agent completes
 				backgroundAutoMerge: false,
 				backgroundMaxDurationMinutes: 30
 			};
@@ -2856,6 +2864,8 @@ function createTabsStore() {
 					baseBranch: tab.backgroundBranch || 'main',
 					// PR configuration
 					autoPr: tab.backgroundAutoPR,
+					// Auto-merge and cleanup (merge PR, delete branch, remove worktree)
+					autoMerge: tab.backgroundAutoMerge,
 					// Duration (0 = unlimited)
 					maxDurationMinutes: tab.backgroundMaxDurationMinutes
 				});
@@ -3195,7 +3205,7 @@ function createTabsStore() {
 				backgroundTaskName: '',
 				backgroundBranch: 'main',
 				backgroundCreateNewBranch: false,
-				backgroundAutoPR: false,
+				backgroundAutoPR: true,  // Default to true - auto-create PR when background agent completes
 				backgroundAutoMerge: false,
 				backgroundMaxDurationMinutes: 30
 			});

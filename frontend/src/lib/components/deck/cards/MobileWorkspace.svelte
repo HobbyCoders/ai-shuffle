@@ -10,7 +10,7 @@
 	 * - Empty state with create buttons
 	 */
 
-	import { ChevronLeft, X, MessageSquare, Bot, Palette, Terminal, Plus, Settings, User, Users, FolderKanban } from 'lucide-svelte';
+	import { ChevronLeft, X, MessageSquare, Bot, Terminal, Plus, Settings, User, Users, FolderKanban } from 'lucide-svelte';
 	import type { DeckCard, CardType } from './types';
 	import type { Snippet } from 'svelte';
 
@@ -48,7 +48,6 @@
 	const cardIcons: Record<CardType, typeof MessageSquare> = {
 		chat: MessageSquare,
 		agent: Bot,
-		studio: Palette,
 		terminal: Terminal,
 		settings: Settings,
 		profile: User,
@@ -60,7 +59,6 @@
 	const cardTypes: { type: CardType; label: string; icon: typeof MessageSquare }[] = [
 		{ type: 'chat', label: 'Chat', icon: MessageSquare },
 		{ type: 'agent', label: 'Agent', icon: Bot },
-		{ type: 'studio', label: 'Studio', icon: Palette },
 		{ type: 'terminal', label: 'Terminal', icon: Terminal },
 	];
 

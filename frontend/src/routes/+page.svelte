@@ -21,13 +21,12 @@
 		sessions,
 		sessionsTagFilter
 	} from '$lib/stores/tabs';
-	import { runningAgents } from '$lib/stores/agents';
+	import { agents, activeAgents, allAgents, runningAgents, completedAgents, failedAgents } from '$lib/stores/agents';
 	import {
 		deck,
-		visibleCards,
+		allCards,
 		focusedCardId,
 		mobileActiveCardIndex,
-		gridSnapEnabled,
 		layoutMode
 	} from '$lib/stores/deck';
 	import type { DeckCard, DeckCardType, LayoutMode } from '$lib/stores/deck';
@@ -44,13 +43,13 @@
 		Workspace,
 		ChatCard,
 		AgentCard,
-		StudioCard,
 		TerminalCard,
 		MobileWorkspace,
 		ProfileCard,
 		ProjectCard,
 		SubagentCard,
 		SettingsCard,
+		UserSettingsCard,
 		CardShuffle
 	} from '$lib/components/deck/cards';
 	import type { CardType, DeckCard as CardsDeckCard } from '$lib/components/deck/cards/types';
@@ -68,6 +67,10 @@
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
 	import CreateMenu from '$lib/components/deck/CreateMenu.svelte';
+
+	// Mobile components
+	import BottomSheet from '$lib/components/chat/BottomSheet.svelte';
+	import ChatSettingsOverlay from '$lib/components/deck/overlays/ChatSettingsOverlay.svelte';
 
 	// Types from deck/types
 	import type {
@@ -90,6 +93,9 @@
 	// Activity Panel State
 	let activityPanelTab = $state<ActivityTabType>('threads');
 	let overlayType = $state<OverlayType>(null);
+
+	// Mobile Settings Sheet
+	let showMobileSettingsSheet = $state(false);
 
 	// Stable callbacks for chat settings (defined once, reused)
 	function handleChatSettingsProfileChange(profileId: string) {
@@ -147,9 +153,11 @@
 
 	// Derived overlay data - automatically updates when dependencies change
 	const chatSettingsOverlayData = $derived.by(() => {
-		if (overlayType !== 'chat-settings') return {};
+		// Compute data when desktop overlay OR mobile bottom sheet is open
+		if (overlayType !== 'chat-settings' && !showMobileSettingsSheet) return {};
 
 		const tab = $activeTab;
+		console.log('[OverlayData] Recomputing for activeTab:', tab?.id, 'backgroundEnabled:', tab?.backgroundEnabled, 'branch:', tab?.backgroundBranch);
 		if (!tab) return {};
 
 		// Get profile settings for effective values
@@ -277,7 +285,7 @@
 	// Derived State: Cards for Workspace
 	// ============================================
 	const workspaceCards = $derived<CardsDeckCard[]>(
-		$visibleCards.map((c) => ({
+		$allCards.map((c) => ({
 			id: c.id,
 			type: mapDeckCardType(c.type),
 			title: c.title,
@@ -286,7 +294,6 @@
 			width: c.size.width,
 			height: c.size.height,
 			zIndex: c.zIndex,
-			minimized: c.minimized,
 			maximized: c.maximized,
 			focused: c.id === $focusedCardId,
 			snappedTo: mapSnapZone(c.snappedTo),
@@ -306,7 +313,7 @@
 
 	// Active Threads: Show all open cards in the sidebar (legacy)
 	const deckSessions = $derived<DeckSession[]>(
-		$visibleCards.map((c) => ({
+		$allCards.map((c) => ({
 			id: c.id,
 			title: c.title || 'Untitled',
 			lastMessage: c.type === 'chat' ? 'Chat' : c.type === 'terminal' ? 'Terminal' : c.type,
@@ -315,34 +322,61 @@
 		}))
 	);
 
-	// Active Sessions for Activity Panel: Combines open cards and running agents
+	// Active Sessions for Activity Panel: Combines open cards and active agents (running + paused)
+	// Track which agent IDs have open cards to avoid duplicates
+	const openAgentCardIds = $derived(
+		new Set($allCards.filter(c => c.type === 'agent').map(c => c.dataId))
+	);
+
 	const activeSessions = $derived<ActiveSession[]>([
-		// Open cards
-		...$visibleCards.map((c) => ({
-			id: c.id,
-			type: 'chat' as const,
-			title: c.title || 'Untitled',
-			status: c.id === $focusedCardId ? 'active' as const : 'idle' as const,
-			isSelected: c.id === $focusedCardId,
-			unread: false
-		})),
-		// Running agents
-		...$runningAgents.map(agent => ({
-			id: agent.id,
-			type: 'agent' as const,
-			title: agent.name,
-			status: agent.status === 'running' ? 'running' as const :
-			        agent.status === 'failed' ? 'error' as const : 'idle' as const,
-			progress: agent.progress,
-			isSelected: false,
-			unread: false
-		}))
+		// Open cards - map to correct types, get agent status from store
+		...$allCards.map((c) => {
+			if (c.type === 'agent') {
+				// Agent card - get status from agent store
+				const agentData = $allAgents.find(a => a.id === c.dataId);
+				return {
+					id: c.id, // Use card ID for focusing
+					type: 'agent' as const,
+					title: agentData?.name || c.title || 'Agent',
+					status: agentData?.status === 'running' ? 'running' as const :
+					        agentData?.status === 'paused' ? 'idle' as const :
+					        agentData?.status === 'failed' ? 'error' as const :
+					        c.id === $focusedCardId ? 'active' as const : 'idle' as const,
+					progress: agentData?.progress,
+					isSelected: c.id === $focusedCardId,
+					unread: false
+				};
+			}
+			// Regular chat card
+			return {
+				id: c.id,
+				type: 'chat' as const,
+				title: c.title || 'Untitled',
+				status: c.id === $focusedCardId ? 'active' as const : 'idle' as const,
+				isSelected: c.id === $focusedCardId,
+				unread: false
+			};
+		}),
+		// Active agents that don't have an open card yet (running + paused)
+		...$activeAgents
+			.filter(agent => !openAgentCardIds.has(agent.id))
+			.map(agent => ({
+				id: agent.id,
+				type: 'agent' as const,
+				title: agent.name || agent.prompt?.slice(0, 30) || `Agent ${agent.id.slice(0, 8)}`,
+				status: agent.status === 'running' ? 'running' as const :
+				        agent.status === 'paused' ? 'idle' as const :
+				        agent.status === 'failed' ? 'error' as const : 'idle' as const,
+				progress: agent.progress,
+				isSelected: false,
+				unread: false
+			}))
 	]);
 
 	// Recent Sessions: Session history for loading old chats
 	// Shows sessions that are NOT currently open as cards
 	const openSessionIds = $derived(
-		new Set($visibleCards
+		new Set($allCards
 			.filter(c => c.dataId)
 			.map(c => c.dataId))
 	);
@@ -357,27 +391,32 @@
 	);
 
 	const badges = $derived<import('$lib/components/deck/types').ActivityBadges>({
-		workspace: $visibleCards.length > 0 ? $visibleCards.length : undefined,
+		workspace: $allCards.length > 0 ? $allCards.length : undefined,
 		studio: undefined,
 		files: undefined
 	});
 
-	// Map running agents to DeckAgent format for ContextPanel
-	const deckAgents = $derived<DeckAgent[]>(
-		$runningAgents.map(agent => ({
+	// Map all agents to DeckAgent format for ContextPanel
+	// Uses allAgents so we track status changes including completed/failed
+	const deckAgents = $derived.by<DeckAgent[]>(() => {
+		const mapped = $allAgents.map(agent => ({
 			id: agent.id,
 			name: agent.name,
 			status: agent.status === 'running' ? 'running' :
 			        agent.status === 'paused' ? 'paused' :
+			        agent.status === 'queued' ? 'queued' :
+			        agent.status === 'completed' ? 'idle' :
 			        agent.status === 'failed' ? 'error' : 'idle',
 			task: agent.prompt?.slice(0, 50),
 			progress: agent.progress
-		}))
-	);
+		} as DeckAgent));
+		console.log('[DeckAgents] allAgents count:', $allAgents.length, 'mapped:', mapped);
+		return mapped;
+	});
 
-	// Split agents for Activity Panel tabs
+	// Split agents for Activity Panel tabs (running/queued go to active sessions)
 	const runningAgentsForPanel = $derived<DeckAgent[]>(
-		deckAgents.filter(a => a.status === 'running' || a.status === 'paused')
+		deckAgents.filter(a => a.status === 'running' || a.status === 'paused' || a.status === 'queued')
 	);
 	const completedAgentsForPanel = $derived<DeckAgent[]>(
 		deckAgents.filter(a => a.status === 'idle' || a.status === 'error')
@@ -386,6 +425,41 @@
 	const deckGenerations: DeckGeneration[] = [];
 	const runningProcesses = $derived<RunningProcess[]>([]);
 
+	// Compute current session info from focused chat card
+	const currentSessionInfo = $derived.by<import('$lib/components/deck/types').SessionInfo | null>(() => {
+		// Find the focused card
+		const focusedCard = $allCards.find(c => c.id === $focusedCardId);
+		if (!focusedCard || focusedCard.type !== 'chat') return null;
+
+		// Get the tab for this card (by dataId which is the tabId)
+		const tabId = focusedCard.dataId;
+		if (!tabId) return null;
+
+		const tab = $allTabs.find(t => t.id === tabId);
+		if (!tab) return null;
+
+		// Get the profile to find the model name
+		const profilesList = $profiles;
+		const profile = profilesList.find(p => p.id === tab.profile);
+		const modelName = tab.modelOverride || profile?.config?.model || 'claude-sonnet-4-20250514';
+
+		// Calculate cost (rough estimate based on Claude pricing)
+		// Sonnet: $3/$15 per 1M tokens (input/output)
+		const inputCost = (tab.totalTokensIn / 1_000_000) * 3;
+		const outputCost = (tab.totalTokensOut / 1_000_000) * 15;
+		const totalCost = inputCost + outputCost;
+
+		return {
+			model: modelName,
+			tokens: {
+				input: tab.totalTokensIn,
+				output: tab.totalTokensOut,
+				total: tab.totalTokensIn + tab.totalTokensOut
+			},
+			cost: totalCost
+		};
+	});
+
 	// ============================================
 	// Helper Functions
 	// ============================================
@@ -393,16 +467,14 @@
 		switch (type) {
 			case 'chat':
 				return 'chat';
-			case 'agent-monitor':
-			case 'agent-launcher':
+			case 'agent':
 				return 'agent';
-			case 'studio-image':
-			case 'studio-video':
-				return 'studio';
 			case 'terminal':
 				return 'terminal';
 			case 'settings':
 				return 'settings';
+			case 'user-settings':
+				return 'user-settings';
 			case 'profile':
 				return 'profile';
 			case 'subagent':
@@ -414,19 +486,9 @@
 		}
 	}
 
-	function mapSnapZone(zone: DeckCard['snappedTo']): CardsDeckCard['snappedTo'] {
-		if (!zone) return undefined;
-		const mapping: Record<string, CardsDeckCard['snappedTo']> = {
-			left: 'left',
-			right: 'right',
-			top: 'top',
-			bottom: 'bottom',
-			'top-left': 'topleft',
-			'top-right': 'topright',
-			'bottom-left': 'bottomleft',
-			'bottom-right': 'bottomright'
-		};
-		return mapping[zone] || undefined;
+	function mapSnapZone(_zone: DeckCard['snappedTo']): CardsDeckCard['snappedTo'] {
+		// Snapping has been removed - always return undefined
+		return undefined;
 	}
 
 	function getTabIdForCard(card: CardsDeckCard): string | null {
@@ -450,8 +512,8 @@
 	function syncDeckCardsWithTabs() {
 		const currentTabs = $allTabs;
 
-		// Use visible cards from deck store
-		const allDeckCards = $visibleCards;
+		// Use all cards from deck store
+		const allDeckCards = $allCards;
 
 		for (const card of allDeckCards) {
 			if (card.type !== 'chat') continue;
@@ -501,7 +563,8 @@
 			tabs.loadProfiles(),
 			tabs.loadSessions(),
 			tabs.loadProjects(),
-			loadAllTags()
+			loadAllTags(),
+			agents.init() // Initialize agents store for background agent tracking
 		]);
 
 		if ($isAdmin) {
@@ -569,17 +632,6 @@
 				shift: true,
 				category: 'agents',
 				action: () => { handleCreateCard('agent'); }
-			}),
-
-			// Studio (Cmd+Shift+S)
-			registerShortcut({
-				id: 'open-studio',
-				description: 'Open studio',
-				key: 's',
-				cmdOrCtrl: true,
-				shift: true,
-				category: 'studio',
-				action: () => { handleCreateCard('studio'); }
 			}),
 
 			// Terminal (Cmd+T)
@@ -820,15 +872,31 @@
 
 	function handleSessionClick(session: ActiveSession) {
 		if (session.type === 'chat') {
-			// It's a card - focus it
-			const existingCard = $visibleCards.find((c) => c.id === session.id);
+			// It's a chat card - focus it
+			const existingCard = $allCards.find((c) => c.id === session.id);
 			if (existingCard) {
 				deck.focusCard(existingCard.id);
 			}
 		} else if (session.type === 'agent') {
-			// It's an agent - open/focus the agent monitor card
+			// It's an agent session - could be a card ID or agent ID
+			// First check if session.id is a card ID (for already open agent cards)
+			const existingCardById = $allCards.find((c) => c.id === session.id);
+			if (existingCardById) {
+				// It's an open card - just focus it
+				deck.focusCard(existingCardById.id);
+				return;
+			}
+
+			// Check if there's already an agent card with this dataId
+			const existingAgentCard = $allCards.find((c) => c.type === 'agent' && c.dataId === session.id);
+			if (existingAgentCard) {
+				deck.focusCard(existingAgentCard.id);
+				return;
+			}
+
+			// No existing card - open a new one
 			deck.setMode('workspace');
-			deck.openOrFocusCard('agent-monitor', session.id, {
+			deck.openOrFocusCard('agent', session.id, {
 				title: session.title,
 				meta: { agentId: session.id }
 			});
@@ -871,12 +939,8 @@
 				break;
 			}
 			case 'agent':
-				deckCardType = 'agent-monitor';
-				title = 'Agent Monitor';
-				break;
-			case 'studio':
-				deckCardType = 'studio-image';
-				title = 'Studio';
+				deckCardType = 'agent';
+				title = 'Agent';
 				break;
 			case 'terminal':
 				deckCardType = 'terminal';
@@ -884,7 +948,7 @@
 				break;
 			case 'settings': {
 				// Singleton - check if already open
-				const existingSettings = $visibleCards.find(c => c.type === 'settings');
+				const existingSettings = $allCards.find(c => c.type === 'settings');
 				if (existingSettings) {
 					deck.focusCard(existingSettings.id);
 					return;
@@ -900,7 +964,7 @@
 			}
 			case 'subagent': {
 				// Singleton
-				const existingSubagent = $visibleCards.find(c => c.type === 'subagent');
+				const existingSubagent = $allCards.find(c => c.type === 'subagent');
 				if (existingSubagent) {
 					deck.focusCard(existingSubagent.id);
 					return;
@@ -911,13 +975,24 @@
 			}
 			case 'project': {
 				// Singleton
-				const existingProject = $visibleCards.find(c => c.type === 'project');
+				const existingProject = $allCards.find(c => c.type === 'project');
 				if (existingProject) {
 					deck.focusCard(existingProject.id);
 					return;
 				}
 				deckCardType = 'project';
 				title = 'Projects';
+				break;
+			}
+			case 'user-settings': {
+				// Singleton - only one user settings card at a time
+				const existingUserSettings = $allCards.find(c => c.type === 'user-settings');
+				if (existingUserSettings) {
+					deck.focusCard(existingUserSettings.id);
+					return;
+				}
+				deckCardType = 'user-settings';
+				title = 'My Settings';
 				break;
 			}
 			default:
@@ -929,7 +1004,24 @@
 	}
 
 	function handleCardFocus(id: string) {
+		console.log('[CardFocus] Card focused:', id);
 		deck.focusCard(id);
+
+		// If this is a chat card, sync the active tab
+		// Note: deck.getCard returns the store's DeckCard type (meta at top level)
+		// which is different from CardsDeckCard (meta under data)
+		const storeCard = deck.getCard(id);
+		console.log('[CardFocus] Store card:', storeCard?.type, 'meta.tabId:', storeCard?.meta?.tabId, 'dataId:', storeCard?.dataId);
+		if (storeCard?.type === 'chat') {
+			// Get tabId from store card's meta (not data.meta)
+			const tabId = (storeCard.meta?.tabId as string) ||
+				(storeCard.dataId ? tabs.findTabBySessionId(storeCard.dataId) : null);
+			console.log('[CardFocus] Resolved tabId:', tabId);
+			if (tabId) {
+				tabs.setActiveTab(tabId);
+				console.log('[CardFocus] activeTab after set:', $activeTab?.id);
+			}
+		}
 	}
 
 	function handleCardMove(id: string, x: number, y: number) {
@@ -942,65 +1034,22 @@
 		const { width, height } = card.size;
 
 		// Apply bounds clamping to prevent cards from going off-screen
-		let clampedPos = workspaceRef.clampToBounds(x, y, width, height);
+		const clampedPos = workspaceRef.clampToBounds(x, y, width, height);
 
-		// Apply grid snapping if enabled
-		clampedPos = workspaceRef.snapToGrid(clampedPos.x, clampedPos.y);
-
-		// Check for card-to-card snapping
-		const snapResult = workspaceRef.checkCardSnapping(id, clampedPos.x, clampedPos.y, width, height);
-
-		// Update the card position with snapped coordinates
-		deck.moveCard(id, snapResult.x, snapResult.y);
-
-		// Show snap guides during drag
-		workspaceRef.updateSnapGuides(snapResult.guides);
-
-		// Also show edge snap preview if applicable
-		workspaceRef.showSnapPreview(snapResult.x, snapResult.y, width, height);
+		// Update the card position
+		deck.moveCard(id, clampedPos.x, clampedPos.y);
 	}
 
 	function handleCardResize(id: string, width: number, height: number) {
 		deck.resizeCard(id, width, height);
 	}
 
-	function handleCardDragEnd(id: string) {
-		if (workspaceRef) {
-			// Clear snap guides when drag ends
-			workspaceRef.clearSnapGuides();
-			workspaceRef.hideSnapPreview();
-
-			// Finalize edge snapping if card is near workspace edge
-			const card = deck.getCard(id);
-			if (card) {
-				workspaceRef.finalizeSnap(id, card.position.x, card.position.y, card.size.width, card.size.height);
-			}
-		}
+	function handleCardDragEnd(_id: string) {
+		// No-op: snapping has been removed
 	}
 
-	function handleCardResizeEnd(id: string) {
-		if (workspaceRef) {
-			// Clear snap guides when resize ends
-			workspaceRef.clearSnapGuides();
-		}
-	}
-
-	function handleCardSnap(id: string, snapTo: CardsDeckCard['snappedTo']) {
-		if (!snapTo) return;
-		const mapping: Record<string, DeckCard['snappedTo']> = {
-			left: 'left',
-			right: 'right',
-			top: 'top',
-			bottom: 'bottom',
-			topleft: 'top-left',
-			topright: 'top-right',
-			bottomleft: 'bottom-left',
-			bottomright: 'bottom-right'
-		};
-		const zone = mapping[snapTo] || null;
-		if (zone) {
-			deck.snapCard(id, zone);
-		}
+	function handleCardResizeEnd(_id: string) {
+		// No-op: snapping has been removed
 	}
 
 	function handleCardMaximize(id: string) {
@@ -1039,7 +1088,7 @@
 	// ============================================
 	function handleOpenProfileCard(editId?: string) {
 		// Find or create profile card
-		const existingProfile = $visibleCards.find(c => c.type === 'profile');
+		const existingProfile = $allCards.find(c => c.type === 'profile');
 		if (existingProfile) {
 			deck.focusCard(existingProfile.id);
 			// If editing a specific profile, set metadata to open in edit mode
@@ -1055,11 +1104,17 @@
 	}
 
 	function handleOpenChatSettings() {
-		// Toggle overlay if already open
+		// On mobile, use the bottom sheet instead of the hidden side panel
+		if (isMobile) {
+			showMobileSettingsSheet = !showMobileSettingsSheet;
+			return;
+		}
+
+		// Desktop: Toggle overlay if already open
 		if (overlayType === 'chat-settings') {
 			overlayType = null;
 			// Also collapse the side panel when closing settings
-			deck.toggleContextPanel();
+			deck.collapseContextPanel();
 			return;
 		}
 
@@ -1070,9 +1125,13 @@
 		overlayType = 'chat-settings';
 	}
 
+	function handleCloseMobileSettings() {
+		showMobileSettingsSheet = false;
+	}
+
 	function handleOpenProjectCard(editId?: string) {
 		// Find or create project card
-		const existingProject = $visibleCards.find(c => c.type === 'project');
+		const existingProject = $allCards.find(c => c.type === 'project');
 		if (existingProject) {
 			deck.focusCard(existingProject.id);
 			// If editing a specific project, set metadata to open in edit mode
@@ -1111,7 +1170,7 @@
 		// For interactive commands, open terminal modal
 		if (command.type === 'interactive') {
 			// Need an active session for terminal
-			const activeCard = $visibleCards.find((c) => c.id === $focusedCardId);
+			const activeCard = $allCards.find((c) => c.id === $focusedCardId);
 			if (activeCard?.dataId) {
 				terminalSessionId = activeCard.dataId;
 				terminalCommand = `/${command.name}`;
@@ -1176,13 +1235,14 @@
 		{activeMode}
 		{badges}
 		contextCollapsed={contextCollapsed}
+		isAdmin={$isAdmin}
 		activeTab={activityPanelTab}
 		{activeSessions}
 		{recentSessions}
 		runningAgents={runningAgentsForPanel}
 		completedAgents={completedAgentsForPanel}
 		generations={deckGenerations}
-		currentSession={null}
+		currentSession={currentSessionInfo}
 		{overlayType}
 		overlayData={chatSettingsOverlayData}
 		sessions={deckSessions}
@@ -1191,20 +1251,33 @@
 		onModeChange={handleModeChange}
 		onLogoClick={() => showCreateMenu = !showCreateMenu}
 		onSettingsClick={() => handleCreateCard('settings')}
-		onContextToggle={() => deck.toggleContextPanel()}
+		onUserSettingsClick={() => handleCreateCard('user-settings')}
+		onContextToggle={() => {
+			deck.toggleContextPanel();
+			// Close chat settings overlay when collapsing the panel
+			if (overlayType === 'chat-settings') {
+				overlayType = null;
+			}
+		}}
 		onTabChange={(tab) => activityPanelTab = tab}
 		onSessionClick={handleSessionClick}
 		onHistorySessionClick={handleHistorySessionClick}
 		onAgentClick={(agent) => {
 			// Open agent card in workspace
+			console.log('[onAgentClick] Clicked agent:', agent.id, agent.name);
 			deck.setMode('workspace');
-			deck.openOrFocusCard('agent-monitor', agent.id, {
+			const cardId = deck.openOrFocusCard('agent', agent.id, {
 				title: agent.name,
 				meta: { agentId: agent.id }
 			});
+			console.log('[onAgentClick] Opened/focused card:', cardId, 'with dataId:', agent.id);
 		}}
 		onGenerationClick={() => {}}
-		onOverlayClose={() => { overlayType = null; }}
+		onOverlayClose={() => {
+			overlayType = null;
+			// Collapse activity panel when closing chat settings
+			deck.collapseContextPanel();
+		}}
 		onProcessClick={() => {}}
 	>
 		{#if activeMode === 'workspace'}
@@ -1237,11 +1310,28 @@
 								onOpenSettings={handleOpenChatSettings}
 							/>
 						{:else if card.type === 'agent'}
-							<div class="p-4">
-								<p class="text-muted-foreground">Agent view (mobile)</p>
-							</div>
-						{:else if card.type === 'studio'}
-							<StudioCard
+							<AgentCard
+								{card}
+								agentId={card.data?.dataId || card.data?.meta?.agentId as string}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
+						{:else if card.type === 'terminal'}
+							<TerminalCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
+						{:else if card.type === 'settings'}
+							<SettingsCard
 								{card}
 								mobile={true}
 								onClose={() => handleCardClose(card.id)}
@@ -1250,21 +1340,12 @@
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
 							/>
-						{:else if card.type === 'terminal'}
-							<div class="terminal-mobile-content">
-								<div class="terminal-line">Terminal integration coming soon...</div>
-								<div class="terminal-line"></div>
-								<div class="terminal-prompt">
-									<span class="prompt-symbol">$</span>
-									<span class="cursor"></span>
-								</div>
-							</div>
-						{:else if card.type === 'settings'}
-							<SettingsCard
+						{:else if card.type === 'user-settings'}
+							<UserSettingsCard
 								{card}
 								mobile={true}
 								onClose={() => handleCardClose(card.id)}
-																onMaximize={() => handleCardMaximize(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
 								onFocus={() => handleCardFocus(card.id)}
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1314,10 +1395,7 @@
 					onCardFocus={handleCardFocus}
 					onCardMove={handleCardMove}
 					onCardResize={handleCardResize}
-					onCardSnap={handleCardSnap}
 					onCreateCard={handleCreateCard}
-					gridSnapEnabled={$gridSnapEnabled}
-					cardSnapEnabled={true}
 					layoutMode={$layoutMode}
 					onLayoutModeChange={handleLayoutModeChange}
 					onFocusNavigate={handleFocusNavigate}
@@ -1328,8 +1406,7 @@
 						<!-- Sorting would cause DOM reordering which resets scroll positions -->
 						{#each workspaceCards as card (card.id)}
 							{@const tabId = getTabIdForCard(card)}
-							{#if !card.minimized}
-								<div
+							<div
 									class="card-wrapper"
 									class:maximized={card.maximized}
 									style:position="absolute"
@@ -1366,20 +1443,9 @@
 									{:else if card.type === 'agent'}
 										<AgentCard
 											{card}
-											agentId={card.data?.dataId as string || card.id}
+											agentId={card.data?.dataId || card.data?.meta?.agentId as string}
 											onClose={() => handleCardClose(card.id)}
-																						onMaximize={() => handleCardMaximize(card.id)}
-											onFocus={() => handleCardFocus(card.id)}
-											onMove={(x, y) => handleCardMove(card.id, x, y)}
-											onResize={(w, h) => handleCardResize(card.id, w, h)}
-											onDragEnd={() => handleCardDragEnd(card.id)}
-											onResizeEnd={() => handleCardResizeEnd(card.id)}
-										/>
-									{:else if card.type === 'studio'}
-										<StudioCard
-											{card}
-											onClose={() => handleCardClose(card.id)}
-																						onMaximize={() => handleCardMaximize(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
 											onFocus={() => handleCardFocus(card.id)}
 											onMove={(x, y) => handleCardMove(card.id, x, y)}
 											onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1402,6 +1468,17 @@
 											{card}
 											onClose={() => handleCardClose(card.id)}
 																						onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
+										/>
+									{:else if card.type === 'user-settings'}
+										<UserSettingsCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
 											onFocus={() => handleCardFocus(card.id)}
 											onMove={(x, y) => handleCardMove(card.id, x, y)}
 											onResize={(w, h) => handleCardResize(card.id, w, h)}
@@ -1450,7 +1527,6 @@
 										</div>
 									{/if}
 								</div>
-							{/if}
 						{/each}
 					{/snippet}
 				</Workspace>
@@ -1482,11 +1558,12 @@
 		open={showCreateMenu}
 		onClose={() => showCreateMenu = false}
 		onCreateChat={() => handleCreateCard('chat')}
-		onCreateStudio={() => handleCreateCard('studio')}
 		onCreateTerminal={() => handleCreateCard('terminal')}
 		onOpenProfiles={() => handleCreateCard('profile')}
 		onOpenProjects={() => handleCreateCard('project')}
 		onOpenSettings={() => handleCreateCard('settings')}
+		onOpenUserSettings={() => handleCreateCard('user-settings')}
+		isAdmin={$isAdmin}
 		{isMobile}
 	/>
 
@@ -1605,6 +1682,18 @@
 		/>
 	{/if}
 
+	<!-- Mobile Settings Bottom Sheet -->
+	<BottomSheet
+		open={showMobileSettingsSheet}
+		onClose={handleCloseMobileSettings}
+		title="Chat Settings"
+	>
+		<ChatSettingsOverlay
+			{...chatSettingsOverlayData}
+			onClose={handleCloseMobileSettings}
+		/>
+	</BottomSheet>
+
 {/if}
 
 <style>
@@ -1636,46 +1725,5 @@
 	.card-placeholder p {
 		color: hsl(var(--muted-foreground));
 		font-size: 0.875rem;
-	}
-
-	/* Mobile terminal styling */
-	.terminal-mobile-content {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		background: hsl(var(--background));
-		color: #22c55e;
-		font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
-		font-size: 0.875rem;
-		padding: 16px;
-		overflow: auto;
-	}
-
-	.terminal-mobile-content .terminal-line {
-		line-height: 1.5;
-		min-height: 1.5em;
-	}
-
-	.terminal-mobile-content .terminal-prompt {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		margin-top: 8px;
-	}
-
-	.terminal-mobile-content .prompt-symbol {
-		color: #00ff00;
-	}
-
-	.terminal-mobile-content .cursor {
-		width: 8px;
-		height: 16px;
-		background: #00ff00;
-		animation: blink 1s step-end infinite;
-	}
-
-	@keyframes blink {
-		0%, 100% { opacity: 1; }
-		50% { opacity: 0; }
 	}
 </style>

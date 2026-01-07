@@ -23,10 +23,11 @@ export interface DeckSession {
 }
 
 // Agent in the deck
+// Note: Maps from BackgroundAgent status: completed→idle, failed→error
 export interface DeckAgent {
 	id: string;
 	name: string;
-	status: 'running' | 'idle' | 'error' | 'paused';
+	status: 'running' | 'idle' | 'error' | 'paused' | 'queued';
 	task?: string;
 	progress?: number;
 }
@@ -70,20 +71,13 @@ export interface CardState {
 	id: string;
 	type: 'chat' | 'agent' | 'generation' | 'file' | 'settings' | 'profile' | 'subagent' | 'project' | 'canvas' | 'terminal';
 	title: string;
-	state: 'normal' | 'minimized' | 'maximized';
+	state: 'normal' | 'maximized';
 	geometry: CardGeometry;
 	zIndex: number;
 	icon?: string;
 	data?: unknown;
 }
 
-// Minimized card for the dock
-export interface MinimizedCard {
-	id: string;
-	type: string; // Allow any card type from deck store
-	title: string;
-	icon?: string;
-}
 
 // Running process for the dock
 export interface RunningProcess {

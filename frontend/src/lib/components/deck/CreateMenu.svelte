@@ -3,17 +3,18 @@
 	 * CreateMenu - Dropdown menu for creating new cards
 	 * Shows card type options with icons and keyboard shortcuts
 	 */
-	import { MessageSquare, Palette, Terminal, User, FolderKanban, Settings, X } from 'lucide-svelte';
+	import { MessageSquare, Terminal, User, FolderKanban, Settings, UserCog, X } from 'lucide-svelte';
 
 	interface Props {
 		open: boolean;
 		onClose: () => void;
 		onCreateChat: () => void;
-		onCreateStudio: () => void;
 		onCreateTerminal: () => void;
 		onOpenProfiles: () => void;
 		onOpenProjects: () => void;
 		onOpenSettings: () => void;
+		onOpenUserSettings?: () => void;
+		isAdmin?: boolean;
 		anchorPosition?: 'left' | 'right';
 		isMobile?: boolean;
 	}
@@ -22,24 +23,40 @@
 		open,
 		onClose,
 		onCreateChat,
-		onCreateStudio,
 		onCreateTerminal,
 		onOpenProfiles,
 		onOpenProjects,
 		onOpenSettings,
+		onOpenUserSettings,
+		isAdmin = false,
 		anchorPosition = 'left',
 		isMobile = false
 	}: Props = $props();
 
-	const menuItems = [
-		{ id: 'chat', label: 'New Chat', icon: MessageSquare, shortcut: '⌘N', action: onCreateChat },
-		{ id: 'studio', label: 'Studio', icon: Palette, shortcut: '⌘⇧S', action: onCreateStudio },
-		{ id: 'terminal', label: 'Terminal', icon: Terminal, shortcut: '⌘T', action: onCreateTerminal },
-		{ id: 'divider', label: '', icon: null, shortcut: '', action: () => {} },
-		{ id: 'profiles', label: 'Profiles', icon: User, shortcut: '⌘⇧P', action: onOpenProfiles },
-		{ id: 'projects', label: 'Projects', icon: FolderKanban, shortcut: '⌘⇧J', action: onOpenProjects },
-		{ id: 'settings', label: 'Settings', icon: Settings, shortcut: '⌘,', action: onOpenSettings }
-	];
+	// Build menu items based on user role
+	const menuItems = $derived.by(() => {
+		const items = [
+			{ id: 'chat', label: 'New Chat', icon: MessageSquare, shortcut: '⌘N', action: onCreateChat },
+			{ id: 'terminal', label: 'Terminal', icon: Terminal, shortcut: '⌘T', action: onCreateTerminal },
+			{ id: 'divider', label: '', icon: null, shortcut: '', action: () => {} }
+		];
+
+		if (isAdmin) {
+			// Admin gets full access to profiles, projects, and admin settings
+			items.push(
+				{ id: 'profiles', label: 'Profiles', icon: User, shortcut: '⌘⇧P', action: onOpenProfiles },
+				{ id: 'projects', label: 'Projects', icon: FolderKanban, shortcut: '⌘⇧J', action: onOpenProjects },
+				{ id: 'settings', label: 'Settings', icon: Settings, shortcut: '⌘,', action: onOpenSettings }
+			);
+		} else {
+			// Non-admin users get their own settings
+			items.push(
+				{ id: 'user-settings', label: 'My Settings', icon: UserCog, shortcut: '', action: onOpenUserSettings || (() => {}) }
+			);
+		}
+
+		return items;
+	});
 
 	function handleItemClick(item: typeof menuItems[0]) {
 		item.action();
@@ -98,7 +115,7 @@
 							role="menuitem"
 						>
 							{#if item.icon}
-								<svelte:component this={item.icon} size={18} strokeWidth={1.5} />
+								<item.icon size={18} strokeWidth={1.5} />
 							{/if}
 							<span class="item-label">{item.label}</span>
 							{#if item.shortcut && !isMobile}
@@ -116,7 +133,7 @@
 	.menu-backdrop {
 		position: fixed;
 		inset: 0;
-		z-index: 1000;
+		z-index: 100000;
 		background: transparent;
 	}
 

@@ -257,8 +257,8 @@
 
 	<!-- Model Selector - Grouped by Provider -->
 	<div>
-		<label class="block text-xs text-muted-foreground mb-2">Model</label>
-		<div class="space-y-4">
+		<label id="video-model-label" class="block text-xs text-muted-foreground mb-2">Model</label>
+		<div class="space-y-4" role="group" aria-labelledby="video-model-label">
 			{#each providerGroups as group}
 				<div>
 					<div class="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
@@ -306,8 +306,8 @@
 
 	<!-- Duration Selector -->
 	<div>
-		<label class="block text-xs text-muted-foreground mb-2">Duration</label>
-		<div class="flex flex-wrap gap-2">
+		<label id="video-duration-label" class="block text-xs text-muted-foreground mb-2">Duration</label>
+		<div class="flex flex-wrap gap-2" role="group" aria-labelledby="video-duration-label">
 			{#each availableDurations as duration}
 				<button
 					type="button"
@@ -324,8 +324,8 @@
 
 	<!-- Resolution Selector -->
 	<div>
-		<label class="block text-xs text-muted-foreground mb-2">Resolution</label>
-		<div class="flex flex-wrap gap-2">
+		<label id="video-resolution-label" class="block text-xs text-muted-foreground mb-2">Resolution</label>
+		<div class="flex flex-wrap gap-2" role="group" aria-labelledby="video-resolution-label">
 			{#each availableResolutions as resolution}
 				<button
 					type="button"
@@ -342,8 +342,8 @@
 
 	<!-- Aspect Ratio -->
 	<div>
-		<label class="block text-xs text-muted-foreground mb-2">Aspect Ratio</label>
-		<div class="flex flex-wrap gap-2">
+		<label id="video-aspect-ratio-label" class="block text-xs text-muted-foreground mb-2">Aspect Ratio</label>
+		<div class="flex flex-wrap gap-2" role="group" aria-labelledby="video-aspect-ratio-label">
 			{#each availableAspectRatios as ratio}
 				<button
 					type="button"
@@ -366,13 +366,14 @@
 	<!-- Audio Toggle (only if model supports nativeAudio) -->
 	{#if showAudioToggle}
 		<div>
-			<label class="block text-xs text-muted-foreground mb-2">Audio ({currentModel.displayName})</label>
+			<label id="video-audio-label" class="block text-xs text-muted-foreground mb-2">Audio ({currentModel.displayName})</label>
 			<button
 				type="button"
 				onclick={toggleAudio}
 				disabled={isGenerating}
 				class="flex items-center gap-3 px-4 py-3 rounded-lg border transition-colors w-full {audioEnabled ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}"
 				aria-pressed={audioEnabled}
+				aria-labelledby="video-audio-label"
 			>
 				<div class="shrink-0 w-8 h-8 rounded-lg flex items-center justify-center {audioEnabled ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}">
 					{#if audioEnabled}

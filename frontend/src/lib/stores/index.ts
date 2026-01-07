@@ -38,7 +38,6 @@ export * from './canvas';
 export {
 	deck,
 	allCards,
-	visibleCards,
 	focusedCard,
 	contextPanelCollapsed,
 	workspaceBounds,

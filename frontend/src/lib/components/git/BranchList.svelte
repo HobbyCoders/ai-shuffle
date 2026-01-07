@@ -169,18 +169,20 @@
 
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                    <label class="block text-xs text-muted-foreground mb-1">Branch Name <span class="text-destructive">*</span></label>
+                    <label for="new-branch-name" class="block text-xs text-muted-foreground mb-1">Branch Name <span class="text-destructive">*</span></label>
                     <input
                         type="text"
+                        id="new-branch-name"
                         bind:value={newBranchName}
                         placeholder="feature/my-feature"
                         class="w-full px-3 py-2 bg-muted border border-border rounded-lg text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
                     />
                 </div>
                 <div>
-                    <label class="block text-xs text-muted-foreground mb-1">Start Point (optional)</label>
+                    <label for="branch-start-point" class="block text-xs text-muted-foreground mb-1">Start Point (optional)</label>
                     <input
                         type="text"
+                        id="branch-start-point"
                         bind:value={newBranchStartPoint}
                         placeholder="main, HEAD, commit SHA..."
                         class="w-full px-3 py-2 bg-muted border border-border rounded-lg text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
@@ -300,6 +302,7 @@
                                         onclick={() => handleDelete(branch.name)}
                                         disabled={deleteConfirmName !== branch.name}
                                         class="p-1 text-destructive hover:text-destructive/80 disabled:opacity-50"
+                                        aria-label="Confirm delete"
                                     >
                                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
@@ -308,6 +311,7 @@
                                     <button
                                         onclick={cancelDelete}
                                         class="p-1 text-muted-foreground hover:text-foreground"
+                                        aria-label="Cancel"
                                     >
                                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />

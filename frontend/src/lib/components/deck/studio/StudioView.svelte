@@ -1,7 +1,8 @@
 <script lang="ts">
-	import { Image, Video, FolderOpen, Mic, FileAudio } from 'lucide-svelte';
+	import { Image, Video, FolderOpen, Mic, FileAudio, Box } from 'lucide-svelte';
 	import ImageGenerator from './ImageGenerator.svelte';
 	import VideoGenerator from './VideoGenerator.svelte';
+	import Model3DGenerator from './Model3DGenerator.svelte';
 	import TTSGenerator from './TTSGenerator.svelte';
 	import STTTranscriber from './STTTranscriber.svelte';
 	import MediaPreview from './MediaPreview.svelte';
@@ -9,13 +10,13 @@
 	import GenerationHistory from './GenerationHistory.svelte';
 	import type { DeckGeneration } from '../types';
 	import { studio, activeGeneration as storeActiveGeneration, activeTab, recentGenerations } from '$lib/stores/studio';
-	import type { ImageProvider, VideoProvider, DeckGeneration as StoreDeckGeneration } from '$lib/stores/studio';
+	import type { ImageProvider, VideoProvider, Model3DProvider, DeckGeneration as StoreDeckGeneration } from '$lib/stores/studio';
 	import { onMount } from 'svelte';
 
 	// Props
 	interface Props {
 		activeGeneration?: DeckGeneration | null;
-		onStartGeneration?: (type: 'image' | 'video', config: unknown) => void;
+		onStartGeneration?: (type: 'image' | 'video' | '3d', config: unknown) => void;
 	}
 
 	let { activeGeneration = null, onStartGeneration }: Props = $props();
@@ -33,7 +34,7 @@
 	});
 
 	// Handle generation from child components
-	async function handleStartGeneration(type: 'image' | 'video', config: unknown) {
+	async function handleStartGeneration(type: 'image' | 'video' | '3d', config: unknown) {
 		try {
 			if (type === 'image') {
 				const imageConfig = config as {
@@ -87,7 +88,7 @@
 	let currentPreview = $derived(selectedAsset || activeGeneration);
 
 	// Handlers
-	function handleTabChange(tab: 'image' | 'video' | 'tts' | 'stt') {
+	function handleTabChange(tab: 'image' | 'video' | '3d' | 'tts' | 'stt') {
 		studio.setActiveTab(tab);
 	}
 
@@ -249,6 +250,16 @@
 					</button>
 					<button
 						type="button"
+						onclick={() => handleTabChange('3d')}
+						class="tab-btn"
+						class:active={$activeTab === '3d'}
+						aria-pressed={$activeTab === '3d'}
+					>
+						<Box class="w-4 h-4" />
+						<span>3D</span>
+					</button>
+					<button
+						type="button"
 						onclick={() => handleTabChange('tts')}
 						class="tab-btn"
 						class:active={$activeTab === 'tts'}
@@ -301,6 +312,8 @@
 						<ImageGenerator onStartGeneration={handleStartGeneration} />
 					{:else if $activeTab === 'video'}
 						<VideoGenerator onStartGeneration={handleStartGeneration} />
+					{:else if $activeTab === '3d'}
+						<Model3DGenerator onStartGeneration={handleStartGeneration} />
 					{:else if $activeTab === 'tts'}
 						<TTSGenerator />
 					{:else if $activeTab === 'stt'}
@@ -372,6 +385,16 @@
 						</button>
 						<button
 							type="button"
+							onclick={() => handleTabChange('3d')}
+							class="tab-btn"
+							class:active={$activeTab === '3d'}
+							aria-pressed={$activeTab === '3d'}
+						>
+							<Box class="w-4 h-4" />
+							3D Models
+						</button>
+						<button
+							type="button"
 							onclick={() => handleTabChange('tts')}
 							class="tab-btn"
 							class:active={$activeTab === 'tts'}
@@ -410,6 +433,8 @@
 						<ImageGenerator onStartGeneration={handleStartGeneration} />
 					{:else if $activeTab === 'video'}
 						<VideoGenerator onStartGeneration={handleStartGeneration} />
+					{:else if $activeTab === '3d'}
+						<Model3DGenerator onStartGeneration={handleStartGeneration} />
 					{:else if $activeTab === 'tts'}
 						<TTSGenerator />
 					{:else if $activeTab === 'stt'}
@@ -468,7 +493,8 @@
 	.preview-content {
 		flex: 1;
 		min-height: 0;
-		padding: 1rem;
+		padding: 1.25rem;
+		background: hsl(var(--muted) / 0.2);
 	}
 
 	.history-section {
@@ -488,8 +514,9 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		padding: 0.75rem 1rem;
+		padding: 0.875rem 1.25rem;
 		border-bottom: 1px solid var(--border);
+		background: hsl(var(--card));
 	}
 
 	.tab-buttons {
@@ -544,6 +571,8 @@
 	.controls-content {
 		flex: 1;
 		overflow-y: auto;
+		padding: 1rem;
+		background: hsl(var(--card) / 0.5);
 	}
 
 	/* Mobile layout */
@@ -610,6 +639,8 @@
 	.mobile-controls {
 		flex-shrink: 0;
 		border-top: 1px solid var(--border);
+		padding: 0.75rem;
+		background: hsl(var(--card) / 0.5);
 	}
 
 	.mobile-history {

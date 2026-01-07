@@ -151,9 +151,12 @@ export interface BranchListResponse {
 
 /**
  * Get all branches for a project
+ * @param projectId - The project ID
+ * @param includeRemote - Whether to include remote tracking branches (default: false for cleaner UI)
  */
-export async function getBranches(projectId: string): Promise<Branch[]> {
-    const response = await api.get<BranchListResponse>(`${BASE}/${projectId}/git/branches`);
+export async function getBranches(projectId: string, includeRemote: boolean = false): Promise<Branch[]> {
+    const params = includeRemote ? '' : '?include_remote=false';
+    const response = await api.get<BranchListResponse>(`${BASE}/${projectId}/git/branches${params}`);
     return response.branches;
 }
 

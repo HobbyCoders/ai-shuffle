@@ -30,6 +30,7 @@
 		activeMode?: ActivityMode;
 		badges?: ActivityBadges;
 		contextCollapsed?: boolean;
+		isAdmin?: boolean;
 		// Activity Panel props
 		activeTab?: ActivityTabType;
 		activeSessions?: ActiveSession[];
@@ -49,6 +50,7 @@
 		onModeChange?: (mode: ActivityMode) => void;
 		onLogoClick?: () => void;
 		onSettingsClick?: () => void;
+		onUserSettingsClick?: () => void;
 		onContextToggle?: () => void;
 		onTabChange?: (tab: ActivityTabType) => void;
 		onSessionClick?: (session: ActiveSession) => void;
@@ -64,6 +66,7 @@
 		activeMode = 'workspace',
 		badges = {},
 		contextCollapsed = false,
+		isAdmin = false,
 		// Activity Panel
 		activeTab = 'threads',
 		activeSessions = [],
@@ -83,6 +86,7 @@
 		onModeChange,
 		onLogoClick,
 		onSettingsClick,
+		onUserSettingsClick,
 		onContextToggle,
 		onTabChange,
 		onSessionClick,
@@ -128,9 +132,11 @@
 				{activeMode}
 				{badges}
 				{isMobile}
+				{isAdmin}
 				{onModeChange}
 				{onLogoClick}
 				{onSettingsClick}
+				{onUserSettingsClick}
 			/>
 		</aside>
 	{/if}
@@ -194,9 +200,11 @@
 				{activeMode}
 				{badges}
 				{isMobile}
+				{isAdmin}
 				{onModeChange}
 				{onLogoClick}
 				{onSettingsClick}
+				{onUserSettingsClick}
 			/>
 		</footer>
 	{/if}

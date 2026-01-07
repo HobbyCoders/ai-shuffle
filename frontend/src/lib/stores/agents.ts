@@ -296,24 +296,9 @@ function createAgentsStore() {
 					break;
 
 				case 'agent_launched':
-				case 'agent_started':
-				case 'agent_progress':
-				case 'agent_paused':
-				case 'agent_resumed':
-				case 'agent_completed':
-				case 'agent_failed':
-				case 'agent_cancelled':
-					// Update agent in store
+					// New agent - full data expected
+					console.log(`[Agents WS] ${message.type}:`, message.agent_id, message.data?.name);
 					if (message.data) {
-						update((state) => ({
-							...state,
-							agents: state.agents.map((a) =>
-								a.id === message.agent_id ? convertApiAgent(message.data) : a
-							)
-						}));
-					}
-					// If it's a new agent (launched), add it
-					if (message.type === 'agent_launched' && message.data) {
 						update((state) => {
 							const exists = state.agents.some((a) => a.id === message.agent_id);
 							if (!exists) {
@@ -322,8 +307,57 @@ function createAgentsStore() {
 									agents: [...state.agents, convertApiAgent(message.data)]
 								};
 							}
-							return state;
+							// If exists, update with full data but preserve logs
+							return {
+								...state,
+								agents: state.agents.map((a) => {
+									if (a.id === message.agent_id) {
+										const converted = convertApiAgent(message.data);
+										return { ...converted, logs: a.logs };
+									}
+									return a;
+								})
+							};
 						});
+					}
+					break;
+
+				case 'agent_started':
+				case 'agent_progress':
+				case 'agent_paused':
+				case 'agent_resumed':
+				case 'agent_completed':
+				case 'agent_failed':
+				case 'agent_cancelled':
+					// Partial or full update - merge with existing data
+					console.log(`[Agents WS] ${message.type}:`, message.agent_id, message.data?.status);
+					if (message.data) {
+						update((state) => ({
+							...state,
+							agents: state.agents.map((a) => {
+								if (a.id !== message.agent_id) return a;
+
+								// Check if this is a full agent response (has name/prompt) or partial update
+								if (message.data.name && message.data.prompt) {
+									// Full update - replace agent data but preserve logs
+									const converted = convertApiAgent(message.data);
+									return { ...converted, logs: a.logs };
+								} else {
+									// Partial update - only update provided fields
+									return {
+										...a,
+										status: message.data.status ?? a.status,
+										progress: message.data.progress ?? a.progress,
+										error: message.data.error ?? a.error,
+										prUrl: message.data.pr_url ?? a.prUrl,
+										branch: message.data.branch ?? a.branch,
+										resultSummary: message.data.result_summary ?? a.resultSummary,
+										tasks: message.data.tasks ?? a.tasks,
+										completedAt: message.data.completed_at ? new Date(message.data.completed_at) : a.completedAt
+									};
+								}
+							})
+						}));
 					}
 					break;
 
@@ -391,10 +425,12 @@ function createAgentsStore() {
 		 * This is idempotent - safe to call multiple times
 		 */
 		async init(): Promise<void> {
+			console.log('[Agents Store] init() called, browser:', browser, 'initialized:', initialized);
 			if (!browser) return;
 
 			// If already initialized and WebSocket is connected, just refresh data
 			if (initialized && wsManager) {
+				console.log('[Agents Store] Already initialized, refreshing...');
 				await this.refresh();
 				return;
 			}
@@ -403,7 +439,9 @@ function createAgentsStore() {
 
 			try {
 				// Fetch initial agents list
+				console.log('[Agents Store] Fetching agents from API...');
 				const response = await apiRequest<{ agents: ApiAgentResponse[]; total: number }>('');
+				console.log('[Agents Store] API response:', response.agents.length, 'agents, total:', response.total);
 
 				update((s) => ({
 					...s,
@@ -414,6 +452,7 @@ function createAgentsStore() {
 				// Connect WebSocket for real-time updates
 				this.connectWebSocket();
 				initialized = true;
+				console.log('[Agents Store] Initialization complete');
 			} catch (error) {
 				console.error('[Agents] Failed to initialize:', error);
 				update((s) => ({
@@ -469,6 +508,7 @@ function createAgentsStore() {
 			projectId?: string;
 			autoBranch?: boolean;
 			autoPr?: boolean;
+			autoMerge?: boolean;
 			autoReview?: boolean;
 			maxDurationMinutes?: number;
 			baseBranch?: string;
@@ -482,6 +522,7 @@ function createAgentsStore() {
 					project_id: options.projectId,
 					auto_branch: options.autoBranch ?? true,
 					auto_pr: options.autoPr ?? true,
+					auto_merge: options.autoMerge ?? false,
 					auto_review: options.autoReview ?? false,
 					max_duration_minutes: options.maxDurationMinutes ?? 0,
 					base_branch: options.baseBranch
@@ -595,14 +636,26 @@ function createAgentsStore() {
 		 */
 		async fetchAgent(id: string): Promise<BackgroundAgent | null> {
 			try {
+				console.log(`[Agents] Fetching agent ${id}...`);
 				const response = await apiRequest<ApiAgentResponse>(`/${id}`);
+				console.log(`[Agents] Got response for agent ${id}:`, response);
 				const agent = convertApiAgent(response);
 
-				// Update in store
-				update((state) => ({
-					...state,
-					agents: state.agents.map((a) => (a.id === id ? agent : a))
-				}));
+				// Update or add agent in store
+				update((state) => {
+					const exists = state.agents.some(a => a.id === id);
+					if (exists) {
+						return {
+							...state,
+							agents: state.agents.map((a) => (a.id === id ? agent : a))
+						};
+					} else {
+						return {
+							...state,
+							agents: [...state.agents, agent]
+						};
+					}
+				});
 
 				return agent;
 			} catch (error) {

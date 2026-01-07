@@ -6,15 +6,16 @@
 	 * - Header with drag handle and window controls
 	 * - Card type icon (Lucide icons)
 	 * - Editable title on double-click
-	 * - Window controls: minimize, maximize/restore, close
+	 * - Window controls: maximize/restore, close
 	 * - 8 resize handles (n, s, e, w, ne, nw, se, sw)
-	 * - States: focused, minimized, maximized
+	 * - States: focused, maximized
 	 * - Glassmorphism styling
 	 */
 
-	import { MessageSquare, Bot, Palette, Terminal, Square, X, Maximize2, Copy, Settings, User, Users, FolderKanban } from 'lucide-svelte';
+	import { MessageSquare, Bot, Terminal, Square, X, Maximize2, Copy, Settings, User, Users, FolderKanban } from 'lucide-svelte';
 	import type { DeckCard, CardType } from './types';
 	import type { Snippet } from 'svelte';
+	import { layoutMode } from '$lib/stores/deck';
 
 	interface Props {
 		card: DeckCard;
@@ -60,7 +61,6 @@
 	const cardIcons: Record<CardType, typeof MessageSquare> = {
 		chat: MessageSquare,
 		agent: Bot,
-		studio: Palette,
 		terminal: Terminal,
 		settings: Settings,
 		profile: User,
@@ -69,6 +69,9 @@
 	};
 
 	const CardIcon = $derived(cardIcons[card.type]);
+
+	// In focus mode, cards are always fullscreen and cannot be un-maximized
+	const isFocusMode = $derived($layoutMode === 'focus');
 
 	// Title editing
 	function handleTitleDoubleClick() {
@@ -201,9 +204,10 @@
 		}
 	}
 
-	// Double-click header to maximize/restore
+	// Double-click header to maximize/restore (disabled in focus mode)
 	function handleHeaderDoubleClick() {
-		if (!isEditingTitle) {
+		// In focus mode, don't allow toggling maximize - cards are always fullscreen
+		if (!isEditingTitle && !isFocusMode) {
 			onMaximize();
 		}
 	}
@@ -220,7 +224,6 @@
 	class="base-card"
 	class:focused={card.focused}
 	class:maximized={card.maximized}
-	class:minimized={card.minimized}
 	class:dragging={isDragging}
 	class:resizing={isResizing}
 	onclick={handleCardClick}
@@ -259,18 +262,21 @@
 		</div>
 
 		<div class="window-controls">
-			<button
-				class="control-btn maximize"
-				onclick={(e) => { e.stopPropagation(); onMaximize(); }}
-				title={card.maximized ? 'Restore' : 'Maximize'}
-				aria-label={card.maximized ? 'Restore' : 'Maximize'}
-			>
-				{#if card.maximized}
-					<Copy size={12} />
-				{:else}
-					<Square size={12} />
-				{/if}
-			</button>
+			<!-- Hide maximize button in focus mode since cards are always fullscreen -->
+			{#if !isFocusMode}
+				<button
+					class="control-btn maximize"
+					onclick={(e) => { e.stopPropagation(); onMaximize(); }}
+					title={card.maximized ? 'Restore' : 'Maximize'}
+					aria-label={card.maximized ? 'Restore' : 'Maximize'}
+				>
+					{#if card.maximized}
+						<Copy size={12} />
+					{:else}
+						<Square size={12} />
+					{/if}
+				</button>
+			{/if}
 			<button
 				class="control-btn close"
 				onclick={(e) => { e.stopPropagation(); onClose(); }}
@@ -377,10 +383,6 @@
 		border-radius: 0;
 		border: none;
 		box-shadow: none;
-	}
-
-	.base-card.minimized {
-		display: none;
 	}
 
 	.base-card.dragging,

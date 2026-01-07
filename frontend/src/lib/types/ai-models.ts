@@ -13,6 +13,7 @@
 export type ImageProvider = 'google-gemini' | 'google-imagen' | 'openai-gpt-image' | 'openai-dalle';
 export type VideoProvider = 'google-veo' | 'openai-sora';
 export type TTSProvider = 'google-tts' | 'openai-tts';
+export type Model3DProvider = 'meshy';
 export type STTProvider = 'google-stt' | 'openai-stt';
 
 // ============================================================================
@@ -87,6 +88,38 @@ export interface VideoModel {
 	deprecated?: boolean;
 }
 
+
+// ============================================================================
+// 3D Model Types
+// ============================================================================
+
+export type Model3DMode = 'text-to-3d' | 'image-to-3d' | 'retexture' | 'rig' | 'animate';
+export type Model3DArtStyle = 'realistic' | 'sculpture';
+export type Model3DTopology = 'quad' | 'triangle';
+
+export interface Model3DModelCapabilities {
+	textTo3D: boolean;
+	imageTo3D: boolean;
+	retexture: boolean;
+	rigging: boolean;
+	animation: boolean;
+	pbr: boolean;
+}
+
+export interface Model3DModel {
+	id: string;
+	name: string;
+	displayName: string;
+	provider: Model3DProvider;
+	description: string;
+	capabilities: Model3DModelCapabilities;
+	artStyles: Model3DArtStyle[];
+	topologies: Model3DTopology[];
+	outputFormats: string[];
+	maxPolycount: number;
+	pricePerModel: number;
+	deprecated?: boolean;
+}
 // ============================================================================
 // TTS Model Types
 // ============================================================================
@@ -825,11 +858,79 @@ export const OPENAI_STT_MODELS: STTModel[] = [
 ];
 
 // ============================================================================
+
+// ============================================================================
+// Model Definitions - Meshy (3D)
+// ============================================================================
+
+export const MESHY_3D_MODELS: Model3DModel[] = [
+	{
+		id: 'meshy-6',
+		name: 'meshy-6',
+		displayName: 'Meshy 6',
+		provider: 'meshy',
+		description: 'Latest Meshy model with best quality and fastest generation',
+		capabilities: {
+			textTo3D: true,
+			imageTo3D: true,
+			retexture: true,
+			rigging: true,
+			animation: true,
+			pbr: true
+		},
+		artStyles: ['realistic', 'sculpture'],
+		topologies: ['quad', 'triangle'],
+		outputFormats: ['glb', 'fbx', 'obj', 'usdz', 'stl', '3mf', 'blend'],
+		maxPolycount: 300000,
+		pricePerModel: 0.20
+	},
+	{
+		id: 'meshy-5',
+		name: 'meshy-5',
+		displayName: 'Meshy 5',
+		provider: 'meshy',
+		description: 'Balanced quality and speed for 3D generation',
+		capabilities: {
+			textTo3D: true,
+			imageTo3D: true,
+			retexture: true,
+			rigging: true,
+			animation: true,
+			pbr: true
+		},
+		artStyles: ['realistic', 'sculpture'],
+		topologies: ['quad', 'triangle'],
+		outputFormats: ['glb', 'fbx', 'obj', 'usdz', 'stl', '3mf', 'blend'],
+		maxPolycount: 300000,
+		pricePerModel: 0.10
+	},
+	{
+		id: 'meshy-4',
+		name: 'meshy-4',
+		displayName: 'Meshy 4',
+		provider: 'meshy',
+		description: 'Fast generation with good quality',
+		capabilities: {
+			textTo3D: true,
+			imageTo3D: true,
+			retexture: true,
+			rigging: false,
+			animation: false,
+			pbr: true
+		},
+		artStyles: ['realistic', 'sculpture'],
+		topologies: ['quad', 'triangle'],
+		outputFormats: ['glb', 'fbx', 'obj', 'usdz', 'stl'],
+		maxPolycount: 200000,
+		pricePerModel: 0.05
+	}
+];
 // Combined Model Collections
 // ============================================================================
 
 export const ALL_IMAGE_MODELS: ImageModel[] = [...GOOGLE_IMAGE_MODELS, ...OPENAI_IMAGE_MODELS];
 export const ALL_VIDEO_MODELS: VideoModel[] = [...GOOGLE_VIDEO_MODELS, ...OPENAI_VIDEO_MODELS];
+export const ALL_3D_MODELS: Model3DModel[] = [...MESHY_3D_MODELS];
 export const ALL_TTS_MODELS: TTSModel[] = [...GOOGLE_TTS_MODELS, ...OPENAI_TTS_MODELS];
 export const ALL_STT_MODELS: STTModel[] = [...GOOGLE_STT_MODELS, ...OPENAI_STT_MODELS];
 
@@ -888,6 +989,7 @@ export function getImageModel(id: string): ImageModel | undefined {
 export function getVideoModel(id: string): VideoModel | undefined {
 	return ALL_VIDEO_MODELS.find(m => m.id === id);
 }
+export function get3DModel(id: string): Model3DModel | undefined {	return ALL_3D_MODELS.find(m => m.id === id);}
 
 export function getTTSModel(id: string): TTSModel | undefined {
 	return ALL_TTS_MODELS.find(m => m.id === id);
@@ -948,5 +1050,6 @@ export const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
 	'openai-gpt-image': 'OpenAI GPT Image',
 	'openai-sora': 'OpenAI Sora',
 	'openai-tts': 'OpenAI TTS',
-	'openai-stt': 'OpenAI Whisper'
+	'openai-stt': 'OpenAI Whisper',
+	'meshy': 'Meshy AI'
 };
