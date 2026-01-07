@@ -26,6 +26,7 @@ from app.core.slash_commands import (
 # New V2 rewind services - direct JSONL manipulation
 from app.core.jsonl_rewind import jsonl_rewind_service
 from app.core.checkpoint_manager import checkpoint_manager
+from app.core.sync_engine import sync_engine
 from app.core.models import (
     RewindRequest, RewindCheckpoint, RewindCheckpointsResponse,
     RewindExecuteResponse, RewindStatus
@@ -483,6 +484,17 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
         restore_code=request.restore_code,
         include_response=request.include_response
     )
+
+    # Broadcast rewind event to all connected devices for this session
+    if result.success:
+        import asyncio
+        asyncio.create_task(
+            sync_engine.broadcast_session_rewound(
+                session_id=session_id,
+                target_uuid=request.target_uuid,
+                messages_removed=result.messages_removed or 0
+            )
+        )
 
     return RewindResponseV2(
         success=result.success,

@@ -295,7 +295,7 @@ async def setup_admin(request: SetupRequest, response: Response):
             key="session",
             value=result["token"],
             httponly=True,
-            secure=False,  # Set to True in production with HTTPS
+            secure=settings.cookie_secure,
             samesite="lax",
             max_age=settings.session_expire_days * 24 * 60 * 60
         )
@@ -341,7 +341,7 @@ async def login(req: Request, login_data: LoginRequest, response: Response):
         key="session",
         value=token,
         httponly=True,
-        secure=False,  # Set to True in production with HTTPS
+        secure=settings.cookie_secure,
         samesite="lax",
         max_age=settings.session_expire_days * 24 * 60 * 60
     )
@@ -391,7 +391,7 @@ async def login_with_api_key(req: Request, login_data: ApiKeyLoginRequest, respo
         key="session",
         value=session_token,
         httponly=True,
-        secure=False,  # Set to True in production with HTTPS
+        secure=settings.cookie_secure,
         samesite="lax",
         max_age=settings.api_key_session_expire_hours * 60 * 60
     )
@@ -569,8 +569,8 @@ async def github_logout(token: str = Depends(require_admin)):
 
 
 @router.get("/diagnostics")
-async def auth_diagnostics(token: str = Depends(require_auth)):
-    """Run diagnostic checks for authentication issues"""
+async def auth_diagnostics(token: str = Depends(require_admin)):
+    """Run diagnostic checks for authentication issues (Admin only)"""
     diagnostics = {}
 
     # Check HOME environment variable

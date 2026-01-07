@@ -26,8 +26,22 @@ from typing import Optional, Dict, Any, Callable, Awaitable
 from dataclasses import dataclass, field
 from datetime import datetime
 import re
+import uuid
 
 logger = logging.getLogger(__name__)
+
+# Pattern for validating UUID format (used for SDK session IDs)
+UUID_PATTERN = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', re.IGNORECASE)
+
+
+def validate_session_id(session_id: str) -> bool:
+    """
+    Validate that a session ID is a valid UUID format.
+    This prevents command injection via malicious session IDs.
+    """
+    if not session_id:
+        return False
+    return bool(UUID_PATTERN.match(session_id))
 
 
 @dataclass
@@ -93,6 +107,14 @@ class CLIBridge:
         """
         if self._is_running:
             logger.warning(f"CLI bridge already running for session {self.session_id}")
+            return False
+
+        # Security: Validate session IDs to prevent command injection
+        if not validate_session_id(self.session_id):
+            logger.error(f"Invalid session_id format: {self.session_id}")
+            return False
+        if not validate_session_id(self.sdk_session_id):
+            logger.error(f"Invalid sdk_session_id format: {self.sdk_session_id}")
             return False
 
         try:

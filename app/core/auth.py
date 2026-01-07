@@ -65,7 +65,20 @@ def find_gh_executable() -> Optional[str]:
 
 
 def run_subprocess_cmd(cmd: list, **kwargs) -> subprocess.CompletedProcess:
-    """Run a subprocess command with proper Windows handling"""
+    """
+    Run a subprocess command with proper Windows handling.
+
+    Security Note: This function should only be called with system-generated
+    commands (paths from shutil.which, known CLI arguments). Never pass
+    user-controlled input directly to this function.
+    """
+    # Security: Validate that command arguments don't contain shell metacharacters
+    # This is a defense-in-depth measure - callers should already sanitize input
+    shell_metacharacters = set(';&|$`\\"\'\n\r')
+    for arg in cmd:
+        if any(c in arg for c in shell_metacharacters):
+            raise ValueError(f"Command argument contains potentially dangerous characters: {arg[:50]}")
+
     if sys.platform == 'win32' and cmd and cmd[0].endswith('.cmd'):
         # On Windows, .cmd files need shell=True
         return subprocess.run(' '.join(f'"{c}"' if ' ' in c else c for c in cmd), shell=True, **kwargs)

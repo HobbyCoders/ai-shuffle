@@ -38,30 +38,54 @@ router = APIRouter(prefix="/api/v1", tags=["WebSocket"])
 _active_chat_sessions: dict[str, asyncio.Task] = {}
 
 
-async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> bool:
-    """Validate authentication token for WebSocket connection"""
+async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> tuple[bool, Optional[dict]]:
+    """
+    Validate authentication token for WebSocket connection.
+
+    Returns:
+        tuple[bool, Optional[dict]]: (is_authenticated, api_user_or_none)
+        - For admin sessions: (True, None)
+        - For API user sessions: (True, api_user_dict)
+        - For failed auth: (False, None)
+    """
+    import hashlib
+
     # First try the token from query parameter
     if token:
-        # Check session token
+        # Check admin session token
         session = database.get_auth_session(token)
         if session:
-            return True
+            return (True, None)  # Admin user
 
-        # Check API key (hashed)
-        import hashlib
+        # Check API key web session token
+        api_key_session = database.get_api_key_session(token)
+        if api_key_session:
+            api_user = database.get_api_user(api_key_session["api_user_id"])
+            if api_user and api_user.get("is_active", True):
+                return (True, api_user)
+
+        # Check raw API key (hashed)
         key_hash = hashlib.sha256(token.encode()).hexdigest()
         api_user = database.get_api_user_by_key_hash(key_hash)
-        if api_user:
-            return True
+        if api_user and api_user.get("is_active", True):
+            return (True, api_user)
 
     # Also check the cookie directly (for httpOnly cookies that JS can't read)
     cookie_token = websocket.cookies.get("session")
     if cookie_token:
+        # Check admin session
         session = database.get_auth_session(cookie_token)
         if session:
-            return True
+            return (True, None)  # Admin user
 
-    return False
+        # Check API key web session
+        api_key_session = database.get_api_key_session(cookie_token)
+        if api_key_session:
+            api_user = database.get_api_user(api_key_session["api_user_id"])
+            if api_user and api_user.get("is_active", True):
+                return (True, api_user)
+
+    return (False, None)
 
 
 # =============================================================================
@@ -116,12 +140,15 @@ async def chat_websocket(
     await websocket.accept()
 
     # Now authenticate
-    if not await authenticate_websocket(websocket, token):
+    is_authenticated, api_user = await authenticate_websocket(websocket, token)
+    if not is_authenticated:
         logger.warning(f"Chat WebSocket auth failed - token provided: {token is not None}, cookie: {websocket.cookies.get('session') is not None}")
         await websocket.close(code=4001, reason="Authentication failed")
         return
 
-    logger.info("Chat WebSocket connected and authenticated")
+    # Extract api_user_id if authenticated as an API user
+    api_user_id: Optional[str] = api_user["id"] if api_user else None
+    logger.info(f"Chat WebSocket connected and authenticated (api_user_id={api_user_id})")
 
     # Generate device_id if not provided
     if not device_id:
@@ -149,6 +176,12 @@ async def chat_websocket(
         message_id = str(uuid.uuid4())
         stream_started = False
 
+        # Unregister this device from SyncEngine while streaming
+        # This prevents duplicate events (we get direct events via send_json)
+        # If the device disconnects and reconnects, it will re-register and get sync events
+        await sync_engine.unregister_device(device_id, session_id)
+        logger.info(f"Unregistered device {device_id} during streaming to prevent duplicates")
+
         try:
             logger.info(f"Starting query for session {session_id}, profile={profile_id}, project={project_id}, overrides={overrides}")
             await send_json({"type": "start", "session_id": session_id, "message_id": message_id})
@@ -169,30 +202,51 @@ async def chat_websocket(
 
                 # Broadcast to other devices via SyncEngine
                 # Start streaming on first content event
+                # Note: We pass source_device_id=None to NOT exclude any device.
+                # The source device gets direct events via send_json(), but if it
+                # disconnects and reconnects, its NEW websocket should receive sync events.
+                # The frontend handles any potential duplication.
                 if not stream_started and event_type in ('stream_start', 'stream_delta', 'chunk', 'tool_use'):
                     await sync_engine.broadcast_stream_start(
                         session_id=session_id,
                         message_id=message_id,
-                        source_device_id=device_id
+                        source_device_id=None  # Don't exclude - let all registered devices receive
                     )
                     stream_started = True
 
-                # Broadcast stream chunks
+                # Broadcast stream chunks (source_device_id=None to not exclude any device)
                 if event_type == 'stream_delta':
-                    # Real-time streaming delta
+                    # Real-time streaming delta - handle different delta types
                     delta_type = event.get('delta_type', 'text')
-                    chunk_data = {
-                        'content': event.get('content', ''),
-                        'delta_type': delta_type,
-                        'index': event.get('index', 0)
-                    }
-                    await sync_engine.broadcast_stream_chunk(
-                        session_id=session_id,
-                        message_id=message_id,
-                        chunk_type='text',
-                        chunk_data=chunk_data,
-                        source_device_id=device_id
-                    )
+
+                    if delta_type == 'tool_input':
+                        # Tool input streaming - broadcast as tool_input type
+                        chunk_data = {
+                            'content': event.get('content', ''),
+                            'delta_type': delta_type,
+                            'index': event.get('index', 0)
+                        }
+                        await sync_engine.broadcast_stream_chunk(
+                            session_id=session_id,
+                            message_id=message_id,
+                            chunk_type='tool_input',
+                            chunk_data=chunk_data,
+                            source_device_id=None
+                        )
+                    else:
+                        # Text or other delta - broadcast as text
+                        chunk_data = {
+                            'content': event.get('content', ''),
+                            'delta_type': delta_type,
+                            'index': event.get('index', 0)
+                        }
+                        await sync_engine.broadcast_stream_chunk(
+                            session_id=session_id,
+                            message_id=message_id,
+                            chunk_type='text',
+                            chunk_data=chunk_data,
+                            source_device_id=None
+                        )
                 elif event_type == 'chunk':
                     # Legacy chunk event (when include_partial_messages=False)
                     chunk_data = {
@@ -203,7 +257,7 @@ async def chat_websocket(
                         message_id=message_id,
                         chunk_type='text',
                         chunk_data=chunk_data,
-                        source_device_id=device_id
+                        source_device_id=None
                     )
                 elif event_type == 'tool_use':
                     # Tool use event
@@ -218,7 +272,7 @@ async def chat_websocket(
                         message_id=message_id,
                         chunk_type='tool_use',
                         chunk_data=chunk_data,
-                        source_device_id=device_id
+                        source_device_id=None
                     )
                 elif event_type == 'tool_result':
                     # Tool result event
@@ -231,7 +285,119 @@ async def chat_websocket(
                         message_id=message_id,
                         chunk_type='tool_result',
                         chunk_data=chunk_data,
-                        source_device_id=device_id
+                        source_device_id=None
+                    )
+                elif event_type == 'system':
+                    # System message (e.g., /context output, local commands)
+                    chunk_data = {
+                        'content': '',
+                        'subtype': event.get('subtype'),
+                        'data': event.get('data')
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='system',
+                        chunk_data=chunk_data,
+                        source_device_id=None
+                    )
+                elif event_type == 'subagent_start':
+                    # Subagent task started
+                    chunk_data = {
+                        'agent_id': event.get('agent_id'),
+                        'agent_type': event.get('agent_type'),
+                        'description': event.get('description'),
+                        'prompt': event.get('prompt'),
+                        'tool_id': event.get('tool_id')
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='subagent_start',
+                        chunk_data=chunk_data,
+                        source_device_id=None
+                    )
+                elif event_type == 'subagent_chunk':
+                    # Text chunk from subagent
+                    chunk_data = {
+                        'agent_id': event.get('agent_id'),
+                        'content': event.get('content', '')
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='subagent_chunk',
+                        chunk_data=chunk_data,
+                        source_device_id=None
+                    )
+                elif event_type == 'subagent_tool_use':
+                    # Tool use within subagent
+                    chunk_data = {
+                        'agent_id': event.get('agent_id'),
+                        'name': event.get('name'),
+                        'id': event.get('id'),
+                        'input': event.get('input')
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='subagent_tool_use',
+                        chunk_data=chunk_data,
+                        source_device_id=None
+                    )
+                elif event_type == 'subagent_tool_result':
+                    # Tool result within subagent
+                    chunk_data = {
+                        'agent_id': event.get('agent_id'),
+                        'tool_use_id': event.get('tool_use_id'),
+                        'output': event.get('output', '')
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='subagent_tool_result',
+                        chunk_data=chunk_data,
+                        source_device_id=None
+                    )
+                elif event_type == 'subagent_done':
+                    # Subagent completed
+                    chunk_data = {
+                        'agent_id': event.get('agent_id'),
+                        'result': event.get('result'),
+                        'is_error': event.get('is_error', False)
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='subagent_done',
+                        chunk_data=chunk_data,
+                        source_device_id=None
+                    )
+                elif event_type == 'stream_block_start':
+                    # Start of a content block (text, tool_use, etc.)
+                    chunk_data = {
+                        'block_type': event.get('block_type'),
+                        'index': event.get('index'),
+                        'content_block': event.get('content_block')
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='stream_block_start',
+                        chunk_data=chunk_data,
+                        source_device_id=None
+                    )
+                elif event_type == 'stream_block_stop':
+                    # End of a content block
+                    chunk_data = {
+                        'index': event.get('index')
+                    }
+                    await sync_engine.broadcast_stream_chunk(
+                        session_id=session_id,
+                        message_id=message_id,
+                        chunk_type='stream_block_stop',
+                        chunk_data=chunk_data,
+                        source_device_id=None
                     )
                 elif event_type == 'done':
                     # Stream completed - broadcast end
@@ -241,7 +407,7 @@ async def chat_websocket(
                             message_id=message_id,
                             metadata=event.get('metadata', {}),
                             interrupted=False,
-                            source_device_id=device_id
+                            source_device_id=None
                         )
 
             logger.info(f"Query completed for session {session_id}")
@@ -256,7 +422,7 @@ async def chat_websocket(
                     message_id=message_id,
                     metadata={},
                     interrupted=True,
-                    source_device_id=device_id
+                    source_device_id=None
                 )
 
         except Exception as e:
@@ -269,10 +435,20 @@ async def chat_websocket(
                     message_id=message_id,
                     metadata={"error": str(e)},
                     interrupted=True,
-                    source_device_id=device_id
+                    source_device_id=None
                 )
 
         finally:
+            # Re-register device with SyncEngine now that streaming is complete,
+            # but ONLY if the websocket is still connected.
+            # If the user disconnected during streaming (phone locked, etc.),
+            # they will re-register when they reconnect via load_session.
+            if websocket.client_state == WebSocketState.CONNECTED:
+                await sync_engine.register_device(device_id, session_id, websocket)
+                logger.info(f"Re-registered device {device_id} after streaming complete")
+            else:
+                logger.info(f"Skipping re-register for device {device_id} - websocket disconnected during streaming")
+
             # Clean up task reference
             if session_id in _active_chat_sessions:
                 del _active_chat_sessions[session_id]
@@ -310,8 +486,14 @@ async def chat_websocket(
                             database.create_session(
                                 session_id=session_id,
                                 profile_id=profile_id,
-                                project_id=project_id
+                                project_id=project_id,
+                                api_user_id=api_user_id
                             )
+                            # Immediately notify frontend of new session_id so it persists on refresh
+                            await send_json({
+                                "type": "session_created",
+                                "session_id": session_id
+                            })
 
                         # Register device with session if switching sessions
                         if session_id != current_session_id:
@@ -330,6 +512,16 @@ async def chat_websocket(
                             content=prompt
                         )
 
+                        # Broadcast user message to other devices
+                        await sync_engine.broadcast_message_added(
+                            session_id=session_id,
+                            message={
+                                "role": "user",
+                                "content": prompt
+                            },
+                            source_device_id=device_id  # Exclude the sender
+                        )
+
                         # Cancel any existing query for this session
                         if session_id in _active_chat_sessions:
                             _active_chat_sessions[session_id].cancel()
@@ -337,6 +529,16 @@ async def chat_websocket(
                                 await _active_chat_sessions[session_id]
                             except asyncio.CancelledError:
                                 pass
+
+                        # Pre-mark session as streaming so other devices know immediately
+                        # This prevents race conditions where a device loads the session
+                        # before broadcast_stream_start is called inside run_query
+                        message_id = str(uuid.uuid4())
+                        await sync_engine.broadcast_stream_start(
+                            session_id=session_id,
+                            message_id=message_id,
+                            source_device_id=device_id  # Exclude sender - they get direct events
+                        )
 
                         # Start new query task
                         query_task = asyncio.create_task(
@@ -428,9 +630,10 @@ async def chat_websocket(
                                 # Check if session is currently streaming (late-joining device)
                                 is_streaming = sync_engine.is_session_streaming(session_id)
                                 streaming_buffer = None
+                                logger.info(f"Session {session_id} streaming status: {is_streaming}")
                                 if is_streaming:
                                     streaming_buffer = sync_engine.get_streaming_buffer(session_id)
-                                    logger.info(f"Session {session_id} is streaming, sending buffer to late-joining device")
+                                    logger.info(f"Session {session_id} is streaming, sending buffer with {len(streaming_buffer) if streaming_buffer else 0} messages")
 
                                 await send_json({
                                     "type": "history",
@@ -440,8 +643,29 @@ async def chat_websocket(
                                     "isStreaming": is_streaming,
                                     "streamingBuffer": streaming_buffer
                                 })
+
+                                # Broadcast to other devices that this session was opened
+                                await sync_engine.broadcast_session_opened(
+                                    session_id=session_id,
+                                    device_id=device_id,
+                                    is_new=False  # Resuming existing session
+                                )
                             else:
                                 await send_json({"type": "error", "message": "Session not found"})
+
+                    elif msg_type == "close_session":
+                        # Close/unload the current session
+                        old_session_id = current_session_id
+                        if old_session_id:
+                            await sync_engine.unregister_device(device_id, old_session_id)
+                            # Broadcast to other devices that this session was closed
+                            await sync_engine.broadcast_session_closed(
+                                session_id=old_session_id,
+                                device_id=device_id
+                            )
+                            current_session_id = None
+                            logger.info(f"Device {device_id} closed session {old_session_id}")
+                            await send_json({"type": "session_closed", "session_id": old_session_id})
 
                     elif msg_type == "pong":
                         pass  # Keep-alive response
@@ -458,18 +682,20 @@ async def chat_websocket(
             except asyncio.CancelledError:
                 pass
 
-            # Cancel any running query
+            # NOTE: We intentionally do NOT cancel the query task when the websocket closes.
+            # This allows streaming to continue for other devices even if the originating
+            # device disconnects (e.g., page refresh, phone locked, network issue).
+            # The query will complete naturally and broadcast stream_end to all devices.
+            # If the user wants to stop the query, they should use the "stop" message explicitly.
             if query_task and not query_task.done():
-                query_task.cancel()
-                try:
-                    await query_task
-                except asyncio.CancelledError:
-                    pass
+                logger.info(f"WebSocket closed but query task still running for session - letting it continue for other devices")
 
-            # Unregister device from sync engine
+            # Unregister device from sync engine, but only if still using this websocket
+            # This prevents race conditions where a new connection was established
+            # before this cleanup runs (e.g., page reload during streaming)
             if current_session_id:
-                await sync_engine.unregister_device(device_id, current_session_id)
-                logger.info(f"Unregistered device {device_id} from session {current_session_id}")
+                await sync_engine.unregister_device(device_id, current_session_id, websocket)
+                logger.info(f"Cleanup: unregister device {device_id} from session {current_session_id}")
 
     except WebSocketDisconnect:
         logger.info("Chat WebSocket disconnected")
@@ -741,7 +967,8 @@ async def cli_websocket(
     """
     await websocket.accept()
 
-    if not await authenticate_websocket(websocket, token):
+    is_authenticated, _ = await authenticate_websocket(websocket, token)
+    if not is_authenticated:
         await websocket.close(code=4001, reason="Authentication failed")
         return
 

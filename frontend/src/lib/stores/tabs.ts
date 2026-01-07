@@ -136,6 +136,22 @@ const SAVE_DEBOUNCE_MS = 1000;
 // Flag to prevent saving during initial load
 let isInitializing = false;
 
+// Persistent device ID for multi-device sync
+// This ensures the same browser/device keeps the same ID across reconnections
+function getOrCreateDeviceId(): string {
+	if (typeof window === 'undefined') {
+		return `device-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+	}
+
+	let deviceId = localStorage.getItem('aihub_device_id');
+	if (!deviceId) {
+		deviceId = `device-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+		localStorage.setItem('aihub_device_id', deviceId);
+		console.log('[Tabs] Generated new device ID:', deviceId);
+	}
+	return deviceId;
+}
+
 /**
  * Save tabs state to backend (debounced)
  */
@@ -248,12 +264,13 @@ function createTabsStore() {
 	});
 
 	/**
-	 * Get WebSocket URL
+	 * Get WebSocket URL with device_id for multi-device sync
 	 */
 	function getWsUrl(): string {
 		const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 		const host = window.location.host;
-		return `${protocol}//${host}/api/v1/ws/chat`;
+		const deviceId = getOrCreateDeviceId();
+		return `${protocol}//${host}/api/v1/ws/chat?device_id=${encodeURIComponent(deviceId)}`;
 	}
 
 	/**
@@ -303,9 +320,9 @@ function createTabsStore() {
 		// Try to get token from cookie (may be null if httpOnly)
 		// Server will also check cookie directly for httpOnly cookies
 		const token = getAuthToken();
-		let url = getWsUrl();
+		let url = getWsUrl(); // Already includes device_id
 		if (token) {
-			url = `${url}?token=${encodeURIComponent(token)}`;
+			url = `${url}&token=${encodeURIComponent(token)}`;
 		}
 		console.log(`[Tab ${tabId}] ${isReconnect ? 'Reconnecting' : 'Connecting'} to WebSocket...`);
 
@@ -316,20 +333,18 @@ function createTabsStore() {
 			console.log(`[Tab ${tabId}] WebSocket connected`);
 			updateTab(tabId, { wsConnected: true, error: null });
 
-			// If reconnecting and tab has a session, reload it to get latest messages
-			// But only if not currently streaming (don't interrupt active streams)
-			if (isReconnect) {
-				const tab = getTab(tabId);
-				if (tab?.sessionId && !tab.isStreaming) {
-					console.log(`[Tab ${tabId}] Reloading session after reconnect:`, tab.sessionId);
-					// Use the WebSocket to request session reload
-					ws.send(JSON.stringify({
-						type: 'load_session',
-						session_id: tab.sessionId
-					}));
-				} else if (tab?.isStreaming) {
-					console.log(`[Tab ${tabId}] Skipping session reload - streaming in progress`);
-				}
+			// Always register with SyncEngine by sending load_session if tab has a session
+			// This is critical for multi-device sync - devices must be registered to receive events
+			const tab = getTab(tabId);
+			if (tab?.sessionId) {
+				console.log(`[Tab ${tabId}] Registering with session via load_session:`, tab.sessionId);
+				// Use the WebSocket to register with SyncEngine and get latest messages
+				// The backend will return isStreaming=true with buffer if still active,
+				// or isStreaming=false with complete history if finished
+				ws.send(JSON.stringify({
+					type: 'load_session',
+					session_id: tab.sessionId
+				}));
 			}
 
 			// Start ping timer
@@ -412,10 +427,543 @@ function createTabsStore() {
 	}
 
 	/**
+	 * Handle sync events from other devices (via SyncEngine)
+	 */
+	function handleSyncEvent(tabId: string, data: Record<string, unknown>) {
+		const eventType = data.event_type as string;
+		const sessionId = data.session_id as string;
+		const eventData = data.data as Record<string, unknown>;
+
+		// Only process events for tabs that have this session loaded
+		const tab = getTab(tabId);
+		if (!tab || tab.sessionId !== sessionId) {
+			return;
+		}
+
+		console.log(`[Tab ${tabId}] Sync event:`, eventType, eventData);
+
+		switch (eventType) {
+			case 'message_added': {
+				// A new message was added by another device (e.g., user message)
+				const message = eventData.message as Record<string, unknown>;
+				console.log(`[Tab ${tabId}] Message added from another device:`, message);
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(t => {
+						if (t.id !== tabId) return t;
+						return {
+							...t,
+							messages: [...t.messages, {
+								id: `msg-sync-${Date.now()}`,
+								role: message.role as 'user' | 'assistant',
+								content: message.content as string,
+								type: message.role === 'user' ? undefined : 'text' as const,
+								streaming: false
+							}]
+						};
+					})
+				}));
+				break;
+			}
+
+			case 'stream_start': {
+				// Another device started streaming
+				console.log(`[Tab ${tabId}] Another device started streaming`);
+				const messageId = eventData.message_id as string;
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(t => {
+						if (t.id !== tabId) return t;
+						return {
+							...t,
+							isStreaming: true,
+							messages: [...t.messages, {
+								id: messageId || `assistant-sync-${Date.now()}`,
+								role: 'assistant' as const,
+								content: '',
+								type: 'text' as const,
+								streaming: true
+							}]
+						};
+					})
+				}));
+				break;
+			}
+
+			case 'stream_chunk': {
+				// Content chunk from another device
+				const chunkType = eventData.chunk_type as string;
+				const content = eventData.content as string;
+				console.log(`[Tab ${tabId}] stream_chunk: type=${chunkType}, content="${content?.substring(0, 50)}..."`);
+
+				if (chunkType === 'text') {
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(t => {
+							if (t.id !== tabId) return t;
+
+							const messages = [...t.messages];
+							const streamingIdx = messages.findLastIndex(
+								m => m.type === 'text' && m.role === 'assistant' && m.streaming
+							);
+
+							if (streamingIdx !== -1) {
+								messages[streamingIdx] = {
+									...messages[streamingIdx],
+									content: messages[streamingIdx].content + (content || '')
+								};
+							} else {
+								messages.push({
+									id: `text-sync-${Date.now()}`,
+									role: 'assistant' as const,
+									content: content || '',
+									type: 'text' as const,
+									streaming: true
+								});
+							}
+
+							return { ...t, messages };
+						})
+					}));
+				} else if (chunkType === 'tool_input') {
+					// Tool input streaming - accumulate JSON in the current tool_use message
+					const partialJson = content;
+					console.log(`[Tab ${tabId}] tool_input sync: ${partialJson?.length} chars`);
+
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(t => {
+							if (t.id !== tabId) return t;
+
+							const messages = [...t.messages];
+							const toolIdx = messages.findLastIndex(
+								m => m.type === 'tool_use' && m.streaming
+							);
+
+							if (toolIdx !== -1) {
+								const current = messages[toolIdx];
+								const partialInput = (current.partialToolInput || '') + partialJson;
+
+								// Try to parse accumulated JSON
+								let parsedInput = current.toolInput || {};
+								try {
+									parsedInput = JSON.parse(partialInput);
+								} catch {
+									// Not valid JSON yet, keep accumulating
+								}
+
+								messages[toolIdx] = {
+									...current,
+									partialToolInput: partialInput,
+									toolInput: parsedInput
+								};
+							}
+
+							return { ...t, messages };
+						})
+					}));
+				} else if (chunkType === 'tool_use') {
+					// Tool use event - this is the ONLY place we create tool messages for sync
+					// (stream_block_start is ignored for tool_use to avoid duplicates)
+					const toolId = eventData.tool_id as string;
+					const toolName = eventData.tool_name as string;
+					const toolInput = eventData.tool_input as Record<string, unknown>;
+					console.log(`[Tab ${tabId}] tool_use sync:`, { toolName, toolId, toolInput });
+
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(t => {
+							if (t.id !== tabId) return t;
+
+							let messages = [...t.messages];
+
+							// Handle current streaming text message - finalize it
+							const streamingIdx = messages.findLastIndex(
+								m => m.type === 'text' && m.role === 'assistant' && m.streaming
+							);
+							if (streamingIdx !== -1) {
+								if (messages[streamingIdx].content) {
+									messages[streamingIdx] = { ...messages[streamingIdx], streaming: false };
+								} else {
+									messages = messages.filter((_, i) => i !== streamingIdx);
+								}
+							}
+
+							// Create the tool use message
+							messages.push({
+								id: `tool-sync-${Date.now()}-${toolId || ''}`,
+								role: 'assistant' as const,
+								content: '',
+								type: 'tool_use' as const,
+								toolName: toolName,
+								toolId: toolId,
+								toolInput: toolInput,
+								toolStatus: 'running' as const,
+								streaming: true
+							});
+
+							return { ...t, messages };
+						})
+					}));
+				} else if (chunkType === 'tool_result') {
+					console.log(`[Tab ${tabId}] tool_result sync:`, {
+						tool_id: eventData.tool_id,
+						content: content?.substring(0, 100),
+						full_eventData: eventData
+					});
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(t => {
+							if (t.id !== tabId) return t;
+
+							const messages = [...t.messages];
+
+							// Mark the matching tool_use as complete
+							const toolId = eventData.tool_id as string;
+							const toolUseIdx = messages.findLastIndex(
+								m => m.type === 'tool_use' && (m.toolId === toolId || m.streaming)
+							);
+							if (toolUseIdx !== -1) {
+								messages[toolUseIdx] = {
+									...messages[toolUseIdx],
+									toolResult: content,
+									toolStatus: 'complete' as const,
+									streaming: false
+								};
+							}
+
+							return { ...t, messages };
+						})
+					}));
+				} else if (chunkType === 'system') {
+					// System message from another device
+					const subtype = eventData.subtype as string;
+					const systemData = eventData.data as Record<string, unknown>;
+					console.log(`[Tab ${tabId}] system sync:`, { subtype, systemData });
+
+					// Extract content for display
+					let displayContent = '';
+					if (systemData?.content && typeof systemData.content === 'string') {
+						displayContent = systemData.content;
+					} else if (typeof systemData === 'object') {
+						displayContent = JSON.stringify(systemData, null, 2);
+					}
+
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(t => {
+							if (t.id !== tabId) return t;
+
+							// Mark any streaming text message as complete
+							let messages = t.messages.map(m =>
+								m.streaming && m.type === 'text' ? { ...m, streaming: false } : m
+							);
+							// Remove empty streaming text messages
+							messages = messages.filter(
+								m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
+							);
+
+							// Add the system message
+							messages.push({
+								id: `system-sync-${Date.now()}`,
+								role: 'system' as const,
+								content: displayContent,
+								type: 'system' as const,
+								systemSubtype: subtype,
+								systemData: systemData,
+								streaming: false
+							});
+
+							return { ...t, messages };
+						})
+					}));
+				} else if (chunkType === 'subagent_start') {
+					// Subagent task started on another device
+					const agentId = eventData.agent_id as string;
+					const agentType = eventData.agent_type as string;
+					const description = eventData.description as string;
+					const prompt = eventData.prompt as string;
+					const toolId = eventData.tool_id as string;
+					console.log(`[Tab ${tabId}] subagent_start sync:`, { agentId, agentType, description });
+
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(t => {
+							if (t.id !== tabId) return t;
+
+							let messages = [...t.messages];
+
+							// Mark any streaming text message as complete
+							const streamingIdx = messages.findLastIndex(
+								m => m.type === 'text' && m.role === 'assistant' && m.streaming
+							);
+							if (streamingIdx !== -1) {
+								if (messages[streamingIdx].content) {
+									messages[streamingIdx] = { ...messages[streamingIdx], streaming: false };
+								} else {
+									messages = messages.filter((_, i) => i !== streamingIdx);
+								}
+							}
+
+							// Add subagent message group
+							messages.push({
+								id: `subagent-sync-${agentId}`,
+								role: 'assistant' as const,
+								content: '',
+								type: 'subagent' as const,
+								toolId: toolId,
+								agentId: agentId,
+								agentType: agentType,
+								agentDescription: description,
+								agentPrompt: prompt,
+								agentStatus: 'running' as const,
+								agentChildren: [],
+								streaming: true
+							});
+
+							return { ...t, messages };
+						})
+					}));
+				} else if (chunkType === 'subagent_chunk') {
+					// Text chunk from subagent on another device
+					const agentId = eventData.agent_id as string;
+					const content = eventData.content as string;
+
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(t => {
+							if (t.id !== tabId) return t;
+
+							const messages = t.messages.map(m => {
+								if (m.type === 'subagent' && m.agentId === agentId) {
+									const children = [...(m.agentChildren || [])];
+									const lastChild = children[children.length - 1];
+
+									if (lastChild && lastChild.type === 'text') {
+										children[children.length - 1] = {
+											...lastChild,
+											content: lastChild.content + content
+										};
+									} else {
+										children.push({
+											id: `${agentId}-text-sync-${Date.now()}`,
+											type: 'text',
+											content: content
+										});
+									}
+									return { ...m, agentChildren: children };
+								}
+								return m;
+							});
+
+							return { ...t, messages };
+						})
+					}));
+				} else if (chunkType === 'subagent_tool_use') {
+					// Tool use within subagent on another device
+					const agentId = eventData.agent_id as string;
+					const toolName = eventData.name as string;
+					const toolId = eventData.id as string;
+					const toolInput = eventData.input as Record<string, unknown>;
+
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(t => {
+							if (t.id !== tabId) return t;
+
+							const messages = t.messages.map(m => {
+								if (m.type === 'subagent' && m.agentId === agentId) {
+									const children = [...(m.agentChildren || [])];
+									children.push({
+										id: `${agentId}-tool-sync-${toolId}`,
+										type: 'tool_use',
+										content: '',
+										toolName: toolName,
+										toolId: toolId,
+										toolInput: toolInput,
+										toolStatus: 'running'
+									});
+									return { ...m, agentChildren: children };
+								}
+								return m;
+							});
+
+							return { ...t, messages };
+						})
+					}));
+				} else if (chunkType === 'subagent_tool_result') {
+					// Tool result within subagent on another device
+					const agentId = eventData.agent_id as string;
+					const toolUseId = eventData.tool_use_id as string;
+					const output = eventData.output as string;
+
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(t => {
+							if (t.id !== tabId) return t;
+
+							const messages = t.messages.map(m => {
+								if (m.type === 'subagent' && m.agentId === agentId) {
+									const children = [...(m.agentChildren || [])];
+									// Find matching tool_use and embed result
+									for (let i = children.length - 1; i >= 0; i--) {
+										if (children[i].type === 'tool_use' && children[i].toolId === toolUseId) {
+											children[i] = {
+												...children[i],
+												toolResult: output,
+												toolStatus: 'complete'
+											};
+											break;
+										}
+									}
+									return { ...m, agentChildren: children };
+								}
+								return m;
+							});
+
+							return { ...t, messages };
+						})
+					}));
+				} else if (chunkType === 'subagent_done') {
+					// Subagent completed on another device
+					const agentId = eventData.agent_id as string;
+					const result = eventData.result as string | undefined;
+					const isError = eventData.is_error as boolean | undefined;
+					console.log(`[Tab ${tabId}] subagent_done sync:`, { agentId, isError });
+
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(t => {
+							if (t.id !== tabId) return t;
+
+							const messages = t.messages.map(m => {
+								if (m.type === 'subagent' && m.agentId === agentId) {
+									return {
+										...m,
+										content: result || '',
+										agentStatus: isError ? 'error' as const : 'completed' as const,
+										streaming: false
+									};
+								}
+								return m;
+							});
+
+							return { ...t, messages };
+						})
+					}));
+				} else if (chunkType === 'stream_block_start') {
+					// Start of a content block from another device
+					// For tool_use blocks, we DO NOT create messages here - we let the 'tool_use' event
+					// create the message to avoid race conditions and duplicates.
+					// The 'tool_use' event has the full data (name, id, input) anyway.
+					const blockType = eventData.block_type as string;
+					const contentBlock = eventData.content_block as { id?: string; name?: string };
+					console.log(`[Tab ${tabId}] stream_block_start sync (ignored for tool_use):`, { blockType, contentBlock });
+					// No action needed - tool_use event will create the message
+				} else if (chunkType === 'stream_block_stop') {
+					// End of a content block - just log for now
+					console.log(`[Tab ${tabId}] stream_block_stop sync:`, { index: eventData.index });
+				}
+				break;
+			}
+
+			case 'stream_end': {
+				// Another device finished streaming
+				console.log(`[Tab ${tabId}] Another device finished streaming`);
+				const metadata = eventData.metadata as Record<string, unknown>;
+				const interrupted = eventData.interrupted as boolean;
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(t => {
+						if (t.id !== tabId) return t;
+
+						// Mark all streaming messages as complete
+						let messages = t.messages.map(m =>
+							m.streaming ? { ...m, streaming: false } : m
+						);
+
+						// Remove empty text messages
+						messages = messages.filter(
+							m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
+						);
+
+						// Add metadata to last assistant message
+						if (messages.length > 0) {
+							const lastIdx = messages.findLastIndex(m => m.role === 'assistant');
+							if (lastIdx !== -1) {
+								messages[lastIdx] = {
+									...messages[lastIdx],
+									metadata,
+									content: interrupted
+										? messages[lastIdx].content + '\n\n[Stopped]'
+										: messages[lastIdx].content
+								};
+							}
+						}
+
+						return { ...t, messages, isStreaming: false };
+					})
+				}));
+
+				// Refresh sessions list
+				loadSessionsInternal();
+				break;
+			}
+
+			case 'session_rewound': {
+				// Another device rewound the session - reload to get updated messages
+				const targetUuid = eventData.target_uuid as string;
+				const messagesRemoved = eventData.messages_removed as number;
+				console.log(`[Tab ${tabId}] Session rewound by another device:`, { targetUuid, messagesRemoved });
+
+				// Reload the session to get the updated message list
+				const tab = getTab(tabId);
+				if (tab?.sessionId) {
+					const ws = tabConnections.get(tabId);
+					if (ws && ws.readyState === WebSocket.OPEN) {
+						ws.send(JSON.stringify({
+							type: 'load_session',
+							session_id: tab.sessionId
+						}));
+					}
+				}
+				break;
+			}
+
+			case 'session_opened': {
+				// Another device opened/resumed this session
+				const deviceId = eventData.device_id as string;
+				const isNew = eventData.is_new as boolean;
+				console.log(`[Tab ${tabId}] Session opened by another device:`, { deviceId, isNew });
+				// Just log for now - could show a notification or indicator
+				break;
+			}
+
+			case 'session_closed': {
+				// Another device closed this session
+				const deviceId = eventData.device_id as string;
+				console.log(`[Tab ${tabId}] Session closed by another device:`, { deviceId });
+				// Just log for now - could show a notification or indicator
+				break;
+			}
+		}
+	}
+
+	/**
 	 * Handle incoming WebSocket message for a tab
 	 */
 	function handleTabMessage(tabId: string, data: Record<string, unknown>) {
 		const msgType = data.type as string;
+		const eventType = data.event_type as string;
+
+		// Handle sync events from other devices
+		if (eventType) {
+			handleSyncEvent(tabId, data);
+			return;
+		}
 
 		switch (msgType) {
 			case 'history': {
@@ -472,16 +1020,60 @@ function createTabsStore() {
 					return chatMessage;
 				}) || [];
 
+				// Handle streaming state from backend
+				const isStreaming = data.isStreaming as boolean || false;
+				const streamingBuffer = data.streamingBuffer as Array<Record<string, unknown>> | undefined;
+				console.log(`[Tab ${tabId}] History response - isStreaming:`, isStreaming, 'bufferLen:', streamingBuffer?.length || 0);
+
+				// If session is actively streaming and has buffered content, merge it
+				let finalMessages = messages;
+				if (isStreaming && streamingBuffer && streamingBuffer.length > 0) {
+					console.log(`[Tab ${tabId}] Late-joining streaming session, merging buffer:`, streamingBuffer.length, 'messages');
+					const bufferMessages: ChatMessage[] = streamingBuffer.map((m) => ({
+						id: `buffer-${Date.now()}-${Math.random()}`,
+						role: 'assistant' as const,
+						content: (m.content as string) || '',
+						type: (m.type || m.chunk_type) as MessageType,
+						toolName: m.tool_name as string | undefined,
+						toolId: m.tool_id as string | undefined,
+						toolInput: m.tool_input as Record<string, unknown> | undefined,
+						streaming: (m.streaming as boolean) ?? true
+					}));
+					finalMessages = [...messages, ...bufferMessages];
+				}
+
+				console.log(`[Tab ${tabId}] Updating tab state - isStreaming:`, isStreaming, 'messageCount:', finalMessages.length);
 				updateTab(tabId, {
 					sessionId: data.session_id as string,
-					messages
+					messages: finalMessages,
+					isStreaming: isStreaming,
+					error: null  // Clear any previous error
 				});
 
 				// Update tab title based on first message
-				if (messages.length > 0 && messages[0].role === 'user') {
-					const title = messages[0].content.substring(0, 30) + (messages[0].content.length > 30 ? '...' : '');
+				if (finalMessages.length > 0 && finalMessages[0].role === 'user') {
+					const title = finalMessages[0].content.substring(0, 30) + (finalMessages[0].content.length > 30 ? '...' : '');
 					updateTab(tabId, { title });
 				}
+				break;
+			}
+
+			case 'session_created': {
+				// New session was created - save sessionId immediately so it persists on refresh
+				// This is sent BEFORE streaming starts, ensuring we can reconnect if page refreshes
+				const sessionId = data.session_id as string;
+				console.log(`[Tab ${tabId}] New session created:`, sessionId);
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+						return { ...tab, sessionId };
+					})
+				}));
+
+				// Save immediately - critical for reconnection on refresh
+				saveTabsToServer(get({ subscribe }));
 				break;
 			}
 
@@ -503,6 +1095,9 @@ function createTabsStore() {
 						};
 					})
 				}));
+
+				// Save again in case session_created wasn't received (backwards compat)
+				saveTabsToServer(get({ subscribe }));
 				break;
 			}
 
@@ -1377,13 +1972,12 @@ function createTabsStore() {
 						activeTabId: persistedState.activeTabId || restoredTabs[0]?.id || null
 					}));
 
-					// Connect WebSockets and load session messages for each tab
+					// Connect WebSockets for each tab
+					// Note: We rely on WebSocket load_session (sent in ws.onopen) to load messages
+					// This ensures we get streaming state and buffer for active sessions
+					// DO NOT call loadSessionInTab here - it uses REST which doesn't have streaming info
 					for (const tab of restoredTabs) {
 						connectTab(tab.id);
-						// Load session messages if tab has a session
-						if (tab.sessionId) {
-							this.loadSessionInTab(tab.id, tab.sessionId);
-						}
 					}
 
 					console.log('[Tabs] Restored', restoredTabs.length, 'tabs from server');
@@ -1471,6 +2065,15 @@ function createTabsStore() {
 			// Don't close if it's the last tab
 			if (state.tabs.length <= 1) {
 				return;
+			}
+
+			// Send close_session message before disconnecting (so other devices know)
+			const tab = state.tabs.find(t => t.id === tabId);
+			if (tab?.sessionId) {
+				const ws = tabConnections.get(tabId);
+				if (ws && ws.readyState === WebSocket.OPEN) {
+					ws.send(JSON.stringify({ type: 'close_session' }));
+				}
 			}
 
 			// Disconnect WebSocket

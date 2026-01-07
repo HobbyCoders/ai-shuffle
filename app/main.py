@@ -171,14 +171,51 @@ app = FastAPI(
 # Security headers middleware (runs first on response)
 app.add_middleware(SecurityHeadersMiddleware)
 
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Request body size limit middleware
+class LimitRequestBodyMiddleware(BaseHTTPMiddleware):
+    """Limit request body size to prevent DoS attacks"""
+
+    async def dispatch(self, request: Request, call_next):
+        # Check Content-Length header if present
+        content_length = request.headers.get("content-length")
+        max_size = settings.max_request_body_mb * 1024 * 1024
+
+        if content_length and int(content_length) > max_size:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=413,
+                content={"detail": f"Request body too large. Maximum size is {settings.max_request_body_mb}MB"}
+            )
+
+        return await call_next(request)
+
+app.add_middleware(LimitRequestBodyMiddleware)
+
+# CORS middleware - configure origins via CORS_ORIGINS environment variable
+# Use "*" only for development; in production, specify exact origins
+cors_origins = [origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()]
+
+# If "*" is in the list, we need to handle it specially
+# Note: allow_credentials=True is incompatible with allow_origins=["*"] in production
+if "*" in cors_origins:
+    # Development mode - allow all origins but warn
+    logger.warning("CORS configured with wildcard '*' - this is insecure for production!")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,  # Must be False when using wildcard
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    # Production mode - use specific origins with credentials
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 # Include API routers
 app.include_router(system.router)

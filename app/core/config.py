@@ -46,6 +46,15 @@ class Settings(BaseSettings):
     # Security - Trusted Proxies (for getting real IP behind reverse proxy)
     trusted_proxy_headers: str = "X-Forwarded-For,X-Real-IP"  # Comma-separated
 
+    # Security - CORS (comma-separated origins, or "*" for development only)
+    cors_origins: str = "http://localhost:8000,http://127.0.0.1:8000"
+
+    # Security - Cookie settings
+    cookie_secure: bool = True  # Set to False only for local HTTP development
+
+    # Security - Request limits
+    max_request_body_mb: int = 50  # Maximum request body size in MB
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

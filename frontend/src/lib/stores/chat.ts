@@ -799,10 +799,12 @@ function createChatStore() {
 
 	/**
 	 * Internal function to load sessions list
+	 * For admins: loads sessions where api_user_id IS NULL (their own chats)
+	 * For API users: the backend automatically filters to their sessions
 	 */
 	async function loadSessionsInternal() {
 		try {
-			const sessions = await api.get<Session[]>('/sessions?limit=50');
+			const sessions = await api.get<Session[]>('/sessions?limit=50&admin_only=true');
 			update(s => ({ ...s, sessions }));
 		} catch (e) {
 			console.error('Failed to load sessions:', e);

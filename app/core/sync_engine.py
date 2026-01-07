@@ -167,11 +167,26 @@ class SyncEngine:
             logger.info(f"Device {device_id} registered to watch session {session_id}")
             return connection
 
-    async def unregister_device(self, device_id: str, session_id: str):
-        """Unregister a device from watching a session"""
+    async def unregister_device(self, device_id: str, session_id: str, websocket: Optional[WebSocket] = None):
+        """Unregister a device from watching a session.
+
+        Args:
+            device_id: The device ID to unregister
+            session_id: The session ID to unregister from
+            websocket: Optional - if provided, only unregister if the current connection
+                      uses this exact websocket. This prevents race conditions where
+                      a new connection is established before cleanup of the old one.
+        """
         async with self._lock:
             if session_id in self._connections:
                 if device_id in self._connections[session_id]:
+                    # If websocket is provided, only unregister if it matches
+                    if websocket is not None:
+                        current_conn = self._connections[session_id][device_id]
+                        if current_conn.websocket is not websocket:
+                            logger.info(f"Device {device_id} has new connection, skipping unregister for old websocket")
+                            return
+
                     del self._connections[session_id][device_id]
                     logger.info(f"Device {device_id} unregistered from session {session_id}")
 
@@ -208,20 +223,26 @@ class SyncEngine:
         session_id = event.session_id
 
         if session_id not in self._connections:
+            logger.debug(f"No connections for session {session_id}, skipping broadcast")
             return
 
         # Get connections to broadcast to
         connections = list(self._connections[session_id].values())
+        logger.info(f"Broadcasting {event.event_type} to {len(connections)} devices for session {session_id[:8]}...")
 
         # Send to all devices except the excluded one
         failed_devices = []
         for conn in connections:
             if exclude_device_id and conn.device_id == exclude_device_id:
+                logger.debug(f"Skipping source device {conn.device_id[:8]}")
                 continue
 
+            logger.debug(f"Sending {event.event_type} to device {conn.device_id[:8]}")
             success = await conn.send_event(event)
             if not success:
                 failed_devices.append(conn.device_id)
+            else:
+                logger.debug(f"Successfully sent {event.event_type} to device {conn.device_id[:8]}")
 
         # Clean up failed connections
         if failed_devices:
@@ -236,10 +257,15 @@ class SyncEngine:
         message_id: str,
         source_device_id: Optional[str] = None
     ):
-        """Notify all devices that streaming has started for a session"""
-        self._streaming_sessions.add(session_id)
-        # Create a new streaming buffer for this session
-        self._streaming_buffers[session_id] = StreamingBuffer(session_id=session_id)
+        """Notify all devices that streaming has started for a session.
+
+        This method is idempotent - calling it multiple times for the same session
+        is safe and won't clear the streaming buffer.
+        """
+        # Only create buffer if not already streaming (idempotent)
+        if session_id not in self._streaming_sessions:
+            self._streaming_sessions.add(session_id)
+            self._streaming_buffers[session_id] = StreamingBuffer(session_id=session_id)
 
         event = SyncEvent(
             event_type="stream_start",
@@ -342,6 +368,62 @@ class SyncEngine:
             source_device_id=source_device_id
         )
         await self.broadcast_event(event, exclude_device_id=source_device_id)
+
+    async def broadcast_session_rewound(
+        self,
+        session_id: str,
+        target_uuid: str,
+        messages_removed: int,
+        source_device_id: Optional[str] = None
+    ):
+        """Broadcast that a session was rewound (messages removed)"""
+        event = SyncEvent(
+            event_type="session_rewound",
+            session_id=session_id,
+            data={
+                "target_uuid": target_uuid,
+                "messages_removed": messages_removed
+            },
+            source_device_id=source_device_id
+        )
+        # Don't exclude any device - all devices need to know about rewind
+        await self.broadcast_event(event, exclude_device_id=None)
+
+    async def broadcast_session_opened(
+        self,
+        session_id: str,
+        device_id: str,
+        is_new: bool = False
+    ):
+        """Broadcast that a device opened/resumed a session"""
+        event = SyncEvent(
+            event_type="session_opened",
+            session_id=session_id,
+            data={
+                "device_id": device_id,
+                "is_new": is_new
+            },
+            source_device_id=device_id
+        )
+        # Notify all devices in session except the one that opened it
+        await self.broadcast_event(event, exclude_device_id=device_id)
+
+    async def broadcast_session_closed(
+        self,
+        session_id: str,
+        device_id: str
+    ):
+        """Broadcast that a device closed a session"""
+        event = SyncEvent(
+            event_type="session_closed",
+            session_id=session_id,
+            data={
+                "device_id": device_id
+            },
+            source_device_id=device_id
+        )
+        # Notify all devices in session except the one that closed it
+        await self.broadcast_event(event, exclude_device_id=device_id)
 
     async def get_session_state(self, session_id: str) -> Dict[str, Any]:
         """Get current state of a session for new device joining"""
