@@ -76,6 +76,38 @@
 		return `$${cost.toFixed(4)}`;
 	}
 
+	// Streaming cursor HTML to inject inline with text
+	const STREAMING_CURSOR = '<span class="streaming-cursor inline-block w-2 h-4 ml-0.5 bg-primary animate-pulse align-middle"></span>';
+
+	/**
+	 * Inject the streaming cursor inside the last text-containing element
+	 * so it appears inline with the text instead of below block elements.
+	 */
+	function injectStreamingCursor(html: string): string {
+		// Find the last closing tag that can contain inline content
+		// Priority: look for common inline/text containers from the end
+		const inlineClosingTags = ['</p>', '</li>', '</td>', '</th>', '</span>', '</strong>', '</em>', '</a>', '</code>'];
+
+		let lastIndex = -1;
+		let lastTag = '';
+
+		for (const tag of inlineClosingTags) {
+			const idx = html.lastIndexOf(tag);
+			if (idx > lastIndex) {
+				lastIndex = idx;
+				lastTag = tag;
+			}
+		}
+
+		if (lastIndex !== -1) {
+			// Insert cursor just before the last closing tag
+			return html.slice(0, lastIndex) + STREAMING_CURSOR + html.slice(lastIndex);
+		}
+
+		// Fallback: append cursor at the end
+		return html + STREAMING_CURSOR;
+	}
+
 	function renderMarkdown(text: string, isStreaming: boolean = false): string {
 		// If streaming, hide media content to prevent flickering - show placeholder instead
 		if (isStreaming) {
@@ -91,7 +123,10 @@
 			// Replace file download links with placeholder
 			processedContent = processedContent.replace(/[^\]]+\]\((\/api\/files\/[^)]+)\)/g,
 				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">File preparing...</div>');
-			return marked(processedContent, { breaks: true }) as string;
+			let html = marked(processedContent, { breaks: true }) as string;
+			// Inject streaming cursor inside the last element so it flows inline with text
+			html = injectStreamingCursor(html);
+			return html;
 		}
 
 		// Process base64 images with download capability and overlay buttons
@@ -317,9 +352,6 @@
 			<div class="prose prose-sm max-w-none break-words" style="overflow-wrap: anywhere; word-break: break-word;">
 				{#if content}
 					{@html renderMarkdown(content, streaming)}
-					{#if streaming}
-						<span class="inline-block w-2 h-4 ml-0.5 bg-primary animate-pulse"></span>
-					{/if}
 				{:else if streaming && !hasPartialMessages}
 					<!-- Only show placeholder dots when partial messages is disabled -->
 					<div class="flex gap-1 py-2">

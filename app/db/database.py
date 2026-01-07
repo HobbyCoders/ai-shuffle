@@ -2103,6 +2103,38 @@ def log_usage(
         )
 
 
+def get_last_session_usage(session_id: str) -> Optional[Dict[str, Any]]:
+    """Get the most recent usage entry for a session.
+
+    Returns cost and duration info for the last query turn in the session.
+    This is used to populate metadata for the last assistant message when
+    loading chat history (since JSONL files don't store cost/duration).
+
+    Returns:
+        Dict with cost_usd, duration_ms, tokens_in, tokens_out, model
+        or None if no usage found
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT cost_usd, duration_ms, tokens_in, tokens_out, model
+            FROM usage_log
+            WHERE session_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+        """, (session_id,))
+        row = cursor.fetchone()
+        if row:
+            return {
+                "total_cost_usd": row["cost_usd"],
+                "duration_ms": row["duration_ms"],
+                "tokens_in": row["tokens_in"],
+                "tokens_out": row["tokens_out"],
+                "model": row["model"]
+            }
+        return None
+
+
 def get_usage_stats() -> Dict[str, Any]:
     """Get aggregate usage statistics"""
     with get_db() as conn:

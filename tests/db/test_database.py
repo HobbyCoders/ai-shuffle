@@ -1592,6 +1592,37 @@ class TestUsageLogging:
         assert stats["total_tokens_out"] == 200
         assert stats["total_cost_usd"] == 0.03
 
+    def test_get_last_session_usage(self, mock_db, setup_profile):
+        """get_last_session_usage should return the most recent usage entry."""
+        db.create_session("session-1", setup_profile)
+        # Add two usage entries
+        db.log_usage("session-1", setup_profile, "model-1", 50, 100, 0.01, 500)
+        db.log_usage("session-1", setup_profile, "model-2", 75, 150, 0.025, 750)
+
+        result = db.get_last_session_usage("session-1")
+
+        assert result is not None
+        # Should return the most recent entry (model-2)
+        assert result["total_cost_usd"] == 0.025
+        assert result["duration_ms"] == 750
+        assert result["tokens_in"] == 75
+        assert result["tokens_out"] == 150
+        assert result["model"] == "model-2"
+
+    def test_get_last_session_usage_not_found(self, mock_db, setup_profile):
+        """get_last_session_usage should return None if no usage exists."""
+        db.create_session("session-1", setup_profile)
+
+        result = db.get_last_session_usage("session-1")
+
+        assert result is None
+
+    def test_get_last_session_usage_nonexistent_session(self, mock_db):
+        """get_last_session_usage should return None for nonexistent session."""
+        result = db.get_last_session_usage("nonexistent-session")
+
+        assert result is None
+
 
 # =============================================================================
 # API Key Session Tests

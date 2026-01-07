@@ -841,6 +841,26 @@ async def chat_websocket(
                                         })
                                     logger.info(f"Loaded {len(messages)} messages from DB for session {session_id}")
 
+                                # Attach cost/duration metadata to last assistant message
+                                # (JSONL files don't store this, so we get it from usage_log)
+                                if messages:
+                                    # Find the last assistant text message
+                                    for i in range(len(messages) - 1, -1, -1):
+                                        msg = messages[i]
+                                        if msg.get("role") == "assistant" and msg.get("type") in ("text", None):
+                                            # Get cost/duration from usage_log
+                                            last_usage = database.get_last_session_usage(session_id)
+                                            if last_usage:
+                                                existing_metadata = msg.get("metadata") or {}
+                                                # Merge usage metadata without overwriting existing values
+                                                msg["metadata"] = {
+                                                    **existing_metadata,
+                                                    "total_cost_usd": last_usage.get("total_cost_usd"),
+                                                    "duration_ms": last_usage.get("duration_ms"),
+                                                }
+                                                logger.debug(f"Attached cost/duration to message: ${last_usage.get('total_cost_usd')}, {last_usage.get('duration_ms')}ms")
+                                            break
+
                                 # Check if session is currently streaming (late-joining device)
                                 is_streaming = sync_engine.is_session_streaming(session_id)
                                 streaming_buffer = None
@@ -851,14 +871,17 @@ async def chat_websocket(
                                 if is_streaming:
                                     active_task = _active_chat_sessions.get(session_id)
                                     if active_task is None or active_task.done():
-                                        # Stale streaming state - clean it up
-                                        logger.warning(f"Session {session_id} marked as streaming but no active task - clearing stale state")
+                                        # Stale streaming state - clean it up silently
+                                        # Don't broadcast interrupted=True as the stream completed normally,
+                                        # the client just missed the completion event while disconnected.
+                                        # Use interrupted=False to avoid showing "[Stopped]" incorrectly.
+                                        logger.warning(f"Session {session_id} marked as streaming but no active task - clearing stale state (stream completed normally)")
                                         await sync_engine.broadcast_stream_end(
                                             session_id=session_id,
                                             message_id="stale-cleanup",
                                             metadata={},
-                                            interrupted=True,
-                                            source_device_id=None
+                                            interrupted=False,  # Changed from True - stream completed, not interrupted
+                                            source_device_id=device_id  # Exclude self from broadcast
                                         )
                                         is_streaming = False
                                     else:

@@ -441,6 +441,28 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                 msg["type"] = "text"
             messages.append(msg)
 
+    # Attach cost/duration metadata to last assistant message
+    # (JSONL files don't store cost/duration, so we get it from usage_log)
+    if messages:
+        # Find the last assistant text message
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            role = msg.get("role")
+            msg_type = msg.get("type")
+            if role == "assistant" and msg_type in ("text", None):
+                # Get cost/duration from usage_log
+                last_usage = database.get_last_session_usage(session_id)
+                if last_usage:
+                    existing_metadata = msg.get("metadata") or {}
+                    # Merge usage metadata without overwriting existing values
+                    msg["metadata"] = {
+                        **existing_metadata,
+                        "total_cost_usd": last_usage.get("total_cost_usd"),
+                        "duration_ms": last_usage.get("duration_ms"),
+                    }
+                    logger.debug(f"Attached cost/duration to message: ${last_usage.get('total_cost_usd')}, {last_usage.get('duration_ms')}ms")
+                break
+
     session["messages"] = messages
     session["tags"] = database.get_session_tags(session_id)
     session["has_forks"] = database.session_has_forks(session_id)
