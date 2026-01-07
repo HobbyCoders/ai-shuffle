@@ -1631,15 +1631,13 @@ def build_options_from_profile(
     # Determine permission mode
     permission_mode = overrides.get("permission_mode") or config.get("permission_mode", "default")
 
-    # Create stderr callback to capture CLI errors
+    # Create stderr callback to capture CLI output
     def stderr_callback(line: str):
         # Log all stderr at INFO level for debugging subagent issues
         logger.info(f"[Claude CLI stderr] {line}")
         # If a queue is provided, put the line for forwarding to frontend
-        # BUT only forward actual errors - not informational messages like compaction summaries
+        # Include a tag to help frontend distinguish errors from info
         if stderr_queue is not None:
-            # Filter out non-error stderr - Claude SDK outputs some informational content to stderr
-            # Only forward lines that look like actual errors
             line_lower = line.lower()
             is_error = (
                 "error" in line_lower or
@@ -1651,11 +1649,11 @@ def build_options_from_profile(
                 line.startswith("Error:") or
                 line.startswith("error:")
             )
-            if is_error:
-                try:
-                    stderr_queue.put_nowait(line)
-                except asyncio.QueueFull:
-                    logger.warning(f"[Claude CLI stderr] Queue full, dropping: {line}")
+            is_compact = "compact" in line_lower or "summary" in line_lower
+            try:
+                stderr_queue.put_nowait({"line": line, "is_error": is_error, "is_compact": is_compact})
+            except asyncio.QueueFull:
+                logger.warning(f"[Claude CLI stderr] Queue full, dropping: {line}")
 
     # Process model selection - handle special 1M context models
     # Models ending in "-1m" use the base model with 1M context beta header
@@ -3051,7 +3049,23 @@ async def stream_to_websocket(
         messages = []
         while True:
             try:
-                line = stderr_queue.get_nowait()
+                item = stderr_queue.get_nowait()
+                # Item is a dict with line, is_error, is_compact
+                line = item["line"]
+                is_error = item["is_error"]
+                is_compact = item["is_compact"]
+
+                # Skip compact-related stderr - the SDK already sends proper compact_boundary
+                # system messages, so we don't need to duplicate that info from stderr
+                if is_compact:
+                    logger.debug(f"[stderr] Skipping compact-related output: {line[:100]}...")
+                    continue
+
+                # Only forward actual errors, skip general informational output
+                if not is_error:
+                    logger.debug(f"[stderr] Skipping non-error output: {line[:100]}...")
+                    continue
+
                 messages.append({
                     "type": "system",
                     "subtype": "stderr",

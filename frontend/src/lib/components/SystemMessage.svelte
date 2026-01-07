@@ -155,12 +155,12 @@
 			}
 
 			case 'stderr': {
-				// CLI stderr output - errors/warnings from the Claude SDK process
+				// CLI stderr output - actual errors from the Claude SDK process
 				const stderrContent = (data.content as string) || message.content || 'Unknown error';
 				return {
 					title: 'CLI Error',
 					content: stderrContent,
-					badge: 'stderr',
+					badge: 'error',
 					badgeColor: 'red'
 				};
 			}
