@@ -5,7 +5,6 @@
 	import { api } from '$lib/api/client';
 	import type { ApiUser, ApiUserWithKey, Profile } from '$lib/api/client';
 	import type { Project } from '$lib/stores/chat';
-
 	let apiUsers: ApiUser[] = [];
 	let profiles: Profile[] = [];
 	let projects: Project[] = [];
@@ -660,4 +659,5 @@
 			</div>
 		</div>
 	{/if}
+
 {/if}

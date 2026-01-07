@@ -593,11 +593,13 @@ def parse_session_history(
                             if tool_name == "Task":
                                 agent_type = tool_input.get("subagent_type", "unknown")
                                 description = tool_input.get("description", "")
+                                prompt = tool_input.get("prompt", "")
 
                                 # Track this Task tool use for later matching with result
                                 task_tool_uses[tool_id] = {
                                     "agent_type": agent_type,
-                                    "description": description
+                                    "description": description,
+                                    "prompt": prompt
                                 }
 
                                 # For now, we don't have the agent_id from tool_use alone
@@ -612,6 +614,7 @@ def parse_session_history(
                                     "toolInput": tool_input,
                                     "agentType": agent_type,
                                     "agentDescription": description,
+                                    "agentPrompt": prompt,
                                     "agentStatus": "pending",  # Will be updated when we find the result
                                     "agentChildren": [],
                                     "metadata": {"timestamp": timestamp},

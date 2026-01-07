@@ -47,6 +47,18 @@ class AuthStatus(BaseModel):
 
 
 # ============================================================================
+# Subagent Models
+# ============================================================================
+
+class SubagentDefinition(BaseModel):
+    """Definition for a subagent that can be invoked by the main agent"""
+    description: str = Field(..., min_length=1, description="When to use this agent")
+    prompt: str = Field(..., min_length=1, description="System prompt for the agent")
+    tools: Optional[List[str]] = Field(None, description="Allowed tools (inherits all if not specified)")
+    model: Optional[str] = Field(None, description="Model override: sonnet, opus, haiku, or inherit")
+
+
+# ============================================================================
 # Profile Models
 # ============================================================================
 
@@ -95,6 +107,9 @@ class ProfileConfig(BaseModel):
 
     # User identification
     user: Optional[str] = None  # User identifier
+
+    # Enabled subagent IDs - references global subagents by ID
+    enabled_agents: Optional[List[str]] = None
 
 
 class ProfileBase(BaseModel):
@@ -199,6 +214,7 @@ class SessionMessage(BaseModel):
     agentId: Optional[str] = None  # The subagent's unique ID
     agentType: Optional[str] = None  # The subagent type (e.g., 'Explore', 'Plan')
     agentDescription: Optional[str] = None  # Task description from the Task tool
+    agentPrompt: Optional[str] = None  # The initial prompt sent to the subagent
     agentStatus: Optional[str] = None  # 'pending', 'running', 'completed', 'error'
     agentChildren: Optional[List[SubagentChildMessage]] = None  # Nested messages from subagent
 

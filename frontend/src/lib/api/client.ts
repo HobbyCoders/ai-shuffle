@@ -125,9 +125,11 @@ export interface ProfileConfig {
 	disallowed_tools?: string[];
 	permission_mode?: string;
 	max_turns?: number;
+	include_partial_messages?: boolean;
 	system_prompt?: {
 		type: string;
 		preset?: string;
+		content?: string;
 		append?: string;
 	} | null;
 }

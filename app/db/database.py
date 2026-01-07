@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 # Schema version for migrations
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def get_connection() -> sqlite3.Connection:
@@ -271,6 +271,21 @@ def _create_schema(cursor: sqlite3.Cursor):
         )
     """)
 
+    # Global subagents (independent of profiles)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS subagents (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            tools JSON,
+            model TEXT,
+            is_builtin BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     # Create indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)")
@@ -290,6 +305,7 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON checkpoints(session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_checkpoints_message_uuid ON checkpoints(message_uuid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_preferences_user ON user_preferences(user_type, user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_subagents_name ON subagents(name)")
 
 
 def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
@@ -477,14 +493,25 @@ def update_profile(
 
 
 def delete_profile(profile_id: str) -> bool:
-    """Delete a profile (only non-builtin)"""
+    """Delete a profile"""
     existing = get_profile(profile_id)
-    if not existing or existing["is_builtin"]:
+    if not existing:
         return False
 
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM profiles WHERE id = ? AND is_builtin = FALSE", (profile_id,))
+        cursor.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+        return cursor.rowcount > 0
+
+
+def set_profile_builtin(profile_id: str, is_builtin: bool) -> bool:
+    """Set the is_builtin flag for a profile"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE profiles SET is_builtin = ?, updated_at = ? WHERE id = ?",
+            (is_builtin, datetime.utcnow().isoformat(), profile_id)
+        )
         return cursor.rowcount > 0
 
 
@@ -1398,3 +1425,105 @@ def get_all_user_preferences(user_type: str, user_id: str) -> List[Dict[str, Any
             if row.get("value"):
                 row["value"] = json.loads(row["value"])
         return rows
+
+
+# ============================================================================
+# Subagent Operations
+# ============================================================================
+
+def get_subagent(subagent_id: str) -> Optional[Dict[str, Any]]:
+    """Get a subagent by ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM subagents WHERE id = ?", (subagent_id,))
+        row = row_to_dict(cursor.fetchone())
+        if row and row.get("tools"):
+            row["tools"] = json.loads(row["tools"]) if isinstance(row["tools"], str) else row["tools"]
+        return row
+
+
+def get_all_subagents() -> List[Dict[str, Any]]:
+    """Get all subagents"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM subagents ORDER BY name ASC")
+        rows = rows_to_list(cursor.fetchall())
+        for row in rows:
+            if row.get("tools"):
+                row["tools"] = json.loads(row["tools"]) if isinstance(row["tools"], str) else row["tools"]
+        return rows
+
+
+def create_subagent(
+    subagent_id: str,
+    name: str,
+    description: str,
+    prompt: str,
+    tools: Optional[List[str]] = None,
+    model: Optional[str] = None,
+    is_builtin: bool = False
+) -> Dict[str, Any]:
+    """Create a new subagent"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO subagents (id, name, description, prompt, tools, model, is_builtin, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (subagent_id, name, description, prompt, json.dumps(tools) if tools else None, model, is_builtin, now, now)
+        )
+    return get_subagent(subagent_id)
+
+
+def update_subagent(
+    subagent_id: str,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    prompt: Optional[str] = None,
+    tools: Optional[List[str]] = None,
+    model: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Update a subagent"""
+    existing = get_subagent(subagent_id)
+    if not existing:
+        return None
+
+    updates = []
+    values = []
+    if name is not None:
+        updates.append("name = ?")
+        values.append(name)
+    if description is not None:
+        updates.append("description = ?")
+        values.append(description)
+    if prompt is not None:
+        updates.append("prompt = ?")
+        values.append(prompt)
+    if tools is not None:
+        updates.append("tools = ?")
+        values.append(json.dumps(tools))
+    if model is not None:
+        updates.append("model = ?")
+        values.append(model if model else None)
+
+    if updates:
+        updates.append("updated_at = ?")
+        values.append(datetime.utcnow().isoformat())
+        values.append(subagent_id)
+
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE subagents SET {', '.join(updates)} WHERE id = ?",
+                values
+            )
+
+    return get_subagent(subagent_id)
+
+
+def delete_subagent(subagent_id: str) -> bool:
+    """Delete a subagent"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM subagents WHERE id = ?", (subagent_id,))
+        return cursor.rowcount > 0

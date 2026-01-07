@@ -13,8 +13,6 @@
 		adminSessions,
 		apiUsers,
 		adminSessionsFilter,
-		defaultProfile,
-		defaultProject,
 		selectedSessionIds,
 		selectedAdminSessionIds,
 		selectionMode,
@@ -33,6 +31,8 @@
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import SubagentMessage from '$lib/components/SubagentMessage.svelte';
+	import QuickActions from '$lib/components/QuickActions.svelte';
+	import SubagentManager from '$lib/components/SubagentManager.svelte';
 	import { executeCommand, isSlashCommand, syncAfterRewind, listCommands, type Command } from '$lib/api/commands';
 
 	// Configure marked for better code highlighting
@@ -40,6 +40,27 @@
 		breaks: true,
 		gfm: true
 	});
+
+	// Subagent interface for enabled agents management
+	interface Subagent {
+		id: string;
+		name: string;
+		description: string;
+		model?: string;
+	}
+
+	// Subagents list for profile config
+	let allSubagents: Subagent[] = [];
+
+	// Load subagents
+	async function loadSubagents() {
+		try {
+			allSubagents = await api.get<Subagent[]>('/subagents');
+		} catch (e) {
+			console.error('Failed to load subagents:', e);
+			allSubagents = [];
+		}
+	}
 
 	// Per-tab state (we track input per tab)
 	let tabInputs: Record<string, string> = {};
@@ -146,6 +167,9 @@
 	// Spotlight search state (Cmd+K)
 	let showSpotlight = false;
 
+	// Subagent manager state
+	let showSubagentManager = false;
+
 	// Command autocomplete state
 	let showCommandAutocomplete: Record<string, boolean> = {};
 	let commandAutocompleteRefs: Record<string, CommandAutocomplete> = {};
@@ -158,6 +182,7 @@
 	let expandedSections: Record<string, boolean> = {
 		toolConfig: false,
 		behavior: false,
+		enabledAgents: false,
 		systemPrompt: false,
 		settingSources: false,
 		advanced: false
@@ -178,6 +203,7 @@
 		max_turns: null as number | null,
 		allowed_tools: '',
 		disallowed_tools: '',
+		enabled_agents: [] as string[],
 		include_partial_messages: true,
 		continue_conversation: false,
 		fork_session: false,
@@ -191,6 +217,24 @@
 		user: '',
 		max_buffer_size: null as number | null
 	};
+
+	// Toggle agent selection
+	function toggleAgent(agentId: string) {
+		if (profileForm.enabled_agents.includes(agentId)) {
+			profileForm.enabled_agents = profileForm.enabled_agents.filter(id => id !== agentId);
+		} else {
+			profileForm.enabled_agents = [...profileForm.enabled_agents, agentId];
+		}
+	}
+
+	function getModelDisplay(model?: string): string {
+		switch (model) {
+			case 'haiku': return 'Haiku';
+			case 'sonnet': return 'Sonnet';
+			case 'opus': return 'Opus';
+			default: return 'Inherit';
+		}
+	}
 
 	// Project form
 	let newProjectId = '';
@@ -223,7 +267,8 @@
 			const promises = [
 				tabs.loadProfiles(),
 				tabs.loadSessions(),
-				tabs.loadProjects()
+				tabs.loadProjects(),
+				loadSubagents()
 			];
 			// Load admin-specific data if user is admin
 			if ($isAdmin) {
@@ -316,10 +361,17 @@
 	}
 
 	// Check if input contains an active @ mention (at start or after whitespace)
+	// Returns true if there's an @ that could be a file reference (supports paths with spaces)
 	function hasActiveAtMention(input: string): boolean {
-		// Look for @ that's either at start or preceded by whitespace, and not yet completed
-		const match = input.match(/(?:^|[\s])@([^\s]*)$/);
-		return match !== null;
+		// Search backwards to find the last @ that's at start or preceded by whitespace
+		for (let i = input.length - 1; i >= 0; i--) {
+			if (input[i] === '@') {
+				if (i === 0 || /\s/.test(input[i - 1])) {
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 
 	// Handle input changes for command and file autocomplete
@@ -358,20 +410,29 @@
 		}
 	}
 
+	// Find the last @ position that's at start or preceded by whitespace
+	function findLastAtIndex(input: string): number {
+		for (let i = input.length - 1; i >= 0; i--) {
+			if (input[i] === '@') {
+				if (i === 0 || /\s/.test(input[i - 1])) {
+					return i;
+				}
+			}
+		}
+		return -1;
+	}
+
 	// Handle file selection from @ autocomplete
 	function handleFileSelect(tabId: string, file: FileItem) {
 		const input = tabInputs[tabId] || '';
 
 		// Find the last @ mention to replace
-		const match = input.match(/(?:^|[\s])@([^\s]*)$/);
-		if (!match) {
+		const atStartIndex = findLastAtIndex(input);
+		if (atStartIndex === -1) {
 			showFileAutocomplete[tabId] = false;
 			showFileAutocomplete = showFileAutocomplete;
 			return;
 		}
-
-		// Calculate where the @ starts
-		const atStartIndex = match.index! + (match[0].startsWith('@') ? 0 : 1);
 
 		// For directories, replace with path and keep autocomplete open
 		if (file.type === 'directory') {
@@ -658,6 +719,7 @@
 			max_turns: null,
 			allowed_tools: '',
 			disallowed_tools: '',
+			enabled_agents: [],
 			include_partial_messages: true,
 			continue_conversation: false,
 			fork_session: false,
@@ -693,6 +755,7 @@
 			max_turns: config.max_turns || null,
 			allowed_tools: (config.allowed_tools || []).join(', '),
 			disallowed_tools: (config.disallowed_tools || []).join(', '),
+			enabled_agents: config.enabled_agents || [],
 			include_partial_messages: config.include_partial_messages !== false,
 			continue_conversation: config.continue_conversation || false,
 			fork_session: config.fork_session || false,
@@ -726,6 +789,9 @@
 		}
 		if (profileForm.disallowed_tools.trim()) {
 			config.disallowed_tools = profileForm.disallowed_tools.split(',').map((t) => t.trim()).filter(Boolean);
+		}
+		if (profileForm.enabled_agents.length > 0) {
+			config.enabled_agents = profileForm.enabled_agents;
 		}
 		if (profileForm.setting_sources.length > 0) {
 			config.setting_sources = profileForm.setting_sources;
@@ -865,12 +931,10 @@
 
 	function setTabProfile(tabId: string, profileId: string) {
 		tabs.setTabProfile(tabId, profileId);
-		tabs.setDefaultProfile(profileId);
 	}
 
 	function setTabProject(tabId: string, projectId: string) {
 		tabs.setTabProject(tabId, projectId);
-		tabs.setDefaultProject(projectId);
 	}
 </script>
 
@@ -899,6 +963,11 @@
 			<button on:click={() => toggleSidebarSection('projects')} class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors {activeSidebarSection === 'projects' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}" title="Projects">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+				</svg>
+			</button>
+			<button on:click={() => showSubagentManager = true} class="w-10 h-10 rounded-lg flex items-center justify-center transition-colors {showSubagentManager ? 'bg-primary text-primary-foreground' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}" title="Subagents">
+				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
 				</svg>
 			</button>
 		</div>
@@ -1347,11 +1416,11 @@
 					<span class="absolute top-1 right-2 w-4 h-4 bg-primary text-primary-foreground text-[10px] font-bold rounded-full flex items-center justify-center">{$allTabs.length}</span>
 				{/if}
 			</button>
-			<button on:click={() => showProjectModal = true} class="flex flex-col items-center justify-center w-16 h-full text-muted-foreground hover:text-foreground transition-colors">
+			<button on:click={() => showSubagentManager = true} class="flex flex-col items-center justify-center w-16 h-full text-muted-foreground hover:text-foreground transition-colors">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
 				</svg>
-				<span class="text-xs mt-0.5">Projects</span>
+				<span class="text-xs mt-0.5">Agents</span>
 			</button>
 			<a href="/settings" class="flex flex-col items-center justify-center w-16 h-full text-muted-foreground hover:text-foreground transition-colors">
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1415,45 +1484,55 @@
 				<!-- Breadcrumb separator -->
 				<span class="text-muted-foreground/50 mx-1 hidden sm:inline">/</span>
 
-				<!-- Project Selector (clickable text style with dropdown) -->
+				<!-- Project Selector (locked when session exists) -->
 				<div class="relative group">
 					<button
-						class="flex items-center gap-1 px-2 py-1 text-sm text-foreground hover:bg-accent rounded-md transition-colors"
+						class="flex items-center gap-1 px-2 py-1 text-sm text-foreground {currentTab.sessionId ? 'cursor-default opacity-75' : 'hover:bg-accent'} rounded-md transition-colors"
+						title={currentTab.sessionId ? 'Project is locked for this chat' : 'Select project'}
 					>
 						<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 						</svg>
 						<span class="hidden sm:inline max-w-[120px] truncate">{$projects.find((p) => p.id === currentTab.project)?.name || 'Default'}</span>
-						<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-						</svg>
+						{#if currentTab.sessionId}
+							<!-- Lock icon when session exists -->
+							<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+							</svg>
+						{:else}
+							<svg class="w-3 h-3 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+							</svg>
+						{/if}
 					</button>
-					<!-- Project dropdown -->
-					<div class="absolute left-0 top-full mt-1 w-48 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
-						<div class="py-1">
-							<button
-								on:click={() => setTabProject(tabId, '')}
-								class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {!currentTab.project ? 'text-primary' : 'text-foreground'}"
-							>
-								Default
-							</button>
-							{#each $projects as project}
+					<!-- Project dropdown (only show when no session) -->
+					{#if !currentTab.sessionId}
+						<div class="absolute left-0 top-full mt-1 w-48 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+							<div class="py-1">
 								<button
-									on:click={() => setTabProject(tabId, project.id)}
-									class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.project === project.id ? 'text-primary' : 'text-foreground'}"
+									on:click={() => setTabProject(tabId, '')}
+									class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {!currentTab.project ? 'text-primary' : 'text-foreground'}"
 								>
-									{project.name}
+									Default
 								</button>
-							{/each}
-							<div class="border-t border-border my-1"></div>
-							<button
-								on:click={() => (showProjectModal = true)}
-								class="w-full px-3 py-2 text-left text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-							>
-								Manage Projects...
-							</button>
+								{#each $projects as project}
+									<button
+										on:click={() => setTabProject(tabId, project.id)}
+										class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.project === project.id ? 'text-primary' : 'text-foreground'}"
+									>
+										{project.name}
+									</button>
+								{/each}
+								<div class="border-t border-border my-1"></div>
+								<button
+									on:click={() => (showProjectModal = true)}
+									class="w-full px-3 py-2 text-left text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+								>
+									Manage Projects...
+								</button>
+							</div>
 						</div>
-					</div>
+					{/if}
 				</div>
 
 				<!-- Rewind Button (after breadcrumb, only when session is active) -->
@@ -1641,6 +1720,8 @@
 								</div>
 							{:else if message.type === 'text' || !message.type}
 								<!-- Assistant Message - Anvil Style -->
+								{@const currentProfile = $profiles.find(p => p.id === currentTab.profile)}
+								{@const hasPartialMessages = currentProfile?.config?.include_partial_messages !== false}
 								<div class="flex gap-3 w-full">
 									<!-- Avatar -->
 									<div class="flex-shrink-0 w-8 h-8 rounded-full bg-accent flex items-center justify-center shadow-s">
@@ -1668,7 +1749,8 @@
 													{#if message.streaming}
 														<span class="inline-block w-2 h-4 ml-0.5 bg-primary animate-pulse"></span>
 													{/if}
-												{:else if message.streaming}
+												{:else if message.streaming && !hasPartialMessages}
+													<!-- Only show placeholder dots when partial messages is disabled -->
 													<div class="flex gap-1 py-2">
 														<span class="w-2 h-2 bg-muted-foreground rounded-full animate-pulse"></span>
 														<span class="w-2 h-2 bg-muted-foreground rounded-full animate-pulse" style="animation-delay: 200ms"></span>
@@ -1728,10 +1810,19 @@
 												</svg>
 											</summary>
 											<div class="bg-card border-t border-border">
-												{#if message.toolInput}
+												{#if message.partialToolInput || message.toolInput}
 													<div class="px-4 py-3 border-b border-border/50">
 														<div class="text-xs text-muted-foreground mb-1 font-medium">Input</div>
-														<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32 whitespace-pre-wrap break-words font-mono">{JSON.stringify(message.toolInput, null, 2)}</pre>
+														{#if message.streaming && message.partialToolInput}
+															<!-- Show raw streaming input with cursor -->
+															<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32 whitespace-pre-wrap break-words font-mono">{message.partialToolInput}<span class="inline-block w-1.5 h-3 ml-0.5 bg-primary animate-pulse"></span></pre>
+														{:else if message.toolInput && Object.keys(message.toolInput).length > 0}
+															<!-- Show formatted JSON when complete -->
+															<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32 whitespace-pre-wrap break-words font-mono">{JSON.stringify(message.toolInput, null, 2)}</pre>
+														{:else if message.partialToolInput}
+															<!-- Fallback: show partial input if toolInput is empty but we have partial -->
+															<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32 whitespace-pre-wrap break-words font-mono">{message.partialToolInput}</pre>
+														{/if}
 													</div>
 												{/if}
 												{#if message.toolResult}
@@ -1841,6 +1932,16 @@
 
 					<!-- Input Form -->
 					<form on:submit|preventDefault={() => handleSubmit(tabId)} class="flex items-center gap-2">
+						<!-- Quick Actions Button -->
+						<QuickActions
+							profileId={currentTab.profile}
+							onAction={(prompt) => {
+								tabInputs[tabId] = prompt;
+								handleSubmit(tabId);
+							}}
+							disabled={currentTab.isStreaming || !$claudeAuthenticated}
+						/>
+
 						<!-- File Button -->
 						<button
 							type="button"
@@ -1942,6 +2043,11 @@
 	onNewChat={handleSpotlightNewChat}
 	onOpenSettings={handleSpotlightOpenSettings}
 />
+
+<!-- Subagent Manager Panel -->
+{#if showSubagentManager}
+	<SubagentManager onClose={() => showSubagentManager = false} />
+{/if}
 
 <!-- Profile Modal -->
 {#if showProfileModal}
@@ -2074,6 +2180,60 @@
 											<p class="text-xs text-muted-foreground">Create new session ID when resuming</p>
 										</div>
 									</label>
+								</div>
+							{/if}
+						</div>
+
+						<!-- Enabled Subagents Accordion -->
+						<div class="border border-border rounded-lg overflow-hidden">
+							<button
+								type="button"
+								on:click={() => toggleSection('enabledAgents')}
+								class="w-full px-3 py-2 bg-accent flex items-center justify-between text-sm text-foreground hover:bg-muted"
+							>
+								<div class="flex items-center gap-2">
+									<span>Enabled Subagents</span>
+									{#if profileForm.enabled_agents.length > 0}
+										<span class="text-xs px-1.5 py-0.5 bg-primary/20 text-primary rounded">{profileForm.enabled_agents.length}</span>
+									{/if}
+								</div>
+								<svg class="w-4 h-4 transition-transform {expandedSections.enabledAgents ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+								</svg>
+							</button>
+							{#if expandedSections.enabledAgents}
+								<div class="p-3 bg-card">
+									{#if allSubagents.length === 0}
+										<p class="text-sm text-muted-foreground text-center py-2">No subagents configured. Create subagents from the Agents menu.</p>
+									{:else}
+										<p class="text-xs text-muted-foreground mb-3">Select which subagents this profile can use</p>
+										<div class="space-y-2 max-h-48 overflow-y-auto">
+											{#each allSubagents as agent (agent.id)}
+												<label class="flex items-start gap-3 p-2 rounded-lg border border-border hover:border-primary/50 cursor-pointer transition-colors">
+													<input
+														type="checkbox"
+														checked={profileForm.enabled_agents.includes(agent.id)}
+														on:change={() => toggleAgent(agent.id)}
+														class="mt-0.5 w-4 h-4 rounded bg-muted border-0 text-primary focus:ring-ring"
+													/>
+													<div class="flex-1 min-w-0">
+														<div class="flex items-center gap-2">
+															<span class="text-sm font-medium text-foreground">{agent.name}</span>
+															<span class="text-xs px-1.5 py-0.5 rounded bg-primary/10 text-primary">{getModelDisplay(agent.model)}</span>
+														</div>
+														<p class="text-xs text-muted-foreground mt-0.5 line-clamp-1">{agent.description}</p>
+													</div>
+												</label>
+											{/each}
+										</div>
+										<div class="flex items-center justify-between mt-3 pt-2 border-t border-border">
+											<span class="text-xs text-muted-foreground">{profileForm.enabled_agents.length} of {allSubagents.length} enabled</span>
+											<div class="flex gap-2">
+												<button type="button" on:click={() => profileForm.enabled_agents = []} class="text-xs text-primary hover:underline">Clear</button>
+												<button type="button" on:click={() => profileForm.enabled_agents = allSubagents.map(a => a.id)} class="text-xs text-primary hover:underline">All</button>
+											</div>
+										</div>
+									{/if}
 								</div>
 							{/if}
 						</div>

@@ -15,11 +15,12 @@ from typing import Optional, Dict, Any, AsyncGenerator
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient
+from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient, AgentDefinition
 from claude_agent_sdk import (
     AssistantMessage, UserMessage, TextBlock, ToolUseBlock, ToolResultBlock,
     ResultMessage, SystemMessage
 )
+from claude_agent_sdk.types import StreamEvent
 
 from app.db import database
 from app.core.config import settings
@@ -123,24 +124,53 @@ def build_options_from_profile(
         if override_append:
             final_system_prompt += "\n\n" + override_append
     elif isinstance(system_prompt, dict):
-        # Has preset config
-        existing_append = system_prompt.get("append", "")
-        full_append = SECURITY_INSTRUCTIONS
-        if existing_append:
-            full_append += "\n\n" + existing_append
-        if override_append:
-            full_append += "\n\n" + override_append
+        prompt_type = system_prompt.get("type", "preset")
 
-        final_system_prompt = {
-            "type": system_prompt.get("type", "preset"),
-            "preset": system_prompt.get("preset", "claude_code"),
-            "append": full_append
-        }
+        if prompt_type == "custom" and system_prompt.get("content"):
+            # Custom system prompt - use content directly with security instructions
+            final_system_prompt = SECURITY_INSTRUCTIONS + "\n\n" + system_prompt["content"]
+            if override_append:
+                final_system_prompt += "\n\n" + override_append
+        else:
+            # Preset system prompt - pass to SDK with append
+            existing_append = system_prompt.get("append", "")
+            full_append = SECURITY_INSTRUCTIONS
+            if existing_append:
+                full_append += "\n\n" + existing_append
+            if override_append:
+                full_append += "\n\n" + override_append
+
+            final_system_prompt = {
+                "type": "preset",
+                "preset": system_prompt.get("preset", "claude_code"),
+                "append": full_append
+            }
     else:
         # String system prompt - use it directly with security instructions
         final_system_prompt = SECURITY_INSTRUCTIONS + "\n\n" + str(system_prompt)
         if override_append:
             final_system_prompt += "\n\n" + override_append
+
+    # Build agents dict from profile's enabled_agents
+    # Profile stores a list of subagent IDs that reference global subagents in the database
+    # The SDK expects AgentDefinition dataclass instances, not raw dicts
+    enabled_agent_ids = config.get("enabled_agents", [])
+    agents_dict = None
+    if enabled_agent_ids:
+        agents_dict = {}
+        for agent_id in enabled_agent_ids:
+            # Look up subagent from global database
+            subagent = database.get_subagent(agent_id)
+            if subagent:
+                # Create AgentDefinition dataclass instance
+                agents_dict[agent_id] = AgentDefinition(
+                    description=subagent.get("description", ""),
+                    prompt=subagent.get("prompt", ""),
+                    tools=subagent.get("tools"),
+                    model=subagent.get("model")
+                )
+            else:
+                logger.warning(f"Subagent not found: {agent_id}")
 
     # Build options with all ClaudeAgentOptions fields
     options = ClaudeAgentOptions(
@@ -175,6 +205,9 @@ def build_options_from_profile(
 
         # User identification
         user=config.get("user"),
+
+        # Subagents
+        agents=agents_dict,
     )
 
     # Apply working directory - project overrides profile cwd
@@ -1308,7 +1341,7 @@ async def stream_to_websocket(
         del _active_sessions[session_id]
 
     # Create new client
-    logger.info(f"[WS] Creating ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
+    logger.info(f"[WS] Creating ClaudeSDKClient for session {session_id} (resume={resume_id is not None}, include_partial={options.include_partial_messages})")
     client = ClaudeSDKClient(options=options)
 
     # Connect
@@ -1341,6 +1374,7 @@ async def stream_to_websocket(
     task_tool_uses = {}  # Track Task (subagent) tool uses by tool_id
     metadata = {}
     interrupted = False
+    include_partial = options.include_partial_messages  # Track if streaming events are enabled
 
     try:
         await state.client.query(prompt)
@@ -1366,6 +1400,78 @@ async def stream_to_websocket(
                         "data": message.data
                     }
 
+            elif isinstance(message, StreamEvent):
+                # StreamEvent is sent when include_partial_messages=True
+                # Contains real-time streaming events for character-by-character display
+                event = message.event
+                event_type = event.get("type") if event else None
+
+                if event_type == "content_block_delta":
+                    delta = event.get("delta", {})
+                    delta_type = delta.get("type")
+
+                    if delta_type == "text_delta" and delta.get("text"):
+                        # Real-time text streaming chunk
+                        text = delta["text"]
+                        logger.debug(f"[WS] StreamEvent text_delta: {len(text)} chars")
+                        yield {
+                            "type": "stream_delta",
+                            "delta_type": "text",
+                            "content": text,
+                            "index": event.get("index", 0)
+                        }
+                    elif delta_type == "thinking_delta" and delta.get("thinking"):
+                        # Thinking block streaming
+                        yield {
+                            "type": "stream_delta",
+                            "delta_type": "thinking",
+                            "content": delta["thinking"],
+                            "index": event.get("index", 0)
+                        }
+                    elif delta_type == "input_json_delta" and delta.get("partial_json"):
+                        # Tool input streaming
+                        yield {
+                            "type": "stream_delta",
+                            "delta_type": "tool_input",
+                            "content": delta["partial_json"],
+                            "index": event.get("index", 0)
+                        }
+
+                elif event_type == "message_start":
+                    # Start of a new streaming message
+                    logger.debug(f"[WS] StreamEvent message_start")
+                    yield {
+                        "type": "stream_start",
+                        "message": event.get("message", {})
+                    }
+
+                elif event_type == "content_block_start":
+                    # Start of a content block (text, thinking, tool_use)
+                    content_block = event.get("content_block", {})
+                    block_type = content_block.get("type")
+                    logger.debug(f"[WS] StreamEvent content_block_start: {block_type}")
+                    yield {
+                        "type": "stream_block_start",
+                        "block_type": block_type,
+                        "index": event.get("index", 0),
+                        "content_block": content_block
+                    }
+
+                elif event_type == "content_block_stop":
+                    # End of a content block
+                    yield {
+                        "type": "stream_block_stop",
+                        "index": event.get("index", 0)
+                    }
+
+                elif event_type == "message_delta":
+                    # Final message metadata (stop_reason, usage)
+                    yield {
+                        "type": "stream_message_delta",
+                        "delta": event.get("delta", {}),
+                        "usage": event.get("usage", {})
+                    }
+
             elif isinstance(message, AssistantMessage):
                 # Check interrupt before processing each message block
                 if state.interrupt_requested:
@@ -1381,14 +1487,19 @@ async def stream_to_websocket(
                         # Check if this text is from a subagent
                         if parent_tool_id and parent_tool_id in task_tool_uses:
                             # Text from subagent - send as subagent_chunk
+                            logger.debug(f"[WS] Subagent chunk len={len(block.text)} for agent={parent_tool_id}")
                             yield {
                                 "type": "subagent_chunk",
                                 "agent_id": parent_tool_id,
                                 "content": block.text
                             }
                         else:
+                            # When include_partial_messages=True, text was already streamed via stream_delta
+                            # Only send chunk when partial messages is disabled
                             response_text.append(block.text)
-                            yield {"type": "chunk", "content": block.text}
+                            if not include_partial:
+                                logger.debug(f"[WS] Text chunk len={len(block.text)} for session={session_id}")
+                                yield {"type": "chunk", "content": block.text}
 
                     elif isinstance(block, ToolUseBlock):
                         tool_id = getattr(block, 'id', None)
@@ -1417,6 +1528,7 @@ async def stream_to_websocket(
                                 "tool_id": tool_id,
                                 "agent_type": tool_input.get("subagent_type", "unknown"),
                                 "description": tool_input.get("description", ""),
+                                "prompt": tool_input.get("prompt", ""),
                                 "agent_id": tool_id  # Use tool_id as agent_id for tracking
                             }
                         # Check if this tool use is from a subagent

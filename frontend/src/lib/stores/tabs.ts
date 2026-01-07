@@ -48,12 +48,14 @@ export interface ChatMessage {
 	toolStatus?: 'running' | 'complete' | 'error'; // Status of tool execution
 	metadata?: Record<string, unknown>;
 	streaming?: boolean;
+	partialToolInput?: string; // Accumulator for streaming tool input JSON
 	systemSubtype?: string; // For system messages (e.g., 'context' for /context command)
 	systemData?: Record<string, unknown>; // Raw data from system message
 	// Subagent-specific fields
 	agentId?: string; // The subagent's unique ID (e.g., '00ed8f4d')
 	agentType?: string; // The subagent type (e.g., 'Explore', 'Plan')
 	agentDescription?: string; // Task description from the Task tool
+	agentPrompt?: string; // The initial prompt sent to the subagent
 	agentStatus?: 'pending' | 'running' | 'completed' | 'error'; // Current status
 	agentChildren?: SubagentChildMessage[]; // Nested messages from subagent execution
 }
@@ -96,8 +98,6 @@ interface TabsState {
 	adminSessions: Session[];
 	apiUsers: ApiUser[];
 	adminSessionsFilter: string | null; // null = all, '' = admin only, 'user_id' = specific user
-	defaultProfile: string;
-	defaultProject: string;
 	// Selection state for batch operations
 	selectedSessionIds: Set<string>;
 	selectedAdminSessionIds: Set<string>;
@@ -233,8 +233,6 @@ function createTabsStore() {
 		adminSessions: [],
 		apiUsers: [],
 		adminSessionsFilter: null,
-		defaultProfile: getPersistedProfile(),
-		defaultProject: getPersistedProject(),
 		// Initialize selection state
 		selectedSessionIds: new Set<string>(),
 		selectedAdminSessionIds: new Set<string>(),
@@ -467,8 +465,10 @@ function createTabsStore() {
 			}
 
 			case 'start': {
+				// Mark streaming as started, but DON'T create empty message yet
+				// Messages will be created when we get actual content (stream_delta for text, stream_block_start for tools)
+				// This prevents empty message boxes from appearing when Claude starts with a tool call
 				const sessionId = data.session_id as string;
-				const assistantMsgId = `assistant-${Date.now()}`;
 
 				update(s => ({
 					...s,
@@ -477,14 +477,8 @@ function createTabsStore() {
 						return {
 							...tab,
 							sessionId,
-							isStreaming: true,
-							messages: [...tab.messages, {
-								id: assistantMsgId,
-								role: 'assistant' as const,
-								content: '',
-								type: 'text' as const,
-								streaming: true
-							}]
+							isStreaming: true
+							// NO empty message added here - wait for actual content
 						};
 					})
 				}));
@@ -492,6 +486,10 @@ function createTabsStore() {
 			}
 
 			case 'chunk': {
+				// 'chunk' is the final complete text from AssistantMessage
+				// When include_partial_messages=True, we already have this text from stream_delta events
+				// So we REPLACE the streaming message content (don't append) to avoid duplication
+				console.log(`[WS] Chunk received: len=${(data.content as string).length}`);
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
@@ -503,11 +501,16 @@ function createTabsStore() {
 						);
 
 						if (streamingIdx !== -1) {
+							// REPLACE content - this is the final version from AssistantMessage
+							// Don't append, as stream_delta already accumulated the text
 							messages[streamingIdx] = {
 								...messages[streamingIdx],
-								content: messages[streamingIdx].content + (data.content as string)
+								content: data.content as string,
+								streaming: false // Mark as complete
 							};
 						} else {
+							// No streaming message exists - this is the first/only chunk
+							// (happens when include_partial_messages=False)
 							messages.push({
 								id: `text-${Date.now()}`,
 								role: 'assistant',
@@ -523,13 +526,186 @@ function createTabsStore() {
 				break;
 			}
 
+			// StreamEvent handlers for real-time character-by-character streaming
+			case 'stream_start': {
+				// Start of a new streaming response - just log it
+				// DON'T create empty message here - wait for actual content via stream_delta
+				// This prevents empty message boxes when Claude's response starts with a tool call
+				console.log('[WS] Stream start received');
+				// No message created - stream_delta will create message when text arrives
+				break;
+			}
+
+			case 'stream_block_start': {
+				// Start of a content block (text, thinking, tool_use)
+				const blockType = data.block_type as string;
+				console.log(`[WS] Stream block start: ${blockType}`);
+
+				if (blockType === 'tool_use') {
+					const contentBlock = data.content_block as { id?: string; name?: string };
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(tab => {
+							if (tab.id !== tabId) return tab;
+
+							let messages = [...tab.messages];
+							// Handle any existing streaming text message
+							const streamingIdx = messages.findLastIndex(
+								m => m.type === 'text' && m.role === 'assistant' && m.streaming
+							);
+							if (streamingIdx !== -1) {
+								if (messages[streamingIdx].content) {
+									// Mark as complete if it has content
+									messages[streamingIdx] = { ...messages[streamingIdx], streaming: false };
+								} else {
+									// Remove empty streaming text messages to avoid lingering placeholders
+									messages = messages.filter((_, i) => i !== streamingIdx);
+								}
+							}
+
+							// Add tool use message
+							messages.push({
+								id: `tool-${Date.now()}-${contentBlock.id || ''}`,
+								role: 'assistant',
+								content: '',
+								type: 'tool_use',
+								toolName: contentBlock.name || '',
+								toolId: contentBlock.id || '',
+								toolInput: {},
+								toolStatus: 'running',
+								streaming: true
+							});
+
+							return { ...tab, messages };
+						})
+					}));
+				}
+				break;
+			}
+
+			case 'stream_delta': {
+				const deltaType = data.delta_type as string;
+
+				if (deltaType === 'text') {
+					// Real-time text streaming - character by character!
+					const text = data.content as string;
+					console.log(`[WS] Stream delta text: ${text.length} chars`);
+
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(tab => {
+							if (tab.id !== tabId) return tab;
+
+							const messages = [...tab.messages];
+							const streamingIdx = messages.findLastIndex(
+								m => m.type === 'text' && m.role === 'assistant' && m.streaming
+							);
+
+							if (streamingIdx !== -1) {
+								// Append to existing streaming message
+								messages[streamingIdx] = {
+									...messages[streamingIdx],
+									content: messages[streamingIdx].content + text
+								};
+							} else {
+								// Create new streaming message
+								messages.push({
+									id: `stream-${Date.now()}`,
+									role: 'assistant',
+									content: text,
+									type: 'text',
+									streaming: true
+								});
+							}
+
+							return { ...tab, messages };
+						})
+					}));
+				} else if (deltaType === 'tool_input') {
+					// Tool input streaming (partial JSON)
+					const partialJson = data.content as string;
+					console.log(`[WS] Stream delta tool_input: ${partialJson.length} chars`);
+
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(tab => {
+							if (tab.id !== tabId) return tab;
+
+							const messages = [...tab.messages];
+							const toolIdx = messages.findLastIndex(
+								m => m.type === 'tool_use' && m.streaming
+							);
+
+							if (toolIdx !== -1) {
+								const current = messages[toolIdx];
+								const partialInput = (current.partialToolInput || '') + partialJson;
+
+								// Try to parse accumulated JSON
+								let parsedInput = current.toolInput || {};
+								try {
+									parsedInput = JSON.parse(partialInput);
+								} catch {
+									// Not valid JSON yet, keep accumulating
+								}
+
+								messages[toolIdx] = {
+									...current,
+									partialToolInput: partialInput,
+									toolInput: parsedInput
+								};
+							}
+
+							return { ...tab, messages };
+						})
+					}));
+				}
+				break;
+			}
+
+			case 'stream_block_stop': {
+				// End of a content block
+				console.log(`[WS] Stream block stop: index=${data.index}`);
+				// The block is complete - we don't need to do anything special here
+				// as the full content comes via AssistantMessage afterwards
+				break;
+			}
+
+			case 'stream_message_delta': {
+				// Final message metadata
+				console.log('[WS] Stream message delta received');
+				// Contains stop_reason and usage - we'll get final data from done event
+				break;
+			}
+
 			case 'tool_use': {
+				// tool_use is the final event from AssistantMessage
+				// When include_partial_messages=True, stream_block_start may have already created this tool
+				const toolId = data.id as string;
+
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
 						if (tab.id !== tabId) return tab;
 
 						let messages = [...tab.messages];
+
+						// Check if this tool already exists (from stream_block_start)
+						const existingToolIdx = messages.findIndex(
+							m => m.type === 'tool_use' && m.toolId === toolId
+						);
+
+						if (existingToolIdx !== -1) {
+							// Update existing tool message with final data
+							messages[existingToolIdx] = {
+								...messages[existingToolIdx],
+								toolName: data.name as string,
+								toolInput: data.input as Record<string, unknown>,
+								toolStatus: 'running'
+							};
+							return { ...tab, messages };
+						}
+
+						// No existing tool - create new one
 						const streamingIdx = messages.findLastIndex(
 							m => m.type === 'text' && m.role === 'assistant' && m.streaming
 						);
@@ -547,12 +723,12 @@ function createTabsStore() {
 						}
 
 						messages.push({
-							id: `tool-${Date.now()}-${data.id || ''}`,
+							id: `tool-${Date.now()}-${toolId || ''}`,
 							role: 'assistant',
 							content: '',
 							type: 'tool_use',
 							toolName: data.name as string,
-							toolId: data.id as string,
+							toolId: toolId,
 							toolInput: data.input as Record<string, unknown>,
 							toolStatus: 'running',
 							streaming: true
@@ -608,14 +784,9 @@ function createTabsStore() {
 							}
 						}
 
-						// Add streaming text placeholder for continuation
-						messages.push({
-							id: `text-${Date.now()}-cont`,
-							role: 'assistant',
-							content: '',
-							type: 'text',
-							streaming: true
-						});
+						// DON'T add empty streaming placeholder here
+						// The stream_delta handler will create a message when text actually arrives
+						// Adding empty placeholders causes lingering empty message boxes
 
 						return { ...tab, messages };
 					})
@@ -626,6 +797,7 @@ function createTabsStore() {
 			case 'done': {
 				const metadata = data.metadata as Record<string, unknown>;
 				const sessionId = data.session_id as string;
+				console.log('[WS] Done event received, cleaning up streaming messages');
 
 				update(s => ({
 					...s,
@@ -766,11 +938,60 @@ function createTabsStore() {
 			}
 
 			case 'system': {
-				// Handle system messages from SDK (e.g., /context command output)
+				// Handle system messages from SDK (e.g., /context command output, streaming events)
 				const subtype = data.subtype as string;
 				const systemData = data.data as Record<string, unknown>;
 
 				console.log('[WS] System message received:', subtype, systemData);
+
+				// Check if this is a streaming event (when include_partial_messages=true)
+				const streamEvent = systemData?.event as { type?: string; delta?: { type?: string; text?: string }; index?: number } | undefined;
+				if (streamEvent?.type) {
+					const eventType = streamEvent.type;
+					console.log(`[WS] Streaming event: ${eventType}`);
+
+					// Handle streaming text deltas
+					if (eventType === 'content_block_delta' && streamEvent.delta?.type === 'text_delta' && streamEvent.delta?.text) {
+						const deltaText = streamEvent.delta.text;
+						console.log(`[WS] Text delta received: len=${deltaText.length}`);
+
+						// Append delta text to the current streaming message
+						update(s => ({
+							...s,
+							tabs: s.tabs.map(tab => {
+								if (tab.id !== tabId) return tab;
+
+								const messages = [...tab.messages];
+								const streamingIdx = messages.findLastIndex(
+									m => m.type === 'text' && m.role === 'assistant' && m.streaming
+								);
+
+								if (streamingIdx !== -1) {
+									messages[streamingIdx] = {
+										...messages[streamingIdx],
+										content: messages[streamingIdx].content + deltaText
+									};
+								} else {
+									// Create new streaming message if none exists
+									messages.push({
+										id: `text-${Date.now()}`,
+										role: 'assistant',
+										content: deltaText,
+										type: 'text',
+										streaming: true
+									});
+								}
+
+								return { ...tab, messages };
+							})
+						}));
+						break;
+					}
+
+					// For other streaming events (message_start, content_block_start, etc.), just log
+					// These are informational and the actual text comes via content_block_delta
+					break;
+				}
 
 				// Extract content for display - for local_command, the content is in data.content
 				let displayContent = '';
@@ -816,6 +1037,7 @@ function createTabsStore() {
 				const agentId = data.agent_id as string;
 				const agentType = data.agent_type as string;
 				const description = data.description as string;
+				const prompt = data.prompt as string;
 				const toolId = data.tool_id as string; // The tool_use ID that launched this subagent
 
 				console.log('[WS] Subagent started:', agentId, agentType, description);
@@ -855,6 +1077,7 @@ function createTabsStore() {
 							agentId: agentId,
 							agentType: agentType,
 							agentDescription: description,
+							agentPrompt: prompt,
 							agentStatus: 'running',
 							agentChildren: [],
 							streaming: true
@@ -1005,7 +1228,12 @@ function createTabsStore() {
 					tabs: s.tabs.map(tab => {
 						if (tab.id !== tabId) return tab;
 
+						// Find the subagent to get its linked toolId
+						const subagent = tab.messages.find(m => m.type === 'subagent' && m.agentId === agentId);
+						const linkedToolId = subagent?.toolId;
+
 						const messages = tab.messages.map(m => {
+							// Update the subagent message
 							if (m.type === 'subagent' && m.agentId === agentId) {
 								return {
 									...m,
@@ -1014,17 +1242,20 @@ function createTabsStore() {
 									streaming: false
 								};
 							}
+							// Also mark the linked Task tool_use as complete
+							if (linkedToolId && m.type === 'tool_use' && m.toolId === linkedToolId) {
+								return {
+									...m,
+									toolStatus: 'complete' as const,
+									streaming: false
+								};
+							}
 							return m;
 						});
 
-						// Add new streaming text placeholder for main agent to continue
-						messages.push({
-							id: `text-${Date.now()}-cont`,
-							role: 'assistant' as const,
-							content: '',
-							type: 'text' as const,
-							streaming: true
-						});
+						// DON'T add empty streaming placeholder here
+						// The stream_delta handler will create a message when text actually arrives
+						// Adding empty placeholders causes lingering empty message boxes
 
 						return { ...tab, messages };
 					})
@@ -1166,7 +1397,6 @@ function createTabsStore() {
 		 * Create a new tab
 		 */
 		createTab(sessionId?: string) {
-			const state = get({ subscribe });
 			const newTabId = generateTabId();
 
 			const newTab: ChatTab = {
@@ -1177,8 +1407,8 @@ function createTabsStore() {
 				isStreaming: false,
 				wsConnected: false,
 				error: null,
-				profile: state.defaultProfile,
-				project: state.defaultProject,
+				profile: getPersistedProfile(),
+				project: getPersistedProject(),
 				totalTokensIn: 0,
 				totalTokensOut: 0,
 				totalCacheCreationTokens: 0,
@@ -1419,6 +1649,7 @@ function createTabsStore() {
 				}
 
 				// Load token totals from session history - single source of truth
+				// Also restore profile and project from the saved session (they are locked once saved)
 				updateTab(tabId, {
 					sessionId: session.id,
 					messages,
@@ -1427,7 +1658,9 @@ function createTabsStore() {
 					totalTokensIn: session.total_tokens_in || 0,
 					totalTokensOut: session.total_tokens_out || 0,
 					totalCacheCreationTokens: session.cache_creation_tokens || 0,
-					totalCacheReadTokens: session.cache_read_tokens || 0
+					totalCacheReadTokens: session.cache_read_tokens || 0,
+					profile: session.profile_id,
+					project: session.project_id || ''
 				});
 
 				// Save tabs state (debounced)
@@ -1455,25 +1688,6 @@ function createTabsStore() {
 			updateTab(tabId, { project: projectId });
 		},
 
-		/**
-		 * Set default profile (persisted)
-		 */
-		setDefaultProfile(profileId: string) {
-			if (typeof window !== 'undefined') {
-				localStorage.setItem('aihub_selectedProfile', profileId);
-			}
-			update(s => ({ ...s, defaultProfile: profileId }));
-		},
-
-		/**
-		 * Set default project (persisted)
-		 */
-		setDefaultProject(projectId: string) {
-			if (typeof window !== 'undefined') {
-				localStorage.setItem('aihub_selectedProject', projectId);
-			}
-			update(s => ({ ...s, defaultProject: projectId }));
-		},
 
 		/**
 		 * Clear error for a tab
@@ -1706,8 +1920,6 @@ export const sessions = derived(tabs, $tabs => $tabs.sessions);
 export const adminSessions = derived(tabs, $tabs => $tabs.adminSessions);
 export const apiUsers = derived(tabs, $tabs => $tabs.apiUsers);
 export const adminSessionsFilter = derived(tabs, $tabs => $tabs.adminSessionsFilter);
-export const defaultProfile = derived(tabs, $tabs => $tabs.defaultProfile);
-export const defaultProject = derived(tabs, $tabs => $tabs.defaultProject);
 // Selection state derived stores
 export const selectedSessionIds = derived(tabs, $tabs => $tabs.selectedSessionIds);
 export const selectedAdminSessionIds = derived(tabs, $tabs => $tabs.selectedAdminSessionIds);
