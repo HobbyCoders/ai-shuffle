@@ -18,6 +18,66 @@ export interface ProviderCredentials {
   [key: string]: string;
 }
 
+// ============================================================================
+// API KEY VALIDATION HELPERS
+// ============================================================================
+
+/**
+ * API key format patterns for different providers
+ * Used for basic format validation before making API calls
+ */
+export const API_KEY_PATTERNS: Record<string, { prefix?: string; minLength: number; description: string }> = {
+  openai: { prefix: 'sk-', minLength: 20, description: 'OpenAI keys start with sk-' },
+  deepseek: { prefix: 'sk-', minLength: 20, description: 'DeepSeek keys start with sk-' },
+  google: { minLength: 30, description: 'Google API keys are typically 39 characters' },
+  gemini: { minLength: 30, description: 'Gemini API keys are typically 39 characters' },
+  meshy: { minLength: 20, description: 'Meshy API keys are alphanumeric strings' },
+};
+
+/**
+ * Validate API key format for a given provider
+ * Returns true if the key appears to be in a valid format
+ */
+export function validateApiKeyFormat(key: string | undefined, providerId: string): { valid: boolean; error?: string } {
+  if (!key || key.trim().length === 0) {
+    return { valid: false, error: `API key for ${providerId} is missing or empty` };
+  }
+
+  const trimmedKey = key.trim();
+  const pattern = API_KEY_PATTERNS[providerId.toLowerCase()];
+
+  if (!pattern) {
+    // Unknown provider - just check it's not empty
+    return trimmedKey.length > 0 ? { valid: true } : { valid: false, error: 'API key is empty' };
+  }
+
+  if (trimmedKey.length < pattern.minLength) {
+    return { valid: false, error: `API key too short (expected at least ${pattern.minLength} characters). ${pattern.description}` };
+  }
+
+  if (pattern.prefix && !trimmedKey.startsWith(pattern.prefix)) {
+    return { valid: false, error: `Invalid API key format. ${pattern.description}` };
+  }
+
+  return { valid: true };
+}
+
+/**
+ * Create validated credentials for a provider
+ * Returns null if validation fails, with error logged
+ */
+export function createValidatedCredentials(
+  apiKey: string | undefined,
+  providerId: string
+): ProviderCredentials | null {
+  const validation = validateApiKeyFormat(apiKey, providerId);
+  if (!validation.valid) {
+    console.warn(`[${providerId}] ${validation.error}`);
+    return null;
+  }
+  return { apiKey: apiKey!.trim() };
+}
+
 /**
  * Information about a specific model
  */

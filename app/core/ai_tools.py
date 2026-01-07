@@ -109,6 +109,31 @@ AI_TOOLS: Dict[str, Dict[str, Any]] = {
         "category": "3d",
         "providers": ["meshy"]
     },
+    # AI Collaboration tools (multi-model workflows)
+    "ai_collaborate": {
+        "name": "AI Collaboration",
+        "description": "Collaborate with other AI models for specialized tasks (review, plan, summarize)",
+        "category": "collaboration",
+        "providers": ["openai", "google", "deepseek"]
+    },
+    "ai_memory": {
+        "name": "AI Memory",
+        "description": "Long-term memory using Gemini's 1M context - store and recall information across sessions",
+        "category": "collaboration",
+        "providers": ["google"]
+    },
+    "ai_review": {
+        "name": "AI Review",
+        "description": "Get second opinions on code, plans, or content from another AI model",
+        "category": "collaboration",
+        "providers": ["openai", "google", "deepseek"]
+    },
+    "ai_reason": {
+        "name": "AI Reasoning",
+        "description": "Complex logical reasoning using DeepSeek-R1 or OpenAI o1 models",
+        "category": "collaboration",
+        "providers": ["deepseek", "openai"]
+    },
 }
 
 # ============================================================================
@@ -123,6 +148,10 @@ PROVIDER_KEY_MAP: Dict[str, str] = {
     "openai-sora": "openai_api_key",
     "google-gemini-video": "image_api_key",
     "meshy": "meshy_api_key",
+    # Collaboration providers
+    "openai": "openai_api_key",
+    "google": "image_api_key",
+    "deepseek": "deepseek_api_key",
 }
 
 # ============================================================================

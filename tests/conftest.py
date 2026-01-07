@@ -15,7 +15,7 @@ import tempfile
 import pytest
 from pathlib import Path
 from typing import Generator
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from contextlib import contextmanager
 
 # Add the project root to the path
@@ -106,35 +106,64 @@ def create_test_schema(cursor: sqlite3.Cursor):
         )
     """)
 
-    # Sessions
+    # Git repositories (must be before worktrees for FK constraint)
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sessions (
+        CREATE TABLE IF NOT EXISTS git_repositories (
             id TEXT PRIMARY KEY,
-            title TEXT,
-            profile_id TEXT REFERENCES agent_profiles(id) ON DELETE SET NULL,
-            project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
-            worktree_id TEXT,
-            status TEXT DEFAULT 'active',
-            is_pinned INTEGER DEFAULT 0,
-            metadata TEXT,
+            project_id TEXT NOT NULL UNIQUE,
+            remote_url TEXT,
+            default_branch TEXT DEFAULT 'main',
+            github_repo_name TEXT,
+            last_synced_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         )
     """)
 
-    # Worktrees
+    # Worktrees (must be before sessions for FK constraint)
+    # Note: session_id is deprecated - relationship is now tracked via sessions.worktree_id
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS worktrees (
             id TEXT PRIMARY KEY,
-            session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            repository_id TEXT NOT NULL,
+            session_id TEXT,
             branch_name TEXT NOT NULL,
-            path TEXT NOT NULL,
+            worktree_path TEXT NOT NULL,
+            base_branch TEXT,
             status TEXT DEFAULT 'active',
-            base_branch TEXT DEFAULT 'main',
-            auto_created INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            FOREIGN KEY (repository_id) REFERENCES git_repositories(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Worktree indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_repository ON worktrees(repository_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_session ON worktrees(session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_branch ON worktrees(branch_name)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_status ON worktrees(status)")
+
+    # Sessions (after worktrees for FK constraint)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            project_id TEXT,
+            profile_id TEXT NOT NULL,
+            api_user_id TEXT,
+            sdk_session_id TEXT,
+            worktree_id TEXT,
+            title TEXT,
+            status TEXT DEFAULT 'active',
+            is_favorite BOOLEAN DEFAULT FALSE,
+            total_cost_usd REAL DEFAULT 0,
+            total_tokens_in INTEGER DEFAULT 0,
+            total_tokens_out INTEGER DEFAULT 0,
+            turn_count INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
+            FOREIGN KEY (profile_id) REFERENCES profiles(id),
+            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,
+            FOREIGN KEY (worktree_id) REFERENCES worktrees(id) ON DELETE SET NULL
         )
     """)
 
@@ -327,6 +356,11 @@ def create_test_schema(cursor: sqlite3.Cursor):
             tools JSON,
             model TEXT,
             is_builtin BOOLEAN DEFAULT FALSE,
+            default_name TEXT,
+            default_description TEXT,
+            default_prompt TEXT,
+            default_tools JSON,
+            default_model TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -552,7 +586,7 @@ def create_test_schema(cursor: sqlite3.Cursor):
     """)
 
     # Insert schema version
-    cursor.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (25)")
+    cursor.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (26)")
 
 
 @pytest.fixture(scope="function")

@@ -137,6 +137,13 @@ async def lifespan(app: FastAPI):
     # Run database migrations
     run_migrations()
 
+    # Seed built-in subagents
+    from app.core.builtin_subagents import seed_builtin_subagents
+    seed_results = seed_builtin_subagents()
+    created = [k for k, v in seed_results.items() if v == "created"]
+    if created:
+        logger.info(f"Created built-in subagents: {', '.join(created)}")
+
     # Try to initialize encryption from ADMIN_PASSWORD env var
     # This enables headless operation without requiring admin login
     if encryption.init_encryption_from_env(database):

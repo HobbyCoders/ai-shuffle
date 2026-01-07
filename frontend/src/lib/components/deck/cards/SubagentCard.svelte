@@ -17,7 +17,7 @@
 	import type { DeckCard } from './types';
 	import { api } from '$lib/api/client';
 	import { groups } from '$lib/stores/groups';
-	import { Search, Plus, Trash2, Download, Upload, X, ArrowLeft, Monitor, User, Settings, Terminal, Check } from 'lucide-svelte';
+	import { Search, Plus, Trash2, Download, Upload, X, ArrowLeft, Monitor, User, Settings, Terminal, Check, Lock, RotateCcw } from 'lucide-svelte';
 	import './card-design-system.css';
 
 	interface Subagent {
@@ -28,6 +28,7 @@
 		tools?: string[];
 		model?: string;
 		is_builtin: boolean;
+		is_modified: boolean;  // Whether built-in subagent has been modified from defaults
 		created_at: string;
 		updated_at: string;
 	}
@@ -268,6 +269,12 @@
 	// Delete subagent
 	function handleDeleteClick(id: string, e: Event) {
 		e.stopPropagation();
+		// Don't allow deleting built-in subagents
+		const agent = subagents.find(s => s.id === id);
+		if (agent?.is_builtin) {
+			error = 'Built-in subagents cannot be deleted. You can disable them in profile settings.';
+			return;
+		}
 		deletingId = id;
 	}
 
@@ -283,6 +290,37 @@
 			error = err.detail || err.message || 'Failed to delete subagent';
 		} finally {
 			deleteLoading = false;
+		}
+	}
+
+	// Revert built-in subagent to defaults
+	let revertingId = $state<string | null>(null);
+	let revertLoading = $state(false);
+
+	async function handleRevert(id: string, e: Event) {
+		e.stopPropagation();
+		revertingId = id;
+	}
+
+	async function confirmRevert() {
+		if (!revertingId) return;
+		revertLoading = true;
+		try {
+			await api.post(`/subagents/${revertingId}/revert`);
+			revertingId = null;
+			await loadSubagents();
+			// If we're in the editor for this agent, reload the form
+			if (editingSubagent?.id === revertingId) {
+				const updated = subagents.find(s => s.id === revertingId);
+				if (updated) {
+					handleEdit(updated);
+				}
+			}
+		} catch (e: unknown) {
+			const err = e as { detail?: string; message?: string };
+			error = err.detail || err.message || 'Failed to revert subagent';
+		} finally {
+			revertLoading = false;
 		}
 	}
 
@@ -491,6 +529,37 @@
 									</div>
 								</div>
 							</div>
+						{:else if revertingId === agent.id}
+							<!-- Inline revert confirmation -->
+							<div class="card-list-item card-list-item--deleting">
+								<div class="card-item-icon" style="color: var(--color-warning);">
+									<RotateCcw />
+								</div>
+								<div class="card-item-content">
+									<p class="delete-confirm-text">
+										Revert <strong>{agent.name}</strong> to original defaults? Your customizations will be lost.
+									</p>
+									<div class="delete-confirm-actions">
+										<button
+											onclick={() => (revertingId = null)}
+											disabled={revertLoading}
+											class="card-btn-secondary"
+										>
+											Cancel
+										</button>
+										<button
+											onclick={confirmRevert}
+											disabled={revertLoading}
+											class="card-btn-primary"
+										>
+											{#if revertLoading}
+												<div class="card-spinner card-spinner--small"></div>
+											{/if}
+											Revert
+										</button>
+									</div>
+								</div>
+							</div>
 						{:else}
 							<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 							<div
@@ -503,6 +572,17 @@
 								<div class="card-item-content">
 									<div class="card-item-header">
 										<span class="card-item-name">{agent.name}</span>
+										{#if agent.is_builtin}
+											<span class="card-badge card-badge--builtin" title="Built-in subagent">
+												<Lock style="width: 10px; height: 10px;" />
+												Built-in
+											</span>
+											{#if agent.is_modified}
+												<span class="card-badge card-badge--modified" title="Modified from defaults">
+													Modified
+												</span>
+											{/if}
+										{/if}
 										<span class="card-badge {getModelBadgeClass(agent.model)}">
 											{getModelDisplay(agent.model)}
 										</span>
@@ -521,6 +601,15 @@
 									<p class="card-item-description">{agent.description}</p>
 								</div>
 								<div class="card-item-actions">
+									{#if agent.is_builtin && agent.is_modified}
+										<button
+											onclick={(e) => handleRevert(agent.id, e)}
+											class="card-action-btn"
+											title="Revert to defaults"
+										>
+											<RotateCcw />
+										</button>
+									{/if}
 									<button
 										onclick={(e) => exportSubagent(agent.id, e)}
 										class="card-action-btn"
@@ -528,13 +617,15 @@
 									>
 										<Download />
 									</button>
-									<button
-										onclick={(e) => handleDeleteClick(agent.id, e)}
-										class="card-action-btn card-action-btn--destructive"
-										title="Delete"
-									>
-										<Trash2 />
-									</button>
+									{#if !agent.is_builtin}
+										<button
+											onclick={(e) => handleDeleteClick(agent.id, e)}
+											class="card-action-btn card-action-btn--destructive"
+											title="Delete"
+										>
+											<Trash2 />
+										</button>
+									{/if}
 								</div>
 							</div>
 						{/if}

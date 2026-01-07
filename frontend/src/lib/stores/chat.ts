@@ -14,7 +14,7 @@
 import { writable, derived, get } from 'svelte/store';
 import type { Session, Profile } from '$lib/api/client';
 import { api } from '$lib/api/client';
-import { isNotificationsEnabled, notifySessionComplete } from '$lib/services/notifications';
+import { isNotificationsEnabled, notifySessionComplete, getPermission } from '$lib/services/notifications';
 
 export type MessageType = 'text' | 'tool_use' | 'tool_result';
 
@@ -784,8 +784,8 @@ function createChatStore() {
 					};
 				});
 
-				// Trigger browser notification if enabled and session took > 10 seconds
-				if (isNotificationsEnabled() && currentState.streamStartTime) {
+				// Trigger browser notification if enabled, permission granted, and session took > 10 seconds
+				if (isNotificationsEnabled() && getPermission() === 'granted' && currentState.streamStartTime) {
 					const duration = (Date.now() - currentState.streamStartTime) / 1000;
 					if (duration > 10) {
 						// Find session title from sessions list
