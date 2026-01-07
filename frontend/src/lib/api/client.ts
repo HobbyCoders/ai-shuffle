@@ -113,6 +113,7 @@ export interface AuthStatus {
 	is_admin: boolean;
 	setup_required: boolean;
 	claude_authenticated: boolean;
+	github_authenticated: boolean;
 	username: string | null;
 	api_user: ApiUserInfo | null;
 }

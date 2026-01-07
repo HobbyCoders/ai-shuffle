@@ -53,7 +53,6 @@ interface ChatState {
 	isStreaming: boolean;
 	isRemoteStreaming: boolean; // True when another device is streaming
 	error: string | null;
-	abortController: AbortController | null;
 }
 
 function createChatStore() {
@@ -68,11 +67,8 @@ function createChatStore() {
 		activeSessionIds: new Set(),
 		isStreaming: false,
 		isRemoteStreaming: false,
-		error: null,
-		abortController: null
+		error: null
 	});
-
-	let currentEventSource: EventSource | null = null;
 	let syncUnsubscribe: (() => void) | null = null;
 	let remoteMsgId: string | null = null; // Track remote streaming message ID
 
@@ -82,8 +78,11 @@ function createChatStore() {
 	function handleSyncEvent(event: SyncEvent) {
 		const state = get({ subscribe });
 
+		console.log('[Chat] handleSyncEvent:', event.event_type, 'session:', event.session_id, 'current:', state.sessionId);
+
 		// Only process events for the current session
 		if (event.session_id !== state.sessionId) {
+			console.log('[Chat] Ignoring event for different session');
 			return;
 		}
 
@@ -107,7 +106,7 @@ function createChatStore() {
 			}
 
 			case 'stream_start': {
-				// Another device started streaming
+				// Streaming started (either local or remote)
 				remoteMsgId = event.data.message_id as string;
 				const placeholderMsg: ChatMessage = {
 					id: remoteMsgId,
@@ -116,17 +115,26 @@ function createChatStore() {
 					type: 'text',
 					streaming: true
 				};
-				update((s) => ({
-					...s,
-					isRemoteStreaming: true,
-					messages: [...s.messages, placeholderMsg]
-				}));
+				update((s) => {
+					// Check if we already have a streaming message (avoid duplicates)
+					const hasStreamingMsg = s.messages.some(m => m.streaming && m.role === 'assistant');
+					if (hasStreamingMsg) {
+						// Already have a streaming message, just update streaming state
+						return { ...s, isStreaming: true };
+					}
+					return {
+						...s,
+						isStreaming: true,
+						messages: [...s.messages, placeholderMsg]
+					};
+				});
 				break;
 			}
 
 			case 'stream_chunk': {
-				// Streaming chunk from another device
+				// Streaming chunk (from background task or another device)
 				const chunkType = event.data.chunk_type as string;
+				console.log('[Chat] Received stream_chunk:', chunkType, event.data);
 
 				update((s) => {
 					const messages = [...s.messages];
@@ -249,7 +257,7 @@ function createChatStore() {
 			}
 
 			case 'stream_end': {
-				// Streaming completed on another device
+				// Streaming completed (local or remote)
 				const metadata = event.data.metadata as Record<string, unknown>;
 				const interrupted = event.data.interrupted as boolean;
 
@@ -283,6 +291,7 @@ function createChatStore() {
 					return {
 						...s,
 						messages: cleanedMessages,
+						isStreaming: false,
 						isRemoteStreaming: false
 					};
 				});
@@ -301,9 +310,9 @@ function createChatStore() {
 			}
 
 			case 'state': {
-				// Initial state from WebSocket connection
+				// State event from WebSocket connection (received on connect/reconnect)
+				// This tells us if the session is currently streaming on another device
 				const isStreaming = event.data.is_streaming as boolean;
-				const dbMessages = event.data.messages as SessionMessage[];
 				const streamingMessages = event.data.streaming_messages as Array<{
 					type: string;
 					role: string;
@@ -314,38 +323,71 @@ function createChatStore() {
 					streaming?: boolean;
 				}> | undefined;
 
-				// Start with messages from database
-				const chatMessages: ChatMessage[] = (dbMessages || []).map((m, i) => ({
-					id: `msg-${i}`,
-					role: m.role as 'user' | 'assistant',
-					content: m.content,
-					type: m.role === 'assistant' ? 'text' as MessageType : undefined,
-					metadata: m.metadata,
-					streaming: false
-				}));
+				console.log('[Chat] State event: is_streaming=', isStreaming, 'buffered messages:', streamingMessages?.length || 0);
 
-				// If session is streaming, append the buffered streaming messages
-				if (isStreaming && streamingMessages && streamingMessages.length > 0) {
-					console.log('[Chat] Session is streaming, appending buffered messages:', streamingMessages.length);
-					streamingMessages.forEach((sm, i) => {
-						chatMessages.push({
-							id: `stream-${Date.now()}-${i}`,
-							role: sm.role as 'user' | 'assistant',
-							content: sm.content || '',
-							type: sm.type as MessageType,
-							toolName: sm.tool_name,
-							toolId: sm.tool_id,
-							toolInput: sm.tool_input,
-							streaming: sm.streaming ?? true
-						});
-					});
-				}
+				update((s) => {
+					// If session is streaming and we have buffered messages, merge them
+					if (isStreaming && streamingMessages && streamingMessages.length > 0) {
+						const messages = [...s.messages];
 
-				update((s) => ({
-					...s,
-					messages: chatMessages,
-					isRemoteStreaming: isStreaming
-				}));
+						// Find existing streaming assistant message
+						const streamingMsgIndex = messages.findIndex(m => m.streaming && m.role === 'assistant');
+
+						if (streamingMsgIndex !== -1) {
+							// Merge buffered content into existing streaming message
+							console.log('[Chat] Merging buffered content into existing streaming message');
+							for (const sm of streamingMessages) {
+								if (sm.type === 'text' && sm.content) {
+									// Append text content
+									messages[streamingMsgIndex] = {
+										...messages[streamingMsgIndex],
+										content: (messages[streamingMsgIndex].content || '') + sm.content
+									};
+								} else if (sm.type === 'tool_use') {
+									// Add tool use message
+									messages.push({
+										id: `tool-${Date.now()}-${sm.tool_id}`,
+										role: 'assistant' as const,
+										content: '',
+										type: 'tool_use' as const,
+										toolName: sm.tool_name,
+										toolId: sm.tool_id,
+										toolInput: sm.tool_input,
+										streaming: sm.streaming ?? true
+									});
+								}
+							}
+							return {
+								...s,
+								messages,
+								isStreaming: true,
+								isRemoteStreaming: isStreaming
+							};
+						} else {
+							// No existing streaming message - create new ones from buffer
+							console.log('[Chat] No streaming message found, creating from buffer');
+							const newMsgs = streamingMessages.map((sm, i) => ({
+								id: `stream-${Date.now()}-${i}`,
+								role: sm.role as 'user' | 'assistant',
+								content: sm.content || '',
+								type: sm.type as MessageType,
+								toolName: sm.tool_name,
+								toolId: sm.tool_id,
+								toolInput: sm.tool_input,
+								streaming: sm.streaming ?? true
+							}));
+							return {
+								...s,
+								messages: [...s.messages, ...newMsgs],
+								isStreaming: true,
+								isRemoteStreaming: isStreaming
+							};
+						}
+					}
+
+					// Don't change isStreaming if we're already streaming locally
+					return { ...s, isRemoteStreaming: isStreaming };
+				});
 				break;
 			}
 		}
@@ -410,7 +452,7 @@ function createChatStore() {
 
 		async loadActiveSessions() {
 			try {
-				const response = await api.get<{ active_sessions: string[] }>('/query/sessions/active');
+				const response = await api.get<{ active_sessions: string[] }>('/streaming/active');
 				const activeIds = new Set(response.active_sessions || []);
 				update(s => ({ ...s, activeSessionIds: activeIds }));
 			} catch (e) {
@@ -523,10 +565,7 @@ function createChatStore() {
 		},
 
 		async sendMessage(prompt: string) {
-			// Create abort controller for this request
-			const abortController = new AbortController();
-
-			// Add user message
+			// Add user message immediately for responsive UI
 			const userMsgId = `msg-${Date.now()}`;
 			const userMessage: ChatMessage = {
 				id: userMsgId,
@@ -534,44 +573,32 @@ function createChatStore() {
 				content: prompt
 			};
 
-			// Add placeholder for assistant response (text message)
-			const assistantMsgId = `msg-${Date.now() + 1}`;
-			const assistantMessage: ChatMessage = {
-				id: assistantMsgId,
-				role: 'assistant',
-				content: '',
-				type: 'text',
-				streaming: true
-			};
-
-			// Capture current state values AFTER updating UI
-			// This ensures we get the latest sessionId even if loadSession just completed
+			// Capture current state values
 			let currentSessionId: string | null = null;
 			let currentProfile: string = 'claude-code';
 			let currentProject: string = '';
 
 			update(s => {
-				// Capture current values from store during update
 				currentSessionId = s.sessionId;
 				currentProfile = s.selectedProfile;
 				currentProject = s.selectedProject;
 				return {
 					...s,
-					messages: [...s.messages, userMessage, assistantMessage],
+					// Only add user message - assistant placeholder will come from stream_start event
+					messages: [...s.messages, userMessage],
 					isStreaming: true,
-					error: null,
-					abortController
+					error: null
 				};
 			});
 
 			// Get device ID for cross-device sync
 			const deviceId = getDeviceIdSync();
 
-			// Build request with captured values
+			// Build request
 			const body: Record<string, unknown> = {
 				prompt,
 				profile: currentProfile,
-				device_id: deviceId // Include device ID for sync
+				device_id: deviceId
 			};
 
 			if (currentSessionId) {
@@ -583,85 +610,54 @@ function createChatStore() {
 			}
 
 			try {
-				// Use fetch for SSE
-				const response = await fetch('/api/v1/conversation/stream', {
+				// Start background query - returns immediately
+				// Streaming events come via WebSocket, not HTTP
+				const response = await fetch('/api/v1/conversation/start', {
 					method: 'POST',
 					headers: {
 						'Content-Type': 'application/json'
 					},
 					credentials: 'include',
-					body: JSON.stringify(body),
-					signal: abortController.signal
+					body: JSON.stringify(body)
 				});
 
 				if (!response.ok) {
 					const error = await response.json();
-					throw new Error(error.detail || 'Stream request failed');
+					throw new Error(error.detail || 'Failed to start conversation');
 				}
 
-				const reader = response.body?.getReader();
-				const decoder = new TextDecoder();
+				const result = await response.json();
+				const newSessionId = result.session_id;
+				const streamingMsgId = result.message_id;
 
-				if (!reader) {
-					throw new Error('No response body');
-				}
+				// Update session ID and add assistant placeholder immediately
+				// This ensures we have a streaming message ready for chunks
+				update(s => ({
+					...s,
+					sessionId: newSessionId,
+					messages: [...s.messages, {
+						id: streamingMsgId,
+						role: 'assistant' as const,
+						content: '',
+						type: 'text' as const,
+						streaming: true
+					}]
+				}));
 
-				let buffer = '';
+				// Connect to WebSocket for streaming updates
+				// The sync handler will receive stream_chunk, stream_end events
+				await connectSync(newSessionId);
 
-				while (true) {
-					const { done, value } = await reader.read();
-					if (done) break;
-
-					buffer += decoder.decode(value, { stream: true });
-
-					// Process SSE events
-					const lines = buffer.split('\n');
-					buffer = lines.pop() || '';
-
-					for (const line of lines) {
-						if (line.startsWith('data: ')) {
-							const data = line.slice(6);
-							try {
-								const event = JSON.parse(data);
-								this.handleStreamEvent(event, assistantMsgId);
-							} catch (e) {
-								console.error('Failed to parse SSE event:', data);
-							}
-						}
-					}
-				}
-
-				// Reload sessions to update the list
+				// Reload sessions list to show new session
 				await this.loadSessions();
 
 			} catch (e: any) {
-				// Don't show error for intentional abort
-				if (e.name === 'AbortError') {
-					update(s => {
-						const messages = [...s.messages];
-						const msgIndex = messages.findIndex(m => m.id === assistantMsgId);
-						if (msgIndex !== -1) {
-							messages[msgIndex] = {
-								...messages[msgIndex],
-								streaming: false,
-								content: messages[msgIndex].content + '\n\n[Stopped]'
-							};
-						}
-						return {
-							...s,
-							messages,
-							isStreaming: false,
-							abortController: null
-						};
-					});
-					return;
-				}
-
+				// Remove the user message on error
 				update(s => ({
 					...s,
+					messages: s.messages.filter(m => m.id !== userMsgId),
 					isStreaming: false,
-					error: e.message || 'Failed to send message',
-					abortController: null
+					error: e.message || 'Failed to send message'
 				}));
 			}
 		},
@@ -669,27 +665,28 @@ function createChatStore() {
 		async stopGeneration() {
 			const state = get({ subscribe });
 
-			// Abort the fetch request
-			if (state.abortController) {
-				state.abortController.abort();
-			}
-
-			// Also call the server-side interrupt if we have a session
+			// Call the server-side interrupt to stop the background task
 			if (state.sessionId) {
 				try {
-					await fetch(`/api/v1/session/${state.sessionId}/interrupt`, {
+					const response = await fetch(`/api/v1/session/${state.sessionId}/interrupt`, {
 						method: 'POST',
 						credentials: 'include'
 					});
+
+					if (!response.ok) {
+						console.warn('Interrupt request failed:', response.status);
+					}
 				} catch (e) {
 					console.error('Failed to interrupt session:', e);
 				}
 			}
 
+			// Update local state - the stream_end event from WebSocket will also update this
+			// but we do it immediately for responsive UI
 			update(s => ({
 				...s,
 				isStreaming: false,
-				abortController: null
+				isRemoteStreaming: false
 			}));
 		},
 
@@ -851,8 +848,7 @@ function createChatStore() {
 						return {
 							...s,
 							messages: cleanedMessages,
-							isStreaming: false,
-							abortController: null
+							isStreaming: false
 						};
 					}
 
@@ -885,8 +881,7 @@ function createChatStore() {
 						return {
 							...s,
 							messages: cleanedMessages,
-							isStreaming: false,
-							abortController: null
+							isStreaming: false
 						};
 					}
 
@@ -908,8 +903,7 @@ function createChatStore() {
 							...s,
 							messages: cleanedMessages,
 							isStreaming: false,
-							error: event.message as string,
-							abortController: null
+							error: event.message as string
 						};
 					}
 				}

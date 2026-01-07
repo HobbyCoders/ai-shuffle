@@ -55,16 +55,31 @@ fi
 mkdir -p /home/appuser/.config/claude /home/appuser/.claude /home/appuser/.config/gh
 chown -R appuser:appuser /home/appuser/.config /home/appuser/.claude
 
-# Copy Claude credentials from root if they exist and appuser doesn't have them
+# =============================================================================
+# Claude Code Credentials Management
+# =============================================================================
+# The volume mount for Claude auth is at /home/appuser/.claude
+# Credentials are stored after in-app login - no need to copy from root anymore
+
+# Check for existing Claude credentials in the volume
+if [ -f /home/appuser/.claude/.credentials.json ]; then
+    CREDS_SIZE=$(stat -c%s /home/appuser/.claude/.credentials.json 2>/dev/null || echo "0")
+    if [ "$CREDS_SIZE" -gt "10" ]; then
+        echo "Claude Code credentials found in volume (${CREDS_SIZE} bytes)"
+    fi
+else
+    echo "Claude Code: No credentials found - login via web UI required"
+fi
+
+# Legacy: Copy Claude credentials from root if they exist (for backwards compatibility)
 if [ -f /root/.claude/.credentials.json ] && [ ! -f /home/appuser/.claude/.credentials.json ]; then
-    echo "Copying Claude credentials from root to appuser..."
-    # Copy hidden files explicitly, then everything else
+    echo "Copying Claude credentials from root to appuser (legacy migration)..."
     cp /root/.claude/.credentials.json /home/appuser/.claude/ 2>/dev/null || true
     cp -r /root/.claude/* /home/appuser/.claude/ 2>/dev/null || true
     chown -R appuser:appuser /home/appuser/.claude
 fi
 
-# Also check .config/claude location
+# Also check .config/claude location (newer Claude versions)
 if [ -f /root/.config/claude/credentials.json ] && [ ! -f /home/appuser/.config/claude/credentials.json ]; then
     echo "Copying Claude config from root to appuser..."
     mkdir -p /home/appuser/.config/claude
@@ -72,27 +87,50 @@ if [ -f /root/.config/claude/credentials.json ] && [ ! -f /home/appuser/.config/
     chown -R appuser:appuser /home/appuser/.config
 fi
 
-# Copy GitHub CLI auth from root if it exists and appuser doesn't have it
-# gh stores auth in ~/.config/gh/hosts.yml
-if [ -f /root/.config/gh/hosts.yml ]; then
-    echo "Copying GitHub CLI auth from root to appuser..."
-    # Always copy if root has auth (volume may be empty or stale)
+# =============================================================================
+# GitHub CLI Credentials Management
+# =============================================================================
+# The volume mount for GitHub auth is at /home/appuser/.config/gh
+# Credentials are stored after in-app login - no need to copy from root anymore
+
+# Check for existing GitHub credentials in the volume
+if [ -f /home/appuser/.config/gh/hosts.yml ]; then
+    echo "GitHub CLI credentials found in volume"
+    # Configure git to use gh as credential helper
+    git config --global credential.helper '!gh auth git-credential'
+    echo "Git configured to use GitHub CLI for authentication"
+
+    # Verify GitHub auth status
+    if setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser gh auth status 2>/dev/null; then
+        echo "GitHub CLI: Authentication verified"
+    else
+        echo "GitHub CLI: Credentials exist but may be expired - re-login via web UI recommended"
+    fi
+else
+    echo "GitHub CLI: No credentials found - login via web UI required"
+fi
+
+# Legacy: Copy GitHub CLI auth from root if it exists (for backwards compatibility)
+if [ -f /root/.config/gh/hosts.yml ] && [ ! -f /home/appuser/.config/gh/hosts.yml ]; then
+    echo "Copying GitHub CLI auth from root to appuser (legacy migration)..."
     cp /root/.config/gh/hosts.yml /home/appuser/.config/gh/ 2>/dev/null || true
     cp -r /root/.config/gh/* /home/appuser/.config/gh/ 2>/dev/null || true
     chown -R appuser:appuser /home/appuser/.config/gh
-    echo "GitHub CLI auth copied successfully"
-fi
-
-# Configure git to use gh as credential helper
-if [ -f /home/appuser/.config/gh/hosts.yml ]; then
-    # Set git credential helper to use gh for appuser
     git config --global credential.helper '!gh auth git-credential'
-    echo "Git configured to use GitHub CLI for authentication"
+    echo "GitHub CLI auth copied and git configured"
 fi
 
 # Ensure data and workspace directories are writable
 chown -R appuser:appuser /data /workspace
 
-# Switch to appuser and run the application
+# Final ownership fix for config directories
+chown -R appuser:appuser /home/appuser/.config /home/appuser/.claude 2>/dev/null || true
+
+# =============================================================================
+# Start Application
+# =============================================================================
+echo ""
+echo "=========================================="
 echo "Starting AI Hub as appuser (${PUID}:${PGID})"
+echo "=========================================="
 exec setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser python -m app.main
