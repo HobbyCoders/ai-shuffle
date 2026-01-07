@@ -69,6 +69,7 @@ class SystemPromptConfig(BaseModel):
     content: Optional[str] = None
     append: Optional[str] = None
     inject_env_details: bool = False  # Inject environment info (working dir, platform, date, etc.)
+    enable_ai_tools: bool = False  # Enable AI tools (image generation, etc.) when configured in Settings
 
 
 class ProfileConfig(BaseModel):
@@ -257,6 +258,13 @@ class Session(SessionBase):
 class SessionWithMessages(Session):
     """Session with message history"""
     messages: List[SessionMessage] = []
+
+
+class SessionSearchResult(Session):
+    """Session search result with match information"""
+    match_type: str  # 'title' or 'content'
+    match_snippet: Optional[str] = None  # Snippet showing where the match was found
+    match_time: Optional[datetime] = None  # When the matching content was created
 
 
 # ============================================================================

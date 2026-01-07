@@ -841,6 +841,162 @@ def delete_session_messages_after(session_id: str, message_id: int) -> int:
         return cursor.rowcount
 
 
+def search_sessions(
+    query: str,
+    project_id: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    api_user_id: Optional[str] = None,
+    admin_only: bool = False,
+    limit: int = 20
+) -> List[Dict[str, Any]]:
+    """
+    Search sessions by title and message content.
+    Returns sessions with matching snippets showing where the match was found.
+    """
+    if not query or not query.strip():
+        return []
+
+    search_term = f"%{query.strip()}%"
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # Build the base query - search both session titles and message content
+        # Use UNION to combine title matches and content matches
+        sql = """
+        WITH title_matches AS (
+            SELECT
+                s.id,
+                s.project_id,
+                s.profile_id,
+                s.api_user_id,
+                s.title,
+                s.status,
+                s.total_cost_usd,
+                s.total_tokens_in,
+                s.total_tokens_out,
+                s.turn_count,
+                s.created_at,
+                s.updated_at,
+                'title' as match_type,
+                s.title as match_snippet,
+                s.updated_at as match_time
+            FROM sessions s
+            WHERE s.title LIKE ? COLLATE NOCASE
+            AND s.status != 'archived'
+        ),
+        content_matches AS (
+            SELECT DISTINCT
+                s.id,
+                s.project_id,
+                s.profile_id,
+                s.api_user_id,
+                s.title,
+                s.status,
+                s.total_cost_usd,
+                s.total_tokens_in,
+                s.total_tokens_out,
+                s.turn_count,
+                s.created_at,
+                s.updated_at,
+                'content' as match_type,
+                (
+                    SELECT SUBSTR(
+                        sm2.content,
+                        MAX(1, INSTR(LOWER(sm2.content), LOWER(?)) - 40),
+                        120
+                    )
+                    FROM session_messages sm2
+                    WHERE sm2.session_id = s.id
+                    AND sm2.content LIKE ? COLLATE NOCASE
+                    AND sm2.role IN ('user', 'assistant')
+                    ORDER BY sm2.created_at DESC
+                    LIMIT 1
+                ) as match_snippet,
+                (
+                    SELECT sm3.created_at
+                    FROM session_messages sm3
+                    WHERE sm3.session_id = s.id
+                    AND sm3.content LIKE ? COLLATE NOCASE
+                    AND sm3.role IN ('user', 'assistant')
+                    ORDER BY sm3.created_at DESC
+                    LIMIT 1
+                ) as match_time
+            FROM sessions s
+            INNER JOIN session_messages sm ON sm.session_id = s.id
+            WHERE sm.content LIKE ? COLLATE NOCASE
+            AND sm.role IN ('user', 'assistant')
+            AND s.status != 'archived'
+        ),
+        all_matches AS (
+            SELECT * FROM title_matches
+            UNION ALL
+            SELECT * FROM content_matches
+        )
+        SELECT
+            id,
+            project_id,
+            profile_id,
+            api_user_id,
+            title,
+            status,
+            total_cost_usd,
+            total_tokens_in,
+            total_tokens_out,
+            turn_count,
+            created_at,
+            updated_at,
+            match_type,
+            match_snippet,
+            match_time
+        FROM all_matches
+        WHERE 1=1
+        """
+
+        # Base params for the search terms (used multiple times in query)
+        params = [search_term, query.strip(), search_term, search_term, search_term]
+
+        # Add filters
+        if project_id:
+            sql += " AND project_id = ?"
+            params.append(project_id)
+        if profile_id:
+            sql += " AND profile_id = ?"
+            params.append(profile_id)
+        if admin_only:
+            sql += " AND api_user_id IS NULL"
+        elif api_user_id:
+            sql += " AND api_user_id = ?"
+            params.append(api_user_id)
+
+        # Group by session to avoid duplicates, keeping the best match
+        # Order by most recent match
+        sql += """
+        GROUP BY id
+        ORDER BY
+            CASE WHEN match_type = 'title' THEN 0 ELSE 1 END,
+            updated_at DESC
+        LIMIT ?
+        """
+        params.append(limit)
+
+        cursor.execute(sql, params)
+        results = rows_to_list(cursor.fetchall())
+
+        # Clean up snippets - add ellipsis if truncated
+        for result in results:
+            if result.get('match_snippet') and result.get('match_type') == 'content':
+                snippet = result['match_snippet']
+                # Add ellipsis if we truncated
+                if len(snippet) >= 118:
+                    if not snippet.startswith(' '):
+                        snippet = '...' + snippet
+                    snippet = snippet + '...'
+                result['match_snippet'] = snippet.strip()
+
+        return results
+
+
 # ============================================================================
 # Usage Log Operations
 # ============================================================================

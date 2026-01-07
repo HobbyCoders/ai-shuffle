@@ -129,6 +129,8 @@ const tabPingTimers: Map<string, ReturnType<typeof setInterval>> = new Map();
 const tabReconnectTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 // Track tabs waiting for history response - queue sync events until history arrives
 const tabsWaitingForHistory: Map<string, Array<Record<string, unknown>>> = new Map();
+// Track stop confirmation timeouts - prevents UI freeze if 'stopped' message never arrives
+const stopTimeouts: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
 // Interface for persisted tab state (only what we need to restore tabs)
 interface PersistedTab {
@@ -244,32 +246,10 @@ function generateTabId(): string {
 }
 
 function createTabsStore() {
-	const initialTabId = generateTabId();
-
+	// Start with no tabs - will be populated from server or user creates one
 	const { subscribe, set, update } = writable<TabsState>({
-		tabs: [{
-			id: initialTabId,
-			title: 'New Chat',
-			sessionId: null,
-			messages: [],
-			isStreaming: false,
-			wsConnected: false,
-			error: null,
-			profile: getPersistedProfile(),
-			project: getPersistedProject(),
-			totalTokensIn: 0,
-			totalTokensOut: 0,
-			totalCacheCreationTokens: 0,
-			totalCacheReadTokens: 0,
-			contextUsed: null,
-			contextMax: 200000,
-			modelOverride: null,
-			permissionModeOverride: null,
-			pendingPermissions: [],
-			pendingQuestions: [],
-			todos: []
-		}],
-		activeTabId: initialTabId,
+		tabs: [],
+		activeTabId: null,
 		profiles: [],
 		projects: [],
 		sessions: [],
@@ -389,7 +369,38 @@ function createTabsStore() {
 
 		ws.onclose = (event) => {
 			console.log(`[Tab ${tabId}] WebSocket closed:`, event.code, event.reason);
-			updateTab(tabId, { wsConnected: false });
+
+			// If the WebSocket closes while streaming, reset the streaming state
+			// to prevent the UI from being stuck in a frozen state
+			const tab = getTab(tabId);
+			if (tab?.isStreaming) {
+				console.warn(`[Tab ${tabId}] WebSocket closed while streaming - resetting UI state`);
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(t => {
+						if (t.id !== tabId) return t;
+
+						let messages = t.messages.map(m =>
+							m.streaming ? { ...m, streaming: false } : m
+						);
+						// Remove empty assistant messages
+						messages = messages.filter(
+							m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
+						);
+
+						return { ...t, messages, isStreaming: false, wsConnected: false };
+					})
+				}));
+			} else {
+				updateTab(tabId, { wsConnected: false });
+			}
+
+			// Clear any pending stop timeout
+			const stopTimeout = stopTimeouts.get(tabId);
+			if (stopTimeout) {
+				clearTimeout(stopTimeout);
+				stopTimeouts.delete(tabId);
+			}
 
 			const pingTimer = tabPingTimers.get(tabId);
 			if (pingTimer) {
@@ -404,8 +415,8 @@ function createTabsStore() {
 
 				const reconnectTimer = setTimeout(() => {
 					// Check if tab still exists
-					const tab = getTab(tabId);
-					if (tab) {
+					const currentTab = getTab(tabId);
+					if (currentTab) {
 						console.log(`[Tab ${tabId}] Attempting reconnect...`);
 						connectTab(tabId, true); // Pass isReconnect flag
 					}
@@ -1196,12 +1207,33 @@ function createTabsStore() {
 						existingContentHashes.add(hash);
 					}
 
+					// First pass: build a map of tool_results in buffer for grouping (legacy support)
+					const bufferToolResults: Map<string, { content: string; status: 'complete' | 'error' }> = new Map();
+					for (const m of streamingBuffer) {
+						const bufferType = (m.type || m.chunk_type || 'text') as string;
+						if (bufferType === 'tool_result') {
+							const toolId = (m.tool_id || '') as string;
+							if (toolId) {
+								bufferToolResults.set(toolId, {
+									content: (m.content || '') as string,
+									status: 'complete'
+								});
+							}
+						}
+					}
+
 					// Process buffer messages and only add non-duplicates
 					for (const m of streamingBuffer) {
 						const bufferType = (m.type || m.chunk_type || 'text') as MessageType;
 						const bufferToolId = (m.tool_id || '') as string;
 						const bufferContent = (m.content || '') as string;
 						const hash = `${bufferType}:${bufferToolId}:${bufferContent.substring(0, 100)}`;
+
+						// Skip standalone tool_result messages - they should be grouped with tool_use
+						if (bufferType === 'tool_result') {
+							console.log(`[Tab ${tabId}] Skipping standalone tool_result, will merge with tool_use:`, bufferToolId);
+							continue;
+						}
 
 						// Skip if we already have similar content in history
 						if (existingContentHashes.has(hash)) {
@@ -1225,6 +1257,7 @@ function createTabsStore() {
 							continue;
 						}
 
+						// Build the buffer message
 						const bufferMsg: ChatMessage = {
 							id: `buffer-${Date.now()}-${Math.random()}`,
 							role: 'assistant' as const,
@@ -1235,6 +1268,25 @@ function createTabsStore() {
 							toolInput: m.tool_input as Record<string, unknown> | undefined,
 							streaming: (m.streaming as boolean) ?? true
 						};
+
+						// For tool_use messages, merge result if present (from new backend format)
+						// or from legacy buffer format (separate tool_result messages)
+						if (bufferType === 'tool_use' && bufferToolId) {
+							// Check for embedded result (new format from backend)
+							if (m.tool_result !== undefined) {
+								bufferMsg.toolResult = m.tool_result as string;
+								bufferMsg.toolStatus = (m.tool_status as 'complete' | 'error') || 'complete';
+								bufferMsg.streaming = false;
+							}
+							// Check for result in legacy format (separate tool_result in buffer)
+							else if (bufferToolResults.has(bufferToolId)) {
+								const result = bufferToolResults.get(bufferToolId)!;
+								bufferMsg.toolResult = result.content;
+								bufferMsg.toolStatus = result.status;
+								bufferMsg.streaming = false;
+							}
+						}
+
 						finalMessages.push(bufferMsg);
 						existingContentHashes.add(hash);
 					}
@@ -1630,6 +1682,13 @@ function createTabsStore() {
 				const sessionId = data.session_id as string;
 				console.log('[WS] Done event received, cleaning up streaming messages');
 
+				// Clear any pending stop timeout since streaming is complete
+				const doneStopTimeout = stopTimeouts.get(tabId);
+				if (doneStopTimeout) {
+					clearTimeout(doneStopTimeout);
+					stopTimeouts.delete(tabId);
+				}
+
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
@@ -1708,6 +1767,14 @@ function createTabsStore() {
 				// Both 'stopped' (from task cancellation) and 'interrupted' (from SDK interrupt)
 				// should be handled the same way - stop streaming and mark as stopped
 				console.log(`[Tab ${tabId}] Received ${msgType} message`);
+
+				// Clear the fallback timeout since we received confirmation
+				const stopTimeout = stopTimeouts.get(tabId);
+				if (stopTimeout) {
+					clearTimeout(stopTimeout);
+					stopTimeouts.delete(tabId);
+				}
+
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
@@ -2318,8 +2385,8 @@ function createTabsStore() {
 				// Try to load persisted tabs from server
 				const persistedState = await loadTabsFromServer();
 
-				if (persistedState && persistedState.tabs && persistedState.tabs.length > 0) {
-					// Restore tabs from server
+				if (persistedState && persistedState.tabs) {
+					// Restore tabs from server (could be empty array)
 					const restoredTabs: ChatTab[] = persistedState.tabs.map(pt => ({
 						id: pt.id,
 						title: pt.title,
@@ -2349,7 +2416,7 @@ function createTabsStore() {
 						activeTabId: persistedState.activeTabId || restoredTabs[0]?.id || null
 					}));
 
-					// Connect WebSockets for each tab
+					// Connect WebSockets for each tab (if any)
 					// Note: We rely on WebSocket load_session (sent in ws.onopen) to load messages
 					// This ensures we get streaming state and buffer for active sessions
 					// DO NOT call loadSessionInTab here - it uses REST which doesn't have streaming info
@@ -2359,11 +2426,8 @@ function createTabsStore() {
 
 					console.log('[Tabs] Restored', restoredTabs.length, 'tabs from server');
 				} else {
-					// No persisted state - connect default tab
-					const state = get({ subscribe });
-					for (const tab of state.tabs) {
-						connectTab(tab.id);
-					}
+					// No persisted state at all - start with empty tabs (user can create one)
+					console.log('[Tabs] No persisted state, starting with empty tabs');
 				}
 			} catch (error) {
 				console.error('[Tabs] Failed to initialize from server:', error);
@@ -2441,14 +2505,14 @@ function createTabsStore() {
 		 */
 		closeTab(tabId: string) {
 			const state = get({ subscribe });
+			const tab = state.tabs.find(t => t.id === tabId);
 
-			// Don't close if it's the last tab
-			if (state.tabs.length <= 1) {
+			// Don't close if the tab is actively streaming
+			if (tab?.isStreaming) {
 				return;
 			}
 
 			// Send close_session message before disconnecting (so other devices know)
-			const tab = state.tabs.find(t => t.id === tabId);
 			if (tab?.sessionId) {
 				const ws = tabConnections.get(tabId);
 				if (ws && ws.readyState === WebSocket.OPEN) {
@@ -2584,9 +2648,9 @@ function createTabsStore() {
 		/**
 		 * Stop generation in a specific tab
 		 *
-		 * Note: We do NOT set isStreaming: false here. We wait for the backend
-		 * to send a 'stopped' message confirming the stop was successful.
-		 * This prevents the UI from showing "stopped" while the backend continues.
+		 * We send a stop message and set a fallback timeout. If the backend
+		 * confirms with 'stopped', the timeout is cleared. If no confirmation
+		 * arrives within the timeout, we force the UI to recover to prevent freezing.
 		 */
 		stopGeneration(tabId: string) {
 			const tab = getTab(tabId);
@@ -2601,8 +2665,38 @@ function createTabsStore() {
 				}));
 			}
 
-			// Don't set isStreaming: false here - wait for 'stopped' confirmation from backend
-			// The backend will send either 'stopped' or 'done' when it actually stops
+			// Set a fallback timeout to force UI recovery if 'stopped' message never arrives
+			// This prevents the UI from freezing indefinitely if the backend fails to respond
+			const existingTimeout = stopTimeouts.get(tabId);
+			if (existingTimeout) {
+				clearTimeout(existingTimeout);
+			}
+
+			const timeoutId = setTimeout(() => {
+				const currentTab = getTab(tabId);
+				if (currentTab?.isStreaming) {
+					console.warn(`[Tab ${tabId}] Stop confirmation timeout - forcing UI recovery`);
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(t => {
+							if (t.id !== tabId) return t;
+
+							let messages = t.messages.map(m =>
+								m.streaming ? { ...m, streaming: false } : m
+							);
+							// Remove empty assistant messages
+							messages = messages.filter(
+								m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
+							);
+
+							return { ...t, messages, isStreaming: false };
+						})
+					}));
+				}
+				stopTimeouts.delete(tabId);
+			}, 5000); // 5 second timeout
+
+			stopTimeouts.set(tabId, timeoutId);
 		},
 
 		/**

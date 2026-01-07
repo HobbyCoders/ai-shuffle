@@ -22,7 +22,7 @@
 		type ChatTab,
 		type ApiUser
 	} from '$lib/stores/tabs';
-	import { api, type FileUploadResponse } from '$lib/api/client';
+	import { api, type FileUploadResponse, searchSessions, type SessionSearchResult } from '$lib/api/client';
 	import { marked } from 'marked';
 	import TerminalModal from '$lib/components/TerminalModal.svelte';
 	import RewindModal from '$lib/components/RewindModal.svelte';
@@ -38,6 +38,7 @@
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import TodoList from '$lib/components/TodoList.svelte';
+	import { groups, organizeByGroups } from '$lib/stores/groups';
 	import { executeCommand, isSlashCommand, syncAfterRewind, listCommands, type Command } from '$lib/api/commands';
 	import { groupSessionsByDate, type DateGroup } from '$lib/utils/dateGroups';
 
@@ -119,20 +120,50 @@
 	let sessionSearchExpanded = false;
 	let collapsedGroups: Set<string> = new Set(['yesterday', 'week', 'month', 'older']); // Only 'today' expanded by default
 
-	// Computed: filtered and grouped sessions
-	$: filteredSessions = sessionSearchQuery
-		? $sessions.filter(s =>
-			s.title?.toLowerCase().includes(sessionSearchQuery.toLowerCase())
-		)
-		: $sessions;
+	// Search state
+	let searchResults: SessionSearchResult[] = [];
+	let isSearching = false;
+	let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+	// Debounced search function
+	function debouncedSearch(query: string) {
+		// Clear existing timer
+		if (searchDebounceTimer) {
+			clearTimeout(searchDebounceTimer);
+		}
+
+		// If query is empty, clear results immediately
+		if (!query.trim()) {
+			searchResults = [];
+			isSearching = false;
+			return;
+		}
+
+		isSearching = true;
+
+		// Debounce the API call by 300ms
+		searchDebounceTimer = setTimeout(async () => {
+			try {
+				const adminOnly = sidebarTab === 'my-chats';
+				searchResults = await searchSessions(query, { adminOnly, limit: 20 });
+			} catch (error) {
+				console.error('Search failed:', error);
+				searchResults = [];
+			} finally {
+				isSearching = false;
+			}
+		}, 300);
+	}
+
+	// Trigger search when query changes
+	$: debouncedSearch(sessionSearchQuery);
+
+	// Computed: filtered and grouped sessions (when not searching)
+	$: filteredSessions = $sessions;
 	$: groupedSessions = groupSessionsByDate(filteredSessions);
 
-	// Admin sessions grouped
-	$: filteredAdminSessions = sessionSearchQuery
-		? $adminSessions.filter(s =>
-			s.title?.toLowerCase().includes(sessionSearchQuery.toLowerCase())
-		)
-		: $adminSessions;
+	// Admin sessions grouped (when not searching)
+	$: filteredAdminSessions = $adminSessions;
 	$: groupedAdminSessions = groupSessionsByDate(filteredAdminSessions);
 
 	function toggleGroupCollapse(key: string) {
@@ -147,6 +178,12 @@
 	function clearSearch() {
 		sessionSearchQuery = '';
 		sessionSearchExpanded = false;
+		searchResults = [];
+		isSearching = false;
+		if (searchDebounceTimer) {
+			clearTimeout(searchDebounceTimer);
+			searchDebounceTimer = null;
+		}
 	}
 
 	function toggleSidebarSection(section: SidebarSection) {
@@ -301,6 +338,7 @@
 		system_prompt_append: '',
 		system_prompt_content: '',
 		system_prompt_inject_env: false,
+		system_prompt_enable_ai_tools: false,
 		setting_sources: [] as string[],
 		cwd: '',
 		add_dirs: '',
@@ -380,7 +418,7 @@
 			return categoryToolNames.length > 0 && categoryToolNames.every(name => profileForm.allowed_tools.includes(name));
 		}
 		if (toolSelectionMode === 'disallow') {
-			return categoryToolNames.every(name => !profileForm.disallowed_tools.includes(name));
+			return categoryToolNames.every(name => profileForm.disallowed_tools.includes(name));
 		}
 		return true;
 	}
@@ -408,7 +446,7 @@
 			return categoryToolNames.every(name => !profileForm.allowed_tools.includes(name));
 		}
 		if (toolSelectionMode === 'disallow') {
-			return categoryToolNames.every(name => profileForm.disallowed_tools.includes(name));
+			return categoryToolNames.every(name => !profileForm.disallowed_tools.includes(name));
 		}
 		return false;
 	}
@@ -861,7 +899,111 @@
 	}
 
 	function renderMarkdown(content: string): string {
-		return marked(content, { breaks: true }) as string;
+		// Process base64 images with download capability
+		// Match data URLs in image tags or standalone base64 image data
+		const base64ImagePattern = /!\[([^\]]*)\]\((data:image\/[^;]+;base64,[^)]+)\)/g;
+
+		// Replace base64 image markdown with custom HTML that includes download button
+		let processedContent = content.replace(base64ImagePattern, (match, alt, dataUrl) => {
+			const downloadId = `img-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+			return `<div class="generated-image-container my-4">
+				<img src="${dataUrl}" alt="${alt || 'Generated image'}" class="max-w-full rounded-lg shadow-md border border-border" />
+				<div class="flex gap-2 mt-2">
+					<button onclick="(function(){
+						const link = document.createElement('a');
+						link.href = '${dataUrl}';
+						link.download = '${alt || 'generated-image'}.png';
+						link.click();
+					})()" class="text-xs px-3 py-1 bg-primary text-primary-foreground rounded hover:opacity-90 flex items-center gap-1">
+						<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+						</svg>
+						Download
+					</button>
+				</div>
+			</div>`;
+		});
+
+		// Also detect JSON tool results with image_base64 field
+		const jsonImagePattern = /"image_base64"\s*:\s*"([A-Za-z0-9+/=]+)"/g;
+		processedContent = processedContent.replace(jsonImagePattern, (match, base64Data) => {
+			// Only replace if it looks like substantial base64 data (not a short string)
+			if (base64Data.length > 100) {
+				return `<div class="generated-image-container my-4">
+					<img src="data:image/png;base64,${base64Data}" alt="Generated image" class="max-w-full rounded-lg shadow-md border border-border" />
+					<div class="flex gap-2 mt-2">
+						<button onclick="(function(){
+							const link = document.createElement('a');
+							link.href = 'data:image/png;base64,${base64Data}';
+							link.download = 'generated-image.png';
+							link.click();
+						})()" class="text-xs px-3 py-1 bg-primary text-primary-foreground rounded hover:opacity-90 flex items-center gap-1">
+							<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+							</svg>
+							Download
+						</button>
+					</div>
+				</div>`;
+			}
+			return match;
+		});
+
+		return marked(processedContent, { breaks: true }) as string;
+	}
+
+	// Render tool result content, detecting and displaying images
+	function renderToolResult(content: string): string {
+		try {
+			// Try to parse as JSON to detect image data
+			const data = JSON.parse(content);
+			if (data.success && data.image_base64 && data.mime_type) {
+				// This is an image generation result!
+				const mimeType = data.mime_type || 'image/png';
+				const dataUrl = `data:${mimeType};base64,${data.image_base64}`;
+				return `<div class="generated-image-result">
+					<div class="mb-2 text-xs text-green-500">✓ Image generated successfully</div>
+					<img src="${dataUrl}" alt="Generated image" class="max-w-full max-h-96 rounded-lg shadow-md border border-border" />
+					<div class="flex gap-2 mt-3">
+						<button onclick="(function(){
+							const link = document.createElement('a');
+							link.href = '${dataUrl}';
+							link.download = 'generated-image.png';
+							link.click();
+						})()" class="text-xs px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:opacity-90 flex items-center gap-1.5 font-medium">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+							</svg>
+							Download Image
+						</button>
+						<button onclick="(function(){
+							navigator.clipboard.writeText('${dataUrl}');
+							this.textContent = 'Copied!';
+							setTimeout(() => this.textContent = 'Copy Data URL', 2000);
+						}).call(this)" class="text-xs px-3 py-1.5 bg-muted text-foreground rounded-md hover:bg-accent flex items-center gap-1.5">
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+							</svg>
+							Copy Data URL
+						</button>
+					</div>
+				</div>`;
+			}
+		} catch {
+			// Not JSON, continue with default rendering
+		}
+		// Return empty to use default <pre> rendering
+		return '';
+	}
+
+	// Check if tool result contains an image
+	function toolResultHasImage(content: string): boolean {
+		try {
+			const data = JSON.parse(content);
+			return data.success && data.image_base64 && data.mime_type;
+		} catch {
+			return false;
+		}
 	}
 
 	// Copy text to clipboard with feedback
@@ -990,6 +1132,7 @@
 			system_prompt_append: '',
 			system_prompt_content: '',
 			system_prompt_inject_env: false,
+			system_prompt_enable_ai_tools: false,
 			setting_sources: [],
 			cwd: '',
 			add_dirs: '',
@@ -1040,6 +1183,7 @@
 			system_prompt_append: sp.append || '',
 			system_prompt_content: sp.content || '',
 			system_prompt_inject_env: sp.inject_env_details || false,
+			system_prompt_enable_ai_tools: sp.enable_ai_tools || false,
 			setting_sources: config.setting_sources || [],
 			cwd: config.cwd || '',
 			add_dirs: (config.add_dirs || []).join(', '),
@@ -1085,7 +1229,8 @@
 		if (profileForm.system_prompt_type === 'preset') {
 			config.system_prompt = {
 				type: 'preset',
-				preset: profileForm.system_prompt_preset
+				preset: profileForm.system_prompt_preset,
+				enable_ai_tools: profileForm.system_prompt_enable_ai_tools
 			};
 			if (profileForm.system_prompt_append.trim()) {
 				config.system_prompt.append = profileForm.system_prompt_append;
@@ -1095,7 +1240,8 @@
 			config.system_prompt = {
 				type: 'custom',
 				content: profileForm.system_prompt_content,
-				inject_env_details: profileForm.system_prompt_inject_env
+				inject_env_details: profileForm.system_prompt_inject_env,
+				enable_ai_tools: profileForm.system_prompt_enable_ai_tools
 			};
 		}
 
@@ -1321,12 +1467,14 @@
 				const currentInput = tabInputs[tabId] || '';
 				tabInputs[tabId] = currentInput ? `${currentInput} ${transcribedText}` : transcribedText;
 
-				// Focus the textarea and trigger auto-resize
+				// Focus the textarea and trigger resize
 				await tick();
 				const textarea = textareas[tabId];
 				if (textarea) {
 					textarea.focus();
-					autoResizeTextarea(textarea);
+					// Trigger auto-resize by resetting height and setting to scrollHeight
+					textarea.style.height = 'auto';
+					textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
 				}
 			}
 		} catch (error: any) {
@@ -1470,16 +1618,8 @@
 			<!-- Sessions Panel Content -->
 			{#if activeSidebarSection === 'sessions'}
 				<div class="flex-1 overflow-hidden flex flex-col">
-					<div class="p-3">
-						<button on:click={() => { handleNewTab(); closeSidebar(); }} class="w-full flex items-center gap-2 px-4 py-2.5 bg-primary hover:opacity-90 text-primary-foreground rounded-lg transition-colors shadow-s">
-							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-							</svg>
-							<span class="font-medium">New Chat</span>
-						</button>
-					</div>
 					{#if $isAdmin}
-						<div class="px-3 flex gap-1">
+						<div class="px-3 pt-3 flex gap-1">
 							<button on:click={() => sidebarTab = 'my-chats'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'my-chats' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}">My Chats</button>
 							<button on:click={() => sidebarTab = 'admin'} class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors {sidebarTab === 'admin' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent'}">Admin</button>
 						</div>
@@ -1501,7 +1641,7 @@
 											isOpen={true}
 											isActive={tab.id === $activeTabId}
 											isStreaming={tab.isStreaming}
-											showCloseButton={$allTabs.length > 1}
+											showCloseButton={true}
 											on:click={() => { tabs.setActiveTab(tab.id); closeSidebar(); }}
 											on:close={(e) => handleCloseTab(e, tab.id)}
 										/>
@@ -1539,81 +1679,142 @@
 							</div>
 						{/if}
 
-						<!-- History Header -->
-						<div class="flex items-center justify-between px-2 mb-2">
-							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">History</div>
-							<div class="flex items-center gap-2">
+						<!-- Search Results (when searching) -->
+						{#if sessionSearchQuery.trim()}
+							<div class="flex items-center justify-between px-2 mb-2">
+								<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">
+									{isSearching ? 'Searching...' : `Results (${searchResults.length})`}
+								</div>
 								<button
-									on:click={() => tabs.loadSessions()}
-									class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
-									title="Refresh sessions"
-									disabled={$sessionsLoading}
+									on:click={clearSearch}
+									class="text-xs text-muted-foreground hover:text-foreground transition-colors"
 								>
-									<svg
-										class="w-3.5 h-3.5 {$sessionsLoading ? 'animate-spin' : ''}"
-										fill="none"
-										stroke="currentColor"
-										viewBox="0 0 24 24"
-									>
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-									</svg>
+									Clear
 								</button>
-								{#if filteredSessions.length > 0}
-									<button
-										on:click={() => tabs.toggleSelectionMode(false)}
-										class="text-xs text-muted-foreground hover:text-foreground transition-colors"
-										title={$selectionMode ? 'Exit selection mode' : 'Select multiple'}
-									>
-										{$selectionMode ? 'Cancel' : 'Select'}
-									</button>
+							</div>
+
+							<div class="space-y-1">
+								{#if isSearching}
+									<div class="flex items-center justify-center py-8">
+										<svg class="w-5 h-5 animate-spin text-muted-foreground" fill="none" viewBox="0 0 24 24">
+											<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+											<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+										</svg>
+									</div>
+								{:else if searchResults.length === 0}
+									<p class="text-xs text-muted-foreground px-2 py-4 text-center">No sessions found matching "{sessionSearchQuery}"</p>
+								{:else}
+									{#each searchResults as result}
+										<button
+											on:click={() => { openSession(result.id); closeSidebar(); }}
+											class="w-full text-left px-3 py-2.5 rounded-lg hover:bg-accent transition-colors group"
+										>
+											<div class="flex items-start gap-2">
+												<div class="flex-1 min-w-0">
+													<div class="text-sm font-medium text-foreground truncate">
+														{result.title || 'Untitled session'}
+													</div>
+													{#if result.match_type === 'content' && result.match_snippet}
+														<div class="text-xs text-muted-foreground mt-1 line-clamp-2">
+															{result.match_snippet}
+														</div>
+													{/if}
+													<div class="flex items-center gap-2 mt-1">
+														<span class="text-xs text-muted-foreground/70">
+															{new Date(result.updated_at).toLocaleDateString()}
+														</span>
+														{#if result.match_type === 'content'}
+															<span class="text-xs bg-accent px-1.5 py-0.5 rounded text-muted-foreground">
+																Content match
+															</span>
+														{/if}
+													</div>
+												</div>
+												<svg class="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+												</svg>
+											</div>
+										</button>
+									{/each}
 								{/if}
 							</div>
-						</div>
-
-						<!-- Grouped Sessions -->
-						<div class="space-y-3" class:opacity-50={$sessionsLoading} class:pointer-events-none={$sessionsLoading}>
-							{#each groupedSessions as group}
-								<div>
-									<!-- Group Header -->
+						{:else}
+							<!-- History Header (when not searching) -->
+							<div class="flex items-center justify-between px-2 mb-2">
+								<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">History</div>
+								<div class="flex items-center gap-2">
 									<button
-										on:click={() => toggleGroupCollapse(group.key)}
-										class="flex items-center gap-2 px-2 py-1 w-full text-left hover:bg-accent/50 rounded transition-colors"
+										on:click={() => tabs.loadSessions()}
+										class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+										title="Refresh sessions"
+										disabled={$sessionsLoading}
 									>
 										<svg
-											class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
+											class="w-3.5 h-3.5 {$sessionsLoading ? 'animate-spin' : ''}"
 											fill="none"
 											stroke="currentColor"
 											viewBox="0 0 24 24"
 										>
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
 										</svg>
-										<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
-										<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
 									</button>
-
-									<!-- Group Content -->
-									{#if !collapsedGroups.has(group.key)}
-										<div class="mt-1 space-y-1">
-											{#each group.sessions as session}
-												<SessionCard
-													{session}
-													selectionMode={$selectionMode}
-													isSelected={$selectedSessionIds.has(session.id)}
-													on:click={() => { openSession(session.id); closeSidebar(); }}
-													on:delete={() => deleteSession(null, session.id)}
-													on:select={() => tabs.toggleSessionSelection(session.id, false)}
-												/>
-											{/each}
-										</div>
+									{#if filteredSessions.length > 0}
+										<button
+											on:click={() => tabs.toggleSelectionMode(false)}
+											class="text-xs text-muted-foreground hover:text-foreground transition-colors"
+											title={$selectionMode ? 'Exit selection mode' : 'Select multiple'}
+										>
+											{$selectionMode ? 'Cancel' : 'Select'}
+										</button>
 									{/if}
 								</div>
-							{/each}
-							{#if $sessionsLoading}
-								<p class="text-xs text-muted-foreground px-2 animate-pulse">Loading sessions...</p>
-							{:else if filteredSessions.length === 0}
-								<p class="text-xs text-muted-foreground px-2">{sessionSearchQuery ? 'No matching sessions' : 'No chat history yet'}</p>
-							{/if}
-						</div>
+							</div>
+
+							<!-- Grouped Sessions -->
+							<div class="space-y-3" class:opacity-50={$sessionsLoading} class:pointer-events-none={$sessionsLoading}>
+								{#each groupedSessions as group}
+									<div>
+										<!-- Group Header -->
+										<button
+											on:click={() => toggleGroupCollapse(group.key)}
+											class="flex items-center gap-2 px-2 py-1 w-full text-left hover:bg-accent/50 rounded transition-colors"
+										>
+											<svg
+												class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
+												fill="none"
+												stroke="currentColor"
+												viewBox="0 0 24 24"
+											>
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+											</svg>
+											<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
+											<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
+										</button>
+
+										<!-- Group Content -->
+										{#if !collapsedGroups.has(group.key)}
+											<div class="mt-1 space-y-1">
+												{#each group.sessions as session}
+													<SessionCard
+														{session}
+														selectionMode={$selectionMode}
+														isSelected={$selectedSessionIds.has(session.id)}
+														on:click={() => { openSession(session.id); closeSidebar(); }}
+														on:delete={() => deleteSession(null, session.id)}
+														on:select={() => tabs.toggleSessionSelection(session.id, false)}
+													/>
+												{/each}
+											</div>
+										{/if}
+									</div>
+								{/each}
+								{#if $sessionsLoading}
+									<p class="text-xs text-muted-foreground px-2 animate-pulse">Loading sessions...</p>
+								{:else if filteredSessions.length === 0}
+									<p class="text-xs text-muted-foreground px-2">No chat history yet</p>
+								{/if}
+							</div>
+						{/if}
 					</div>
 				{/if}
 
@@ -1635,7 +1836,7 @@
 											isOpen={true}
 											isActive={tab.id === $activeTabId}
 											isStreaming={tab.isStreaming}
-											showCloseButton={$allTabs.length > 1}
+											showCloseButton={true}
 											on:click={() => { tabs.setActiveTab(tab.id); closeSidebar(); }}
 											on:close={(e) => handleCloseTab(e, tab.id)}
 										/>
@@ -1688,78 +1889,139 @@
 							</div>
 						{/if}
 
-						<!-- Header with label and selection toggle -->
-						<div class="flex items-center justify-between px-2 mb-2">
-							<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">API User Sessions</div>
-							<div class="flex items-center gap-2">
+						<!-- Search Results (when searching in Admin tab) -->
+						{#if sessionSearchQuery.trim()}
+							<div class="flex items-center justify-between px-2 mb-2">
+								<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">
+									{isSearching ? 'Searching...' : `Results (${searchResults.length})`}
+								</div>
 								<button
-									on:click={() => tabs.loadAdminSessions($adminSessionsFilter)}
-									class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
-									title="Refresh sessions"
+									on:click={clearSearch}
+									class="text-xs text-muted-foreground hover:text-foreground transition-colors"
 								>
-									<svg
-										class="w-3.5 h-3.5"
-										fill="none"
-										stroke="currentColor"
-										viewBox="0 0 24 24"
-									>
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-									</svg>
+									Clear
 								</button>
-								{#if filteredAdminSessions.length > 0}
-									<button
-										on:click={() => tabs.toggleSelectionMode(true)}
-										class="text-xs text-muted-foreground hover:text-foreground transition-colors"
-										title={$adminSelectionMode ? 'Exit selection mode' : 'Select multiple'}
-									>
-										{$adminSelectionMode ? 'Cancel' : 'Select'}
-									</button>
+							</div>
+
+							<div class="space-y-1">
+								{#if isSearching}
+									<div class="flex items-center justify-center py-8">
+										<svg class="w-5 h-5 animate-spin text-muted-foreground" fill="none" viewBox="0 0 24 24">
+											<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+											<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+										</svg>
+									</div>
+								{:else if searchResults.length === 0}
+									<p class="text-xs text-muted-foreground px-2 py-4 text-center">No sessions found matching "{sessionSearchQuery}"</p>
+								{:else}
+									{#each searchResults as result}
+										<button
+											on:click={() => { openSession(result.id); closeSidebar(); }}
+											class="w-full text-left px-3 py-2.5 rounded-lg hover:bg-accent transition-colors group"
+										>
+											<div class="flex items-start gap-2">
+												<div class="flex-1 min-w-0">
+													<div class="text-sm font-medium text-foreground truncate">
+														{result.title || 'Untitled session'}
+													</div>
+													{#if result.match_type === 'content' && result.match_snippet}
+														<div class="text-xs text-muted-foreground mt-1 line-clamp-2">
+															{result.match_snippet}
+														</div>
+													{/if}
+													<div class="flex items-center gap-2 mt-1">
+														<span class="text-xs text-muted-foreground/70">
+															{new Date(result.updated_at).toLocaleDateString()}
+														</span>
+														{#if result.match_type === 'content'}
+															<span class="text-xs bg-accent px-1.5 py-0.5 rounded text-muted-foreground">
+																Content match
+															</span>
+														{/if}
+													</div>
+												</div>
+												<svg class="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+												</svg>
+											</div>
+										</button>
+									{/each}
 								{/if}
 							</div>
-						</div>
-
-						<!-- Grouped Admin Sessions -->
-						<div class="space-y-3">
-							{#each groupedAdminSessions as group}
-								<div>
-									<!-- Group Header -->
+						{:else}
+							<!-- Header with label and selection toggle (when not searching) -->
+							<div class="flex items-center justify-between px-2 mb-2">
+								<div class="text-xs text-muted-foreground uppercase tracking-wider font-medium">API User Sessions</div>
+								<div class="flex items-center gap-2">
 									<button
-										on:click={() => toggleGroupCollapse(group.key)}
-										class="flex items-center gap-2 px-2 py-1 w-full text-left hover:bg-accent/50 rounded transition-colors"
+										on:click={() => tabs.loadAdminSessions($adminSessionsFilter)}
+										class="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+										title="Refresh sessions"
 									>
 										<svg
-											class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
+											class="w-3.5 h-3.5"
 											fill="none"
 											stroke="currentColor"
 											viewBox="0 0 24 24"
 										>
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
 										</svg>
-										<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
-										<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
 									</button>
-
-									<!-- Group Content -->
-									{#if !collapsedGroups.has(group.key)}
-										<div class="mt-1 space-y-1">
-											{#each group.sessions as session}
-												<SessionCard
-													{session}
-													selectionMode={$adminSelectionMode}
-													isSelected={$selectedAdminSessionIds.has(session.id)}
-													on:click={() => { openSession(session.id); closeSidebar(); }}
-													on:delete={() => deleteSession(null, session.id)}
-													on:select={() => tabs.toggleSessionSelection(session.id, true)}
-												/>
-											{/each}
-										</div>
+									{#if filteredAdminSessions.length > 0}
+										<button
+											on:click={() => tabs.toggleSelectionMode(true)}
+											class="text-xs text-muted-foreground hover:text-foreground transition-colors"
+											title={$adminSelectionMode ? 'Exit selection mode' : 'Select multiple'}
+										>
+											{$adminSelectionMode ? 'Cancel' : 'Select'}
+										</button>
 									{/if}
 								</div>
-							{/each}
-							{#if filteredAdminSessions.length === 0}
-								<p class="text-xs text-muted-foreground px-2">{sessionSearchQuery ? 'No matching sessions' : 'No API user sessions found'}</p>
-							{/if}
-						</div>
+							</div>
+
+							<!-- Grouped Admin Sessions -->
+							<div class="space-y-3">
+								{#each groupedAdminSessions as group}
+									<div>
+										<!-- Group Header -->
+										<button
+											on:click={() => toggleGroupCollapse(group.key)}
+											class="flex items-center gap-2 px-2 py-1 w-full text-left hover:bg-accent/50 rounded transition-colors"
+										>
+											<svg
+												class="w-3 h-3 text-muted-foreground transition-transform {collapsedGroups.has(group.key) ? '' : 'rotate-90'}"
+												fill="none"
+												stroke="currentColor"
+												viewBox="0 0 24 24"
+											>
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+											</svg>
+											<span class="text-xs text-muted-foreground uppercase tracking-wider font-medium">{group.label}</span>
+											<span class="text-xs text-muted-foreground/60">({group.sessions.length})</span>
+										</button>
+
+										<!-- Group Content -->
+										{#if !collapsedGroups.has(group.key)}
+											<div class="mt-1 space-y-1">
+												{#each group.sessions as session}
+													<SessionCard
+														{session}
+														selectionMode={$adminSelectionMode}
+														isSelected={$selectedAdminSessionIds.has(session.id)}
+														on:click={() => { openSession(session.id); closeSidebar(); }}
+														on:delete={() => deleteSession(null, session.id)}
+														on:select={() => tabs.toggleSessionSelection(session.id, true)}
+													/>
+												{/each}
+											</div>
+										{/if}
+									</div>
+								{/each}
+								{#if filteredAdminSessions.length === 0}
+									<p class="text-xs text-muted-foreground px-2">No API user sessions found</p>
+								{/if}
+							</div>
+						{/if}
 					</div>
 				{/if}
 				</div>
@@ -1767,7 +2029,8 @@
 
 			<!-- Projects Panel Content -->
 			{#if activeSidebarSection === 'projects'}
-				<div class="flex-1 overflow-y-auto p-3">
+				{@const projectsOrganized = organizeByGroups($projects, 'projects', $groups)}
+				<div class="flex-1 overflow-y-auto p-3 flex flex-col">
 					{#if $activeTab?.sessionId}
 						<div class="flex items-center gap-2 p-3 mb-4 bg-muted/50 rounded-lg border border-border">
 							<svg class="w-4 h-4 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1776,84 +2039,233 @@
 							<p class="text-xs text-muted-foreground">Project is locked for this chat</p>
 						</div>
 					{/if}
-					<div class="space-y-2 mb-4">
-						{#each $projects as project}
-							<button
-								class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg transition-colors text-left {$activeTab?.project === project.id ? 'ring-2 ring-primary' : ''} {$activeTab?.sessionId ? 'opacity-50 cursor-not-allowed' : 'hover:bg-accent/80'}"
-								on:click={() => { if ($activeTabId && !$activeTab?.sessionId) { setTabProject($activeTabId, project.id); closeSidebar(); } }}
-								disabled={!!$activeTab?.sessionId}
-							>
-								<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-								</svg>
-								<div class="flex-1 min-w-0">
-									<p class="text-sm text-foreground font-medium truncate">{project.name}</p>
-									<p class="text-xs text-muted-foreground truncate">/workspace/{project.path}/</p>
+					<div class="flex-1 overflow-y-auto space-y-1 -mx-1 px-1">
+						<!-- Grouped projects -->
+						{#each projectsOrganized.groupOrder as group}
+							{@const groupProjects = projectsOrganized.grouped.get(group.name) || []}
+							{#if groupProjects.length > 0}
+								<div class="mb-2">
+									<button
+										class="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+										on:click={() => groups.toggleGroupCollapsed('projects', group.name)}
+									>
+										<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+										</svg>
+										<span class="uppercase tracking-wide">{group.name}</span>
+										<span class="text-muted-foreground/60">({groupProjects.length})</span>
+									</button>
+									{#if !group.collapsed}
+										<div class="space-y-1 ml-2">
+											{#each groupProjects as project}
+												<button
+													class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg transition-colors text-left {$activeTab?.project === project.id ? 'ring-2 ring-primary' : ''} {$activeTab?.sessionId ? 'opacity-50 cursor-not-allowed' : 'hover:bg-accent/80'}"
+													on:click={() => { if ($activeTabId && !$activeTab?.sessionId) { setTabProject($activeTabId, project.id); closeSidebar(); } }}
+													disabled={!!$activeTab?.sessionId}
+												>
+													<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+													</svg>
+													<div class="flex-1 min-w-0">
+														<p class="text-sm text-foreground font-medium truncate">{project.name}</p>
+														<p class="text-xs text-muted-foreground truncate">/workspace/{project.path}/</p>
+													</div>
+												</button>
+											{/each}
+										</div>
+									{/if}
 								</div>
-							</button>
+							{/if}
 						{/each}
+						<!-- Ungrouped projects -->
+						{#if projectsOrganized.ungrouped.length > 0}
+							{#if projectsOrganized.groupOrder.length > 0}
+								<div class="px-2 py-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide">Other</div>
+							{/if}
+							<div class="space-y-1 {projectsOrganized.groupOrder.length > 0 ? 'ml-2' : ''}">
+								{#each projectsOrganized.ungrouped as project}
+									<button
+										class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg transition-colors text-left {$activeTab?.project === project.id ? 'ring-2 ring-primary' : ''} {$activeTab?.sessionId ? 'opacity-50 cursor-not-allowed' : 'hover:bg-accent/80'}"
+										on:click={() => { if ($activeTabId && !$activeTab?.sessionId) { setTabProject($activeTabId, project.id); closeSidebar(); } }}
+										disabled={!!$activeTab?.sessionId}
+									>
+										<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+										</svg>
+										<div class="flex-1 min-w-0">
+											<p class="text-sm text-foreground font-medium truncate">{project.name}</p>
+											<p class="text-xs text-muted-foreground truncate">/workspace/{project.path}/</p>
+										</div>
+									</button>
+								{/each}
+							</div>
+						{/if}
 						{#if $projects.length === 0}
-							<p class="text-xs text-muted-foreground px-2">No projects yet</p>
+							<p class="text-xs text-muted-foreground px-2 py-4 text-center">No projects yet</p>
 						{/if}
 					</div>
-					<button on:click={() => showProjectModal = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">{$projects.length === 0 ? '+ Create Project' : 'Manage Projects'}</button>
+					<div class="mt-auto pt-3">
+						<button on:click={() => showProjectModal = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">{$projects.length === 0 ? '+ Create Project' : 'Manage Projects'}</button>
+					</div>
 				</div>
 			{/if}
 
 			<!-- Profiles Panel Content -->
 			{#if activeSidebarSection === 'profiles'}
-				<div class="flex-1 overflow-y-auto p-3">
-					<div class="space-y-2 mb-4">
-						{#each $profiles as profile}
-							<button
-								class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg hover:bg-accent/80 transition-colors text-left {$activeTab?.profile === profile.id ? 'ring-2 ring-primary' : ''}"
-								on:click={() => { if ($activeTabId) setTabProfile($activeTabId, profile.id); closeSidebar(); }}
-							>
-								<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-								</svg>
-								<div class="flex-1 min-w-0">
-									<p class="text-sm text-foreground font-medium truncate">{profile.name}</p>
-									<p class="text-xs text-muted-foreground truncate">{profile.description || 'No description'}</p>
+				{@const profilesOrganized = organizeByGroups($profiles, 'profiles', $groups)}
+				<div class="flex-1 overflow-y-auto p-3 flex flex-col">
+					<div class="flex-1 overflow-y-auto space-y-1 -mx-1 px-1">
+						<!-- Grouped profiles -->
+						{#each profilesOrganized.groupOrder as group}
+							{@const groupProfiles = profilesOrganized.grouped.get(group.name) || []}
+							{#if groupProfiles.length > 0}
+								<div class="mb-2">
+									<button
+										class="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+										on:click={() => groups.toggleGroupCollapsed('profiles', group.name)}
+									>
+										<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+										</svg>
+										<span class="uppercase tracking-wide">{group.name}</span>
+										<span class="text-muted-foreground/60">({groupProfiles.length})</span>
+									</button>
+									{#if !group.collapsed}
+										<div class="space-y-1 ml-2">
+											{#each groupProfiles as profile}
+												<button
+													class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg hover:bg-accent/80 transition-colors text-left {$activeTab?.profile === profile.id ? 'ring-2 ring-primary' : ''}"
+													on:click={() => { if ($activeTabId) setTabProfile($activeTabId, profile.id); closeSidebar(); }}
+												>
+													<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+													</svg>
+													<div class="flex-1 min-w-0">
+														<p class="text-sm text-foreground font-medium truncate">{profile.name}</p>
+														<p class="text-xs text-muted-foreground truncate">{profile.description || 'No description'}</p>
+													</div>
+													{#if profile.is_builtin}
+														<span class="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded">Built-in</span>
+													{/if}
+												</button>
+											{/each}
+										</div>
+									{/if}
 								</div>
-								{#if profile.is_builtin}
-									<span class="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded">Built-in</span>
-								{/if}
-							</button>
+							{/if}
 						{/each}
+						<!-- Ungrouped profiles -->
+						{#if profilesOrganized.ungrouped.length > 0}
+							{#if profilesOrganized.groupOrder.length > 0}
+								<div class="px-2 py-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide">Other</div>
+							{/if}
+							<div class="space-y-1 {profilesOrganized.groupOrder.length > 0 ? 'ml-2' : ''}">
+								{#each profilesOrganized.ungrouped as profile}
+									<button
+										class="w-full flex items-center gap-3 p-3 bg-accent rounded-lg hover:bg-accent/80 transition-colors text-left {$activeTab?.profile === profile.id ? 'ring-2 ring-primary' : ''}"
+										on:click={() => { if ($activeTabId) setTabProfile($activeTabId, profile.id); closeSidebar(); }}
+									>
+										<svg class="w-5 h-5 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+										</svg>
+										<div class="flex-1 min-w-0">
+											<p class="text-sm text-foreground font-medium truncate">{profile.name}</p>
+											<p class="text-xs text-muted-foreground truncate">{profile.description || 'No description'}</p>
+										</div>
+										{#if profile.is_builtin}
+											<span class="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded">Built-in</span>
+										{/if}
+									</button>
+								{/each}
+							</div>
+						{/if}
 						{#if $profiles.length === 0}
-							<p class="text-xs text-muted-foreground px-2">No profiles yet</p>
+							<p class="text-xs text-muted-foreground px-2 py-4 text-center">No profiles yet</p>
 						{/if}
 					</div>
-					<button on:click={() => showProfileModal = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">{$profiles.length === 0 ? '+ Create Profile' : 'Manage Profiles'}</button>
+					<div class="mt-auto pt-3">
+						<button on:click={() => showProfileModal = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">{$profiles.length === 0 ? '+ Create Profile' : 'Manage Profiles'}</button>
+					</div>
 				</div>
 			{/if}
 
 			<!-- Subagents Panel Content -->
 			{#if activeSidebarSection === 'subagents'}
-				<div class="flex-1 overflow-y-auto p-3">
-					<div class="space-y-2 mb-4">
-						{#each allSubagents as agent}
-							<div class="w-full p-3 bg-accent rounded-lg">
-								<div class="flex items-start gap-3">
-									<svg class="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-									</svg>
-									<div class="flex-1 min-w-0">
-										<div class="flex items-center gap-2">
-											<p class="text-sm text-foreground font-medium truncate">{agent.name}</p>
-											{#if agent.is_builtin}
-												<span class="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded">Built-in</span>
-											{/if}
+				{@const subagentsOrganized = organizeByGroups(allSubagents, 'subagents', $groups)}
+				<div class="flex-1 overflow-y-auto p-3 flex flex-col">
+					<div class="flex-1 overflow-y-auto space-y-1 -mx-1 px-1">
+						<!-- Grouped subagents -->
+						{#each subagentsOrganized.groupOrder as group}
+							{@const groupAgents = subagentsOrganized.grouped.get(group.name) || []}
+							{#if groupAgents.length > 0}
+								<div class="mb-2">
+									<button
+										class="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+										on:click={() => groups.toggleGroupCollapsed('subagents', group.name)}
+									>
+										<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+										</svg>
+										<span class="uppercase tracking-wide">{group.name}</span>
+										<span class="text-muted-foreground/60">({groupAgents.length})</span>
+									</button>
+									{#if !group.collapsed}
+										<div class="space-y-1 ml-2">
+											{#each groupAgents as agent}
+												<div class="w-full p-3 bg-accent rounded-lg">
+													<div class="flex items-start gap-3">
+														<svg class="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+														</svg>
+														<div class="flex-1 min-w-0">
+															<div class="flex items-center gap-2">
+																<p class="text-sm text-foreground font-medium truncate">{agent.name}</p>
+																{#if agent.is_builtin}
+																	<span class="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded">Built-in</span>
+																{/if}
+															</div>
+															<p class="text-xs text-muted-foreground line-clamp-2">{agent.description}</p>
+															{#if agent.model}
+																<span class="text-[10px] text-primary mt-1 inline-block">{agent.model}</span>
+															{/if}
+														</div>
+													</div>
+												</div>
+											{/each}
 										</div>
-										<p class="text-xs text-muted-foreground line-clamp-2">{agent.description}</p>
-										{#if agent.model}
-											<span class="text-[10px] text-primary mt-1 inline-block">{agent.model}</span>
-										{/if}
-									</div>
+									{/if}
 								</div>
-							</div>
+							{/if}
 						{/each}
+						<!-- Ungrouped subagents -->
+						{#if subagentsOrganized.ungrouped.length > 0}
+							{#if subagentsOrganized.groupOrder.length > 0}
+								<div class="px-2 py-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide">Other</div>
+							{/if}
+							<div class="space-y-1 {subagentsOrganized.groupOrder.length > 0 ? 'ml-2' : ''}">
+								{#each subagentsOrganized.ungrouped as agent}
+									<div class="w-full p-3 bg-accent rounded-lg">
+										<div class="flex items-start gap-3">
+											<svg class="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+											</svg>
+											<div class="flex-1 min-w-0">
+												<div class="flex items-center gap-2">
+													<p class="text-sm text-foreground font-medium truncate">{agent.name}</p>
+													{#if agent.is_builtin}
+														<span class="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded">Built-in</span>
+													{/if}
+												</div>
+												<p class="text-xs text-muted-foreground line-clamp-2">{agent.description}</p>
+												{#if agent.model}
+													<span class="text-[10px] text-primary mt-1 inline-block">{agent.model}</span>
+												{/if}
+											</div>
+										</div>
+									</div>
+								{/each}
+							</div>
+						{/if}
 						{#if allSubagents.length === 0}
 							<div class="text-center py-8">
 								<svg class="w-12 h-12 mx-auto text-muted-foreground/30 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1863,7 +2275,9 @@
 							</div>
 						{/if}
 					</div>
-					<button on:click={() => showSubagentManager = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">{allSubagents.length === 0 ? '+ Create Subagent' : 'Manage Subagents'}</button>
+					<div class="mt-auto pt-3">
+						<button on:click={() => showSubagentManager = true} class="w-full py-2 border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">{allSubagents.length === 0 ? '+ Create Subagent' : 'Manage Subagents'}</button>
+					</div>
 				</div>
 			{/if}
 		</aside>
@@ -1888,12 +2302,6 @@
 				</button>
 			</div>
 			<div class="p-3 space-y-2">
-				<button on:click={() => { handleNewTab(); sidebarOpen = false; }} class="w-full flex items-center gap-2 px-4 py-2.5 bg-primary hover:opacity-90 text-primary-foreground rounded-lg transition-colors shadow-s">
-					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-					</svg>
-					<span class="font-medium">New Chat</span>
-				</button>
 				<!-- Mobile Search (tap to expand) -->
 				{#if sessionSearchExpanded}
 					<div class="relative">
@@ -1949,7 +2357,7 @@
 										isOpen={true}
 										isActive={tab.id === $activeTabId}
 										isStreaming={tab.isStreaming}
-										showCloseButton={$allTabs.length > 1}
+										showCloseButton={true}
 										abbreviated={true}
 										on:click={() => { tabs.setActiveTab(tab.id); sidebarOpen = false; }}
 										on:close={(e) => handleCloseTab(e, tab.id)}
@@ -2034,7 +2442,7 @@
 										isOpen={true}
 										isActive={tab.id === $activeTabId}
 										isStreaming={tab.isStreaming}
-										showCloseButton={$allTabs.length > 1}
+										showCloseButton={true}
 										abbreviated={true}
 										on:click={() => { tabs.setActiveTab(tab.id); sidebarOpen = false; }}
 										on:close={(e) => handleCloseTab(e, tab.id)}
@@ -2236,6 +2644,8 @@
 						</svg>
 					</div>
 				{:else}
+					{@const headerProfilesOrganized = organizeByGroups($profiles, 'profiles', $groups)}
+					{@const hasProfileGroups = headerProfilesOrganized.groupOrder.length > 0}
 					<div class="relative group">
 						<button
 							class="flex items-center gap-1 px-2 py-1 text-sm text-foreground hover:bg-accent rounded-md transition-colors"
@@ -2249,19 +2659,57 @@
 							</svg>
 						</button>
 						<!-- Profile dropdown -->
-						<div class="absolute left-0 top-full mt-1 w-48 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+						<div class="absolute left-0 top-full mt-1 w-56 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 max-h-80 overflow-y-auto">
 							<div class="py-1">
 								{#if $profiles.length === 0}
 									<p class="px-3 py-2 text-sm text-muted-foreground">No profiles yet</p>
 								{:else}
-									{#each $profiles as profile}
-										<button
-											on:click={() => setTabProfile(tabId, profile.id)}
-											class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.profile === profile.id ? 'text-primary' : 'text-foreground'}"
-										>
-											{profile.name}
-										</button>
+									<!-- Grouped profiles -->
+									{#each headerProfilesOrganized.groupOrder as group}
+										{@const groupProfiles = headerProfilesOrganized.grouped.get(group.name) || []}
+										{#if groupProfiles.length > 0}
+											<div class="py-1">
+												<button
+													class="w-full flex items-center gap-2 px-3 py-1 text-xs font-medium text-muted-foreground hover:text-foreground uppercase tracking-wide bg-muted/30 transition-colors"
+													on:click|stopPropagation={() => groups.toggleGroupCollapsed('profiles', group.name)}
+												>
+													<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+													</svg>
+													<span>{group.name}</span>
+													<span class="text-muted-foreground/60 ml-auto">({groupProfiles.length})</span>
+												</button>
+												{#if !group.collapsed}
+													{#each groupProfiles as profile}
+														<button
+															on:click={() => setTabProfile(tabId, profile.id)}
+															class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.profile === profile.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
+														>
+															{profile.name}
+														</button>
+													{/each}
+												{/if}
+											</div>
+										{/if}
 									{/each}
+									<!-- Ungrouped profiles -->
+									{#if headerProfilesOrganized.ungrouped.length > 0}
+										{#if hasProfileGroups}
+											<div class="py-1">
+												<div class="px-3 py-1 text-xs font-medium text-muted-foreground uppercase tracking-wide bg-muted/30">
+													Other
+												</div>
+											</div>
+										{/if}
+										{#each headerProfilesOrganized.ungrouped as profile}
+											<button
+												on:click={() => setTabProfile(tabId, profile.id)}
+												class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.profile === profile.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
+											>
+												{profile.name}
+											</button>
+										{/each}
+									{/if}
 								{/if}
 								<div class="border-t border-border my-1"></div>
 								<button
@@ -2313,19 +2761,59 @@
 						</button>
 						<!-- Project dropdown (only show when no session) -->
 						{#if !currentTab.sessionId}
-							<div class="absolute left-0 top-full mt-1 w-48 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+							{@const headerProjectsOrganized = organizeByGroups($projects, 'projects', $groups)}
+							{@const hasGroups = headerProjectsOrganized.groupOrder.length > 0}
+							<div class="absolute left-0 top-full mt-1 w-56 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 max-h-80 overflow-y-auto">
 								<div class="py-1">
 									{#if $projects.length === 0}
 										<p class="px-3 py-2 text-sm text-muted-foreground">No projects yet</p>
 									{:else}
-										{#each $projects as project}
-											<button
-												on:click={() => setTabProject(tabId, project.id)}
-												class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.project === project.id ? 'text-primary' : 'text-foreground'}"
-											>
-												{project.name}
-											</button>
+										<!-- Grouped projects -->
+										{#each headerProjectsOrganized.groupOrder as group}
+											{@const groupProjects = headerProjectsOrganized.grouped.get(group.name) || []}
+											{#if groupProjects.length > 0}
+												<div class="py-1">
+													<button
+														class="w-full flex items-center gap-2 px-3 py-1 text-xs font-medium text-muted-foreground hover:text-foreground uppercase tracking-wide bg-muted/30 transition-colors"
+														on:click|stopPropagation={() => groups.toggleGroupCollapsed('projects', group.name)}
+													>
+														<svg class="w-3 h-3 transition-transform {group.collapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+														</svg>
+														<span>{group.name}</span>
+														<span class="text-muted-foreground/60 ml-auto">({groupProjects.length})</span>
+													</button>
+													{#if !group.collapsed}
+														{#each groupProjects as project}
+															<button
+																on:click={() => setTabProject(tabId, project.id)}
+																class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.project === project.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
+															>
+																{project.name}
+															</button>
+														{/each}
+													{/if}
+												</div>
+											{/if}
 										{/each}
+										<!-- Ungrouped projects -->
+										{#if headerProjectsOrganized.ungrouped.length > 0}
+											{#if hasGroups}
+												<div class="py-1">
+													<div class="px-3 py-1 text-xs font-medium text-muted-foreground uppercase tracking-wide bg-muted/30">
+														Other
+													</div>
+												</div>
+											{/if}
+											{#each headerProjectsOrganized.ungrouped as project}
+												<button
+													on:click={() => setTabProject(tabId, project.id)}
+													class="w-full px-3 py-2 text-left text-sm hover:bg-accent transition-colors {currentTab.project === project.id ? 'text-primary bg-accent/50' : 'text-foreground'}"
+												>
+													{project.name}
+												</button>
+											{/each}
+										{/if}
 									{/if}
 									<div class="border-t border-border my-1"></div>
 									<button
@@ -2446,14 +2934,13 @@
 				</div>
 			</div>
 		{:else}
-			<!-- Empty state context bar (no active tab) -->
+			<!-- Empty state context bar (no active tab) - just show mobile menu button -->
 			<div class="bg-card border-b border-border h-12 flex items-center px-2 sm:px-4">
 				<button class="lg:hidden p-2 mr-2 text-muted-foreground hover:text-foreground rounded-md hover:bg-accent transition-colors" on:click={() => (sidebarOpen = true)}>
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
 					</svg>
 				</button>
-				<span class="text-sm text-muted-foreground">Select a session from the sidebar to start</span>
 			</div>
 		{/if}
 
@@ -2657,7 +3144,11 @@
 												{#if message.toolResult}
 													<div class="px-4 py-3">
 														<div class="text-xs text-muted-foreground mb-1 font-medium">Result</div>
-														<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.toolResult}</pre>
+														{#if toolResultHasImage(message.toolResult)}
+															{@html renderToolResult(message.toolResult)}
+														{:else}
+															<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.toolResult}</pre>
+														{/if}
 													</div>
 												{/if}
 											</div>
@@ -2691,7 +3182,11 @@
 												</svg>
 											</summary>
 											<div class="px-4 py-3 bg-card border-t border-border">
-												<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.content}</pre>
+												{#if toolResultHasImage(message.content)}
+													{@html renderToolResult(message.content)}
+												{:else}
+													<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.content}</pre>
+												{/if}
 											</div>
 										</details>
 									</div>
@@ -2845,6 +3340,24 @@
 
 								<!-- Voice/Send/Stop/Queue Buttons -->
 								<div class="flex items-center gap-1">
+									<!-- Voice Recording Button - always available -->
+									<button
+										type="button"
+										on:click={toggleRecording}
+										disabled={!$claudeAuthenticated || isUploading || isTranscribing}
+										class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center rounded-xl transition-all disabled:opacity-30 disabled:cursor-not-allowed {isRecording ? 'bg-destructive/20 text-destructive animate-pulse' : isTranscribing ? 'bg-primary/15 text-primary' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}"
+										title={isRecording ? 'Stop recording' : isTranscribing ? 'Transcribing...' : 'Voice input'}
+									>
+										{#if isTranscribing}
+											<svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
+											</svg>
+										{:else}
+											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+											</svg>
+										{/if}
+									</button>
 									{#if currentTab.isStreaming}
 										<!-- When streaming: show queue button if text entered, always show stop button -->
 										{#if (tabInputs[tabId] || '').trim()}
@@ -2869,24 +3382,6 @@
 											</svg>
 										</button>
 									{:else}
-										<!-- Voice Recording Button -->
-										<button
-											type="button"
-											on:click={toggleRecording}
-											disabled={!$claudeAuthenticated || isUploading || isTranscribing}
-											class="w-9 h-9 sm:w-8 sm:h-8 flex items-center justify-center rounded-xl transition-all disabled:opacity-30 disabled:cursor-not-allowed {isRecording ? 'bg-destructive/20 text-destructive animate-pulse' : isTranscribing ? 'bg-primary/15 text-primary' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}"
-											title={isRecording ? 'Stop recording' : isTranscribing ? 'Transcribing...' : 'Voice input'}
-										>
-											{#if isTranscribing}
-												<svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
-												</svg>
-											{:else}
-												<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-												</svg>
-											{/if}
-										</button>
 										<!-- Send Button -->
 										<button
 											type="submit"
@@ -3040,6 +3535,45 @@
 					</form>
 				</div>
 			</div>
+		{:else}
+			<!-- Empty state when no tabs are open -->
+			<div class="flex-1 flex flex-col items-center justify-center p-8 text-center">
+				<div class="max-w-md space-y-6">
+					<div class="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-br from-primary/20 to-primary/10 flex items-center justify-center">
+						<svg class="w-8 h-8 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+						</svg>
+					</div>
+
+					<div class="space-y-2">
+						<h2 class="text-xl font-semibold text-foreground">No open chats</h2>
+						<p class="text-sm text-muted-foreground">
+							Start a new conversation or open one from your history
+						</p>
+					</div>
+
+					<div class="flex flex-col sm:flex-row gap-3 justify-center">
+						<button
+							on:click={handleNewTab}
+							class="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg font-medium transition-colors"
+						>
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+							</svg>
+							New Chat
+						</button>
+						<button
+							on:click={() => (sidebarOpen = true)}
+							class="lg:hidden inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-accent hover:bg-accent/80 text-foreground rounded-lg font-medium transition-colors"
+						>
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+							</svg>
+							View History
+						</button>
+					</div>
+				</div>
+			</div>
 		{/if}
 	</main>
 </div>
@@ -3117,7 +3651,7 @@
 								</select>
 							</div>
 							<div>
-								<label class="block text-xs text-muted-foreground mb-1">Permission Mode</label>
+								<label class="block text-xs text-muted-foreground mb-1">Permission</label>
 								<select bind:value={profileForm.permission_mode} class="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground">
 									<option value="default">Default</option>
 									<option value="acceptEdits">Accept Edits</option>
@@ -3190,7 +3724,7 @@
 													{@const categoryToolNames = category.tools.map(t => t.name)}
 													{@const selectedInCategory = toolSelectionMode === 'allow'
 														? categoryToolNames.filter(name => profileForm.allowed_tools.includes(name)).length
-														: categoryToolNames.filter(name => !profileForm.disallowed_tools.includes(name)).length}
+														: categoryToolNames.filter(name => profileForm.disallowed_tools.includes(name)).length}
 													{@const isFullySelected = selectedInCategory === categoryToolNames.length}
 													{@const isPartiallySelected = selectedInCategory > 0 && selectedInCategory < categoryToolNames.length}
 													<div class="border border-border rounded-lg overflow-hidden">
@@ -3232,7 +3766,7 @@
 																{#each category.tools as tool}
 																	{@const isSelected = toolSelectionMode === 'allow'
 																		? profileForm.allowed_tools.includes(tool.name)
-																		: !profileForm.disallowed_tools.includes(tool.name)}
+																		: profileForm.disallowed_tools.includes(tool.name)}
 																	<label class="flex items-center gap-2 px-2 py-1 rounded hover:bg-muted/50 cursor-pointer">
 																		<input
 																			type="checkbox"
@@ -3394,12 +3928,12 @@
 										</div>
 										<div>
 											<label class="block text-xs text-muted-foreground mb-1">Append Instructions</label>
-											<textarea bind:value={profileForm.system_prompt_append} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-none" rows="3" placeholder="Additional instructions to append to the system prompt..."></textarea>
+											<textarea bind:value={profileForm.system_prompt_append} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-y" rows="3" placeholder="Additional instructions to append to the system prompt..."></textarea>
 										</div>
 									{:else}
 										<div>
 											<label class="block text-xs text-muted-foreground mb-1">Custom System Prompt</label>
-											<textarea bind:value={profileForm.system_prompt_content} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-none" rows="4" placeholder="Enter your custom system prompt (can be blank)..."></textarea>
+											<textarea bind:value={profileForm.system_prompt_content} class="w-full bg-muted border-0 rounded-lg px-3 py-2 text-sm text-foreground resize-y" rows="4" placeholder="Enter your custom system prompt (can be blank)..."></textarea>
 										</div>
 										<label class="flex items-center gap-2 cursor-pointer">
 											<input type="checkbox" bind:checked={profileForm.system_prompt_inject_env} class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring" />
@@ -3407,6 +3941,15 @@
 										</label>
 										<p class="text-xs text-muted-foreground">Adds working directory, platform, git status, and today's date to the system prompt.</p>
 									{/if}
+
+									<!-- AI Tools toggle - shown for both preset and custom -->
+									<div class="pt-3 border-t border-border">
+										<label class="flex items-center gap-2 cursor-pointer">
+											<input type="checkbox" bind:checked={profileForm.system_prompt_enable_ai_tools} class="w-4 h-4 rounded bg-muted border-0 text-violet-600 focus:ring-ring" />
+											<span class="text-sm text-foreground">Enable AI Tools</span>
+										</label>
+										<p class="text-xs text-muted-foreground mt-1">Allow Claude to use AI tools like image generation (Nano Banana). Configure tools in Settings → Integrations.</p>
+									</div>
 								</div>
 							{/if}
 						</div>
@@ -3500,11 +4043,58 @@
 					<div class="space-y-2 mb-4">
 						{#each $profiles as profile}
 							<div class="flex items-center justify-between p-3 bg-accent rounded-lg">
-								<div>
-									<p class="text-sm text-foreground font-medium">{profile.name}</p>
+								<div class="flex-1 min-w-0">
+									<div class="flex items-center gap-2">
+										<p class="text-sm text-foreground font-medium">{profile.name}</p>
+										{#if $groups.profiles.assignments[profile.id]}
+											<span class="text-[10px] px-1.5 py-0.5 bg-primary/10 text-primary rounded">{$groups.profiles.assignments[profile.id]}</span>
+										{/if}
+									</div>
 									<p class="text-xs text-muted-foreground">{profile.id}</p>
 								</div>
 								<div class="flex gap-1">
+									<!-- Group button -->
+									<div class="relative group/dropdown">
+										<button class="p-1.5 text-muted-foreground hover:text-foreground" title="Assign to group">
+											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+											</svg>
+										</button>
+										<div class="absolute right-0 top-full mt-1 w-40 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover/dropdown:opacity-100 group-hover/dropdown:visible transition-all z-50">
+											<div class="py-1 max-h-48 overflow-y-auto">
+												{#each $groups.profiles.groups as group}
+													<button
+														on:click={() => groups.assignToGroup('profiles', profile.id, group.name)}
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
+													>
+														{#if $groups.profiles.assignments[profile.id] === group.name}
+															<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+															</svg>
+														{:else}
+															<span class="w-3"></span>
+														{/if}
+														{group.name}
+													</button>
+												{/each}
+												{#if $groups.profiles.assignments[profile.id]}
+													<button
+														on:click={() => groups.removeFromGroup('profiles', profile.id)}
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
+													>
+														<span class="ml-5">Remove</span>
+													</button>
+												{/if}
+												<div class="border-t border-border my-1"></div>
+												<button
+													on:click={() => { const name = prompt('New group name:'); if (name?.trim()) { groups.createGroup('profiles', name.trim()); groups.assignToGroup('profiles', profile.id, name.trim()); } }}
+													class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
+												>
+													<span class="ml-5">+ New group</span>
+												</button>
+											</div>
+										</div>
+									</div>
 									<!-- Export button (always visible) -->
 									<button on:click={() => exportProfile(profile.id)} class="p-1.5 text-muted-foreground hover:text-foreground" title="Export profile">
 										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -3591,15 +4181,64 @@
 					<div class="space-y-2 mb-4">
 						{#each $projects as project}
 							<div class="flex items-center justify-between p-3 bg-accent rounded-lg">
-								<div>
-									<p class="text-sm text-foreground font-medium">{project.name}</p>
+								<div class="flex-1 min-w-0">
+									<div class="flex items-center gap-2">
+										<p class="text-sm text-foreground font-medium">{project.name}</p>
+										{#if $groups.projects.assignments[project.id]}
+											<span class="text-[10px] px-1.5 py-0.5 bg-primary/10 text-primary rounded">{$groups.projects.assignments[project.id]}</span>
+										{/if}
+									</div>
 									<p class="text-xs text-muted-foreground mt-0.5">/workspace/{project.path}/</p>
 								</div>
-								<button on:click={() => deleteProject(project.id)} class="text-muted-foreground hover:text-destructive">
-									<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-									</svg>
-								</button>
+								<div class="flex gap-1">
+									<!-- Group button -->
+									<div class="relative group/dropdown">
+										<button class="p-1.5 text-muted-foreground hover:text-foreground" title="Assign to group">
+											<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+											</svg>
+										</button>
+										<div class="absolute right-0 top-full mt-1 w-40 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover/dropdown:opacity-100 group-hover/dropdown:visible transition-all z-50">
+											<div class="py-1 max-h-48 overflow-y-auto">
+												{#each $groups.projects.groups as group}
+													<button
+														on:click={() => groups.assignToGroup('projects', project.id, group.name)}
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors flex items-center gap-2"
+													>
+														{#if $groups.projects.assignments[project.id] === group.name}
+															<svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+															</svg>
+														{:else}
+															<span class="w-3"></span>
+														{/if}
+														{group.name}
+													</button>
+												{/each}
+												{#if $groups.projects.assignments[project.id]}
+													<button
+														on:click={() => groups.removeFromGroup('projects', project.id)}
+														class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
+													>
+														<span class="ml-5">Remove</span>
+													</button>
+												{/if}
+												<div class="border-t border-border my-1"></div>
+												<button
+													on:click={() => { const name = prompt('New group name:'); if (name?.trim()) { groups.createGroup('projects', name.trim()); groups.assignToGroup('projects', project.id, name.trim()); } }}
+													class="w-full px-3 py-1.5 text-left text-sm hover:bg-accent transition-colors text-muted-foreground"
+												>
+													<span class="ml-5">+ New group</span>
+												</button>
+											</div>
+										</div>
+									</div>
+									<button on:click={() => deleteProject(project.id)} class="p-1.5 text-muted-foreground hover:text-destructive" title="Delete project">
+										<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+										</svg>
+									</button>
+								</div>
 							</div>
 						{/each}
 					</div>

@@ -111,37 +111,6 @@ async function loadFromBackend(): Promise<GroupsState | null> {
 let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 let pendingState: GroupsState | null = null;
 
-/**
- * Immediately flush any pending save to backend (sync, for beforeunload)
- */
-function flushPendingGroupsSave() {
-	if (!pendingState) return;
-
-	// Cancel the debounce timer
-	if (saveTimeout) {
-		clearTimeout(saveTimeout);
-		saveTimeout = null;
-	}
-
-	// Use sendBeacon for reliable delivery during page unload
-	// sendBeacon is designed for this use case and won't be cancelled
-	const data = JSON.stringify({ key: API_PREFERENCE_KEY, value: pendingState });
-	navigator.sendBeacon(`/api/v1/preferences/${API_PREFERENCE_KEY}`, new Blob([data], { type: 'application/json' }));
-
-	pendingState = null;
-}
-
-// Register beforeunload handler to flush pending saves when browser closes
-if (browser) {
-	window.addEventListener('beforeunload', flushPendingGroupsSave);
-	// Also handle visibility change (tab switch, minimize) - more reliable on mobile
-	document.addEventListener('visibilitychange', () => {
-		if (document.visibilityState === 'hidden') {
-			flushPendingGroupsSave();
-		}
-	});
-}
-
 async function saveToBackend(state: GroupsState) {
 	if (!browser) return;
 
@@ -181,7 +150,7 @@ function createGroupsStore() {
 
 	// Load from backend asynchronously and merge/update
 	if (browser) {
-		loadFromBackend().then(async (backendState) => {
+		loadFromBackend().then((backendState) => {
 			if (backendState) {
 				// Backend has data, use it (more authoritative)
 				set(backendState);
@@ -193,18 +162,7 @@ function createGroupsStore() {
 				if (localState.projects.groups.length > 0 ||
 					localState.profiles.groups.length > 0 ||
 					localState.subagents.groups.length > 0) {
-					// Wait for the save to complete before marking as loaded
-					// This prevents race conditions where changes might be lost
-					try {
-						await fetch(`/api/v1/preferences/${API_PREFERENCE_KEY}`, {
-							method: 'PUT',
-							headers: { 'Content-Type': 'application/json' },
-							credentials: 'include',
-							body: JSON.stringify({ key: API_PREFERENCE_KEY, value: localState })
-						});
-					} catch (e) {
-						console.error('[Groups] Failed to sync initial state to backend:', e);
-					}
+					saveToBackend(localState);
 				}
 				backendLoaded = true;
 			}

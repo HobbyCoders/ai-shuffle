@@ -95,17 +95,26 @@ class StreamingBuffer:
                 if m.get('type') == 'text':
                     m['streaming'] = False
         elif chunk_type == 'tool_result':
-            # Find the tool_use message and mark it complete, add result
+            # Find the tool_use message and merge the result into it (for proper grouping)
+            # This ensures late-joining devices see tool_use with embedded result
+            found_tool_use = False
             for m in self.messages:
-                if m.get('tool_id') == tool_id:
+                if m.get('type') == 'tool_use' and m.get('tool_id') == tool_id:
                     m['streaming'] = False
-            self.messages.append({
-                'type': 'tool_result',
-                'role': 'assistant',
-                'content': content,
-                'tool_id': tool_id,
-                'streaming': False
-            })
+                    m['tool_result'] = content
+                    m['tool_status'] = 'complete'
+                    found_tool_use = True
+                    break
+
+            # Only create separate tool_result if no matching tool_use found (shouldn't happen normally)
+            if not found_tool_use:
+                self.messages.append({
+                    'type': 'tool_result',
+                    'role': 'assistant',
+                    'content': content,
+                    'tool_id': tool_id,
+                    'streaming': False
+                })
         elif chunk_type == 'system':
             # System message (e.g., /context output, local commands)
             # These need to be buffered so late-joining devices see them

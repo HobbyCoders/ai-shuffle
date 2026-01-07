@@ -65,6 +65,47 @@
 		if (content.length <= maxLength) return content;
 		return content.substring(0, maxLength) + '...';
 	}
+
+	// Check if tool result contains an image
+	function toolResultHasImage(content: string): boolean {
+		try {
+			const data = JSON.parse(content);
+			return data.success && data.image_base64 && data.mime_type;
+		} catch {
+			return false;
+		}
+	}
+
+	// Render tool result content, detecting and displaying images
+	function renderToolResult(content: string): string {
+		try {
+			const data = JSON.parse(content);
+			if (data.success && data.image_base64 && data.mime_type) {
+				const mimeType = data.mime_type || 'image/png';
+				const dataUrl = `data:${mimeType};base64,${data.image_base64}`;
+				return `<div class="generated-image-result">
+					<div class="mb-2 text-xs text-green-500">✓ Image generated successfully</div>
+					<img src="${dataUrl}" alt="Generated image" class="max-w-full max-h-64 rounded-lg shadow-md border border-border" />
+					<div class="flex gap-2 mt-2">
+						<button onclick="(function(){
+							const link = document.createElement('a');
+							link.href = '${dataUrl}';
+							link.download = 'generated-image.png';
+							link.click();
+						})()" class="text-xs px-2 py-1 bg-primary text-primary-foreground rounded hover:opacity-90 flex items-center gap-1">
+							<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+							</svg>
+							Download
+						</button>
+					</div>
+				</div>`;
+			}
+		} catch {
+			// Not JSON
+		}
+		return '';
+	}
 </script>
 
 <details class="w-full border border-border rounded-lg overflow-hidden shadow-s group">
@@ -171,7 +212,11 @@
 									{#if child.toolResult}
 										<div class="p-2 bg-muted/50 rounded">
 											<div class="text-xs text-muted-foreground/70 mb-1 font-medium">Result</div>
-											<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{truncateContent(child.toolResult)}</pre>
+											{#if toolResultHasImage(child.toolResult)}
+												{@html renderToolResult(child.toolResult)}
+											{:else}
+												<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{truncateContent(child.toolResult)}</pre>
+											{/if}
 										</div>
 									{/if}
 								</div>
@@ -194,7 +239,13 @@
 									</svg>
 								</summary>
 								{#if child.content}
-									<pre class="mt-2 p-2 bg-muted/50 rounded text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{truncateContent(child.content)}</pre>
+									{#if toolResultHasImage(child.content)}
+										<div class="mt-2 p-2 bg-muted/50 rounded">
+											{@html renderToolResult(child.content)}
+										</div>
+									{:else}
+										<pre class="mt-2 p-2 bg-muted/50 rounded text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{truncateContent(child.content)}</pre>
+									{/if}
 								{/if}
 							</details>
 						</div>
@@ -230,7 +281,11 @@
 			{#if message.content && message.agentStatus !== 'running'}
 				<div class="px-4 py-3 border-t border-border/50">
 					<div class="text-xs text-muted-foreground mb-1 font-medium">Result</div>
-					<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.content}</pre>
+					{#if toolResultHasImage(message.content)}
+						{@html renderToolResult(message.content)}
+					{:else}
+						<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.content}</pre>
+					{/if}
 				</div>
 			{/if}
 		</div>
