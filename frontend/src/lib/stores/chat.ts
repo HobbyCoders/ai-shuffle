@@ -35,7 +35,7 @@ function createChatStore() {
 		sessionId: null,
 		messages: [],
 		profiles: [],
-		selectedProfile: 'code-reader',
+		selectedProfile: 'claude-code',
 		isStreaming: false,
 		error: null
 	});

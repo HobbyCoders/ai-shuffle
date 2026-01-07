@@ -24,6 +24,8 @@ services:
       - COMMAND_TIMEOUT=${COMMAND_TIMEOUT:-300}
       - PUID=${PUID:-99}
       - PGID=${PGID:-100}
+      # Auto-update Claude Code and GitHub CLI on container start (default: true)
+      - AUTO_UPDATE=${AUTO_UPDATE:-true}
 
     # Load environment from .env file (optional)
     env_file:
@@ -33,6 +35,8 @@ services:
     volumes:
       # Persist Claude Code authentication tokens
       - claude-auth:/home/appuser/.claude
+      # Persist GitHub CLI authentication
+      - gh-auth:/home/appuser/.config/gh
       # Persist database and session data
       - ai-hub-data:/data
       # Mount workspace directory for projects
@@ -78,6 +82,9 @@ services:
 volumes:
   # Named volume for Claude authentication persistence
   claude-auth:
+    driver: local
+  # Named volume for GitHub CLI authentication persistence
+  gh-auth:
     driver: local
   # Named volume for AI Hub data (database, sessions)
   ai-hub-data:
