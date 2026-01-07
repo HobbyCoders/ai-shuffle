@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 # Schema version for migrations
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 11
 
 
 def get_connection() -> sqlite3.Connection:
@@ -204,10 +204,13 @@ def _create_schema(cursor: sqlite3.Cursor):
         CREATE TABLE IF NOT EXISTS api_users (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
+            username TEXT UNIQUE,
+            password_hash TEXT,
             api_key_hash TEXT NOT NULL,
             project_id TEXT,
             profile_id TEXT,
             is_active BOOLEAN DEFAULT TRUE,
+            web_login_allowed BOOLEAN DEFAULT TRUE,
             description TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -216,6 +219,22 @@ def _create_schema(cursor: sqlite3.Cursor):
             FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL
         )
     """)
+
+    # Add columns if they don't exist (migration for existing DBs)
+    # Note: SQLite doesn't support ADD COLUMN with UNIQUE constraint, so we add
+    # the column without UNIQUE and rely on the CREATE UNIQUE INDEX below
+    try:
+        cursor.execute("ALTER TABLE api_users ADD COLUMN username TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        cursor.execute("ALTER TABLE api_users ADD COLUMN password_hash TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        cursor.execute("ALTER TABLE api_users ADD COLUMN web_login_allowed BOOLEAN DEFAULT TRUE")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
 
     # Login attempts tracking for brute force protection
     cursor.execute("""
@@ -316,6 +335,7 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_usage_log_created ON usage_log(created_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_users_active ON api_users(is_active)")
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_api_users_username ON api_users(username) WHERE username IS NOT NULL")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_api_user ON sessions(api_user_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_session ON sync_log(session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_created ON sync_log(created_at)")
@@ -376,6 +396,17 @@ def create_admin(username: str, password_hash: str) -> Dict[str, Any]:
         return {"id": 1, "username": username}
 
 
+def update_admin_password(password_hash: str) -> bool:
+    """Update admin password"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE admin SET password_hash = ? WHERE id = 1",
+            (password_hash,)
+        )
+        return cursor.rowcount > 0
+
+
 # ============================================================================
 # Auth Session Operations
 # ============================================================================
@@ -417,6 +448,23 @@ def cleanup_expired_sessions():
             "DELETE FROM auth_sessions WHERE expires_at < ?",
             (datetime.utcnow().isoformat(),)
         )
+
+
+def clear_all_sessions():
+    """
+    Clear all authentication sessions (admin and API user).
+    Called on app startup to force re-login, which is required
+    to restore the encryption key to memory.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Clear admin sessions
+        cursor.execute("DELETE FROM auth_sessions")
+        admin_count = cursor.rowcount
+        # Clear API user web sessions
+        cursor.execute("DELETE FROM api_key_sessions")
+        api_count = cursor.rowcount
+        return admin_count, api_count
 
 
 # ============================================================================
@@ -1083,16 +1131,19 @@ def create_api_user(
     api_key_hash: str,
     project_id: Optional[str] = None,
     profile_id: Optional[str] = None,
-    description: Optional[str] = None
+    description: Optional[str] = None,
+    username: Optional[str] = None,
+    password_hash: Optional[str] = None,
+    web_login_allowed: bool = True
 ) -> Dict[str, Any]:
     """Create a new API user"""
     now = datetime.utcnow().isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO api_users (id, name, api_key_hash, project_id, profile_id, description, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (user_id, name, api_key_hash, project_id, profile_id, description, now, now)
+            """INSERT INTO api_users (id, name, api_key_hash, project_id, profile_id, description, username, password_hash, web_login_allowed, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user_id, name, api_key_hash, project_id, profile_id, description, username, password_hash, web_login_allowed, now, now)
         )
     return get_api_user(user_id)
 
@@ -1103,7 +1154,8 @@ def update_api_user(
     project_id: Optional[str] = None,
     profile_id: Optional[str] = None,
     description: Optional[str] = None,
-    is_active: Optional[bool] = None
+    is_active: Optional[bool] = None,
+    web_login_allowed: Optional[bool] = None
 ) -> Optional[Dict[str, Any]]:
     """Update an API user"""
     existing = get_api_user(user_id)
@@ -1127,6 +1179,9 @@ def update_api_user(
     if is_active is not None:
         updates.append("is_active = ?")
         values.append(is_active)
+    if web_login_allowed is not None:
+        updates.append("web_login_allowed = ?")
+        values.append(web_login_allowed)
 
     if updates:
         updates.append("updated_at = ?")
@@ -1170,6 +1225,66 @@ def delete_api_user(user_id: str) -> bool:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM api_users WHERE id = ?", (user_id,))
         return cursor.rowcount > 0
+
+
+def get_api_user_by_username(username: str) -> Optional[Dict[str, Any]]:
+    """Get an API user by username"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM api_users WHERE username = ? AND is_active = TRUE",
+            (username,)
+        )
+        return row_to_dict(cursor.fetchone())
+
+
+def is_api_key_claimed(key_hash: str) -> bool:
+    """Check if an API key has already been claimed (has username/password set)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT username FROM api_users WHERE api_key_hash = ?",
+            (key_hash,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return row["username"] is not None
+        return False
+
+
+def claim_api_key(key_hash: str, username: str, password_hash: str) -> Optional[Dict[str, Any]]:
+    """
+    Claim an API key by setting username and password.
+    Returns the updated API user or None if the key doesn't exist or is already claimed.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # First check if the key exists and isn't claimed
+        cursor.execute(
+            "SELECT id, username FROM api_users WHERE api_key_hash = ? AND is_active = TRUE",
+            (key_hash,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None  # API key doesn't exist or is inactive
+        if row["username"] is not None:
+            return None  # Already claimed
+
+        # Claim it
+        user_id = row["id"]
+        cursor.execute(
+            "UPDATE api_users SET username = ?, password_hash = ?, updated_at = ? WHERE id = ?",
+            (username, password_hash, datetime.utcnow().isoformat(), user_id)
+        )
+    return get_api_user(user_id)
+
+
+def is_username_taken(username: str) -> bool:
+    """Check if a username is already taken"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM api_users WHERE username = ?", (username,))
+        return cursor.fetchone() is not None
 
 
 # ============================================================================

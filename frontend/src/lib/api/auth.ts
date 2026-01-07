@@ -25,8 +25,33 @@ export async function loginWithApiKey(apiKey: string): Promise<{
 	return api.post('/auth/login/api-key', { api_key: apiKey });
 }
 
+export async function registerApiUser(apiKey: string, username: string, password: string): Promise<{
+	status: string;
+	message: string;
+	is_admin: boolean;
+	api_user: ApiUserInfo & { username: string };
+}> {
+	return api.post('/auth/register/api-user', { api_key: apiKey, username, password });
+}
+
+export async function loginApiUser(username: string, password: string): Promise<{
+	status: string;
+	message: string;
+	is_admin: boolean;
+	api_user: ApiUserInfo & { username: string };
+}> {
+	return api.post('/auth/login/api-user', { username, password });
+}
+
 export async function logout(): Promise<void> {
 	await api.post('/auth/logout');
+}
+
+export async function changePassword(currentPassword: string, newPassword: string): Promise<{
+	status: string;
+	message: string;
+}> {
+	return api.post('/auth/change-password', { current_password: currentPassword, new_password: newPassword });
 }
 
 export async function getClaudeAuthStatus(): Promise<{

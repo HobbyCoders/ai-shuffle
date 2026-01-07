@@ -23,9 +23,28 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class ChangePasswordRequest(BaseModel):
+    """Admin password change request"""
+    current_password: str
+    new_password: str = Field(..., min_length=8)
+
+
 class ApiKeyLoginRequest(BaseModel):
     """API key login request for web UI"""
     api_key: str
+
+
+class ApiUserRegisterRequest(BaseModel):
+    """API user registration request - claim an API key with username/password"""
+    api_key: str
+    username: str = Field(..., min_length=3, max_length=50)
+    password: str = Field(..., min_length=8)
+
+
+class ApiUserLoginRequest(BaseModel):
+    """API user login request with username/password"""
+    username: str
+    password: str
 
 
 class ApiUserInfo(BaseModel):
@@ -405,6 +424,7 @@ class ApiUserBase(BaseModel):
     description: Optional[str] = None
     project_id: Optional[str] = None
     profile_id: Optional[str] = None
+    web_login_allowed: bool = True  # Whether user can login to web UI
 
 
 class ApiUserCreate(ApiUserBase):
@@ -419,12 +439,14 @@ class ApiUserUpdate(BaseModel):
     project_id: Optional[str] = None
     profile_id: Optional[str] = None
     is_active: Optional[bool] = None
+    web_login_allowed: Optional[bool] = None
 
 
 class ApiUser(ApiUserBase):
     """Full API user response (without sensitive data)"""
     id: str
     is_active: bool = True
+    username: Optional[str] = None  # Set when user registers
     created_at: datetime
     updated_at: datetime
     last_used_at: Optional[datetime] = None

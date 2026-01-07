@@ -14,10 +14,13 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Response, Request, Depends, status
 
 from app.core.models import (
-    SetupRequest, LoginRequest, AuthStatus, HealthResponse, ApiKeyLoginRequest
+    SetupRequest, LoginRequest, AuthStatus, HealthResponse, ApiKeyLoginRequest,
+    ApiUserRegisterRequest, ApiUserLoginRequest, ChangePasswordRequest
 )
+import bcrypt
 from app.core.auth import auth_service
 from app.core.config import settings
+from app.core import encryption
 from app.db import database as db
 
 logger = logging.getLogger(__name__)
@@ -290,6 +293,12 @@ async def setup_admin(request: SetupRequest, response: Response):
     try:
         result = auth_service.setup_admin(request.username, request.password)
 
+        # Set encryption key in memory (derived from password)
+        try:
+            encryption.set_encryption_key(request.password, db)
+        except Exception as e:
+            logger.error(f"Failed to set up encryption during admin setup: {e}")
+
         # Set session cookie
         response.set_cookie(
             key="session",
@@ -335,6 +344,17 @@ async def login(req: Request, login_data: LoginRequest, response: Response):
     record_login_result(req, login_data.username, success=True)
     client_ip = get_client_ip(req)
     logger.info(f"Successful admin login for user '{login_data.username}' from IP {client_ip}")
+
+    # Set encryption key in memory (derived from password)
+    try:
+        encryption.set_encryption_key(login_data.password, db)
+        # Encrypt any existing plaintext API keys (migration)
+        encrypted_count = encryption.encrypt_existing_plaintext_keys(db)
+        if encrypted_count > 0:
+            logger.info(f"Encrypted {encrypted_count} existing plaintext API keys")
+    except Exception as e:
+        logger.error(f"Failed to set up encryption: {e}")
+        # Don't fail login, but log the error
 
     # Set session cookie
     response.set_cookie(
@@ -409,6 +429,217 @@ async def login_with_api_key(req: Request, login_data: ApiKeyLoginRequest, respo
     }
 
 
+@router.post("/register/api-user")
+async def register_api_user(req: Request, register_data: ApiUserRegisterRequest, response: Response):
+    """
+    Register as an API user by claiming an API key with a username and password.
+
+    The API key must be pre-created by an admin. This endpoint allows the end user
+    to claim that API key by setting their own username and password. After registration,
+    the user can login with just username/password.
+    """
+    # Check rate limiting
+    check_rate_limit(req, register_data.username)
+
+    # Validate API key format
+    if not register_data.api_key.startswith("aih_"):
+        record_login_result(req, register_data.username, success=False)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid API key format"
+        )
+
+    # Check if username is already taken
+    if db.is_username_taken(register_data.username):
+        record_login_result(req, register_data.username, success=False)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username already taken"
+        )
+
+    # Hash the API key to look it up
+    key_hash = hash_api_key(register_data.api_key)
+
+    # Check if API key exists
+    api_user = db.get_api_user_by_key_hash(key_hash)
+    if not api_user:
+        record_login_result(req, register_data.username, success=False)
+        client_ip = get_client_ip(req)
+        logger.warning(f"Registration attempt with invalid API key from IP {client_ip}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid API key"
+        )
+
+    # Check if API key is already claimed
+    if api_user.get("username"):
+        record_login_result(req, register_data.username, success=False)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This API key has already been registered"
+        )
+
+    # Check if API user is active
+    if not api_user.get("is_active", True):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This API key is disabled"
+        )
+
+    # Check if web login is allowed for this API user
+    if not api_user.get("web_login_allowed", True):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Web login is not allowed for this API key. Use the API key directly for API access."
+        )
+
+    # Hash the password with bcrypt
+    password_hash = bcrypt.hashpw(
+        register_data.password.encode('utf-8'),
+        bcrypt.gensalt()
+    ).decode('utf-8')
+
+    # Claim the API key
+    updated_user = db.claim_api_key(key_hash, register_data.username, password_hash)
+    if not updated_user:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to register. Please try again."
+        )
+
+    # Create session for the newly registered user
+    session_token = secrets.token_urlsafe(32)
+    expires_at = datetime.utcnow() + timedelta(hours=settings.api_key_session_expire_hours)
+    db.create_api_key_session(session_token, updated_user["id"], expires_at)
+
+    # Record successful registration
+    record_login_result(req, register_data.username, success=True)
+    db.update_api_user_last_used(updated_user["id"])
+    client_ip = get_client_ip(req)
+    logger.info(f"Successful API user registration for '{register_data.username}' from IP {client_ip}")
+
+    # Set session cookie
+    response.set_cookie(
+        key="session",
+        value=session_token,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+        max_age=settings.api_key_session_expire_hours * 60 * 60
+    )
+
+    return {
+        "status": "ok",
+        "message": "Registration successful",
+        "is_admin": False,
+        "api_user": {
+            "id": updated_user["id"],
+            "name": updated_user["name"],
+            "username": updated_user["username"],
+            "project_id": updated_user["project_id"],
+            "profile_id": updated_user["profile_id"]
+        }
+    }
+
+
+@router.post("/login/api-user")
+async def login_api_user(req: Request, login_data: ApiUserLoginRequest, response: Response):
+    """
+    Login as an API user using username and password.
+
+    This is for API users who have already registered (claimed their API key
+    with a username and password).
+    """
+    # Check rate limiting
+    check_rate_limit(req, login_data.username)
+
+    # Look up user by username
+    api_user = db.get_api_user_by_username(login_data.username)
+
+    if not api_user:
+        record_login_result(req, login_data.username, success=False)
+        client_ip = get_client_ip(req)
+        logger.warning(f"Failed API user login attempt for '{login_data.username}' from IP {client_ip}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password"
+        )
+
+    # Check if user is active
+    if not api_user.get("is_active", True):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is disabled"
+        )
+
+    # Check if web login is allowed
+    if not api_user.get("web_login_allowed", True):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Web login is not allowed for this account. Use your API key directly for API access."
+        )
+
+    # Verify password
+    if not api_user.get("password_hash"):
+        # User exists but hasn't set up password (shouldn't happen, but handle it)
+        record_login_result(req, login_data.username, success=False)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password"
+        )
+
+    try:
+        password_valid = bcrypt.checkpw(
+            login_data.password.encode('utf-8'),
+            api_user["password_hash"].encode('utf-8')
+        )
+    except Exception:
+        password_valid = False
+
+    if not password_valid:
+        record_login_result(req, login_data.username, success=False)
+        client_ip = get_client_ip(req)
+        logger.warning(f"Failed API user login attempt for '{login_data.username}' from IP {client_ip}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password"
+        )
+
+    # Create session
+    session_token = secrets.token_urlsafe(32)
+    expires_at = datetime.utcnow() + timedelta(hours=settings.api_key_session_expire_hours)
+    db.create_api_key_session(session_token, api_user["id"], expires_at)
+
+    # Record successful login
+    record_login_result(req, login_data.username, success=True)
+    db.update_api_user_last_used(api_user["id"])
+    client_ip = get_client_ip(req)
+    logger.info(f"Successful API user login for '{login_data.username}' from IP {client_ip}")
+
+    # Set session cookie
+    response.set_cookie(
+        key="session",
+        value=session_token,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+        max_age=settings.api_key_session_expire_hours * 60 * 60
+    )
+
+    return {
+        "status": "ok",
+        "message": "Logged in",
+        "is_admin": False,
+        "api_user": {
+            "id": api_user["id"],
+            "name": api_user["name"],
+            "username": api_user["username"],
+            "project_id": api_user["project_id"],
+            "profile_id": api_user["profile_id"]
+        }
+    }
+
+
 @router.post("/logout")
 async def logout(request: Request, response: Response):
     """Logout and invalidate session"""
@@ -419,8 +650,86 @@ async def logout(request: Request, response: Response):
         # Also try to delete API key session if exists
         db.delete_api_key_session(token)
 
+    # Note: We don't clear the encryption key on logout to allow
+    # the app to continue functioning for API users
+
     response.delete_cookie(key="session")
     return {"status": "ok", "message": "Logged out"}
+
+
+@router.post("/change-password")
+async def change_password(
+    req: Request,
+    password_data: ChangePasswordRequest,
+    token: str = Depends(require_admin)
+):
+    """
+    Change admin password and re-encrypt all sensitive data.
+
+    This endpoint:
+    1. Verifies the current password
+    2. Decrypts all sensitive data with the old password
+    3. Re-encrypts all sensitive data with the new password
+    4. Updates the admin password hash
+    """
+    # Get current admin info
+    admin = db.get_admin()
+    if not admin:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Admin account not found"
+        )
+
+    # Verify current password
+    if not auth_service.verify_password(password_data.current_password, admin["password_hash"]):
+        client_ip = get_client_ip(req)
+        logger.warning(f"Failed password change attempt - wrong current password from IP {client_ip}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Current password is incorrect"
+        )
+
+    # Check if new password is same as old
+    if password_data.current_password == password_data.new_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be different from current password"
+        )
+
+    # Re-encrypt all secrets with new password
+    try:
+        success = encryption.re_encrypt_all_secrets(
+            password_data.current_password,
+            password_data.new_password,
+            db
+        )
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to re-encrypt secrets. Password not changed."
+            )
+    except Exception as e:
+        logger.error(f"Failed to re-encrypt secrets: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to re-encrypt secrets. Password not changed."
+        )
+
+    # Update admin password
+    new_password_hash = bcrypt.hashpw(
+        password_data.new_password.encode('utf-8'),
+        bcrypt.gensalt()
+    ).decode('utf-8')
+
+    db.update_admin_password(new_password_hash)
+
+    client_ip = get_client_ip(req)
+    logger.info(f"Admin password changed successfully from IP {client_ip}")
+
+    return {
+        "status": "ok",
+        "message": "Password changed successfully. All encrypted data has been re-encrypted."
+    }
 
 
 @router.get("/claude/status")

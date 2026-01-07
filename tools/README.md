@@ -12,7 +12,7 @@ Generate AI images using Google Gemini's image models.
 
 ```typescript
 // IMPORTANT: Save as .mjs and run with: node yourscript.mjs
-import { generateImage } from '/workspace/ai-hub/tools/dist/image-generation/generateImage.js';
+import { generateImage } from '/opt/ai-tools/dist/image-generation/generateImage.js';
 
 // Generate an image
 const result = await generateImage({
@@ -51,7 +51,7 @@ Edit existing images using AI. Add elements, remove objects, change styles, and 
 
 ```typescript
 // IMPORTANT: Save as .mjs and run with: node yourscript.mjs
-import { editImage } from '/workspace/ai-hub/tools/dist/image-generation/editImage.js';
+import { editImage } from '/opt/ai-tools/dist/image-generation/editImage.js';
 
 // Edit an existing image
 const result = await editImage({
@@ -95,7 +95,7 @@ Generate AI videos using Google Veo models.
 
 ```typescript
 // IMPORTANT: Save as .mjs and run with: node yourscript.mjs
-import { generateVideo } from '/workspace/ai-hub/tools/dist/video-generation/generateVideo.js';
+import { generateVideo } from '/opt/ai-tools/dist/video-generation/generateVideo.js';
 
 // Generate a video
 const result = await generateVideo({

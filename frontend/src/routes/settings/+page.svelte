@@ -5,10 +5,10 @@
 	import { api } from '$lib/api/client';
 	import type { ApiUser, ApiUserWithKey, Profile, WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
 	import type { Project } from '$lib/stores/chat';
-	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig } from '$lib/api/auth';
+	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig, changePassword } from '$lib/api/auth';
 
 	// Tab management
-	type SettingsTab = 'general' | 'authentication' | 'api-users' | 'integrations';
+	type SettingsTab = 'general' | 'security' | 'authentication' | 'api-users' | 'integrations';
 	let activeTab: SettingsTab = 'general';
 
 	// Mobile sidebar state
@@ -65,14 +65,26 @@
 	let openaiKeySuccess = '';
 	let openaiKeyError = '';
 
-	// Image generation (Nano Banana) settings
+	// Image generation (multi-provider) settings
 	interface ImageModel {
 		id: string;
 		name: string;
 		description: string;
 		price_per_image: number;
+		provider: string;
+		provider_name: string;
+		available: boolean;
+		is_current: boolean;
+	}
+	interface ImageProvider {
+		id: string;
+		name: string;
+		description: string;
+		available: boolean;
+		is_current: boolean;
 	}
 	let imageModels: ImageModel[] = [];
+	let imageProviders: ImageProvider[] = [];
 	let imageProvider = '';
 	let imageModel = '';
 	let imageApiKey = '';
@@ -82,28 +94,69 @@
 	let imageConfigError = '';
 	let selectedImageModel = '';
 
-	// Video generation (Veo) settings
+	// Video generation settings (multi-provider)
 	interface VideoModel {
 		id: string;
 		name: string;
 		description: string;
 		price_per_second: number;
+		provider: string;
+		provider_name: string;
+		max_duration: number;
+		capabilities: string[];
+		available: boolean;
+		is_current: boolean;
 	}
-	let videoModels: VideoModel[] = [
-		{ id: 'veo-3.1-fast-generate-preview', name: 'Veo 3.1 Fast', description: 'Fast video generation', price_per_second: 0.15 },
-		{ id: 'veo-3.1-generate-preview', name: 'Veo 3.1', description: 'High quality video generation', price_per_second: 0.40 }
-	];
+	interface VideoProvider {
+		id: string;
+		name: string;
+		description: string;
+		available: boolean;
+		is_current: boolean;
+	}
+	let videoModels: VideoModel[] = [];
+	let videoProviders: VideoProvider[] = [];
 	let videoModel = '';
-	let selectedVideoModel = 'veo-3.1-fast-generate-preview';
+	let videoProvider = '';
+	let selectedVideoModel = '';
 	let savingVideoModel = false;
 	let videoConfigSuccess = '';
 	let videoConfigError = '';
+
+	// Audio settings (TTS/STT)
+	interface AudioModel {
+		id: string;
+		name: string;
+		description: string;
+		price_display: string;
+		available: boolean;
+		is_current: boolean;
+	}
+	let ttsModels: AudioModel[] = [];
+	let sttModels: AudioModel[] = [];
+	let selectedTtsModel = '';
+	let selectedSttModel = '';
+	let currentTtsModel = '';
+	let currentSttModel = '';
+	let savingTtsModel = false;
+	let savingSttModel = false;
+	let audioConfigSuccess = '';
+	let audioConfigError = '';
+
+	// Password change state
+	let currentPassword = '';
+	let newPassword = '';
+	let confirmPassword = '';
+	let changingPassword = false;
+	let passwordChangeError = '';
+	let passwordChangeSuccess = '';
 
 	let formData = {
 		name: '',
 		description: '',
 		project_id: '',
-		profile_id: ''
+		profile_id: '',
+		web_login_allowed: true
 	};
 
 	onMount(async () => {
@@ -165,28 +218,86 @@
 				image_model: string | null;
 				image_api_key_set: boolean;
 				image_api_key_masked: string;
+				video_provider: string | null;
 				video_model: string | null;
+				tts_model: string | null;
+				stt_model: string | null;
 			}>('/settings/integrations');
 			openaiApiKeyMasked = settings.openai_api_key_masked;
 			imageProvider = settings.image_provider || '';
 			imageModel = settings.image_model || '';
 			imageApiKeyMasked = settings.image_api_key_masked || '';
 			selectedImageModel = settings.image_model || '';
+			videoProvider = settings.video_provider || '';
 			videoModel = settings.video_model || '';
-			selectedVideoModel = settings.video_model || 'veo-3.1-fast-generate-preview';
+			selectedVideoModel = settings.video_model || '';
+			currentTtsModel = settings.tts_model || 'gpt-4o-mini-tts';
+			currentSttModel = settings.stt_model || 'whisper-1';
+			selectedTtsModel = currentTtsModel;
+			selectedSttModel = currentSttModel;
 		} catch (e) {
 			console.error('Failed to load integration settings:', e);
 		}
 
-		// Load available image models
+		// Load available image models and providers
 		try {
-			const modelsResponse = await api.get<{models: ImageModel[]}>('/settings/integrations/image/models');
-			imageModels = modelsResponse.models;
-			if (!selectedImageModel && imageModels.length > 0) {
-				selectedImageModel = imageModels[0].id;
+			const imageResponse = await api.get<{
+				models: ImageModel[];
+				providers: ImageProvider[];
+				current_provider: string | null;
+				current_model: string | null;
+			}>('/settings/integrations/image/models');
+			imageModels = imageResponse.models;
+			imageProviders = imageResponse.providers;
+			if (!selectedImageModel && imageResponse.current_model) {
+				selectedImageModel = imageResponse.current_model;
+			} else if (!selectedImageModel && imageModels.length > 0) {
+				// Default to first available model
+				const availableModel = imageModels.find(m => m.available);
+				selectedImageModel = availableModel?.id || imageModels[0].id;
 			}
 		} catch (e) {
 			console.error('Failed to load image models:', e);
+		}
+
+		// Load available video models and providers
+		try {
+			const videoResponse = await api.get<{
+				models: VideoModel[];
+				providers: VideoProvider[];
+				current_provider: string | null;
+				current_model: string | null;
+			}>('/settings/integrations/video/models');
+			videoModels = videoResponse.models;
+			videoProviders = videoResponse.providers;
+			if (!selectedVideoModel && videoResponse.current_model) {
+				selectedVideoModel = videoResponse.current_model;
+			} else if (!selectedVideoModel && videoModels.length > 0) {
+				// Default to first available model
+				const availableModel = videoModels.find(m => m.available);
+				selectedVideoModel = availableModel?.id || videoModels[0].id;
+			}
+		} catch (e) {
+			console.error('Failed to load video models:', e);
+		}
+
+		// Load available audio models (TTS/STT)
+		try {
+			const audioResponse = await api.get<{
+				tts_models: AudioModel[];
+				stt_models: AudioModel[];
+				current_tts: string;
+				current_stt: string;
+				openai_configured: boolean;
+			}>('/settings/integrations/audio/models');
+			ttsModels = audioResponse.tts_models;
+			sttModels = audioResponse.stt_models;
+			currentTtsModel = audioResponse.current_tts;
+			currentSttModel = audioResponse.current_stt;
+			selectedTtsModel = currentTtsModel;
+			selectedSttModel = currentSttModel;
+		} catch (e) {
+			console.error('Failed to load audio models:', e);
 		}
 	}
 
@@ -280,13 +391,16 @@
 		imageConfigSuccess = '';
 
 		try {
-			const result = await api.patch<{success: boolean, model: string}>('/settings/integrations/image/model', {
+			const result = await api.patch<{success: boolean, provider: string, model: string}>('/settings/integrations/image/model', {
 				model: selectedImageModel
 			});
 			imageModel = result.model;
-			imageConfigSuccess = 'Model updated successfully';
+			imageProvider = result.provider;
+			imageConfigSuccess = 'Image model updated successfully';
+			// Reload to refresh availability status
+			await loadIntegrationSettings();
 		} catch (e: any) {
-			imageConfigError = e.detail || 'Failed to update model';
+			imageConfigError = e.detail || 'Failed to update image model';
 		} finally {
 			updatingImageModel = false;
 		}
@@ -325,15 +439,66 @@
 		videoConfigSuccess = '';
 
 		try {
-			const result = await api.patch<{success: boolean, model: string}>('/settings/integrations/video/model', {
+			const result = await api.patch<{success: boolean, provider: string, model: string}>('/settings/integrations/video/model', {
 				model: selectedVideoModel
 			});
 			videoModel = result.model;
+			videoProvider = result.provider;
 			videoConfigSuccess = 'Video model updated successfully';
+			// Reload to refresh availability status
+			await loadIntegrationSettings();
 		} catch (e: any) {
 			videoConfigError = e.detail || 'Failed to update video model';
 		} finally {
 			savingVideoModel = false;
+		}
+	}
+
+	// TTS model selection
+	async function saveTtsModel() {
+		if (!selectedTtsModel || selectedTtsModel === currentTtsModel) {
+			return;
+		}
+
+		savingTtsModel = true;
+		audioConfigError = '';
+		audioConfigSuccess = '';
+
+		try {
+			await api.patch<{success: boolean, model: string}>('/settings/integrations/audio/tts', {
+				model: selectedTtsModel
+			});
+			currentTtsModel = selectedTtsModel;
+			audioConfigSuccess = 'TTS model updated';
+			setTimeout(() => audioConfigSuccess = '', 3000);
+		} catch (e: any) {
+			audioConfigError = e.detail || 'Failed to update TTS model';
+		} finally {
+			savingTtsModel = false;
+		}
+	}
+
+	// STT model selection
+	async function saveSttModel() {
+		if (!selectedSttModel || selectedSttModel === currentSttModel) {
+			return;
+		}
+
+		savingSttModel = true;
+		audioConfigError = '';
+		audioConfigSuccess = '';
+
+		try {
+			await api.patch<{success: boolean, model: string}>('/settings/integrations/audio/stt', {
+				model: selectedSttModel
+			});
+			currentSttModel = selectedSttModel;
+			audioConfigSuccess = 'STT model updated - voice input will now use ' + sttModels.find(m => m.id === selectedSttModel)?.name;
+			setTimeout(() => audioConfigSuccess = '', 3000);
+		} catch (e: any) {
+			audioConfigError = e.detail || 'Failed to update STT model';
+		} finally {
+			savingSttModel = false;
 		}
 	}
 
@@ -487,12 +652,46 @@
 		}
 	}
 
+	async function handlePasswordChange() {
+		passwordChangeError = '';
+		passwordChangeSuccess = '';
+
+		if (!currentPassword || !newPassword || !confirmPassword) {
+			passwordChangeError = 'All fields are required';
+			return;
+		}
+
+		if (newPassword.length < 8) {
+			passwordChangeError = 'New password must be at least 8 characters';
+			return;
+		}
+
+		if (newPassword !== confirmPassword) {
+			passwordChangeError = 'New passwords do not match';
+			return;
+		}
+
+		changingPassword = true;
+		try {
+			await changePassword(currentPassword, newPassword);
+			passwordChangeSuccess = 'Password changed successfully. All encrypted data has been re-encrypted.';
+			currentPassword = '';
+			newPassword = '';
+			confirmPassword = '';
+		} catch (e: any) {
+			passwordChangeError = e.detail || 'Failed to change password';
+		} finally {
+			changingPassword = false;
+		}
+	}
+
 	function resetForm() {
 		formData = {
 			name: '',
 			description: '',
 			project_id: '',
-			profile_id: ''
+			profile_id: '',
+			web_login_allowed: true
 		};
 		editingUser = null;
 		showCreateForm = false;
@@ -510,7 +709,8 @@
 			name: user.name,
 			description: user.description || '',
 			project_id: user.project_id || '',
-			profile_id: user.profile_id || ''
+			profile_id: user.profile_id || '',
+			web_login_allowed: user.web_login_allowed ?? true
 		};
 		showCreateForm = true;
 		newlyCreatedKey = null;
@@ -529,14 +729,16 @@
 					name: formData.name,
 					description: formData.description || null,
 					project_id: formData.project_id || null,
-					profile_id: formData.profile_id || null
+					profile_id: formData.profile_id || null,
+					web_login_allowed: formData.web_login_allowed
 				});
 			} else {
 				const result = await api.post<ApiUserWithKey>('/api-users', {
 					name: formData.name,
 					description: formData.description || null,
 					project_id: formData.project_id || null,
-					profile_id: formData.profile_id || null
+					profile_id: formData.profile_id || null,
+					web_login_allowed: formData.web_login_allowed
 				});
 				newlyCreatedKey = result.api_key;
 			}
@@ -606,6 +808,7 @@
 
 	const tabs: { id: SettingsTab; label: string; icon: string }[] = [
 		{ id: 'general', label: 'General', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z' },
+		{ id: 'security', label: 'Security', icon: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z' },
 		{ id: 'authentication', label: 'Authentication', icon: 'M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z' },
 		{ id: 'api-users', label: 'API Users', icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z' },
 		{ id: 'integrations', label: 'Integrations', icon: 'M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z' }
@@ -832,6 +1035,119 @@
 						</div>
 					{/if}
 
+					<!-- Security Tab -->
+					{#if activeTab === 'security'}
+						<div class="space-y-6">
+							<div>
+								<h2 class="text-xl font-bold text-foreground mb-1">Security Settings</h2>
+								<p class="text-sm text-muted-foreground">Manage your account security and encryption settings.</p>
+							</div>
+
+							<!-- Change Password Section -->
+							<div class="card p-6">
+								<div class="flex items-center gap-3 mb-4">
+									<div class="w-10 h-10 bg-primary/15 rounded-lg flex items-center justify-center">
+										<svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+										</svg>
+									</div>
+									<div>
+										<h3 class="font-semibold text-foreground">Change Password</h3>
+										<p class="text-xs text-muted-foreground">Update your admin password. This will re-encrypt all stored API keys.</p>
+									</div>
+								</div>
+
+								<div class="space-y-4 max-w-md">
+									<div>
+										<label for="currentPassword" class="block text-sm font-medium text-foreground mb-1.5">Current Password</label>
+										<input
+											type="password"
+											id="currentPassword"
+											bind:value={currentPassword}
+											class="input"
+											placeholder="Enter current password"
+											autocomplete="current-password"
+										/>
+									</div>
+
+									<div>
+										<label for="newPassword" class="block text-sm font-medium text-foreground mb-1.5">New Password</label>
+										<input
+											type="password"
+											id="newPassword"
+											bind:value={newPassword}
+											class="input"
+											placeholder="Enter new password (min 8 characters)"
+											autocomplete="new-password"
+										/>
+									</div>
+
+									<div>
+										<label for="confirmPassword" class="block text-sm font-medium text-foreground mb-1.5">Confirm New Password</label>
+										<input
+											type="password"
+											id="confirmPassword"
+											bind:value={confirmPassword}
+											class="input"
+											placeholder="Confirm new password"
+											autocomplete="new-password"
+										/>
+									</div>
+
+									{#if passwordChangeError}
+										<div class="bg-destructive/10 border border-destructive/30 text-destructive px-3 py-2 rounded-lg text-sm">
+											{passwordChangeError}
+										</div>
+									{/if}
+
+									{#if passwordChangeSuccess}
+										<div class="bg-success/10 border border-success/30 text-success px-3 py-2 rounded-lg text-sm">
+											{passwordChangeSuccess}
+										</div>
+									{/if}
+
+									<button
+										on:click={handlePasswordChange}
+										class="btn btn-primary"
+										disabled={changingPassword}
+									>
+										{#if changingPassword}
+											<span class="inline-block animate-spin mr-2">&#9696;</span>
+											Changing Password...
+										{:else}
+											Change Password
+										{/if}
+									</button>
+								</div>
+							</div>
+
+							<!-- Encryption Info Section -->
+							<div class="card p-6">
+								<div class="flex items-center gap-3 mb-4">
+									<div class="w-10 h-10 bg-success/15 rounded-lg flex items-center justify-center">
+										<svg class="w-5 h-5 text-success" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+										</svg>
+									</div>
+									<div>
+										<h3 class="font-semibold text-foreground">Encryption</h3>
+										<p class="text-xs text-muted-foreground">Your API keys are encrypted at rest using your admin password.</p>
+									</div>
+								</div>
+
+								<div class="bg-muted/30 rounded-lg p-4 text-sm text-muted-foreground">
+									<p class="mb-2"><strong class="text-foreground">How it works:</strong></p>
+									<ul class="list-disc list-inside space-y-1">
+										<li>API keys (OpenAI, Gemini, etc.) are encrypted using a key derived from your password</li>
+										<li>The encryption key is never stored - it's generated when you log in</li>
+										<li>If you change your password, all keys are automatically re-encrypted</li>
+										<li>Even if the database is accessed, keys cannot be decrypted without your password</li>
+									</ul>
+								</div>
+							</div>
+						</div>
+					{/if}
+
 					<!-- Authentication Tab -->
 					{#if activeTab === 'authentication'}
 						<div class="space-y-4">
@@ -1012,9 +1328,15 @@
 												<div class="flex-1 min-w-0">
 													<div class="flex items-center gap-2 mb-1">
 														<span class="font-medium text-foreground">{user.name}</span>
+														{#if user.username}
+															<span class="text-xs px-2 py-0.5 rounded-full bg-primary/15 text-primary">@{user.username}</span>
+														{/if}
 														<span class="text-xs px-2 py-0.5 rounded-full {user.is_active ? 'bg-success/15 text-success' : 'bg-destructive/15 text-destructive'}">
 															{user.is_active ? 'Active' : 'Inactive'}
 														</span>
+														{#if user.web_login_allowed === false}
+															<span class="text-xs px-2 py-0.5 rounded-full bg-warning/15 text-warning">API Only</span>
+														{/if}
 													</div>
 													{#if user.description}
 														<p class="text-sm text-muted-foreground mb-2">{user.description}</p>
@@ -1101,276 +1423,266 @@
 
 					<!-- Integrations Tab -->
 					{#if activeTab === 'integrations'}
-						<div class="space-y-4">
-							<div>
+						<div class="space-y-4 max-h-[calc(100vh-12rem)] overflow-y-auto pb-4 pr-1">
+							<div class="sticky top-0 bg-background pb-2 z-10">
 								<h2 class="text-xl font-bold text-foreground mb-1">Integrations</h2>
-								<p class="text-sm text-muted-foreground">Connect external services to extend AI Hub.</p>
+								<p class="text-sm text-muted-foreground">Configure API keys and select default models.</p>
 							</div>
 
-							<!-- OpenAI Integration - Compact -->
+							<!-- Success/Error Messages -->
+							{#if audioConfigSuccess || imageConfigSuccess || videoConfigSuccess}
+								<div class="bg-success/10 border border-success/30 text-success px-3 py-2 rounded text-xs flex items-center gap-2">
+									<span>✓</span>
+									<span>{audioConfigSuccess || imageConfigSuccess || videoConfigSuccess}</span>
+								</div>
+							{/if}
+							{#if audioConfigError}
+								<div class="bg-destructive/10 border border-destructive/30 text-destructive px-3 py-2 rounded text-xs">
+									{audioConfigError}
+								</div>
+							{/if}
+
+							<!-- API Keys Section -->
 							<div class="card p-4">
-								<div class="flex items-center gap-3 mb-3">
-									<div class="w-9 h-9 bg-emerald-500/15 rounded-lg flex items-center justify-center shrink-0">
-										<svg class="w-5 h-5 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
-											<path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.8956zm16.0993 3.8558L12.6 8.3829l2.02-1.1638a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.4066-.6567zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/>
-										</svg>
-									</div>
-									<div class="flex-1 min-w-0">
-										<div class="flex items-center justify-between gap-2">
-											<span class="font-semibold text-foreground text-sm">OpenAI Whisper</span>
+								<h3 class="text-sm font-semibold text-foreground mb-3 flex items-center gap-2">
+									<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+									</svg>
+									API Keys
+								</h3>
+
+								<div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+									<!-- OpenAI Key -->
+									<div class="p-3 bg-muted/30 rounded-lg">
+										<div class="flex items-center justify-between mb-2">
+											<span class="text-xs font-medium text-foreground flex items-center gap-1.5">
+												<span class="w-5 h-5 bg-emerald-500/15 rounded flex items-center justify-center">
+													<svg class="w-3 h-3 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
+														<path d="M22.28 9.82a5.98 5.98 0 00-.52-4.91 6.05 6.05 0 00-6.51-2.9A6.07 6.07 0 004.98 4.18a5.98 5.98 0 00-4 2.9 6.05 6.05 0 00.74 7.1 5.98 5.98 0 00.51 4.91 6.05 6.05 0 006.51 2.9A5.98 5.98 0 0013.26 24a6.06 6.06 0 005.77-4.21 5.99 5.99 0 004-2.9 6.06 6.06 0 00-.75-7.07z"/>
+													</svg>
+												</span>
+												OpenAI
+											</span>
 											{#if openaiApiKeyMasked}
-												<span class="text-[10px] px-2 py-0.5 rounded-full bg-success/15 text-success font-medium shrink-0">Configured</span>
-											{:else}
-												<span class="text-[10px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground font-medium shrink-0">Not Set</span>
+												<span class="text-[9px] px-1.5 py-0.5 rounded bg-success/15 text-success">✓</span>
 											{/if}
 										</div>
-										<p class="text-xs text-muted-foreground truncate">Voice-to-text transcription</p>
-									</div>
-								</div>
-
-								{#if openaiKeySuccess}
-									<div class="bg-success/10 border border-success/30 text-success px-2 py-1.5 rounded text-xs flex items-center gap-1.5 mb-3">
-										<span>✓</span>
-										<span>{openaiKeySuccess}</span>
-									</div>
-								{/if}
-
-								{#if openaiKeyError}
-									<div class="bg-destructive/10 border border-destructive/30 text-destructive px-2 py-1.5 rounded text-xs mb-3">
-										{openaiKeyError}
-									</div>
-								{/if}
-
-								{#if openaiApiKeyMasked}
-									<div class="flex items-center gap-2 mb-3 p-2 bg-muted rounded text-xs">
-										<code class="text-foreground font-mono flex-1 truncate">{openaiApiKeyMasked}</code>
-									</div>
-								{/if}
-
-								<div class="flex gap-2">
-									<input
-										type="password"
-										bind:value={openaiApiKey}
-										placeholder={openaiApiKeyMasked ? "New API key..." : "sk-..."}
-										class="input text-xs py-1.5 font-mono flex-1"
-									/>
-									<button
-										on:click={saveOpenaiApiKey}
-										disabled={savingOpenaiKey || !openaiApiKey.trim()}
-										class="btn btn-primary text-xs py-1.5 px-3"
-									>
-										{#if savingOpenaiKey}
-											<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
-										{:else}
-											{openaiApiKeyMasked ? 'Update' : 'Save'}
+										{#if openaiApiKeyMasked}
+											<code class="text-[10px] text-muted-foreground font-mono">{openaiApiKeyMasked}</code>
 										{/if}
-									</button>
-									{#if openaiApiKeyMasked}
-										<button
-											on:click={removeOpenaiApiKey}
-											disabled={savingOpenaiKey}
-											class="btn btn-secondary text-xs py-1.5 px-3"
-											title="Remove API key"
-										>
-											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-											</svg>
-										</button>
-									{/if}
-								</div>
-								<p class="text-[10px] text-muted-foreground mt-2">
-									<a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">Get API key</a> · ~$0.006/min
-								</p>
-							</div>
-
-							<!-- Image Generation (Nano Banana) Integration - Compact -->
-							<div class="card p-4">
-								<div class="flex items-center gap-3 mb-3">
-									<div class="w-9 h-9 bg-yellow-500/15 rounded-lg flex items-center justify-center text-lg shrink-0">
-										🍌
-									</div>
-									<div class="flex-1 min-w-0">
-										<div class="flex items-center justify-between gap-2">
-											<span class="font-semibold text-foreground text-sm">Nano Banana</span>
-											{#if imageApiKeyMasked}
-												<span class="text-[10px] px-2 py-0.5 rounded-full bg-success/15 text-success font-medium shrink-0">Configured</span>
-											{:else}
-												<span class="text-[10px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground font-medium shrink-0">Not Set</span>
-											{/if}
-										</div>
-										<p class="text-xs text-muted-foreground truncate">AI Image Generation (Google Gemini)</p>
-									</div>
-								</div>
-
-								{#if imageConfigSuccess}
-									<div class="bg-success/10 border border-success/30 text-success px-2 py-1.5 rounded text-xs flex items-center gap-1.5 mb-3">
-										<span>✓</span>
-										<span>{imageConfigSuccess}</span>
-									</div>
-								{/if}
-
-								{#if imageConfigError}
-									<div class="bg-destructive/10 border border-destructive/30 text-destructive px-2 py-1.5 rounded text-xs mb-3">
-										{imageConfigError}
-									</div>
-								{/if}
-
-								{#if imageApiKeyMasked}
-									<div class="flex items-center gap-2 mb-3 p-2 bg-muted rounded text-xs">
-										<code class="text-foreground font-mono truncate">{imageApiKeyMasked}</code>
-									</div>
-								{/if}
-
-								<div class="space-y-3">
-									<!-- Model Selection - Always visible, with quick update when configured -->
-									<div class="flex gap-2">
-										<select
-											bind:value={selectedImageModel}
-											class="input text-xs py-1.5 flex-1"
-										>
-											{#each imageModels as model}
-												<option value={model.id}>
-													{model.name} (${model.price_per_image}/img)
-												</option>
-											{/each}
-										</select>
-										{#if imageApiKeyMasked && selectedImageModel !== imageModel}
-											<button
-												on:click={updateImageModel}
-												disabled={updatingImageModel}
-												class="btn btn-primary text-xs py-1.5 px-3"
-												title="Apply model change"
-											>
-												{#if updatingImageModel}
-													<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
-												{:else}
-													Apply
-												{/if}
+										<div class="flex gap-1.5 mt-2">
+											<input type="password" bind:value={openaiApiKey} placeholder={openaiApiKeyMasked ? "New key..." : "sk-..."} class="input text-[10px] py-1 px-2 font-mono flex-1 min-w-0" />
+											<button on:click={saveOpenaiApiKey} disabled={savingOpenaiKey || !openaiApiKey.trim()} class="btn btn-primary text-[10px] py-1 px-2">
+												{savingOpenaiKey ? '...' : 'Save'}
 											</button>
-										{/if}
+										</div>
+										<p class="text-[9px] text-muted-foreground mt-1.5">
+											<a href="https://platform.openai.com/api-keys" target="_blank" class="text-primary hover:underline">Get key</a> · TTS, STT, GPT Image, Sora
+										</p>
 									</div>
 
-									<!-- API Key Input -->
-									<div class="flex gap-2">
-										<input
-											type="password"
-											bind:value={imageApiKey}
-											placeholder={imageApiKeyMasked ? "New API key..." : "AIza..."}
-											class="input text-xs py-1.5 font-mono flex-1"
-										/>
-										<button
-											on:click={saveImageConfig}
-											disabled={savingImageConfig || (!imageApiKey.trim() && !imageApiKeyMasked)}
-											class="btn btn-primary text-xs py-1.5 px-3"
-										>
-											{#if savingImageConfig}
-												<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
-											{:else}
-												{imageApiKeyMasked ? 'Update' : 'Save'}
+									<!-- Google Gemini Key -->
+									<div class="p-3 bg-muted/30 rounded-lg">
+										<div class="flex items-center justify-between mb-2">
+											<span class="text-xs font-medium text-foreground flex items-center gap-1.5">
+												<span class="w-5 h-5 bg-blue-500/15 rounded flex items-center justify-center">
+													<svg class="w-3 h-3 text-blue-400" viewBox="0 0 24 24" fill="currentColor">
+														<path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+													</svg>
+												</span>
+												Google Gemini
+											</span>
+											{#if imageApiKeyMasked}
+												<span class="text-[9px] px-1.5 py-0.5 rounded bg-success/15 text-success">✓</span>
 											{/if}
-										</button>
+										</div>
 										{#if imageApiKeyMasked}
-											<button
-												on:click={removeImageConfig}
-												disabled={savingImageConfig}
-												class="btn btn-secondary text-xs py-1.5 px-3"
-												title="Remove configuration"
-											>
-												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-												</svg>
-											</button>
+											<code class="text-[10px] text-muted-foreground font-mono">{imageApiKeyMasked}</code>
 										{/if}
-									</div>
-								</div>
-
-								<p class="text-[10px] text-muted-foreground mt-2">
-									<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">Get API key</a> · ~$0.039/image
-								</p>
-							</div>
-
-							<!-- Video Generation (Veo) - Model Selection -->
-							<div class="card p-4">
-								<div class="flex items-center gap-3 mb-3">
-									<div class="w-9 h-9 bg-purple-500/15 rounded-lg flex items-center justify-center text-lg shrink-0">
-										🎬
-									</div>
-									<div class="flex-1 min-w-0">
-										<div class="flex items-center justify-between gap-2">
-											<span class="font-semibold text-foreground text-sm">Veo Video Generation</span>
-											{#if imageApiKeyMasked}
-												<span class="text-[10px] px-2 py-0.5 rounded-full bg-success/15 text-success font-medium shrink-0">Ready</span>
-											{:else}
-												<span class="text-[10px] px-2 py-0.5 rounded-full bg-warning/15 text-warning font-medium shrink-0">Needs API Key</span>
-											{/if}
+										<div class="flex gap-1.5 mt-2">
+											<input type="password" bind:value={imageApiKey} placeholder={imageApiKeyMasked ? "New key..." : "AIza..."} class="input text-[10px] py-1 px-2 font-mono flex-1 min-w-0" />
+											<button on:click={saveImageConfig} disabled={savingImageConfig || (!imageApiKey.trim() && !imageApiKeyMasked)} class="btn btn-primary text-[10px] py-1 px-2">
+												{savingImageConfig ? '...' : 'Save'}
+											</button>
 										</div>
-										<p class="text-xs text-muted-foreground truncate">AI Video Generation (Google Veo)</p>
+										<p class="text-[9px] text-muted-foreground mt-1.5">
+											<a href="https://aistudio.google.com/apikey" target="_blank" class="text-primary hover:underline">Get key</a> · Nano Banana, Imagen 4, Veo
+										</p>
 									</div>
 								</div>
+							</div>
 
-								{#if videoConfigSuccess}
-									<div class="bg-success/10 border border-success/30 text-success px-2 py-1.5 rounded text-xs flex items-center gap-1.5 mb-3">
-										<span>✓</span>
-										<span>{videoConfigSuccess}</span>
+							<!-- Default Models Section -->
+							<div class="card p-4">
+								<h3 class="text-sm font-semibold text-foreground mb-3 flex items-center gap-2">
+									<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+									</svg>
+									Default Models
+								</h3>
+
+								<!-- Image Generation -->
+								<div class="mb-4">
+									<div class="flex items-center gap-2 mb-2">
+										<span class="w-5 h-5 bg-purple-500/15 rounded flex items-center justify-center">
+											<svg class="w-3 h-3 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+											</svg>
+										</span>
+										<span class="text-xs font-medium text-foreground">Image Generation</span>
 									</div>
-								{/if}
-
-								{#if videoConfigError}
-									<div class="bg-destructive/10 border border-destructive/30 text-destructive px-2 py-1.5 rounded text-xs mb-3">
-										{videoConfigError}
-									</div>
-								{/if}
-
-								<div class="space-y-3">
-									<!-- Model Selection -->
-									<div class="flex gap-2">
-										<select
-											bind:value={selectedVideoModel}
-											class="input text-xs py-1.5 flex-1"
-										>
-											{#each videoModels as model}
-												<option value={model.id}>
-													{model.name} (${model.price_per_second}/sec)
-												</option>
-											{/each}
-										</select>
-										{#if selectedVideoModel !== videoModel}
+									<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+										{#each imageModels as model}
 											<button
-												on:click={saveVideoModel}
-												disabled={savingVideoModel}
-												class="btn btn-primary text-xs py-1.5 px-3"
-												title="Apply model change"
+												on:click={() => { selectedImageModel = model.id; updateImageModel(); }}
+												disabled={!model.available || updatingImageModel}
+												class="h-[72px] p-2.5 rounded-lg border text-left transition-all flex flex-col justify-between {model.id === imageModel ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/50 hover:bg-muted/50'} {!model.available ? 'opacity-40 cursor-not-allowed' : ''}"
 											>
-												{#if savingVideoModel}
-													<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>
-												{:else}
-													Apply
-												{/if}
+												<div class="flex items-start justify-between gap-1">
+													<div class="text-[11px] font-medium text-foreground leading-tight">{model.name}</div>
+													<!-- Provider icon -->
+													{#if model.provider === 'google-gemini' || model.provider === 'google-imagen'}
+														<span class="w-4 h-4 bg-blue-500/15 rounded flex-shrink-0 flex items-center justify-center">
+															<svg class="w-2.5 h-2.5 text-blue-400" viewBox="0 0 24 24" fill="currentColor">
+																<path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+															</svg>
+														</span>
+													{:else if model.provider === 'openai-gpt-image'}
+														<span class="w-4 h-4 bg-emerald-500/15 rounded flex-shrink-0 flex items-center justify-center">
+															<svg class="w-2.5 h-2.5 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
+																<path d="M22.28 9.82a5.98 5.98 0 00-.52-4.91 6.05 6.05 0 00-6.51-2.9A6.07 6.07 0 004.98 4.18a5.98 5.98 0 00-4 2.9 6.05 6.05 0 00.74 7.1 5.98 5.98 0 00.51 4.91 6.05 6.05 0 006.51 2.9A5.98 5.98 0 0013.26 24a6.06 6.06 0 005.77-4.21 5.99 5.99 0 004-2.9 6.06 6.06 0 00-.75-7.07z"/>
+															</svg>
+														</span>
+													{/if}
+												</div>
+												<div>
+													<div class="text-[10px] text-primary font-medium">${model.price_per_image}/img</div>
+													<div class="text-[9px] text-muted-foreground truncate">{model.provider_name}</div>
+												</div>
 											</button>
-										{/if}
+										{/each}
 									</div>
-
-									{#if !imageApiKeyMasked}
-										<p class="text-[10px] text-warning">Configure Nano Banana API key above to enable video generation (uses same key)</p>
-									{/if}
 								</div>
 
-								<p class="text-[10px] text-muted-foreground mt-2">
-									Uses same API key as Nano Banana · $0.15-$0.40/sec · 4-8 sec videos
-								</p>
-							</div>
-
-							<!-- Future integrations placeholder - Compact -->
-							<div class="card p-3 border-dashed opacity-50">
-								<div class="flex items-center gap-2">
-									<div class="w-7 h-7 bg-muted rounded flex items-center justify-center">
-										<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-										</svg>
+								<!-- Video Generation -->
+								<div class="mb-4">
+									<div class="flex items-center gap-2 mb-2">
+										<span class="w-5 h-5 bg-pink-500/15 rounded flex items-center justify-center">
+											<svg class="w-3 h-3 text-pink-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+											</svg>
+										</span>
+										<span class="text-xs font-medium text-foreground">Video Generation</span>
 									</div>
-									<span class="text-xs text-muted-foreground">More integrations coming soon</span>
+									<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+										{#each videoModels as model}
+											<button
+												on:click={() => { selectedVideoModel = model.id; saveVideoModel(); }}
+												disabled={!model.available || savingVideoModel}
+												class="h-[72px] p-2.5 rounded-lg border text-left transition-all flex flex-col justify-between {model.id === videoModel ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/50 hover:bg-muted/50'} {!model.available ? 'opacity-40 cursor-not-allowed' : ''}"
+											>
+												<div class="flex items-start justify-between gap-1">
+													<div class="text-[11px] font-medium text-foreground leading-tight">{model.name}</div>
+													<!-- Provider icon -->
+													{#if model.provider === 'google-veo'}
+														<span class="w-4 h-4 bg-blue-500/15 rounded flex-shrink-0 flex items-center justify-center">
+															<svg class="w-2.5 h-2.5 text-blue-400" viewBox="0 0 24 24" fill="currentColor">
+																<path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+															</svg>
+														</span>
+													{:else if model.provider === 'openai-sora'}
+														<span class="w-4 h-4 bg-emerald-500/15 rounded flex-shrink-0 flex items-center justify-center">
+															<svg class="w-2.5 h-2.5 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
+																<path d="M22.28 9.82a5.98 5.98 0 00-.52-4.91 6.05 6.05 0 00-6.51-2.9A6.07 6.07 0 004.98 4.18a5.98 5.98 0 00-4 2.9 6.05 6.05 0 00.74 7.1 5.98 5.98 0 00.51 4.91 6.05 6.05 0 006.51 2.9A5.98 5.98 0 0013.26 24a6.06 6.06 0 005.77-4.21 5.99 5.99 0 004-2.9 6.06 6.06 0 00-.75-7.07z"/>
+															</svg>
+														</span>
+													{/if}
+												</div>
+												<div>
+													<div class="text-[10px] text-primary font-medium">${model.price_per_second}/sec</div>
+													<div class="text-[9px] text-muted-foreground truncate">{model.provider_name}</div>
+												</div>
+											</button>
+										{/each}
+									</div>
+								</div>
+
+								<!-- Speech-to-Text (STT) -->
+								<div class="mb-4">
+									<div class="flex items-center gap-2 mb-2">
+										<span class="w-5 h-5 bg-amber-500/15 rounded flex items-center justify-center">
+											<svg class="w-3 h-3 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+											</svg>
+										</span>
+										<span class="text-xs font-medium text-foreground">Speech-to-Text</span>
+										<span class="text-[9px] text-muted-foreground">(Voice input)</span>
+									</div>
+									<div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
+										{#each sttModels as model}
+											<button
+												on:click={() => { selectedSttModel = model.id; saveSttModel(); }}
+												disabled={!model.available || savingSttModel}
+												class="h-[72px] p-2.5 rounded-lg border text-left transition-all flex flex-col justify-between {model.id === currentSttModel ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/50 hover:bg-muted/50'} {!model.available ? 'opacity-40 cursor-not-allowed' : ''}"
+											>
+												<div class="flex items-start justify-between gap-1">
+													<div class="text-[11px] font-medium text-foreground leading-tight">{model.name}</div>
+													<span class="w-4 h-4 bg-emerald-500/15 rounded flex-shrink-0 flex items-center justify-center">
+														<svg class="w-2.5 h-2.5 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
+															<path d="M22.28 9.82a5.98 5.98 0 00-.52-4.91 6.05 6.05 0 00-6.51-2.9A6.07 6.07 0 004.98 4.18a5.98 5.98 0 00-4 2.9 6.05 6.05 0 00.74 7.1 5.98 5.98 0 00.51 4.91 6.05 6.05 0 006.51 2.9A5.98 5.98 0 0013.26 24a6.06 6.06 0 005.77-4.21 5.99 5.99 0 004-2.9 6.06 6.06 0 00-.75-7.07z"/>
+														</svg>
+													</span>
+												</div>
+												<div>
+													<div class="text-[10px] text-primary font-medium">{model.price_display}</div>
+													<div class="text-[9px] text-muted-foreground">OpenAI</div>
+												</div>
+											</button>
+										{/each}
+									</div>
+									<p class="text-[9px] text-muted-foreground mt-1.5">Used for voice input in chat</p>
+								</div>
+
+								<!-- Text-to-Speech (TTS) -->
+								<div>
+									<div class="flex items-center gap-2 mb-2">
+										<span class="w-5 h-5 bg-cyan-500/15 rounded flex items-center justify-center">
+											<svg class="w-3 h-3 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+											</svg>
+										</span>
+										<span class="text-xs font-medium text-foreground">Text-to-Speech</span>
+										<span class="text-[9px] text-muted-foreground">(Read aloud)</span>
+									</div>
+									<div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
+										{#each ttsModels as model}
+											<button
+												on:click={() => { selectedTtsModel = model.id; saveTtsModel(); }}
+												disabled={!model.available || savingTtsModel}
+												class="h-[72px] p-2.5 rounded-lg border text-left transition-all flex flex-col justify-between {model.id === currentTtsModel ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/50 hover:bg-muted/50'} {!model.available ? 'opacity-40 cursor-not-allowed' : ''}"
+											>
+												<div class="flex items-start justify-between gap-1">
+													<div class="text-[11px] font-medium text-foreground leading-tight">{model.name}</div>
+													<span class="w-4 h-4 bg-emerald-500/15 rounded flex-shrink-0 flex items-center justify-center">
+														<svg class="w-2.5 h-2.5 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
+															<path d="M22.28 9.82a5.98 5.98 0 00-.52-4.91 6.05 6.05 0 00-6.51-2.9A6.07 6.07 0 004.98 4.18a5.98 5.98 0 00-4 2.9 6.05 6.05 0 00.74 7.1 5.98 5.98 0 00.51 4.91 6.05 6.05 0 006.51 2.9A5.98 5.98 0 0013.26 24a6.06 6.06 0 005.77-4.21 5.99 5.99 0 004-2.9 6.06 6.06 0 00-.75-7.07z"/>
+														</svg>
+													</span>
+												</div>
+												<div>
+													<div class="text-[10px] text-primary font-medium">{model.price_display}</div>
+													<div class="text-[9px] text-muted-foreground">OpenAI</div>
+												</div>
+											</button>
+										{/each}
+									</div>
+									<p class="text-[9px] text-muted-foreground mt-1.5">Used for reading messages aloud (coming soon)</p>
 								</div>
 							</div>
+
+							<p class="text-[10px] text-muted-foreground text-center">
+								💡 Click a model card to set it as default. You can override defaults in your messages.
+							</p>
 						</div>
 					{/if}
 				</div>
@@ -1455,6 +1767,17 @@
 								{/each}
 							</select>
 							<p class="text-xs text-muted-foreground mt-1">Restrict this user to use a specific agent profile</p>
+						</div>
+
+						<div class="flex items-center gap-3 py-2">
+							<label class="relative inline-flex items-center cursor-pointer">
+								<input type="checkbox" bind:checked={formData.web_login_allowed} class="sr-only peer" />
+								<div class="w-9 h-5 bg-muted rounded-full peer peer-checked:bg-primary transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4"></div>
+							</label>
+							<div>
+								<span class="text-sm font-medium text-foreground">Allow Web Login</span>
+								<p class="text-xs text-muted-foreground">When disabled, user can only access via API key (API-only mode)</p>
+							</div>
 						</div>
 
 						<div class="flex gap-2 pt-2">

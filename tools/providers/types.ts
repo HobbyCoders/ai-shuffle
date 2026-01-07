@@ -18,66 +18,6 @@ export interface ProviderCredentials {
   [key: string]: string;
 }
 
-// ============================================================================
-// API KEY VALIDATION HELPERS
-// ============================================================================
-
-/**
- * API key format patterns for different providers
- * Used for basic format validation before making API calls
- */
-export const API_KEY_PATTERNS: Record<string, { prefix?: string; minLength: number; description: string }> = {
-  openai: { prefix: 'sk-', minLength: 20, description: 'OpenAI keys start with sk-' },
-  deepseek: { prefix: 'sk-', minLength: 20, description: 'DeepSeek keys start with sk-' },
-  google: { minLength: 30, description: 'Google API keys are typically 39 characters' },
-  gemini: { minLength: 30, description: 'Gemini API keys are typically 39 characters' },
-  meshy: { minLength: 20, description: 'Meshy API keys are alphanumeric strings' },
-};
-
-/**
- * Validate API key format for a given provider
- * Returns true if the key appears to be in a valid format
- */
-export function validateApiKeyFormat(key: string | undefined, providerId: string): { valid: boolean; error?: string } {
-  if (!key || key.trim().length === 0) {
-    return { valid: false, error: `API key for ${providerId} is missing or empty` };
-  }
-
-  const trimmedKey = key.trim();
-  const pattern = API_KEY_PATTERNS[providerId.toLowerCase()];
-
-  if (!pattern) {
-    // Unknown provider - just check it's not empty
-    return trimmedKey.length > 0 ? { valid: true } : { valid: false, error: 'API key is empty' };
-  }
-
-  if (trimmedKey.length < pattern.minLength) {
-    return { valid: false, error: `API key too short (expected at least ${pattern.minLength} characters). ${pattern.description}` };
-  }
-
-  if (pattern.prefix && !trimmedKey.startsWith(pattern.prefix)) {
-    return { valid: false, error: `Invalid API key format. ${pattern.description}` };
-  }
-
-  return { valid: true };
-}
-
-/**
- * Create validated credentials for a provider
- * Returns null if validation fails, with error logged
- */
-export function createValidatedCredentials(
-  apiKey: string | undefined,
-  providerId: string
-): ProviderCredentials | null {
-  const validation = validateApiKeyFormat(apiKey, providerId);
-  if (!validation.valid) {
-    console.warn(`[${providerId}] ${validation.error}`);
-    return null;
-  }
-  return { apiKey: apiKey!.trim() };
-}
-
 /**
  * Information about a specific model
  */
@@ -128,13 +68,7 @@ export type ModelCapability =
   | 'speech-to-text'
   // Analysis capabilities
   | 'video-understanding'
-  | 'image-understanding'
-  // 3D model capabilities
-  | 'text-to-3d'
-  | 'image-to-3d'
-  | '3d-texturing'
-  | '3d-rigging'
-  | '3d-animation';
+  | 'image-understanding';
 
 // ============================================================================
 // IMAGE PROVIDER TYPES
@@ -438,11 +372,6 @@ export interface ToolEnvironment {
   AUDIO_PROVIDER?: string;
   AUDIO_API_KEY?: string;
   AUDIO_MODEL?: string;
-  // 3D model generation
-  MODEL3D_PROVIDER?: string;
-  MODEL3D_API_KEY?: string;
-  MODEL3D_MODEL?: string;
-  MESHY_API_KEY?: string;
   // Legacy support (backwards compatible)
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;
@@ -453,7 +382,6 @@ export interface ToolEnvironment {
   GENERATED_IMAGES_DIR?: string;
   GENERATED_VIDEOS_DIR?: string;
   GENERATED_AUDIO_DIR?: string;
-  GENERATED_MODELS_DIR?: string;
 }
 
 // ============================================================================
@@ -649,208 +577,3 @@ export interface VideoAnalysisProvider {
   ): Promise<{ valid: boolean; error?: string }>;
 }
 
-// ============================================================================
-// 3D MODEL PROVIDER TYPES
-// ============================================================================
-
-/**
- * Input for generating a 3D model from text
- */
-export interface Unified3DInput {
-  /** Text prompt describing the 3D model to generate (max 600 chars) */
-  prompt: string;
-  /** Art style for the model */
-  art_style?: 'realistic' | 'sculpture';
-  /** AI model version to use */
-  ai_model?: 'meshy-4' | 'meshy-5' | 'meshy-6' | 'latest';
-  /** Mesh topology type */
-  topology?: 'quad' | 'triangle';
-  /** Target polygon count (100-300,000) */
-  target_polycount?: number;
-  /** Generation mode */
-  mode?: 'preview' | 'refine';
-  /** Task ID to refine (required for refine mode) */
-  preview_task_id?: string;
-  /** Provider-specific options */
-  [key: string]: any;
-}
-
-/**
- * Input for generating a 3D model from an image
- */
-export interface UnifiedImage3DInput extends Unified3DInput {
-  /** Path to the source image */
-  image_path: string;
-  /** Symmetry mode for the model */
-  symmetry_mode?: 'off' | 'auto' | 'on';
-  /** Whether to remesh the model */
-  should_remesh?: boolean;
-  /** Whether to apply texturing */
-  should_texture?: boolean;
-  /** Enable PBR (Physically Based Rendering) textures */
-  enable_pbr?: boolean;
-  /** Pose mode for humanoid models */
-  pose_mode?: 'a-pose' | 't-pose' | '';
-  /** Additional prompt for texturing */
-  texture_prompt?: string;
-}
-
-/**
- * Input for retexturing a 3D model
- */
-export interface UnifiedRetextureInput {
-  /** Model source - either a task_id or model_url */
-  model_source: string;
-  /** Text prompt for style */
-  style_prompt?: string;
-  /** Image URL for style reference */
-  style_image_url?: string;
-  /** AI model version to use */
-  ai_model?: 'meshy-4' | 'meshy-5' | 'latest';
-  /** Preserve original UV mapping */
-  enable_original_uv?: boolean;
-  /** Enable PBR textures */
-  enable_pbr?: boolean;
-  /** Provider-specific options */
-  [key: string]: any;
-}
-
-/**
- * Input for auto-rigging a 3D model
- */
-export interface UnifiedRiggingInput {
-  /** Model source - either a task_id or model_url */
-  model_source: string;
-  /** Height of the model in meters (default 1.7m) */
-  height_meters?: number;
-  /** Texture image URL for the rigged model */
-  texture_image_url?: string;
-  /** Provider-specific options */
-  [key: string]: any;
-}
-
-/**
- * Input for animating a rigged 3D model
- */
-export interface UnifiedAnimationInput {
-  /** Rigging task ID (from a successful rigging operation) */
-  rig_task_id: string;
-  /** Animation action ID */
-  action_id: string;
-  /** Frames per second */
-  fps?: 24 | 25 | 30 | 60;
-  /** Operation type for post-processing */
-  operation_type?: 'change_fps' | 'fbx2usdz' | 'extract_armature';
-  /** Provider-specific options */
-  [key: string]: any;
-}
-
-/**
- * Result from 3D model generation
- */
-export interface Model3DResult {
-  success: boolean;
-  /** Task ID for tracking async operations */
-  task_id?: string;
-  /** URLs to download the 3D model in various formats */
-  model_urls?: {
-    glb?: string;
-    fbx?: string;
-    obj?: string;
-    usdz?: string;
-    stl?: string;
-    blend?: string;
-  };
-  /** URLs to download texture maps */
-  texture_urls?: {
-    base_color?: string;
-    metallic?: string;
-    roughness?: string;
-    normal?: string;
-  };
-  /** Local file path where primary model was saved */
-  file_path?: string;
-  /** Filename of the saved model */
-  filename?: string;
-  /** Generation progress (0-100) */
-  progress?: number;
-  /** Current task status */
-  status?: 'PENDING' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'CANCELED';
-  /** Thumbnail/preview URL */
-  thumbnail_url?: string;
-  /** Error message if failed */
-  error?: string;
-  /** Provider-specific metadata */
-  provider_metadata?: Record<string, any>;
-}
-
-/**
- * 3D model generation provider interface
- */
-export interface Model3DProvider {
-  /** Unique provider identifier (e.g., "meshy") */
-  readonly id: string;
-  /** Human-readable provider name */
-  readonly name: string;
-  /** Available models for this provider */
-  readonly models: ModelInfo[];
-
-  /**
-   * Generate a 3D model from a text prompt
-   */
-  textTo3D(
-    input: Unified3DInput,
-    credentials: ProviderCredentials,
-    model: string
-  ): Promise<Model3DResult>;
-
-  /**
-   * Generate a 3D model from an image (optional capability)
-   */
-  imageTo3D?(
-    input: UnifiedImage3DInput,
-    credentials: ProviderCredentials,
-    model: string
-  ): Promise<Model3DResult>;
-
-  /**
-   * Apply new textures to a 3D model (optional capability)
-   */
-  retexture?(
-    input: UnifiedRetextureInput,
-    credentials: ProviderCredentials,
-    model: string
-  ): Promise<Model3DResult>;
-
-  /**
-   * Auto-rig a 3D model for animation (optional capability)
-   */
-  rig?(
-    input: UnifiedRiggingInput,
-    credentials: ProviderCredentials
-  ): Promise<Model3DResult>;
-
-  /**
-   * Apply animation to a rigged model (optional capability)
-   */
-  animate?(
-    input: UnifiedAnimationInput,
-    credentials: ProviderCredentials
-  ): Promise<Model3DResult>;
-
-  /**
-   * Get the status of an async task
-   */
-  getTask(
-    taskId: string,
-    taskType: 'text-to-3d' | 'image-to-3d' | 'retexture' | 'rigging' | 'animation',
-    credentials: ProviderCredentials
-  ): Promise<Model3DResult>;
-
-  /**
-   * Validate provider credentials
-   */
-  validateCredentials(
-    credentials: ProviderCredentials
-  ): Promise<{ valid: boolean; error?: string }>;
-}

@@ -37,6 +37,7 @@ from app.core.checkpoint_manager import checkpoint_manager
 from app.core.permission_handler import permission_handler
 from app.core.platform import detect_deployment_mode, DeploymentMode
 from app.core.user_question_handler import user_question_handler
+from app.core import encryption
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +173,18 @@ def _build_plugins_list(enabled_plugins: Optional[list]) -> Optional[list]:
 
 
 @dataclass
+class StreamingInputMessage:
+    """A message to be sent to Claude via streaming input.
+
+    Supports text messages and image attachments per the SDK documentation.
+    """
+    content: str  # Text content
+    images: list = field(default_factory=list)  # List of image attachments
+    # Each image should be: {"type": "base64", "media_type": "image/png", "data": "..."}
+    # Or: {"type": "url", "url": "https://..."}
+
+
+@dataclass
 class SessionState:
     """Track state for an active SDK session"""
     client: ClaudeSDKClient
@@ -196,7 +209,11 @@ def get_session_state(session_id: str) -> Optional[SessionState]:
     return _active_sessions.get(session_id)
 
 
-async def queue_user_message(session_id: str, message: str) -> bool:
+async def queue_user_message(
+    session_id: str,
+    message: str,
+    images: Optional[list] = None
+) -> bool:
     """
     Queue a user message to be sent to Claude while streaming.
 
@@ -206,7 +223,10 @@ async def queue_user_message(session_id: str, message: str) -> bool:
 
     Args:
         session_id: The session ID to queue the message for
-        message: The user message to queue
+        message: The text content of the user message
+        images: Optional list of image attachments. Each should be:
+            - {"type": "base64", "media_type": "image/png", "data": "..."}
+            - {"type": "url", "url": "https://..."}
 
     Returns:
         True if the message was queued successfully, False if session not found or not streaming
@@ -220,9 +240,15 @@ async def queue_user_message(session_id: str, message: str) -> bool:
         logger.warning(f"Cannot queue message - session {session_id} is not streaming")
         return False
 
+    # Create streaming input message with optional images
+    streaming_msg = StreamingInputMessage(
+        content=message,
+        images=images or []
+    )
+
     # Queue the message
-    await state.message_queue.put(message)
-    logger.info(f"Queued user message for session {session_id}: {message[:50]}...")
+    await state.message_queue.put(streaming_msg)
+    logger.info(f"Queued streaming input for session {session_id}: {message[:50]}... (images: {len(streaming_msg.images)})")
     return True
 
 
@@ -232,6 +258,82 @@ def get_queued_message_count(session_id: str) -> int:
     if not state:
         return 0
     return state.message_queue.qsize()
+
+
+def _build_message_content(streaming_msg: StreamingInputMessage) -> Any:
+    """Build the message content structure for the SDK.
+
+    Converts a StreamingInputMessage into the format expected by Claude SDK:
+    - Simple string if no images
+    - List of content blocks if images are attached
+    """
+    if not streaming_msg.images:
+        # Simple text-only message
+        return streaming_msg.content
+
+    # Build content blocks array with text and images
+    content_blocks = []
+
+    # Add text block first
+    if streaming_msg.content:
+        content_blocks.append({
+            "type": "text",
+            "text": streaming_msg.content
+        })
+
+    # Add image blocks
+    for img in streaming_msg.images:
+        if img.get("type") == "base64":
+            content_blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img.get("media_type", "image/png"),
+                    "data": img.get("data", "")
+                }
+            })
+        elif img.get("type") == "url":
+            content_blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "url",
+                    "url": img.get("url", "")
+                }
+            })
+
+    return content_blocks
+
+
+def create_single_message_generator(
+    prompt: str,
+    images: Optional[list] = None
+) -> AsyncGenerator:
+    """
+    Create an AsyncGenerator that yields a single message to the Claude SDK.
+
+    This wraps the initial prompt (and optional images) in the generator format
+    required by the SDK for streaming input with image support.
+
+    Args:
+        prompt: The message text
+        images: Optional images to attach
+
+    Yields:
+        Single message dictionary in SDK format
+    """
+    async def generator():
+        msg = StreamingInputMessage(content=prompt, images=images or [])
+        content = _build_message_content(msg)
+
+        yield {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": content
+            }
+        }
+
+    return generator()
 
 
 async def cleanup_stale_sessions(max_age_seconds: int = 3600):
@@ -337,18 +439,44 @@ def _get_available_tools(ai_tools_config: Optional[Dict[str, Any]] = None) -> li
     # Get the absolute path to tools directory
     tools_dir = settings.effective_tools_dir
 
-    # Check image generation (Nano Banana) - only if enabled in profile
+    # Provider display names for dynamic tool names
+    IMAGE_PROVIDER_NAMES = {
+        "google-gemini": "Nano Banana",
+        "openai-gpt-image": "GPT Image"
+    }
+    VIDEO_PROVIDER_NAMES = {
+        "google-veo": "Veo",
+        "openai-sora": "Sora"
+    }
+
+    # Helper to check if an image provider has API key configured AND decryptable
+    def _has_image_api_key(provider: str) -> bool:
+        if provider == "openai-gpt-image":
+            key = _get_decrypted_api_key("openai_api_key")
+        else:  # google-gemini
+            key = _get_decrypted_api_key("image_api_key")
+        return bool(key)
+
+    # Helper to check if a video provider has API key configured AND decryptable
+    def _has_video_api_key(provider: str) -> bool:
+        if provider == "openai-sora":
+            key = _get_decrypted_api_key("openai_api_key")
+        else:  # google-veo
+            key = _get_decrypted_api_key("image_api_key")
+        return bool(key)
+
+    # Check image generation - only if enabled in profile
     if ai_tools_config.get("image_generation", False):
         image_provider = database.get_system_setting("image_provider")
         image_model = database.get_system_setting("image_model")
-        image_api_key = database.get_system_setting("image_api_key")
 
-        if all([image_provider, image_model, image_api_key]):
+        if image_provider and image_model and _has_image_api_key(image_provider):
             # Use absolute path so scripts can run from any directory (e.g., /tmp/)
             tool_path = f"{tools_dir}/dist/image-generation/generateImage.js"
+            provider_name = IMAGE_PROVIDER_NAMES.get(image_provider, "AI")
             tools.append({
-                "name": "Image Generation (Nano Banana)",
-                "description": "Generate AI images from text prompts",
+                "name": f"Image Generation ({provider_name})",
+                "description": f"Generate AI images from text prompts using {provider_name}",
                 "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
 import {{ generateImage }} from '{tool_path}';
 const result = await generateImage({{ prompt: 'your description here' }});
@@ -358,18 +486,18 @@ console.log(JSON.stringify(result));
 // DISPLAY: After success, show image as markdown: ![Description](result.image_url)"""
             })
 
-    # Check image editing (Nano Banana) - only if enabled in profile
+    # Check image editing - only if enabled in profile
     if ai_tools_config.get("image_editing", False):
         image_provider = database.get_system_setting("image_provider")
         image_model = database.get_system_setting("image_model")
-        image_api_key = database.get_system_setting("image_api_key")
 
-        if all([image_provider, image_model, image_api_key]):
+        if image_provider and image_model and _has_image_api_key(image_provider):
             # Use absolute path so scripts can run from any directory (e.g., /tmp/)
             tool_path = f"{tools_dir}/dist/image-generation/editImage.js"
+            provider_name = IMAGE_PROVIDER_NAMES.get(image_provider, "AI")
             tools.append({
-                "name": "Image Editing (Nano Banana)",
-                "description": "Edit existing images using AI - add elements, remove objects, change styles, and more",
+                "name": f"Image Editing ({provider_name})",
+                "description": f"Edit existing images using {provider_name} - add elements, remove objects, change styles, and more",
                 "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
 import {{ editImage }} from '{tool_path}';
 const result = await editImage({{
@@ -382,21 +510,27 @@ console.log(JSON.stringify(result));
 // DISPLAY: After success, show image as markdown: ![Description](result.image_url)"""
             })
 
-    # Check video generation (Veo) - only if enabled in profile
+    # Check video generation - only if enabled in profile
     if ai_tools_config.get("video_generation", False):
-        # Video uses the same API key as images (Gemini API)
-        video_api_key = database.get_system_setting("image_api_key")
+        video_provider = database.get_system_setting("video_provider")
+        video_model = database.get_system_setting("video_model")
 
-        if video_api_key:
+        if video_provider and video_model and _has_video_api_key(video_provider):
             tool_path = f"{tools_dir}/dist/video-generation/generateVideo.js"
+            provider_name = VIDEO_PROVIDER_NAMES.get(video_provider, "AI")
+            # Adjust duration info based on provider
+            if video_provider == "openai-sora":
+                duration_info = "4, 8, or 12 seconds"
+            else:
+                duration_info = "4, 6, or 8 seconds"
             tools.append({
-                "name": "Video Generation (Veo)",
-                "description": "Generate AI videos from text prompts (4-8 seconds, 720p/1080p)",
+                "name": f"Video Generation ({provider_name})",
+                "description": f"Generate AI videos from text prompts using {provider_name} ({duration_info}, 720p/1080p)",
                 "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
 import {{ generateVideo }} from '{tool_path}';
 const result = await generateVideo({{
   prompt: 'your video description here',
-  duration: 8,  // 4, 6, or 8 seconds
+  duration: 8,  // {duration_info}
   aspect_ratio: '16:9'  // or '9:16' for vertical
 }});
 // IMPORTANT: Output the result as JSON - the chat UI will display the video
@@ -405,7 +539,8 @@ console.log(JSON.stringify(result));
 // DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
             })
 
-    # Check reference-based image generation (Nano Banana) - for character/style consistency
+    # Check reference-based image generation - for character/style consistency
+    # Note: This feature is currently only supported by Nano Banana (Google Gemini)
     if ai_tools_config.get("image_reference", False):
         image_api_key = database.get_system_setting("image_api_key")
 
@@ -413,7 +548,7 @@ console.log(JSON.stringify(result));
             tool_path = f"{tools_dir}/dist/image-generation/generateWithReference.js"
             tools.append({
                 "name": "Reference-Based Image Generation (Nano Banana)",
-                "description": "Generate images with character/style consistency using reference images (up to 14)",
+                "description": "Generate images with character/style consistency using reference images (up to 14). Note: Only available with Nano Banana provider.",
                 "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
 import {{ generateWithReference }} from '{tool_path}';
 const result = await generateWithReference({{
@@ -425,15 +560,17 @@ console.log(JSON.stringify(result));
 // DISPLAY: After success, show image as markdown: ![Description](result.image_url)"""
             })
 
-    # Check image-to-video (Veo) - animate still images
+    # Check image-to-video - animate still images
     if ai_tools_config.get("image_to_video", False):
-        video_api_key = database.get_system_setting("image_api_key")
+        video_provider = database.get_system_setting("video_provider")
+        video_model = database.get_system_setting("video_model")
 
-        if video_api_key:
+        if video_provider and video_model and _has_video_api_key(video_provider):
             tool_path = f"{tools_dir}/dist/video-generation/imageToVideo.js"
+            provider_name = VIDEO_PROVIDER_NAMES.get(video_provider, "AI")
             tools.append({
-                "name": "Image to Video (Veo)",
-                "description": "Animate a still image into a video",
+                "name": f"Image to Video ({provider_name})",
+                "description": f"Animate a still image into a video using {provider_name}",
                 "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
 import {{ imageToVideo }} from '{tool_path}';
 const result = await imageToVideo({{
@@ -445,7 +582,8 @@ console.log(JSON.stringify(result));
 // DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
             })
 
-    # Check video extension (Veo) - extend existing videos
+    # Check video extension - extend existing videos
+    # Note: This feature is currently only supported by Veo (Google)
     if ai_tools_config.get("video_extend", False):
         video_api_key = database.get_system_setting("image_api_key")
 
@@ -453,19 +591,20 @@ console.log(JSON.stringify(result));
             tool_path = f"{tools_dir}/dist/video-generation/extendVideo.js"
             tools.append({
                 "name": "Video Extension (Veo)",
-                "description": "Extend existing Veo videos by approximately 7 seconds (up to 20 times)",
+                "description": "Extend existing Veo videos by approximately 7 seconds (up to 20 times). IMPORTANT: Can only extend videos generated by Veo - use the source_video_uri from a previous generateVideo/imageToVideo/bridgeFrames result.",
                 "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
 import {{ extendVideo }} from '{tool_path}';
 const result = await extendVideo({{
-  video_path: '/path/to/video.mp4',
-  prompt: 'Continue the action smoothly'  // Optional
+  video_uri: 'https://generativelanguage.googleapis.com/v1beta/files/...',  // URI from previous generation (source_video_uri)
+  prompt: 'Continue the action smoothly'  // Describe what should happen next
 }});
 // IMPORTANT: Output the result as JSON - the chat UI will display the video
 console.log(JSON.stringify(result));
 // DISPLAY: After success, show video as markdown link: [Description](result.video_url)"""
             })
 
-    # Check frame bridging (Veo) - smooth transitions between images
+    # Check frame bridging - smooth transitions between images
+    # Note: This feature is currently only supported by Veo (Google)
     if ai_tools_config.get("video_bridge", False):
         video_api_key = database.get_system_setting("image_api_key")
 
@@ -473,7 +612,7 @@ console.log(JSON.stringify(result));
             tool_path = f"{tools_dir}/dist/video-generation/bridgeFrames.js"
             tools.append({
                 "name": "Frame Bridging (Veo)",
-                "description": "Generate a smooth video transition between two images (first and last frame)",
+                "description": "Generate a smooth video transition between two images (first and last frame). Note: Only available with Veo provider.",
                 "usage": f"""// IMPORTANT: Save as .mjs and run with: node yourscript.mjs
 import {{ bridgeFrames }} from '{tool_path}';
 const result = await bridgeFrames({{
@@ -531,6 +670,36 @@ The chat UI will render this as an embedded video player with Download and Copy 
     return tools_section
 
 
+def _get_decrypted_api_key(setting_name: str) -> Optional[str]:
+    """
+    Get an API key from the database and decrypt it if encrypted.
+
+    Args:
+        setting_name: The name of the setting (e.g., "openai_api_key")
+
+    Returns:
+        The decrypted API key, or None if not found or decryption fails
+    """
+    value = database.get_system_setting(setting_name)
+    if not value:
+        return None
+
+    # Check if the value is encrypted
+    if encryption.is_encrypted(value):
+        if not encryption.is_encryption_ready():
+            logger.warning(f"Cannot decrypt {setting_name}: encryption key not available")
+            return None
+        try:
+            decrypted = encryption.decrypt_value(value)
+            return decrypted
+        except Exception as e:
+            logger.error(f"Failed to decrypt {setting_name}: {e}")
+            return None
+
+    # Return plaintext value (for backwards compatibility during migration)
+    return value
+
+
 def _build_env_with_ai_tools(
     base_env: Optional[Dict[str, str]],
     ai_tools_config: Optional[Dict[str, Any]]
@@ -553,31 +722,72 @@ def _build_env_with_ai_tools(
     if not ai_tools_config:
         return env
 
-    # Inject Gemini API key for image generation/editing
+    # Inject credentials for image generation/editing (supports multiple providers)
     if ai_tools_config.get("image_generation", False) or ai_tools_config.get("image_editing", False):
-        image_api_key = database.get_system_setting("image_api_key")
+        image_provider = database.get_system_setting("image_provider")
         image_model = database.get_system_setting("image_model")
 
-        if image_api_key:
-            env["GEMINI_API_KEY"] = image_api_key
-            logger.debug("Injected GEMINI_API_KEY into execution environment")
+        # Set the provider
+        if image_provider:
+            env["IMAGE_PROVIDER"] = image_provider
+            logger.debug(f"Injected IMAGE_PROVIDER={image_provider} into execution environment")
 
+        # Set the model
         if image_model:
+            env["IMAGE_MODEL"] = image_model
+            # Also set legacy GEMINI_MODEL for backwards compatibility
             env["GEMINI_MODEL"] = image_model
-            logger.debug(f"Injected GEMINI_MODEL={image_model} into execution environment")
+            logger.debug(f"Injected IMAGE_MODEL={image_model} into execution environment")
 
-    # Inject Veo model for video generation (uses same API key as images)
+        # Inject API key based on provider (using decryption helper)
+        if image_provider == "openai-gpt-image":
+            # GPT Image uses OpenAI API key
+            openai_api_key = _get_decrypted_api_key("openai_api_key")
+            if openai_api_key:
+                env["OPENAI_API_KEY"] = openai_api_key
+                env["IMAGE_API_KEY"] = openai_api_key
+                logger.debug("Injected OPENAI_API_KEY for GPT Image generation")
+        else:
+            # Default to Google Gemini - uses Gemini API key
+            image_api_key = _get_decrypted_api_key("image_api_key")
+            if image_api_key:
+                env["GEMINI_API_KEY"] = image_api_key
+                env["IMAGE_API_KEY"] = image_api_key
+                logger.debug("Injected GEMINI_API_KEY for Gemini image generation")
+
+    # Inject video generation credentials (supports multiple providers)
     if ai_tools_config.get("video_generation", False):
-        video_api_key = database.get_system_setting("image_api_key")
+        video_provider = database.get_system_setting("video_provider")
         video_model = database.get_system_setting("video_model")
 
-        if video_api_key and "GEMINI_API_KEY" not in env:
-            env["GEMINI_API_KEY"] = video_api_key
-            logger.debug("Injected GEMINI_API_KEY for video generation")
+        # Set the provider
+        if video_provider:
+            env["VIDEO_PROVIDER"] = video_provider
+            logger.debug(f"Injected VIDEO_PROVIDER={video_provider} into execution environment")
 
+        # Set the model
         if video_model:
+            env["VIDEO_MODEL"] = video_model
+            # Also set legacy VEO_MODEL for backwards compatibility
             env["VEO_MODEL"] = video_model
-            logger.debug(f"Injected VEO_MODEL={video_model} into execution environment")
+            logger.debug(f"Injected VIDEO_MODEL={video_model} into execution environment")
+
+        # Inject API key based on provider (using decryption helper)
+        if video_provider == "openai-sora":
+            # Sora uses OpenAI API key
+            openai_api_key = _get_decrypted_api_key("openai_api_key")
+            if openai_api_key:
+                env["OPENAI_API_KEY"] = openai_api_key
+                env["VIDEO_API_KEY"] = openai_api_key
+                logger.debug("Injected OPENAI_API_KEY for Sora video generation")
+        else:
+            # Default to Google Veo - uses Gemini API key
+            video_api_key = _get_decrypted_api_key("image_api_key")
+            if video_api_key:
+                if "GEMINI_API_KEY" not in env:
+                    env["GEMINI_API_KEY"] = video_api_key
+                env["VIDEO_API_KEY"] = video_api_key
+                logger.debug("Injected GEMINI_API_KEY for Veo video generation")
 
     # Add more tool credentials here as they become available
     # if ai_tools_config.get("text_to_speech", False):
@@ -1929,13 +2139,25 @@ async def stream_to_websocket(
     profile_id: str,
     project_id: Optional[str] = None,
     overrides: Optional[Dict[str, Any]] = None,
-    broadcast_func: Optional[callable] = None
+    broadcast_func: Optional[callable] = None,
+    images: Optional[list] = None
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Stream Claude response directly to WebSocket.
 
     This is the simplified streaming function for the WebSocket-first architecture.
     No sync engine, no background tasks - just direct streaming.
+
+    Args:
+        prompt: The user's message text
+        session_id: The chat session ID
+        profile_id: The profile to use
+        project_id: Optional project ID
+        overrides: Optional overrides for model, permission_mode, etc.
+        broadcast_func: Async function to broadcast messages to the WebSocket
+        images: Optional list of image attachments in SDK format:
+            - {"type": "base64", "media_type": "image/png", "data": "..."}
+            - {"type": "url", "url": "https://..."}
 
     Yields events:
     - {"type": "chunk", "content": "..."}
@@ -1944,14 +2166,6 @@ async def stream_to_websocket(
     - {"type": "permission_request", ...} - When tool permission is needed
     - {"type": "done", "session_id": "...", "metadata": {...}}
     - {"type": "error", "message": "..."}
-
-    Args:
-        prompt: The user's message
-        session_id: The chat session ID
-        profile_id: The profile to use
-        project_id: Optional project ID
-        overrides: Optional overrides for model, permission_mode, etc.
-        broadcast_func: Async function to broadcast messages to the WebSocket
     """
     # Get profile
     profile = get_profile(profile_id)
@@ -2144,7 +2358,11 @@ async def stream_to_websocket(
     include_partial = options.include_partial_messages  # Track if streaming events are enabled
 
     try:
-        await state.client.query(prompt)
+        # Send the initial query to Claude using streaming input format
+        # This yields a single message with optional images
+        # Additional queued messages are processed sequentially after each response
+        message_gen = create_single_message_generator(prompt, images)
+        await state.client.query(message_gen)
 
         async for message in state.client.receive_response():
             # Check for interrupt request as a failsafe
@@ -2458,21 +2676,30 @@ async def stream_to_websocket(
                     metadata["cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                     metadata["cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
 
-        # Streaming input: After completing the receive_response loop, check for queued messages
-        # This allows users to send messages while Claude is working
+        # Process any queued messages (streaming input)
+        # Messages queued via message_queue while Claude was responding
         while not state.message_queue.empty() and not interrupted and not state.interrupt_requested:
             try:
-                next_prompt = state.message_queue.get_nowait()
-                logger.info(f"[WS] Processing queued message for session {session_id}: {next_prompt[:50]}...")
+                next_msg = state.message_queue.get_nowait()
+                # Handle both StreamingInputMessage and plain strings for backwards compatibility
+                if isinstance(next_msg, StreamingInputMessage):
+                    next_prompt = next_msg.content
+                    next_images = next_msg.images
+                else:
+                    next_prompt = str(next_msg)
+                    next_images = None
+                logger.info(f"[WS] Processing queued message for session {session_id}: {next_prompt[:50]}... (images: {len(next_images) if next_images else 0})")
 
                 # Notify frontend that we're processing a queued message
                 yield {
                     "type": "queued_message_processing",
-                    "prompt": next_prompt
+                    "prompt": next_prompt,
+                    "has_images": bool(next_images)
                 }
 
-                # Send the queued message to Claude and process the response
-                await state.client.query(next_prompt)
+                # Send the queued message to Claude using generator format (supports images)
+                queued_gen = create_single_message_generator(next_prompt, next_images)
+                await state.client.query(queued_gen)
 
                 # Process the response for this queued message
                 async for queued_message in state.client.receive_response():

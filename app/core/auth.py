@@ -176,6 +176,16 @@ class AuthService:
         admin = database.get_admin()
         return admin["username"] if admin else None
 
+    def verify_password(self, password: str, password_hash: str) -> bool:
+        """Verify a password against a hash"""
+        try:
+            return bcrypt.checkpw(
+                password.encode('utf-8'),
+                password_hash.encode('utf-8')
+            )
+        except Exception:
+            return False
+
     # =========================================================================
     # Claude CLI Authentication
     # =========================================================================

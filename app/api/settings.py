@@ -13,10 +13,122 @@ from pydantic import BaseModel
 
 from app.db import database
 from app.api.auth import require_admin, require_auth
+from app.core import encryption
 
 logger = logging.getLogger(__name__)
 
+
+def get_decrypted_api_key(setting_name: str) -> Optional[str]:
+    """
+    Get an API key from the database and decrypt it if encrypted.
+    Returns None if not set or if decryption fails.
+    """
+    value = database.get_system_setting(setting_name)
+    if not value:
+        return None
+
+    # If encrypted, try to decrypt
+    if encryption.is_encrypted(value):
+        if not encryption.is_encryption_ready():
+            logger.warning(f"Cannot decrypt {setting_name} - encryption key not loaded")
+            return None
+        try:
+            return encryption.decrypt_value(value)
+        except Exception as e:
+            logger.error(f"Failed to decrypt {setting_name}: {e}")
+            return None
+    else:
+        # Plaintext (legacy or migration pending)
+        return value
+
+
+def set_encrypted_api_key(setting_name: str, api_key: str) -> None:
+    """
+    Encrypt and store an API key in the database.
+    If encryption is not ready, stores as plaintext (will be encrypted on next admin login).
+    """
+    if encryption.is_encryption_ready():
+        encrypted = encryption.encrypt_value(api_key)
+        database.set_system_setting(setting_name, encrypted)
+    else:
+        # Fallback to plaintext if encryption not ready
+        # This will be encrypted when admin logs in
+        logger.warning(f"Storing {setting_name} as plaintext - encryption key not loaded")
+        database.set_system_setting(setting_name, api_key)
+
 router = APIRouter(prefix="/api/v1/settings", tags=["Settings"])
+
+
+# ============================================================================
+# Internal API Key Access (for AI tools)
+# ============================================================================
+
+@router.get("/internal/api-keys/{key_name}")
+async def get_internal_api_key(key_name: str):
+    """
+    Internal endpoint for AI tools to get decrypted API keys.
+
+    This endpoint is used by the Node.js AI tools (image generation, video generation)
+    to access API keys that are encrypted in the database.
+
+    Only allows specific key names to prevent arbitrary setting access.
+    """
+    allowed_keys = ["openai_api_key", "image_api_key", "gemini_api_key", "video_api_key"]
+
+    if key_name not in allowed_keys:
+        raise HTTPException(status_code=400, detail=f"Invalid key name. Allowed: {allowed_keys}")
+
+    api_key = get_decrypted_api_key(key_name)
+
+    if not api_key:
+        raise HTTPException(status_code=404, detail=f"API key '{key_name}' not configured or encryption not ready")
+
+    return {"key": api_key}
+
+
+@router.get("/internal/image-config")
+async def get_internal_image_config():
+    """
+    Internal endpoint for AI tools to get image generation configuration.
+    Returns provider, model, and decrypted API key.
+    """
+    provider = database.get_system_setting("image_provider")
+    model = database.get_system_setting("image_model")
+    api_key = get_decrypted_api_key("image_api_key")
+
+    if not all([provider, model, api_key]):
+        raise HTTPException(status_code=404, detail="Image generation not configured")
+
+    return {
+        "provider": provider,
+        "model": model,
+        "api_key": api_key
+    }
+
+
+@router.get("/internal/video-config")
+async def get_internal_video_config():
+    """
+    Internal endpoint for AI tools to get video generation configuration.
+    Returns provider, model, and decrypted API key.
+    """
+    provider = database.get_system_setting("video_provider")
+    model = database.get_system_setting("video_model")
+
+    # Video can use either OpenAI key (Sora) or image_api_key (Veo/Google)
+    if provider == "openai-sora":
+        api_key = get_decrypted_api_key("openai_api_key")
+    else:
+        api_key = get_decrypted_api_key("image_api_key")
+
+    if not all([provider, model, api_key]):
+        raise HTTPException(status_code=404, detail="Video generation not configured")
+
+    return {
+        "provider": provider,
+        "model": model,
+        "api_key": api_key
+    }
 
 
 # ============================================================================
@@ -33,7 +145,11 @@ class IntegrationSettingsResponse(BaseModel):
     image_api_key_set: bool = False
     image_api_key_masked: str = ""
     # Video generation settings
-    video_model: Optional[str] = None  # "veo-3.1-fast-generate-preview" or "veo-3.1-generate-preview"
+    video_provider: Optional[str] = None  # "google-veo" or "openai-sora"
+    video_model: Optional[str] = None  # "veo-3.1-fast-generate-preview", "sora-2", etc.
+    # Audio settings (TTS/STT)
+    tts_model: Optional[str] = None  # "gpt-4o-mini-tts", "tts-1", "tts-1-hd"
+    stt_model: Optional[str] = None  # "gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"
 
 
 class OpenAIKeyRequest(BaseModel):
@@ -86,21 +202,80 @@ class VoiceToTextResponse(BaseModel):
     error: Optional[str] = None
 
 
-# Available Nano Banana models
-# Verified via ListModels API and tested with generateContent
-# See: https://ai.google.dev/gemini-api/docs/models
-NANO_BANANA_MODELS = {
-    "gemini-2.5-flash-image": {
-        "name": "Nano Banana (Gemini 2.5 Flash)",
-        "description": "Fast image generation with good quality - ~$0.039/image",
-        "price_per_image": 0.039
+# ============================================================================
+# Image Generation Model Selection
+# ============================================================================
+
+# Available image providers and their models
+IMAGE_PROVIDERS = {
+    "google-gemini": {
+        "name": "Google Gemini (Nano Banana)",
+        "description": "Google's Gemini image generation API",
+        "requires_key": "image_api_key"
     },
-    "gemini-3-pro-image-preview": {
-        "name": "Nano Banana Pro (Gemini 3 Pro)",
-        "description": "Studio-quality, better text rendering, 2K/4K support - ~$0.10/image",
-        "price_per_image": 0.10
+    "google-imagen": {
+        "name": "Google Imagen 4",
+        "description": "Google's flagship image generation",
+        "requires_key": "image_api_key"
+    },
+    "openai-gpt-image": {
+        "name": "OpenAI GPT Image",
+        "description": "OpenAI's GPT-4o native image generation",
+        "requires_key": "openai_api_key"
     }
 }
+
+# Available image models by provider
+IMAGE_MODELS = {
+    # Google Gemini (Nano Banana) models
+    "gemini-2.5-flash-image": {
+        "name": "Nano Banana",
+        "description": "Fast image generation with good quality",
+        "price_per_image": 0.039,
+        "provider": "google-gemini",
+        "capabilities": ["text-to-image", "image-edit", "image-reference"]
+    },
+    "gemini-3-pro-image-preview": {
+        "name": "Nano Banana Pro",
+        "description": "Studio-quality, better text rendering, 2K/4K support",
+        "price_per_image": 0.10,
+        "provider": "google-gemini",
+        "capabilities": ["text-to-image", "image-edit", "image-reference"]
+    },
+    # Google Imagen 4 models
+    "imagen-4.0-fast-generate-001": {
+        "name": "Imagen 4 Fast",
+        "description": "Speed-optimized for rapid generation",
+        "price_per_image": 0.02,
+        "provider": "google-imagen",
+        "capabilities": ["text-to-image"]
+    },
+    "imagen-4.0-generate-001": {
+        "name": "Imagen 4",
+        "description": "Flagship quality with superior text rendering",
+        "price_per_image": 0.04,
+        "provider": "google-imagen",
+        "capabilities": ["text-to-image"]
+    },
+    "imagen-4.0-ultra-generate-001": {
+        "name": "Imagen 4 Ultra",
+        "description": "Highest quality with 2K resolution support",
+        "price_per_image": 0.06,
+        "provider": "google-imagen",
+        "capabilities": ["text-to-image"]
+    },
+    # OpenAI GPT Image models
+    "gpt-image-1": {
+        "name": "GPT Image 1",
+        "description": "GPT-4o native image generation - high quality, accurate text",
+        "price_per_image": 0.07,
+        "provider": "openai-gpt-image",
+        "capabilities": ["text-to-image", "image-edit"]
+    }
+}
+
+# Legacy alias for backwards compatibility
+NANO_BANANA_MODELS = {k: v for k, v in IMAGE_MODELS.items() if v.get("provider") == "google-gemini"}
 
 
 def mask_api_key(key: str) -> str:
@@ -117,11 +292,17 @@ async def get_integration_settings(token: str = Depends(require_auth)):
 
     Returns whether API keys are configured (without exposing the actual keys).
     """
-    openai_key = database.get_system_setting("openai_api_key")
+    # Get decrypted API keys for masking display
+    openai_key = get_decrypted_api_key("openai_api_key")
+    image_api_key = get_decrypted_api_key("image_api_key")
+
+    # Non-sensitive settings
     image_provider = database.get_system_setting("image_provider")
     image_model = database.get_system_setting("image_model")
-    image_api_key = database.get_system_setting("image_api_key")
+    video_provider = database.get_system_setting("video_provider")
     video_model = database.get_system_setting("video_model")
+    tts_model = database.get_system_setting("tts_model") or "gpt-4o-mini-tts"
+    stt_model = database.get_system_setting("stt_model") or "whisper-1"
 
     return IntegrationSettingsResponse(
         openai_api_key_set=bool(openai_key),
@@ -130,7 +311,10 @@ async def get_integration_settings(token: str = Depends(require_auth)):
         image_model=image_model,
         image_api_key_set=bool(image_api_key),
         image_api_key_masked=mask_api_key(image_api_key) if image_api_key else "",
-        video_model=video_model
+        video_provider=video_provider,
+        video_model=video_model,
+        tts_model=tts_model,
+        stt_model=stt_model
     )
 
 
@@ -172,8 +356,8 @@ async def set_openai_api_key(
         logger.warning(f"Error validating OpenAI key: {e}")
         # Don't fail on network errors - save the key
 
-    # Save to database
-    database.set_system_setting("openai_api_key", api_key)
+    # Save to database (encrypted if encryption is ready)
+    set_encrypted_api_key("openai_api_key", api_key)
 
     return OpenAIKeyResponse(
         success=True,
@@ -188,6 +372,138 @@ async def remove_openai_api_key(token: str = Depends(require_admin)):
     """
     database.delete_system_setting("openai_api_key")
     return {"success": True}
+
+
+# ============================================================================
+# Audio Settings (TTS/STT)
+# ============================================================================
+
+# Available TTS models
+TTS_MODELS = {
+    "gpt-4o-mini-tts": {
+        "name": "GPT-4o Mini TTS",
+        "description": "Steerable TTS with natural speech and instructions support",
+        "price_display": "~$0.015/min",
+        "price_per_minute": 0.015
+    },
+    "tts-1": {
+        "name": "TTS-1",
+        "description": "Standard quality TTS, optimized for speed",
+        "price_display": "~$0.015/1K chars",
+        "price_per_1k_chars": 0.015
+    },
+    "tts-1-hd": {
+        "name": "TTS-1 HD",
+        "description": "High quality TTS with better clarity",
+        "price_display": "~$0.030/1K chars",
+        "price_per_1k_chars": 0.030
+    }
+}
+
+# Available STT models
+STT_MODELS = {
+    "gpt-4o-transcribe": {
+        "name": "GPT-4o Transcribe",
+        "description": "Best quality transcription with improved accuracy",
+        "price_display": "~$0.006/min",
+        "price_per_minute": 0.006
+    },
+    "gpt-4o-mini-transcribe": {
+        "name": "GPT-4o Mini Transcribe",
+        "description": "Fast, affordable transcription",
+        "price_display": "~$0.003/min",
+        "price_per_minute": 0.003
+    },
+    "whisper-1": {
+        "name": "Whisper",
+        "description": "Original Whisper model for transcription",
+        "price_display": "~$0.006/min",
+        "price_per_minute": 0.006
+    }
+}
+
+
+class AudioModelUpdateRequest(BaseModel):
+    """Request to update TTS or STT model"""
+    model: str
+
+
+@router.get("/integrations/audio/models")
+async def get_audio_models(token: str = Depends(require_auth)):
+    """
+    Get available TTS and STT models.
+    """
+    openai_key = get_decrypted_api_key("openai_api_key")
+    current_tts = database.get_system_setting("tts_model") or "gpt-4o-mini-tts"
+    current_stt = database.get_system_setting("stt_model") or "whisper-1"
+
+    tts_models = [
+        {
+            "id": model_id,
+            "name": info["name"],
+            "description": info["description"],
+            "price_display": info["price_display"],
+            "available": bool(openai_key),
+            "is_current": model_id == current_tts
+        }
+        for model_id, info in TTS_MODELS.items()
+    ]
+
+    stt_models = [
+        {
+            "id": model_id,
+            "name": info["name"],
+            "description": info["description"],
+            "price_display": info["price_display"],
+            "available": bool(openai_key),
+            "is_current": model_id == current_stt
+        }
+        for model_id, info in STT_MODELS.items()
+    ]
+
+    return {
+        "tts_models": tts_models,
+        "stt_models": stt_models,
+        "current_tts": current_tts,
+        "current_stt": current_stt,
+        "openai_configured": bool(openai_key)
+    }
+
+
+@router.patch("/integrations/audio/tts")
+async def update_tts_model(
+    request: AudioModelUpdateRequest,
+    token: str = Depends(require_admin)
+):
+    """Update the default TTS model."""
+    model = request.model.strip()
+
+    if model not in TTS_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid TTS model. Available: {', '.join(TTS_MODELS.keys())}"
+        )
+
+    database.set_system_setting("tts_model", model)
+    return {"success": True, "model": model}
+
+
+@router.patch("/integrations/audio/stt")
+async def update_stt_model(
+    request: AudioModelUpdateRequest,
+    token: str = Depends(require_admin)
+):
+    """Update the default STT model."""
+    model = request.model.strip()
+
+    if model not in STT_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid STT model. Available: {', '.join(STT_MODELS.keys())}"
+        )
+
+    database.set_system_setting("stt_model", model)
+    return {"success": True, "model": model}
 
 
 # ============================================================================
@@ -206,18 +522,22 @@ async def transcribe_audio(
     token: str = Depends(require_auth)
 ):
     """
-    Transcribe audio to text using OpenAI Whisper.
+    Transcribe audio to text using OpenAI STT models.
 
     Accepts audio files (webm, mp3, mp4, wav, m4a, etc.) and returns transcribed text.
+    Uses the configured STT model (whisper-1, gpt-4o-transcribe, gpt-4o-mini-transcribe).
     Requires an OpenAI API key to be configured in settings.
     """
     # Check if OpenAI key is configured
-    openai_key = database.get_system_setting("openai_api_key")
+    openai_key = get_decrypted_api_key("openai_api_key")
     if not openai_key:
         raise HTTPException(
             status_code=400,
             detail="OpenAI API key not configured. Go to Settings > Integrations to add your key."
         )
+
+    # Get configured STT model (default to whisper-1 for backwards compatibility)
+    stt_model = database.get_system_setting("stt_model") or "whisper-1"
 
     # Validate file type
     content_type = file.content_type or ""
@@ -251,16 +571,16 @@ async def transcribe_audio(
     if len(audio_data) > 25 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Audio file too large. Maximum size is 25MB.")
 
-    # Call OpenAI Whisper API with retry logic for rate limits
+    # Call OpenAI Audio Transcription API with retry logic for rate limits
     max_retries = 3
     retry_delay = 2  # seconds
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            # Prepare the multipart form data
+            # Prepare the multipart form data with selected model
             files = {
                 "file": (filename, BytesIO(audio_data), content_type or "audio/webm"),
-                "model": (None, "whisper-1"),
+                "model": (None, stt_model),
                 "response_format": (None, "json"),
             }
 
@@ -337,24 +657,66 @@ async def transcribe_audio(
 
 
 # ============================================================================
-# Image Generation (Nano Banana / Google Gemini)
+# Image Generation (Multi-Provider)
 # ============================================================================
+
+class ImageModelUpdateRequest(BaseModel):
+    """Request to update the image model"""
+    model: str
+
+
+class ImageProviderUpdateRequest(BaseModel):
+    """Request to update the image provider"""
+    provider: str
+
 
 @router.get("/integrations/image/models")
 async def get_image_models(token: str = Depends(require_auth)):
     """
-    Get available image generation models.
+    Get available image generation models grouped by provider.
     """
+    # Get current settings
+    current_provider = database.get_system_setting("image_provider")
+    current_model = database.get_system_setting("image_model")
+    openai_key = get_decrypted_api_key("openai_api_key")
+    image_api_key = get_decrypted_api_key("image_api_key")
+
+    # Build models list with availability info
+    models = []
+    for model_id, model_info in IMAGE_MODELS.items():
+        provider_id = model_info["provider"]
+        provider_info = IMAGE_PROVIDERS[provider_id]
+
+        # Check if this provider's API key is configured
+        required_key = provider_info["requires_key"]
+        is_available = bool(get_decrypted_api_key(required_key))
+
+        models.append({
+            "id": model_id,
+            "name": model_info["name"],
+            "description": model_info["description"],
+            "price_per_image": model_info["price_per_image"],
+            "provider": provider_id,
+            "provider_name": provider_info["name"],
+            "capabilities": model_info.get("capabilities", []),
+            "available": is_available,
+            "is_current": model_id == current_model
+        })
+
     return {
-        "models": [
+        "models": models,
+        "providers": [
             {
-                "id": model_id,
-                "name": model_info["name"],
-                "description": model_info["description"],
-                "price_per_image": model_info["price_per_image"]
+                "id": provider_id,
+                "name": provider_info["name"],
+                "description": provider_info["description"],
+                "available": bool(database.get_system_setting(provider_info["requires_key"])),
+                "is_current": provider_id == current_provider
             }
-            for model_id, model_info in NANO_BANANA_MODELS.items()
-        ]
+            for provider_id, provider_info in IMAGE_PROVIDERS.items()
+        ],
+        "current_provider": current_provider,
+        "current_model": current_model
     }
 
 
@@ -366,7 +728,8 @@ async def set_image_generation(
     """
     Configure image generation provider and API key (admin only).
 
-    Currently supports Google Gemini (Nano Banana) models.
+    Supports Google Gemini (Nano Banana) models.
+    For OpenAI GPT Image, use the OpenAI API key configured in Whisper section.
     """
     provider = request.provider.lower().strip()
     model = request.model.strip()
@@ -375,19 +738,28 @@ async def set_image_generation(
     if not api_key:
         raise HTTPException(status_code=400, detail="API key cannot be empty")
 
-    if provider != "google":
-        raise HTTPException(status_code=400, detail="Currently only 'google' provider is supported for Nano Banana")
+    # Map legacy "google" provider to new ID
+    if provider == "google":
+        provider = "google-gemini"
 
-    if model not in NANO_BANANA_MODELS:
+    # Validate provider
+    if provider not in ["google-gemini"]:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid model. Available models: {', '.join(NANO_BANANA_MODELS.keys())}"
+            detail="This endpoint is for Google Gemini API key. OpenAI GPT Image uses the OpenAI key from Whisper settings."
+        )
+
+    # Get models for this provider
+    provider_models = [m for m in IMAGE_MODELS.keys() if IMAGE_MODELS[m]["provider"] == provider]
+    if model not in provider_models:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid model for {provider}. Available models: {', '.join(provider_models)}"
         )
 
     # Validate the API key by making a test request to Google AI
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            # Test the API key with a simple models list request
             response = await client.get(
                 f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
             )
@@ -395,7 +767,7 @@ async def set_image_generation(
                 raise HTTPException(status_code=400, detail="Invalid API key. Please check your Google AI API key.")
             elif response.status_code == 403:
                 raise HTTPException(status_code=400, detail="API key doesn't have permission. Enable the Generative Language API.")
-            elif response.status_code not in [200, 401]:  # 401 might be okay for some key types
+            elif response.status_code not in [200, 401]:
                 logger.warning(f"Google AI API check returned status {response.status_code}: {response.text}")
     except httpx.TimeoutException:
         logger.warning("Google AI API validation timed out, saving key anyway")
@@ -404,10 +776,10 @@ async def set_image_generation(
     except Exception as e:
         logger.warning(f"Error validating Google AI key: {e}")
 
-    # Save to database
+    # Save to database (API key encrypted)
     database.set_system_setting("image_provider", provider)
     database.set_system_setting("image_model", model)
-    database.set_system_setting("image_api_key", api_key)
+    set_encrypted_api_key("image_api_key", api_key)
 
     return ImageGenerationResponse(
         success=True,
@@ -428,42 +800,45 @@ async def remove_image_generation(token: str = Depends(require_admin)):
     return {"success": True}
 
 
-class ImageModelUpdateRequest(BaseModel):
-    """Request to update just the image model"""
-    model: str
-
-
 @router.patch("/integrations/image/model")
 async def update_image_model(
     request: ImageModelUpdateRequest,
     token: str = Depends(require_admin)
 ):
     """
-    Update just the image model without changing the API key (admin only).
+    Update the image generation model (admin only).
 
-    Allows users to switch between models on the fly without re-entering credentials.
+    The provider is automatically determined from the selected model.
     """
     model = request.model.strip()
 
-    # Check if image generation is configured
-    api_key = database.get_system_setting("image_api_key")
+    if model not in IMAGE_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid model. Available models: {', '.join(IMAGE_MODELS.keys())}"
+        )
+
+    model_info = IMAGE_MODELS[model]
+    provider = model_info["provider"]
+
+    # Check if the required API key is configured
+    required_key = IMAGE_PROVIDERS[provider]["requires_key"]
+    api_key = database.get_system_setting(required_key)
+
     if not api_key:
+        key_name = "Google AI API key (Nano Banana)" if required_key == "image_api_key" else "OpenAI API key"
         raise HTTPException(
             status_code=400,
-            detail="Image generation not configured. Please set up with an API key first."
+            detail=f"{key_name} is required for {IMAGE_PROVIDERS[provider]['name']}. Configure it in Settings first."
         )
 
-    if model not in NANO_BANANA_MODELS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid model. Available models: {', '.join(NANO_BANANA_MODELS.keys())}"
-        )
-
-    # Update just the model
+    # Save the provider and model
+    database.set_system_setting("image_provider", provider)
     database.set_system_setting("image_model", model)
 
     return {
         "success": True,
+        "provider": provider,
         "model": model
     }
 
@@ -481,7 +856,7 @@ async def generate_image(
     # Check if image generation is configured
     provider = database.get_system_setting("image_provider")
     model = database.get_system_setting("image_model")
-    api_key = database.get_system_setting("image_api_key")
+    api_key = get_decrypted_api_key("image_api_key")
 
     if not all([provider, model, api_key]):
         raise HTTPException(
@@ -601,27 +976,90 @@ async def generate_image(
 
 
 # ============================================================================
-# Video Generation (Veo) Model Selection
+# Video Generation Model Selection
 # ============================================================================
 
-# Available Veo models
-VEO_MODELS = {
+# Available video providers and their models
+VIDEO_PROVIDERS = {
+    "google-veo": {
+        "name": "Google Veo",
+        "description": "Google's video generation API",
+        "requires_key": "image_api_key"  # Uses the same key as Gemini/Nano Banana
+    },
+    "openai-sora": {
+        "name": "OpenAI Sora",
+        "description": "OpenAI's video generation API",
+        "requires_key": "openai_api_key"
+    }
+}
+
+# Available video models by provider
+VIDEO_MODELS = {
+    # Google Veo 3 models with native audio
+    "veo-3-fast-generate-preview": {
+        "name": "Veo 3 Fast",
+        "description": "Fast video with native audio (dialogue, effects, music)",
+        "price_per_second": 0.40,
+        "provider": "google-veo",
+        "max_duration": 8,
+        "capabilities": ["text-to-video", "image-to-video", "video-with-audio"]
+    },
+    "veo-3-generate-preview": {
+        "name": "Veo 3",
+        "description": "Highest quality video with native audio",
+        "price_per_second": 0.75,
+        "provider": "google-veo",
+        "max_duration": 8,
+        "capabilities": ["text-to-video", "image-to-video", "video-with-audio"]
+    },
+    # Google Veo 3.1 models (no audio)
     "veo-3.1-fast-generate-preview": {
         "name": "Veo 3.1 Fast",
         "description": "Fast video generation - lower latency",
-        "price_per_second": 0.15
+        "price_per_second": 0.15,
+        "provider": "google-veo",
+        "max_duration": 8,
+        "capabilities": ["text-to-video", "image-to-video", "video-extend", "frame-bridge"]
     },
     "veo-3.1-generate-preview": {
         "name": "Veo 3.1",
         "description": "High quality video generation",
-        "price_per_second": 0.40
+        "price_per_second": 0.40,
+        "provider": "google-veo",
+        "max_duration": 8,
+        "capabilities": ["text-to-video", "image-to-video", "video-extend", "frame-bridge"]
+    },
+    # OpenAI Sora models
+    "sora-2": {
+        "name": "Sora 2",
+        "description": "Fast video generation with good quality",
+        "price_per_second": 0.10,
+        "provider": "openai-sora",
+        "max_duration": 12,
+        "capabilities": ["text-to-video", "image-to-video"]
+    },
+    "sora-2-pro": {
+        "name": "Sora 2 Pro",
+        "description": "High quality video generation with better details",
+        "price_per_second": 0.40,
+        "provider": "openai-sora",
+        "max_duration": 12,
+        "capabilities": ["text-to-video", "image-to-video"]
     }
 }
+
+# Legacy alias for backwards compatibility
+VEO_MODELS = {k: v for k, v in VIDEO_MODELS.items() if v.get("provider") == "google-veo"}
 
 
 class VideoModelUpdateRequest(BaseModel):
     """Request to update the video model"""
     model: str
+
+
+class VideoProviderUpdateRequest(BaseModel):
+    """Request to update the video provider"""
+    provider: str
 
 
 @router.patch("/integrations/video/model")
@@ -632,46 +1070,297 @@ async def update_video_model(
     """
     Update the video generation model (admin only).
 
-    Video generation uses the same API key as image generation (Gemini API).
+    The provider is automatically determined from the selected model.
     """
     model = request.model.strip()
 
-    if model not in VEO_MODELS:
+    if model not in VIDEO_MODELS:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid model. Available models: {', '.join(VEO_MODELS.keys())}"
+            detail=f"Invalid model. Available models: {', '.join(VIDEO_MODELS.keys())}"
         )
 
-    # Save the model
+    model_info = VIDEO_MODELS[model]
+    provider = model_info["provider"]
+
+    # Check if the required API key is configured
+    required_key = VIDEO_PROVIDERS[provider]["requires_key"]
+    api_key = database.get_system_setting(required_key)
+
+    if not api_key:
+        key_name = "Google AI API key (Nano Banana)" if required_key == "image_api_key" else "OpenAI API key"
+        raise HTTPException(
+            status_code=400,
+            detail=f"{key_name} is required for {VIDEO_PROVIDERS[provider]['name']}. Configure it in Settings first."
+        )
+
+    # Save the provider and model
+    database.set_system_setting("video_provider", provider)
     database.set_system_setting("video_model", model)
 
     return {
         "success": True,
+        "provider": provider,
         "model": model
+    }
+
+
+@router.patch("/integrations/video/provider")
+async def update_video_provider(
+    request: VideoProviderUpdateRequest,
+    token: str = Depends(require_admin)
+):
+    """
+    Update the video generation provider (admin only).
+
+    This will also reset the model to the first available model for that provider.
+    """
+    provider = request.provider.strip()
+
+    if provider not in VIDEO_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid provider. Available providers: {', '.join(VIDEO_PROVIDERS.keys())}"
+        )
+
+    # Check if the required API key is configured
+    required_key = VIDEO_PROVIDERS[provider]["requires_key"]
+    api_key = database.get_system_setting(required_key)
+
+    if not api_key:
+        key_name = "Google AI API key (Nano Banana)" if required_key == "image_api_key" else "OpenAI API key"
+        raise HTTPException(
+            status_code=400,
+            detail=f"{key_name} is required for {VIDEO_PROVIDERS[provider]['name']}. Configure it in Settings first."
+        )
+
+    # Get first model for this provider
+    provider_models = [m for m, info in VIDEO_MODELS.items() if info["provider"] == provider]
+    default_model = provider_models[0] if provider_models else None
+
+    # Save the provider and model
+    database.set_system_setting("video_provider", provider)
+    if default_model:
+        database.set_system_setting("video_model", default_model)
+
+    return {
+        "success": True,
+        "provider": provider,
+        "model": default_model
     }
 
 
 @router.get("/integrations/video/models")
 async def get_video_models(token: str = Depends(require_auth)):
     """
-    Get available video generation models.
+    Get available video generation models grouped by provider.
     """
+    # Get current settings
+    current_provider = database.get_system_setting("video_provider")
+    current_model = database.get_system_setting("video_model")
+    openai_key = get_decrypted_api_key("openai_api_key")
+    image_api_key = get_decrypted_api_key("image_api_key")
+
+    # Build models list with availability info
+    models = []
+    for model_id, model_info in VIDEO_MODELS.items():
+        provider_id = model_info["provider"]
+        provider_info = VIDEO_PROVIDERS[provider_id]
+
+        # Check if this provider's API key is configured
+        required_key = provider_info["requires_key"]
+        is_available = bool(get_decrypted_api_key(required_key))
+
+        models.append({
+            "id": model_id,
+            "name": model_info["name"],
+            "description": model_info["description"],
+            "price_per_second": model_info["price_per_second"],
+            "provider": provider_id,
+            "provider_name": provider_info["name"],
+            "max_duration": model_info.get("max_duration", 8),
+            "capabilities": model_info.get("capabilities", []),
+            "available": is_available,
+            "is_current": model_id == current_model
+        })
+
     return {
-        "models": [
+        "models": models,
+        "providers": [
             {
-                "id": model_id,
-                "name": model_info["name"],
-                "description": model_info["description"],
-                "price_per_second": model_info["price_per_second"]
+                "id": provider_id,
+                "name": provider_info["name"],
+                "description": provider_info["description"],
+                "available": bool(database.get_system_setting(provider_info["requires_key"])),
+                "is_current": provider_id == current_provider
             }
-            for model_id, model_info in VEO_MODELS.items()
-        ]
+            for provider_id, provider_info in VIDEO_PROVIDERS.items()
+        ],
+        "current_provider": current_provider,
+        "current_model": current_model
     }
 
 
 # ============================================================================
 # Voice-to-Text (Speech Recognition)
 # ============================================================================
+
+# ============================================================================
+# AI Tools Configuration (for Profile Management)
+# ============================================================================
+
+# AI Tools definitions with provider requirements
+# NOTE: These are tools the model (Claude) can use, not app features
+# TTS/STT are app features (voice input, read messages) - not model tools
+AI_TOOLS = {
+    # Image tools
+    "image_generation": {
+        "name": "Image Generation",
+        "description": "Generate AI images from text prompts (supports 1K-4K, multiple images)",
+        "category": "image",
+        "providers": ["google-gemini", "google-imagen", "openai-gpt-image"]
+    },
+    "image_editing": {
+        "name": "Image Editing",
+        "description": "Edit existing images - add, remove, or modify elements",
+        "category": "image",
+        "providers": ["google-gemini", "openai-gpt-image"]
+    },
+    "image_reference": {
+        "name": "Reference-Based Generation",
+        "description": "Generate images with character/style consistency using reference images",
+        "category": "image",
+        "providers": ["google-gemini"]  # Only Gemini supports this
+    },
+    # Video tools
+    "video_generation": {
+        "name": "Video Generation",
+        "description": "Generate AI videos from text prompts (4-12 sec)",
+        "category": "video",
+        "providers": ["google-veo", "openai-sora"]
+    },
+    "video_with_audio": {
+        "name": "Video with Audio",
+        "description": "Generate video with native audio (dialogue, effects, music) using Veo 3",
+        "category": "video",
+        "providers": ["google-veo"]  # Veo 3 models only
+    },
+    "image_to_video": {
+        "name": "Image to Video",
+        "description": "Animate a still image into a video",
+        "category": "video",
+        "providers": ["google-veo", "openai-sora"]
+    },
+    "video_extend": {
+        "name": "Video Extension",
+        "description": "Extend existing Veo videos by ~7 seconds",
+        "category": "video",
+        "providers": ["google-veo"]  # Only Veo supports this
+    },
+    "video_bridge": {
+        "name": "Frame Bridging",
+        "description": "Generate smooth transitions between two images",
+        "category": "video",
+        "providers": ["google-veo"]  # Only Veo supports this
+    },
+    # Analysis tools
+    "video_understanding": {
+        "name": "Video Understanding",
+        "description": "Analyze videos up to 2 hours and answer questions about content",
+        "category": "analysis",
+        "providers": ["google-gemini-video"]
+    }
+}
+
+# Map providers to their required API key
+PROVIDER_KEY_MAP = {
+    "google-gemini": "image_api_key",
+    "google-imagen": "image_api_key",
+    "openai-gpt-image": "openai_api_key",
+    "google-veo": "image_api_key",
+    "openai-sora": "openai_api_key",
+    "google-gemini-video": "image_api_key"
+}
+
+
+@router.get("/ai-tools/available")
+async def get_available_ai_tools(token: str = Depends(require_auth)):
+    """
+    Get list of AI tools available based on configured providers.
+
+    Returns tools grouped by category with availability status.
+    Used by the profile management UI to show only available tools.
+    """
+    # Check which API keys are configured
+    openai_key = get_decrypted_api_key("openai_api_key")
+    image_api_key = get_decrypted_api_key("image_api_key")
+
+    # Determine which providers are available (for model tools only)
+    available_providers = set()
+    if image_api_key:
+        available_providers.add("google-gemini")
+        available_providers.add("google-imagen")
+        available_providers.add("google-veo")
+        available_providers.add("google-gemini-video")
+    if openai_key:
+        available_providers.add("openai-gpt-image")
+        available_providers.add("openai-sora")
+
+    # Get current configured providers
+    current_image_provider = database.get_system_setting("image_provider")
+    current_video_provider = database.get_system_setting("video_provider")
+
+    # Build tools list with availability
+    tools = []
+    categories = {}
+
+    for tool_id, tool_info in AI_TOOLS.items():
+        # Check if any of the tool's providers are available
+        tool_providers = tool_info["providers"]
+        is_available = any(p in available_providers for p in tool_providers)
+
+        # Determine which provider would be used for this tool
+        active_provider = None
+        if tool_info["category"] == "image" and current_image_provider in tool_providers:
+            active_provider = current_image_provider
+        elif tool_info["category"] == "video" and current_video_provider in tool_providers:
+            active_provider = current_video_provider
+        elif is_available:
+            # Use first available provider
+            for p in tool_providers:
+                if p in available_providers:
+                    active_provider = p
+                    break
+
+        tool_data = {
+            "id": tool_id,
+            "name": tool_info["name"],
+            "description": tool_info["description"],
+            "category": tool_info["category"],
+            "available": is_available,
+            "providers": tool_providers,
+            "active_provider": active_provider
+        }
+        tools.append(tool_data)
+
+        # Group by category
+        cat = tool_info["category"]
+        if cat not in categories:
+            categories[cat] = {
+                "id": cat,
+                "name": f"{cat.title()} Tools",
+                "tools": []
+            }
+        categories[cat]["tools"].append(tool_data)
+
+    return {
+        "tools": tools,
+        "categories": list(categories.values()),
+        "available_providers": list(available_providers),
+        "current_image_provider": current_image_provider,
+        "current_video_provider": current_video_provider
+    }
+
 
 @router.post("/transcribe", response_model=VoiceToTextResponse)
 async def transcribe_audio(
@@ -690,7 +1379,7 @@ async def transcribe_audio(
         language: Optional language code (e.g., 'en', 'es', 'fr')
     """
     # Check if OpenAI API key is configured
-    api_key = database.get_system_setting("openai_api_key")
+    api_key = get_decrypted_api_key("openai_api_key")
 
     if not api_key:
         raise HTTPException(

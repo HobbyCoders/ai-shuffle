@@ -78,7 +78,8 @@ async def create_api_user(request: ApiUserCreate, token: str = Depends(require_a
         api_key_hash=api_key_hash,
         project_id=request.project_id,
         profile_id=request.profile_id,
-        description=request.description
+        description=request.description,
+        web_login_allowed=request.web_login_allowed
     )
 
     # Return with the plaintext API key (only time it's shown)
@@ -123,7 +124,8 @@ async def update_api_user(
         project_id=request.project_id,
         profile_id=request.profile_id,
         description=request.description,
-        is_active=request.is_active
+        is_active=request.is_active,
+        web_login_allowed=request.web_login_allowed
     )
 
     return user

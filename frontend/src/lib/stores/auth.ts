@@ -4,7 +4,7 @@
 
 import { writable, derived } from 'svelte/store';
 import type { AuthStatus } from '$lib/api/client';
-import { getAuthStatus, login as apiLogin, loginWithApiKey as apiLoginWithApiKey, logout as apiLogout, setup as apiSetup } from '$lib/api/auth';
+import { getAuthStatus, login as apiLogin, loginWithApiKey as apiLoginWithApiKey, registerApiUser as apiRegisterApiUser, loginApiUser as apiLoginApiUser, logout as apiLogout, setup as apiSetup } from '$lib/api/auth';
 
 interface AuthState {
 	status: AuthStatus | null;
@@ -66,6 +66,30 @@ function createAuthStore() {
 				update(s => ({ ...s, status, loading: false }));
 			} catch (e: any) {
 				update(s => ({ ...s, loading: false, error: e.detail || 'API key login failed' }));
+				throw e;
+			}
+		},
+
+		async registerApiUser(apiKey: string, username: string, password: string) {
+			update(s => ({ ...s, loading: true, error: null }));
+			try {
+				await apiRegisterApiUser(apiKey, username, password);
+				const status = await getAuthStatus();
+				update(s => ({ ...s, status, loading: false }));
+			} catch (e: any) {
+				update(s => ({ ...s, loading: false, error: e.detail || 'Registration failed' }));
+				throw e;
+			}
+		},
+
+		async loginApiUser(username: string, password: string) {
+			update(s => ({ ...s, loading: true, error: null }));
+			try {
+				await apiLoginApiUser(username, password);
+				const status = await getAuthStatus();
+				update(s => ({ ...s, status, loading: false }));
+			} catch (e: any) {
+				update(s => ({ ...s, loading: false, error: e.detail || 'Login failed' }));
 				throw e;
 			}
 		},

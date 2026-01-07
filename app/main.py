@@ -127,6 +127,13 @@ async def lifespan(app: FastAPI):
     # Run database migrations
     run_migrations()
 
+    # Clear all sessions on startup - forces re-login to restore encryption key
+    # This is required because the encryption key (derived from admin password)
+    # is only kept in memory and lost on restart
+    admin_cleared, api_cleared = database.clear_all_sessions()
+    if admin_cleared or api_cleared:
+        logger.info(f"Cleared {admin_cleared} admin and {api_cleared} API user sessions (re-login required)")
+
     # Load user-configured workspace path from database (for local mode)
     load_workspace_from_database()
 
