@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount, onDestroy, afterUpdate } from 'svelte';
+	import { onMount, onDestroy, afterUpdate, tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { auth, username, claudeAuthenticated, isAuthenticated, isAdmin } from '$lib/stores/auth';
 	import {
@@ -28,8 +28,10 @@
 	import { marked } from 'marked';
 	import TerminalModal from '$lib/components/TerminalModal.svelte';
 	import RewindModal from '$lib/components/RewindModal.svelte';
+	import SystemMessage from '$lib/components/SystemMessage.svelte';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
+	import SubagentMessage from '$lib/components/SubagentMessage.svelte';
 	import { executeCommand, isSlashCommand, syncAfterRewind, listCommands, type Command } from '$lib/api/commands';
 
 	// Configure marked for better code highlighting
@@ -71,11 +73,8 @@
 		sidebarPinned = !sidebarPinned;
 	}
 
-	// Simple auto-scroll: always scroll unless user scrolled up recently
-	let autoScrollPaused: Record<string, boolean> = {};
-	let scrollPauseTimers: Record<string, ReturnType<typeof setTimeout>> = {};
-	let isAutoScrolling = false; // Prevent scroll handler from triggering during auto-scroll
-	const SCROLL_RESUME_DELAY = 5000; // Resume auto-scroll after 5s of no user scroll
+	// Auto-scroll: ALWAYS scroll to bottom. No exceptions. No pausing.
+	// User can scroll up to read, but it will keep scrolling on new content.
 	let showProfileModal = false;
 	let showProjectModal = false;
 	let showNewProfileForm = false;
@@ -223,58 +222,42 @@
 		}
 	}
 
-	// Scroll to bottom helper
+	// Scroll to bottom - aggressive approach with multiple fallbacks
 	function scrollToBottom(tabId: string) {
 		const container = messagesContainers[tabId];
-		if (container) {
-			isAutoScrolling = true;
-			container.scrollTop = container.scrollHeight;
-			// Reset flag after scroll completes
-			requestAnimationFrame(() => {
-				isAutoScrolling = false;
-			});
-		}
+		if (!container) return;
+		container.scrollTop = container.scrollHeight;
 	}
 
-	// Auto-scroll after every DOM update (new messages, content changes, etc.)
+	// Force scroll after DOM updates - using tick() for proper timing
+	async function forceScrollToBottom() {
+		if (!$activeTabId) return;
+		await tick(); // Wait for Svelte to update DOM
+		scrollToBottom($activeTabId);
+		// Double-tap with RAF for layout-dependent updates
+		requestAnimationFrame(() => {
+			if ($activeTabId) scrollToBottom($activeTabId);
+		});
+	}
+
+	// Scroll after every DOM update
 	afterUpdate(() => {
-		if ($activeTabId && !autoScrollPaused[$activeTabId]) {
-			scrollToBottom($activeTabId);
-		}
+		forceScrollToBottom();
 	});
 
-	// Handle user scroll - pause auto-scroll temporarily when scrolling up
-	function handleScroll(tabId: string) {
-		// Ignore scroll events triggered by auto-scroll
-		if (isAutoScrolling) return;
+	// Scroll when messages change (reactive to the actual data)
+	$: if ($activeTab?.messages) {
+		forceScrollToBottom();
+	}
 
-		const container = messagesContainers[tabId];
-		if (!container) return;
-
-		const { scrollTop, scrollHeight, clientHeight } = container;
-		const isAtBottom = scrollHeight - scrollTop - clientHeight < 50;
-
-		if (isAtBottom) {
-			// User scrolled to bottom - resume immediately
-			autoScrollPaused[tabId] = false;
-			if (scrollPauseTimers[tabId]) {
-				clearTimeout(scrollPauseTimers[tabId]);
-			}
-		} else {
-			// User scrolled up - pause auto-scroll
-			autoScrollPaused[tabId] = true;
-
-			// Clear existing timer
-			if (scrollPauseTimers[tabId]) {
-				clearTimeout(scrollPauseTimers[tabId]);
-			}
-
-			// Resume auto-scroll after inactivity
-			scrollPauseTimers[tabId] = setTimeout(() => {
-				autoScrollPaused[tabId] = false;
-				scrollToBottom(tabId);
-			}, SCROLL_RESUME_DELAY);
-		}
+	// Scroll when switching tabs
+	let previousTabId: string | null = null;
+	$: if ($activeTabId && $activeTabId !== previousTabId) {
+		previousTabId = $activeTabId;
+		// Multiple attempts to catch the container binding
+		forceScrollToBottom();
+		setTimeout(forceScrollToBottom, 50);
+		setTimeout(forceScrollToBottom, 150);
 	}
 
 	async function handleSubmit(tabId: string) {
@@ -359,12 +342,28 @@
 	}
 
 	// Handle rewind completion from RewindModal V2
-	async function handleRewindCompleteV2(success: boolean, messagesRemoved: number) {
-		console.log('Rewind V2 complete:', { success, messagesRemoved });
+	async function handleRewindCompleteV2(success: boolean, messagesRemoved: number, messageContent?: string) {
+		console.log('Rewind V2 complete:', { success, messagesRemoved, messageContent });
 
 		if (success && messagesRemoved > 0 && $activeTabId && rewindSessionId) {
 			// Reload the session to reflect changes
 			await tabs.loadSessionInTab($activeTabId, rewindSessionId);
+
+			// Populate the input field with the rewound message so user can edit and resend
+			if (messageContent) {
+				tabInputs[$activeTabId] = messageContent;
+				tabInputs = tabInputs; // Trigger Svelte reactivity
+
+				// Focus the textarea after a short delay
+				setTimeout(() => {
+					const textarea = textareas[$activeTabId];
+					if (textarea) {
+						textarea.focus();
+						// Move cursor to end
+						textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+					}
+				}, 100);
+			}
 		}
 
 		rewindSessionId = '';
@@ -509,10 +508,15 @@
 		const tabId = tabs.openSession(sessionId);
 		sidebarOpen = false;
 
-		// Reset auto-scroll state and scroll to bottom after session loads
+		// Ensure auto-scroll is enabled and scroll after session loads
 		if (tabId) {
-			autoScrollPaused[tabId] = false;
-			setTimeout(() => scrollToBottom(tabId), 100);
+			userScrolledAway = false;
+			isUserInteracting = false;
+			// Try scrolling multiple times as messages load async from API
+			setTimeout(() => scrollToBottom(tabId), 50);
+			setTimeout(() => scrollToBottom(tabId), 200);
+			setTimeout(() => scrollToBottom(tabId), 500);
+			setTimeout(() => scrollToBottom(tabId), 1000);
 		}
 	}
 
@@ -1361,38 +1365,84 @@
 
 				<!-- Right side: Token counts, rewind, connection status -->
 				<div class="flex items-center gap-2 sm:gap-3">
-					<!-- Token counts (only show if > 0) -->
-					{#if currentTab.totalTokensIn > 0}
-						<span class="flex items-center gap-1 text-xs text-muted-foreground" title="Input tokens">
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4" />
-							</svg>
-							<span>{formatTokenCount(currentTab.totalTokensIn)}</span>
-						</span>
-					{/if}
-					{#if currentTab.totalTokensOut > 0}
-						<span class="flex items-center gap-1 text-xs text-muted-foreground" title="Output tokens">
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8v12m0 0l4-4m-4 4l-4-4" />
-							</svg>
-							<span>{formatTokenCount(currentTab.totalTokensOut)}</span>
-						</span>
-					{/if}
-					{#if currentTab.totalCacheCreationTokens > 0}
-						<span class="flex items-center gap-1 text-xs text-muted-foreground" title="Cache creation tokens">
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-							</svg>
-							<span>{formatTokenCount(currentTab.totalCacheCreationTokens)}</span>
-						</span>
-					{/if}
-					{#if currentTab.totalCacheReadTokens > 0}
-						<span class="flex items-center gap-1 text-xs text-blue-400" title="Cache read tokens (saved)">
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-							</svg>
-							<span>{formatTokenCount(currentTab.totalCacheReadTokens)}</span>
-						</span>
+					<!-- Context usage dropdown (only show if any tokens > 0) -->
+					{#if currentTab.totalTokensIn > 0 || currentTab.totalTokensOut > 0}
+						{@const contextUsed = currentTab.totalTokensIn + currentTab.totalTokensOut + currentTab.totalCacheCreationTokens}
+						{@const contextMax = 200000}
+						{@const contextPercent = Math.min((contextUsed / contextMax) * 100, 100)}
+						<div class="relative group">
+							<button
+								class="flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors"
+								title="Context usage: {formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}"
+							>
+								<!-- Circular progress indicator -->
+								<svg class="w-4 h-4 -rotate-90" viewBox="0 0 20 20">
+									<circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="2" opacity="0.2" />
+									<circle
+										cx="10" cy="10" r="8" fill="none"
+										stroke={contextPercent > 80 ? '#ef4444' : contextPercent > 60 ? '#f59e0b' : '#22c55e'}
+										stroke-width="2"
+										stroke-dasharray={2 * Math.PI * 8}
+										stroke-dashoffset={2 * Math.PI * 8 * (1 - contextPercent / 100)}
+										stroke-linecap="round"
+									/>
+								</svg>
+								<span>{Math.round(contextPercent)}%</span>
+								<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+								</svg>
+							</button>
+							<!-- Token dropdown -->
+							<div class="absolute right-0 top-full mt-1 w-52 bg-card border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+								<div class="py-2 px-3 space-y-2">
+									<!-- Context header -->
+									<div class="flex items-center justify-between text-xs pb-1 border-b border-border">
+										<span class="text-muted-foreground">Context</span>
+										<span class="text-foreground font-medium">{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)}</span>
+									</div>
+									<div class="flex items-center justify-between text-xs">
+										<span class="flex items-center gap-1.5 text-muted-foreground">
+											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4" />
+											</svg>
+											Input
+										</span>
+										<span class="text-foreground font-medium">{formatTokenCount(currentTab.totalTokensIn)}</span>
+									</div>
+									<div class="flex items-center justify-between text-xs">
+										<span class="flex items-center gap-1.5 text-muted-foreground">
+											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8v12m0 0l4-4m-4 4l-4-4" />
+											</svg>
+											Output
+										</span>
+										<span class="text-foreground font-medium">{formatTokenCount(currentTab.totalTokensOut)}</span>
+									</div>
+									{#if currentTab.totalCacheCreationTokens > 0}
+										<div class="flex items-center justify-between text-xs">
+											<span class="flex items-center gap-1.5 text-muted-foreground">
+												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+												</svg>
+												Cache Creation
+											</span>
+											<span class="text-foreground font-medium">{formatTokenCount(currentTab.totalCacheCreationTokens)}</span>
+										</div>
+									{/if}
+									{#if currentTab.totalCacheReadTokens > 0}
+										<div class="flex items-center justify-between text-xs">
+											<span class="flex items-center gap-1.5 text-blue-400">
+												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+												</svg>
+												Cache Read
+											</span>
+											<span class="text-blue-400 font-medium">{formatTokenCount(currentTab.totalCacheReadTokens)}</span>
+										</div>
+									{/if}
+								</div>
+							</div>
+						</div>
 					{/if}
 
 					<!-- Rewind Button (only when session is active) -->
@@ -1444,7 +1494,6 @@
 			<!-- Messages Area -->
 			<div
 				bind:this={messagesContainers[tabId]}
-				on:scroll={() => handleScroll(tabId)}
 				class="flex-1 overflow-y-auto"
 			>
 				{#if currentTab.messages.length === 0}
@@ -1544,7 +1593,7 @@
 									</div>
 								</div>
 							{:else if message.type === 'tool_use'}
-								<!-- Tool Use - Anvil Style Expandable Card -->
+								<!-- Tool Use with grouped Result - Expandable Card -->
 								<div class="flex gap-3 w-full">
 									<div class="flex-shrink-0 w-8 h-8 rounded-full bg-yellow-500/10 flex items-center justify-center shadow-s">
 										<svg class="w-4 h-4 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1555,7 +1604,7 @@
 									<div class="flex-1 min-w-0">
 										<details class="w-full border border-border rounded-lg overflow-hidden shadow-s group">
 											<summary class="w-full px-4 py-2 bg-muted/30 hover:bg-muted/50 flex items-center gap-2 cursor-pointer list-none transition-colors">
-												{#if message.streaming}
+												{#if message.toolStatus === 'running' || message.streaming}
 													<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
 													</svg>
@@ -1570,8 +1619,10 @@
 												</svg>
 												<span class="text-sm font-medium text-foreground">{message.toolName}</span>
 												<span class="text-muted-foreground">•</span>
-												{#if message.streaming}
+												{#if message.toolStatus === 'running' || message.streaming}
 													<span class="text-primary text-sm">Executing...</span>
+												{:else if message.toolStatus === 'error'}
+													<span class="text-red-500 text-sm">Error</span>
 												{:else}
 													<span class="text-green-500 text-sm">Complete</span>
 												{/if}
@@ -1579,16 +1630,25 @@
 													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 												</svg>
 											</summary>
-											{#if message.toolInput}
-												<div class="px-4 py-3 bg-card border-t border-border">
-													<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{JSON.stringify(message.toolInput, null, 2)}</pre>
-												</div>
-											{/if}
+											<div class="bg-card border-t border-border">
+												{#if message.toolInput}
+													<div class="px-4 py-3 border-b border-border/50">
+														<div class="text-xs text-muted-foreground mb-1 font-medium">Input</div>
+														<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32 whitespace-pre-wrap break-words font-mono">{JSON.stringify(message.toolInput, null, 2)}</pre>
+													</div>
+												{/if}
+												{#if message.toolResult}
+													<div class="px-4 py-3">
+														<div class="text-xs text-muted-foreground mb-1 font-medium">Result</div>
+														<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.toolResult}</pre>
+													</div>
+												{/if}
+											</div>
 										</details>
 									</div>
 								</div>
 							{:else if message.type === 'tool_result'}
-								<!-- Tool Result - Anvil Style Expandable Card -->
+								<!-- Standalone Tool Result (fallback for ungrouped results) -->
 								<div class="flex gap-3 w-full">
 									<div class="flex-shrink-0 w-8 h-8 rounded-full bg-blue-500/10 flex items-center justify-center shadow-s">
 										<svg class="w-4 h-4 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1617,6 +1677,30 @@
 												<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.content}</pre>
 											</div>
 										</details>
+									</div>
+								</div>
+							{:else if message.type === 'system'}
+								<!-- System Message (e.g., /context output, status updates) -->
+								<div class="flex gap-3 w-full">
+									<div class="flex-shrink-0 w-8 h-8 rounded-full bg-purple-500/10 flex items-center justify-center shadow-s">
+										<svg class="w-4 h-4 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+										</svg>
+									</div>
+									<div class="flex-1 min-w-0">
+										<SystemMessage {message} />
+									</div>
+								</div>
+							{:else if message.type === 'subagent'}
+								<!-- Subagent Message - Collapsible container for all subagent work -->
+								<div class="flex gap-3 w-full">
+									<div class="flex-shrink-0 w-8 h-8 rounded-full bg-indigo-500/10 flex items-center justify-center shadow-s">
+										<svg class="w-4 h-4 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+										</svg>
+									</div>
+									<div class="flex-1 min-w-0">
+										<SubagentMessage {message} />
 									</div>
 								</div>
 							{/if}

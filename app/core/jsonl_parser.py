@@ -149,6 +149,149 @@ def _is_system_content(content: str) -> bool:
     return False
 
 
+def get_agent_jsonl_paths(sdk_session_id: str, working_dir: str = "/workspace") -> Dict[str, Path]:
+    """
+    Find all agent JSONL files for a session.
+
+    Agent files are named agent-{agent_id}.jsonl and contain entries with
+    matching sessionId field.
+
+    Returns:
+        Dict mapping agent_id to Path
+    """
+    claude_projects_dir = settings.get_claude_projects_dir
+    agent_files: Dict[str, Path] = {}
+
+    # First try the specified working_dir
+    project_dir_name = get_project_dir_name(working_dir)
+    project_dir = claude_projects_dir / project_dir_name
+
+    # If not found, search all project directories (fallback)
+    project_dirs_to_search = []
+    if project_dir.exists():
+        project_dirs_to_search.append(project_dir)
+    else:
+        # Fallback: search all project directories
+        if claude_projects_dir.exists():
+            for proj_dir in claude_projects_dir.iterdir():
+                if proj_dir.is_dir():
+                    # Check if this project dir has the session file
+                    session_file = proj_dir / f"{sdk_session_id}.jsonl"
+                    if session_file.exists():
+                        project_dirs_to_search.append(proj_dir)
+                        break
+
+    for search_dir in project_dirs_to_search:
+        for agent_file in search_dir.glob("agent-*.jsonl"):
+            # Extract agent_id from filename (agent-{id}.jsonl)
+            agent_id = agent_file.stem.replace("agent-", "")
+
+            # Verify this agent file belongs to our session by checking first entry
+            try:
+                with open(agent_file, 'r', encoding='utf-8') as f:
+                    first_line = f.readline().strip()
+                    if first_line:
+                        entry = json.loads(first_line)
+                        if entry.get("sessionId") == sdk_session_id:
+                            agent_files[agent_id] = agent_file
+                            logger.debug(f"Found agent file {agent_id} for session {sdk_session_id}")
+            except Exception as e:
+                logger.warning(f"Failed to check agent file {agent_file}: {e}")
+
+    return agent_files
+
+
+def parse_agent_history(agent_path: Path) -> List[Dict[str, Any]]:
+    """
+    Parse an agent's JSONL file and return child messages.
+
+    Returns list of child messages with: id, type, content, toolName, toolId, toolInput, toolResult, toolStatus, timestamp
+    Tool results are grouped with their corresponding tool_use entries.
+    """
+    children: List[Dict[str, Any]] = []
+    tool_names_by_id: Dict[str, str] = {}
+
+    for entry in parse_jsonl_file(agent_path):
+        entry_type = entry.get("type")
+        message_data = entry.get("message", {})
+        role = message_data.get("role")
+        content = message_data.get("content")
+        timestamp = entry.get("timestamp")
+        uuid = entry.get("uuid", "")
+
+        if entry_type == "assistant" and role == "assistant":
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        block_type = block.get("type")
+
+                        if block_type == "text":
+                            text = block.get("text", "")
+                            if text:
+                                children.append({
+                                    "id": f"agent-text-{uuid}",
+                                    "type": "text",
+                                    "content": text,
+                                    "timestamp": timestamp
+                                })
+
+                        elif block_type == "tool_use":
+                            tool_id = block.get("id")
+                            tool_name = block.get("name")
+                            if tool_id and tool_name:
+                                tool_names_by_id[tool_id] = tool_name
+
+                            children.append({
+                                "id": f"agent-tool-{tool_id}",
+                                "type": "tool_use",
+                                "content": "",
+                                "toolName": tool_name,
+                                "toolId": tool_id,
+                                "toolInput": block.get("input", {}),
+                                "toolStatus": "running",  # Will be updated when result arrives
+                                "timestamp": timestamp
+                            })
+
+        elif entry_type == "user" and role == "user":
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        tool_use_id = block.get("tool_use_id")
+                        raw_content = block.get("content", "")
+                        is_error = block.get("is_error", False)
+
+                        # Extract text from content
+                        if isinstance(raw_content, list):
+                            output = extract_text_from_content(raw_content)
+                        else:
+                            output = raw_content if isinstance(raw_content, str) else ""
+
+                        # Truncate for display
+                        output = output[:2000] if output else ""
+
+                        # Group tool result with its corresponding tool_use
+                        found_tool_use = False
+                        for child in children:
+                            if child.get("type") == "tool_use" and child.get("toolId") == tool_use_id:
+                                child["toolResult"] = output
+                                child["toolStatus"] = "error" if is_error else "complete"
+                                found_tool_use = True
+                                break
+
+                        # Only create separate tool_result if no matching tool_use found
+                        if not found_tool_use:
+                            children.append({
+                                "id": f"agent-result-{tool_use_id}",
+                                "type": "tool_result",
+                                "content": output,
+                                "toolName": tool_names_by_id.get(tool_use_id),
+                                "toolId": tool_use_id,
+                                "timestamp": timestamp
+                            })
+
+    return children
+
+
 def parse_session_history(
     sdk_session_id: str,
     working_dir: str = "/workspace"
@@ -158,6 +301,9 @@ def parse_session_history(
 
     This transforms the JSONL format to match the format used by live streaming,
     ensuring visual consistency between resumed and live sessions.
+
+    Also parses associated agent JSONL files for Task tool calls and creates
+    subagent message groups.
 
     Args:
         sdk_session_id: The Claude SDK session ID
@@ -174,11 +320,24 @@ def parse_session_history(
 
     logger.info(f"Parsing JSONL history from {jsonl_path}")
 
+    # Find all agent files for this session
+    agent_files = get_agent_jsonl_paths(sdk_session_id, working_dir)
+    agent_children_cache: Dict[str, List[Dict[str, Any]]] = {}
+
+    # Pre-parse all agent files
+    for agent_id, agent_path in agent_files.items():
+        agent_children_cache[agent_id] = parse_agent_history(agent_path)
+        logger.debug(f"Parsed {len(agent_children_cache[agent_id])} messages from agent {agent_id}")
+
     messages: List[Dict[str, Any]] = []
     msg_counter = 0
 
     # Track tool names by ID for matching tool_result to tool_use
     tool_names_by_id: Dict[str, str] = {}
+
+    # Track Task tool uses that have been converted to subagent messages
+    # Maps tool_use_id to agent info for matching with tool_result
+    task_tool_uses: Dict[str, Dict[str, Any]] = {}
 
     for entry in parse_jsonl_file(jsonl_path):
         entry_type = entry.get("type")
@@ -276,19 +435,57 @@ def parse_session_history(
                                 # Sometimes toolUseResult is just a string (error messages)
                                 output = tool_result
 
-                            messages.append({
-                                "id": f"result-{uuid}-{tool_use_id}",
-                                "role": "assistant",  # Display as assistant for UI consistency
-                                "content": output[:2000] if output else "",  # Truncate like streaming
-                                "type": "tool_result",
-                                "toolId": tool_use_id,
-                                "toolName": tool_names_by_id.get(tool_use_id),  # Match to tool_use
-                                "metadata": {
-                                    "timestamp": timestamp,
-                                    "is_error": is_error
-                                },
-                                "streaming": False
-                            })
+                            # Check if this is a result for a Task tool (subagent)
+                            if tool_use_id in task_tool_uses:
+                                # This is a subagent result - update the existing subagent message
+                                task_info = task_tool_uses[tool_use_id]
+
+                                # Extract agentId from toolUseResult if available
+                                tool_use_result = entry.get("toolUseResult", {})
+                                agent_id = tool_use_result.get("agentId") if isinstance(tool_use_result, dict) else None
+
+                                # Find and update the subagent message
+                                for msg in messages:
+                                    if msg.get("type") == "subagent" and msg.get("toolId") == tool_use_id:
+                                        msg["content"] = output[:2000] if output else ""
+                                        msg["agentStatus"] = "error" if is_error else "completed"
+
+                                        # Use agentId from toolUseResult to find the right agent children
+                                        if agent_id and agent_id in agent_children_cache:
+                                            msg["agentId"] = agent_id
+                                            msg["agentChildren"] = agent_children_cache[agent_id]
+                                            # Clear from cache to avoid double-assignment
+                                            agent_children_cache[agent_id] = []
+                                        break
+
+                                # Don't add a separate tool_result message for Task tools
+                                continue
+
+                            # Group tool result with its corresponding tool_use message
+                            # Find the matching tool_use and embed the result
+                            found_tool_use = False
+                            for msg in messages:
+                                if msg.get("type") == "tool_use" and msg.get("toolId") == tool_use_id:
+                                    msg["toolResult"] = output[:2000] if output else ""
+                                    msg["toolStatus"] = "error" if is_error else "complete"
+                                    found_tool_use = True
+                                    break
+
+                            # Only create separate tool_result if no matching tool_use found
+                            if not found_tool_use:
+                                messages.append({
+                                    "id": f"result-{uuid}-{tool_use_id}",
+                                    "role": "assistant",  # Display as assistant for UI consistency
+                                    "content": output[:2000] if output else "",  # Truncate like streaming
+                                    "type": "tool_result",
+                                    "toolId": tool_use_id,
+                                    "toolName": tool_names_by_id.get(tool_use_id),  # Match to tool_use
+                                    "metadata": {
+                                        "timestamp": timestamp,
+                                        "is_error": is_error
+                                    },
+                                    "streaming": False
+                                })
                         elif block.get("type") == "text":
                             # Text block in user content array
                             text = block.get("text", "")
@@ -336,22 +533,53 @@ def parse_session_history(
                             msg_counter += 1
                             tool_id = block.get("id")
                             tool_name = block.get("name")
+                            tool_input = block.get("input", {})
 
                             # Track tool name by ID for matching tool results
                             if tool_id and tool_name:
                                 tool_names_by_id[tool_id] = tool_name
 
-                            messages.append({
-                                "id": f"tool-{uuid}-{tool_id or msg_counter}",
-                                "role": "assistant",
-                                "content": "",
-                                "type": "tool_use",
-                                "toolName": tool_name,
-                                "toolId": tool_id,
-                                "toolInput": block.get("input", {}),
-                                "metadata": {"timestamp": timestamp},
-                                "streaming": False
-                            })
+                            # Check if this is a Task tool - create subagent message instead
+                            if tool_name == "Task":
+                                agent_type = tool_input.get("subagent_type", "unknown")
+                                description = tool_input.get("description", "")
+
+                                # Track this Task tool use for later matching with result
+                                task_tool_uses[tool_id] = {
+                                    "agent_type": agent_type,
+                                    "description": description
+                                }
+
+                                # For now, we don't have the agent_id from tool_use alone
+                                # We'll need to match it from tool_result or find a pattern
+                                # Create a placeholder subagent message
+                                messages.append({
+                                    "id": f"subagent-{tool_id}",
+                                    "role": "assistant",
+                                    "content": "",
+                                    "type": "subagent",
+                                    "toolId": tool_id,
+                                    "toolInput": tool_input,
+                                    "agentType": agent_type,
+                                    "agentDescription": description,
+                                    "agentStatus": "pending",  # Will be updated when we find the result
+                                    "agentChildren": [],
+                                    "metadata": {"timestamp": timestamp},
+                                    "streaming": False
+                                })
+                            else:
+                                messages.append({
+                                    "id": f"tool-{uuid}-{tool_id or msg_counter}",
+                                    "role": "assistant",
+                                    "content": "",
+                                    "type": "tool_use",
+                                    "toolName": tool_name,
+                                    "toolId": tool_id,
+                                    "toolInput": tool_input,
+                                    "toolStatus": "running",  # Will be updated when result arrives
+                                    "metadata": {"timestamp": timestamp},
+                                    "streaming": False
+                                })
 
             elif isinstance(content, str) and content:
                 # Plain string content (less common)
@@ -382,7 +610,12 @@ def get_session_cost_from_jsonl(
     Note: JSONL files don't contain total cost, only per-message usage.
     This extracts what we can find.
 
-    Returns dict with: total_tokens_in, total_tokens_out, model, etc.
+    Returns dict with:
+    - total_tokens_in: Input tokens (not including cache tokens)
+    - total_tokens_out: Output tokens
+    - cache_creation_tokens: Tokens used to create cache entries
+    - cache_read_tokens: Tokens read from cache (doesn't count toward context)
+    - model: The model used
     """
     jsonl_path = get_session_jsonl_path(sdk_session_id, working_dir)
     if not jsonl_path:
@@ -391,6 +624,9 @@ def get_session_cost_from_jsonl(
     total_input_tokens = 0
     total_output_tokens = 0
     model = None
+
+    # Track the last usage data - for cache tokens we want the final state
+    last_usage = {}
 
     for entry in parse_jsonl_file(jsonl_path):
         if entry.get("type") == "assistant":
@@ -401,15 +637,22 @@ def get_session_cost_from_jsonl(
             if not model:
                 model = message_data.get("model")
 
-            # Sum up tokens
+            # Sum up input/output tokens (these are incremental per turn)
             total_input_tokens += usage.get("input_tokens", 0)
-            total_input_tokens += usage.get("cache_creation_input_tokens", 0)
-            total_input_tokens += usage.get("cache_read_input_tokens", 0)
             total_output_tokens += usage.get("output_tokens", 0)
 
+            # Keep track of latest usage for cache tokens
+            if usage:
+                last_usage = usage
+
+    # Cache tokens from final message represent current cache state
+    # - cache_creation_input_tokens: take from last message (represents final cache size)
+    # - cache_read_input_tokens: take from last message (represents what was read last)
     return {
         "total_tokens_in": total_input_tokens,
         "total_tokens_out": total_output_tokens,
+        "cache_creation_tokens": last_usage.get("cache_creation_input_tokens", 0),
+        "cache_read_tokens": last_usage.get("cache_read_input_tokens", 0),
         "model": model
     }
 

@@ -166,19 +166,40 @@ class Project(ProjectBase):
 # Session Models
 # ============================================================================
 
+class SubagentChildMessage(BaseModel):
+    """A child message within a subagent (tool call or text)"""
+    id: str
+    type: str  # 'text', 'tool_use', 'tool_result'
+    content: str
+    toolName: Optional[str] = None
+    toolId: Optional[str] = None
+    toolInput: Optional[Dict[str, Any]] = None
+    toolResult: Optional[str] = None  # Result content for tool_use (grouped with tool call)
+    toolStatus: Optional[str] = None  # 'running', 'complete', 'error'
+    timestamp: Optional[str] = None
+
+
 class SessionMessage(BaseModel):
     """A message in a session"""
     id: Any  # Can be int from DB or string from JSONL
     role: str  # user, assistant, system, tool
     content: str
-    type: Optional[str] = None  # text, tool_use, tool_result - critical for rendering
+    type: Optional[str] = None  # text, tool_use, tool_result, subagent - critical for rendering
     tool_name: Optional[str] = None  # snake_case for DB compatibility
     tool_input: Optional[Dict[str, Any]] = None  # snake_case for DB compatibility
     toolName: Optional[str] = None  # camelCase for frontend compatibility
     toolInput: Optional[Dict[str, Any]] = None  # camelCase for frontend compatibility
     toolId: Optional[str] = None  # Tool ID for matching tool_use to tool_result
+    toolResult: Optional[str] = None  # Result content for tool_use (grouped with tool call)
+    toolStatus: Optional[str] = None  # 'running', 'complete', 'error'
     metadata: Optional[Dict[str, Any]] = None
     created_at: Optional[datetime] = None  # Optional for JSONL messages without timestamp
+    # Subagent-specific fields (for type='subagent')
+    agentId: Optional[str] = None  # The subagent's unique ID
+    agentType: Optional[str] = None  # The subagent type (e.g., 'Explore', 'Plan')
+    agentDescription: Optional[str] = None  # Task description from the Task tool
+    agentStatus: Optional[str] = None  # 'pending', 'running', 'completed', 'error'
+    agentChildren: Optional[List[SubagentChildMessage]] = None  # Nested messages from subagent
 
 
 class SessionBase(BaseModel):
@@ -201,6 +222,8 @@ class Session(SessionBase):
     total_cost_usd: float = 0.0
     total_tokens_in: int = 0
     total_tokens_out: int = 0
+    cache_creation_tokens: int = 0  # Tokens used to create cache (counts toward context)
+    cache_read_tokens: int = 0  # Tokens read from cache (doesn't count toward context)
     turn_count: int = 0
     created_at: datetime
     updated_at: datetime

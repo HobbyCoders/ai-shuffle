@@ -309,8 +309,9 @@ class JSONLRewindService:
 
             keep_entries = entries[:truncate_before]
         else:
-            # Truncate immediately after the target user message
-            keep_entries = entries[:target_index + 1]
+            # Truncate BEFORE the target user message (remove it entirely)
+            # This allows the user to re-prompt with the message content in the input field
+            keep_entries = entries[:target_index]
 
         messages_removed = len(entries) - len(keep_entries)
 

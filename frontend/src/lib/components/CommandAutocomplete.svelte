@@ -6,7 +6,7 @@
     display: string;
     description: string;
     argument_hint?: string;
-    type: 'custom' | 'interactive';
+    type: 'custom' | 'interactive' | 'sdk_builtin';
   }
 
   interface Props {
@@ -156,6 +156,10 @@
               {#if command.type === 'interactive'}
                 <span class="px-1.5 py-0.5 text-xs bg-purple-900/50 text-purple-300 rounded">
                   interactive
+                </span>
+              {:else if command.type === 'sdk_builtin'}
+                <span class="px-1.5 py-0.5 text-xs bg-green-900/50 text-green-300 rounded">
+                  builtin
                 </span>
               {:else}
                 <span class="px-1.5 py-0.5 text-xs bg-blue-900/50 text-blue-300 rounded">

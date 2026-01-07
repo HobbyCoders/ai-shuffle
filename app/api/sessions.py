@@ -117,14 +117,14 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
     # Try to load messages from JSONL file first (source of truth for consistency)
     sdk_session_id = session.get("sdk_session_id")
     messages = []
+    working_dir = "/workspace"
 
     if sdk_session_id:
         try:
-            from app.core.jsonl_parser import parse_session_history
+            from app.core.jsonl_parser import parse_session_history, get_session_cost_from_jsonl
             from app.core.config import settings
 
             # Get working dir from project if available
-            working_dir = "/workspace"
             project_id = session.get("project_id")
             if project_id:
                 project = database.get_project(project_id)
@@ -140,7 +140,7 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                     timestamp = m.get("metadata", {}).get("timestamp")
                     # Don't pass raw timestamp strings to Pydantic datetime field
                     # The frontend handles timestamp display from metadata anyway
-                    messages.append({
+                    msg_data = {
                         "id": m.get("id", i),
                         "role": m.get("role", "user"),
                         "content": m.get("content", ""),
@@ -148,11 +148,33 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                         "toolName": m.get("toolName"),  # camelCase for frontend
                         "toolInput": m.get("toolInput"),  # camelCase for frontend
                         "toolId": m.get("toolId"),
+                        "toolResult": m.get("toolResult"),  # Tool output grouped with tool_use
+                        "toolStatus": m.get("toolStatus"),  # Status: running, complete, error
                         "tool_name": m.get("toolName"),  # Also include snake_case for compatibility
                         "tool_input": m.get("toolInput"),  # Also include snake_case for compatibility
                         "metadata": m.get("metadata"),
                         "created_at": None  # Let Pydantic use default; timestamp is in metadata
-                    })
+                    }
+                    # Include subagent-specific fields if present
+                    if m.get("type") == "subagent":
+                        msg_data["agentId"] = m.get("agentId")
+                        msg_data["agentType"] = m.get("agentType")
+                        msg_data["agentDescription"] = m.get("agentDescription")
+                        msg_data["agentStatus"] = m.get("agentStatus")
+                        msg_data["agentChildren"] = m.get("agentChildren")
+                    messages.append(msg_data)
+
+            # Get token usage from JSONL - always load cache tokens since they're not in DB
+            # Also load input/output tokens if database doesn't have them
+            usage_data = get_session_cost_from_jsonl(sdk_session_id, working_dir)
+            if usage_data:
+                # Cache tokens are only in JSONL, always use those
+                session["cache_creation_tokens"] = usage_data.get("cache_creation_tokens", 0)
+                session["cache_read_tokens"] = usage_data.get("cache_read_tokens", 0)
+                # Input/output tokens - use JSONL if DB doesn't have them
+                if session.get("total_tokens_in", 0) == 0 and session.get("total_tokens_out", 0) == 0:
+                    session["total_tokens_in"] = usage_data.get("total_tokens_in", 0)
+                    session["total_tokens_out"] = usage_data.get("total_tokens_out", 0)
         except Exception as e:
             # Log the error but don't fail - fall back to database
             logger.error(f"Failed to parse JSONL for session {session_id}: {e}")

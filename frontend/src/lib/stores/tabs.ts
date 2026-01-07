@@ -21,7 +21,20 @@ export interface ApiUser {
 	last_used_at?: string;
 }
 
-export type MessageType = 'text' | 'tool_use' | 'tool_result';
+export type MessageType = 'text' | 'tool_use' | 'tool_result' | 'system' | 'subagent';
+
+// Subagent child message - represents a single tool call or text from a subagent
+export interface SubagentChildMessage {
+	id: string;
+	type: 'text' | 'tool_use' | 'tool_result';
+	content: string;
+	toolName?: string;
+	toolId?: string;
+	toolInput?: Record<string, unknown>;
+	toolResult?: string; // Result content for tool_use (grouped with tool call)
+	toolStatus?: 'running' | 'complete' | 'error'; // Status of tool execution
+	timestamp?: string;
+}
 
 export interface ChatMessage {
 	id: string;
@@ -31,8 +44,18 @@ export interface ChatMessage {
 	toolName?: string;
 	toolId?: string;
 	toolInput?: Record<string, unknown>;
+	toolResult?: string; // Result content for tool_use messages (grouped with tool call)
+	toolStatus?: 'running' | 'complete' | 'error'; // Status of tool execution
 	metadata?: Record<string, unknown>;
 	streaming?: boolean;
+	systemSubtype?: string; // For system messages (e.g., 'context' for /context command)
+	systemData?: Record<string, unknown>; // Raw data from system message
+	// Subagent-specific fields
+	agentId?: string; // The subagent's unique ID (e.g., '00ed8f4d')
+	agentType?: string; // The subagent type (e.g., 'Explore', 'Plan')
+	agentDescription?: string; // Task description from the Task tool
+	agentStatus?: 'pending' | 'running' | 'completed' | 'error'; // Current status
+	agentChildren?: SubagentChildMessage[]; // Nested messages from subagent execution
 }
 
 export interface Project {
@@ -384,7 +407,8 @@ function createTabsStore() {
 						msgType = m.role as MessageType;
 					}
 
-					return {
+					// Build the chat message with all fields
+					const chatMessage: ChatMessage = {
 						id: String(m.id || `msg-${i}`),
 						role: (m.role === 'tool_use' || m.role === 'tool_result' ? 'assistant' : m.role) as 'user' | 'assistant',
 						content: m.content as string,
@@ -392,9 +416,22 @@ function createTabsStore() {
 						toolName: (m.toolName || m.tool_name) as string | undefined,
 						toolId: m.toolId as string | undefined,
 						toolInput: (m.toolInput || m.tool_input) as Record<string, unknown> | undefined,
+						toolResult: m.toolResult as string | undefined,
+						toolStatus: m.toolStatus as 'running' | 'complete' | 'error' | undefined,
 						metadata: m.metadata as Record<string, unknown>,
 						streaming: false
 					};
+
+					// Add subagent-specific fields if present
+					if (msgType === 'subagent') {
+						chatMessage.agentId = m.agentId as string | undefined;
+						chatMessage.agentType = m.agentType as string | undefined;
+						chatMessage.agentDescription = m.agentDescription as string | undefined;
+						chatMessage.agentStatus = m.agentStatus as 'pending' | 'running' | 'completed' | 'error' | undefined;
+						chatMessage.agentChildren = m.agentChildren as SubagentChildMessage[] | undefined;
+					}
+
+					return chatMessage;
 				}) || [];
 
 				updateTab(tabId, {
@@ -498,6 +535,7 @@ function createTabsStore() {
 							toolName: data.name as string,
 							toolId: data.id as string,
 							toolInput: data.input as Record<string, unknown>,
+							toolStatus: 'running',
 							streaming: true
 						});
 
@@ -508,47 +546,50 @@ function createTabsStore() {
 			}
 
 			case 'tool_result': {
+				// Group tool result with its corresponding tool_use message
+				const toolUseId = data.tool_use_id as string;
+				const output = data.output as string;
+
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
 						if (tab.id !== tabId) return tab;
 
-						const messages = [...tab.messages];
-						const toolUseId = data.tool_use_id as string;
+						let messages = [...tab.messages];
 
-						// Find and update the matching tool_use message
-						// First try to match by toolId, then fall back to any streaming tool
-						let foundByToolId = false;
+						// Find the matching tool_use message and embed the result
+						let found = false;
 						for (let i = messages.length - 1; i >= 0; i--) {
 							const m = messages[i];
 							if (m.type === 'tool_use' && m.toolId === toolUseId) {
-								messages[i] = { ...m, streaming: false };
-								foundByToolId = true;
+								messages[i] = {
+									...m,
+									toolResult: output,
+									toolStatus: 'complete',
+									streaming: false
+								};
+								found = true;
 								break;
 							}
 						}
 
-						// If not found by toolId, update any streaming tool_use message
-						if (!foundByToolId) {
+						// Fallback: if not found by toolId, try any running tool_use
+						if (!found) {
 							for (let i = messages.length - 1; i >= 0; i--) {
 								const m = messages[i];
-								if (m.type === 'tool_use' && m.streaming) {
-									messages[i] = { ...m, streaming: false };
+								if (m.type === 'tool_use' && m.toolStatus === 'running') {
+									messages[i] = {
+										...m,
+										toolResult: output,
+										toolStatus: 'complete',
+										streaming: false
+									};
 									break;
 								}
 							}
 						}
 
-						messages.push({
-							id: `result-${Date.now()}`,
-							role: 'assistant',
-							content: data.output as string,
-							type: 'tool_result',
-							toolName: data.name as string,
-							toolId: toolUseId,
-							streaming: false
-						});
-
+						// Add streaming text placeholder for continuation
 						messages.push({
 							id: `text-${Date.now()}-cont`,
 							role: 'assistant',
@@ -608,11 +649,12 @@ function createTabsStore() {
 							isStreaming: false,
 							sessionId: data.session_id as string || tab.sessionId,
 							title,
-							// Accumulate tokens (add to existing totals)
+							// Accumulate input/output tokens (add to existing totals)
 							totalTokensIn: tab.totalTokensIn + tokensIn,
 							totalTokensOut: tab.totalTokensOut + tokensOut,
-							totalCacheCreationTokens: tab.totalCacheCreationTokens + cacheCreationTokens,
-							totalCacheReadTokens: tab.totalCacheReadTokens + cacheReadTokens
+							// Cache tokens represent current state, not incremental - use latest values
+							totalCacheCreationTokens: cacheCreationTokens,
+							totalCacheReadTokens: cacheReadTokens
 						};
 					})
 				}));
@@ -687,6 +729,265 @@ function createTabsStore() {
 				if (ws?.readyState === WebSocket.OPEN) {
 					ws.send(JSON.stringify({ type: 'pong' }));
 				}
+				break;
+			}
+
+			case 'system': {
+				// Handle system messages from SDK (e.g., /context command output)
+				const subtype = data.subtype as string;
+				const systemData = data.data as Record<string, unknown>;
+
+				console.log('[WS] System message received:', subtype, systemData);
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+
+						// First, mark any streaming text message as complete
+						let messages = tab.messages.map(m =>
+							m.streaming ? { ...m, streaming: false } : m
+						);
+						// Remove empty streaming text messages
+						messages = messages.filter(
+							m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
+						);
+
+						// Add the system message
+						messages.push({
+							id: `system-${Date.now()}`,
+							role: 'system' as const,
+							content: JSON.stringify(systemData, null, 2),
+							type: 'system' as const,
+							systemSubtype: subtype,
+							systemData: systemData,
+							streaming: false
+						});
+
+						return { ...tab, messages };
+					})
+				}));
+				break;
+			}
+
+			case 'subagent_start': {
+				// Subagent task started - create a new subagent message group
+				const agentId = data.agent_id as string;
+				const agentType = data.agent_type as string;
+				const description = data.description as string;
+				const toolId = data.tool_id as string; // The tool_use ID that launched this subagent
+
+				console.log('[WS] Subagent started:', agentId, agentType, description);
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+
+						let messages = [...tab.messages];
+
+						// Find and mark the Task tool_use as not streaming
+						const toolUseIdx = messages.findIndex(m => m.type === 'tool_use' && m.toolId === toolId);
+						if (toolUseIdx !== -1) {
+							messages[toolUseIdx] = { ...messages[toolUseIdx], streaming: false };
+						}
+
+						// Mark any streaming text message as complete
+						const streamingIdx = messages.findLastIndex(
+							m => m.type === 'text' && m.role === 'assistant' && m.streaming
+						);
+						if (streamingIdx !== -1) {
+							if (messages[streamingIdx].content) {
+								messages[streamingIdx] = { ...messages[streamingIdx], streaming: false };
+							} else {
+								messages = messages.filter((_, i) => i !== streamingIdx);
+							}
+						}
+
+						// Add subagent message group
+						messages.push({
+							id: `subagent-${agentId}`,
+							role: 'assistant',
+							content: '',
+							type: 'subagent',
+							toolId: toolId,
+							agentId: agentId,
+							agentType: agentType,
+							agentDescription: description,
+							agentStatus: 'running',
+							agentChildren: [],
+							streaming: true
+						});
+
+						return { ...tab, messages };
+					})
+				}));
+				break;
+			}
+
+			case 'subagent_tool_use': {
+				// Tool use within a subagent - add to the subagent's children
+				const agentId = data.agent_id as string;
+				const toolName = data.name as string;
+				const toolId = data.id as string;
+				const toolInput = data.input as Record<string, unknown>;
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+
+						const messages = tab.messages.map(m => {
+							if (m.type === 'subagent' && m.agentId === agentId) {
+								const children = [...(m.agentChildren || [])];
+								children.push({
+									id: `${agentId}-tool-${toolId}`,
+									type: 'tool_use',
+									content: '',
+									toolName: toolName,
+									toolId: toolId,
+									toolInput: toolInput,
+									toolStatus: 'running'
+								});
+								return { ...m, agentChildren: children };
+							}
+							return m;
+						});
+
+						return { ...tab, messages };
+					})
+				}));
+				break;
+			}
+
+			case 'subagent_tool_result': {
+				// Tool result within a subagent - embed in matching tool_use child
+				const agentId = data.agent_id as string;
+				const toolUseId = data.tool_use_id as string;
+				const output = data.output as string;
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+
+						const messages = tab.messages.map(m => {
+							if (m.type === 'subagent' && m.agentId === agentId) {
+								const children = [...(m.agentChildren || [])];
+								// Find matching tool_use and embed result
+								let found = false;
+								for (let i = children.length - 1; i >= 0; i--) {
+									if (children[i].type === 'tool_use' && children[i].toolId === toolUseId) {
+										children[i] = {
+											...children[i],
+											toolResult: output,
+											toolStatus: 'complete'
+										};
+										found = true;
+										break;
+									}
+								}
+								// Fallback: try any running tool_use
+								if (!found) {
+									for (let i = children.length - 1; i >= 0; i--) {
+										if (children[i].type === 'tool_use' && children[i].toolStatus === 'running') {
+											children[i] = {
+												...children[i],
+												toolResult: output,
+												toolStatus: 'complete'
+											};
+											break;
+										}
+									}
+								}
+								return { ...m, agentChildren: children };
+							}
+							return m;
+						});
+
+						return { ...tab, messages };
+					})
+				}));
+				break;
+			}
+
+			case 'subagent_chunk': {
+				// Text chunk from subagent - add to children or update last text child
+				const agentId = data.agent_id as string;
+				const content = data.content as string;
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+
+						const messages = tab.messages.map(m => {
+							if (m.type === 'subagent' && m.agentId === agentId) {
+								const children = [...(m.agentChildren || [])];
+								const lastChild = children[children.length - 1];
+
+								if (lastChild && lastChild.type === 'text') {
+									// Append to existing text child
+									children[children.length - 1] = {
+										...lastChild,
+										content: lastChild.content + content
+									};
+								} else {
+									// Create new text child
+									children.push({
+										id: `${agentId}-text-${Date.now()}`,
+										type: 'text',
+										content: content
+									});
+								}
+								return { ...m, agentChildren: children };
+							}
+							return m;
+						});
+
+						return { ...tab, messages };
+					})
+				}));
+				break;
+			}
+
+			case 'subagent_done': {
+				// Subagent completed - update status and store final result
+				const agentId = data.agent_id as string;
+				const result = data.result as string | undefined;
+				const isError = data.is_error as boolean | undefined;
+
+				console.log('[WS] Subagent done:', agentId, isError ? 'error' : 'success');
+
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+
+						const messages = tab.messages.map(m => {
+							if (m.type === 'subagent' && m.agentId === agentId) {
+								return {
+									...m,
+									content: result || '',
+									agentStatus: isError ? 'error' as const : 'completed' as const,
+									streaming: false
+								};
+							}
+							return m;
+						});
+
+						// Add new streaming text placeholder for main agent to continue
+						messages.push({
+							id: `text-${Date.now()}-cont`,
+							role: 'assistant' as const,
+							content: '',
+							type: 'text' as const,
+							streaming: true
+						});
+
+						return { ...tab, messages };
+					})
+				}));
 				break;
 			}
 		}
@@ -1003,6 +1304,16 @@ function createTabsStore() {
 		async loadSessionInTab(tabId: string, sessionId: string) {
 			try {
 				const session = await api.get<Session & { messages: Array<Record<string, unknown>> }>(`/sessions/${sessionId}`);
+				// Debug: log subagent messages from API response
+				const subagentMsgs = session.messages.filter(m => m.type === 'subagent');
+				if (subagentMsgs.length > 0) {
+					console.log('[tabs] Subagent messages from API:', subagentMsgs.map(m => ({
+						type: m.type,
+						agentId: m.agentId,
+						agentStatus: m.agentStatus,
+						agentChildrenCount: (m.agentChildren as unknown[])?.length || 0
+					})));
+				}
 				const messages: ChatMessage[] = session.messages.map((m, i) => {
 					// Determine message type - JSONL messages have explicit 'type' field
 					let msgType: MessageType | undefined = m.type as MessageType | undefined;
@@ -1014,7 +1325,8 @@ function createTabsStore() {
 						msgType = m.role as MessageType;
 					}
 
-					return {
+					// Build the chat message with all fields
+					const chatMessage: ChatMessage = {
 						id: String(m.id || `msg-${i}`),
 						role: (m.role === 'tool_use' || m.role === 'tool_result' ? 'assistant' : m.role) as 'user' | 'assistant',
 						content: m.content as string,
@@ -1022,9 +1334,22 @@ function createTabsStore() {
 						toolName: (m.toolName || m.tool_name) as string | undefined,
 						toolId: m.toolId as string | undefined,
 						toolInput: (m.toolInput || m.tool_input) as Record<string, unknown> | undefined,
+						toolResult: m.toolResult as string | undefined,
+						toolStatus: m.toolStatus as 'running' | 'complete' | 'error' | undefined,
 						metadata: m.metadata as Record<string, unknown>,
 						streaming: false
 					};
+
+					// Add subagent-specific fields if present
+					if (msgType === 'subagent') {
+						chatMessage.agentId = m.agentId as string | undefined;
+						chatMessage.agentType = m.agentType as string | undefined;
+						chatMessage.agentDescription = m.agentDescription as string | undefined;
+						chatMessage.agentStatus = m.agentStatus as 'pending' | 'running' | 'completed' | 'error' | undefined;
+						chatMessage.agentChildren = m.agentChildren as SubagentChildMessage[] | undefined;
+					}
+
+					return chatMessage;
 				});
 
 				// Generate title from first user message
@@ -1041,9 +1366,9 @@ function createTabsStore() {
 					error: null,
 					totalTokensIn: session.total_tokens_in || 0,
 					totalTokensOut: session.total_tokens_out || 0,
-					// Cache tokens are not persisted in database, reset for session
-					totalCacheCreationTokens: 0,
-					totalCacheReadTokens: 0
+					// Cache tokens from JSONL file (if available)
+					totalCacheCreationTokens: session.cache_creation_tokens || 0,
+					totalCacheReadTokens: session.cache_read_tokens || 0
 				});
 
 				// Save tabs state (debounced)

@@ -440,13 +440,45 @@ class CheckpointManager:
         stored_checkpoints = database.get_session_checkpoints(session_id)
         stored_by_uuid = {cp['message_uuid']: cp for cp in stored_checkpoints}
 
+        # Build index-to-git_ref mapping for efficient lookup of git_refs after each checkpoint
+        # and find the git_ref to restore to for each checkpoint
+        index_to_git_ref = {}
+        for stored_cp in stored_checkpoints:
+            if stored_cp.get('git_ref'):
+                index_to_git_ref[stored_cp.get('message_index', 0)] = stored_cp.get('git_ref')
+
+        # For each checkpoint index, find the git_ref to restore to (closest at or before)
+        # and whether there are any changes after it
+        def find_restore_git_ref(target_index: int) -> Optional[str]:
+            """Find closest git_ref at or before target_index"""
+            for idx in sorted(index_to_git_ref.keys(), reverse=True):
+                if idx <= target_index:
+                    return index_to_git_ref[idx]
+            return None
+
+        def has_changes_after(target_index: int) -> bool:
+            """Check if any git_ref exists after target_index"""
+            return any(idx > target_index for idx in index_to_git_ref.keys())
+
         # Convert to full checkpoints
         checkpoints = []
         for cp in chat_checkpoints:
             # Look up stored checkpoint for git_ref
             stored = stored_by_uuid.get(cp.uuid)
             git_ref = stored.get('git_ref') if stored else None
-            has_git_snapshot = git_ref is not None
+            cp_index = cp.index
+
+            # Determine the git_ref to restore to for this checkpoint
+            restore_git_ref = find_restore_git_ref(cp_index)
+
+            # Determine if there are code changes after this checkpoint
+            has_code_changes_after = has_changes_after(cp_index)
+
+            # git_available is True if:
+            # 1. There's a git_ref to restore to (at or before this checkpoint), OR
+            # 2. Git repo is available for new snapshots (fallback)
+            # AND there are changes after this checkpoint to revert
+            can_restore_code = (restore_git_ref is not None or git_repo_available) and has_code_changes_after
 
             full_cp = {
                 'id': f"{session_id}:{cp.uuid}",
@@ -455,10 +487,11 @@ class CheckpointManager:
                 'message_uuid': cp.uuid,
                 'message_preview': cp.message_preview,
                 'full_message': cp.full_message,
-                'message_index': cp.index,
+                'message_index': cp_index,
                 'timestamp': cp.timestamp,
-                'git_available': has_git_snapshot or git_repo_available,  # Can restore if has snapshot or repo available
-                'git_ref': git_ref
+                'git_available': can_restore_code,  # True if code restore is meaningful
+                'git_ref': restore_git_ref,  # The git_ref we would restore TO (at or before this checkpoint)
+                'has_changes_after': has_code_changes_after  # Whether there are git changes after this checkpoint
             }
             checkpoints.append(full_cp)
 
@@ -745,11 +778,86 @@ class CheckpointManager:
             logger.error(f"Failed to cleanup checkpoints after rewind: {e}")
 
     def _find_git_ref_for_checkpoint(self, session_id: str, target_uuid: str) -> Optional[str]:
-        """Find the git ref associated with a checkpoint from database."""
-        checkpoint = database.get_checkpoint_by_message_uuid(session_id, target_uuid)
-        if checkpoint and checkpoint.get('git_ref'):
-            return checkpoint['git_ref']
+        """
+        Find the git ref to restore to for a checkpoint.
+
+        This looks for the most recent git_ref AT OR BEFORE the target checkpoint.
+        If the target checkpoint has no git_ref, we find the closest earlier one,
+        which represents the state the code was in at that point in time.
+
+        Args:
+            session_id: Our internal session ID
+            target_uuid: The UUID of the target message
+
+        Returns:
+            Git ref to restore to, or None if no snapshots exist
+        """
+        # Get the target checkpoint to find its index
+        target_checkpoint = database.get_checkpoint_by_message_uuid(session_id, target_uuid)
+        if not target_checkpoint:
+            return None
+
+        # If target has a git_ref, use it directly
+        if target_checkpoint.get('git_ref'):
+            return target_checkpoint['git_ref']
+
+        # Otherwise, find the most recent checkpoint with a git_ref at or before target
+        target_index = target_checkpoint.get('message_index', 0)
+        all_checkpoints = database.get_session_checkpoints(session_id)
+
+        # Sort by message_index descending and find first one at or before target with git_ref
+        for cp in sorted(all_checkpoints, key=lambda x: x.get('message_index', 0), reverse=True):
+            cp_index = cp.get('message_index', 0)
+            if cp_index <= target_index and cp.get('git_ref'):
+                return cp['git_ref']
+
         return None
+
+    def _find_latest_git_ref_after_checkpoint(self, session_id: str, target_uuid: str) -> Optional[str]:
+        """
+        Find the most recent git_ref that exists AFTER a checkpoint.
+
+        This is used to determine if there are any code changes to revert.
+        If there's a git_ref after the target checkpoint, there are changes
+        that would need to be reverted.
+
+        Args:
+            session_id: Our internal session ID
+            target_uuid: The UUID of the target message
+
+        Returns:
+            Latest git_ref after the target, or None if no changes after target
+        """
+        # Get the target checkpoint to find its index
+        target_checkpoint = database.get_checkpoint_by_message_uuid(session_id, target_uuid)
+        if not target_checkpoint:
+            return None
+
+        target_index = target_checkpoint.get('message_index', 0)
+        all_checkpoints = database.get_session_checkpoints(session_id)
+
+        # Find any checkpoint after target with a git_ref
+        for cp in sorted(all_checkpoints, key=lambda x: x.get('message_index', 0), reverse=True):
+            cp_index = cp.get('message_index', 0)
+            if cp_index > target_index and cp.get('git_ref'):
+                return cp['git_ref']
+
+        return None
+
+    def has_code_changes_after_checkpoint(self, session_id: str, target_uuid: str) -> bool:
+        """
+        Check if there are any code changes (git snapshots) after a checkpoint.
+
+        This is used to determine if the "Restore code" option should be available.
+
+        Args:
+            session_id: Our internal session ID
+            target_uuid: The UUID of the target message
+
+        Returns:
+            True if there are git snapshots after the target checkpoint
+        """
+        return self._find_latest_git_ref_after_checkpoint(session_id, target_uuid) is not None
 
     def _count_changed_files(self, working_dir: str, git_ref: str) -> int:
         """Count files that would be changed by restoring a git ref."""
