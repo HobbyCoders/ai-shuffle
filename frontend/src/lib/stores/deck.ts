@@ -1245,6 +1245,14 @@ function createDeckStore() {
 		},
 
 		/**
+		 * Find a card by a metadata key-value pair
+		 */
+		findCardByMeta(key: string, value: unknown): DeckCard | undefined {
+			const state = get({ subscribe });
+			return state.cards.find((c) => c.meta && c.meta[key] === value);
+		},
+
+		/**
 		 * Open or focus an existing card for a dataId
 		 */
 		openOrFocusCard(
