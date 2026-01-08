@@ -23,7 +23,7 @@ from app.core.cleanup_manager import cleanup_manager
 from app.core import encryption
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, knowledge, rate_limits, github, git, studio, plugins, user_self_service, meshy, notes, hooks
+from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, user_self_service, meshy, notes, hooks
 
 # Import middleware
 from app.middleware.rate_limit import RateLimitMiddleware
@@ -284,7 +284,6 @@ app.include_router(search.router)
 app.include_router(templates.router)
 app.include_router(webhooks.router)
 app.include_router(security.router)
-app.include_router(knowledge.router)
 app.include_router(rate_limits.router)
 app.include_router(github.router)
 app.include_router(git.router)
