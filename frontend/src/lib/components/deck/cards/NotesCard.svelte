@@ -207,10 +207,31 @@
 		}
 	}
 
-	// Mark as having unsaved changes
+	// Mark as having unsaved changes and trigger autosave
 	function markDirty() {
 		hasUnsavedChanges = true;
+
+		// Clear existing timeout
+		if (saveTimeout) {
+			clearTimeout(saveTimeout);
+		}
+
+		// Only autosave if we have a title (required field)
+		if (editorTitle.trim()) {
+			saveTimeout = setTimeout(() => {
+				saveNote();
+			}, 1000); // Autosave after 1 second of inactivity
+		}
 	}
+
+	// Cleanup timeout on component destroy
+	onMount(() => {
+		return () => {
+			if (saveTimeout) {
+				clearTimeout(saveTimeout);
+			}
+		};
+	});
 
 	// Add a tag
 	function addTag() {
@@ -354,15 +375,17 @@
 						<div class="note-header">
 							{#if note.is_pinned}
 								<span class="pin-icon">
-									<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-										<path d="M16 3h-2v6.586l-4.707-4.707-1.414 1.414L12.586 11l-7.293 7.293 1.414 1.414L14 12.414V19h2V3z"/>
+									<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+										<line x1="12" y1="17" x2="12" y2="22"/>
+										<path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/>
 									</svg>
 								</span>
 							{/if}
 							<span class="note-title">{note.title}</span>
 							<button class="pin-btn" onclick={(e) => togglePin(note, e)} title={note.is_pinned ? 'Unpin' : 'Pin'}>
-								<svg width="14" height="14" viewBox="0 0 24 24" fill={note.is_pinned ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="2">
-									<path d="M16 3h-2v6.586l-4.707-4.707-1.414 1.414L12.586 11l-7.293 7.293 1.414 1.414L14 12.414V19h2V3z"/>
+								<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+									<line x1="12" y1="17" x2="12" y2="22"/>
+									<path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/>
 								</svg>
 							</button>
 						</div>
@@ -405,6 +428,9 @@
 				Back
 			</button>
 			<div class="editor-actions">
+				{#if saving}
+					<span class="autosave-status">Saving...</span>
+				{/if}
 				{#if editingNote}
 					<button class="delete-btn" onclick={handleDelete} title="Delete note">
 						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -413,13 +439,6 @@
 						</svg>
 					</button>
 				{/if}
-				<button
-					class="save-btn"
-					onclick={saveNote}
-					disabled={saving || !editorTitle.trim()}
-				>
-					{saving ? 'Saving...' : 'Save'}
-				</button>
 			</div>
 		</div>
 
@@ -487,9 +506,6 @@
 			{/if}
 		</div>
 
-		{#if hasUnsavedChanges}
-			<div class="unsaved-indicator">Unsaved changes</div>
-		{/if}
 	</div>
 {/snippet}
 
@@ -640,7 +656,6 @@
 		display: flex;
 		flex-direction: column;
 		gap: 6px;
-		width: 100%;
 		padding: 12px;
 		background: var(--muted);
 		border: 1px solid transparent;
@@ -665,7 +680,6 @@
 	.pin-icon {
 		color: var(--primary);
 		flex-shrink: 0;
-		margin-left: 2px;
 	}
 
 	.note-title {
@@ -692,8 +706,6 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		margin: -4px;
-		margin-right: -4px;
 		flex-shrink: 0;
 	}
 
@@ -836,20 +848,12 @@
 		background: rgba(239, 68, 68, 0.1);
 	}
 
-	.save-btn {
-		padding: 6px 16px;
-		background: var(--primary);
-		color: var(--primary-foreground);
-		border: none;
-		border-radius: 6px;
-		font-size: 14px;
-		font-weight: 500;
-		cursor: pointer;
-	}
-
-	.save-btn:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
+	.autosave-status {
+		font-size: 12px;
+		color: var(--muted-foreground);
+		display: flex;
+		align-items: center;
+		gap: 4px;
 	}
 
 	.title-input {
@@ -1034,12 +1038,4 @@
 		font-style: italic;
 	}
 
-	/* Unsaved Indicator */
-	.unsaved-indicator {
-		padding: 4px 12px;
-		background: rgba(234, 179, 8, 0.1);
-		color: rgb(234, 179, 8);
-		font-size: 12px;
-		text-align: center;
-	}
 </style>
