@@ -238,8 +238,8 @@
 		Bash: 'terminal',
 		// Web
 		WebFetch: 'globe', WebSearch: 'globe',
-		// Agent
-		Task: 'bot',
+		// Agent / Skills
+		Task: 'bot', Skill: 'bot',
 		// Todo
 		TodoWrite: 'list',
 	};
@@ -253,6 +253,7 @@
 		// Use the description field that tools provide, fallback to path/pattern fields
 		return String(
 			toolInput.description ||
+			toolInput.skill ||  // Skill tool - show skill name
 			toolInput.file_path ||
 			toolInput.path ||
 			toolInput.notebook_path ||
@@ -273,7 +274,7 @@
 			return getToolSummary(parsed);
 		} catch {
 			// Fallback: extract fields via regex from incomplete JSON (in priority order)
-			const fields = ['description', 'file_path', 'path', 'notebook_path', 'pattern', 'glob', 'query', 'command', 'prompt'];
+			const fields = ['description', 'skill', 'file_path', 'path', 'notebook_path', 'pattern', 'glob', 'query', 'command', 'prompt'];
 			for (const field of fields) {
 				const value = extractFieldFromPartial(partial, field);
 				if (value) return value;
