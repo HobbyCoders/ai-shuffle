@@ -3729,6 +3729,8 @@ function createTabsStore() {
 			// and immediately process the new message
 			if (tab.isStreaming && tab.sessionId) {
 				console.log(`[Tab ${tabId}] Interrupting and sending new message: ${prompt.substring(0, 50)}...`);
+				// Update lastMessageTime to reset health check timer
+				tabLastMessageTime.set(tabId, Date.now());
 				ws.send(JSON.stringify({
 					type: 'interrupt_and_query',
 					prompt,
@@ -3749,6 +3751,13 @@ function createTabsStore() {
 			}
 
 			// Send query
+			// Update lastMessageTime BEFORE sending to prevent health check from
+			// closing the connection while waiting for server response.
+			// The health check uses this timestamp to detect stale connections,
+			// but without this update, sending a message + setting isStreaming=true
+			// could trigger the 15s streaming timeout before the server responds.
+			tabLastMessageTime.set(tabId, Date.now());
+
 			ws.send(JSON.stringify({
 				type: 'query',
 				prompt,
