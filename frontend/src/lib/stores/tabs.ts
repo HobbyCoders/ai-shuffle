@@ -2568,20 +2568,58 @@ function createTabsStore() {
 				}
 
 				// Reload full session with messages from backend
-				// This is the single source of truth for:
-				// - Token counts (total_tokens_in, total_tokens_out, etc.)
-				// - Cost/duration metadata on messages (populated by backend from usage_log)
-				// Add a small delay to ensure JSONL is fully written by the SDK
+				// This ensures we have complete JSONL-based message content and token counts.
+				// The metadata from the done event is already applied above, so we need to
+				// preserve it if the reload doesn't include metadata (race condition with JSONL write).
+				// Use longer delay to give SDK time to flush JSONL writes.
 				if (sessionId) {
-					setTimeout(() => {
-						// Use loadSessionInTab to reload messages with proper metadata
-						// This ensures cost/duration is shown correctly on all final messages
-						tabs.loadSessionInTab(tabId, sessionId).then(() => {
-							console.log('[Tab] Reloaded session with metadata after streaming:', sessionId);
-						}).catch(err => {
-							console.error('[Tab] Failed to reload session after streaming:', err);
-						});
-					}, 500); // 500ms delay for JSONL write completion
+					setTimeout(async () => {
+						try {
+							// Get current state to preserve metadata if reload doesn't include it
+							const currentTab = getTab(tabId);
+							const currentLastAssistantIdx = currentTab?.messages.findLastIndex(m => m.role === 'assistant');
+							const currentMetadata = currentLastAssistantIdx !== undefined && currentLastAssistantIdx !== -1
+								? currentTab?.messages[currentLastAssistantIdx]?.metadata
+								: undefined;
+
+							const success = await tabs.loadSessionInTab(tabId, sessionId);
+							if (success) {
+								console.log('[Tab] Reloaded session with messages after streaming:', sessionId);
+
+								// If the reloaded data doesn't have metadata but we had it before,
+								// restore the metadata from the done event
+								const reloadedTab = getTab(tabId);
+								if (reloadedTab && currentMetadata) {
+									const lastAssistantIdx = reloadedTab.messages.findLastIndex(m => m.role === 'assistant');
+									if (lastAssistantIdx !== -1) {
+										const lastMsg = reloadedTab.messages[lastAssistantIdx];
+										// Only restore if the reloaded message doesn't have cost/duration metadata
+										if (!lastMsg.metadata?.cost_usd && !lastMsg.metadata?.total_cost_usd) {
+											console.log('[Tab] Restoring metadata from done event that was lost in reload');
+											update(s => ({
+												...s,
+												tabs: s.tabs.map(t => {
+													if (t.id !== tabId) return t;
+													const messages = [...t.messages];
+													if (messages[lastAssistantIdx]) {
+														messages[lastAssistantIdx] = {
+															...messages[lastAssistantIdx],
+															metadata: { ...messages[lastAssistantIdx].metadata, ...currentMetadata }
+														};
+													}
+													return { ...t, messages };
+												})
+											}));
+										}
+									}
+								}
+							}
+						} catch (err) {
+							// Log but don't fail - we already have the messages from streaming
+							// The metadata from done event is already applied
+							console.warn('[Tab] Failed to reload session after streaming, keeping streamed data:', err);
+						}
+					}, 1000); // 1000ms delay to give SDK more time to flush JSONL
 				}
 
 				// Refresh sessions list
