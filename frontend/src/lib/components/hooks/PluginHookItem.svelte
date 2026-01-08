@@ -69,7 +69,7 @@
 		padding: 12px;
 		background: var(--secondary);
 		border: 1px dashed var(--border);
-		border-radius: 8px;
+		border-radius: var(--radius, 0.75rem);
 	}
 
 	.hook-icon {
@@ -78,7 +78,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		background: color-mix(in oklch, var(--muted-foreground) 15%, transparent);
 		color: var(--muted-foreground);
 		flex-shrink: 0;
@@ -107,7 +107,7 @@
 		padding: 2px 6px;
 		font-size: 0.6875rem;
 		font-weight: 500;
-		border-radius: 4px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 		background: color-mix(in oklch, var(--event-color) 15%, transparent);
 		color: var(--event-color);
 	}
@@ -116,7 +116,7 @@
 		padding: 2px 6px;
 		font-size: 0.6875rem;
 		font-family: monospace;
-		border-radius: 4px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 		background: var(--muted);
 		color: var(--muted-foreground);
 	}
@@ -145,7 +145,7 @@
 		padding: 2px 8px;
 		font-size: 0.6875rem;
 		font-weight: 500;
-		border-radius: 4px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 		background: var(--muted);
 		color: var(--muted-foreground);
 		flex-shrink: 0;

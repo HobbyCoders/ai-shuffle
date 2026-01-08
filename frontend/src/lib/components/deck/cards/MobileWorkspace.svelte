@@ -306,7 +306,7 @@
 		justify-content: center;
 		background: transparent;
 		border: none;
-		border-radius: 10px;
+		border-radius: var(--radius, 0.75rem);
 		color: hsl(var(--foreground));
 		cursor: pointer;
 		transition: all 0.15s ease;
@@ -378,7 +378,7 @@
 		height: 16px;
 		padding: 0 4px;
 		background: hsl(var(--primary));
-		border-radius: 8px;
+		border-radius: var(--radius, 0.75rem);
 		font-size: 0.625rem;
 		font-weight: 600;
 		color: hsl(var(--primary-foreground));

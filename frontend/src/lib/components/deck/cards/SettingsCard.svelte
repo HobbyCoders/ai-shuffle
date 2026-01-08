@@ -2136,7 +2136,7 @@
 		height: 24px;
 		background: var(--muted);
 		border: 1px solid var(--border);
-		border-radius: 12px;
+		border-radius: var(--radius, 0.75rem);
 		cursor: pointer;
 		transition: all 200ms ease;
 		flex-shrink: 0;
@@ -2154,7 +2154,7 @@
 	.toggle.small {
 		width: 36px;
 		height: 20px;
-		border-radius: 10px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.83);
 	}
 
 	.toggle-knob {
@@ -2344,7 +2344,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		border-radius: 8px;
+		border-radius: var(--radius, 0.75rem);
 		color: white;
 	}
 
@@ -2409,7 +2409,7 @@
 		color: var(--muted-foreground);
 		background: var(--secondary);
 		padding: 2px 6px;
-		border-radius: 4px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 	}
 
 	.api-key-input {
@@ -2441,7 +2441,7 @@
 	.slider {
 		width: 100%;
 		height: 6px;
-		border-radius: 3px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.25);
 		background: var(--muted);
 		appearance: none;
 		cursor: pointer;
@@ -2533,7 +2533,7 @@
 		height: 32px;
 		background: transparent;
 		border: none;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		color: var(--muted-foreground);
 		cursor: pointer;
 		transition: all 150ms ease;
@@ -2604,7 +2604,7 @@
 		margin-top: 6px;
 		padding: 8px;
 		background: var(--muted);
-		border-radius: 4px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 		font-family: monospace;
 		font-size: 0.75rem;
 		word-break: break-all;

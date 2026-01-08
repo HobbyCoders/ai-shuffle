@@ -122,7 +122,7 @@
 		padding: 12px;
 		background: var(--card);
 		border: 1px solid var(--border);
-		border-radius: 8px;
+		border-radius: var(--radius, 0.75rem);
 		transition: all 150ms ease;
 	}
 
@@ -140,7 +140,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		flex-shrink: 0;
 	}
 
@@ -177,7 +177,7 @@
 		padding: 2px 6px;
 		font-size: 0.6875rem;
 		font-weight: 500;
-		border-radius: 4px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 		background: color-mix(in oklch, var(--event-color) 15%, transparent);
 		color: var(--event-color);
 	}
@@ -186,7 +186,7 @@
 		padding: 2px 6px;
 		font-size: 0.6875rem;
 		font-family: monospace;
-		border-radius: 4px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 		background: var(--muted);
 		color: var(--muted-foreground);
 	}
@@ -201,7 +201,7 @@
 		font-size: 0.6875rem;
 		padding: 2px 4px;
 		background: var(--muted);
-		border-radius: 3px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.25);
 	}
 
 	.hook-url {
@@ -230,7 +230,7 @@
 		justify-content: center;
 		width: 28px;
 		height: 28px;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		background: transparent;
 		border: none;
 		color: var(--muted-foreground);
@@ -259,7 +259,7 @@
 		justify-content: center;
 		width: 36px;
 		height: 28px;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		background: transparent;
 		border: none;
 		cursor: pointer;

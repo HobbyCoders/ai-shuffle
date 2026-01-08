@@ -214,7 +214,7 @@
 		padding: 20px;
 		background: var(--card);
 		border: 1px solid var(--border);
-		border-radius: 12px;
+		border-radius: var(--radius, 0.75rem);
 		max-width: 500px;
 		width: 100%;
 	}
@@ -239,7 +239,7 @@
 		justify-content: center;
 		width: 28px;
 		height: 28px;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		background: transparent;
 		border: none;
 		color: var(--muted-foreground);
@@ -274,7 +274,7 @@
 	.form-select,
 	.form-textarea {
 		padding: 10px 12px;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		background: var(--input);
 		border: 1px solid var(--border);
 		color: var(--foreground);
@@ -320,7 +320,7 @@
 	.type-btn {
 		flex: 1;
 		padding: 8px 12px;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		background: var(--secondary);
 		border: 1px solid var(--border);
 		color: var(--muted-foreground);
@@ -374,7 +374,7 @@
 		padding: 10px 16px;
 		font-size: 0.875rem;
 		font-weight: 500;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		cursor: pointer;
 		transition: all 150ms ease;
 		border: none;

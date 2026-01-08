@@ -527,7 +527,7 @@
 
   :global(.command-autocomplete-dropdown .dropdown-list::-webkit-scrollbar-thumb) {
     background: var(--scrollbar-thumb, rgba(255, 255, 255, 0.1));
-    border-radius: 3px;
+    border-radius: calc(var(--radius, 0.75rem) * 0.25);
   }
 
   :global(.command-autocomplete-dropdown .dropdown-list::-webkit-scrollbar-thumb:hover) {

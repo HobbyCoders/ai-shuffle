@@ -537,7 +537,7 @@
 		overflow: hidden;
 		min-height: 0;
 		background: var(--card);
-		border-radius: 0 0 12px 12px;
+		border-radius: 0 0 var(--radius, 0.75rem) var(--radius, 0.75rem);
 	}
 
 	.notes-card-content.mobile {
@@ -567,7 +567,7 @@
 		gap: 8px;
 		padding: 8px 12px;
 		background: var(--muted);
-		border-radius: 8px;
+		border-radius: var(--radius, 0.75rem);
 		color: var(--muted-foreground);
 	}
 
@@ -592,7 +592,7 @@
 		background: var(--primary);
 		color: var(--primary-foreground);
 		border: none;
-		border-radius: 8px;
+		border-radius: var(--radius, 0.75rem);
 		font-size: 14px;
 		font-weight: 500;
 		cursor: pointer;
@@ -624,7 +624,7 @@
 		padding: 4px 10px;
 		background: var(--muted);
 		border: 1px solid transparent;
-		border-radius: 16px;
+		border-radius: calc(var(--radius, 0.75rem) * 1.33);
 		color: var(--muted-foreground);
 		font-size: 12px;
 		cursor: pointer;
@@ -659,7 +659,7 @@
 		padding: 12px;
 		background: var(--muted);
 		border: 1px solid transparent;
-		border-radius: 10px;
+		border-radius: var(--radius, 0.75rem);
 		margin-bottom: 8px;
 		text-align: left;
 		cursor: pointer;
@@ -739,9 +739,9 @@
 
 	.note-tag {
 		padding: 2px 6px;
-		background: rgba(34, 197, 94, 0.15);
-		color: rgb(34, 197, 94);
-		border-radius: 4px;
+		background: color-mix(in oklch, var(--success) 15%, transparent);
+		color: var(--success);
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 		font-size: 11px;
 	}
 
@@ -783,7 +783,7 @@
 		background: var(--primary);
 		color: var(--primary-foreground);
 		border: none;
-		border-radius: 8px;
+		border-radius: var(--radius, 0.75rem);
 		font-size: 14px;
 		cursor: pointer;
 	}
@@ -820,7 +820,7 @@
 		padding: 6px 12px;
 		background: var(--muted);
 		border: none;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		color: var(--foreground);
 		font-size: 14px;
 		cursor: pointer;
@@ -839,13 +839,13 @@
 		padding: 6px 10px;
 		background: var(--muted);
 		border: none;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		color: var(--destructive);
 		cursor: pointer;
 	}
 
 	.delete-btn:hover {
-		background: rgba(239, 68, 68, 0.1);
+		background: color-mix(in oklch, var(--destructive) 10%, transparent);
 	}
 
 	.autosave-status {
@@ -893,9 +893,9 @@
 		align-items: center;
 		gap: 4px;
 		padding: 4px 8px;
-		background: rgba(34, 197, 94, 0.15);
-		color: rgb(34, 197, 94);
-		border-radius: 4px;
+		background: color-mix(in oklch, var(--success) 15%, transparent);
+		color: var(--success);
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 		font-size: 12px;
 	}
 
@@ -914,7 +914,7 @@
 		padding: 4px 8px;
 		background: none;
 		border: 1px dashed var(--border);
-		border-radius: 4px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 		color: var(--foreground);
 		font-size: 12px;
 		outline: none;
@@ -1012,14 +1012,14 @@
 	.preview-content :global(pre) {
 		padding: 12px;
 		background: var(--muted);
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		overflow-x: auto;
 	}
 
 	.preview-content :global(code) {
 		padding: 2px 6px;
 		background: var(--muted);
-		border-radius: 4px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 		font-family: 'Fira Code', monospace;
 		font-size: 0.9em;
 	}

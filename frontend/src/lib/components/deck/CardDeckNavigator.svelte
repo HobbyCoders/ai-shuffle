@@ -2072,10 +2072,10 @@
 		text-align: center;
 		padding: 8px 16px;
 		font-size: 0.8125rem;
-		color: var(--ai-primary);
-		background: var(--ai-subtle);
-		border-top: 1px solid rgba(34, 211, 238, 0.15);
-		border-bottom: 1px solid rgba(34, 211, 238, 0.15);
+		color: var(--primary);
+		background: color-mix(in oklch, var(--primary) 8%, transparent);
+		border-top: 1px solid color-mix(in oklch, var(--primary) 15%, transparent);
+		border-bottom: 1px solid color-mix(in oklch, var(--primary) 15%, transparent);
 	}
 
 	/* ========================================
@@ -2433,9 +2433,9 @@
 	}
 
 	.card[data-ai-active="true"] .card-icon {
-		background: var(--ai-subtle);
-		border-color: rgba(34, 211, 238, 0.3);
-		color: var(--ai-primary);
+		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		border-color: color-mix(in oklch, var(--primary) 30%, transparent);
+		color: var(--primary);
 	}
 
 	.card[data-ai-active="true"] .card-icon :global(svg) {
@@ -2505,15 +2505,15 @@
 		top: 12px;
 		right: 12px;
 		padding: 3px 8px;
-		background: var(--ai-subtle);
-		border: 1px solid rgba(34, 211, 238, 0.2);
+		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		border: 1px solid color-mix(in oklch, var(--primary) 20%, transparent);
 		border-radius: calc(var(--radius-sm) * 0.5);
 		font-family: ui-monospace, monospace;
 		font-size: 0.625rem;
 		font-weight: 500;
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
-		color: var(--ai-primary);
+		color: var(--primary);
 		display: flex;
 		align-items: center;
 		gap: 4px;
@@ -3053,15 +3053,15 @@
 		top: 12px;
 		right: 12px;
 		padding: 4px 10px;
-		background: var(--ai-subtle);
-		border: 1px solid rgba(34, 211, 238, 0.2);
+		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		border: 1px solid color-mix(in oklch, var(--primary) 20%, transparent);
 		border-radius: calc(var(--radius-sm) * 0.75);
 		font-family: ui-monospace, monospace;
 		font-size: 0.65rem;
 		font-weight: 500;
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
-		color: var(--ai-primary);
+		color: var(--primary);
 		display: flex;
 		align-items: center;
 		gap: 5px;

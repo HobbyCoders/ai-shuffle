@@ -239,21 +239,21 @@
 	}
 
 	.timeline-item:hover .node-dot {
-		background: var(--ai-primary, #22d3ee);
-		box-shadow: 0 0 8px rgba(34, 211, 238, 0.4);
+		background: var(--primary);
+		box-shadow: 0 0 8px color-mix(in oklch, var(--primary) 40%, transparent);
 	}
 
 	.timeline-item.is-streaming .node-dot {
-		background: var(--ai-primary, #22d3ee);
+		background: var(--primary);
 		animation: nodePulse 2s ease-in-out infinite;
 	}
 
 	@keyframes nodePulse {
 		0%, 100% {
-			box-shadow: 0 0 0 0 rgba(34, 211, 238, 0.4);
+			box-shadow: 0 0 0 0 color-mix(in oklch, var(--primary) 40%, transparent);
 		}
 		50% {
-			box-shadow: 0 0 0 6px rgba(34, 211, 238, 0);
+			box-shadow: 0 0 0 6px color-mix(in oklch, var(--primary) 0%, transparent);
 		}
 	}
 
@@ -262,7 +262,7 @@
 		flex: 1;
 		background: var(--bg-card, oklch(0.15 0.01 260));
 		border: 1px solid var(--border-default, rgba(255, 255, 255, 0.1));
-		border-radius: 10px;
+		border-radius: var(--radius, 0.75rem);
 		padding: 14px 16px;
 		cursor: pointer;
 		transition: all 0.2s ease;
@@ -274,17 +274,17 @@
 
 	.timeline-card:hover {
 		background: var(--bg-card-hover, oklch(0.17 0.01 260));
-		border-color: var(--ai-primary, #22d3ee);
+		border-color: var(--primary);
 		transform: translateX(4px);
 	}
 
 	.timeline-card:focus-visible {
-		outline: 2px solid var(--ai-primary, #22d3ee);
+		outline: 2px solid var(--primary);
 		outline-offset: 2px;
 	}
 
 	.timeline-item.is-streaming .timeline-card {
-		border-color: rgba(34, 211, 238, 0.3);
+		border-color: color-mix(in oklch, var(--primary) 30%, transparent);
 	}
 
 	.card-header {
@@ -314,11 +314,11 @@
 		font-weight: 600;
 		text-transform: uppercase;
 		letter-spacing: 0.03em;
-		color: var(--ai-primary, #22d3ee);
-		background: rgba(34, 211, 238, 0.1);
-		border: 1px solid rgba(34, 211, 238, 0.2);
+		color: var(--primary);
+		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		border: 1px solid color-mix(in oklch, var(--primary) 20%, transparent);
 		padding: 2px 8px;
-		border-radius: 4px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 		flex-shrink: 0;
 	}
 

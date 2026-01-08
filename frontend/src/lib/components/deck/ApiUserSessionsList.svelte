@@ -246,7 +246,7 @@
 		padding: 8px 12px;
 		background: var(--bg-card, oklch(0.15 0.01 260));
 		border: 1px solid var(--border-default, rgba(255, 255, 255, 0.08));
-		border-radius: 8px;
+		border-radius: var(--radius, 0.75rem);
 		color: var(--text-primary, #f4f4f5);
 		font-size: 0.8125rem;
 		font-weight: 500;
@@ -261,8 +261,8 @@
 	}
 
 	.filter-dropdown.open {
-		border-color: var(--ai-primary, #22d3ee);
-		box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.15);
+		border-color: var(--primary);
+		box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 15%, transparent);
 	}
 
 	.filter-dropdown :global(.chevron) {
@@ -296,7 +296,7 @@
 		overflow-y: auto;
 		background: var(--bg-card, oklch(0.13 0.01 260));
 		border: 1px solid var(--border-default, rgba(255, 255, 255, 0.1));
-		border-radius: 10px;
+		border-radius: var(--radius, 0.75rem);
 		box-shadow:
 			0 8px 32px rgba(0, 0, 0, 0.4),
 			0 0 0 1px rgba(255, 255, 255, 0.05);
@@ -324,7 +324,7 @@
 		padding: 10px 12px;
 		background: transparent;
 		border: none;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		color: var(--text-primary, #f4f4f5);
 		font-size: 0.8125rem;
 		cursor: pointer;
@@ -338,8 +338,8 @@
 	}
 
 	.dropdown-item.active {
-		background: rgba(34, 211, 238, 0.1);
-		color: var(--ai-primary, #22d3ee);
+		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		color: var(--primary);
 	}
 
 	.dropdown-item .user-info {
@@ -365,11 +365,11 @@
 	}
 
 	.dropdown-item.active .user-username {
-		color: rgba(34, 211, 238, 0.7);
+		color: color-mix(in oklch, var(--primary) 70%, transparent);
 	}
 
 	.dropdown-item .check {
-		color: var(--ai-primary, #22d3ee);
+		color: var(--primary);
 		font-weight: 600;
 	}
 
@@ -406,7 +406,7 @@
 		padding: 10px 14px;
 		background: var(--bg-card, oklch(0.15 0.01 260));
 		border: 1px solid var(--border-default, rgba(255, 255, 255, 0.08));
-		border-radius: 8px;
+		border-radius: var(--radius, 0.75rem);
 		cursor: pointer;
 		transition: all 0.15s ease;
 		position: relative;
@@ -436,7 +436,7 @@
 	}
 
 	.list-item:focus-visible {
-		outline: 2px solid var(--ai-primary, #22d3ee);
+		outline: 2px solid var(--primary);
 		outline-offset: 2px;
 	}
 
@@ -458,7 +458,7 @@
 	}
 
 	.list-item.is-streaming .accent-bar {
-		background: var(--ai-primary, #22d3ee);
+		background: var(--primary);
 		opacity: 1;
 		animation: pulse 2s ease-in-out infinite;
 	}
@@ -482,7 +482,7 @@
 		padding: 4px 8px;
 		background: rgba(255, 255, 255, 0.04);
 		border: 1px solid rgba(255, 255, 255, 0.06);
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		font-size: 0.75rem;
 		font-weight: 500;
 		color: var(--text-muted, #71717a);
@@ -497,9 +497,9 @@
 	}
 
 	.msg-count.streaming {
-		background: rgba(34, 211, 238, 0.12);
-		border-color: rgba(34, 211, 238, 0.25);
-		color: var(--ai-primary, #22d3ee);
+		background: color-mix(in oklch, var(--primary) 12%, transparent);
+		border-color: color-mix(in oklch, var(--primary) 25%, transparent);
+		color: var(--primary);
 	}
 
 	/* Content column */
@@ -589,7 +589,7 @@
 		padding: 8px 16px;
 		background: rgba(168, 85, 247, 0.1);
 		border: 1px solid rgba(168, 85, 247, 0.2);
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		color: var(--accent-purple, #a855f7);
 		font-size: 0.8125rem;
 		font-weight: 500;

@@ -190,7 +190,7 @@
 		justify-content: center;
 		background: transparent;
 		border: none;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		color: var(--muted-foreground);
 		cursor: pointer;
 		transition: all 0.15s ease;
@@ -222,7 +222,7 @@
 		min-width: 160px;
 		background: var(--popover);
 		border: 1px solid var(--border);
-		border-radius: 8px;
+		border-radius: var(--radius, 0.75rem);
 		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
 		padding: 4px;
 		pointer-events: auto;
@@ -248,7 +248,7 @@
 		padding: 8px 12px;
 		background: transparent;
 		border: none;
-		border-radius: 4px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 		color: var(--foreground);
 		font-size: 0.8125rem;
 		text-align: left;

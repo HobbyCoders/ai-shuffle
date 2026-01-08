@@ -116,7 +116,7 @@
 		padding: 0 4px;
 		background: color-mix(in oklch, var(--primary) 20%, transparent);
 		color: var(--primary);
-		border-radius: 8px;
+		border-radius: var(--radius, 0.75rem);
 		font-size: 0.625rem;
 		font-weight: 700;
 		display: flex;

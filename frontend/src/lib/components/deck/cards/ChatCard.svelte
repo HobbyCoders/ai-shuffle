@@ -400,7 +400,7 @@
 	.chat-card-content :global(.user-message) {
 		background: color-mix(in oklch, var(--primary) 10%, var(--card));
 		border: 1px solid color-mix(in oklch, var(--primary) 25%, var(--border));
-		border-radius: 12px;
+		border-radius: var(--radius, 0.75rem);
 		padding: 12px 16px;
 		box-shadow: var(--shadow-s);
 		transition: box-shadow 0.2s ease, transform 0.2s ease, background-color 0.2s ease;
@@ -440,7 +440,7 @@
 		background: var(--muted);
 		border: 1px solid var(--border);
 		box-shadow: var(--shadow-s);
-		border-radius: 8px;
+		border-radius: var(--radius, 0.75rem);
 		margin: 12px 0;
 		padding: 12px 16px;
 	}
@@ -450,7 +450,7 @@
 		color: var(--foreground);
 		border: 1px solid var(--border);
 		padding: 2px 6px;
-		border-radius: 4px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 		font-size: 0.875em;
 		font-weight: 500;
 	}

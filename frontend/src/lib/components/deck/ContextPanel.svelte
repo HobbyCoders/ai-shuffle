@@ -297,7 +297,7 @@
 		background: var(--card);
 		border: 1px solid var(--border);
 		border-right: none;
-		border-radius: 8px 0 0 8px;
+		border-radius: var(--radius, 0.75rem) 0 0 var(--radius, 0.75rem);
 		color: var(--muted-foreground);
 		cursor: pointer;
 		display: flex;
@@ -335,7 +335,7 @@
 	.section {
 		background: var(--secondary);
 		border: 1px solid var(--border);
-		border-radius: 10px;
+		border-radius: var(--radius, 0.75rem);
 		overflow: visible;
 		flex-shrink: 0;
 	}
@@ -370,7 +370,7 @@
 	.section-count {
 		padding: 2px 6px;
 		background: var(--muted);
-		border-radius: 10px;
+		border-radius: var(--radius, 0.75rem);
 		font-size: 0.625rem;
 		font-weight: 700;
 	}
@@ -412,7 +412,7 @@
 		padding: 8px 10px;
 		background: transparent;
 		border: 1px solid transparent;
-		border-radius: 8px;
+		border-radius: var(--radius, 0.75rem);
 		cursor: pointer;
 		transition: all 0.15s ease;
 		text-align: left;
@@ -452,7 +452,7 @@
 		color: var(--success);
 		background: color-mix(in oklch, var(--success) 15%, transparent);
 		padding: 2px 6px;
-		border-radius: 4px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 	}
 
 	.status-dot {
@@ -506,7 +506,7 @@
 
 	.generation-item {
 		aspect-ratio: 1;
-		border-radius: 8px;
+		border-radius: var(--radius, 0.75rem);
 		overflow: hidden;
 		background: var(--muted);
 		border: 1px solid var(--border);
@@ -563,7 +563,7 @@
 		align-items: center;
 		padding: 6px 8px;
 		background: var(--muted);
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		border: 1px solid var(--border);
 	}
 

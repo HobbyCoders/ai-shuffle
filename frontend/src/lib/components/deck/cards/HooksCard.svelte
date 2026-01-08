@@ -973,7 +973,7 @@
 		padding: 10px 16px;
 		font-size: 0.875rem;
 		font-weight: 500;
-		border-radius: 8px;
+		border-radius: var(--radius, 0.75rem);
 		background: var(--primary);
 		color: var(--primary-foreground);
 		border: none;
@@ -1005,7 +1005,7 @@
 		overflow-y: auto;
 		background: var(--popover);
 		border: 1px solid var(--border);
-		border-radius: 8px;
+		border-radius: var(--radius, 0.75rem);
 		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 		z-index: 50;
 		padding: 4px;
@@ -1019,7 +1019,7 @@
 		padding: 8px 12px;
 		font-size: 0.875rem;
 		text-align: left;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		background: transparent;
 		border: none;
 		color: var(--foreground);
@@ -1062,7 +1062,7 @@
 		border: none;
 		color: var(--foreground);
 		font-size: 0.8125rem;
-		border-radius: 4px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 		cursor: pointer;
 		transition: background 0.15s;
 	}
@@ -1099,7 +1099,7 @@
 		min-width: 150px;
 		background: var(--card);
 		border: 1px solid var(--border);
-		border-radius: 8px;
+		border-radius: var(--radius, 0.75rem);
 		box-shadow: var(--shadow-l);
 		z-index: 100;
 		max-height: 200px;
@@ -1146,7 +1146,7 @@
 		padding: 6px 12px;
 		font-size: 0.8125rem;
 		font-weight: 500;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		white-space: nowrap;
 		display: flex;
 		align-items: center;
@@ -1207,7 +1207,7 @@
 	.search-input {
 		width: 100%;
 		padding: 8px 12px 8px 36px;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		background: var(--input);
 		border: 1px solid var(--border);
 		color: var(--foreground);
@@ -1232,7 +1232,7 @@
 		padding: 8px 12px;
 		font-size: 0.875rem;
 		font-weight: 500;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		background: var(--primary);
 		color: var(--primary-foreground);
 		border: none;
@@ -1252,7 +1252,7 @@
 		gap: 8px;
 		margin: 0 16px;
 		padding: 10px 12px;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		font-size: 0.8125rem;
 		animation: slideDown 200ms ease;
 	}
@@ -1301,7 +1301,7 @@
 		gap: 8px;
 		margin: 12px 16px 0;
 		padding: 10px 12px;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		background: color-mix(in oklch, var(--destructive) 15%, transparent);
 		color: var(--destructive);
 		font-size: 0.8125rem;
@@ -1314,7 +1314,7 @@
 		border: none;
 		color: var(--destructive);
 		cursor: pointer;
-		border-radius: 4px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 		transition: opacity 150ms ease;
 	}
 

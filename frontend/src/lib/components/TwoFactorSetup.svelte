@@ -382,7 +382,7 @@
 	}
 
 	.status-icon.enabled {
-		background: rgba(34, 197, 94, 0.2);
+		background: color-mix(in oklch, var(--success) 20%, transparent);
 	}
 
 	.status-text h3 {

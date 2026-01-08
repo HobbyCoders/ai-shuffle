@@ -187,7 +187,7 @@
 		background: var(--card);
 		border: 1px solid var(--border);
 		border-right: none;
-		border-radius: 8px 0 0 8px;
+		border-radius: var(--radius, 0.75rem) 0 0 var(--radius, 0.75rem);
 		color: var(--muted-foreground);
 		cursor: pointer;
 		display: flex;

@@ -119,7 +119,7 @@
 		padding: 8px 10px;
 		background: transparent;
 		border: 1px solid transparent;
-		border-radius: 8px;
+		border-radius: var(--radius, 0.75rem);
 		cursor: pointer;
 		transition: all 0.15s ease;
 		text-align: left;
