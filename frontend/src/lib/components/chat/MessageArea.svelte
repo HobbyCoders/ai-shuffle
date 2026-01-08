@@ -201,6 +201,7 @@
 	// Track previous values to detect actual content changes (not just re-renders)
 	let prevMessagesLength = $state(0);
 	let prevLastContent = $state('');
+	let prevLastMetadata = $state<string | null>(null);
 
 	// Get last message content for streaming detection (includes toolInput for TodoWrite)
 	const lastMessageContent = $derived(() => {
@@ -213,6 +214,18 @@
 		return lastMsg.content || '';
 	});
 
+	// Get last message metadata for tracking changes (cost/duration appear here)
+	const lastMessageMetadata = $derived(() => {
+		const lastMsg = tab.messages[tab.messages.length - 1];
+		if (!lastMsg?.metadata) return null;
+		// Only track specific fields that affect rendering
+		const m = lastMsg.metadata as Record<string, unknown>;
+		return JSON.stringify({
+			cost: m.cost_usd ?? m.total_cost_usd,
+			duration: m.duration_ms
+		});
+	});
+
 	// Watch for message changes and streaming content updates
 	$effect(() => {
 		// Only run after mount and when there's actual content change
@@ -221,18 +234,21 @@
 		// Get current values
 		const currentLength = tab.messages.length;
 		const currentContent = lastMessageContent();
+		const currentMetadata = lastMessageMetadata();
 
-		// Only scroll if there's an actual change (new message or content update)
+		// Only scroll if there's an actual change (new message, content update, or metadata added)
 		const hasNewMessage = currentLength !== prevMessagesLength;
 		const hasContentChange = currentContent !== prevLastContent;
+		const hasMetadataChange = currentMetadata !== prevLastMetadata;
 
-		if ((hasNewMessage || hasContentChange) && shouldAutoScroll && containerRef) {
+		if ((hasNewMessage || hasContentChange || hasMetadataChange) && shouldAutoScroll && containerRef) {
 			tick().then(scrollToBottom);
 		}
 
 		// Update previous values
 		prevMessagesLength = currentLength;
 		prevLastContent = currentContent;
+		prevLastMetadata = currentMetadata;
 	});
 </script>
 

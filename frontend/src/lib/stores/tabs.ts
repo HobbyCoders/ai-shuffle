@@ -1152,21 +1152,22 @@ function createTabsStore() {
 						if (t.id !== tabId) return t;
 
 						// Extract input token counts from usage data (synced from message_start)
-						// These represent the full context sent to Claude for this turn
+						// These represent the FULL context sent to Claude for this turn
+						// NOTE: REPLACE values, not add - SDK sends total context
 						const inputTokens = usage?.input_tokens || 0;
 						const cacheCreationTokens = usage?.cache_creation_input_tokens || 0;
 						const cacheReadTokens = usage?.cache_read_input_tokens || 0;
 
 						// Only update context if we have usage data
 						const contextUpdate = usage ? {
-							totalTokensIn: t.totalTokensIn + inputTokens,
+							totalTokensIn: inputTokens,  // REPLACE, not add
 							totalCacheCreationTokens: cacheCreationTokens,
 							totalCacheReadTokens: cacheReadTokens,
 							contextUsed: inputTokens + cacheCreationTokens + cacheReadTokens
 						} : {};
 
 						if (usage) {
-							console.log(`[Tab ${tabId}] Sync stream_start with usage:`, {
+							console.log(`[Tab ${tabId}] Sync stream_start with usage (REPLACING):`, {
 								inputTokens,
 								cacheCreationTokens,
 								cacheReadTokens,
@@ -1619,20 +1620,21 @@ function createTabsStore() {
 					console.log(`[Tab ${tabId}] stream_block_stop sync:`, { index: eventData.index });
 				} else if (chunkType === 'stream_message_delta') {
 					// Final message metadata with output token usage (synced from another device)
+					// NOTE: These are TOTAL values for the current turn, not increments!
 					const usage = eventData.usage as Record<string, number> | undefined;
 					if (usage && usage.output_tokens) {
-						console.log(`[Tab ${tabId}] Sync stream_message_delta with output usage:`, usage);
+						console.log(`[Tab ${tabId}] Sync stream_message_delta with output usage (REPLACING):`, usage);
 						update(s => ({
 							...s,
 							tabs: s.tabs.map(t => {
 								if (t.id !== tabId) return t;
 
-								// Update output token count
+								// REPLACE output token count - SDK sends total, not delta
 								const outputTokens = usage.output_tokens || 0;
 
 								return {
 									...t,
-									totalTokensOut: t.totalTokensOut + outputTokens
+									totalTokensOut: outputTokens
 								};
 							})
 						}));
@@ -1644,6 +1646,7 @@ function createTabsStore() {
 			case 'usage_update': {
 				// Usage update during streaming (agentic loops with multiple turns)
 				// Each new assistant turn has updated token usage
+				// NOTE: These are TOTAL values for the current turn, not increments!
 				const usage = eventData.usage as Record<string, number> | undefined;
 				if (usage) {
 					const inputTokens = usage.input_tokens || 0;
@@ -1651,7 +1654,7 @@ function createTabsStore() {
 					const cacheReadTokens = usage.cache_read_input_tokens || 0;
 					const newContextUsed = inputTokens + cacheCreationTokens + cacheReadTokens;
 
-					console.log(`[Tab ${tabId}] Sync usage_update:`, {
+					console.log(`[Tab ${tabId}] Sync usage_update (REPLACING not adding):`, {
 						inputTokens,
 						cacheCreationTokens,
 						cacheReadTokens,
@@ -1663,9 +1666,10 @@ function createTabsStore() {
 						tabs: s.tabs.map(t => {
 							if (t.id !== tabId) return t;
 
+							// REPLACE values, not add - SDK sends total context for current turn
 							return {
 								...t,
-								totalTokensIn: t.totalTokensIn + inputTokens,
+								totalTokensIn: inputTokens,
 								totalCacheCreationTokens: cacheCreationTokens,
 								totalCacheReadTokens: cacheReadTokens,
 								contextUsed: newContextUsed
@@ -2253,24 +2257,26 @@ function createTabsStore() {
 				// DON'T create empty message here - wait for actual content via stream_delta
 				// This prevents empty message boxes when Claude's response starts with a tool call
 				// BUT we can extract input token usage from the message_start event
+				// NOTE: REPLACE values, not add - SDK sends total context for current turn
 				const message = data.message as { usage?: Record<string, number> } | undefined;
 				const usage = message?.usage;
 				if (usage) {
-					console.log('[WS] Stream start with input usage:', usage);
+					console.log('[WS] Stream start with input usage (REPLACING):', usage);
 					update(s => ({
 						...s,
 						tabs: s.tabs.map(tab => {
 							if (tab.id !== tabId) return tab;
 
 							// Extract input token counts from message_start
-							// These represent the full context sent to Claude for this turn
+							// These represent the FULL context sent to Claude for this turn
 							const inputTokens = usage.input_tokens || 0;
 							const cacheCreationTokens = usage.cache_creation_input_tokens || 0;
 							const cacheReadTokens = usage.cache_read_input_tokens || 0;
 
+							// REPLACE values - SDK sends total context, not increments
 							return {
 								...tab,
-								totalTokensIn: tab.totalTokensIn + inputTokens,
+								totalTokensIn: inputTokens,
 								totalCacheCreationTokens: cacheCreationTokens,
 								totalCacheReadTokens: cacheReadTokens,
 								// Update context used based on current turn's input tokens
@@ -2785,6 +2791,11 @@ function createTabsStore() {
 					displayContent = JSON.stringify(systemData, null, 2);
 				}
 
+				// Check if this is a compact_boundary - we need to reset context usage
+				// since the SDK doesn't provide post_tokens, we reset to null so the
+				// next stream_start will set the proper value
+				const isCompactBoundary = subtype === 'compact_boundary';
+
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
@@ -2809,6 +2820,20 @@ function createTabsStore() {
 							systemData: systemData,
 							streaming: false
 						});
+
+						// Reset context usage on compact_boundary - SDK doesn't provide post_tokens
+						// The next stream_start will set the correct compacted value
+						if (isCompactBoundary) {
+							return {
+								...tab,
+								messages,
+								contextUsed: null,
+								totalTokensIn: 0,
+								totalTokensOut: 0,
+								totalCacheCreationTokens: 0,
+								totalCacheReadTokens: 0
+							};
+						}
 
 						return { ...tab, messages };
 					})

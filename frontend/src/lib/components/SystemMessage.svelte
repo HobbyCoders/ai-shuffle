@@ -57,13 +57,19 @@
 					: 'Context was compacted.';
 
 				if (preTokens) {
-					content += ` Previous context: ${preTokens.toLocaleString()} tokens.`;
+					// Format large numbers nicely
+					const formatTokens = (n: number) => {
+						if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
+						if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+						return n.toLocaleString();
+					};
+					content += ` Previous context: ${formatTokens(preTokens)} tokens.`;
 				}
 
 				return {
 					title: 'Context Compacted',
 					content,
-					badge: trigger === 'auto' ? 'auto' : 'manual',
+					badge: preTokens ? `${Math.round(preTokens / 1000)}k → compacted` : (trigger === 'auto' ? 'auto' : 'manual'),
 					badgeColor: 'green'
 				};
 			}
