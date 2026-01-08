@@ -39,9 +39,14 @@ class WorktreeStatus:
 
 def get_connection() -> sqlite3.Connection:
     """Get a database connection with row factory"""
-    conn = sqlite3.connect(str(settings.db_path), check_same_thread=False)
+    conn = sqlite3.connect(str(settings.db_path), check_same_thread=False, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # Use WAL mode for better concurrent access and crash recovery
+    conn.execute("PRAGMA journal_mode = WAL")
+    # Set busy timeout to wait up to 30 seconds if database is locked
+    # This is critical on Windows where file locking is more aggressive
+    conn.execute("PRAGMA busy_timeout = 30000")
     return conn
 
 
@@ -1041,6 +1046,10 @@ def cleanup_expired_2fa_sessions():
 
 def create_auth_session(token: str, expires_at: datetime) -> Dict[str, Any]:
     """Create an auth session token"""
+    logger.info(
+        f"create_auth_session: Creating token ...{token[-4:]} "
+        f"(expires_at={expires_at.isoformat()})"
+    )
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -1054,15 +1063,51 @@ def get_auth_session(token: str) -> Optional[Dict[str, Any]]:
     """Get an auth session by token"""
     with get_db() as conn:
         cursor = conn.cursor()
+        now_iso = datetime.utcnow().isoformat()
         cursor.execute(
             "SELECT * FROM auth_sessions WHERE token = ? AND expires_at > ?",
-            (token, datetime.utcnow().isoformat())
+            (token, now_iso)
         )
-        return row_to_dict(cursor.fetchone())
+        result = row_to_dict(cursor.fetchone())
+
+        # Debug logging for the mystery logout issue
+        if result is None and token:
+            # Check how many tokens exist total
+            cursor.execute("SELECT COUNT(*) as cnt FROM auth_sessions")
+            total_count = cursor.fetchone()["cnt"]
+
+            # Check if THIS token exists (regardless of expiry)
+            cursor.execute(
+                "SELECT token, expires_at, created_at FROM auth_sessions WHERE token = ?",
+                (token,)
+            )
+            exact_match = cursor.fetchone()
+
+            # Log database path and state for debugging
+            logger.warning(
+                f"get_auth_session FAILED for ...{token[-4:]}: "
+                f"total_tokens_in_db={total_count}, "
+                f"token_exists={exact_match is not None}, "
+                f"db_path={settings.db_path}, "
+                f"now={now_iso}"
+            )
+            if exact_match:
+                logger.warning(
+                    f"  Token ...{token[-4:]} found but expired/invalid: "
+                    f"expires_at={exact_match['expires_at']}, created_at={exact_match['created_at']}"
+                )
+
+        return result
 
 
 def delete_auth_session(token: str):
     """Delete an auth session"""
+    import traceback
+    # Log deletion with stack trace to help debug unexpected logouts
+    logger.warning(
+        f"delete_auth_session: Deleting token ...{token[-4:] if token else 'None'}. "
+        f"Stack: {''.join(traceback.format_stack()[-5:-1])}"
+    )
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
@@ -1072,10 +1117,26 @@ def cleanup_expired_sessions():
     """Remove expired auth sessions"""
     with get_db() as conn:
         cursor = conn.cursor()
+        now_iso = datetime.utcnow().isoformat()
+        # First, log what we're about to delete for debugging
+        cursor.execute(
+            "SELECT token, expires_at FROM auth_sessions WHERE expires_at < ?",
+            (now_iso,)
+        )
+        expired = cursor.fetchall()
+        if expired:
+            for row in expired:
+                logger.warning(
+                    f"cleanup_expired_sessions: Deleting token ...{row['token'][-4:]} "
+                    f"(expired_at={row['expires_at']}, now={now_iso})"
+                )
         cursor.execute(
             "DELETE FROM auth_sessions WHERE expires_at < ?",
-            (datetime.utcnow().isoformat(),)
+            (now_iso,)
         )
+        deleted = cursor.rowcount
+        if deleted > 0:
+            logger.info(f"cleanup_expired_sessions: Deleted {deleted} expired sessions")
 
 
 def clear_all_sessions():
@@ -2133,6 +2194,47 @@ def get_last_session_usage(session_id: str) -> Optional[Dict[str, Any]]:
                 "model": row["model"]
             }
         return None
+
+
+def get_all_session_usage(session_id: str) -> List[Dict[str, Any]]:
+    """Get ALL usage entries for a session, ordered by turn.
+
+    Returns list of usage entries, one per conversation turn.
+    The Nth entry corresponds to the Nth user->assistant turn.
+    Includes both per-turn cost and cumulative cost running total.
+
+    Args:
+        session_id: The session to get usage for
+
+    Returns:
+        List of dicts with: cost_usd, cumulative_cost_usd, duration_ms,
+        tokens_in, tokens_out, model, turn_index
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT cost_usd, duration_ms, tokens_in, tokens_out, model
+            FROM usage_log
+            WHERE session_id = ?
+            ORDER BY id ASC
+        """, (session_id,))
+        rows = cursor.fetchall()
+
+        result = []
+        cumulative_cost = 0.0
+        for turn_index, row in enumerate(rows):
+            cost = row["cost_usd"] or 0.0
+            cumulative_cost += cost
+            result.append({
+                "cost_usd": cost,
+                "cumulative_cost_usd": cumulative_cost,
+                "duration_ms": row["duration_ms"],
+                "tokens_in": row["tokens_in"],
+                "tokens_out": row["tokens_out"],
+                "model": row["model"],
+                "turn_index": turn_index
+            })
+        return result
 
 
 def get_usage_stats() -> Dict[str, Any]:

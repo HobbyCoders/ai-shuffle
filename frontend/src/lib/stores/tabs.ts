@@ -2529,29 +2529,19 @@ function createTabsStore() {
 					});
 				}
 
-				// Load token counts from session history - single source of truth
-				// This is more reliable than tracking incremental tokens during streaming
+				// Reload full session with messages from backend
+				// This is the single source of truth for:
+				// - Token counts (total_tokens_in, total_tokens_out, etc.)
+				// - Cost/duration metadata on messages (populated by backend from usage_log)
 				// Add a small delay to ensure JSONL is fully written by the SDK
 				if (sessionId) {
 					setTimeout(() => {
-						api.get<Session>(`/sessions/${sessionId}`).then(session => {
-							console.log('[Tab] Loaded session token counts:', {
-								sessionId,
-								total_tokens_in: session.total_tokens_in,
-								total_tokens_out: session.total_tokens_out,
-								cache_creation_tokens: session.cache_creation_tokens,
-								cache_read_tokens: session.cache_read_tokens,
-								context_tokens: session.context_tokens
-							});
-							updateTab(tabId, {
-								totalTokensIn: session.total_tokens_in || 0,
-								totalTokensOut: session.total_tokens_out || 0,
-								totalCacheCreationTokens: session.cache_creation_tokens || 0,
-								totalCacheReadTokens: session.cache_read_tokens || 0,
-								contextUsed: session.context_tokens || 0
-							});
+						// Use loadSessionInTab to reload messages with proper metadata
+						// This ensures cost/duration is shown correctly on all final messages
+						tabs.loadSessionInTab(tabId, sessionId).then(() => {
+							console.log('[Tab] Reloaded session with metadata after streaming:', sessionId);
 						}).catch(err => {
-							console.error('[Tab] Failed to load session token counts:', err);
+							console.error('[Tab] Failed to reload session after streaming:', err);
 						});
 					}, 500); // 500ms delay for JSONL write completion
 				}

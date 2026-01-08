@@ -367,8 +367,10 @@
 		</div>
 		{#if metadata && !streaming}
 			<div class="mt-2 text-xs text-muted-foreground flex items-center gap-3">
-				{#if metadata.total_cost_usd}
+				{#if metadata.is_final_message && metadata.total_cost_usd}
 					<span>{formatCost(metadata.total_cost_usd as number)}</span>
+				{:else if metadata.cost_usd}
+					<span>{formatCost(metadata.cost_usd as number)}</span>
 				{/if}
 				{#if metadata.duration_ms}
 					<span>{((metadata.duration_ms as number) / 1000).toFixed(1)}s</span>

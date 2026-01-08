@@ -1047,25 +1047,45 @@ async def chat_websocket(
                                         })
                                     logger.info(f"Loaded {len(messages)} messages from DB for session {session_id}")
 
-                                # Attach cost/duration metadata to last assistant message
+                                # Attach cost/duration metadata to ALL final assistant messages
                                 # (JSONL files don't store this, so we get it from usage_log)
                                 if messages:
-                                    # Find the last assistant text message
-                                    for i in range(len(messages) - 1, -1, -1):
-                                        msg = messages[i]
+                                    # Find all final assistant messages (last text msg before each user msg or end)
+                                    final_indices = []
+                                    for i, msg in enumerate(messages):
                                         if msg.get("role") == "assistant" and msg.get("type") in ("text", None):
-                                            # Get cost/duration from usage_log
-                                            last_usage = database.get_last_session_usage(session_id)
-                                            if last_usage:
-                                                existing_metadata = msg.get("metadata") or {}
-                                                # Merge usage metadata without overwriting existing values
-                                                msg["metadata"] = {
-                                                    **existing_metadata,
-                                                    "total_cost_usd": last_usage.get("total_cost_usd"),
-                                                    "duration_ms": last_usage.get("duration_ms"),
-                                                }
-                                                logger.debug(f"Attached cost/duration to message: ${last_usage.get('total_cost_usd')}, {last_usage.get('duration_ms')}ms")
-                                            break
+                                            # Check if this is final for this turn
+                                            is_final = True
+                                            for j in range(i + 1, len(messages)):
+                                                next_msg = messages[j]
+                                                if next_msg.get("role") == "user":
+                                                    break  # Next turn started, this was final
+                                                if next_msg.get("role") == "assistant" and next_msg.get("type") in ("text", None):
+                                                    is_final = False  # There's another text message after
+                                                    break
+                                            if is_final:
+                                                final_indices.append(i)
+
+                                    # Get all usage entries and match to final messages
+                                    usage_entries = database.get_all_session_usage(session_id)
+                                    for turn_idx, msg_idx in enumerate(final_indices):
+                                        if turn_idx < len(usage_entries):
+                                            usage = usage_entries[turn_idx]
+                                            is_absolute_final = (turn_idx == len(final_indices) - 1)
+                                            existing_metadata = messages[msg_idx].get("metadata") or {}
+
+                                            metadata = {
+                                                **existing_metadata,
+                                                "cost_usd": usage["cost_usd"],
+                                                "duration_ms": usage["duration_ms"],
+                                                "is_final_message": is_absolute_final
+                                            }
+                                            # Only add cumulative cost to the absolute final message
+                                            if is_absolute_final:
+                                                metadata["total_cost_usd"] = usage["cumulative_cost_usd"]
+
+                                            messages[msg_idx]["metadata"] = metadata
+                                            logger.debug(f"Attached cost/duration to message {msg_idx}: ${usage['cost_usd']}, {usage['duration_ms']}ms, final={is_absolute_final}")
 
                                 # Check if session is currently streaming (late-joining device)
                                 is_streaming = sync_engine.is_session_streaming(session_id)

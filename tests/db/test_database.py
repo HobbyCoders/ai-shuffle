@@ -1623,6 +1623,59 @@ class TestUsageLogging:
 
         assert result is None
 
+    def test_get_all_session_usage_empty(self, mock_db, setup_profile):
+        """get_all_session_usage should return empty list if no usage exists."""
+        db.create_session("session-1", setup_profile)
+
+        result = db.get_all_session_usage("session-1")
+
+        assert result == []
+
+    def test_get_all_session_usage_single_turn(self, mock_db, setup_profile):
+        """get_all_session_usage should return single entry with cumulative cost."""
+        db.create_session("session-1", setup_profile)
+        db.log_usage("session-1", setup_profile, "model-1", 50, 100, 0.01, 500)
+
+        result = db.get_all_session_usage("session-1")
+
+        assert len(result) == 1
+        assert result[0]["cost_usd"] == 0.01
+        assert result[0]["cumulative_cost_usd"] == 0.01
+        assert result[0]["duration_ms"] == 500
+        assert result[0]["tokens_in"] == 50
+        assert result[0]["tokens_out"] == 100
+        assert result[0]["model"] == "model-1"
+        assert result[0]["turn_index"] == 0
+
+    def test_get_all_session_usage_multiple_turns(self, mock_db, setup_profile):
+        """get_all_session_usage should return all entries with cumulative costs."""
+        db.create_session("session-1", setup_profile)
+        db.log_usage("session-1", setup_profile, "model-1", 50, 100, 0.01, 500)
+        db.log_usage("session-1", setup_profile, "model-1", 75, 150, 0.02, 750)
+        db.log_usage("session-1", setup_profile, "model-1", 100, 200, 0.03, 1000)
+
+        result = db.get_all_session_usage("session-1")
+
+        assert len(result) == 3
+        # First turn
+        assert result[0]["cost_usd"] == 0.01
+        assert result[0]["cumulative_cost_usd"] == 0.01
+        assert result[0]["turn_index"] == 0
+        # Second turn
+        assert result[1]["cost_usd"] == 0.02
+        assert result[1]["cumulative_cost_usd"] == 0.03  # 0.01 + 0.02
+        assert result[1]["turn_index"] == 1
+        # Third turn
+        assert result[2]["cost_usd"] == 0.03
+        assert result[2]["cumulative_cost_usd"] == 0.06  # 0.01 + 0.02 + 0.03
+        assert result[2]["turn_index"] == 2
+
+    def test_get_all_session_usage_nonexistent_session(self, mock_db):
+        """get_all_session_usage should return empty list for nonexistent session."""
+        result = db.get_all_session_usage("nonexistent-session")
+
+        assert result == []
+
 
 # =============================================================================
 # API Key Session Tests

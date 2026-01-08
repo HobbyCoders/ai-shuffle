@@ -12,7 +12,6 @@
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
-	import ContextOverflowWarning from './ContextOverflowWarning.svelte';
 	import { AUTO_COMPACTION_BASE, CONTEXT_MAX } from '$lib/constants/chat';
 
 	interface Command {
@@ -154,12 +153,6 @@
 		$canUseOpenAI // API users need OpenAI key
 	);
 
-	// Context overflow warning state
-	let showOverflowWarning = $state(false);
-	let pendingMessage = $state('');
-	const MESSAGE_SIZE_WARNING = 50000; // 50KB
-	const CONTEXT_WARNING_PERCENT = 90;
-
 	// Autocomplete state
 	let showCommandAutocomplete = $state(false);
 	let showFileAutocomplete = $state(false);
@@ -288,22 +281,11 @@
 			finalPrompt = inputValue.trim() + '\n\n' + fileRefs;
 		}
 
-		// Check for potential context overflow
-		const isLargeMessage = finalPrompt.length > MESSAGE_SIZE_WARNING;
-		const isContextNearFull = contextPercent > CONTEXT_WARNING_PERCENT;
-
-		if (isLargeMessage || isContextNearFull) {
-			// Show warning dialog
-			pendingMessage = finalPrompt;
-			showOverflowWarning = true;
-			return;
-		}
-
-		// Proceed with sending
+		// Send the message
 		sendMessage(finalPrompt);
 	}
 
-	// Actually send the message (called directly or after overflow warning confirmation)
+	// Actually send the message
 	function sendMessage(finalPrompt: string) {
 		inputValue = '';
 		uploadedFiles = [];
@@ -318,27 +300,6 @@
 		}
 
 		tabs.sendMessage(tab.id, finalPrompt);
-	}
-
-	// Handle overflow warning actions
-	function handleSendAnyway() {
-		showOverflowWarning = false;
-		sendMessage(pendingMessage);
-		pendingMessage = '';
-	}
-
-	function handleTruncate(length: number) {
-		showOverflowWarning = false;
-		const truncated = pendingMessage.substring(0, length) + '\n\n[Message truncated due to size]';
-		sendMessage(truncated);
-		pendingMessage = '';
-	}
-
-	function handleCancelOverflow() {
-		showOverflowWarning = false;
-		// Keep the message in input for editing
-		inputValue = pendingMessage;
-		pendingMessage = '';
 	}
 
 	// Handle keydown for textarea
@@ -711,16 +672,6 @@
 		'text-emerald-500'
 	);
 </script>
-
-<!-- Context Overflow Warning Dialog -->
-<ContextOverflowWarning
-	show={showOverflowWarning}
-	messageLength={pendingMessage.length}
-	{contextPercent}
-	onSendAnyway={handleSendAnyway}
-	onTruncate={handleTruncate}
-	onCancel={handleCancelOverflow}
-/>
 
 <div class="chat-input-wrapper">
 	<div class="chat-input-container">
