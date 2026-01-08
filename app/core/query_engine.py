@@ -555,14 +555,13 @@ def _build_ai_tools_section(
     """
     Build the <ai-tools> section for system prompts with multi-provider support.
 
-    This new design exposes ALL available providers to Claude, allowing dynamic
-    provider selection per-request instead of requiring settings changes.
+    This compact version provides tool paths and key parameters without verbose examples.
+    Claude knows how to write the code - we just need to tell it what's available.
 
     Args:
         ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
         prefix: String to prepend before the section (default: "\n\n")
         api_keys: Optional dict with API keys to include in technical notes
-                  (keys: gemini_api_key, openai_api_key, meshy_api_key)
 
     Returns:
         The formatted <ai-tools> section, or empty string if no tools enabled
@@ -574,10 +573,8 @@ def _build_ai_tools_section(
     tools_dir = settings.effective_tools_dir
 
     # Convert Windows paths to file:// URLs for ESM imports
-    # On Windows, Node.js ESM requires file:// URLs for absolute paths
     tools_dir_str = str(tools_dir)
     if platform.system() == "Windows" and len(tools_dir_str) >= 2 and tools_dir_str[1] == ':':
-        # Convert D:\path\to\tools to file:///D:/path/to/tools
         tools_dir_str = "file:///" + tools_dir_str.replace("\\", "/")
 
     # Check if any AI tools are enabled
@@ -594,518 +591,120 @@ def _build_ai_tools_section(
     tools_section = f"{prefix}<ai-tools>\n"
     tools_section += """## AI Content Generation Tools
 
-You have specialized tools for generating and analyzing images, videos, and 3D models. These tools use AI providers (Google, OpenAI, Meshy) to create content.
+**Usage:** Write `.mjs` scripts, run with `node script.mjs`, delete after. All tools return JSON with `file_path` and URL fields.
 
----
-## ⚠️ MANDATORY: Tool Selection Rules
-
-**BEFORE using WebFetch, Read, or any other tool on media files, CHECK THIS LIST:**
-
-| User Intent | Correct Tool | WRONG Approach |
-|-------------|--------------|----------------|
-| "Analyze this video" / "What's in this video" / "Describe this video" | `analyzeVideo` | ❌ WebFetch, ❌ Read |
-| "Generate an image of..." / "Create a picture of..." | `generateImage` | ❌ WebSearch |
-| "Edit this image" / "Add X to the image" / "Remove X from image" | `editImage` | ❌ generateImage from scratch |
-| "Make a video of..." / "Generate a video showing..." | `generateVideo` | ❌ WebSearch |
-| "Animate this image" / "Turn this image into video" | `imageToVideo` | ❌ generateVideo |
-| "Continue this video" / "Extend the video" | `extendVideo` | ❌ generateVideo |
-| "Create a 3D model of..." / "Generate 3D..." | `textTo3D` | ❌ image generation |
-| "Turn this image into 3D" / "Make 3D from image" | `imageTo3D` | ❌ textTo3D |
-| "Retexture this model" / "Change texture" | `retexture3D` | ❌ textTo3D |
-| "Rig this model" / "Add skeleton" | `rig3D` | ❌ animate3D |
-| "Animate this model" / "Make it move" | `animate3D` | ❌ rig3D alone |
-
-**Key Decision Rules:**
-1. **Video files (.mp4, .mov, .webm)** → ALWAYS use `analyzeVideo` for understanding content
-2. **Image files (.png, .jpg, .webp)** → Use `Read` tool (it supports images natively) OR use as input to other tools
-3. **3D model files (.glb, .fbx, .obj)** → Use 3D tools for retexturing, rigging, or animation
-4. **"Create/Generate/Make" requests** → Use generation tools, not search tools
-5. **"Analyze/Describe/What's in" requests** → Use analysis tools
-
----
-## 🔧 Technical Notes
-
-- **CRITICAL ON WINDOWS**: You MUST save scripts to `.mjs` files - do NOT use `node -e` with inline code
-- The import paths use `file:///` URLs which only work in `.mjs` files, not inline `-e` scripts
-- Delete scripts after successful execution
-- All tools return JSON with `file_path` and URL fields
-
-"""
-
-    # Build environment variable string for inline use
-    env_vars_inline = []
-    if api_keys:
-        if api_keys.get("gemini_api_key"):
-            env_vars_inline.append(f'GEMINI_API_KEY="{api_keys["gemini_api_key"]}"')
-        if api_keys.get("openai_api_key"):
-            env_vars_inline.append(f'OPENAI_API_KEY="{api_keys["openai_api_key"]}"')
-        if api_keys.get("meshy_api_key"):
-            env_vars_inline.append(f'MESHY_API_KEY="{api_keys["meshy_api_key"]}"')
-
-    if env_vars_inline:
-        # Detect platform for correct syntax
-        if platform.system() == "Windows":
-            # PowerShell syntax: $env:VAR="value"; node script.mjs
-            env_prefix = "; ".join([f'$env:{v.split("=")[0]}={v.split("=")[1]}' for v in env_vars_inline]) + "; "
-            tools_section += f"""### Running Scripts with API Keys
-
-On Windows (PowerShell), prefix your node command with environment variables:
-```powershell
-{env_prefix}node script.mjs
-```
-
-"""
-        else:
-            # Unix syntax: VAR="value" node script.mjs
-            env_prefix = " ".join(env_vars_inline) + " "
-            tools_section += f"""### Running Scripts with API Keys
-
-Prefix your node command with environment variables:
-```bash
-{env_prefix}node script.mjs
-```
+### Tool Selection (MANDATORY)
+| Intent | Tool | NOT |
+|--------|------|-----|
+| Analyze/describe video | `analyzeVideo` | ❌ WebFetch/Read |
+| Generate image | `generateImage` | ❌ WebSearch |
+| Edit existing image | `editImage` | ❌ generateImage |
+| Generate video from text | `generateVideo` | ❌ WebSearch |
+| Animate image to video | `imageToVideo` | ❌ generateVideo |
+| Extend Veo video | `extendVideo` | ❌ generateVideo |
+| Create 3D from text | `textTo3D` | ❌ image gen |
+| Convert image to 3D | `imageTo3D` | ❌ textTo3D |
 
 """
 
     # =========================================================================
-    # IMAGE TOOLS SECTION
+    # IMAGE TOOLS
     # =========================================================================
     if any_image_tools and providers["image_providers"]:
-        tools_section += """---
-## 🖼️ Image Tools
-
-"""
-        # Build provider comparison table
-        tools_section += """### Available Image Providers
-
-| Provider | ID | Supports Editing | Best For |
-|----------|-----|------------------|----------|
-"""
+        tools_section += "### 🖼️ Image Tools\n"
+        tools_section += "**Providers:** "
+        provider_list = []
         for pid, pinfo in providers["image_providers"].items():
-            supports_edit = "✅ Yes" if "image-edit" in pinfo["capabilities"] else "❌ No"
-            tools_section += f"| {pinfo['name']} | `{pid}` | {supports_edit} | {pinfo['best_for']} |\n"
+            edit_mark = " (edit)" if "image-edit" in pinfo["capabilities"] else ""
+            provider_list.append(f"`{pid}`{edit_mark}")
+        tools_section += ", ".join(provider_list) + "\n\n"
 
-        tools_section += """
-### Provider Selection Guidelines
-
-- **Need to edit later?** → Use `google-gemini` or `openai-gpt-image` (they support editing)
-- **Need highest quality?** → Use `google-imagen` (Imagen 4)
-- **Need accurate text in image?** → Use `openai-gpt-image`
-- **Need character consistency?** → Use `google-gemini` with reference images
-
-"""
-        # Image Generation
         if ai_tools_config.get("image_generation", False):
-            tool_path = f"{tools_dir_str}/dist/image-generation/generateImage.js"
-            tools_section += f"""### Generate Image
+            tools_section += f"- **generateImage**: `import {{ generateImage }} from '{tools_dir_str}/dist/image-generation/generateImage.js'`\n"
+            tools_section += "  - Params: `prompt`, `provider` → Returns: `image_url`, `file_path`\n"
 
-**🎯 USE WHEN:** User says "generate", "create", "make", "draw", "design" + image/picture/photo/artwork/illustration
-**❌ DO NOT USE:** For editing existing images (use editImage), for understanding images (use Read tool)
-
-```typescript
-import {{ generateImage }} from '{tool_path}';
-
-const result = await generateImage({{
-  prompt: 'a sunset over mountains',
-  provider: 'google-gemini',  // or 'google-imagen', 'openai-gpt-image'
-}});
-console.log(JSON.stringify(result));
-```
-
-**Display result:** `![Description](result.image_url)`
-**Response fields:** `image_url`, `file_path`, `provider_used`, `model_used`
-
-"""
-
-        # Image Editing
         if ai_tools_config.get("image_editing", False):
-            tool_path = f"{tools_dir_str}/dist/image-generation/editImage.js"
-            tools_section += f"""### Edit Image
+            tools_section += f"- **editImage**: `import {{ editImage }} from '{tools_dir_str}/dist/image-generation/editImage.js'`\n"
+            tools_section += "  - Params: `prompt`, `image_path`, `provider` (gemini/openai only) → Returns: `image_url`\n"
 
-**🎯 USE WHEN:** User has an existing image AND wants to "edit", "modify", "add to", "remove from", "change", "fix", "adjust"
-**❌ DO NOT USE:** For generating new images from scratch (use generateImage), for understanding what's in an image (use Read tool)
-
-**Supported providers:** `google-gemini`, `openai-gpt-image` only
-
-```typescript
-import {{ editImage }} from '{tool_path}';
-
-const result = await editImage({{
-  prompt: 'Add a rainbow in the sky',
-  image_path: '/path/to/image.png',
-  provider: 'google-gemini'
-}});
-console.log(JSON.stringify(result));
-```
-
-**Display result:** `![Description](result.image_url)`
-
-"""
-
-        # Reference-based Generation
         if ai_tools_config.get("image_reference", False) and providers["has_gemini"]:
-            tool_path = f"{tools_dir_str}/dist/image-generation/generateWithReference.js"
-            tools_section += f"""### Generate with Reference Images
+            tools_section += f"- **generateWithReference**: `import {{ generateWithReference }} from '{tools_dir_str}/dist/image-generation/generateWithReference.js'`\n"
+            tools_section += "  - Params: `prompt`, `reference_images[]` (up to 14) → Returns: `image_url`\n"
 
-**🎯 USE WHEN:** User wants to generate NEW image but maintain consistency with existing images - "like this character", "in this style", "same person/object as", "consistent with"
-**❌ DO NOT USE:** For editing an image (use editImage), for generating without references (use generateImage)
-
-**Only available with:** `google-gemini`
-
-```typescript
-import {{ generateWithReference }} from '{tool_path}';
-
-const result = await generateWithReference({{
-  prompt: 'The character standing in a forest',
-  reference_images: ['/path/to/character.png']  // Up to 14 references
-}});
-console.log(JSON.stringify(result));
-```
-
-**Display result:** `![Description](result.image_url)`
-
-"""
+        tools_section += "\n"
 
     # =========================================================================
-    # VIDEO TOOLS SECTION
+    # VIDEO TOOLS
     # =========================================================================
     if any_video_tools and providers["video_providers"]:
-        tools_section += """---
-## 🎬 Video Tools
-
-"""
-        # Build provider comparison table
-        tools_section += """### Available Video Providers
-
-| Provider | ID | Duration | Extend | Audio | Best For |
-|----------|-----|----------|--------|-------|----------|
-"""
+        tools_section += "### 🎬 Video Tools\n"
+        tools_section += "**Providers:** "
+        provider_list = []
         for pid, pinfo in providers["video_providers"].items():
-            supports_extend = "✅" if "video-extend" in pinfo["capabilities"] else "❌"
-            supports_audio = "✅" if "video-with-audio" in pinfo["capabilities"] else "❌"
-            tools_section += f"| {pinfo['name']} | `{pid}` | {pinfo['durations']} | {supports_extend} | {supports_audio} | {pinfo['best_for']} |\n"
+            caps = []
+            if "video-extend" in pinfo["capabilities"]:
+                caps.append("extend")
+            if "video-with-audio" in pinfo["capabilities"]:
+                caps.append("audio")
+            cap_str = f" ({','.join(caps)})" if caps else ""
+            provider_list.append(f"`{pid}`{cap_str}")
+        tools_section += ", ".join(provider_list) + "\n\n"
 
-        tools_section += """
-### Provider Selection Guidelines
-
-- **Need to extend video later?** → Use `google-veo` (Sora doesn't support extend)
-- **Need native audio (dialogue, effects)?** → Use `google-veo` with Veo 3 models
-- **Need frame bridging?** → Use `google-veo`
-- **Longer duration (12s)?** → Use `openai-sora`
-
-"""
-        # Video Generation
         if ai_tools_config.get("video_generation", False) or ai_tools_config.get("video_with_audio", False):
-            tool_path = f"{tools_dir_str}/dist/video-generation/generateVideo.js"
-            tools_section += f"""### Generate Video
+            tools_section += f"- **generateVideo**: `import {{ generateVideo }} from '{tools_dir_str}/dist/video-generation/generateVideo.js'`\n"
+            tools_section += "  - Params: `prompt`, `duration` (4/6/8), `aspect_ratio`, `provider` → Returns: `video_url`, `source_video_uri`\n"
+            tools_section += "  - For audio: use `veo-3-generate-preview` model. Takes 1-6 min.\n"
 
-**🎯 USE WHEN:** User says "generate", "create", "make" + video/clip/animation FROM TEXT DESCRIPTION
-**❌ DO NOT USE:** For analyzing existing videos (use analyzeVideo), for animating an image (use imageToVideo)
-
-⏱️ Takes 1-6 minutes. Use `veo-3-generate-preview` model for videos with audio/dialogue.
-
-```typescript
-import {{ generateVideo }} from '{tool_path}';
-
-const result = await generateVideo({{
-  prompt: 'A cat playing with a ball of yarn',
-  duration: 8,
-  aspect_ratio: '16:9',
-  provider: 'google-veo',  // or 'openai-sora'
-}});
-console.log(JSON.stringify(result));
-```
-
-**Display result:** `[Video description](result.video_url)`
-**Response fields:** `video_url`, `file_path`, `source_video_uri` (for extending), `provider_used`
-
-"""
-
-        # Image to Video
         if ai_tools_config.get("image_to_video", False):
-            tool_path = f"{tools_dir_str}/dist/video-generation/imageToVideo.js"
-            tools_section += f"""### Image to Video
+            tools_section += f"- **imageToVideo**: `import {{ imageToVideo }} from '{tools_dir_str}/dist/video-generation/imageToVideo.js'`\n"
+            tools_section += "  - Params: `image_path`, `prompt`, `provider` → Returns: `video_url`\n"
 
-**🎯 USE WHEN:** User has an existing IMAGE and wants to "animate", "bring to life", "make it move", "turn into video"
-**❌ DO NOT USE:** For generating video from text only (use generateVideo), for analyzing videos (use analyzeVideo)
-
-```typescript
-import {{ imageToVideo }} from '{tool_path}';
-
-const result = await imageToVideo({{
-  image_path: '/path/to/image.png',
-  prompt: 'The character starts walking forward',
-  provider: 'google-veo'  // or 'openai-sora'
-}});
-console.log(JSON.stringify(result));
-```
-
-**Display result:** `[Video description](result.video_url)`
-
-"""
-
-        # Video Extension (Veo only)
         if ai_tools_config.get("video_extend", False) and providers["has_gemini"]:
-            tool_path = f"{tools_dir_str}/dist/video-generation/extendVideo.js"
-            tools_section += f"""### Extend Video (Veo Only)
+            tools_section += f"- **extendVideo** (Veo only): `import {{ extendVideo }} from '{tools_dir_str}/dist/video-generation/extendVideo.js'`\n"
+            tools_section += "  - Params: `video_uri` (from previous result.source_video_uri), `prompt` → Returns: `video_url`\n"
 
-**🎯 USE WHEN:** User wants to "extend", "continue", "make longer" an EXISTING Veo-generated video
-**❌ DO NOT USE:** For Sora videos (not supported), for analyzing videos (use analyzeVideo), for new videos (use generateVideo)
-
-**Requires:** `source_video_uri` from a previous Veo generateVideo/imageToVideo result
-
-```typescript
-import {{ extendVideo }} from '{tool_path}';
-
-const result = await extendVideo({{
-  video_uri: previousResult.source_video_uri,
-  prompt: 'Continue the action smoothly'
-}});
-console.log(JSON.stringify(result));
-```
-
-**Display result:** `[Extended video](result.video_url)`
-
-"""
-
-        # Frame Bridging (Veo only)
         if ai_tools_config.get("video_bridge", False) and providers["has_gemini"]:
-            tool_path = f"{tools_dir_str}/dist/video-generation/bridgeFrames.js"
-            tools_section += f"""### Frame Bridging (Veo Only)
+            tools_section += f"- **bridgeFrames** (Veo only): `import {{ bridgeFrames }} from '{tools_dir_str}/dist/video-generation/bridgeFrames.js'`\n"
+            tools_section += "  - Params: `start_image`, `end_image`, `prompt` → Returns: `video_url`\n"
 
-**🎯 USE WHEN:** User has TWO images and wants to create a "transition", "morph", "bridge between", "interpolate"
-**❌ DO NOT USE:** For single image animation (use imageToVideo), for analyzing videos (use analyzeVideo)
-
-```typescript
-import {{ bridgeFrames }} from '{tool_path}';
-
-const result = await bridgeFrames({{
-  start_image: '/path/to/start.png',
-  end_image: '/path/to/end.png',
-  prompt: 'Smooth camera pan between scenes'
-}});
-console.log(JSON.stringify(result));
-```
-
-**Display result:** `[Transition video](result.video_url)`
-
-"""
-
-        # Video Analysis/Understanding
         if ai_tools_config.get("video_understanding", False) and providers["has_gemini"]:
-            tool_path = f"{tools_dir_str}/dist/video-analysis/analyzeVideo.js"
-            tools_section += f"""### Analyze Video
+            tools_section += f"- **analyzeVideo**: `import {{ analyzeVideo }} from '{tools_dir_str}/dist/video-analysis/analyzeVideo.js'`\n"
+            tools_section += "  - Params: `video_path`, `prompt` → Returns: `response`, `scenes`, `transcript`\n"
+            tools_section += "  - **ONLY tool for video understanding** - not WebFetch/Read\n"
 
-**🎯 USE WHEN:** User has an EXISTING VIDEO FILE and wants to:
-- "Analyze", "describe", "what's in", "summarize", "review" the video
-- "Transcribe", "get transcript", "what are they saying"
-- "Report on", "break down", "explain what happens"
-- Understand scenes, actions, objects, people, text, or audio in the video
-
-**❌ DO NOT USE:** WebFetch (cannot fetch video content), Read tool (cannot read video files), generateVideo (that creates new videos)
-
-**⚠️ CRITICAL:** This is the ONLY tool that can understand video content. For ANY request involving understanding/analyzing an existing video file, use this tool.
-
-```typescript
-import {{ analyzeVideo }} from '{tool_path}';
-
-const result = await analyzeVideo({{
-  video_path: '/path/to/video.mp4',
-  prompt: 'Provide a detailed analysis of this video including scenes, actions, dialogue, and any text visible'
-}});
-console.log(JSON.stringify(result));
-```
-
-**Response fields:** `response` (AI analysis), `scenes` (scene breakdown), `transcript` (spoken words), `duration_seconds`
-
-"""
+        tools_section += "\n"
 
     # =========================================================================
-    # 3D MODEL TOOLS SECTION
+    # 3D MODEL TOOLS
     # =========================================================================
     if any_3d_tools and providers["model3d_providers"]:
-        tools_section += """---
-## 🧊 3D Model Tools
+        tools_section += "### 🧊 3D Model Tools (Meshy)\n"
+        tools_section += "**Note:** Async (2-5 min). Use `wait_for_completion: true` or poll with `getTask3D`.\n\n"
 
-"""
-        # Build provider info
-        tools_section += """### Available 3D Providers
-
-| Provider | ID | Capabilities | Best For |
-|----------|-----|--------------|----------|
-"""
-        for pid, pinfo in providers["model3d_providers"].items():
-            caps = ", ".join(pinfo["capabilities"][:3])  # First 3 capabilities
-            tools_section += f"| {pinfo['name']} | `{pid}` | {caps} | {pinfo['best_for']} |\n"
-
-        tools_section += """
-### Important Notes
-
-- **Async Processing:** 3D generation takes 1-5 minutes. Tasks return immediately with a `task_id`.
-- **Polling Required:** Use `getTask3D` to check task status and get download URLs.
-- **Credits:** Each operation costs 5-20 Meshy credits depending on complexity.
-- **Output Formats:** GLB (default), FBX, OBJ, USDZ available.
-
-"""
-        # Text to 3D
         if ai_tools_config.get("text_to_3d", False):
-            tool_path = f"{tools_dir_str}/dist/model3d-generation/textTo3D.js"
-            tools_section += f"""### Text to 3D
+            tools_section += f"- **textTo3D**: `import {{ textTo3D }} from '{tools_dir_str}/dist/model3d-generation/textTo3D.js'`\n"
+            tools_section += "  - Params: `prompt`, `art_style` (realistic/sculpture), `model` (latest/meshy-5), `topology`, `target_polycount`, `wait_for_completion`\n"
 
-**🎯 USE WHEN:** User says "create 3D model", "generate 3D", "make a 3D object" FROM TEXT DESCRIPTION
-**❌ DO NOT USE:** For converting images to 3D (use imageTo3D)
-
-⏱️ Takes 2-5 minutes. Returns task_id for polling.
-
-```typescript
-import {{ textTo3D }} from '{tool_path}';
-
-const result = await textTo3D({{
-  prompt: 'A medieval sword with ornate handle',
-  art_style: 'realistic',  // or 'sculpture'
-  model: 'latest',  // or 'meshy-5', 'meshy-4'
-  topology: 'quad',  // or 'triangle'
-  target_polycount: 50000,  // 100 to 300,000 (default 30,000)
-  symmetry_mode: 'auto',  // or 'on', 'off'
-  pose_mode: 't-pose',  // or 'a-pose', '' (for characters)
-  wait_for_completion: true  // Wait for result vs return task_id
-}});
-console.log(JSON.stringify(result));
-```
-
-**Response fields:** `task_id`, `status`, `model_urls` (glb/fbx/obj/usdz when complete), `thumbnail_url`
-
-"""
-
-        # Image to 3D
         if ai_tools_config.get("image_to_3d", False):
-            tool_path = f"{tools_dir_str}/dist/model3d-generation/imageTo3D.js"
-            tools_section += f"""### Image to 3D
+            tools_section += f"- **imageTo3D**: `import {{ imageTo3D }} from '{tools_dir_str}/dist/model3d-generation/imageTo3D.js'`\n"
+            tools_section += "  - Params: `image_path`, `prompt` (optional), `model`, `topology`, `enable_pbr`, `wait_for_completion`\n"
 
-**🎯 USE WHEN:** User has an existing IMAGE and wants to convert it to a 3D model
-**❌ DO NOT USE:** For generating 3D from text only (use textTo3D)
-
-⏱️ Takes 2-5 minutes. Returns task_id for polling.
-
-```typescript
-import {{ imageTo3D }} from '{tool_path}';
-
-const result = await imageTo3D({{
-  image_path: '/path/to/character.png',
-  prompt: 'A fantasy warrior character',  // Optional guidance
-  model: 'latest',  // or 'meshy-5', 'meshy-4'
-  topology: 'quad',  // or 'triangle'
-  target_polycount: 50000,  // 100 to 300,000
-  symmetry_mode: 'auto',  // or 'on', 'off'
-  should_texture: true,
-  enable_pbr: true,  // Generate metallic/roughness/normal maps
-  wait_for_completion: true
-}});
-console.log(JSON.stringify(result));
-```
-
-**Response fields:** `task_id`, `status`, `model_urls` (glb/fbx/obj/usdz), `texture_urls`, `thumbnail_url`
-
-"""
-
-        # Retexture 3D
         if ai_tools_config.get("retexture_3d", False):
-            tool_path = f"{tools_dir_str}/dist/model3d-generation/retexture3D.js"
-            tools_section += f"""### Retexture 3D
+            tools_section += f"- **retexture3D**: `import {{ retexture3D }} from '{tools_dir_str}/dist/model3d-generation/retexture3D.js'`\n"
+            tools_section += "  - Params: `model_path_or_task_id`, `style_prompt`, `style_image` (optional), `enable_pbr`\n"
 
-**🎯 USE WHEN:** User has an existing 3D model and wants to apply new AI-generated textures
-**❌ DO NOT USE:** For creating new 3D models (use textTo3D or imageTo3D)
-
-```typescript
-import {{ retexture3D }} from '{tool_path}';
-
-const result = await retexture3D({{
-  model_path_or_task_id: '/path/to/model.glb',  // or Meshy task_id
-  style_prompt: 'Worn leather texture with scratches',
-  style_image: '/path/to/reference.png',  // Optional style reference
-  model: 'meshy-5',  // or 'meshy-4', 'latest'
-  enable_pbr: true,  // Generate metallic/roughness/normal maps
-  wait_for_completion: true
-}});
-console.log(JSON.stringify(result));
-```
-
-**Response fields:** `task_id`, `status`, `model_urls` (glb/fbx/obj/usdz), `texture_urls`
-
-"""
-
-        # Rig 3D
         if ai_tools_config.get("rig_3d", False):
-            tool_path = f"{tools_dir_str}/dist/model3d-generation/rig3D.js"
-            tools_section += f"""### Rig 3D (Auto-Rigging)
+            tools_section += f"- **rig3D**: `import {{ rig3D }} from '{tools_dir_str}/dist/model3d-generation/rig3D.js'`\n"
+            tools_section += "  - Params: `model_path_or_task_id`, `height_meters` → Use result.task_id with animate3D\n"
 
-**🎯 USE WHEN:** User wants to add animation skeleton to a humanoid 3D model
-**❌ DO NOT USE:** For non-humanoid models (rigging only works for humanoid shapes)
-
-⚠️ Only works with humanoid models. Use t-pose or a-pose for best results.
-
-```typescript
-import {{ rig3D }} from '{tool_path}';
-
-const result = await rig3D({{
-  model_path_or_task_id: '/path/to/humanoid.glb',  // or Meshy task_id
-  height_meters: 1.8,  // Character height for proper scaling
-  wait_for_completion: true
-}});
-console.log(JSON.stringify(result));
-// Use result.task_id with animate3D
-```
-
-**Response fields:** `task_id`, `status`, `model_urls` (rigged model with skeleton)
-
-"""
-
-        # Animate 3D
         if ai_tools_config.get("animate_3d", False):
-            tool_path = f"{tools_dir_str}/dist/model3d-generation/animate3D.js"
-            tools_section += f"""### Animate 3D
+            tools_section += f"- **animate3D**: `import {{ animate3D }} from '{tools_dir_str}/dist/model3d-generation/animate3D.js'`\n"
+            tools_section += "  - Params: `rig_task_id` (from rig3D), `action_id` (walk_forward, run, jump, idle, wave, dance_hip_hop, etc), `fps`\n"
 
-**🎯 USE WHEN:** User wants to apply preset animations to a rigged 3D model
-**❌ DO NOT USE:** For unrigged models (must rig first with rig3D)
+        tools_section += f"- **getTask3D**: `import {{ getTask3D }} from '{tools_dir_str}/dist/model3d-generation/getTask3D.js'`\n"
+        tools_section += "  - Params: `task_id` → Returns: `status`, `model_urls` (glb/fbx/obj/usdz), `thumbnail_url`\n"
 
-⚠️ Model must be rigged first. Use rig3D before animate3D.
-
-```typescript
-import {{ animate3D }} from '{tool_path}';
-
-const result = await animate3D({{
-  rig_task_id: 'task-id-from-rig3D',  // Required: from rig3D result
-  action_id: 'walk_forward',  // See action list below
-  fps: 30,  // 24, 25, 30, or 60
-  wait_for_completion: true
-}});
-console.log(JSON.stringify(result));
-```
-
-**Common action_ids:** walk_forward, run_forward, jump, idle, idle_breathing, wave, clap, punch, kick, dance_hip_hop, dance_salsa, sit, crouch (500+ available)
-
-**Response fields:** `task_id`, `status`, `model_urls` (animated FBX), `video_url` (preview)
-
-"""
-
-        # Get Task (always include when any 3D tool is enabled)
-        tool_path = f"{tools_dir_str}/dist/model3d-generation/getTask3D.js"
-        tools_section += f"""### Check Task Status
-
-**🎯 USE WHEN:** Need to check status of a 3D generation task or get download URLs
-
-```typescript
-import {{ getTask3D }} from '{tool_path}';
-
-const result = await getTask3D({{
-  task_id: 'previous_result.task_id'
-}});
-console.log(JSON.stringify(result));
-```
-
-**Response fields:** `status` (PENDING, IN_PROGRESS, SUCCEEDED, FAILED), `model_urls`, `thumbnail_url`, `video_url`
-
-"""
+        tools_section += "\n"
 
     tools_section += "</ai-tools>"
 
@@ -3057,15 +2656,17 @@ async def stream_to_websocket(
     include_partial = options.include_partial_messages  # Track if streaming events are enabled
 
     # Inject knowledge base context if project has knowledge documents
-    # This prepends relevant context to the user's prompt based on keyword matching
+    # Only inject on FIRST message of session (resume_id is None) to save context tokens.
+    # The knowledge base context becomes part of conversation history after the first message.
     enhanced_prompt = prompt
-    if project_id:
+    is_first_message = resume_id is None
+    if project_id and is_first_message:
         try:
             relevant_context = knowledge_service.get_relevant_context(
                 project_id=project_id,
                 query=prompt,
-                max_chunks=5,
-                max_chars=4000
+                max_chunks=3,  # Reduced from 5 for token efficiency
+                max_chars=2000  # Reduced from 4000 for token efficiency
             )
             if relevant_context:
                 formatted_context = knowledge_service.format_context_for_prompt(relevant_context)

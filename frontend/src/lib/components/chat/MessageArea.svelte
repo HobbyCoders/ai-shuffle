@@ -18,6 +18,7 @@
 	import UserMessage from './UserMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import ToolUseMessage from './ToolUseMessage.svelte';
+	import ThinkingBlock from './ThinkingBlock.svelte';
 	// Note: ToolResultMessage is intentionally not imported - tool_result messages are
 	// always merged into tool_use messages to prevent flickering during streaming
 	import SystemMessage from '$lib/components/SystemMessage.svelte';
@@ -54,6 +55,7 @@
 	const currentProfile = $derived($profiles.find(p => p.id === tab.profile));
 	const hasPartialMessages = $derived(currentProfile?.config?.include_partial_messages !== false);
 	const fileCheckpointingEnabled = $derived(currentProfile?.config?.enable_file_checkpointing === true);
+	const showThinkingBlocks = $derived(currentProfile?.config?.show_thinking_blocks !== false);
 
 	// Find the last streaming message index - only that message should show the streaming indicator
 	// This prevents multiple bouncing dots from appearing after each tool call
@@ -304,6 +306,14 @@
 						{fileCheckpointingEnabled}
 						onRewindComplete={handleRewindComplete}
 					/>
+				{:else if message.type === 'thinking'}
+					<!-- Thinking block - only show if setting is enabled -->
+					{#if showThinkingBlocks}
+						<ThinkingBlock
+							content={message.content}
+							streaming={message.streaming}
+						/>
+					{/if}
 				{:else if message.type === 'text' || !message.type}
 					<AssistantMessage
 						content={message.content}

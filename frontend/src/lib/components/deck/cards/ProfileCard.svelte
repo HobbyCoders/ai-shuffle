@@ -144,6 +144,7 @@
 		include_partial_messages: true,
 		continue_conversation: false,
 		fork_session: false,
+		show_thinking_blocks: true,
 		system_prompt_type: 'preset',
 		system_prompt_preset: 'claude_code',
 		system_prompt_append: '',
@@ -261,6 +262,7 @@
 			include_partial_messages: true,
 			continue_conversation: false,
 			fork_session: false,
+			show_thinking_blocks: true,
 			system_prompt_type: 'preset',
 			system_prompt_preset: 'claude_code',
 			system_prompt_append: '',
@@ -346,6 +348,7 @@
 			include_partial_messages: config.include_partial_messages !== false,
 			continue_conversation: (config as any).continue_conversation || false,
 			fork_session: (config as any).fork_session || false,
+			show_thinking_blocks: (config as any).show_thinking_blocks !== false,
 			system_prompt_type: sp.type || 'preset',
 			system_prompt_preset: sp.preset || 'claude_code',
 			system_prompt_append: sp.append || '',
@@ -531,6 +534,7 @@
 			include_partial_messages: profileForm.include_partial_messages,
 			continue_conversation: profileForm.continue_conversation,
 			fork_session: profileForm.fork_session,
+			show_thinking_blocks: profileForm.show_thinking_blocks,
 			// SDK 0.1.15+ file checkpointing for rewind
 			enable_file_checkpointing: profileForm.enable_file_checkpointing
 		};
@@ -877,6 +881,17 @@
 								<div class="checkbox-content">
 									<span class="checkbox-label">Fork Session</span>
 									<p class="checkbox-desc">Create new session ID when resuming</p>
+								</div>
+							</label>
+							<label class="checkbox-item">
+								<input
+									type="checkbox"
+									bind:checked={profileForm.show_thinking_blocks}
+									class="checkbox-input"
+								/>
+								<div class="checkbox-content">
+									<span class="checkbox-label">Show Thinking Blocks</span>
+									<p class="checkbox-desc">Display Claude's extended thinking process in chat</p>
 								</div>
 							</label>
 						</div>

@@ -17,8 +17,10 @@ import {
 	clearBuffer,
 	removeBuffer,
 	findLastStreamingTextIndex,
+	findLastStreamingThinkingIndex,
 	invalidateStreamingIndexCache,
 	appendToStreamingText,
+	appendToStreamingThinking,
 	appendToToolInput,
 	type BatchedUpdate,
 	type BufferedEvent
@@ -38,7 +40,7 @@ export interface ApiUser {
 	last_used_at?: string;
 }
 
-export type MessageType = 'text' | 'tool_use' | 'tool_result' | 'system' | 'subagent';
+export type MessageType = 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'system' | 'subagent';
 
 // Subagent child message - represents a single tool call or text from a subagent
 export interface SubagentChildMessage {
@@ -600,7 +602,21 @@ function createTabsStore() {
 		switch (type) {
 			case 'stream_block_start': {
 				const blockType = data.block_type as string;
-				if (blockType === 'tool_use') {
+				if (blockType === 'thinking') {
+					// Finalize any existing streaming thinking message
+					const thinkingIdx = findLastStreamingThinkingIndex(messages);
+					if (thinkingIdx !== -1) {
+						messages[thinkingIdx] = { ...messages[thinkingIdx], streaming: false };
+					}
+					// Note: The thinking message will be created by appendToStreamingThinking
+					// when the first thinking delta arrives
+				} else if (blockType === 'text') {
+					// When text block starts, finalize any existing streaming thinking message
+					const thinkingIdx = findLastStreamingThinkingIndex(messages);
+					if (thinkingIdx !== -1) {
+						messages[thinkingIdx] = { ...messages[thinkingIdx], streaming: false };
+					}
+				} else if (blockType === 'tool_use') {
 					const contentBlock = data.content_block as { id?: string; name?: string };
 					// Handle any existing streaming text message
 					const streamingIdx = messages.findLastIndex(
@@ -612,6 +628,11 @@ function createTabsStore() {
 						} else {
 							messages.splice(streamingIdx, 1);
 						}
+					}
+					// Also finalize any streaming thinking message
+					const thinkingIdx = findLastStreamingThinkingIndex(messages);
+					if (thinkingIdx !== -1) {
+						messages[thinkingIdx] = { ...messages[thinkingIdx], streaming: false };
 					}
 					// Add tool use message
 					messages.push({
@@ -629,9 +650,15 @@ function createTabsStore() {
 				break;
 			}
 
-			case 'stream_block_stop':
-				// Block complete - nothing special to do
+			case 'stream_block_stop': {
+				// Block complete - finalize any streaming messages
+				// The block index tells us which block stopped, but we handle generically
+				const thinkingIdx = findLastStreamingThinkingIndex(messages);
+				if (thinkingIdx !== -1) {
+					messages[thinkingIdx] = { ...messages[thinkingIdx], streaming: false };
+				}
 				break;
+			}
 
 			case 'stream_message_delta': {
 				// Final message metadata with output token usage
@@ -652,6 +679,11 @@ function createTabsStore() {
 
 			const tab = s.tabs[tabIndex];
 			const messages = [...tab.messages]; // Single copy per flush
+
+			// Apply all thinking deltas at once (before text, as thinking typically comes first)
+			if (batch.thinkingDelta) {
+				appendToStreamingThinking(messages, batch.thinkingDelta);
+			}
 
 			// Apply all text deltas at once
 			if (batch.textDelta) {

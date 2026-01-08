@@ -29,6 +29,7 @@ export interface BufferedEvent {
  */
 export interface BatchedUpdate {
 	textDelta: string;
+	thinkingDelta: string;
 	toolInputDeltas: Map<string, string>;
 	discreteEvents: BufferedEvent[];
 	usageUpdate: {
@@ -46,6 +47,7 @@ interface StreamingBuffer {
 	tabId: string;
 	sessionId: string;
 	pendingTextDelta: string;
+	pendingThinkingDelta: string;
 	pendingToolInput: Map<string, string>;
 	discreteEvents: BufferedEvent[];
 	usageUpdate: BatchedUpdate['usageUpdate'];
@@ -79,6 +81,7 @@ function getOrCreateBuffer(tabId: string, sessionId?: string): StreamingBuffer {
 			tabId,
 			sessionId: sessionId || '',
 			pendingTextDelta: '',
+			pendingThinkingDelta: '',
 			pendingToolInput: new Map(),
 			discreteEvents: [],
 			usageUpdate: null,
@@ -132,6 +135,24 @@ export function pushEvent(tabId: string, type: string, data: Record<string, unkn
 
 		// Flush on threshold to ensure smooth updates
 		if (buffer.pendingTextDelta.length >= TEXT_BATCH_THRESHOLD) {
+			scheduleFlush(tabId, true); // Immediate
+		} else {
+			scheduleFlush(tabId);
+		}
+		return;
+	}
+
+	// Handle thinking deltas - accumulate separately from text
+	if (type === 'stream_delta' && data.delta_type === 'thinking') {
+		const thinking = data.content as string;
+		buffer.pendingThinkingDelta += thinking;
+
+		if (DEBUG_BUFFER) {
+			console.log(`[Buffer ${tabId}] Thinking delta: +${thinking.length} chars, total: ${buffer.pendingThinkingDelta.length}`);
+		}
+
+		// Flush on threshold to ensure smooth updates
+		if (buffer.pendingThinkingDelta.length >= TEXT_BATCH_THRESHOLD) {
 			scheduleFlush(tabId, true); // Immediate
 		} else {
 			scheduleFlush(tabId);
@@ -229,17 +250,19 @@ export function flushNow(tabId: string): void {
 
 	// Check if there's anything to flush
 	const hasTextDelta = buffer.pendingTextDelta.length > 0;
+	const hasThinkingDelta = buffer.pendingThinkingDelta.length > 0;
 	const hasToolInput = buffer.pendingToolInput.size > 0;
 	const hasEvents = buffer.discreteEvents.length > 0;
 	const hasUsage = buffer.usageUpdate !== null;
 
-	if (!hasTextDelta && !hasToolInput && !hasEvents && !hasUsage) {
+	if (!hasTextDelta && !hasThinkingDelta && !hasToolInput && !hasEvents && !hasUsage) {
 		return;
 	}
 
 	// Create batch
 	const batch: BatchedUpdate = {
 		textDelta: buffer.pendingTextDelta,
+		thinkingDelta: buffer.pendingThinkingDelta,
 		toolInputDeltas: new Map(buffer.pendingToolInput),
 		discreteEvents: [...buffer.discreteEvents],
 		usageUpdate: buffer.usageUpdate
@@ -247,13 +270,14 @@ export function flushNow(tabId: string): void {
 
 	// Clear buffer
 	buffer.pendingTextDelta = '';
+	buffer.pendingThinkingDelta = '';
 	buffer.pendingToolInput.clear();
 	buffer.discreteEvents = [];
 	buffer.usageUpdate = null;
 	buffer.lastFlushTime = Date.now();
 
 	if (DEBUG_BUFFER) {
-		console.log(`[Buffer ${tabId}] Flushing: text=${batch.textDelta.length}, tools=${batch.toolInputDeltas.size}, events=${batch.discreteEvents.length}`);
+		console.log(`[Buffer ${tabId}] Flushing: text=${batch.textDelta.length}, thinking=${batch.thinkingDelta.length}, tools=${batch.toolInputDeltas.size}, events=${batch.discreteEvents.length}`);
 	}
 
 	// Apply to store
@@ -279,6 +303,7 @@ export function clearBuffer(tabId: string): void {
 
 	// Clear all accumulated data
 	buffer.pendingTextDelta = '';
+	buffer.pendingThinkingDelta = '';
 	buffer.pendingToolInput.clear();
 	buffer.discreteEvents = [];
 	buffer.usageUpdate = null;
@@ -311,6 +336,7 @@ export function hasPendingData(tabId: string): boolean {
 	if (!buffer) return false;
 
 	return buffer.pendingTextDelta.length > 0 ||
+		buffer.pendingThinkingDelta.length > 0 ||
 		buffer.pendingToolInput.size > 0 ||
 		buffer.discreteEvents.length > 0;
 }
@@ -405,6 +431,45 @@ export function appendToStreamingText(messages: ChatMessage[], text: string): bo
 		// Update cache
 		cachedStreamingTextIdx = messages.length - 1;
 		cachedMessagesLength = messages.length;
+		return true;
+	}
+}
+
+/**
+ * Find the index of the last streaming thinking message
+ */
+export function findLastStreamingThinkingIndex(messages: ChatMessage[]): number {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const m = messages[i];
+		if (m.type === 'thinking' && m.role === 'assistant' && m.streaming) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+/**
+ * Append thinking content to the streaming thinking message, or create one if it doesn't exist
+ */
+export function appendToStreamingThinking(messages: ChatMessage[], thinking: string): boolean {
+	const streamingIdx = findLastStreamingThinkingIndex(messages);
+
+	if (streamingIdx !== -1) {
+		// Append to existing streaming thinking message
+		messages[streamingIdx] = {
+			...messages[streamingIdx],
+			content: messages[streamingIdx].content + thinking
+		};
+		return true;
+	} else {
+		// Create new streaming thinking message
+		messages.push({
+			id: `thinking-${Date.now()}`,
+			role: 'assistant',
+			content: thinking,
+			type: 'thinking' as MessageType,
+			streaming: true
+		});
 		return true;
 	}
 }
