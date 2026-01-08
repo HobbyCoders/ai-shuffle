@@ -528,24 +528,15 @@ code {
 	transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s;
 }
 
-/* Dark mode inputs - deeper background for contrast */
-.dark .input {
-	background-color: oklch(0.12 0.008 260);
-	border-color: oklch(0.30 0.012 260);
+/* Inputs use theme variables for consistent theming */
+.input {
+	background-color: var(--input-bg);
+	border-color: var(--input-border);
 }
 
-.dark .input:hover:not(:focus) {
-	border-color: oklch(0.38 0.015 260);
-}
-
-/* Light mode inputs - subtle gray background */
-.light .input {
-	background-color: oklch(0.97 0.003 260);
-	border-color: oklch(0.82 0.01 260);
-}
-
-.light .input:hover:not(:focus) {
-	border-color: oklch(0.72 0.015 260);
+.input:hover:not(:focus) {
+	background-color: var(--input-bg-hover);
+	border-color: var(--input-border-hover);
 }
 
 .input::placeholder {
@@ -555,16 +546,8 @@ code {
 .input:focus {
 	outline: none;
 	box-shadow: 0 0 0 2px var(--ring);
-}
-
-.dark .input:focus {
 	border-color: var(--ring);
-	background-color: oklch(0.14 0.01 260);
-}
-
-.light .input:focus {
-	border-color: var(--ring);
-	background-color: oklch(1 0 0);
+	background-color: var(--input-bg-focus);
 }
 
 /* Select element styling */
@@ -588,14 +571,6 @@ select.input option {
 	background-color: var(--card);
 	color: var(--foreground);
 	padding: 0.5rem;
-}
-
-.dark select.input option {
-	background-color: oklch(0.18 0.01 260);
-}
-
-.light select.input option {
-	background-color: oklch(1 0 0);
 }
 
 /* Global select element styling (for selects without .input class) */

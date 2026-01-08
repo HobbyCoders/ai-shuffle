@@ -2318,17 +2318,17 @@
 		}
 	}
 
-	/* Visual feedback when dropping a card INTO a deck */
+	/* Visual feedback when dropping a card INTO a deck - use standard primary glow */
 	.card.drop-into-deck {
 		transform: scale(1.08);
 	}
 
 	.card.drop-into-deck .card-inner {
-		border-color: var(--deck-color, var(--ai-primary));
+		border-color: var(--ai-primary);
 		box-shadow:
-			0 0 20px color-mix(in srgb, var(--deck-color, var(--ai-primary)) 40%, transparent),
+			0 0 20px var(--ai-glow),
 			0 8px 32px var(--shadow-color);
-		background: color-mix(in srgb, var(--deck-color, var(--ai-primary)) 10%, var(--bg-card));
+		background: color-mix(in srgb, var(--ai-primary) 10%, var(--bg-card));
 	}
 
 	.card-inner {
@@ -2931,16 +2931,18 @@
 		transform: scale(0.97);
 	}
 
-	/* Deck card styling */
+	/* Deck card styling - match desktop: only icon gets deck color, not card border/glow */
 	.mobile-card.deck-card {
-		border-color: color-mix(in srgb, var(--deck-color, var(--ai-primary)) 40%, transparent);
+		/* Use standard border, not deck-color based */
+		border-color: var(--border-default);
 	}
 
 	.mobile-card.deck-card.active {
-		border-color: var(--deck-color, var(--ai-primary));
+		/* Use standard primary glow like other cards, not deck-color based */
+		border-color: var(--ai-primary);
 		box-shadow:
 			0 12px 32px rgba(0, 0, 0, 0.5),
-			0 0 24px color-mix(in srgb, var(--deck-color, var(--ai-primary)) 30%, transparent);
+			0 0 24px var(--ai-glow);
 	}
 
 	/* Add deck card styling */
@@ -2961,12 +2963,12 @@
 		pointer-events: none;
 	}
 
-	/* Drop into deck feedback */
+	/* Drop into deck feedback - use standard primary glow */
 	.mobile-card.drop-into-deck {
 		transform: scale(1.05);
-		border-color: var(--deck-color, var(--ai-primary));
+		border-color: var(--ai-primary);
 		box-shadow:
-			0 0 30px color-mix(in srgb, var(--deck-color, var(--ai-primary)) 40%, transparent);
+			0 0 30px var(--ai-glow);
 	}
 
 	/* Mobile Card Icon */

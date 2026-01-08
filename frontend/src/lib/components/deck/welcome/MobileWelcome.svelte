@@ -230,32 +230,26 @@
 		align-items: center;
 		justify-content: center;
 
-		/* Dark workspace gradient with HSL fallback for oklch */
+		/* Use theme-aware background gradient (matches WelcomeHero) */
 		background:
 			radial-gradient(
 				ellipse 80% 60% at 50% 40%,
-				hsl(250, 10%, 18%) 0%,
-				hsl(250, 10%, 14%) 60%,
-				hsl(250, 10%, 12%) 100%
-			);
-		background:
-			radial-gradient(
-				ellipse 80% 60% at 50% 40%,
-				oklch(0.18 0.01 260) 0%,
-				oklch(0.14 0.008 260) 60%,
-				oklch(0.12 0.006 260) 100%
+				color-mix(in oklch, var(--card) 100%, var(--background)) 0%,
+				var(--background) 60%,
+				color-mix(in oklch, var(--background) 95%, black) 100%
 			);
 
 		overflow: hidden;
 	}
 
-	/* Subtle grid pattern overlay - tech/workspace feel */
+	/* Subtle grid pattern overlay - tech/workspace feel (matches WelcomeHero) */
 	.grid-pattern {
 		position: absolute;
 		inset: 0;
+		/* Use theme-aware grid color */
 		background-image:
-			linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
-			linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+			linear-gradient(color-mix(in oklch, var(--border) 20%, transparent) 1px, transparent 1px),
+			linear-gradient(90deg, color-mix(in oklch, var(--border) 20%, transparent) 1px, transparent 1px);
 		background-size: 30px 30px;
 		opacity: 0.5;
 		pointer-events: none;
@@ -320,11 +314,10 @@
 		aspect-ratio: 3 / 4;
 		padding: 1.5rem 1rem;
 
-		/* HSL fallback for oklch */
-		background: hsl(250, 10%, 17%);
-		background: oklch(0.17 0.01 260);
-		border: 1px solid rgba(255, 255, 255, 0.08);
-		border-radius: 20px;
+		/* Use theme-aware card background */
+		background: var(--card);
+		border: 1px solid var(--border);
+		border-radius: var(--radius-lg, 20px);
 
 		display: flex;
 		flex-direction: column;
@@ -371,9 +364,9 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		border-radius: 16px;
-		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid rgba(255, 255, 255, 0.06);
+		border-radius: var(--radius, 16px);
+		background: color-mix(in oklch, var(--foreground) 4%, transparent);
+		border: 1px solid color-mix(in oklch, var(--foreground) 6%, transparent);
 		color: var(--muted-foreground);
 		transition: all 0.25s ease-out;
 	}
@@ -412,7 +405,7 @@
 		width: 8px;
 		height: 8px;
 		border-radius: 50%;
-		background: rgba(255, 255, 255, 0.2);
+		background: color-mix(in oklch, var(--foreground) 20%, transparent);
 		border: none;
 		padding: 0;
 		cursor: pointer;
@@ -421,12 +414,12 @@
 	}
 
 	.dot.active {
-		background: var(--accent-cyan);
-		box-shadow: 0 0 8px rgba(var(--accent-cyan-rgb), 0.4);
+		background: var(--primary);
+		box-shadow: 0 0 8px color-mix(in oklch, var(--primary) 40%, transparent);
 	}
 
 	.dot:not(.active):hover {
-		background: rgba(255, 255, 255, 0.4);
+		background: color-mix(in oklch, var(--foreground) 40%, transparent);
 	}
 
 	/* Swipe Hint - fixed opacity animation */

@@ -1289,14 +1289,16 @@
 		flex: 1;
 	}
 
-	/* ===== USAGE INDICATOR ===== */
+	/* ===== USAGE INDICATOR - Glass styling to match desktop ===== */
 	.usage-indicator {
 		display: flex;
 		align-items: center;
 		gap: 8px;
 		padding: 4px 8px;
-		background: var(--muted);
-		border: 1px solid var(--border);
+		background: var(--glass-bg);
+		backdrop-filter: blur(var(--glass-blur, 12px));
+		-webkit-backdrop-filter: blur(var(--glass-blur, 12px));
+		border: 1px solid var(--glass-border);
 		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 	}
 
