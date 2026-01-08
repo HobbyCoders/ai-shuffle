@@ -665,12 +665,8 @@
 		}
 	}
 
-	// Context color based on usage
-	const contextColor = $derived(
-		contextPercent > 80 ? 'text-red-500' :
-		contextPercent > 60 ? 'text-amber-500' :
-		'text-emerald-500'
-	);
+	// Context color - always themed (no usage-based color changes)
+	const contextColor = $derived('');
 </script>
 
 <div class="chat-input-wrapper">
@@ -1112,7 +1108,6 @@
 		transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 	}
 
-
 	/* Focus glow effect */
 	.input-wrapper:focus-within {
 		border-color: var(--ring);
@@ -1300,58 +1295,32 @@
 		align-items: center;
 		gap: 8px;
 		padding: 4px 8px;
+		background: var(--muted);
+		border: 1px solid var(--border);
 		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		background: var(--status-success-bg);
-		border: 1px solid var(--status-success-border);
-	}
-
-	.usage-indicator.text-amber-500 {
-		background: var(--status-warning-bg);
-		border-color: var(--status-warning-border);
-	}
-
-	.usage-indicator.text-red-500 {
-		background: var(--status-error-bg);
-		border-color: var(--status-error-border);
 	}
 
 	.usage-bar {
 		width: 40px;
 		height: 4px;
-		background: var(--muted);
+		background: color-mix(in oklch, var(--muted) 50%, var(--background));
 		border-radius: calc(var(--radius, 0.75rem) * 0.17);
 		overflow: hidden;
 	}
 
 	.usage-fill {
 		height: 100%;
-		background: var(--button-success-gradient);
+		background: var(--primary);
 		border-radius: calc(var(--radius, 0.75rem) * 0.17);
 		transition: width 0.3s ease;
-	}
-
-	.usage-indicator.text-amber-500 .usage-fill {
-		background: linear-gradient(90deg, var(--warning), oklch(from var(--warning) calc(l + 0.1) c h));
-	}
-
-	.usage-indicator.text-red-500 .usage-fill {
-		background: linear-gradient(90deg, var(--destructive), oklch(from var(--destructive) calc(l + 0.1) c h));
 	}
 
 	.usage-text {
 		font-family: ui-monospace, 'Monaco', 'Menlo', monospace;
 		font-size: 11px;
 		font-weight: 500;
-		color: var(--success);
+		color: var(--muted-foreground);
 		letter-spacing: 0.02em;
-	}
-
-	.usage-indicator.text-amber-500 .usage-text {
-		color: var(--warning);
-	}
-
-	.usage-indicator.text-red-500 .usage-text {
-		color: var(--destructive);
 	}
 
 	/* ===== SELECTORS (Agent/Project) ===== */
