@@ -322,8 +322,8 @@
 	<div class="min-w-0">
 		<details class="w-full border border-border rounded-lg overflow-hidden group">
 			<summary class="w-full px-3 py-2 hover:bg-muted/30 flex items-center gap-2 cursor-pointer list-none transition-colors">
-				<!-- Status indicator -->
-				{#if status === 'running' || streaming}
+				<!-- Status indicator - use toolStatus as primary, not streaming -->
+				{#if status === 'running'}
 					<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
 					</svg>
@@ -523,7 +523,15 @@
 								</div>
 								<div class="rounded border border-zinc-500/20 bg-zinc-500/5 p-2">
 									<div class="max-h-60 overflow-auto">
-										<pre class="text-[10px] font-mono text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{result || ' '}</pre>
+										{#if result}
+											<pre class="text-[10px] font-mono text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{result}</pre>
+										{:else if status === 'error'}
+											<pre class="text-[10px] font-mono text-red-400 m-0 w-max !bg-transparent !p-0 !rounded-none">[Interrupted]</pre>
+										{:else if status === 'running'}
+											<pre class="text-[10px] font-mono text-muted-foreground m-0 w-max !bg-transparent !p-0 !rounded-none">Running...</pre>
+										{:else}
+											<pre class="text-[10px] font-mono text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none"> </pre>
+										{/if}
 									</div>
 								</div>
 							</div>
@@ -558,6 +566,10 @@
 											{:else}
 												<pre class="text-[10px] font-mono text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{result}</pre>
 											{/if}
+										{:else if status === 'error'}
+											<pre class="text-[10px] font-mono text-red-400 m-0 w-max !bg-transparent !p-0 !rounded-none">[Interrupted]</pre>
+										{:else if status === 'running'}
+											<pre class="text-[10px] font-mono text-muted-foreground m-0 w-max !bg-transparent !p-0 !rounded-none">Running...</pre>
 										{:else}
 											<pre class="text-[10px] font-mono text-muted-foreground m-0 w-max !bg-transparent !p-0 !rounded-none"> </pre>
 										{/if}

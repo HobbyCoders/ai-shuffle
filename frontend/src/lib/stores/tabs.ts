@@ -3729,6 +3729,28 @@ function createTabsStore() {
 			// and immediately process the new message
 			if (tab.isStreaming && tab.sessionId) {
 				console.log(`[Tab ${tabId}] Interrupting and sending new message: ${prompt.substring(0, 50)}...`);
+
+				// Immediately mark running tools as interrupted in the UI
+				// This prevents the spinner from showing on old tools while new streaming starts
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(t => {
+						if (t.id !== tabId) return t;
+						const messages = t.messages.map(m => {
+							// Mark running tools as error (interrupted)
+							if (m.type === 'tool_use' && m.toolStatus === 'running') {
+								return { ...m, streaming: false, toolStatus: 'error' as const };
+							}
+							// Mark streaming text as not streaming
+							return m.streaming ? { ...m, streaming: false } : m;
+						});
+						return { ...t, messages };
+					})
+				}));
+
+				// Clear pending tools tracking since we're interrupting
+				tabPendingTools.delete(tabId);
+
 				// Update lastMessageTime to reset health check timer
 				tabLastMessageTime.set(tabId, Date.now());
 				ws.send(JSON.stringify({
