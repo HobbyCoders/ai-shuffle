@@ -102,7 +102,12 @@ class ProfileConfig(BaseModel):
     permission_mode: Optional[str] = "default"  # default, acceptEdits, plan, bypassPermissions
     max_turns: Optional[int] = None
 
-    # Tool configuration
+    # Tool configuration - SDK 0.1.12+ supports new 'tools' option
+    # tools: Explicit list of tools to enable, or "claude_code" preset (new SDK way)
+    # allowed_tools: Legacy - only these tools allowed (if tools not set)
+    # disallowed_tools: Block these tools (can be combined with tools or allowed_tools)
+    tools: Optional[List[str]] = None  # New SDK 0.1.12+ - explicit tool list
+    tools_preset: Optional[str] = None  # "claude_code" to use preset (SDK 0.1.12+)
     allowed_tools: Optional[List[str]] = None
     disallowed_tools: Optional[List[str]] = None
 
@@ -143,6 +148,9 @@ class ProfileConfig(BaseModel):
     # Each entry should be a path to a plugin directory containing .claude-plugin/plugin.json
     # Paths can be relative (resolved from workspace) or absolute
     enabled_plugins: Optional[List[str]] = None
+
+    # File checkpointing for rewind (SDK 0.1.15+)
+    enable_file_checkpointing: bool = False  # Enable file snapshots for rewind
 
 
 class ProfileBase(BaseModel):

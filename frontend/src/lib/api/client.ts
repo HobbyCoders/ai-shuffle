@@ -123,9 +123,12 @@ export interface ProfileConfig {
 	model?: string;
 	allowed_tools?: string[];
 	disallowed_tools?: string[];
+	tools?: string[];  // SDK 0.1.12+ - explicit tool list
+	tools_preset?: string;  // SDK 0.1.12+ - "claude_code" preset
 	permission_mode?: string;
 	max_turns?: number;
 	include_partial_messages?: boolean;
+	enable_file_checkpointing?: boolean;  // SDK 0.1.15+ - enable file snapshots for rewind
 	system_prompt?: {
 		type: string;
 		preset?: string;
@@ -1068,6 +1071,7 @@ export interface RewindExecuteResponse {
 	success: boolean;
 	message: string;
 	chat_rewound: boolean;
+	files_rewound: boolean;
 	messages_removed: number;
 	error: string | null;
 }
@@ -1085,16 +1089,19 @@ export async function getRewindCheckpoints(sessionId: string): Promise<RewindChe
  * @param targetUuid - UUID of the checkpoint to rewind to
  * @param includeResponse - If true, keep Claude's response to the target message
  * @param targetRole - The role of the target message ("user" or "assistant")
+ * @param restoreFiles - If true, also restore files to checkpoint state (requires file checkpointing enabled)
  */
 export async function executeRewind(
 	sessionId: string,
 	targetUuid: string,
 	includeResponse: boolean = true,
-	targetRole: 'user' | 'assistant' = 'user'
+	targetRole: 'user' | 'assistant' = 'user',
+	restoreFiles: boolean = false
 ): Promise<RewindExecuteResponse> {
 	return api.post<RewindExecuteResponse>(`/commands/rewind/execute/${sessionId}`, {
 		target_uuid: targetUuid,
 		restore_chat: true,
+		restore_files: restoreFiles,
 		include_response: includeResponse,
 		target_role: targetRole
 	});

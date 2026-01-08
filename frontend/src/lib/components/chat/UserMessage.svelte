@@ -8,11 +8,13 @@
 		content: string;
 		timestamp?: Date;
 		sessionId?: string | null;
+		messageUuid?: string | null;  // UUID from JSONL for direct rewind
 		streaming?: boolean;
 		onRewindComplete?: () => void;
+		fileCheckpointingEnabled?: boolean;  // If true, show option to rewind files too
 	}
 
-	let { content, timestamp, sessionId = null, streaming = false, onRewindComplete }: Props = $props();
+	let { content, timestamp, sessionId = null, messageUuid = null, streaming = false, onRewindComplete, fileCheckpointingEnabled = false }: Props = $props();
 
 	let isHovered = $state(false);
 	let isTouchDevice = $state(false);
@@ -58,7 +60,9 @@
 						{sessionId}
 						messageContent={content}
 						messageRole="user"
+						{messageUuid}
 						{onRewindComplete}
+						{fileCheckpointingEnabled}
 					/>
 				</div>
 			{/if}

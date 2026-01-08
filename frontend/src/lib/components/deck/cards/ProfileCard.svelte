@@ -155,7 +155,9 @@
 		add_dirs: '',
 		user: '',
 		max_buffer_size: null as number | null,
-		env_vars: [] as { key: string; value: string }[]
+		env_vars: [] as { key: string; value: string }[],
+		// SDK 0.1.15+ file checkpointing for rewind
+		enable_file_checkpointing: false
 	});
 
 	// Common environment variable presets with valid ranges
@@ -166,7 +168,8 @@
 		{ key: 'BASH_DEFAULT_TIMEOUT_MS', placeholder: 'ms (default: 120000)' },
 		{ key: 'BASH_MAX_TIMEOUT_MS', placeholder: 'ms (default: 600000)' },
 		{ key: 'MCP_TIMEOUT', placeholder: 'ms for server startup' },
-		{ key: 'MCP_TOOL_TIMEOUT', placeholder: 'ms for tool execution' }
+		{ key: 'MCP_TOOL_TIMEOUT', placeholder: 'ms for tool execution' },
+		{ key: 'CLAUDE_CODE_STREAM_CLOSE_TIMEOUT', placeholder: 'ms for stream close (SDK 0.1.10+)' }
 	];
 
 	// Tool selection mode
@@ -269,7 +272,8 @@
 			add_dirs: '',
 			user: '',
 			max_buffer_size: null,
-			env_vars: []
+			env_vars: [],
+			enable_file_checkpointing: false
 		};
 		toolSelectionMode = 'all';
 		aiToolSelectionMode = 'custom';
@@ -353,7 +357,8 @@
 			add_dirs: ((config as any).add_dirs || []).join(', '),
 			user: (config as any).user || '',
 			max_buffer_size: (config as any).max_buffer_size || null,
-			env_vars: Object.entries((config as any).env || {}).map(([key, value]) => ({ key, value: value as string }))
+			env_vars: Object.entries((config as any).env || {}).map(([key, value]) => ({ key, value: value as string })),
+			enable_file_checkpointing: (config as any).enable_file_checkpointing || false
 		};
 
 		viewMode = 'form';
@@ -525,7 +530,9 @@
 			permission_mode: profileForm.permission_mode,
 			include_partial_messages: profileForm.include_partial_messages,
 			continue_conversation: profileForm.continue_conversation,
-			fork_session: profileForm.fork_session
+			fork_session: profileForm.fork_session,
+			// SDK 0.1.15+ file checkpointing for rewind
+			enable_file_checkpointing: profileForm.enable_file_checkpointing
 		};
 
 		if (profileForm.max_turns) config.max_turns = profileForm.max_turns;
@@ -1386,6 +1393,23 @@
 								class="card-form-input"
 								placeholder="Default"
 							/>
+						</div>
+					</div>
+
+					<div class="card-form-section">
+						<h3 class="card-form-title">Rewind & Recovery</h3>
+						<div class="checkbox-group">
+							<label class="checkbox-item">
+								<input
+									type="checkbox"
+									bind:checked={profileForm.enable_file_checkpointing}
+									class="checkbox-input"
+								/>
+								<div class="checkbox-content">
+									<span class="checkbox-label">Enable File Checkpointing</span>
+									<p class="checkbox-desc">Create file snapshots for rewind operations. Allows restoring both conversation history and file changes. (SDK 0.1.15+)</p>
+								</div>
+							</label>
 						</div>
 					</div>
 

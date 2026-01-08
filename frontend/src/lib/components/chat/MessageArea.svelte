@@ -53,6 +53,7 @@
 	// Current profile for message settings
 	const currentProfile = $derived($profiles.find(p => p.id === tab.profile));
 	const hasPartialMessages = $derived(currentProfile?.config?.include_partial_messages !== false);
+	const fileCheckpointingEnabled = $derived(currentProfile?.config?.enable_file_checkpointing === true);
 
 	// Find the last streaming message index - only that message should show the streaming indicator
 	// This prevents multiple bouncing dots from appearing after each tool call
@@ -280,15 +281,23 @@
 		<div class="max-w-5xl mx-auto px-4 sm:px-8 py-4 space-y-4">
 			{#each tab.messages as message, messageIndex (message.id)}
 				{#if message.role === 'user'}
-					<UserMessage content={message.content} sessionId={tab.sessionId} onRewindComplete={handleRewindComplete} />
+					<UserMessage
+						content={message.content}
+						sessionId={tab.sessionId}
+						messageUuid={message.id}
+						{fileCheckpointingEnabled}
+						onRewindComplete={handleRewindComplete}
+					/>
 				{:else if message.type === 'text' || !message.type}
 					<AssistantMessage
 						content={message.content}
 						messageIndex={messageIndex}
 						messageId={message.id}
+						messageUuid={message.id}
 						sessionId={tab.sessionId}
 						streaming={message.streaming && messageIndex === lastStreamingMessageIndex()}
 						{hasPartialMessages}
+						{fileCheckpointingEnabled}
 						metadata={message.metadata}
 						onRewindComplete={handleRewindComplete}
 					/>

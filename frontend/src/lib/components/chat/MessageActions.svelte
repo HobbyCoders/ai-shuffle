@@ -11,30 +11,35 @@
 		sessionId?: string | null;
 		messageContent: string;
 		messageRole: 'user' | 'assistant';
+		messageUuid?: string | null;  // Direct UUID from JSONL - preferred for rewind
 		canRead?: boolean;
 		isStreaming?: boolean;
 		onCopy?: (content: string) => void;
 		onRead?: () => void;
 		isReading?: boolean;
 		onRewindComplete?: () => void;
+		fileCheckpointingEnabled?: boolean;  // If true, show option to rewind files too
 	}
 
 	let {
 		sessionId,
 		messageContent,
 		messageRole,
+		messageUuid = null,  // If provided, use directly for rewind (no text matching needed)
 		canRead = false,
 		isStreaming = false,
 		onCopy,
 		onRead,
 		isReading = false,
-		onRewindComplete
+		onRewindComplete,
+		fileCheckpointingEnabled = false
 	}: Props = $props();
 
 	let copied = $state(false);
 	let showRewindDialog = $state(false);
 	let isRewinding = $state(false);
 	let rewindError = $state<string | null>(null);
+	let rewindMode = $state<'chat' | 'chat_and_files'>('chat');  // Selected rewind mode
 
 	/**
 	 * Strip markdown syntax but keep readable text for copying
@@ -91,6 +96,7 @@
 		if (!sessionId) return;
 		showRewindDialog = true;
 		rewindError = null;
+		rewindMode = 'chat';  // Reset to default mode
 	}
 
 	async function handleRewindConfirm() {
@@ -99,7 +105,28 @@
 		isRewinding = true;
 		rewindError = null;
 
+		const restoreFiles = rewindMode === 'chat_and_files';
+
 		try {
+			// If we have a direct UUID, use it (preferred - no text matching needed)
+			if (messageUuid) {
+				console.log('[Rewind] Using direct UUID:', messageUuid, 'restoreFiles:', restoreFiles);
+				const includeResponse = messageRole === 'assistant';
+				const result = await executeRewind(sessionId, messageUuid, includeResponse, messageRole, restoreFiles);
+
+				if (result.success) {
+					console.log('[Rewind] Success - removed', result.messages_removed, 'messages, files_rewound:', result.files_rewound);
+					showRewindDialog = false;
+					onRewindComplete?.();
+				} else {
+					rewindError = result.error || 'Rewind failed';
+				}
+				return;
+			}
+
+			// Fallback: text-based matching (for streaming messages without UUID)
+			console.log('[Rewind] No UUID available, falling back to text matching');
+
 			// Get all checkpoints
 			const checkpointsResponse = await getRewindCheckpoints(sessionId);
 
@@ -154,10 +181,10 @@
 			// For user messages: include_response=false removes this message and everything after
 			// For assistant messages: keeps this message, removes everything after
 			const includeResponse = messageRole === 'assistant';
-			const result = await executeRewind(sessionId, targetCheckpoint.uuid, includeResponse, messageRole);
+			const result = await executeRewind(sessionId, targetCheckpoint.uuid, includeResponse, messageRole, restoreFiles);
 
 			if (result.success) {
-				console.log('[Rewind] Success - removed', result.messages_removed, 'messages');
+				console.log('[Rewind] Success - removed', result.messages_removed, 'messages, files_rewound:', result.files_rewound);
 				showRewindDialog = false;
 				onRewindComplete?.();
 			} else {
@@ -265,6 +292,37 @@
 				</span>
 				<span class="ml-1">{getMessagePreview(messageContent)}</span>
 			</div>
+
+			<!-- Rewind Mode Selection (only if file checkpointing is enabled) -->
+			{#if fileCheckpointingEnabled}
+				<div class="mb-4 space-y-2">
+					<p class="text-sm font-medium text-foreground">Rewind Options:</p>
+					<label class="flex items-center gap-2 cursor-pointer">
+						<input
+							type="radio"
+							name="rewind-mode"
+							value="chat"
+							checked={rewindMode === 'chat'}
+							onchange={() => rewindMode = 'chat'}
+							class="w-4 h-4 text-primary"
+						/>
+						<span class="text-sm text-foreground">Chat Only</span>
+						<span class="text-xs text-muted-foreground">- Remove messages only</span>
+					</label>
+					<label class="flex items-center gap-2 cursor-pointer">
+						<input
+							type="radio"
+							name="rewind-mode"
+							value="chat_and_files"
+							checked={rewindMode === 'chat_and_files'}
+							onchange={() => rewindMode = 'chat_and_files'}
+							class="w-4 h-4 text-primary"
+						/>
+						<span class="text-sm text-foreground">Chat & Code</span>
+						<span class="text-xs text-muted-foreground">- Also restore files to checkpoint</span>
+					</label>
+				</div>
+			{/if}
 
 			{#if rewindError}
 				<div class="bg-destructive/10 border border-destructive/30 text-destructive text-sm px-3 py-2 rounded mb-4">

@@ -30,6 +30,8 @@ from app.core.models import (
     RewindRequest, RewindCheckpoint, RewindCheckpointsResponse,
     RewindExecuteResponse
 )
+# SDK client for file rewind operations
+from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
 
 logger = logging.getLogger(__name__)
 
@@ -346,6 +348,7 @@ class RewindRequestV2(BaseModel):
     """V2 Rewind request using message UUID instead of index"""
     target_uuid: str  # UUID of the message to rewind to
     restore_chat: bool = True  # Truncate JSONL (rewind conversation)
+    restore_files: bool = False  # Restore files to checkpoint state (requires file checkpointing enabled)
     include_response: bool = True  # Keep Claude's response to target message
     target_role: str = "user"  # Role of target message ("user" or "assistant")
 
@@ -355,8 +358,59 @@ class RewindResponseV2(BaseModel):
     success: bool
     message: str
     chat_rewound: bool = False
+    files_rewound: bool = False
     messages_removed: int = 0
     error: Optional[str] = None
+
+
+async def rewind_files_via_sdk(
+    sdk_session_id: str,
+    target_uuid: str,
+    working_dir: str
+) -> tuple[bool, Optional[str]]:
+    """
+    Rewind files to a checkpoint using the Claude SDK.
+
+    This creates a temporary SDK client, resumes the session, and calls rewind_files().
+
+    IMPORTANT: This requires that the session was originally created with
+    enable_file_checkpointing=True in ClaudeAgentOptions. If file checkpointing
+    was not enabled when the session started, this operation will fail.
+
+    Args:
+        sdk_session_id: The SDK session ID to resume
+        target_uuid: UUID of the user message to rewind files to
+        working_dir: Working directory for the project
+
+    Returns:
+        Tuple of (success, error_message)
+    """
+    try:
+        # Create options for file rewind - must include enable_file_checkpointing
+        # even when resuming to ensure SDK knows about the checkpointing state
+        options = ClaudeAgentOptions(
+            resume=sdk_session_id,
+            cwd=working_dir,
+            enable_file_checkpointing=True,  # Required for rewind_files() operation
+        )
+
+        client = ClaudeSDKClient(options=options)
+
+        try:
+            await client.connect()
+            await client.rewind_files(target_uuid)
+            logger.info(f"Successfully rewound files for session {sdk_session_id} to {target_uuid}")
+            return True, None
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass  # Ignore disconnect errors
+
+    except Exception as e:
+        error_msg = f"File rewind failed: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        return False, error_msg
 
 
 @router.get("/rewind/checkpoints/{session_id}")
@@ -434,17 +488,19 @@ async def get_rewind_checkpoints(session_id: str):
 @router.post("/rewind/execute/{session_id}")
 async def execute_rewind(session_id: str, request: RewindRequestV2):
     """
-    Execute a rewind operation to restore conversation.
+    Execute a rewind operation to restore conversation and optionally files.
 
     Direct JSONL truncation - bulletproof, no PTY/terminal needed.
 
     How it works:
     1. Truncates the JSONL file at the target message UUID
-    2. Syncs our local database
-    3. Next SDK resume will use truncated context
+    2. Optionally rewinds files via SDK (if enable_file_checkpointing was enabled)
+    3. Syncs our local database
+    4. Next SDK resume will use truncated context
 
     Options:
     - restore_chat: Truncate JSONL (rewind conversation context)
+    - restore_files: Restore files to checkpoint state (requires file checkpointing)
     - include_response: Keep Claude's response to target message
     """
     # Get session info
@@ -471,7 +527,13 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
     # Get working directory for project
     working_dir = get_working_dir_for_project(session.get("project_id"))
 
-    # Execute rewind using JSONL rewind service
+    # Track what was rewound
+    chat_rewound = False
+    files_rewound = False
+    messages_removed = 0
+    errors = []
+
+    # Execute chat rewind using JSONL rewind service
     if request.restore_chat:
         result = jsonl_rewind_service.truncate_to_checkpoint(
             sdk_session_id=sdk_session_id,
@@ -480,31 +542,56 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
             include_response=request.include_response,
             target_role=request.target_role
         )
-    else:
-        # If not restoring chat, nothing to do
-        result = RewindResult(
-            success=True,
-            message="No rewind action taken (restore_chat=False)",
-            messages_removed=0
+        if result.success:
+            chat_rewound = True
+            messages_removed = result.messages_removed or 0
+        else:
+            errors.append(f"Chat rewind failed: {result.error}")
+
+    # Execute file rewind via SDK (if requested)
+    if request.restore_files:
+        file_success, file_error = await rewind_files_via_sdk(
+            sdk_session_id=sdk_session_id,
+            target_uuid=request.target_uuid,
+            working_dir=working_dir
         )
+        if file_success:
+            files_rewound = True
+        else:
+            errors.append(file_error or "File rewind failed")
+
+    # Determine overall success
+    success = (not request.restore_chat or chat_rewound) and (not request.restore_files or files_rewound)
+
+    # Build result message
+    if success:
+        parts = []
+        if chat_rewound:
+            parts.append(f"removed {messages_removed} messages")
+        if files_rewound:
+            parts.append("restored files")
+        message = f"Successfully rewound: {', '.join(parts)}" if parts else "Rewind completed"
+    else:
+        message = "Rewind partially failed"
 
     # Broadcast rewind event to all connected devices for this session
-    if result.success and result.messages_removed > 0:
+    if chat_rewound and messages_removed > 0:
         import asyncio
         asyncio.create_task(
             sync_engine.broadcast_session_rewound(
                 session_id=session_id,
                 target_uuid=request.target_uuid,
-                messages_removed=result.messages_removed or 0
+                messages_removed=messages_removed
             )
         )
 
     return RewindResponseV2(
-        success=result.success,
-        message=result.message,
-        chat_rewound=request.restore_chat and result.success,
-        messages_removed=result.messages_removed or 0,
-        error=result.error
+        success=success,
+        message=message,
+        chat_rewound=chat_rewound,
+        files_rewound=files_rewound,
+        messages_removed=messages_removed,
+        error="; ".join(errors) if errors else None
     )
 
 

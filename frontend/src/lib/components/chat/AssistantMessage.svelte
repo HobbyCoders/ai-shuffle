@@ -18,9 +18,11 @@
 		timestamp?: Date;
 		messageIndex: number;
 		messageId: string;
+		messageUuid?: string | null;  // UUID from JSONL for direct rewind (may be same as messageId)
 		sessionId?: string | null;
 		streaming?: boolean;
 		hasPartialMessages?: boolean;
+		fileCheckpointingEnabled?: boolean;  // If true, show option to rewind files too
 		metadata?: Record<string, unknown>;
 		onCopy?: (content: string, messageId: string) => void;
 		onRewindComplete?: () => void;
@@ -31,9 +33,11 @@
 		timestamp,
 		messageIndex,
 		messageId,
+		messageUuid = null,  // UUID from JSONL for direct rewind
 		sessionId,
 		streaming = false,
 		hasPartialMessages = true,
+		fileCheckpointingEnabled = false,
 		metadata,
 		onCopy,
 		onRewindComplete
@@ -342,11 +346,13 @@
 						{sessionId}
 						messageContent={content}
 						messageRole="assistant"
+						{messageUuid}
 						{canRead}
 						isStreaming={streaming}
 						onRead={handleRead}
 						{isReading}
 						{onRewindComplete}
+						{fileCheckpointingEnabled}
 					/>
 				</div>
 			{/if}

@@ -1665,6 +1665,24 @@ def build_options_from_profile(
         model_to_use, betas_to_use = MODEL_1M_MAPPING[raw_model]
         logger.info(f"1M context model selected: {raw_model} -> model={model_to_use}, betas={betas_to_use}")
 
+    # Build tool configuration (SDK 0.1.12+ supports new 'tools' parameter)
+    # Priority: tools > tools_preset > allowed_tools (legacy)
+    tools_config = config.get("tools")  # Explicit list of tools
+    tools_preset = config.get("tools_preset")  # "claude_code" preset
+    allowed_tools = config.get("allowed_tools") or []
+    disallowed_tools = config.get("disallowed_tools") or []
+
+    # Determine tools parameter for SDK
+    # New SDK way: use 'tools' param with list or preset dict
+    # Legacy way: use 'allowed_tools' param
+    sdk_tools = None
+    if tools_config:
+        # Explicit tool list provided
+        sdk_tools = tools_config
+    elif tools_preset == "claude_code":
+        # Use preset (TypedDict format for SDK)
+        sdk_tools = {"type": "preset", "preset": "claude_code"}
+
     # Build options with all ClaudeAgentOptions fields
     # Note: We don't set cli_path - let the SDK use its bundled CLI or find system CLI automatically
     # The SDK handles finding Claude properly on all platforms
@@ -1674,9 +1692,13 @@ def build_options_from_profile(
         permission_mode=permission_mode,
         max_turns=overrides.get("max_turns") or config.get("max_turns"),
 
-        # Tool configuration
-        allowed_tools=config.get("allowed_tools") or [],
-        disallowed_tools=config.get("disallowed_tools") or [],
+        # Tool configuration (SDK 0.1.12+)
+        # 'tools' is the new way - explicit list or preset
+        # 'allowed_tools' is legacy - used if tools not set
+        # 'disallowed_tools' always applies as a blocklist
+        tools=sdk_tools,
+        allowed_tools=allowed_tools if not sdk_tools else [],  # Only use if tools not set
+        disallowed_tools=disallowed_tools,
 
         # System prompt
         system_prompt=final_system_prompt,
@@ -1727,6 +1749,9 @@ def build_options_from_profile(
 
         # Beta features - e.g., 1M context window
         betas=betas_to_use,
+
+        # File checkpointing for rewind (SDK 0.1.15+)
+        enable_file_checkpointing=config.get("enable_file_checkpointing", False),
     )
 
     deployment_mode = detect_deployment_mode()
