@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONFIG = {
     # Cleanup schedule
     "cleanup_interval_minutes": 5,
-    "sdk_session_max_age_minutes": 60,
-    "websocket_max_age_minutes": 5,
+    "sdk_session_max_age_minutes": 60,  # Legacy: SDK sessions now cleanup automatically when streaming ends
+    "websocket_max_age_minutes": 5,  # Safety net for silent disconnects
     "sync_log_retention_hours": 24,
 
     # File cleanup (disabled by default)
@@ -347,9 +347,17 @@ class CleanupManager:
         """
         Run a full cleanup cycle.
 
+        Primary cleanup tasks (always run):
+        - Database cleanup: auth sessions, lockouts, API key sessions, sync logs
+        - File cleanup: images, videos, uploads (if enabled in settings)
+
+        Optional safety-net callbacks (rarely needed now):
+        - cleanup_sessions_callback: SDK session cleanup (now automatic when streaming ends)
+        - cleanup_connections_callback: WebSocket connection cleanup (safety net for silent disconnects)
+
         Args:
-            cleanup_sessions_callback: Async function to cleanup SDK sessions (takes max_age_seconds)
-            cleanup_connections_callback: Async function to cleanup WebSocket connections (takes max_age_seconds)
+            cleanup_sessions_callback: Optional async function to cleanup SDK sessions (takes max_age_seconds)
+            cleanup_connections_callback: Optional async function to cleanup WebSocket connections (takes max_age_seconds)
         """
         stats = CleanupStats()
 
@@ -362,12 +370,12 @@ class CleanupManager:
 
         logger.debug("Running cleanup cycle...")
 
-        # SDK sessions cleanup
+        # SDK sessions cleanup (safety net - primary cleanup now happens when streaming ends)
         if cleanup_sessions_callback:
             max_age = self.get_config("sdk_session_max_age_minutes") * 60
             await cleanup_sessions_callback(max_age_seconds=max_age)
 
-        # WebSocket connections cleanup
+        # WebSocket connections cleanup (safety net for connections that died silently)
         if cleanup_connections_callback:
             max_age = self.get_config("websocket_max_age_minutes") * 60
             await cleanup_connections_callback(max_age_seconds=max_age)

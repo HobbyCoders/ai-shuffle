@@ -304,9 +304,24 @@ class SyncEngine:
         """Get number of devices watching a session"""
         return len(self._connections.get(session_id, {}))
 
+    def is_device_watching_session(self, device_id: str, session_id: str) -> bool:
+        """Check if a specific device is already watching a session.
+
+        Used to prevent the same device from opening the same session in multiple tabs.
+        """
+        return device_id in self._connections.get(session_id, {})
+
     def is_session_streaming(self, session_id: str) -> bool:
         """Check if a session is currently streaming"""
         return session_id in self._streaming_sessions
+
+    def clear_streaming_state(self, session_id: str) -> None:
+        """Clear streaming state for a session without broadcasting.
+
+        Used during cleanup when no devices are connected to receive broadcasts.
+        """
+        self._streaming_sessions.discard(session_id)
+        self._streaming_buffers.pop(session_id, None)
 
     async def acquire_session_lock(self, session_id: str, device_id: str) -> tuple[bool, Optional[str]]:
         """Acquire exclusive lock on a session for a device.

@@ -755,6 +755,21 @@ async def chat_websocket(
             if session_id in _active_chat_sessions:
                 del _active_chat_sessions[session_id]
 
+            # If no devices are connected after query finished, cleanup session resources
+            # This handles the case where the user closed the tab during the query
+            remaining_devices = sync_engine.get_device_count(session_id)
+            if remaining_devices == 0:
+                logger.info(f"Query finished but no devices connected for session {session_id}, cleaning up resources")
+
+                from app.core.query_engine import cleanup_session as cleanup_query_session
+                cleaned = await cleanup_query_session(session_id)
+                if cleaned:
+                    logger.info(f"Cleaned up query engine resources for session {session_id}")
+
+                if live_session_store.has_session(session_id):
+                    await live_session_store.cleanup_session(session_id)
+                    logger.info(f"Cleaned up live session store for session {session_id}")
+
     try:
         # Start ping task
         ping_task = asyncio.create_task(ping_loop(websocket, "chat"))
@@ -942,40 +957,23 @@ async def chat_websocket(
                     elif msg_type == "load_session":
                         # Load a session's message history from JSONL file
                         session_id = data.get("session_id")
-                        force_takeover = data.get("force", False)  # Allow forced takeover
                         if session_id:
                             session = database.get_session(session_id)
                             if session:
-                                # Check for session lock - enforce single active device per session
-                                lock_success, lock_owner = await sync_engine.acquire_session_lock(session_id, device_id)
-                                if not lock_success and not force_takeover:
-                                    # Session is locked by another device
+                                # Check if THIS DEVICE already has this session open in another tab
+                                # This prevents duplicate tabs with the same session on the same device
+                                # But allows DIFFERENT devices to view the same session simultaneously
+                                if sync_engine.is_device_watching_session(device_id, session_id):
+                                    # Same device already has this session open - block duplicate
                                     await send_json({
-                                        "type": "session_locked",
+                                        "type": "session_already_open",
                                         "session_id": session_id,
-                                        "locked_by": lock_owner,
-                                        "message": "This session is already open on another device. Use force=true to take over."
+                                        "message": "This session is already open in another tab on this device."
                                     })
                                     continue
-                                elif not lock_success and force_takeover:
-                                    # Force takeover - release the old lock and acquire new one
-                                    # First, notify the old device that it's being kicked
-                                    await sync_engine.broadcast_event(
-                                        SyncEvent(
-                                            event_type="session_takeover",
-                                            session_id=session_id,
-                                            data={"new_device": device_id, "message": "Session taken over by another device"}
-                                        ),
-                                        exclude_device_id=device_id
-                                    )
-                                    # Release old lock and acquire for this device
-                                    await sync_engine.release_session_lock(session_id, lock_owner)
-                                    await sync_engine.acquire_session_lock(session_id, device_id)
-                                    logger.info(f"Device {device_id[:8]} force-took over session {session_id[:8]} from {lock_owner[:8]}")
 
-                                # Release lock on old session if switching
+                                # Unregister from old session if switching
                                 if current_session_id and current_session_id != session_id:
-                                    await sync_engine.release_session_lock(current_session_id, device_id)
                                     await sync_engine.unregister_device(device_id, current_session_id)
 
                                 # Register to new session
@@ -1140,6 +1138,8 @@ async def chat_websocket(
 
                             current_session_id = None
                             logger.info(f"Device {device_id} closed session {old_session_id}")
+                            # Try to send confirmation, but don't worry if WebSocket is already closed
+                            # (common when frontend sends close_session right before disconnecting)
                             await send_json({"type": "session_closed", "session_id": old_session_id})
 
                     elif msg_type == "permission_response":
@@ -1244,12 +1244,49 @@ async def chat_websocket(
             # before this cleanup runs (e.g., page reload during streaming)
             if current_session_id:
                 await sync_engine.unregister_device(device_id, current_session_id, websocket)
-                # Release session lock when disconnecting
-                await sync_engine.release_session_lock(current_session_id, device_id)
                 logger.info(f"Cleanup: unregister device {device_id} from session {current_session_id}")
+
+                # Check if this was the last device for this session
+                # If so, and no active query is running, cleanup the session resources
+                remaining_devices = sync_engine.get_device_count(current_session_id)
+                active_task = _active_chat_sessions.get(current_session_id)
+                is_task_done = active_task is None or active_task.done()
+
+                if remaining_devices == 0 and is_task_done:
+                    # No more devices watching and no active query - cleanup session resources
+                    logger.info(f"Last device disconnected from session {current_session_id}, cleaning up resources")
+
+                    # Cleanup query engine SDK resources (Claude Code process, etc.)
+                    from app.core.query_engine import cleanup_session as cleanup_query_session
+                    cleaned = await cleanup_query_session(current_session_id)
+                    if cleaned:
+                        logger.info(f"Cleaned up query engine resources for session {current_session_id}")
+
+                    # Cleanup live session store (in-memory streaming state)
+                    if live_session_store.has_session(current_session_id):
+                        await live_session_store.cleanup_session(current_session_id)
+                        logger.info(f"Cleaned up live session store for session {current_session_id}")
+
+                    # Remove from active chat sessions tracking
+                    _active_chat_sessions.pop(current_session_id, None)
+
+                    # Clear streaming state in sync engine (no need to broadcast - no devices left)
+                    sync_engine.clear_streaming_state(current_session_id)
+                elif remaining_devices > 0:
+                    logger.info(f"Session {current_session_id} still has {remaining_devices} device(s) connected")
+                elif not is_task_done:
+                    logger.info(f"Session {current_session_id} has active query, deferring cleanup")
 
     except WebSocketDisconnect:
         logger.info("Chat WebSocket disconnected")
+
+    except RuntimeError as e:
+        # Handle "WebSocket is not connected" error that happens when we try to
+        # receive after the connection was closed (e.g., after processing close_session)
+        if "not connected" in str(e).lower():
+            logger.info("Chat WebSocket disconnected (connection closed)")
+        else:
+            logger.error(f"Chat WebSocket runtime error: {e}")
 
     except Exception as e:
         logger.error(f"Chat WebSocket error: {e}")
@@ -1379,6 +1416,25 @@ async def session_sync_websocket(
     finally:
         # Unregister device
         await sync_engine.unregister_device(device_id, session_id)
+
+        # Check if this was the last device and cleanup if needed
+        remaining_devices = sync_engine.get_device_count(session_id)
+        active_task = _active_chat_sessions.get(session_id)
+        is_task_done = active_task is None or active_task.done()
+
+        if remaining_devices == 0 and is_task_done:
+            logger.info(f"Last device disconnected from legacy sync session {session_id}, cleaning up resources")
+
+            from app.core.query_engine import cleanup_session as cleanup_query_session
+            cleaned = await cleanup_query_session(session_id)
+            if cleaned:
+                logger.info(f"Cleaned up query engine resources for session {session_id}")
+
+            if live_session_store.has_session(session_id):
+                await live_session_store.cleanup_session(session_id)
+
+            _active_chat_sessions.pop(session_id, None)
+            await sync_engine.broadcast_stream_end(session_id, interrupted=True)
 
 
 async def ping_loop(websocket: WebSocket, device_id: str):

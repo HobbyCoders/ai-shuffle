@@ -18,7 +18,6 @@ from app.db import database
 from app.db.database import init_database
 from app.core.profiles import run_migrations
 from app.core.auth import auth_service
-from app.core.query_engine import cleanup_stale_sessions
 from app.core.sync_engine import sync_engine
 from app.core.cleanup_manager import cleanup_manager
 from app.core import encryption
@@ -107,9 +106,11 @@ async def periodic_cleanup():
             await asyncio.sleep(interval_minutes * 60)
 
             # Run cleanup cycle through cleanup manager
-            # This handles sleep mode checking, configurable timeouts, and file cleanup
+            # This handles sleep mode, database cleanup (auth sessions, sync logs), and file cleanup
+            # Note: SDK session cleanup is now automatic when streaming ends, so we don't pass that callback
+            # WebSocket connection cleanup is a safety net for edge cases (connections that died silently)
             await cleanup_manager.run_cleanup_cycle(
-                cleanup_sessions_callback=cleanup_stale_sessions,
+                cleanup_sessions_callback=None,  # SDK sessions now cleanup automatically when streaming ends
                 cleanup_connections_callback=sync_engine.cleanup_stale_connections
             )
 

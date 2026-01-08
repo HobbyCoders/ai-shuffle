@@ -465,8 +465,13 @@ class TestCleanupSession:
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_cleanup_session_disconnects_client(self):
-        """Should disconnect SDK client when cleaning up session."""
+    async def test_cleanup_session_removes_client_reference(self):
+        """Should remove SDK client reference when cleaning up session.
+
+        Note: We don't call client.disconnect() because SDK clients use anyio
+        cancel scopes which are task-bound. Calling disconnect from a different
+        task causes errors. The client will be garbage collected.
+        """
         mock_client = AsyncMock()
         state = SessionState(client=mock_client, is_connected=True)
         _active_sessions["test-session"] = state
@@ -475,7 +480,8 @@ class TestCleanupSession:
 
         assert result is True
         assert "test-session" not in _active_sessions
-        mock_client.disconnect.assert_called_once()
+        # Client should NOT be disconnected (causes task context errors)
+        mock_client.disconnect.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_cleanup_session_cancels_background_task(self):

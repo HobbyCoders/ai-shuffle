@@ -371,13 +371,25 @@ async def cleanup_session(session_id: str) -> bool:
             pass
         logger.info(f"Cancelled background task for session {session_id}")
 
-    # Disconnect SDK client
+    # Note: The SDK client should have been disconnected in the streaming task's
+    # finally block. This is a fallback for edge cases (e.g., task was cancelled
+    # before reaching finally, or session cleanup called for old stale sessions).
+    # We try to terminate the subprocess directly since disconnect() can't be
+    # called from a different task (anyio cancel scopes are task-bound).
     if state.client:
         try:
-            await state.client.disconnect()
-            logger.info(f"Disconnected SDK client for session {session_id}")
+            transport = getattr(state.client, '_transport', None)
+            if transport:
+                process = getattr(transport, '_process', None)
+                if process and process.returncode is None:
+                    process.terminate()
+                    logger.info(f"Terminated Claude Code subprocess for session {session_id} (fallback cleanup)")
+                else:
+                    logger.info(f"Claude Code subprocess already terminated for session {session_id}")
+            else:
+                logger.info(f"No transport found for session {session_id}")
         except Exception as e:
-            logger.warning(f"Error disconnecting SDK client for session {session_id}: {e}")
+            logger.warning(f"Error terminating subprocess for session {session_id}: {e}")
 
     # Cleanup agent files
     if state.agents_dir and state.written_agent_ids:
@@ -2238,8 +2250,7 @@ async def stream_query(
         yield {"type": "error", "message": str(e)}
 
     finally:
-        # Mark as not streaming - but DON'T disconnect the client
-        # Following Anvil's pattern: keep client connected for session lifetime
+        # Mark as not streaming
         state.is_streaming = False
         state.last_activity = datetime.now()
 
@@ -3391,6 +3402,25 @@ async def stream_to_websocket(
         state.is_streaming = False
         state.interrupt_requested = False
         state.last_activity = datetime.now()
+
+        # Disconnect the SDK client to terminate the Claude Code subprocess
+        # This MUST be done in the same task that created/connected the client
+        # (anyio cancel scopes are task-bound)
+        if state.client:
+            try:
+                await state.client.disconnect()
+                logger.info(f"[WS] Disconnected SDK client for session {session_id}")
+            except Exception as e:
+                logger.warning(f"[WS] Error disconnecting SDK client for session {session_id}: {e}")
+            state.is_connected = False
+
+        # Remove from active sessions and cleanup agent files
+        if session_id in _active_sessions:
+            if state.agents_dir and state.written_agent_ids:
+                cleanup_agents_directory(state.agents_dir, state.written_agent_ids)
+                logger.info(f"[WS] Cleaned up agent files for session {session_id}")
+            del _active_sessions[session_id]
+            logger.info(f"[WS] Removed session {session_id} from active sessions")
 
     # Update session in database
     # Only set title for new sessions (when resume_id was None, meaning first message)

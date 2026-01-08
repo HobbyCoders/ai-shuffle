@@ -915,12 +915,15 @@ class TestPeriodicCleanupAdditional:
     """Additional tests for periodic cleanup."""
 
     @pytest.mark.asyncio
-    async def test_cleanup_calls_both_callbacks(self):
-        """Periodic cleanup should call both session and connection cleanup."""
+    async def test_cleanup_calls_cleanup_cycle(self):
+        """Periodic cleanup should call cleanup_cycle with connection callback only.
+
+        Note: SDK session cleanup callback was removed since SDK sessions now
+        cleanup automatically when streaming ends.
+        """
         from app.main import periodic_cleanup
 
         with patch("app.main.cleanup_manager") as mock_cleanup, \
-             patch("app.main.cleanup_stale_sessions") as mock_session_cleanup, \
              patch("app.main.sync_engine") as mock_sync_engine:
 
             # Set interval to 0.0001 minutes = 0.006 seconds = 6ms
@@ -940,6 +943,11 @@ class TestPeriodicCleanupAdditional:
 
             # Verify run_cleanup_cycle was called
             assert mock_cleanup.run_cleanup_cycle.called, "run_cleanup_cycle should have been called"
+
+            # Verify it was called with None for sessions callback (SDK cleanup is now automatic)
+            # and with sync_engine.cleanup_stale_connections for connections
+            call_kwargs = mock_cleanup.run_cleanup_cycle.call_args.kwargs
+            assert call_kwargs.get("cleanup_sessions_callback") is None
 
 
 class TestRouterRegistrationAdditional:

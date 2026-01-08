@@ -9,6 +9,20 @@ import { writable, derived, get } from 'svelte/store';
 import type { Session, Profile, PermissionRequest as PermissionRequestType, UserQuestionRequest, PaginatedSessions, SessionSearchResult, PaginatedSessionSearchResults } from '$lib/api/client';
 import { api, searchSessionsPaginated } from '$lib/api/client';
 import { isNotificationsEnabled, notifySessionComplete, getPermission, type SessionCompleteInfo } from '$lib/services/notifications';
+import { deck } from './deck';
+import {
+	initStreamingBuffer,
+	pushEvent,
+	flushNow,
+	clearBuffer,
+	removeBuffer,
+	findLastStreamingTextIndex,
+	invalidateStreamingIndexCache,
+	appendToStreamingText,
+	appendToToolInput,
+	type BatchedUpdate,
+	type BufferedEvent
+} from './streaming-buffer';
 
 export interface ApiUser {
 	id: string;
@@ -565,6 +579,134 @@ function createTabsStore() {
 	}
 
 	/**
+	 * Check if WebSocket is healthy (receiving messages recently)
+	 * Used to skip polling when WS is working well
+	 */
+	const WEBSOCKET_HEALTHY_THRESHOLD_MS = 2000;
+
+	function isWebSocketHealthy(tabId: string): boolean {
+		const lastMessage = tabLastMessageTime.get(tabId);
+		if (!lastMessage) return false;
+		return Date.now() - lastMessage < WEBSOCKET_HEALTHY_THRESHOLD_MS;
+	}
+
+	/**
+	 * Process a discrete event from the buffer and apply it to messages array.
+	 * This handles non-delta events like stream_block_start, stream_block_stop, etc.
+	 */
+	function processDiscreteEvent(messages: ChatMessage[], event: BufferedEvent, tab: ChatTab): void {
+		const { type, data } = event;
+
+		switch (type) {
+			case 'stream_block_start': {
+				const blockType = data.block_type as string;
+				if (blockType === 'tool_use') {
+					const contentBlock = data.content_block as { id?: string; name?: string };
+					// Handle any existing streaming text message
+					const streamingIdx = messages.findLastIndex(
+						m => m.type === 'text' && m.role === 'assistant' && m.streaming
+					);
+					if (streamingIdx !== -1) {
+						if (messages[streamingIdx].content) {
+							messages[streamingIdx] = { ...messages[streamingIdx], streaming: false };
+						} else {
+							messages.splice(streamingIdx, 1);
+						}
+					}
+					// Add tool use message
+					messages.push({
+						id: `tool-${Date.now()}-${contentBlock.id || ''}`,
+						role: 'assistant',
+						content: '',
+						type: 'tool_use',
+						toolName: contentBlock.name || '',
+						toolId: contentBlock.id || '',
+						toolInput: {},
+						toolStatus: 'running',
+						streaming: true
+					});
+				}
+				break;
+			}
+
+			case 'stream_block_stop':
+				// Block complete - nothing special to do
+				break;
+
+			case 'stream_message_delta': {
+				// Final message metadata with output token usage
+				// This is handled separately via usageUpdate in batch
+				break;
+			}
+		}
+	}
+
+	/**
+	 * Apply a batched update from the streaming buffer to the store.
+	 * This is called by the streaming-buffer module when it flushes.
+	 */
+	function applyBatchedUpdate(tabId: string, batch: BatchedUpdate): void {
+		update(s => {
+			const tabIndex = s.tabs.findIndex(t => t.id === tabId);
+			if (tabIndex === -1) return s;
+
+			const tab = s.tabs[tabIndex];
+			const messages = [...tab.messages]; // Single copy per flush
+
+			// Apply all text deltas at once
+			if (batch.textDelta) {
+				appendToStreamingText(messages, batch.textDelta);
+			}
+
+			// Apply all tool input deltas
+			for (const [toolId, delta] of batch.toolInputDeltas) {
+				appendToToolInput(messages, toolId, delta);
+			}
+
+			// Process discrete events
+			for (const event of batch.discreteEvents) {
+				processDiscreteEvent(messages, event, tab);
+			}
+
+			// Apply usage updates
+			let newTotalTokensIn = tab.totalTokensIn;
+			let newTotalTokensOut = tab.totalTokensOut;
+			let newCacheCreation = tab.totalCacheCreationTokens;
+			let newCacheRead = tab.totalCacheReadTokens;
+
+			if (batch.usageUpdate) {
+				if (batch.usageUpdate.inputTokens !== undefined) {
+					newTotalTokensIn = batch.usageUpdate.inputTokens;
+				}
+				if (batch.usageUpdate.outputTokens !== undefined) {
+					newTotalTokensOut = batch.usageUpdate.outputTokens;
+				}
+				if (batch.usageUpdate.cacheCreationTokens !== undefined) {
+					newCacheCreation = batch.usageUpdate.cacheCreationTokens;
+				}
+				if (batch.usageUpdate.cacheReadTokens !== undefined) {
+					newCacheRead = batch.usageUpdate.cacheReadTokens;
+				}
+			}
+
+			// Single new object creation
+			const newTabs = [...s.tabs];
+			newTabs[tabIndex] = {
+				...tab,
+				messages,
+				totalTokensIn: newTotalTokensIn,
+				totalTokensOut: newTotalTokensOut,
+				totalCacheCreationTokens: newCacheCreation,
+				totalCacheReadTokens: newCacheRead
+			};
+			return { ...s, tabs: newTabs };
+		});
+	}
+
+	// Initialize the streaming buffer with our callback
+	initStreamingBuffer(applyBatchedUpdate);
+
+	/**
 	 * Connect WebSocket for a specific tab
 	 */
 	function connectTab(tabId: string, isReconnect = false) {
@@ -776,6 +918,12 @@ function createTabsStore() {
 		tabLastUpdateId.set(tabId, 0);
 
 		const pollLiveState = async () => {
+			// Skip polling if WebSocket is actively receiving events
+			// This prevents double updates and reduces memory churn
+			if (isWebSocketHealthy(tabId)) {
+				return;
+			}
+
 			const tab = getTab(tabId);
 			if (!tab || tab.sessionId !== sessionId) {
 				// Tab closed or switched sessions
@@ -888,6 +1036,10 @@ function createTabsStore() {
 						};
 					})
 				}));
+
+				// Clear streaming buffer after poll replaces state (avoid stale data)
+				clearBuffer(tabId);
+				invalidateStreamingIndexCache();
 
 				// Stop polling if streaming ended
 				if (!data.is_streaming) {
@@ -2133,163 +2285,27 @@ function createTabsStore() {
 			}
 
 			case 'stream_block_start': {
-				// Start of a content block (text, thinking, tool_use)
-				const blockType = data.block_type as string;
-				console.log(`[WS] Stream block start: ${blockType}`);
-
-				if (blockType === 'tool_use') {
-					const contentBlock = data.content_block as { id?: string; name?: string };
-					update(s => ({
-						...s,
-						tabs: s.tabs.map(tab => {
-							if (tab.id !== tabId) return tab;
-
-							let messages = [...tab.messages];
-							// Handle any existing streaming text message
-							const streamingIdx = messages.findLastIndex(
-								m => m.type === 'text' && m.role === 'assistant' && m.streaming
-							);
-							if (streamingIdx !== -1) {
-								if (messages[streamingIdx].content) {
-									// Mark as complete if it has content
-									messages[streamingIdx] = { ...messages[streamingIdx], streaming: false };
-								} else {
-									// Remove empty streaming text messages to avoid lingering placeholders
-									messages = messages.filter((_, i) => i !== streamingIdx);
-								}
-							}
-
-							// Add tool use message
-							messages.push({
-								id: `tool-${Date.now()}-${contentBlock.id || ''}`,
-								role: 'assistant',
-								content: '',
-								type: 'tool_use',
-								toolName: contentBlock.name || '',
-								toolId: contentBlock.id || '',
-								toolInput: {},
-								toolStatus: 'running',
-								streaming: true
-							});
-
-							return { ...tab, messages };
-						})
-					}));
-				}
+				// Batch non-critical block start events
+				pushEvent(tabId, 'stream_block_start', data);
 				break;
 			}
 
 			case 'stream_delta': {
-				const deltaType = data.delta_type as string;
-
-				if (deltaType === 'text') {
-					// Real-time text streaming - character by character!
-					const text = data.content as string;
-					console.log(`[WS] Stream delta text: ${text.length} chars`);
-
-					update(s => ({
-						...s,
-						tabs: s.tabs.map(tab => {
-							if (tab.id !== tabId) return tab;
-
-							const messages = [...tab.messages];
-							const streamingIdx = messages.findLastIndex(
-								m => m.type === 'text' && m.role === 'assistant' && m.streaming
-							);
-
-							if (streamingIdx !== -1) {
-								// Append to existing streaming message
-								messages[streamingIdx] = {
-									...messages[streamingIdx],
-									content: messages[streamingIdx].content + text
-								};
-							} else {
-								// Create new streaming message
-								messages.push({
-									id: `stream-${Date.now()}`,
-									role: 'assistant',
-									content: text,
-									type: 'text',
-									streaming: true
-								});
-							}
-
-							return { ...tab, messages };
-						})
-					}));
-				} else if (deltaType === 'tool_input') {
-					// Tool input streaming (partial JSON)
-					const partialJson = data.content as string;
-					console.log(`[WS] Stream delta tool_input: ${partialJson.length} chars`);
-
-					update(s => ({
-						...s,
-						tabs: s.tabs.map(tab => {
-							if (tab.id !== tabId) return tab;
-
-							const messages = [...tab.messages];
-							const toolIdx = messages.findLastIndex(
-								m => m.type === 'tool_use' && m.streaming
-							);
-
-							if (toolIdx !== -1) {
-								const current = messages[toolIdx];
-								const partialInput = (current.partialToolInput || '') + partialJson;
-
-								// Try to parse accumulated JSON
-								let parsedInput = current.toolInput || {};
-								try {
-									parsedInput = JSON.parse(partialInput);
-								} catch {
-									// Not valid JSON yet, keep accumulating
-								}
-
-								messages[toolIdx] = {
-									...current,
-									partialToolInput: partialInput,
-									toolInput: parsedInput
-								};
-							}
-
-							return { ...tab, messages };
-						})
-					}));
-				}
+				// Use buffer for batched updates - dramatically reduces store updates
+				// from 50-100/sec to ~60/sec (RAF-based)
+				pushEvent(tabId, 'stream_delta', data);
 				break;
 			}
 
 			case 'stream_block_stop': {
-				// End of a content block
-				console.log(`[WS] Stream block stop: index=${data.index}`);
-				// The block is complete - we don't need to do anything special here
-				// as the full content comes via AssistantMessage afterwards
+				// Batch block stop events
+				pushEvent(tabId, 'stream_block_stop', data);
 				break;
 			}
 
 			case 'stream_message_delta': {
-				// Final message metadata with output token usage
-				// Per Anthropic API: message_delta contains cumulative output_tokens for current response
-				const usage = data.usage as Record<string, number> | undefined;
-				if (usage && usage.output_tokens) {
-					console.log('[WS] Stream message delta with output usage:', usage);
-					update(s => ({
-						...s,
-						tabs: s.tabs.map(tab => {
-							if (tab.id !== tabId) return tab;
-
-							// Update output token count
-							// output_tokens in message_delta is the total for this response
-							const outputTokens = usage.output_tokens || 0;
-
-							return {
-								...tab,
-								totalTokensOut: tab.totalTokensOut + outputTokens
-							};
-						})
-					}));
-				} else {
-					console.log('[WS] Stream message delta received (no output usage)');
-				}
+				// Batch message delta (usage updates) - buffer handles accumulation
+				pushEvent(tabId, 'stream_message_delta', data);
 				break;
 			}
 
@@ -3688,6 +3704,11 @@ function createTabsStore() {
 
 			// Add user message immediately
 			const userMsgId = `user-${Date.now()}`;
+			const isFirstMessage = tab.title === 'New Chat';
+			const newTitle = isFirstMessage
+				? prompt.substring(0, 100) + (prompt.length > 100 ? '...' : '')
+				: tab.title;
+
 			update(s => ({
 				...s,
 				tabs: s.tabs.map(t => {
@@ -3701,10 +3722,18 @@ function createTabsStore() {
 						}],
 						isStreaming: true,
 						error: null,
-						title: t.title === 'New Chat' ? prompt.substring(0, 100) + (prompt.length > 100 ? '...' : '') : t.title
+						title: newTitle
 					};
 				})
 			}));
+
+			// Update the deck card title if this is the first message
+			if (isFirstMessage) {
+				const deckCard = deck.findCardByMeta('tabId', tabId);
+				if (deckCard) {
+					deck.setCardTitle(deckCard.id, newTitle);
+				}
+			}
 
 			// If currently streaming, send interrupt_and_query to stop current response
 			// and immediately process the new message
@@ -3877,6 +3906,11 @@ function createTabsStore() {
 
 			// Add user message
 			const userMsgId = `user-${Date.now()}`;
+			const isFirstMessage = tab.title === 'New Chat';
+			const newTitle = isFirstMessage
+				? prompt.substring(0, 100) + (prompt.length > 100 ? '...' : '')
+				: tab.title;
+
 			update(s => ({
 				...s,
 				tabs: s.tabs.map(t => {
@@ -3890,10 +3924,18 @@ function createTabsStore() {
 						}],
 						isStreaming: true,
 						error: null,
-						title: t.title === 'New Chat' ? prompt.substring(0, 100) + (prompt.length > 100 ? '...' : '') : t.title
+						title: newTitle
 					};
 				})
 			}));
+
+			// Update the deck card title if this is the first message
+			if (isFirstMessage) {
+				const deckCard = deck.findCardByMeta('tabId', tabId);
+				if (deckCard) {
+					deck.setCardTitle(deckCard.id, newTitle);
+				}
+			}
 
 			// Build overrides object only if there are actual overrides
 			const overrides: Record<string, string> = {};
