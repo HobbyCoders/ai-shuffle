@@ -559,11 +559,11 @@ async def export_profile(
         continue_conversation=config.get("continue_conversation", False),
         fork_session=config.get("fork_session", False),
         setting_sources=config.get("setting_sources"),
-        # Note: We intentionally exclude sensitive data:
-        # - cwd (working directory path)
-        # - add_dirs (additional directory paths)
+        env=config.get("env"),  # Environment variables are exported
+        # Note: We intentionally exclude some data:
+        # - cwd (working directory path - system-specific)
+        # - add_dirs (additional directory paths - system-specific)
         # - user (user identifier)
-        # - env (environment variables)
         # - extra_args (may contain sensitive data)
         # - enabled_plugins (plugin paths are system-specific)
     )
@@ -684,6 +684,8 @@ async def import_profile(
         config["max_buffer_size"] = agent_data.max_buffer_size
     if agent_data.setting_sources:
         config["setting_sources"] = agent_data.setting_sources
+    if agent_data.env:
+        config["env"] = agent_data.env
 
     # Create the profile
     profile = database.create_profile(

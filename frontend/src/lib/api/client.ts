@@ -816,6 +816,7 @@ export interface AgentExportData {
 	continue_conversation: boolean | null;
 	fork_session: boolean | null;
 	setting_sources: string[] | null;
+	env: Record<string, string> | null;
 }
 
 export interface AgentExport {

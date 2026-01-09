@@ -756,6 +756,8 @@ class AgentExportData(BaseModel):
     continue_conversation: Optional[bool] = False
     fork_session: Optional[bool] = False
     setting_sources: Optional[List[str]] = None
+    # Environment variables (exported with profile)
+    env: Optional[Dict[str, str]] = None
 
 
 class AgentExport(BaseModel):

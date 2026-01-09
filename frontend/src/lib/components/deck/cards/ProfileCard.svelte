@@ -1468,12 +1468,28 @@
 											bind:value={envVar.key}
 											class="card-form-input card-form-input--mono env-var-key"
 											placeholder="VARIABLE_NAME"
+											oninput={(e) => {
+												// Disallow commas in env var keys
+												const target = e.target as HTMLInputElement;
+												if (target.value.includes(',')) {
+													target.value = target.value.replace(/,/g, '');
+													envVar.key = target.value;
+												}
+											}}
 										/>
 										<input
 											type="text"
 											bind:value={envVar.value}
 											class="card-form-input card-form-input--mono env-var-value"
 											placeholder={preset?.placeholder || 'value'}
+											oninput={(e) => {
+												// Disallow commas in env var values
+												const target = e.target as HTMLInputElement;
+												if (target.value.includes(',')) {
+													target.value = target.value.replace(/,/g, '');
+													envVar.value = target.value;
+												}
+											}}
 										/>
 										<button
 											type="button"
