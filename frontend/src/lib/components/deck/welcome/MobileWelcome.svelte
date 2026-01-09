@@ -24,7 +24,6 @@
 	// Carousel layout constants - single source of truth
 	const CARD_WIDTH_PERCENT = 0.75; // Card is 75% of viewport
 	const CARD_GAP = 16; // Gap between cards in pixels
-	const SCROLL_DEBOUNCE_MS = 100; // Debounce delay to let scroll-snap settle
 
 	// Card type definition
 	type CardDef = {
@@ -102,7 +101,7 @@
 	// Carousel state - relies entirely on CSS scroll-snap for smooth swiping
 	let currentIndex = $state(0);
 	let carouselEl: HTMLDivElement | undefined = $state();
-	let scrollDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+	let rafId: number | null = null; // For real-time scroll tracking
 
 	// Helper to calculate card dimensions
 	function getCardMetrics() {
@@ -124,42 +123,48 @@
 		carouselEl.scrollTo({ left: offset, behavior: 'smooth' });
 	}
 
-	// Handle scroll snap detection (debounced) - CSS scroll-snap handles the actual snapping
+	// Find closest card to center - extracted for reuse
+	function findClosestCardIndex(): number {
+		if (!carouselEl) return currentIndex;
+
+		const carouselRect = carouselEl.getBoundingClientRect();
+		const carouselCenter = carouselRect.left + carouselRect.width / 2;
+		const cardElements = carouselEl.querySelectorAll('.carousel-card');
+
+		let closestIndex = 0;
+		let closestDistance = Infinity;
+
+		cardElements.forEach((card, index) => {
+			const cardRect = card.getBoundingClientRect();
+			const cardCenter = cardRect.left + cardRect.width / 2;
+			const distance = Math.abs(carouselCenter - cardCenter);
+
+			if (distance < closestDistance) {
+				closestDistance = distance;
+				closestIndex = index;
+			}
+		});
+
+		return closestIndex;
+	}
+
+	// Handle scroll with real-time tracking using RAF for smooth visual updates
 	function handleScroll() {
 		if (!carouselEl) return;
 
-		// Clear any pending debounce timer
-		if (scrollDebounceTimer) {
-			clearTimeout(scrollDebounceTimer);
+		// Cancel any pending RAF to prevent stacking
+		if (rafId !== null) {
+			cancelAnimationFrame(rafId);
 		}
 
-		// Debounce the index update to let scroll-snap settle
-		scrollDebounceTimer = setTimeout(() => {
-			if (!carouselEl) return;
-
-			// Find which card is closest to the center of the viewport
-			const carouselRect = carouselEl.getBoundingClientRect();
-			const carouselCenter = carouselRect.left + carouselRect.width / 2;
-			const cardElements = carouselEl.querySelectorAll('.carousel-card');
-
-			let closestIndex = 0;
-			let closestDistance = Infinity;
-
-			cardElements.forEach((card, index) => {
-				const cardRect = card.getBoundingClientRect();
-				const cardCenter = cardRect.left + cardRect.width / 2;
-				const distance = Math.abs(carouselCenter - cardCenter);
-
-				if (distance < closestDistance) {
-					closestDistance = distance;
-					closestIndex = index;
-				}
-			});
-
+		// Use RAF for smooth, immediate visual feedback
+		rafId = requestAnimationFrame(() => {
+			const closestIndex = findClosestCardIndex();
 			if (closestIndex !== currentIndex) {
 				currentIndex = closestIndex;
 			}
-		}, SCROLL_DEBOUNCE_MS);
+			rafId = null;
+		});
 	}
 </script>
 
@@ -294,7 +299,7 @@
 		gap: 16px;
 		width: 100%;
 		overflow-x: auto;
-		scroll-snap-type: x mandatory;
+		scroll-snap-type: x proximity; /* proximity = lighter feel, only snaps when close */
 		scrollbar-width: none;
 		-ms-overflow-style: none;
 		padding: 1rem 12.5%; /* Center first/last cards */
@@ -327,8 +332,12 @@
 
 		cursor: pointer;
 		scroll-snap-align: center;
-		scroll-snap-stop: always; /* Prevent momentum from skipping cards */
-		transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+		/* scroll-snap-stop: normal allows momentum to carry through cards naturally */
+		/* Split transitions: fast for glow/border (scroll response), smooth for transform (tap) */
+		transition:
+			border-color 0.1s ease-out,
+			box-shadow 0.15s ease-out,
+			transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 		-webkit-tap-highlight-color: transparent;
 
 		box-shadow:
@@ -368,7 +377,7 @@
 		background: color-mix(in oklch, var(--foreground) 4%, transparent);
 		border: 1px solid color-mix(in oklch, var(--foreground) 6%, transparent);
 		color: var(--muted-foreground);
-		transition: all 0.25s ease-out;
+		transition: all 0.12s ease-out; /* Fast response to scroll */
 	}
 
 	.carousel-card.active .card-icon {
@@ -409,7 +418,7 @@
 		border: none;
 		padding: 0;
 		cursor: pointer;
-		transition: all 0.2s ease;
+		transition: all 0.1s ease-out; /* Fast response to scroll */
 		-webkit-tap-highlight-color: transparent;
 	}
 

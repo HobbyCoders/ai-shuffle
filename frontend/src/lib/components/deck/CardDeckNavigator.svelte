@@ -102,11 +102,9 @@
 	// Mobile carousel state - relies on CSS scroll-snap for smooth swiping
 	const MOBILE_CARD_WIDTH_PERCENT = 0.75; // Card is 75% of viewport
 	const MOBILE_CARD_GAP = 16; // Gap between cards in pixels
-	const MOBILE_SCROLL_DEBOUNCE_MS = 100; // Debounce delay to let scroll-snap settle
-	const MOBILE_FAST_SCROLL_THRESHOLD = 6; // Above this many cards, allow momentum scrolling
 	let mobileCarouselRef = $state<HTMLDivElement | null>(null);
 	let mobileCurrentIndex = $state(0);
-	let mobileScrollDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+	let mobileRafId: number | null = null; // For real-time scroll tracking
 
 	// Edit mode state
 	let isEditMode = $state(false);
@@ -1267,44 +1265,50 @@
 		mobileCarouselRef.scrollTo({ left: offset, behavior: 'smooth' });
 	}
 
-	// Handle mobile scroll snap detection (debounced) - CSS scroll-snap handles actual swiping
+	// Find closest mobile card to center - extracted for reuse
+	function findClosestMobileCardIndex(): number {
+		if (!mobileCarouselRef) return mobileCurrentIndex;
+
+		const carouselRect = mobileCarouselRef.getBoundingClientRect();
+		const carouselCenter = carouselRect.left + carouselRect.width / 2;
+		const cardElements = mobileCarouselRef.querySelectorAll('.mobile-card');
+
+		let closestIndex = 0;
+		let closestDistance = Infinity;
+
+		cardElements.forEach((card, index) => {
+			const cardRect = card.getBoundingClientRect();
+			const cardCenter = cardRect.left + cardRect.width / 2;
+			const distance = Math.abs(carouselCenter - cardCenter);
+
+			if (distance < closestDistance) {
+				closestDistance = distance;
+				closestIndex = index;
+			}
+		});
+
+		return closestIndex;
+	}
+
+	// Handle mobile scroll with real-time tracking using RAF for smooth visual updates
 	function handleMobileScroll() {
 		if (!mobileCarouselRef) return;
 		// Don't update during edit mode drag
 		if (isEditMode && isPointerDragging) return;
 
-		// Clear any pending debounce timer
-		if (mobileScrollDebounceTimer) {
-			clearTimeout(mobileScrollDebounceTimer);
+		// Cancel any pending RAF to prevent stacking
+		if (mobileRafId !== null) {
+			cancelAnimationFrame(mobileRafId);
 		}
 
-		// Debounce the index update to let scroll-snap settle
-		mobileScrollDebounceTimer = setTimeout(() => {
-			if (!mobileCarouselRef) return;
-
-			// Find which card is closest to the center of the viewport
-			const carouselRect = mobileCarouselRef.getBoundingClientRect();
-			const carouselCenter = carouselRect.left + carouselRect.width / 2;
-			const cardElements = mobileCarouselRef.querySelectorAll('.mobile-card');
-
-			let closestIndex = 0;
-			let closestDistance = Infinity;
-
-			cardElements.forEach((card, index) => {
-				const cardRect = card.getBoundingClientRect();
-				const cardCenter = cardRect.left + cardRect.width / 2;
-				const distance = Math.abs(carouselCenter - cardCenter);
-
-				if (distance < closestDistance) {
-					closestDistance = distance;
-					closestIndex = index;
-				}
-			});
-
+		// Use RAF for smooth, immediate visual feedback
+		mobileRafId = requestAnimationFrame(() => {
+			const closestIndex = findClosestMobileCardIndex();
 			if (closestIndex !== mobileCurrentIndex) {
 				mobileCurrentIndex = closestIndex;
 			}
-		}, MOBILE_SCROLL_DEBOUNCE_MS);
+			mobileRafId = null;
+		});
 	}
 
 	// Reset mobile carousel when view changes
@@ -1467,7 +1471,6 @@
 							class="mobile-carousel"
 							class:edit-mode={isEditMode}
 							class:is-dragging={isPointerDragging}
-							class:many-cards={mobileCardCount > MOBILE_FAST_SCROLL_THRESHOLD}
 							bind:this={mobileCarouselRef}
 							onscroll={handleMobileScroll}
 							role="region"
@@ -2864,7 +2867,7 @@
 		gap: 16px;
 		width: 100%;
 		overflow-x: auto;
-		scroll-snap-type: x mandatory;
+		scroll-snap-type: x proximity; /* proximity = lighter feel, only snaps when close */
 		scrollbar-width: none;
 		-ms-overflow-style: none;
 		padding: 1rem 12.5%; /* Center first/last cards */
@@ -2902,13 +2905,12 @@
 
 		cursor: pointer;
 		scroll-snap-align: center;
-		scroll-snap-stop: always; /* Prevent momentum from skipping cards (disabled with many cards) */
-		transition: all 0.3s var(--ease-out);
-
-		/* When carousel has many cards, allow momentum scrolling for faster navigation */
-		.many-cards & {
-			scroll-snap-stop: normal;
-		}
+		/* scroll-snap-stop: normal (default) allows momentum to carry through cards naturally */
+		/* Split transitions: fast for glow/border (scroll response), smooth for transform (tap) */
+		transition:
+			border-color 0.1s ease-out,
+			box-shadow 0.15s ease-out,
+			transform 0.2s var(--ease-out);
 		-webkit-tap-highlight-color: transparent;
 
 		box-shadow:
@@ -2993,7 +2995,7 @@
 		background: var(--bg-elevated);
 		border: 1px solid var(--border-subtle);
 		color: var(--icon-color, var(--text-secondary));
-		transition: all 0.25s ease-out;
+		transition: all 0.12s ease-out; /* Fast response to scroll */
 	}
 
 	.mobile-card.active .mobile-card-icon {
@@ -3153,7 +3155,7 @@
 		border: none;
 		padding: 0;
 		cursor: pointer;
-		transition: all 0.2s ease;
+		transition: all 0.1s ease-out; /* Fast response to scroll */
 		-webkit-tap-highlight-color: transparent;
 	}
 
