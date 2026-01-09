@@ -10,6 +10,7 @@
 	import BaseCard from './BaseCard.svelte';
 	import type { DeckCard } from './types';
 	import { onMount } from 'svelte';
+	import './card-design-system.css';
 	import { auth, username, isAdmin, claudeAuthenticated, githubAuthenticated } from '$lib/stores/auth';
 	import { api } from '$lib/api/client';
 	import { theme, themePreference, isDark, currentPresetId, themePresets, type Theme } from '$lib/stores/theme';
@@ -1865,13 +1866,13 @@
 
 <!-- Conditional wrapper: Mobile uses no BaseCard, Desktop uses BaseCard -->
 {#if mobile}
-	<div class="settings mobile">
+	<div class="settings card-system mobile">
 		{@render settingsContent()}
 	</div>
 {:else}
 	<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
 		{#snippet children()}
-			<div class="settings">
+			<div class="settings card-system">
 				{@render settingsContent()}
 			</div>
 		{/snippet}

@@ -11,6 +11,7 @@
 	import BaseCard from './BaseCard.svelte';
 	import type { DeckCard } from './types';
 	import { onMount } from 'svelte';
+	import './card-design-system.css';
 	import { auth, apiUser, isAdmin } from '$lib/stores/auth';
 	import {
 		getMyProfile,
@@ -386,7 +387,7 @@
 	{onDragEnd}
 	{onResizeEnd}
 >
-	<div class="flex h-full">
+	<div class="card-system flex h-full">
 		<!-- Sidebar Navigation -->
 		<div class="w-48 border-r border-border p-2 flex-shrink-0">
 			<div class="space-y-1">

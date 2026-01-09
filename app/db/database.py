@@ -3698,13 +3698,18 @@ def get_sessions_by_tag(tag_id: str, limit: int = 50, offset: int = 0) -> List[D
 # Analytics Operations
 # ============================================================================
 
-def get_analytics_usage_stats(start_date: Optional[str] = None, end_date: Optional[str] = None) -> Dict[str, Any]:
+def get_analytics_usage_stats(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    api_user_id: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Get aggregate usage statistics for a date range.
 
     Args:
         start_date: Start date (ISO format YYYY-MM-DD), inclusive
         end_date: End date (ISO format YYYY-MM-DD), inclusive
+        api_user_id: Optional API user ID to filter by (None = all users)
 
     Returns:
         Dictionary with total_tokens_in, total_tokens_out, total_cost_usd, session_count, query_count
@@ -3716,29 +3721,37 @@ def get_analytics_usage_stats(start_date: Optional[str] = None, end_date: Option
         date_filter = ""
         params = []
         if start_date:
-            date_filter += " AND DATE(created_at) >= ?"
+            date_filter += " AND DATE(ul.created_at) >= ?"
             params.append(start_date)
         if end_date:
-            date_filter += " AND DATE(created_at) <= ?"
+            date_filter += " AND DATE(ul.created_at) <= ?"
             params.append(end_date)
 
-        # Get usage log aggregates
+        # Add user filter if specified
+        user_filter = ""
+        if api_user_id:
+            user_filter = " AND s.api_user_id = ?"
+            params.append(api_user_id)
+
+        # Get usage log aggregates (join with sessions for user filtering)
         cursor.execute(f"""
             SELECT
-                COALESCE(SUM(tokens_in), 0) as total_tokens_in,
-                COALESCE(SUM(tokens_out), 0) as total_tokens_out,
-                COALESCE(SUM(cost_usd), 0) as total_cost_usd,
+                COALESCE(SUM(ul.tokens_in), 0) as total_tokens_in,
+                COALESCE(SUM(ul.tokens_out), 0) as total_tokens_out,
+                COALESCE(SUM(ul.cost_usd), 0) as total_cost_usd,
                 COUNT(*) as query_count
-            FROM usage_log
-            WHERE 1=1 {date_filter}
+            FROM usage_log ul
+            LEFT JOIN sessions s ON ul.session_id = s.id
+            WHERE 1=1 {date_filter} {user_filter}
         """, params)
         usage_row = cursor.fetchone()
 
         # Get session count for the same period
         cursor.execute(f"""
-            SELECT COUNT(DISTINCT session_id) as session_count
-            FROM usage_log
-            WHERE session_id IS NOT NULL {date_filter}
+            SELECT COUNT(DISTINCT ul.session_id) as session_count
+            FROM usage_log ul
+            LEFT JOIN sessions s ON ul.session_id = s.id
+            WHERE ul.session_id IS NOT NULL {date_filter} {user_filter}
         """, params)
         session_row = cursor.fetchone()
 
@@ -3754,7 +3767,8 @@ def get_analytics_usage_stats(start_date: Optional[str] = None, end_date: Option
 def get_analytics_cost_breakdown(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    group_by: str = "profile"
+    group_by: str = "profile",
+    api_user_id: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Get cost breakdown grouped by profile, user, or date.
@@ -3763,6 +3777,7 @@ def get_analytics_cost_breakdown(
         start_date: Start date (ISO format YYYY-MM-DD), inclusive
         end_date: End date (ISO format YYYY-MM-DD), inclusive
         group_by: Grouping - 'profile', 'user', or 'date'
+        api_user_id: Optional API user ID to filter by (None = all users)
 
     Returns:
         List of dictionaries with key, name, total_cost_usd, total_tokens_in, total_tokens_out, query_count
@@ -3780,6 +3795,12 @@ def get_analytics_cost_breakdown(
             date_filter += " AND DATE(ul.created_at) <= ?"
             params.append(end_date)
 
+        # Add user filter if specified
+        user_filter = ""
+        if api_user_id:
+            user_filter = " AND s.api_user_id = ?"
+            params.append(api_user_id)
+
         if group_by == "profile":
             cursor.execute(f"""
                 SELECT
@@ -3791,7 +3812,8 @@ def get_analytics_cost_breakdown(
                     COUNT(*) as query_count
                 FROM usage_log ul
                 LEFT JOIN profiles p ON ul.profile_id = p.id
-                WHERE 1=1 {date_filter}
+                LEFT JOIN sessions s ON ul.session_id = s.id
+                WHERE 1=1 {date_filter} {user_filter}
                 GROUP BY ul.profile_id, p.name
                 ORDER BY total_cost_usd DESC
             """, params)
@@ -3812,7 +3834,7 @@ def get_analytics_cost_breakdown(
                 FROM usage_log ul
                 LEFT JOIN sessions s ON ul.session_id = s.id
                 LEFT JOIN api_users au ON s.api_user_id = au.id
-                WHERE 1=1 {date_filter}
+                WHERE 1=1 {date_filter} {user_filter}
                 GROUP BY s.api_user_id, au.name
                 ORDER BY total_cost_usd DESC
             """, params)
@@ -3827,7 +3849,8 @@ def get_analytics_cost_breakdown(
                     COALESCE(SUM(ul.cost_usd), 0) as total_cost_usd,
                     COUNT(*) as query_count
                 FROM usage_log ul
-                WHERE 1=1 {date_filter}
+                LEFT JOIN sessions s ON ul.session_id = s.id
+                WHERE 1=1 {date_filter} {user_filter}
                 GROUP BY DATE(ul.created_at)
                 ORDER BY DATE(ul.created_at) DESC
             """, params)
@@ -3852,7 +3875,8 @@ def get_analytics_cost_breakdown(
 def get_analytics_usage_trends(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    interval: str = "day"
+    interval: str = "day",
+    api_user_id: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Get usage trends over time.
@@ -3861,6 +3885,7 @@ def get_analytics_usage_trends(
         start_date: Start date (ISO format YYYY-MM-DD), inclusive
         end_date: End date (ISO format YYYY-MM-DD), inclusive
         interval: Time interval - 'day', 'week', or 'month'
+        api_user_id: Optional API user ID to filter by (None = all users)
 
     Returns:
         List of dictionaries with date, tokens_in, tokens_out, cost_usd, query_count
@@ -3868,34 +3893,41 @@ def get_analytics_usage_trends(
     with get_db() as conn:
         cursor = conn.cursor()
 
-        # Build date filter clause
+        # Build filter clauses
         date_filter = ""
         params = []
         if start_date:
-            date_filter += " AND DATE(created_at) >= ?"
+            date_filter += " AND DATE(u.created_at) >= ?"
             params.append(start_date)
         if end_date:
-            date_filter += " AND DATE(created_at) <= ?"
+            date_filter += " AND DATE(u.created_at) <= ?"
             params.append(end_date)
+
+        # User filter for API users (join with sessions to get api_user_id)
+        user_filter = ""
+        if api_user_id:
+            user_filter = " AND s.api_user_id = ?"
+            params.append(api_user_id)
 
         # Choose date grouping based on interval
         if interval == "week":
             # SQLite strftime: %Y-W%W gives year and week number
-            date_expr = "strftime('%Y-W%W', created_at)"
+            date_expr = "strftime('%Y-W%W', u.created_at)"
         elif interval == "month":
-            date_expr = "strftime('%Y-%m', created_at)"
+            date_expr = "strftime('%Y-%m', u.created_at)"
         else:  # day
-            date_expr = "DATE(created_at)"
+            date_expr = "DATE(u.created_at)"
 
         cursor.execute(f"""
             SELECT
                 {date_expr} as date,
-                COALESCE(SUM(tokens_in), 0) as tokens_in,
-                COALESCE(SUM(tokens_out), 0) as tokens_out,
-                COALESCE(SUM(cost_usd), 0) as cost_usd,
+                COALESCE(SUM(u.tokens_in), 0) as tokens_in,
+                COALESCE(SUM(u.tokens_out), 0) as tokens_out,
+                COALESCE(SUM(u.cost_usd), 0) as cost_usd,
                 COUNT(*) as query_count
-            FROM usage_log
-            WHERE 1=1 {date_filter}
+            FROM usage_log u
+            JOIN sessions s ON u.session_id = s.id
+            WHERE 1=1 {date_filter} {user_filter}
             GROUP BY {date_expr}
             ORDER BY date ASC
         """, params)
@@ -3916,7 +3948,8 @@ def get_analytics_usage_trends(
 def get_analytics_top_sessions(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    limit: int = 10
+    limit: int = 10,
+    api_user_id: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Get top sessions by cost.
@@ -3925,6 +3958,7 @@ def get_analytics_top_sessions(
         start_date: Start date (ISO format YYYY-MM-DD), inclusive
         end_date: End date (ISO format YYYY-MM-DD), inclusive
         limit: Maximum number of sessions to return
+        api_user_id: Optional API user ID to filter by (None = all users)
 
     Returns:
         List of dictionaries with session_id, title, profile_id, profile_name, total_cost_usd, etc.
@@ -3932,7 +3966,7 @@ def get_analytics_top_sessions(
     with get_db() as conn:
         cursor = conn.cursor()
 
-        # Build date filter clause
+        # Build filter clauses
         date_filter = ""
         params = []
         if start_date:
@@ -3941,6 +3975,12 @@ def get_analytics_top_sessions(
         if end_date:
             date_filter += " AND DATE(s.created_at) <= ?"
             params.append(end_date)
+
+        # User filter for API users
+        user_filter = ""
+        if api_user_id:
+            user_filter = " AND s.api_user_id = ?"
+            params.append(api_user_id)
 
         params.append(limit)
 
@@ -3956,7 +3996,7 @@ def get_analytics_top_sessions(
                 s.created_at
             FROM sessions s
             LEFT JOIN profiles p ON s.profile_id = p.id
-            WHERE s.total_cost_usd > 0 {date_filter}
+            WHERE s.total_cost_usd > 0 {date_filter} {user_filter}
             ORDER BY s.total_cost_usd DESC
             LIMIT ?
         """, params)

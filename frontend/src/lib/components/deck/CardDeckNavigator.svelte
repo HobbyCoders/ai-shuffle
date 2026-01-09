@@ -22,7 +22,7 @@
 		MessageSquare, Terminal, Clock,
 		Settings, FolderOpen, X, Files, User, Users, Pencil, Check,
 		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronRight, Bot, Puzzle,
-		List, GitBranch, Key, Zap, StickyNote
+		List, GitBranch, Key, Zap, StickyNote, BarChart3
 	} from 'lucide-svelte';
 	import { tabs, type ApiUser } from '$lib/stores/tabs';
 	import type { Session } from '$lib/api/client';
@@ -49,6 +49,7 @@
 		onOpenPlugins?: () => void;
 		onOpenHooks?: () => void;
 		onOpenNotes?: () => void;
+		onOpenStats?: () => void;
 		onOpenUserSettings?: () => void;
 		isAdmin?: boolean;
 		isApiUser?: boolean;
@@ -70,6 +71,7 @@
 		onOpenPlugins,
 		onOpenHooks,
 		onOpenNotes,
+		onOpenStats,
 		onOpenUserSettings,
 		isAdmin = false,
 		isApiUser = false,
@@ -149,7 +151,7 @@
 	let renameDeckName = $state('');
 
 	// Card types for main deck
-	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins' | 'hooks' | 'notes' | 'user-settings';
+	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins' | 'hooks' | 'notes' | 'stats' | 'user-settings';
 
 	// Cards that API users are allowed to see (whitelist approach)
 	const API_USER_ALLOWED_CARDS = new Set(['new-chat', 'recent', 'file-browser', 'user-settings']);
@@ -307,6 +309,14 @@
 				title: 'Notes',
 				subtitle: 'Project notes & ideas',
 				icon: StickyNote
+			},
+			{
+				id: 'stats',
+				type: 'action',
+				action: 'stats',
+				title: 'Stats',
+				subtitle: 'Usage & analytics',
+				icon: BarChart3
 			}
 		];
 
@@ -578,6 +588,7 @@
 			case 'plugins': onOpenPlugins?.(); break;
 			case 'hooks': onOpenHooks?.(); break;
 			case 'notes': onOpenNotes?.(); break;
+			case 'stats': onOpenStats?.(); break;
 			case 'user-settings': onOpenUserSettings?.(); break;
 		}
 	}

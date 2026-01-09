@@ -12,7 +12,7 @@
 	 * - Glassmorphism styling
 	 */
 
-	import { MessageSquare, Terminal, Square, X, Maximize2, Copy, Settings, User, Users, FolderKanban, Puzzle, FolderOpen, StickyNote, Zap } from 'lucide-svelte';
+	import { MessageSquare, Terminal, Square, X, Maximize2, Copy, Settings, User, Users, FolderKanban, Puzzle, FolderOpen, StickyNote, Zap, BarChart3 } from 'lucide-svelte';
 	import type { DeckCard, CardType } from './types';
 	import type { Snippet } from 'svelte';
 	import { layoutMode } from '$lib/stores/deck';
@@ -74,6 +74,7 @@
 		'file-browser': FolderOpen,
 		notes: StickyNote,
 		hooks: Zap,
+		stats: BarChart3,
 	};
 
 	const CardIcon = $derived(cardIcons[card.type]);

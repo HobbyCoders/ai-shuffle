@@ -11,6 +11,7 @@
 	import BaseCard from './BaseCard.svelte';
 	import type { DeckCard } from './types';
 	import { tabs, allTabs } from '$lib/stores/tabs';
+	import './card-design-system.css';
 	import { MessageArea, ChatInput, ExecutionModeSelector } from '$lib/components/chat';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
@@ -97,7 +98,7 @@
 {#if mobile}
 	<!-- Mobile: Full-screen card with no BaseCard wrapper or ChatHeader -->
 	<!-- MobileWorkspace provides the header with title and close button -->
-	<div class="chat-card-content mobile" class:transitioning-from-empty={transitioningFromEmpty}>
+	<div class="chat-card-content card-system mobile" class:transitioning-from-empty={transitioningFromEmpty}>
 		{#if tab}
 			{#if isEmptyState}
 				<!-- Empty state: Centered layout with mode selector -->
@@ -160,7 +161,7 @@
 {:else}
 	<!-- Desktop: Full BaseCard with all features -->
 	<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
-		<div class="chat-card-content" class:transitioning-from-empty={transitioningFromEmpty}>
+		<div class="chat-card-content card-system" class:transitioning-from-empty={transitioningFromEmpty}>
 			{#if tab}
 				{#if isEmptyState}
 					<!-- Empty state: Centered layout with mode selector -->

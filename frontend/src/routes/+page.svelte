@@ -55,13 +55,13 @@
 		PluginManagerCard,
 		NotesCard,
 		HooksCard,
+		StatsCard,
 		StackedCardPreview
 	} from '$lib/components/deck/cards';
 	import type { CardType, DeckCard as CardsDeckCard } from '$lib/components/deck/cards/types';
 
 	// Modals
 	import KeyboardShortcutsModal from '$lib/components/KeyboardShortcutsModal.svelte';
-	import AnalyticsModal from '$lib/components/AnalyticsModal.svelte';
 	import TerminalModal from '$lib/components/TerminalModal.svelte';
 	import ImportSessionModal from '$lib/components/ImportSessionModal.svelte';
 	import TagManager from '$lib/components/TagManager.svelte';
@@ -102,7 +102,6 @@
 	// State: Modals
 	// ============================================
 	let showKeyboardShortcuts = $state(false);
-	let showAnalyticsModal = $state(false);
 	let showTerminalModal = $state(false);
 	let showImportModal = $state(false);
 	let showTagManager = $state(false);
@@ -186,6 +185,8 @@
 				return 'hooks';
 			case 'notes':
 				return 'notes';
+			case 'stats':
+				return 'stats';
 			default:
 				return 'chat';
 		}
@@ -395,8 +396,6 @@
 						showTerminalModal = false;
 					} else if (showKnowledgeModal) {
 						showKnowledgeModal = false;
-					} else if (showAnalyticsModal) {
-						showAnalyticsModal = false;
 					} else if (showTagManager) {
 						showTagManager = false;
 					}
@@ -693,6 +692,17 @@
 				title = 'Notes';
 				break;
 			}
+			case 'stats': {
+				// Singleton - only one stats card at a time
+				const existingStats = $allCards.find(c => c.type === 'stats');
+				if (existingStats) {
+					deck.focusCard(existingStats.id);
+					return;
+				}
+				deckCardType = 'stats';
+				title = 'Stats';
+				break;
+			}
 			default:
 				deckCardType = 'chat';
 				title = 'New Card';
@@ -806,6 +816,16 @@
 
 	function handleCardTitleChange(id: string, title: string) {
 		deck.setCardTitle(id, title);
+	}
+
+	function handleOpenSession(sessionId: string) {
+		const tabId = tabs.openSession(sessionId);
+		const sessionData = $sessions.find((s) => s.id === sessionId);
+		deck.addCard('chat', {
+			title: sessionData?.title || 'Chat',
+			dataId: sessionId,
+			meta: { tabId }
+		});
 	}
 
 	// ============================================
@@ -1066,6 +1086,17 @@
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
 							/>
+						{:else if card.type === 'stats'}
+							<StatsCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+								onSessionClick={(sessionId) => handleOpenSession(sessionId)}
+							/>
 						{:else}
 							<div class="p-4">
 								<p class="text-muted-foreground">Unknown card type</p>
@@ -1253,6 +1284,18 @@
 											onDragEnd={() => handleCardDragEnd(card.id)}
 											onResizeEnd={() => handleCardResizeEnd(card.id)}
 										/>
+									{:else if card.type === 'stats'}
+										<StatsCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
+											onSessionClick={(sessionId) => handleOpenSession(sessionId)}
+										/>
 									{:else}
 										<!-- Other card types -->
 										<div class="card-placeholder">
@@ -1312,6 +1355,7 @@
 		onOpenPlugins={() => handleCreateCard('plugins')}
 		onOpenHooks={() => handleCreateCard('hooks')}
 		onOpenNotes={() => handleCreateCard('notes')}
+		onOpenStats={() => handleCreateCard('stats')}
 		onOpenUserSettings={() => handleCreateCard('user-settings')}
 		isAdmin={$isAdmin}
 		isApiUser={!!$apiUser}
@@ -1334,22 +1378,6 @@
 
 	<!-- Keyboard Shortcuts Modal -->
 	<KeyboardShortcutsModal open={showKeyboardShortcuts} onClose={() => showKeyboardShortcuts = false} />
-
-	<!-- Analytics Modal -->
-	<AnalyticsModal
-		open={showAnalyticsModal}
-		onClose={() => showAnalyticsModal = false}
-		onSessionClick={(sessionId) => {
-			const tabId = tabs.openSession(sessionId);
-			const sessionData = $sessions.find((s) => s.id === sessionId);
-			deck.addCard('chat', {
-				title: sessionData?.title || 'Chat',
-				dataId: sessionId,
-				meta: { tabId }
-			});
-			showAnalyticsModal = false;
-		}}
-	/>
 
 	<!-- Advanced Search Modal (Cmd+Shift+F) -->
 	<AdvancedSearch

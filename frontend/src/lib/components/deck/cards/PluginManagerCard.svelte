@@ -186,7 +186,7 @@
 	{onResizeEnd}
 >
 	{#snippet children()}
-		<div class="plugin-card" class:mobile class:maximized={card.maximized}>
+		<div class="plugin-card card-system" class:mobile class:maximized={card.maximized}>
 			<!-- Tabs -->
 			<div class="plugin-tabs">
 				{#each tabs as tab}

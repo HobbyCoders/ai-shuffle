@@ -30,3 +30,6 @@ export { default as PluginManagerCard } from './PluginManagerCard.svelte';
 
 // Hooks Management
 export { default as HooksCard } from './HooksCard.svelte';
+
+// Analytics
+export { default as StatsCard } from './StatsCard.svelte';

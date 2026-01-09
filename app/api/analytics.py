@@ -1,11 +1,15 @@
 """
 Analytics API routes for usage statistics and cost tracking
+
+User-Specific Analytics:
+- Admin users see all data across the entire instance
+- API users see only their own usage data (filtered by api_user_id)
 """
 
 from typing import Optional, List
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, Query, HTTPException, status
+from fastapi import APIRouter, Depends, Query, HTTPException, status, Request
 
 from app.core.models import (
     UsageStats,
@@ -20,6 +24,22 @@ from app.db import database
 from app.api.auth import require_auth
 
 router = APIRouter(prefix="/api/v1/analytics", tags=["Analytics"])
+
+
+def get_user_filter(request: Request) -> Optional[str]:
+    """
+    Get the api_user_id filter based on authentication.
+    Returns None for admin users (see all data) or the user ID for API users.
+    """
+    is_admin = getattr(request.state, 'is_admin', True)
+    api_user = getattr(request.state, 'api_user', None)
+
+    if is_admin or not api_user:
+        # Admin sees all data
+        return None
+
+    # API user sees only their own data
+    return api_user.get('id')
 
 
 def validate_date_format(date_str: Optional[str], param_name: str) -> Optional[str]:
@@ -46,6 +66,7 @@ def get_default_date_range() -> tuple[str, str]:
 
 @router.get("/summary", response_model=AnalyticsSummaryResponse)
 async def get_analytics_summary(
+    request: Request,
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     token: str = Depends(require_auth)
@@ -57,6 +78,7 @@ async def get_analytics_summary(
     - Recent usage trend (last 7 days within range)
 
     If no date range is provided, defaults to last 30 days.
+    API users see only their own data; admins see all data.
     """
     # Validate and default dates
     start_date = validate_date_format(start_date, "start_date")
@@ -67,8 +89,11 @@ async def get_analytics_summary(
         start_date = start_date or default_start
         end_date = end_date or default_end
 
+    # Get user filter (None for admin, user_id for API users)
+    api_user_id = get_user_filter(request)
+
     # Get usage stats
-    usage_data = database.get_analytics_usage_stats(start_date, end_date)
+    usage_data = database.get_analytics_usage_stats(start_date, end_date, api_user_id=api_user_id)
     usage_stats = UsageStats(
         total_tokens_in=usage_data["total_tokens_in"],
         total_tokens_out=usage_data["total_tokens_out"],
@@ -78,7 +103,7 @@ async def get_analytics_summary(
     )
 
     # Get top profiles (limit to 5 for summary)
-    profile_breakdown = database.get_analytics_cost_breakdown(start_date, end_date, group_by="profile")
+    profile_breakdown = database.get_analytics_cost_breakdown(start_date, end_date, group_by="profile", api_user_id=api_user_id)
     top_profiles = [
         CostBreakdownItem(
             key=item["key"],
@@ -93,7 +118,7 @@ async def get_analytics_summary(
 
     # Get recent trend (last 7 days of the range)
     trend_start = (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
-    trend_data = database.get_analytics_usage_trends(trend_start, end_date, interval="day")
+    trend_data = database.get_analytics_usage_trends(trend_start, end_date, interval="day", api_user_id=api_user_id)
     recent_trend = [
         UsageTrend(
             date=item["date"],
@@ -116,6 +141,7 @@ async def get_analytics_summary(
 
 @router.get("/costs", response_model=CostBreakdownResponse)
 async def get_cost_breakdown(
+    request: Request,
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     group_by: str = Query("profile", description="Group by: profile, user, or date"),
@@ -129,6 +155,7 @@ async def get_cost_breakdown(
     - **date**: Group costs by date
 
     If no date range is provided, defaults to last 30 days.
+    API users see only their own data; admins see all data.
     """
     # Validate group_by
     if group_by not in ("profile", "user", "date"):
@@ -146,8 +173,11 @@ async def get_cost_breakdown(
         start_date = start_date or default_start
         end_date = end_date or default_end
 
+    # Get user filter (None for admin, user_id for API users)
+    api_user_id = get_user_filter(request)
+
     # Get breakdown data
-    breakdown_data = database.get_analytics_cost_breakdown(start_date, end_date, group_by=group_by)
+    breakdown_data = database.get_analytics_cost_breakdown(start_date, end_date, group_by=group_by, api_user_id=api_user_id)
 
     items = [
         CostBreakdownItem(
@@ -174,6 +204,7 @@ async def get_cost_breakdown(
 
 @router.get("/trends", response_model=UsageTrendsResponse)
 async def get_usage_trends(
+    request: Request,
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     interval: str = Query("day", description="Interval: day, week, or month"),
@@ -187,6 +218,7 @@ async def get_usage_trends(
     - **month**: Monthly data points (format: YYYY-MM)
 
     If no date range is provided, defaults to last 30 days.
+    API users see only their own data; admins see all data.
     """
     # Validate interval
     if interval not in ("day", "week", "month"):
@@ -204,8 +236,11 @@ async def get_usage_trends(
         start_date = start_date or default_start
         end_date = end_date or default_end
 
+    # Get user filter (None for admin, user_id for API users)
+    api_user_id = get_user_filter(request)
+
     # Get trend data
-    trend_data = database.get_analytics_usage_trends(start_date, end_date, interval=interval)
+    trend_data = database.get_analytics_usage_trends(start_date, end_date, interval=interval, api_user_id=api_user_id)
 
     data_points = [
         UsageTrend(
@@ -228,6 +263,7 @@ async def get_usage_trends(
 
 @router.get("/top-sessions", response_model=List[TopSession])
 async def get_top_sessions(
+    request: Request,
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     limit: int = Query(10, ge=1, le=100, description="Number of sessions to return"),
@@ -240,6 +276,7 @@ async def get_top_sessions(
     useful for identifying high-cost conversations.
 
     If no date range is provided, defaults to last 30 days.
+    API users see only their own data; admins see all data.
     """
     # Validate and default dates
     start_date = validate_date_format(start_date, "start_date")
@@ -250,8 +287,11 @@ async def get_top_sessions(
         start_date = start_date or default_start
         end_date = end_date or default_end
 
+    # Get user filter (None for admin, user_id for API users)
+    api_user_id = get_user_filter(request)
+
     # Get top sessions data
-    sessions_data = database.get_analytics_top_sessions(start_date, end_date, limit=limit)
+    sessions_data = database.get_analytics_top_sessions(start_date, end_date, limit=limit, api_user_id=api_user_id)
 
     return [
         TopSession(

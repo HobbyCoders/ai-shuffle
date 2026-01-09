@@ -22,7 +22,8 @@
 		Puzzle,
 		FolderOpen,
 		StickyNote,
-		Zap
+		Zap,
+		BarChart3
 	} from 'lucide-svelte';
 	import { allTabs } from '$lib/stores/tabs';
 	import type { DeckCard, CardType } from './types';
@@ -59,7 +60,8 @@
 		'user-settings': Settings,
 		'file-browser': FolderOpen,
 		notes: StickyNote,
-		hooks: Zap
+		hooks: Zap,
+		stats: BarChart3
 	};
 
 	const CardIcon = $derived(cardIcons[card.type] || MessageSquare);

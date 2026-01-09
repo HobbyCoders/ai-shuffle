@@ -206,7 +206,7 @@
 {#if mobile}
 	<!-- Mobile: Direct content without BaseCard wrapper -->
 	<!-- MobileWorkspace provides the header with title and close button -->
-	<div class="hooks-card mobile">
+	<div class="hooks-card card-system mobile">
 			<!-- No project selected state -->
 			{#if !hasProject}
 				<div class="no-project-state">
@@ -518,7 +518,7 @@
 		{onResizeEnd}
 	>
 		{#snippet children()}
-			<div class="hooks-card" class:maximized={card.maximized}>
+			<div class="hooks-card card-system" class:maximized={card.maximized}>
 				<!-- No project selected state -->
 				{#if !hasProject}
 					<div class="no-project-state">

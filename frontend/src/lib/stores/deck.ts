@@ -38,7 +38,8 @@ export type DeckCardType =
 	| 'project'
 	| 'plugins'
 	| 'hooks'
-	| 'notes';
+	| 'notes'
+	| 'stats';
 
 export type SnapZone =
 	| 'left'
@@ -402,6 +403,8 @@ function getDefaultTitle(type: DeckCardType): string {
 			return 'Hooks';
 		case 'notes':
 			return 'Notes';
+		case 'stats':
+			return 'Stats';
 		default:
 			return 'Card';
 	}

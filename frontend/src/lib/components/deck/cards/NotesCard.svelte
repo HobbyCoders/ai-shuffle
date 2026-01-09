@@ -8,6 +8,7 @@
 	import BaseCard from './BaseCard.svelte';
 	import type { DeckCard } from './types';
 	import { selectedProject } from '$lib/stores/chat';
+	import './card-design-system.css';
 	import {
 		getProjectNotes,
 		createNote,
@@ -510,7 +511,7 @@
 {/snippet}
 
 {#if mobile}
-	<div class="notes-card-content mobile">
+	<div class="notes-card-content card-system mobile">
 		{#if editingNote || isCreatingNew}
 			{@render editorView()}
 		{:else}
@@ -519,7 +520,7 @@
 	</div>
 {:else}
 	<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
-		<div class="notes-card-content">
+		<div class="notes-card-content card-system">
 			{#if editingNote || isCreatingNew}
 				{@render editorView()}
 			{:else}
@@ -530,14 +531,17 @@
 {/if}
 
 <style>
+	/* ============================================
+	   NOTES CARD - Uses card-design-system.css tokens
+	   ============================================ */
 	.notes-card-content {
 		flex: 1;
 		display: flex;
 		flex-direction: column;
 		overflow: hidden;
 		min-height: 0;
-		background: var(--card);
-		border-radius: 0 0 var(--radius, 0.75rem) var(--radius, 0.75rem);
+		background: var(--surface-0);
+		border-radius: 0 0 var(--radius-lg) var(--radius-lg);
 	}
 
 	.notes-card-content.mobile {
@@ -545,7 +549,9 @@
 		border-radius: 0;
 	}
 
-	/* List View */
+	/* ============================================
+	   LIST VIEW
+	   ============================================ */
 	.notes-list {
 		display: flex;
 		flex-direction: column;
@@ -555,52 +561,53 @@
 
 	.notes-toolbar {
 		display: flex;
-		gap: 8px;
-		padding: 12px;
-		border-bottom: 1px solid var(--border);
+		gap: var(--space-2);
+		padding: var(--space-3);
+		border-bottom: 1px solid var(--border-default);
 	}
 
 	.search-box {
 		flex: 1;
 		display: flex;
 		align-items: center;
-		gap: 8px;
-		padding: 8px 12px;
-		background: var(--muted);
-		border-radius: var(--radius, 0.75rem);
-		color: var(--muted-foreground);
+		gap: var(--space-2);
+		padding: var(--space-2) var(--space-3);
+		background: var(--surface-1);
+		border-radius: var(--radius-md);
+		color: var(--text-secondary);
 	}
 
 	.search-input {
 		flex: 1;
 		background: none;
 		border: none;
-		color: var(--foreground);
-		font-size: 14px;
+		color: var(--text-primary);
+		font-size: var(--text-md);
 		outline: none;
 	}
 
 	.search-input::placeholder {
-		color: var(--muted-foreground);
+		color: var(--text-secondary);
 	}
 
 	.new-note-btn {
 		display: flex;
 		align-items: center;
-		gap: 6px;
-		padding: 8px 12px;
+		gap: calc(var(--space-1) * 1.5);
+		padding: var(--space-2) var(--space-3);
 		background: var(--primary);
 		color: var(--primary-foreground);
 		border: none;
-		border-radius: var(--radius, 0.75rem);
-		font-size: 14px;
+		border-radius: var(--radius-md);
+		font-size: var(--text-md);
 		font-weight: 500;
 		cursor: pointer;
-		transition: opacity 0.2s;
+		transition: all var(--transition-smooth);
 	}
 
 	.new-note-btn:hover:not(:disabled) {
 		opacity: 0.9;
+		box-shadow: var(--shadow-glow-soft);
 	}
 
 	.new-note-btn:disabled {
@@ -608,31 +615,34 @@
 		cursor: not-allowed;
 	}
 
-	/* Tag Filter */
+	/* ============================================
+	   TAG FILTER
+	   ============================================ */
 	.tag-filter {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 6px;
-		padding: 8px 12px;
-		border-bottom: 1px solid var(--border);
+		gap: calc(var(--space-1) * 1.5);
+		padding: var(--space-2) var(--space-3);
+		border-bottom: 1px solid var(--border-default);
 	}
 
 	.tag-pill {
 		display: flex;
 		align-items: center;
-		gap: 4px;
-		padding: 4px 10px;
-		background: var(--muted);
+		gap: var(--space-1);
+		padding: var(--space-1) calc(var(--space-2) + 2px);
+		background: var(--surface-1);
 		border: 1px solid transparent;
-		border-radius: calc(var(--radius, 0.75rem) * 1.33);
-		color: var(--muted-foreground);
-		font-size: 12px;
+		border-radius: var(--radius-full);
+		color: var(--text-secondary);
+		font-size: var(--text-sm);
 		cursor: pointer;
-		transition: all 0.2s;
+		transition: all var(--transition-smooth);
 	}
 
 	.tag-pill:hover {
-		background: var(--accent);
+		background: var(--surface-hover);
+		border-color: var(--border-subtle);
 	}
 
 	.tag-pill.active {
@@ -641,72 +651,75 @@
 	}
 
 	.tag-count {
-		font-size: 10px;
+		font-size: var(--text-xs);
 		opacity: 0.7;
 	}
 
-	/* Notes Scroll */
+	/* ============================================
+	   NOTES SCROLL & ITEMS
+	   ============================================ */
 	.notes-scroll {
 		flex: 1;
 		overflow-y: auto;
-		padding: 8px;
+		padding: var(--space-2);
 	}
 
 	.note-item {
 		display: flex;
 		flex-direction: column;
-		gap: 6px;
-		padding: 12px;
-		background: var(--muted);
+		gap: calc(var(--space-1) * 1.5);
+		padding: var(--space-3);
+		background: var(--surface-1);
 		border: 1px solid transparent;
-		border-radius: var(--radius, 0.75rem);
-		margin-bottom: 8px;
+		border-radius: var(--radius-md);
+		margin-bottom: var(--space-2);
 		text-align: left;
 		cursor: pointer;
-		transition: all 0.2s;
+		transition: all var(--transition-smooth);
 	}
 
 	.note-item:hover {
-		border-color: var(--border);
-		background: var(--accent);
+		border-color: var(--border-default);
+		background: var(--surface-hover);
+		box-shadow: var(--shadow-xs);
 	}
 
 	.note-header {
 		display: flex;
 		align-items: center;
-		gap: 6px;
+		gap: calc(var(--space-1) * 1.5);
 	}
 
 	.pin-icon {
-		color: var(--primary);
+		color: var(--text-accent);
 		flex-shrink: 0;
 	}
 
 	.note-title {
 		flex: 1;
 		font-weight: 500;
-		font-size: 14px;
-		color: var(--foreground);
+		font-size: var(--text-md);
+		color: var(--text-primary);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
 
 	.pin-btn {
-		padding: 8px;
+		padding: var(--space-2);
 		background: none;
 		border: none;
-		color: var(--muted-foreground);
+		color: var(--text-secondary);
 		cursor: pointer;
 		opacity: 0;
-		transition: opacity 0.2s;
-		/* Ensure minimum touch target size */
+		transition: all var(--transition-smooth);
 		min-width: 32px;
 		min-height: 32px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		flex-shrink: 0;
+		border-radius: var(--radius-sm);
 	}
 
 	.note-item:hover .pin-btn {
@@ -714,53 +727,58 @@
 	}
 
 	.pin-btn:hover {
-		color: var(--primary);
+		color: var(--text-accent);
+		background: var(--surface-active);
 	}
 
-	/* Touch devices: always show pin button */
+	/* Touch devices: always show pin button with larger target */
 	@media (pointer: coarse) {
 		.pin-btn {
 			opacity: 1;
+			min-width: 44px;
+			min-height: 44px;
 		}
 	}
 
 	.note-meta {
 		display: flex;
 		align-items: center;
-		gap: 8px;
-		font-size: 12px;
-		color: var(--muted-foreground);
+		gap: var(--space-2);
+		font-size: var(--text-sm);
+		color: var(--text-secondary);
 	}
 
 	.note-tags {
 		display: flex;
-		gap: 4px;
+		gap: var(--space-1);
 	}
 
 	.note-tag {
-		padding: 2px 6px;
+		padding: 2px calc(var(--space-1) * 1.5);
 		background: color-mix(in oklch, var(--success) 15%, transparent);
 		color: var(--success);
-		border-radius: calc(var(--radius, 0.75rem) * 0.33);
-		font-size: 11px;
+		border-radius: var(--radius-sm);
+		font-size: var(--text-xs);
 	}
 
 	.note-tag.more {
-		background: var(--muted);
-		color: var(--muted-foreground);
+		background: var(--surface-1);
+		color: var(--text-secondary);
 	}
 
 	.linked-sessions {
 		display: flex;
 		align-items: center;
-		gap: 4px;
+		gap: var(--space-1);
 	}
 
 	.note-date {
 		margin-left: auto;
 	}
 
-	/* Empty and Loading States */
+	/* ============================================
+	   EMPTY & LOADING STATES
+	   ============================================ */
 	.empty-state,
 	.loading-state,
 	.error-state {
@@ -768,9 +786,9 @@
 		flex-direction: column;
 		align-items: center;
 		justify-content: center;
-		gap: 12px;
+		gap: var(--space-3);
 		height: 200px;
-		color: var(--muted-foreground);
+		color: var(--text-secondary);
 		text-align: center;
 	}
 
@@ -779,25 +797,34 @@
 	}
 
 	.create-first-btn {
-		padding: 8px 16px;
+		padding: var(--space-2) var(--space-4);
 		background: var(--primary);
 		color: var(--primary-foreground);
 		border: none;
-		border-radius: var(--radius, 0.75rem);
-		font-size: 14px;
+		border-radius: var(--radius-md);
+		font-size: var(--text-md);
 		cursor: pointer;
+		transition: all var(--transition-smooth);
 	}
 
-	/* Footer */
+	.create-first-btn:hover {
+		box-shadow: var(--shadow-glow-soft);
+	}
+
+	/* ============================================
+	   FOOTER
+	   ============================================ */
 	.notes-footer {
-		padding: 8px 12px;
-		border-top: 1px solid var(--border);
-		font-size: 12px;
-		color: var(--muted-foreground);
+		padding: var(--space-2) var(--space-3);
+		border-top: 1px solid var(--border-default);
+		font-size: var(--text-sm);
+		color: var(--text-secondary);
 		text-align: center;
 	}
 
-	/* Editor View */
+	/* ============================================
+	   EDITOR VIEW
+	   ============================================ */
 	.note-editor {
 		display: flex;
 		flex-direction: column;
@@ -809,128 +836,143 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		padding: 12px;
-		border-bottom: 1px solid var(--border);
+		padding: var(--space-3);
+		border-bottom: 1px solid var(--border-default);
 	}
 
 	.back-btn {
 		display: flex;
 		align-items: center;
-		gap: 4px;
-		padding: 6px 12px;
-		background: var(--muted);
+		gap: var(--space-1);
+		padding: calc(var(--space-1) * 1.5) var(--space-3);
+		background: var(--surface-1);
 		border: none;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		color: var(--foreground);
-		font-size: 14px;
+		border-radius: var(--radius-sm);
+		color: var(--text-primary);
+		font-size: var(--text-md);
 		cursor: pointer;
+		transition: all var(--transition-smooth);
 	}
 
 	.back-btn:hover {
-		background: var(--accent);
+		background: var(--surface-hover);
 	}
 
 	.editor-actions {
 		display: flex;
-		gap: 8px;
+		gap: var(--space-2);
 	}
 
 	.delete-btn {
-		padding: 6px 10px;
-		background: var(--muted);
+		padding: calc(var(--space-1) * 1.5) calc(var(--space-2) + 2px);
+		background: var(--surface-1);
 		border: none;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
+		border-radius: var(--radius-sm);
 		color: var(--destructive);
 		cursor: pointer;
+		transition: all var(--transition-smooth);
 	}
 
 	.delete-btn:hover {
-		background: color-mix(in oklch, var(--destructive) 10%, transparent);
+		background: color-mix(in oklch, var(--destructive) 12%, transparent);
 	}
 
 	.autosave-status {
-		font-size: 12px;
-		color: var(--muted-foreground);
+		font-size: var(--text-sm);
+		color: var(--text-secondary);
 		display: flex;
 		align-items: center;
-		gap: 4px;
+		gap: var(--space-1);
 	}
 
 	.title-input {
-		padding: 12px;
+		padding: var(--space-3);
 		background: none;
 		border: none;
-		border-bottom: 1px solid var(--border);
-		color: var(--foreground);
-		font-size: 18px;
+		border-bottom: 1px solid var(--border-default);
+		color: var(--text-primary);
+		font-size: var(--text-xl);
 		font-weight: 600;
 		outline: none;
 	}
 
 	.title-input::placeholder {
-		color: var(--muted-foreground);
+		color: var(--text-secondary);
 	}
 
-	/* Tags Section */
+	.title-input:focus {
+		border-bottom-color: var(--border-emphasis);
+	}
+
+	/* ============================================
+	   TAGS SECTION
+	   ============================================ */
 	.tags-section {
 		display: flex;
 		align-items: center;
-		gap: 12px;
-		padding: 8px 12px;
-		border-bottom: 1px solid var(--border);
+		gap: var(--space-3);
+		padding: var(--space-2) var(--space-3);
+		border-bottom: 1px solid var(--border-default);
 	}
 
 	.tags-list {
 		flex: 1;
 		display: flex;
 		flex-wrap: wrap;
-		gap: 6px;
+		gap: calc(var(--space-1) * 1.5);
 		align-items: center;
 	}
 
 	.editor-tag {
 		display: flex;
 		align-items: center;
-		gap: 4px;
-		padding: 4px 8px;
+		gap: var(--space-1);
+		padding: var(--space-1) var(--space-2);
 		background: color-mix(in oklch, var(--success) 15%, transparent);
 		color: var(--success);
-		border-radius: calc(var(--radius, 0.75rem) * 0.33);
-		font-size: 12px;
+		border-radius: var(--radius-sm);
+		font-size: var(--text-sm);
 	}
 
 	.remove-tag {
 		background: none;
 		border: none;
 		color: inherit;
-		font-size: 14px;
+		font-size: var(--text-md);
 		cursor: pointer;
 		padding: 0;
 		line-height: 1;
+		opacity: 0.7;
+		transition: opacity var(--transition-fast);
+	}
+
+	.remove-tag:hover {
+		opacity: 1;
 	}
 
 	.tag-input {
 		min-width: 80px;
-		padding: 4px 8px;
+		padding: var(--space-1) var(--space-2);
 		background: none;
-		border: 1px dashed var(--border);
-		border-radius: calc(var(--radius, 0.75rem) * 0.33);
-		color: var(--foreground);
-		font-size: 12px;
+		border: 1px dashed var(--border-default);
+		border-radius: var(--radius-sm);
+		color: var(--text-primary);
+		font-size: var(--text-sm);
 		outline: none;
+		transition: all var(--transition-smooth);
 	}
 
 	.tag-input:focus {
 		border-style: solid;
-		border-color: var(--primary);
+		border-color: var(--border-emphasis);
 	}
 
 	.pin-toggle {
 		display: flex;
 		align-items: center;
-		gap: 6px;
-		font-size: 12px;
-		color: var(--muted-foreground);
+		gap: calc(var(--space-1) * 1.5);
+		font-size: var(--text-sm);
+		color: var(--text-secondary);
 		cursor: pointer;
 		white-space: nowrap;
 	}
@@ -939,34 +981,39 @@
 		accent-color: var(--primary);
 	}
 
-	/* Editor Tabs */
+	/* ============================================
+	   EDITOR TABS
+	   ============================================ */
 	.editor-tabs {
 		display: flex;
-		border-bottom: 1px solid var(--border);
+		border-bottom: 1px solid var(--border-default);
 	}
 
 	.editor-tabs button {
 		flex: 1;
-		padding: 8px;
+		padding: var(--space-2);
 		background: none;
 		border: none;
 		border-bottom: 2px solid transparent;
-		color: var(--muted-foreground);
-		font-size: 13px;
+		color: var(--text-secondary);
+		font-size: var(--text-base);
 		cursor: pointer;
-		transition: all 0.2s;
+		transition: all var(--transition-smooth);
 	}
 
 	.editor-tabs button:hover {
-		color: var(--foreground);
+		color: var(--text-primary);
+		background: var(--surface-hover);
 	}
 
 	.editor-tabs button.active {
-		color: var(--primary);
+		color: var(--text-accent);
 		border-bottom-color: var(--primary);
 	}
 
-	/* Content Area */
+	/* ============================================
+	   CONTENT AREA
+	   ============================================ */
 	.content-area {
 		flex: 1;
 		overflow: hidden;
@@ -975,27 +1022,27 @@
 
 	.content-textarea {
 		flex: 1;
-		padding: 12px;
+		padding: var(--space-3);
 		background: none;
 		border: none;
-		color: var(--foreground);
-		font-family: 'Fira Code', 'Monaco', monospace;
-		font-size: 14px;
+		color: var(--text-primary);
+		font-family: var(--card-font-mono);
+		font-size: var(--text-md);
 		line-height: 1.6;
 		resize: none;
 		outline: none;
 	}
 
 	.content-textarea::placeholder {
-		color: var(--muted-foreground);
+		color: var(--text-secondary);
 	}
 
 	.preview-content {
 		flex: 1;
-		padding: 12px;
+		padding: var(--space-3);
 		overflow-y: auto;
 		line-height: 1.6;
-		color: var(--foreground);
+		color: var(--text-primary);
 	}
 
 	.preview-content :global(h1),
@@ -1010,17 +1057,17 @@
 	.preview-content :global(h3) { font-size: 1.1em; }
 
 	.preview-content :global(pre) {
-		padding: 12px;
-		background: var(--muted);
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
+		padding: var(--space-3);
+		background: var(--surface-1);
+		border-radius: var(--radius-sm);
 		overflow-x: auto;
 	}
 
 	.preview-content :global(code) {
-		padding: 2px 6px;
-		background: var(--muted);
-		border-radius: calc(var(--radius, 0.75rem) * 0.33);
-		font-family: 'Fira Code', monospace;
+		padding: 2px calc(var(--space-1) * 1.5);
+		background: var(--surface-1);
+		border-radius: var(--radius-sm);
+		font-family: var(--card-font-mono);
 		font-size: 0.9em;
 	}
 
@@ -1030,12 +1077,11 @@
 	}
 
 	.preview-content :global(li) {
-		margin-left: 20px;
+		margin-left: var(--space-5);
 	}
 
 	.preview-empty {
-		color: var(--muted-foreground);
+		color: var(--text-secondary);
 		font-style: italic;
 	}
-
 </style>

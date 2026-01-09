@@ -13,7 +13,8 @@ export type CardType =
   | 'file-browser'
   | 'plugins'
   | 'notes'
-  | 'hooks';
+  | 'hooks'
+  | 'stats';
 
 export interface DeckCard {
   id: string;
@@ -47,6 +48,7 @@ export const DEFAULT_CARD_SIZES: Record<CardType, { width: number; height: numbe
   plugins: { width: 650, height: 550 },
   notes: { width: 600, height: 550 },
   hooks: { width: 650, height: 550 },
+  stats: { width: 700, height: 600 },
 };
 
 export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }> = {
@@ -61,6 +63,7 @@ export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }>
   plugins: { width: 500, height: 450 },
   notes: { width: 400, height: 350 },
   hooks: { width: 500, height: 400 },
+  stats: { width: 500, height: 400 },
 };
 
 /**
