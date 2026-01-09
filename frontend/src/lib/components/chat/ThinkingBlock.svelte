@@ -38,7 +38,12 @@
 
 	function renderMarkdown(text: string): string {
 		try {
-			return marked.parse(text) as string;
+			// Strip code blocks - they don't render well with italic styling
+			// Remove fenced code blocks (```...```)
+			let cleaned = text.replace(/```[\s\S]*?```/g, '');
+			// Remove inline code (`...`)
+			cleaned = cleaned.replace(/`[^`]+`/g, '');
+			return marked.parse(cleaned) as string;
 		} catch {
 			return text;
 		}
@@ -184,29 +189,6 @@
 		font-size: 1em;
 		font-weight: 600;
 		margin: 0.5rem 0 0.25rem 0;
-	}
-
-	/* Code blocks should be distinguishable but still muted */
-	.thinking-content :global(code) {
-		background: var(--surface-1, hsl(var(--muted) / 0.3));
-		padding: 0.125rem 0.25rem;
-		border-radius: 3px;
-		font-size: 0.85em;
-		font-style: normal;
-	}
-
-	.thinking-content :global(pre) {
-		background: var(--surface-1, hsl(var(--muted) / 0.5));
-		padding: 0.5rem 0.75rem;
-		border-radius: var(--radius-sm, 6px);
-		overflow-x: auto;
-		margin: 0.5rem 0;
-		font-style: normal;
-	}
-
-	.thinking-content :global(pre code) {
-		background: transparent;
-		padding: 0;
 	}
 
 	/* Lists */

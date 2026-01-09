@@ -1030,13 +1030,29 @@ function createTabsStore() {
 				tabLastUpdateId.set(tabId, newUpdateId);
 
 				// Convert server messages to ChatMessage format
+				// IMPORTANT: Preserve existing message IDs to prevent Svelte component recreation
+				// This keeps expanded/collapsed state stable for ThinkingBlocks, etc.
 				const serverMessages = (data.messages as Array<Record<string, unknown>>) || [];
+				const tab = getTab(tabId);
+				const existingMessages = tab?.messages || [];
+
 				const messages: ChatMessage[] = serverMessages.map((m, i) => {
+					const serverType = (m.type as MessageType) || 'text';
+					const serverRole = (m.role as 'user' | 'assistant' | 'system') || 'assistant';
+
+					// Try to match with existing message by index and type
+					// This preserves the frontend's ID so Svelte doesn't recreate the component
+					const existingMsg = existingMessages[i];
+					const canPreserveId = existingMsg &&
+						existingMsg.type === serverType &&
+						existingMsg.role === serverRole;
+
 					const msg: ChatMessage = {
-						id: (m.id as string) || `live-${i}`,
-						role: (m.role as 'user' | 'assistant' | 'system') || 'assistant',
+						// Preserve existing ID if message matches, otherwise use server ID
+						id: canPreserveId ? existingMsg.id : ((m.id as string) || `live-${i}`),
+						role: serverRole,
 						content: (m.content as string) || '',
-						type: (m.type as MessageType) || 'text',
+						type: serverType,
 						streaming: (m.streaming as boolean) || false,
 					};
 
@@ -2330,9 +2346,20 @@ function createTabsStore() {
 						...tokenUpdates
 					});
 				} else {
+					// Preserve existing message IDs where possible to prevent Svelte component recreation
+					// This keeps UI state (like ThinkingBlock expanded/collapsed) stable
+					const existingMessages = currentTab?.messages || [];
+					const messagesWithPreservedIds = finalMessages.map((msg, i) => {
+						const existingMsg = existingMessages[i];
+						const canPreserveId = existingMsg &&
+							existingMsg.type === msg.type &&
+							existingMsg.role === msg.role;
+						return canPreserveId ? { ...msg, id: existingMsg.id } : msg;
+					});
+
 					updateTab(tabId, {
 						sessionId: data.session_id as string,
-						messages: finalMessages,
+						messages: messagesWithPreservedIds,
 						isStreaming: isStreaming,
 						todos: latestTodos,
 						error: null,  // Clear any previous error
@@ -4396,11 +4423,23 @@ function createTabsStore() {
 					title = firstUserMsg.content.substring(0, 100) + (firstUserMsg.content.length > 100 ? '...' : '');
 				}
 
+				// Preserve existing message IDs where possible to prevent Svelte component recreation
+				// This keeps UI state (like ThinkingBlock expanded/collapsed) stable
+				const currentTab = getTab(tabId);
+				const existingMessages = currentTab?.messages || [];
+				const messagesWithPreservedIds = messages.map((msg, i) => {
+					const existingMsg = existingMessages[i];
+					const canPreserveId = existingMsg &&
+						existingMsg.type === msg.type &&
+						existingMsg.role === msg.role;
+					return canPreserveId ? { ...msg, id: existingMsg.id } : msg;
+				});
+
 				// Load token totals from session history - single source of truth
 				// Also restore profile and project from the saved session (they are locked once saved)
 				updateTab(tabId, {
 					sessionId: session.id,
-					messages,
+					messages: messagesWithPreservedIds,
 					title,
 					error: null,
 					totalTokensIn: session.total_tokens_in || 0,
