@@ -847,36 +847,120 @@
 						</div>
 					</div>
 
+					<!-- Model Selector -->
 					<div class="card-form-section">
-						<h3 class="card-form-title">Core Settings</h3>
-						<div class="form-grid cols-3">
-							<div class="form-field">
-								<label class="card-form-label">Model</label>
-								<select bind:value={profileForm.model} class="card-form-input">
-									<option value="sonnet">Sonnet</option>
-									<option value="sonnet-1m">Sonnet 1M</option>
-									<option value="opus">Opus</option>
-									<option value="haiku">Haiku</option>
-								</select>
-							</div>
-							<div class="form-field">
-								<label class="card-form-label">Permission Mode</label>
-								<select bind:value={profileForm.permission_mode} class="card-form-input">
-									<option value="default">Default</option>
-									<option value="acceptEdits">Accept Edits</option>
-									<option value="plan">Plan</option>
-									<option value="bypassPermissions">Bypass</option>
-								</select>
-							</div>
-							<div class="form-field">
-								<label class="card-form-label">Max Turns</label>
-								<input
-									type="number"
-									bind:value={profileForm.max_turns}
-									class="card-form-input"
-									placeholder="Unlimited"
-								/>
-							</div>
+						<h3 class="card-form-title">Model</h3>
+						<p class="card-form-hint">Select the Claude model for this profile</p>
+						<div class="card-mode-selector">
+							<button
+								type="button"
+								class="card-mode-btn"
+								class:card-mode-btn--active={profileForm.model === 'haiku'}
+								onclick={() => profileForm.model = 'haiku'}
+							>
+								Haiku
+							</button>
+							<button
+								type="button"
+								class="card-mode-btn"
+								class:card-mode-btn--active={profileForm.model === 'sonnet'}
+								onclick={() => profileForm.model = 'sonnet'}
+							>
+								Sonnet
+							</button>
+							<button
+								type="button"
+								class="card-mode-btn"
+								class:card-mode-btn--active={profileForm.model === 'sonnet-1m'}
+								onclick={() => profileForm.model = 'sonnet-1m'}
+							>
+								Sonnet 1M
+							</button>
+							<button
+								type="button"
+								class="card-mode-btn"
+								class:card-mode-btn--active={profileForm.model === 'opus'}
+								onclick={() => profileForm.model = 'opus'}
+							>
+								Opus
+							</button>
+						</div>
+						<p class="card-form-hint model-hint">
+							{#if profileForm.model === 'haiku'}
+								Fastest and most compact - ideal for simple tasks
+							{:else if profileForm.model === 'sonnet'}
+								Balanced performance - recommended for most use cases
+							{:else if profileForm.model === 'sonnet-1m'}
+								Extended context (1M tokens) - for large codebases
+							{:else if profileForm.model === 'opus'}
+								Most capable - best for complex reasoning
+							{/if}
+						</p>
+					</div>
+
+					<!-- Permission Mode Selector -->
+					<div class="card-form-section">
+						<h3 class="card-form-title">Permission Mode</h3>
+						<p class="card-form-hint">Control how Claude handles tool permissions</p>
+						<div class="card-mode-selector">
+							<button
+								type="button"
+								class="card-mode-btn"
+								class:card-mode-btn--active={profileForm.permission_mode === 'default'}
+								onclick={() => profileForm.permission_mode = 'default'}
+							>
+								Default
+							</button>
+							<button
+								type="button"
+								class="card-mode-btn"
+								class:card-mode-btn--active={profileForm.permission_mode === 'acceptEdits'}
+								onclick={() => profileForm.permission_mode = 'acceptEdits'}
+							>
+								Accept Edits
+							</button>
+							<button
+								type="button"
+								class="card-mode-btn"
+								class:card-mode-btn--active={profileForm.permission_mode === 'plan'}
+								onclick={() => profileForm.permission_mode = 'plan'}
+							>
+								Plan
+							</button>
+							<button
+								type="button"
+								class="card-mode-btn"
+								class:card-mode-btn--active={profileForm.permission_mode === 'bypassPermissions'}
+								onclick={() => profileForm.permission_mode = 'bypassPermissions'}
+							>
+								Bypass
+							</button>
+						</div>
+						<p class="card-form-hint permission-hint">
+							{#if profileForm.permission_mode === 'default'}
+								Ask for confirmation before executing tools
+							{:else if profileForm.permission_mode === 'acceptEdits'}
+								Auto-approve file edits, ask for other tools
+							{:else if profileForm.permission_mode === 'plan'}
+								Create plans without executing - for review workflows
+							{:else if profileForm.permission_mode === 'bypassPermissions'}
+								Execute all tools without confirmation
+							{/if}
+						</p>
+					</div>
+
+					<!-- Max Turns -->
+					<div class="card-form-section">
+						<h3 class="card-form-title">Limits</h3>
+						<div class="form-field">
+							<label class="card-form-label">Max Turns</label>
+							<input
+								type="number"
+								bind:value={profileForm.max_turns}
+								class="card-form-input"
+								placeholder="Unlimited"
+							/>
+							<p class="card-form-hint">Maximum agentic turns per query (leave empty for unlimited)</p>
 						</div>
 					</div>
 
