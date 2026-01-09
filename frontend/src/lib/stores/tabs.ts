@@ -648,11 +648,29 @@ function createTabsStore() {
 			}
 
 			case 'stream_block_stop': {
-				// Block complete - we don't blindly finalize thinking here because
-				// this event fires for ALL block types (text, tool_use, etc.)
-				// Thinking is finalized when text or tool_use starts instead.
-				// This prevents fragmentation when stream_block_stop for a previous
-				// block arrives in the same batch as new thinking deltas.
+				// Block complete - finalize streaming text and thinking messages immediately
+				// so indicators don't linger while waiting for the next block to start.
+				// Tool_use messages are NOT finalized here because they remain "streaming"
+				// until the tool_result arrives (tool execution could take time).
+
+				// Finalize streaming text message
+				const streamingTextIdx = messages.findLastIndex(
+					m => m.type === 'text' && m.role === 'assistant' && m.streaming
+				);
+				if (streamingTextIdx !== -1) {
+					if (messages[streamingTextIdx].content) {
+						messages[streamingTextIdx] = { ...messages[streamingTextIdx], streaming: false };
+					} else {
+						// Remove empty streaming text messages
+						messages.splice(streamingTextIdx, 1);
+					}
+				}
+
+				// Finalize streaming thinking message
+				const streamingThinkingIdx = findLastStreamingThinkingIndex(messages);
+				if (streamingThinkingIdx !== -1) {
+					messages[streamingThinkingIdx] = { ...messages[streamingThinkingIdx], streaming: false };
+				}
 				break;
 			}
 
@@ -1170,8 +1188,9 @@ function createTabsStore() {
 
 			case 'stream_start': {
 				// Another device started streaming
+				// DON'T create empty message here - wait for actual content via stream_chunk events
+				// This prevents empty "Claude [time] ●●●" headers appearing before content arrives
 				console.log(`[Tab ${tabId}] Another device started streaming`);
-				const messageId = eventData.message_id as string;
 				const usage = eventData.usage as Record<string, number> | undefined;
 
 				update(s => ({
@@ -1203,17 +1222,11 @@ function createTabsStore() {
 							});
 						}
 
+						// Just mark as streaming - messages will be created when content arrives
 						return {
 							...t,
 							isStreaming: true,
-							...contextUpdate,
-							messages: [...t.messages, {
-								id: messageId || `assistant-sync-${Date.now()}`,
-								role: 'assistant' as const,
-								content: '',
-								type: 'text' as const,
-								streaming: true
-							}]
+							...contextUpdate
 						};
 					})
 				}));

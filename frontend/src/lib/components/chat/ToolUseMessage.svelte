@@ -56,14 +56,19 @@
 		return result;
 	}
 
+	// Check tool type based on name (not content) so specialized UI shows immediately
+	const isEditTool = $derived(name === 'Edit');
+	const isReadTool = $derived(name === 'Read');
+	const isWriteTool = $derived(name === 'Write');
+	const isBashTool = $derived(name === 'Bash');
+
 	// Extract Edit tool fields - works with both complete input and streaming partialInput
 	const editFields = $derived.by(() => {
-		if (name !== 'Edit') return { isEdit: false, filePath: '', oldString: '', newString: '' };
+		if (!isEditTool) return { filePath: '', oldString: '', newString: '' };
 
 		// Try complete input first
 		if (input?.old_string !== undefined && input?.new_string !== undefined) {
 			return {
-				isEdit: true,
 				filePath: String(input.file_path || ''),
 				oldString: String(input.old_string || ''),
 				newString: String(input.new_string || '')
@@ -71,59 +76,45 @@
 		}
 
 		// During streaming, extract from partialInput
-		if (streaming && partialInput) {
-			const oldStr = extractFieldFromPartial(partialInput, 'old_string');
-			const newStr = extractFieldFromPartial(partialInput, 'new_string');
-			// Only show diff if we have at least old_string
-			if (oldStr) {
-				return {
-					isEdit: true,
-					filePath: extractFieldFromPartial(partialInput, 'file_path'),
-					oldString: oldStr,
-					newString: newStr
-				};
-			}
+		if (partialInput) {
+			return {
+				filePath: extractFieldFromPartial(partialInput, 'file_path'),
+				oldString: extractFieldFromPartial(partialInput, 'old_string'),
+				newString: extractFieldFromPartial(partialInput, 'new_string')
+			};
 		}
 
-		return { isEdit: false, filePath: '', oldString: '', newString: '' };
+		return { filePath: '', oldString: '', newString: '' };
 	});
 
-	const isEditTool = $derived(editFields.isEdit);
 	const editFilePath = $derived(editFields.filePath);
 	const oldString = $derived(editFields.oldString);
 	const newString = $derived(editFields.newString);
 
 	// Extract Read tool fields
 	const readFields = $derived.by(() => {
-		if (name !== 'Read') return { isRead: false, filePath: '', content: '' };
+		if (!isReadTool) return { filePath: '', content: '' };
 
 		const filePath = input?.file_path !== undefined
 			? String(input.file_path || '')
 			: extractFieldFromPartial(partialInput || '', 'file_path');
 
-		if (filePath) {
-			return {
-				isRead: true,
-				filePath,
-				content: result || ''
-			};
-		}
-
-		return { isRead: false, filePath: '', content: '' };
+		return {
+			filePath,
+			content: result || ''
+		};
 	});
 
-	const isReadTool = $derived(readFields.isRead);
 	const readFilePath = $derived(readFields.filePath);
 	const readContent = $derived(readFields.content);
 
 	// Extract Write tool fields
 	const writeFields = $derived.by(() => {
-		if (name !== 'Write') return { isWrite: false, filePath: '', content: '' };
+		if (!isWriteTool) return { filePath: '', content: '' };
 
 		// Try complete input first
 		if (input?.file_path !== undefined && input?.content !== undefined) {
 			return {
-				isWrite: true,
 				filePath: String(input.file_path || ''),
 				content: String(input.content || '')
 			};
@@ -131,51 +122,35 @@
 
 		// During streaming, extract from partialInput
 		if (partialInput) {
-			const fp = extractFieldFromPartial(partialInput, 'file_path');
-			const content = extractFieldFromPartial(partialInput, 'content');
-			if (fp) {
-				return {
-					isWrite: true,
-					filePath: fp,
-					content: content
-				};
-			}
+			return {
+				filePath: extractFieldFromPartial(partialInput, 'file_path'),
+				content: extractFieldFromPartial(partialInput, 'content')
+			};
 		}
 
-		return { isWrite: false, filePath: '', content: '' };
+		return { filePath: '', content: '' };
 	});
 
-	const isWriteTool = $derived(writeFields.isWrite);
 	const writeFilePath = $derived(writeFields.filePath);
 	const writeContent = $derived(writeFields.content);
 
 	// Extract Bash tool fields
 	const bashFields = $derived.by(() => {
-		if (name !== 'Bash') return { isBash: false, command: '' };
+		if (!isBashTool) return { command: '' };
 
 		// Try complete input first
 		if (input?.command !== undefined) {
-			return {
-				isBash: true,
-				command: String(input.command || '')
-			};
+			return { command: String(input.command || '') };
 		}
 
 		// During streaming, extract from partialInput
 		if (partialInput) {
-			const cmd = extractFieldFromPartial(partialInput, 'command');
-			if (cmd) {
-				return {
-					isBash: true,
-					command: cmd
-				};
-			}
+			return { command: extractFieldFromPartial(partialInput, 'command') };
 		}
 
-		return { isBash: true, command: '' };
+		return { command: '' };
 	});
 
-	const isBashTool = $derived(bashFields.isBash);
 	const bashCommand = $derived(bashFields.command);
 
 	// Simple line-based diff for Edit tool
@@ -433,7 +408,7 @@
 								</div>
 								<div class="rounded border border-red-500/20 bg-red-500/5 p-2">
 									<div class="max-h-60 overflow-auto">
-										<pre class="text-[10px] font-mono text-red-400 m-0 w-max !bg-transparent !p-0 !rounded-none">{oldString || ' '}</pre>
+										<pre class="text-[10px] font-mono text-red-400 m-0 w-max !bg-transparent !p-0 !rounded-none">{oldString || ' '}{#if streaming && !oldString}<span class="inline-block w-1.5 h-3 ml-0.5 bg-red-400 animate-pulse"></span>{/if}</pre>
 									</div>
 								</div>
 							</div>
@@ -445,7 +420,7 @@
 								</div>
 								<div class="rounded border border-green-500/20 bg-green-500/5 p-2">
 									<div class="max-h-60 overflow-auto">
-										<pre class="text-[10px] font-mono text-green-400 m-0 w-max !bg-transparent !p-0 !rounded-none">{newString || ' '}</pre>
+										<pre class="text-[10px] font-mono text-green-400 m-0 w-max !bg-transparent !p-0 !rounded-none">{newString || ' '}{#if streaming && oldString && !newString}<span class="inline-block w-1.5 h-3 ml-0.5 bg-green-400 animate-pulse"></span>{/if}</pre>
 									</div>
 								</div>
 							</div>
