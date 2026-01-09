@@ -694,11 +694,6 @@
 					>
 						<tab.icon />
 						<span class="tab-label">{tab.label}</span>
-						<span
-							class="card-tab-indicator"
-							class:card-tab-indicator--valid={tabStatus()[tab.id]}
-							class:card-tab-indicator--invalid={!tabStatus()[tab.id]}
-						></span>
 					</button>
 				{/each}
 			</div>
@@ -772,29 +767,56 @@
 					<div class="editor-tab-content">
 						<!-- Model Selection -->
 						<div class="card-form-section">
-							<label class="card-form-label">Model</label>
-							<div class="card-selection-grid">
-								{#each MODEL_OPTIONS as opt}
-									<button
-										type="button"
-										onclick={() => formModel = opt.value}
-										class="card-selection-item"
-										class:card-selection-item--selected={formModel === opt.value}
-									>
-										<span class="card-selection-label">{opt.label}</span>
-										<span class="card-selection-desc">{opt.description}</span>
-									</button>
-								{/each}
+							<label class="card-form-label">Model — {#if formModel === ''}use profile default{:else if formModel === 'haiku'}fastest and most compact{:else if formModel === 'sonnet'}balanced performance{:else if formModel === 'sonnet-1m'}extended context (1M tokens){:else if formModel === 'opus'}most capable{/if}</label>
+							<div class="card-mode-selector">
+								<button
+									type="button"
+									class="card-mode-btn"
+									class:card-mode-btn--active={formModel === ''}
+									onclick={() => formModel = ''}
+								>
+									Inherit
+								</button>
+								<button
+									type="button"
+									class="card-mode-btn"
+									class:card-mode-btn--active={formModel === 'haiku'}
+									onclick={() => formModel = 'haiku'}
+								>
+									Haiku
+								</button>
+								<button
+									type="button"
+									class="card-mode-btn"
+									class:card-mode-btn--active={formModel === 'sonnet'}
+									onclick={() => formModel = 'sonnet'}
+								>
+									Sonnet
+								</button>
+								<button
+									type="button"
+									class="card-mode-btn"
+									class:card-mode-btn--active={formModel === 'sonnet-1m'}
+									onclick={() => formModel = 'sonnet-1m'}
+								>
+									Sonnet 1M
+								</button>
+								<button
+									type="button"
+									class="card-mode-btn"
+									class:card-mode-btn--active={formModel === 'opus'}
+									onclick={() => formModel = 'opus'}
+								>
+									Opus
+								</button>
 							</div>
 						</div>
 
-						<!-- Tool Access Mode -->
+						<!-- Tool Access -->
 						<div class="card-form-section">
 							<div class="section-header">
-								<label class="card-form-label">Tool Access</label>
-								{#if toolSelectionMode === 'select'}
-									<span class="card-badge card-badge--primary">{formTools.length} selected</span>
-								{/if}
+								<h3 class="card-form-title">Tool Access</h3>
+								<span class="card-badge card-badge--primary">{availableTools.all_tools.length} available</span>
 							</div>
 
 							<div class="card-mode-selector">
@@ -804,7 +826,6 @@
 									class="card-mode-btn"
 									class:card-mode-btn--active={toolSelectionMode === 'all'}
 								>
-									<Check />
 									All Tools
 								</button>
 								<button
@@ -813,63 +834,58 @@
 									class="card-mode-btn"
 									class:card-mode-btn--active={toolSelectionMode === 'select'}
 								>
-									<Settings />
 									Custom
 								</button>
 							</div>
 
-							{#if toolSelectionMode === 'all'}
-								<p class="info-box">
-									The subagent will have access to all tools available in the profile.
-								</p>
-							{/if}
-						</div>
+							<p class="card-form-hint">
+								{#if toolSelectionMode === 'all'}
+									Subagent can use all tools available in the profile.
+								{:else}
+									Subagent can ONLY use selected tools.
+								{/if}
+							</p>
 
-						<!-- Tool Selection -->
-						{#if toolSelectionMode === 'select'}
-							<div class="card-form-section">
-								<div class="tool-actions">
-									<button type="button" onclick={selectAllTools} class="text-action">
-										Select all
-									</button>
-									<span class="separator">|</span>
-									<button type="button" onclick={clearAllTools} class="text-action">
-										Clear all
-									</button>
-								</div>
-
-								<div class="tool-categories">
+							{#if toolSelectionMode === 'select'}
+								<div class="tools-list">
 									{#each availableTools.categories as category}
 										{#if category.tools.length > 0}
+											{@const state = getCategorySelectionState(category)}
 											<div class="tool-category">
 												<button
 													type="button"
-													onclick={() => selectAllInCategory(category)}
 													class="category-header"
+													onclick={() => selectAllInCategory(category)}
 												>
-													<span
+													<div
 														class="category-checkbox"
-														class:category-checkbox--partial={getCategorySelectionState(category) === 'partial'}
-														class:category-checkbox--checked={getCategorySelectionState(category) !== 'none'}
+														class:checked={state !== 'none'}
+														class:partial={state === 'partial'}
 													>
-														{#if getCategorySelectionState(category) !== 'none'}
-															<Check class="w-3 h-3" />
+														{#if state === 'all'}
+															<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
+															</svg>
+														{:else if state === 'partial'}
+															<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+																<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" />
+															</svg>
 														{/if}
-													</span>
+													</div>
 													<span class="category-name">{category.name}</span>
+													<span class="category-count">{category.tools.length}</span>
 												</button>
-
-												<div class="card-tool-chips">
+												<div class="category-tools">
 													{#each category.tools as tool}
-														<button
-															type="button"
-															onclick={() => toggleTool(tool.name)}
-															class="card-tool-chip"
-															class:card-tool-chip--selected={formTools.includes(tool.name)}
-															title={tool.description}
-														>
-															{tool.name}
-														</button>
+														<label class="tool-item">
+															<input
+																type="checkbox"
+																checked={formTools.includes(tool.name)}
+																onchange={() => toggleTool(tool.name)}
+																class="tool-checkbox"
+															/>
+															<span class="tool-name" title={tool.description}>{tool.name}</span>
+														</label>
 													{/each}
 												</div>
 											</div>
@@ -877,13 +893,11 @@
 									{/each}
 								</div>
 
-								{#if formTools.length === 0}
-									<p class="warning-box">
-										No tools selected. The subagent won't be able to perform any actions.
-									</p>
-								{/if}
-							</div>
-						{/if}
+								<div class="selection-count">
+									{formTools.length} tool{formTools.length !== 1 ? 's' : ''} selected
+								</div>
+							{/if}
+						</div>
 					</div>
 				{/if}
 
@@ -1104,92 +1118,126 @@
 		margin-top: var(--space-3);
 	}
 
-	/* Tool actions */
-	.tool-actions {
-		display: flex;
-		gap: var(--space-3);
-		align-items: center;
-		margin-bottom: var(--space-3);
-	}
-
-	.text-action {
-		background: none;
-		border: none;
-		color: var(--primary);
-		font-size: var(--text-xs);
-		font-weight: 500;
-		cursor: pointer;
-		padding: 0;
-	}
-
-	.text-action:hover {
-		text-decoration: underline;
-	}
-
-	.separator {
-		color: var(--text-tertiary);
-	}
-
-	/* Tool categories */
-	.tool-categories {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-4);
-		max-height: 260px;
+	/* Tools List */
+	.tools-list {
+		max-height: 256px;
 		overflow-y: auto;
-		padding-right: var(--space-2);
+		padding-right: var(--space-2, 8px);
+		margin-top: var(--space-3, 12px);
 	}
 
 	.tool-category {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-2);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md, 10px);
+		overflow: hidden;
+		margin-bottom: var(--space-2, 8px);
 	}
 
 	.category-header {
 		display: flex;
 		align-items: center;
-		gap: var(--space-2);
-		background: none;
+		gap: var(--space-3, 12px);
+		width: 100%;
+		padding: var(--space-3, 12px);
+		background: var(--surface-1);
 		border: none;
-		padding: 0;
+		color: var(--text-primary);
+		font-size: var(--text-md, 0.875rem);
 		cursor: pointer;
-		color: var(--text-secondary);
-		font-size: var(--text-xs);
-		font-weight: 500;
-		text-transform: uppercase;
-		letter-spacing: var(--tracking-caps);
+		transition: all var(--transition-smooth, 200ms);
 	}
 
 	.category-header:hover {
-		color: var(--text-primary);
+		background: var(--surface-hover);
 	}
 
 	.category-checkbox {
+		width: 16px;
+		height: 16px;
+		border-radius: 4px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 16px;
-		height: 16px;
 		background: var(--surface-1);
 		border: 1px solid var(--border-default);
-		border-radius: var(--radius-sm);
-		transition: all var(--transition-fast);
+		transition: all var(--transition-fast, 100ms);
 	}
 
-	.category-checkbox--checked {
+	.category-checkbox.checked {
 		background: var(--primary);
 		border-color: var(--primary);
-		color: var(--primary-foreground);
 	}
 
-	.category-checkbox--partial {
-		background: color-mix(in oklch, var(--primary) 50%, var(--surface-1));
+	.category-checkbox.partial {
+		background: var(--primary);
+		border-color: var(--primary);
+	}
+
+	.check-icon {
+		width: 12px;
+		height: 12px;
+		color: var(--primary-foreground);
 	}
 
 	.category-name {
 		flex: 1;
 		text-align: left;
+		font-weight: 500;
+	}
+
+	.category-count {
+		font-size: var(--text-sm, 0.75rem);
+		color: var(--text-secondary);
+	}
+
+	.category-tools {
+		display: grid;
+		grid-template-columns: repeat(2, 1fr);
+		gap: 4px;
+		padding: var(--space-2, 8px);
+		background: var(--surface-0);
+	}
+
+	@media (max-width: 480px) {
+		.category-tools {
+			grid-template-columns: 1fr;
+		}
+	}
+
+	.tool-item {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2, 8px);
+		padding: 6px var(--space-2, 8px);
+		border-radius: var(--radius-sm, 6px);
+		cursor: pointer;
+		transition: background var(--transition-fast, 100ms);
+	}
+
+	.tool-item:hover {
+		background: var(--surface-1);
+	}
+
+	.tool-checkbox {
+		width: 14px;
+		height: 14px;
+		flex-shrink: 0;
+	}
+
+	.tool-name {
+		font-size: var(--text-base, 0.8125rem);
+		color: var(--text-primary);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.selection-count {
+		font-size: var(--text-sm, 0.75rem);
+		color: var(--text-secondary);
+		margin-top: var(--space-3, 12px);
+		padding-top: var(--space-3, 12px);
+		border-top: 1px solid var(--border-subtle);
 	}
 
 	/* Required indicator */
