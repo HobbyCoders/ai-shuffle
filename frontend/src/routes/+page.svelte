@@ -925,6 +925,10 @@
 
 </script>
 
+<svelte:head>
+	<title>AI Shuffle</title>
+</svelte:head>
+
 {#if !$isAuthenticated}
 	<div class="flex items-center justify-center h-screen bg-background">
 		<p class="text-muted-foreground">Redirecting to login...</p>

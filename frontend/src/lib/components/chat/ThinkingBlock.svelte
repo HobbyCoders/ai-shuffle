@@ -143,6 +143,7 @@
 		width: 1rem;
 		height: 1rem;
 		flex-shrink: 0;
+		margin-left: auto;
 		color: var(--muted-foreground);
 		transition: transform 200ms ease;
 	}

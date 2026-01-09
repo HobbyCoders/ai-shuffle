@@ -1,6 +1,6 @@
 {
-  "name": "AI Hub",
-  "short_name": "AI Hub",
+  "name": "AI Shuffle",
+  "short_name": "AI Shuffle",
   "description": "Self-hosted AI chat interface for Claude Code",
   "start_url": "/",
   "display": "standalone",

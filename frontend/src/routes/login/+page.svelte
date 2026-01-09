@@ -111,7 +111,7 @@
 </script>
 
 <svelte:head>
-	<title>Login - AI Hub</title>
+	<title>Login - AI Shuffle</title>
 	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
 </svelte:head>
 
@@ -119,7 +119,7 @@
 	<div class="card p-6 sm:p-8 w-full max-w-md">
 		<div class="text-center mb-6 sm:mb-8">
 			<div class="text-4xl mb-3">🤖</div>
-			<h1 class="text-xl sm:text-2xl font-bold text-foreground mb-2">AI Hub</h1>
+			<h1 class="text-xl sm:text-2xl font-bold text-foreground mb-2">AI Shuffle</h1>
 			<p class="text-muted-foreground text-sm sm:text-base">
 				{#if requires2FA}
 					Enter your verification code
