@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { createEventDispatcher } from 'svelte';
+	import './deck/cards/card-design-system.css';
 
 	export interface PermissionRequestData {
 		request_id: string;
@@ -32,82 +33,76 @@
 	let customPattern = $state('');
 	let isEditingPattern = $state(false);
 
-	// Tool display configuration
+	// Tool display configuration - uses theme CSS variables for colors
+	// Maps tools to semantic theme colors: success, warning, info, primary, destructive
 	const toolConfig: Record<string, {
 		icon: string;
-		gradient: string;
+		themeColor: 'success' | 'warning' | 'info' | 'primary' | 'destructive' | 'muted';
 		label: string;
-		accentClass: string;
 	}> = {
 		Bash: {
 			icon: 'M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z',
-			gradient: 'from-emerald-500/20 to-emerald-600/5',
-			label: 'Run Command',
-			accentClass: 'text-emerald-400'
+			themeColor: 'success',
+			label: 'Run Command'
 		},
 		Read: {
 			icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z',
-			gradient: 'from-blue-500/20 to-blue-600/5',
-			label: 'Read File',
-			accentClass: 'text-blue-400'
+			themeColor: 'info',
+			label: 'Read File'
 		},
 		Write: {
 			icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z',
-			gradient: 'from-amber-500/20 to-amber-600/5',
-			label: 'Write File',
-			accentClass: 'text-amber-400'
+			themeColor: 'warning',
+			label: 'Write File'
 		},
 		Edit: {
 			icon: 'M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z',
-			gradient: 'from-orange-500/20 to-orange-600/5',
-			label: 'Edit File',
-			accentClass: 'text-orange-400'
+			themeColor: 'warning',
+			label: 'Edit File'
 		},
 		Glob: {
 			icon: 'M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z',
-			gradient: 'from-purple-500/20 to-purple-600/5',
-			label: 'Find Files',
-			accentClass: 'text-purple-400'
+			themeColor: 'primary',
+			label: 'Find Files'
 		},
 		Grep: {
 			icon: 'M10 21h7a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v11m0 5l4.879-4.879m0 0a3 3 0 104.243-4.242 3 3 0 00-4.243 4.242z',
-			gradient: 'from-violet-500/20 to-violet-600/5',
-			label: 'Search Content',
-			accentClass: 'text-violet-400'
+			themeColor: 'primary',
+			label: 'Search Content'
 		},
 		WebFetch: {
 			icon: 'M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9',
-			gradient: 'from-cyan-500/20 to-cyan-600/5',
-			label: 'Fetch URL',
-			accentClass: 'text-cyan-400'
+			themeColor: 'info',
+			label: 'Fetch URL'
 		},
 		WebSearch: {
 			icon: 'M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z',
-			gradient: 'from-sky-500/20 to-sky-600/5',
-			label: 'Web Search',
-			accentClass: 'text-sky-400'
+			themeColor: 'info',
+			label: 'Web Search'
 		},
 		Task: {
 			icon: 'M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z',
-			gradient: 'from-indigo-500/20 to-indigo-600/5',
-			label: 'Run Agent',
-			accentClass: 'text-indigo-400'
+			themeColor: 'primary',
+			label: 'Run Agent'
 		},
 		NotebookEdit: {
 			icon: 'M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253',
-			gradient: 'from-rose-500/20 to-rose-600/5',
-			label: 'Edit Notebook',
-			accentClass: 'text-rose-400'
+			themeColor: 'destructive',
+			label: 'Edit Notebook'
 		}
 	};
 
 	function getToolConfig(name: string) {
 		return toolConfig[name] || {
 			icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z',
-			gradient: 'from-gray-500/20 to-gray-600/5',
-			label: name,
-			accentClass: 'text-gray-400'
+			themeColor: 'muted' as const,
+			label: name
 		};
+	}
+
+	// Get CSS variable for theme color
+	function getThemeColorVar(color: string): string {
+		return `var(--${color})`;
 	}
 
 	// Get tool summary for display
@@ -248,15 +243,25 @@
 
 <!-- Permission Request Panel -->
 <div
-	class="permission-panel rounded-2xl border border-border/60 bg-gradient-to-b {config.gradient} shadow-lg overflow-hidden backdrop-blur-sm"
+	class="card-system permission-panel rounded-2xl border shadow-lg overflow-hidden backdrop-blur-sm"
+	style="
+		border-color: color-mix(in oklch, var(--primary) 30%, var(--border));
+		background: linear-gradient(to bottom, color-mix(in oklch, var(--primary) 12%, var(--card)), color-mix(in oklch, var(--primary) 5%, var(--card)));
+	"
 	role="dialog"
 	aria-labelledby="permission-title"
 >
 	<!-- Compact Header -->
 	<div class="flex items-center gap-3 px-4 py-3 border-b border-border/40">
 		<!-- Tool Icon -->
-		<div class="flex-shrink-0 w-9 h-9 rounded-xl bg-card/80 border border-border/50 flex items-center justify-center shadow-sm">
-			<svg class="w-4.5 h-4.5 {config.accentClass}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+		<div
+			class="flex-shrink-0 w-9 h-9 rounded-xl border flex items-center justify-center shadow-sm"
+			style="
+				background: color-mix(in oklch, var(--primary) 15%, var(--card));
+				border-color: color-mix(in oklch, var(--primary) 25%, var(--border));
+			"
+		>
+			<svg class="w-4.5 h-4.5" style="color: var(--primary);" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d={config.icon} />
 			</svg>
 		</div>
@@ -265,7 +270,14 @@
 		<div class="flex-1 min-w-0">
 			<h3 id="permission-title" class="text-sm font-semibold text-foreground flex items-center gap-2">
 				{config.label}
-				<span class="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded-md bg-warning/15 text-warning border border-warning/20">
+				<span
+					class="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded-md border"
+					style="
+						background: color-mix(in oklch, var(--primary) 15%, transparent);
+						color: var(--primary);
+						border-color: color-mix(in oklch, var(--primary) 20%, transparent);
+					"
+				>
 					Permission
 				</span>
 			</h3>
@@ -274,12 +286,18 @@
 
 		<!-- Queue Badge -->
 		{#if queueCount > 1}
-			<div class="flex-shrink-0 flex items-center gap-1.5 px-2 py-1 rounded-lg bg-warning/10 border border-warning/20">
+			<div
+				class="flex-shrink-0 flex items-center gap-1.5 px-2 py-1 rounded-lg border"
+				style="
+					background: color-mix(in oklch, var(--primary) 10%, transparent);
+					border-color: color-mix(in oklch, var(--primary) 20%, transparent);
+				"
+			>
 				<span class="relative flex h-2 w-2">
-					<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-warning/60 opacity-75"></span>
-					<span class="relative inline-flex rounded-full h-2 w-2 bg-warning"></span>
+					<span class="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style="background: color-mix(in oklch, var(--primary) 60%, transparent);"></span>
+					<span class="relative inline-flex rounded-full h-2 w-2" style="background: var(--primary);"></span>
 				</span>
-				<span class="text-xs font-medium text-warning">{queueCount}</span>
+				<span class="text-xs font-medium" style="color: var(--primary);">{queueCount}</span>
 			</div>
 		{/if}
 	</div>
@@ -459,11 +477,7 @@
 			<button
 				type="button"
 				onclick={handleDeny}
-				class="flex-1 sm:flex-none px-4 py-2.5 text-sm font-medium rounded-xl
-					bg-destructive/10 text-destructive border border-destructive/20
-					hover:bg-destructive/20 hover:border-destructive/30
-					active:scale-[0.98] transition-all duration-150
-					focus:outline-none focus:ring-2 focus:ring-destructive/30"
+				class="deny-btn"
 			>
 				Deny
 			</button>
@@ -472,11 +486,7 @@
 			<button
 				type="button"
 				onclick={handleAllow}
-				class="flex-1 px-5 py-2.5 text-sm font-medium rounded-xl
-					bg-success/15 text-success border border-success/25
-					hover:bg-success/25 hover:border-success/35
-					active:scale-[0.98] transition-all duration-150
-					focus:outline-none focus:ring-2 focus:ring-success/30"
+				class="allow-btn"
 			>
 				{rememberChoice === 'none' ? 'Allow' : rememberChoice === 'session' ? 'Allow (Session)' : 'Allow Always'}
 			</button>
@@ -622,6 +632,64 @@
 
 	.pattern-input::placeholder {
 		color: var(--muted-foreground);
+	}
+
+	/* Action Buttons */
+	.deny-btn {
+		flex: 1 1 0%;
+		padding: 0.625rem 1rem;
+		font-size: 0.875rem;
+		font-weight: 500;
+		border-radius: var(--radius, 0.75rem);
+		background: color-mix(in oklch, var(--muted-foreground) 10%, transparent);
+		color: var(--muted-foreground);
+		border: 1px solid color-mix(in oklch, var(--muted-foreground) 20%, transparent);
+		transition: all 0.15s ease;
+	}
+
+	.deny-btn:hover {
+		background: color-mix(in oklch, var(--muted-foreground) 20%, transparent);
+		border-color: color-mix(in oklch, var(--muted-foreground) 30%, transparent);
+	}
+
+	.deny-btn:active {
+		transform: scale(0.98);
+	}
+
+	.deny-btn:focus {
+		outline: none;
+		box-shadow: 0 0 0 2px color-mix(in oklch, var(--muted-foreground) 30%, transparent);
+	}
+
+	.allow-btn {
+		flex: 1 1 0%;
+		padding: 0.625rem 1.25rem;
+		font-size: 0.875rem;
+		font-weight: 500;
+		border-radius: var(--radius, 0.75rem);
+		background: var(--primary);
+		color: var(--primary-foreground);
+		border: 1px solid transparent;
+		transition: all 0.15s ease;
+	}
+
+	.allow-btn:hover {
+		background: color-mix(in oklch, var(--primary) 85%, black);
+	}
+
+	.allow-btn:active {
+		transform: scale(0.98);
+	}
+
+	.allow-btn:focus {
+		outline: none;
+		box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 30%, transparent);
+	}
+
+	@media (min-width: 640px) {
+		.deny-btn {
+			flex: 0 0 auto;
+		}
 	}
 
 	/* Mobile optimizations */

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { createEventDispatcher } from 'svelte';
+	import './deck/cards/card-design-system.css';
 
 	export interface QuestionOption {
 		label: string;
@@ -217,15 +218,25 @@
 
 <!-- User Question Panel -->
 <div
-	class="question-panel rounded-2xl border border-border/60 bg-gradient-to-b from-info/10 to-info/5 shadow-lg overflow-hidden backdrop-blur-sm"
+	class="card-system question-panel rounded-2xl border shadow-lg overflow-hidden backdrop-blur-sm"
+	style="
+		border-color: color-mix(in oklch, var(--primary) 30%, var(--border));
+		background: linear-gradient(to bottom, color-mix(in oklch, var(--primary) 12%, var(--card)), color-mix(in oklch, var(--primary) 5%, var(--card)));
+	"
 	role="dialog"
 	aria-labelledby="question-title"
 >
 	<!-- Header -->
 	<div class="flex items-center gap-3 px-4 py-3 border-b border-border/40">
 		<!-- Icon -->
-		<div class="flex-shrink-0 w-9 h-9 rounded-xl bg-info/15 border border-info/25 flex items-center justify-center">
-			<svg class="w-4.5 h-4.5 text-info" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+		<div
+			class="flex-shrink-0 w-9 h-9 rounded-xl border flex items-center justify-center"
+			style="
+				background: color-mix(in oklch, var(--primary) 15%, var(--card));
+				border-color: color-mix(in oklch, var(--primary) 25%, var(--border));
+			"
+		>
+			<svg class="w-4.5 h-4.5" style="color: var(--primary);" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
 			</svg>
 		</div>
@@ -234,7 +245,14 @@
 		<div class="flex-1 min-w-0">
 			<h3 id="question-title" class="text-sm font-semibold text-foreground flex items-center gap-2">
 				Claude has a question
-				<span class="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded-md bg-info/15 text-info border border-info/20">
+				<span
+					class="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded-md border"
+					style="
+						background: color-mix(in oklch, var(--primary) 15%, transparent);
+						color: var(--primary);
+						border-color: color-mix(in oklch, var(--primary) 20%, transparent);
+					"
+				>
 					Input Required
 				</span>
 			</h3>
@@ -257,12 +275,13 @@
 						type="button"
 						onclick={() => goToQuestion(idx)}
 						disabled={!canProceed(idx) && idx > currentStep}
-						class="w-2 h-2 rounded-full transition-all duration-200 {
-							isReviewStep ? 'bg-info' :
-							idx === currentStep ? 'bg-info scale-125' :
-							idx < currentStep ? 'bg-info/60 hover:bg-info/80' :
-							'bg-muted-foreground/30'
-						}"
+						class="w-2 h-2 rounded-full transition-all duration-200"
+						style={
+							isReviewStep ? 'background: var(--primary);' :
+							idx === currentStep ? 'background: var(--primary); transform: scale(1.25);' :
+							idx < currentStep ? 'background: color-mix(in oklch, var(--primary) 60%, transparent);' :
+							'background: color-mix(in oklch, var(--muted-foreground) 30%, transparent);'
+						}
 						aria-label="Go to question {idx + 1}"
 					></button>
 				{/each}
@@ -271,11 +290,12 @@
 						type="button"
 						onclick={() => { if (canSubmit()) isReviewStep = true; }}
 						disabled={!canSubmit()}
-						class="w-2 h-2 rounded-full transition-all duration-200 ml-1 {
-							isReviewStep ? 'bg-success scale-125' :
-							canSubmit() ? 'bg-success/60 hover:bg-success/80' :
-							'bg-muted-foreground/30'
-						}"
+						class="w-2 h-2 rounded-full transition-all duration-200 ml-1"
+						style={
+							isReviewStep ? 'background: var(--success); transform: scale(1.25);' :
+							canSubmit() ? 'background: color-mix(in oklch, var(--success) 60%, transparent);' :
+							'background: color-mix(in oklch, var(--muted-foreground) 30%, transparent);'
+						}
 						aria-label="Review answers"
 					></button>
 				{/if}
@@ -297,7 +317,10 @@
 						<div class="flex items-start justify-between gap-3">
 							<div class="flex-1 min-w-0">
 								{#if question.header}
-									<span class="inline-block px-2 py-0.5 text-[10px] font-medium rounded-md bg-info/15 text-info mb-1.5">
+									<span
+										class="inline-block px-2 py-0.5 text-[10px] font-medium rounded-md mb-1.5"
+										style="background: color-mix(in oklch, var(--primary) 15%, transparent); color: var(--primary);"
+									>
 										{question.header}
 									</span>
 								{/if}
@@ -327,7 +350,10 @@
 				<!-- Question Header & Text -->
 				<div class="mb-4">
 					{#if currentQuestion.header}
-						<span class="inline-block px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded-md bg-info/15 text-info mb-2">
+						<span
+							class="inline-block px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded-md mb-2"
+							style="background: color-mix(in oklch, var(--primary) 15%, transparent); color: var(--primary);"
+						>
 							{currentQuestion.header}
 						</span>
 					{/if}
@@ -414,9 +440,7 @@
 								bind:value={otherText[currentStep]}
 								placeholder="Enter your answer..."
 								rows="2"
-								class="w-full px-3 py-2.5 text-sm bg-input border border-border rounded-xl
-									focus:outline-none focus:ring-2 focus:ring-info/40 focus:border-info/40
-									resize-none transition-all"
+								class="other-textarea"
 							></textarea>
 						</div>
 					{/if}
@@ -454,11 +478,8 @@
 						type="button"
 						onclick={handleSubmit}
 						disabled={!canSubmit()}
-						class="flex items-center gap-2 px-5 py-2.5 text-sm font-medium rounded-xl transition-all duration-150
-							{canSubmit()
-								? 'bg-info text-white hover:bg-info/90 active:scale-[0.98]'
-								: 'bg-muted text-muted-foreground cursor-not-allowed'
-							}"
+						class="submit-btn"
+						class:disabled={!canSubmit()}
 					>
 						Submit
 						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -470,11 +491,8 @@
 						type="button"
 						onclick={handleSubmit}
 						disabled={!canProceed(currentStep)}
-						class="flex items-center gap-2 px-5 py-2.5 text-sm font-medium rounded-xl transition-all duration-150
-							{canProceed(currentStep)
-								? 'bg-info text-white hover:bg-info/90 active:scale-[0.98]'
-								: 'bg-muted text-muted-foreground cursor-not-allowed'
-							}"
+						class="submit-btn"
+						class:disabled={!canProceed(currentStep)}
 					>
 						Submit
 						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -486,11 +504,8 @@
 						type="button"
 						onclick={goNext}
 						disabled={!canProceed(currentStep)}
-						class="flex items-center gap-2 px-5 py-2.5 text-sm font-medium rounded-xl transition-all duration-150
-							{canProceed(currentStep)
-								? 'bg-info text-white hover:bg-info/90 active:scale-[0.98]'
-								: 'bg-muted text-muted-foreground cursor-not-allowed'
-							}"
+						class="submit-btn"
+						class:disabled={!canProceed(currentStep)}
 					>
 						{isLastQuestion ? 'Review' : 'Next'}
 						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -598,8 +613,8 @@
 	}
 
 	.option-card.selected {
-		border-color: var(--info);
-		background: color-mix(in oklch, var(--info) 8%, var(--card));
+		border-color: var(--primary);
+		background: color-mix(in oklch, var(--primary) 8%, var(--card));
 	}
 
 	/* Checkbox Indicator */
@@ -615,8 +630,8 @@
 	}
 
 	.checkbox-indicator.checked {
-		background: var(--info);
-		border-color: var(--info);
+		background: var(--primary);
+		border-color: var(--primary);
 	}
 
 	/* Radio Indicator */
@@ -632,15 +647,62 @@
 	}
 
 	.radio-indicator.checked {
-		border-color: var(--info);
+		border-color: var(--primary);
 	}
 
 	.radio-dot {
 		width: 0.5rem;
 		height: 0.5rem;
 		border-radius: 50%;
-		background: var(--info);
+		background: var(--primary);
 		animation: dot-pop 0.15s ease;
+	}
+
+	/* Submit Button */
+	.submit-btn {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.625rem 1.25rem;
+		font-size: 0.875rem;
+		font-weight: 500;
+		border-radius: var(--radius, 0.75rem);
+		background: var(--primary);
+		color: var(--primary-foreground);
+		transition: all 0.15s ease;
+	}
+
+	.submit-btn:hover:not(.disabled) {
+		background: color-mix(in oklch, var(--primary) 90%, black);
+	}
+
+	.submit-btn:active:not(.disabled) {
+		transform: scale(0.98);
+	}
+
+	.submit-btn.disabled {
+		background: var(--muted);
+		color: var(--muted-foreground);
+		cursor: not-allowed;
+	}
+
+	/* Other Textarea */
+	.other-textarea {
+		width: 100%;
+		padding: 0.625rem 0.75rem;
+		font-size: 0.875rem;
+		background: var(--input);
+		border: 1px solid var(--border);
+		border-radius: var(--radius, 0.75rem);
+		color: var(--foreground);
+		resize: none;
+		transition: all 0.15s ease;
+	}
+
+	.other-textarea:focus {
+		outline: none;
+		border-color: color-mix(in oklch, var(--primary) 40%, var(--border));
+		box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 20%, transparent);
 	}
 
 	@keyframes dot-pop {
