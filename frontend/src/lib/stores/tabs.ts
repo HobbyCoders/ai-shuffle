@@ -603,13 +603,10 @@ function createTabsStore() {
 			case 'stream_block_start': {
 				const blockType = data.block_type as string;
 				if (blockType === 'thinking') {
-					// Finalize any existing streaming thinking message
-					const thinkingIdx = findLastStreamingThinkingIndex(messages);
-					if (thinkingIdx !== -1) {
-						messages[thinkingIdx] = { ...messages[thinkingIdx], streaming: false };
-					}
-					// Note: The thinking message will be created by appendToStreamingThinking
-					// when the first thinking delta arrives
+					// Don't finalize existing thinking here - the thinking message will be
+					// created/appended by appendToStreamingThinking when deltas arrive.
+					// Finalizing here would cause fragmentation when batch contains both
+					// thinking deltas and stream_block_start(thinking) in the same batch.
 				} else if (blockType === 'text') {
 					// When text block starts, finalize any existing streaming thinking message
 					const thinkingIdx = findLastStreamingThinkingIndex(messages);
@@ -651,12 +648,11 @@ function createTabsStore() {
 			}
 
 			case 'stream_block_stop': {
-				// Block complete - finalize any streaming messages
-				// The block index tells us which block stopped, but we handle generically
-				const thinkingIdx = findLastStreamingThinkingIndex(messages);
-				if (thinkingIdx !== -1) {
-					messages[thinkingIdx] = { ...messages[thinkingIdx], streaming: false };
-				}
+				// Block complete - we don't blindly finalize thinking here because
+				// this event fires for ALL block types (text, tool_use, etc.)
+				// Thinking is finalized when text or tool_use starts instead.
+				// This prevents fragmentation when stream_block_stop for a previous
+				// block arrives in the same batch as new thinking deltas.
 				break;
 			}
 
@@ -2149,19 +2145,38 @@ function createTabsStore() {
 					}
 				}
 
-				updateTab(tabId, {
-					sessionId: data.session_id as string,
-					messages: finalMessages,
-					isStreaming: isStreaming,
-					todos: latestTodos,
-					error: null,  // Clear any previous error
-					...tokenUpdates
-				});
+				// DEFENSIVE CHECK: Don't replace existing messages with empty array
+				// This can happen if the client reconnects right after stop, before JSONL is written.
+				// In that case, keep the existing messages to prevent "chat history disappearing" bug.
+				const currentTab = getTab(tabId);
+				const shouldPreserveMessages = finalMessages.length === 0 && currentTab && currentTab.messages.length > 0;
 
-				// Update tab title based on first message
-				if (finalMessages.length > 0 && finalMessages[0].role === 'user') {
-					const title = finalMessages[0].content.substring(0, 100) + (finalMessages[0].content.length > 100 ? '...' : '');
-					updateTab(tabId, { title });
+				if (shouldPreserveMessages) {
+					console.warn(`[Tab ${tabId}] Received empty history but tab has ${currentTab.messages.length} messages - preserving existing messages`);
+					// Still update other fields, but keep existing messages
+					updateTab(tabId, {
+						sessionId: data.session_id as string,
+						// messages: NOT updated - keep existing
+						isStreaming: isStreaming,
+						// todos: NOT updated if we have existing messages
+						error: null,
+						...tokenUpdates
+					});
+				} else {
+					updateTab(tabId, {
+						sessionId: data.session_id as string,
+						messages: finalMessages,
+						isStreaming: isStreaming,
+						todos: latestTodos,
+						error: null,  // Clear any previous error
+						...tokenUpdates
+					});
+
+					// Update tab title based on first message
+					if (finalMessages.length > 0 && finalMessages[0].role === 'user') {
+						const title = finalMessages[0].content.substring(0, 100) + (finalMessages[0].content.length > 100 ? '...' : '');
+						updateTab(tabId, { title });
+					}
 				}
 
 				// If session is streaming, start server-authoritative polling

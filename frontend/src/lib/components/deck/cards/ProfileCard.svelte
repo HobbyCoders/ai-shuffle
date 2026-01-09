@@ -144,7 +144,7 @@
 		include_partial_messages: true,
 		continue_conversation: false,
 		fork_session: false,
-		show_thinking_blocks: true,
+		thinking_mode: 'default' as 'default' | 'think' | 'think_harder' | 'ultra_think',
 		system_prompt_type: 'preset',
 		system_prompt_preset: 'claude_code',
 		system_prompt_append: '',
@@ -262,7 +262,7 @@
 			include_partial_messages: true,
 			continue_conversation: false,
 			fork_session: false,
-			show_thinking_blocks: true,
+			thinking_mode: 'default' as 'default' | 'think' | 'think_harder' | 'ultra_think',
 			system_prompt_type: 'preset',
 			system_prompt_preset: 'claude_code',
 			system_prompt_append: '',
@@ -348,7 +348,7 @@
 			include_partial_messages: config.include_partial_messages !== false,
 			continue_conversation: (config as any).continue_conversation || false,
 			fork_session: (config as any).fork_session || false,
-			show_thinking_blocks: (config as any).show_thinking_blocks !== false,
+			thinking_mode: (config as any).thinking_mode || 'default',
 			system_prompt_type: sp.type || 'preset',
 			system_prompt_preset: sp.preset || 'claude_code',
 			system_prompt_append: sp.append || '',
@@ -524,6 +524,39 @@
 		}
 	}
 
+	// Token budgets for thinking modes
+	const THINKING_TOKEN_BUDGETS = {
+		think: '8000',
+		think_harder: '24000', 
+		ultra_think: '64000'
+	};
+
+	// Update thinking mode and sync env var
+	function updateThinkingMode(mode: 'default' | 'think' | 'think_harder' | 'ultra_think') {
+		profileForm.thinking_mode = mode;
+		
+		// Find existing MAX_THINKING_TOKENS env var index
+		const existingIndex = profileForm.env_vars.findIndex(v => v.key === 'MAX_THINKING_TOKENS');
+		
+		if (mode === 'default') {
+			// Remove the env var if it exists
+			if (existingIndex !== -1) {
+				profileForm.env_vars = profileForm.env_vars.filter((_, i) => i !== existingIndex);
+			}
+		} else {
+			// Add or update the env var
+			const tokenBudget = THINKING_TOKEN_BUDGETS[mode];
+			if (existingIndex !== -1) {
+				// Update existing
+				profileForm.env_vars[existingIndex].value = tokenBudget;
+				profileForm.env_vars = [...profileForm.env_vars]; // Trigger reactivity
+			} else {
+				// Add new
+				profileForm.env_vars = [...profileForm.env_vars, { key: 'MAX_THINKING_TOKENS', value: tokenBudget }];
+			}
+		}
+	}
+
 	// Save profile
 	async function saveProfile() {
 		if (!profileForm.id || !profileForm.name) return;
@@ -534,7 +567,7 @@
 			include_partial_messages: profileForm.include_partial_messages,
 			continue_conversation: profileForm.continue_conversation,
 			fork_session: profileForm.fork_session,
-			show_thinking_blocks: profileForm.show_thinking_blocks,
+			thinking_mode: profileForm.thinking_mode,
 			// SDK 0.1.15+ file checkpointing for rewind
 			enable_file_checkpointing: profileForm.enable_file_checkpointing
 		};
@@ -882,19 +915,58 @@
 									<span class="checkbox-label">Fork Session</span>
 									<p class="checkbox-desc">Create new session ID when resuming</p>
 								</div>
-							</label>
-							<label class="checkbox-item">
-								<input
-									type="checkbox"
-									bind:checked={profileForm.show_thinking_blocks}
-									class="checkbox-input"
-								/>
-								<div class="checkbox-content">
-									<span class="checkbox-label">Show Thinking Blocks</span>
-									<p class="checkbox-desc">Display Claude's extended thinking process in chat</p>
-								</div>
-							</label>
+							</label>						</div>
+					</div>
+
+					<!-- Thinking Mode Section -->
+					<div class="card-form-section">
+						<h3 class="card-form-title">Extended Thinking</h3>
+						<p class="card-form-hint">Configure Claude's extended thinking capability for deeper reasoning</p>
+						<div class="card-mode-selector">
+							<button
+								type="button"
+								class="card-mode-btn"
+								class:card-mode-btn--active={profileForm.thinking_mode === 'default'}
+								onclick={() => updateThinkingMode('default')}
+							>
+								Default
+							</button>
+							<button
+								type="button"
+								class="card-mode-btn"
+								class:card-mode-btn--active={profileForm.thinking_mode === 'think'}
+								onclick={() => updateThinkingMode('think')}
+							>
+								Think
+							</button>
+							<button
+								type="button"
+								class="card-mode-btn"
+								class:card-mode-btn--active={profileForm.thinking_mode === 'think_harder'}
+								onclick={() => updateThinkingMode('think_harder')}
+							>
+								Think Harder
+							</button>
+							<button
+								type="button"
+								class="card-mode-btn"
+								class:card-mode-btn--active={profileForm.thinking_mode === 'ultra_think'}
+								onclick={() => updateThinkingMode('ultra_think')}
+							>
+								Ultra Think
+							</button>
 						</div>
+						<p class="card-form-hint thinking-mode-hint">
+							{#if profileForm.thinking_mode === 'default'}
+								No extended thinking - standard response mode
+							{:else if profileForm.thinking_mode === 'think'}
+								Light reasoning (8K tokens) - good for simple tasks
+							{:else if profileForm.thinking_mode === 'think_harder'}
+								Substantial reasoning (24K tokens) - good for complex tasks
+							{:else if profileForm.thinking_mode === 'ultra_think'}
+								Deep reasoning (64K tokens) - for multi-step problem solving
+							{/if}
+						</p>
 					</div>
 				{:else if activeTab === 'tools'}
 					<!-- Tools Tab -->

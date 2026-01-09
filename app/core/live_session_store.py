@@ -74,7 +74,7 @@ class LiveMessage:
     """A message in a live streaming session."""
     id: str
     role: str  # 'user', 'assistant', 'system'
-    type: str  # 'text', 'tool_use', 'tool_result', 'subagent', 'system'
+    type: str  # 'text', 'thinking', 'tool_use', 'tool_result', 'subagent', 'system'
     content: str = ""
     streaming: bool = False
 
@@ -308,6 +308,45 @@ class LiveSessionStore:
             session.messages.append(msg)
             self._increment_update_id(session)
 
+    async def append_thinking(self, session_id: str, content: str) -> None:
+        """Append thinking content to the current streaming thinking message."""
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return
+
+            # Find the last streaming thinking message
+            for msg in reversed(session.messages):
+                if msg.type == "thinking" and msg.role == "assistant" and msg.streaming:
+                    msg.content += content
+                    self._increment_update_id(session)
+                    return
+
+            # No streaming thinking message found - create one
+            msg = LiveMessage(
+                id=f"thinking-{datetime.utcnow().timestamp()}",
+                role="assistant",
+                type="thinking",
+                content=content,
+                streaming=True,
+            )
+            session.messages.append(msg)
+            self._increment_update_id(session)
+
+    async def finalize_thinking(self, session_id: str) -> None:
+        """Mark the current thinking message as complete (not streaming)."""
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return
+
+            # Find and finalize the last streaming thinking message
+            for msg in reversed(session.messages):
+                if msg.type == "thinking" and msg.role == "assistant" and msg.streaming:
+                    msg.streaming = False
+                    self._increment_update_id(session)
+                    return
+
     async def add_tool_use(
         self,
         session_id: str,
@@ -321,11 +360,12 @@ class LiveSessionStore:
             if not session:
                 return
 
-            # Mark any current streaming text as complete (but keep if has content)
+            # Mark any current streaming text or thinking as complete
             for msg in reversed(session.messages):
-                if msg.type == "text" and msg.role == "assistant" and msg.streaming:
-                    msg.streaming = False
-                    break
+                if msg.role == "assistant" and msg.streaming:
+                    if msg.type in ("text", "thinking"):
+                        msg.streaming = False
+                        # Don't break - finalize both if they exist
 
             # Add tool use message
             msg = LiveMessage(
@@ -429,11 +469,12 @@ class LiveSessionStore:
             if not session:
                 return
 
-            # Mark any current streaming text as complete
+            # Mark any current streaming text or thinking as complete
             for msg in reversed(session.messages):
-                if msg.type == "text" and msg.role == "assistant" and msg.streaming:
-                    msg.streaming = False
-                    break
+                if msg.role == "assistant" and msg.streaming:
+                    if msg.type in ("text", "thinking"):
+                        msg.streaming = False
+                        # Don't break - finalize both if they exist
 
             msg = LiveMessage(
                 id=f"subagent-{agent_id}",
@@ -615,6 +656,16 @@ class LiveSessionStore:
         """
         End streaming for a session.
 
+        IMPORTANT: This method keeps the session in memory (with is_streaming=False)
+        instead of removing it immediately. This ensures that if a client reconnects
+        and calls load_session before the JSONL file is fully written, they can still
+        retrieve the messages from the in-memory store.
+
+        The session will be cleaned up when:
+        1. A new streaming session starts (overwrites the old session)
+        2. cleanup_ended_session() is called explicitly
+        3. The server restarts
+
         Args:
             session_id: The session ID
             metadata: Final metadata to attach to last assistant message
@@ -624,7 +675,7 @@ class LiveSessionStore:
             The final messages as a list of dicts, or None if session not found
         """
         async with self._lock:
-            session = self._sessions.pop(session_id, None)
+            session = self._sessions.get(session_id)
             if not session:
                 logger.warning(f"Cannot end streaming: session {session_id} not found")
                 return None
@@ -649,9 +700,27 @@ class LiveSessionStore:
                         break
 
             session.is_streaming = False
-            logger.info(f"Ended streaming for session {session_id} with {len(session.messages)} messages")
+            self._increment_update_id(session)
+            logger.info(f"Ended streaming for session {session_id} with {len(session.messages)} messages (kept in memory)")
 
             return [m.to_dict() for m in session.messages]
+
+    async def cleanup_ended_session(self, session_id: str) -> bool:
+        """
+        Remove an ended session from memory.
+
+        Call this after you're confident the JSONL file is written and clients
+        have had a chance to retrieve the messages.
+
+        Returns:
+            True if session was removed, False if not found
+        """
+        async with self._lock:
+            if session_id in self._sessions:
+                del self._sessions[session_id]
+                logger.info(f"Cleaned up ended session {session_id} from memory")
+                return True
+            return False
 
     def get_session(self, session_id: str) -> Optional[LiveSession]:
         """

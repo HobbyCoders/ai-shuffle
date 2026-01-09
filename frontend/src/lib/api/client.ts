@@ -129,7 +129,7 @@ export interface ProfileConfig {
 	max_turns?: number;
 	include_partial_messages?: boolean;
 	enable_file_checkpointing?: boolean;  // SDK 0.1.15+ - enable file snapshots for rewind
-	show_thinking_blocks?: boolean;  // UI setting - show Claude's extended thinking process
+	thinking_mode?: 'default' | 'think' | 'think_harder' | 'ultra_think';  // Extended thinking configuration
 	system_prompt?: {
 		type: string;
 		preset?: string;

@@ -35,6 +35,18 @@ router = APIRouter(prefix="/api/v1", tags=["WebSocket"])
 _active_chat_sessions: dict[str, asyncio.Task] = {}
 
 
+async def _delayed_session_cleanup(session_id: str, delay_seconds: int = 30) -> None:
+    """
+    Clean up an ended session from live_session_store after a delay.
+
+    This gives reconnecting clients time to retrieve messages before
+    they're removed from memory. After the delay, messages must be
+    retrieved from JSONL file instead.
+    """
+    await asyncio.sleep(delay_seconds)
+    await live_session_store.cleanup_ended_session(session_id)
+
+
 async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> tuple[bool, Optional[dict]]:
     """
     Validate authentication token for WebSocket connection.
@@ -359,8 +371,25 @@ async def chat_websocket(
                             chunk_data=chunk_data,
                             source_device_id=None
                         )
+                    elif delta_type == 'thinking':
+                        # Thinking delta - update live store with thinking type
+                        await live_session_store.append_thinking(session_id, content)
+                        # Broadcast with thinking delta_type
+                        chunk_data = {
+                            'content': content,
+                            'delta_type': delta_type,
+                            'index': event.get('index', 0)
+                        }
+                        await sync_engine.broadcast_stream_chunk(
+                            session_id=session_id,
+                            message_id=message_id,
+                            chunk_type='text',
+                            chunk_data=chunk_data,
+                            source_device_id=None
+                        )
                     else:
-                        # Text or other delta - update live store
+                        # Text delta - finalize any streaming thinking, then update live store
+                        await live_session_store.finalize_thinking(session_id)
                         await live_session_store.append_text(session_id, content)
                         # Broadcast as text
                         chunk_data = {
@@ -612,12 +641,16 @@ async def chat_websocket(
                     # Store metadata for webhook dispatch
                     final_metadata = event.get('metadata', {})
 
-                    # End live session store streaming (clears from memory)
+                    # End live session store streaming
+                    # NOTE: end_streaming() now keeps messages in memory for reconnecting clients
                     await live_session_store.end_streaming(
                         session_id=session_id,
                         metadata=final_metadata,
                         interrupted=False
                     )
+
+                    # Schedule delayed cleanup (gives clients time to reconnect)
+                    asyncio.create_task(_delayed_session_cleanup(session_id, delay_seconds=30))
 
                     # Stream completed - broadcast end
                     if stream_started:
@@ -653,11 +686,16 @@ async def chat_websocket(
             logger.info(f"Query cancelled for session {session_id}")
 
             # End live session store with interrupted flag
+            # NOTE: end_streaming() now keeps messages in memory for reconnecting clients
             await live_session_store.end_streaming(
                 session_id=session_id,
                 metadata={},
                 interrupted=True
             )
+
+            # Schedule delayed cleanup of ended session (gives clients time to reconnect)
+            # This prevents memory leak while ensuring messages are available for ~30 seconds
+            asyncio.create_task(_delayed_session_cleanup(session_id, delay_seconds=30))
 
             # Broadcast stream end with interrupted flag
             if stream_started:
@@ -674,11 +712,15 @@ async def chat_websocket(
             await send_json({"type": "error", "message": str(e)})
 
             # End live session store on error
+            # NOTE: end_streaming() now keeps messages in memory for reconnecting clients
             await live_session_store.end_streaming(
                 session_id=session_id,
                 metadata={"error": str(e)},
                 interrupted=True
             )
+
+            # Schedule delayed cleanup of ended session (gives clients time to reconnect)
+            asyncio.create_task(_delayed_session_cleanup(session_id, delay_seconds=30))
 
             # Broadcast stream end on error
             if stream_started:

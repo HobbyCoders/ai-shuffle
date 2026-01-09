@@ -625,13 +625,30 @@ def parse_session_history(
                     })
                 continue
 
-            # Assistant message - contains text blocks and tool use blocks
+            # Assistant message - contains thinking, text blocks, and tool use blocks
             if isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict):
                         block_type = block.get("type")
 
-                        if block_type == "text":
+                        if block_type == "thinking":
+                            # Extended thinking block
+                            thinking_text = block.get("thinking", "")
+                            if thinking_text:  # Only add non-empty thinking blocks
+                                msg_counter += 1
+                                messages.append({
+                                    "id": f"thinking-{uuid}-{msg_counter}",
+                                    "role": "assistant",
+                                    "content": thinking_text,
+                                    "type": "thinking",
+                                    "metadata": {
+                                        "timestamp": timestamp,
+                                        "model": message_data.get("model")
+                                    },
+                                    "streaming": False
+                                })
+
+                        elif block_type == "text":
                             text = block.get("text", "")
                             if text:  # Only add non-empty text blocks
                                 msg_counter += 1
