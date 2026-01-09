@@ -80,3 +80,8 @@ CLAUDE.md
 unban.py
 frontend/build-frontend.bat
 /generated-audio
+frontend/build.bat
+
+# Coverage
+.coverage
+htmlcov/
