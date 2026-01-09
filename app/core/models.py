@@ -100,6 +100,7 @@ class ProfileConfig(BaseModel):
     # Core settings
     model: Optional[str] = "sonnet"
     permission_mode: Optional[str] = "default"  # default, acceptEdits, plan, bypassPermissions
+    thinking_mode: Optional[str] = "default"  # default, think, think_harder, ultra_think
     max_turns: Optional[int] = None
 
     # Tool configuration - SDK 0.1.12+ supports new 'tools' option
@@ -151,9 +152,6 @@ class ProfileConfig(BaseModel):
 
     # File checkpointing for rewind (SDK 0.1.15+)
     enable_file_checkpointing: bool = False  # Enable file snapshots for rewind
-
-    # Extended thinking mode
-    thinking_mode: Optional[str] = "default"  # default, think, think_harder, ultra_think
 
 
 class ProfileBase(BaseModel):

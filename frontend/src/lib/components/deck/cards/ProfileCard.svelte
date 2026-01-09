@@ -847,120 +847,135 @@
 						</div>
 					</div>
 
-					<!-- Model Selector -->
 					<div class="card-form-section">
-						<h3 class="card-form-title">Model</h3>
-						<p class="card-form-hint">Select the Claude model for this profile</p>
-						<div class="card-mode-selector">
-							<button
-								type="button"
-								class="card-mode-btn"
-								class:card-mode-btn--active={profileForm.model === 'haiku'}
-								onclick={() => profileForm.model = 'haiku'}
-							>
-								Haiku
-							</button>
-							<button
-								type="button"
-								class="card-mode-btn"
-								class:card-mode-btn--active={profileForm.model === 'sonnet'}
-								onclick={() => profileForm.model = 'sonnet'}
-							>
-								Sonnet
-							</button>
-							<button
-								type="button"
-								class="card-mode-btn"
-								class:card-mode-btn--active={profileForm.model === 'sonnet-1m'}
-								onclick={() => profileForm.model = 'sonnet-1m'}
-							>
-								Sonnet 1M
-							</button>
-							<button
-								type="button"
-								class="card-mode-btn"
-								class:card-mode-btn--active={profileForm.model === 'opus'}
-								onclick={() => profileForm.model = 'opus'}
-							>
-								Opus
-							</button>
-						</div>
-						<p class="card-form-hint model-hint">
-							{#if profileForm.model === 'haiku'}
-								Fastest and most compact - ideal for simple tasks
-							{:else if profileForm.model === 'sonnet'}
-								Balanced performance - recommended for most use cases
-							{:else if profileForm.model === 'sonnet-1m'}
-								Extended context (1M tokens) - for large codebases
-							{:else if profileForm.model === 'opus'}
-								Most capable - best for complex reasoning
-							{/if}
-						</p>
-					</div>
+						<h3 class="card-form-title">Core Settings</h3>
 
-					<!-- Permission Mode Selector -->
-					<div class="card-form-section">
-						<h3 class="card-form-title">Permission Mode</h3>
-						<p class="card-form-hint">Control how Claude handles tool permissions</p>
-						<div class="card-mode-selector">
-							<button
-								type="button"
-								class="card-mode-btn"
-								class:card-mode-btn--active={profileForm.permission_mode === 'default'}
-								onclick={() => profileForm.permission_mode = 'default'}
-							>
-								Default
-							</button>
-							<button
-								type="button"
-								class="card-mode-btn"
-								class:card-mode-btn--active={profileForm.permission_mode === 'acceptEdits'}
-								onclick={() => profileForm.permission_mode = 'acceptEdits'}
-							>
-								Accept Edits
-							</button>
-							<button
-								type="button"
-								class="card-mode-btn"
-								class:card-mode-btn--active={profileForm.permission_mode === 'plan'}
-								onclick={() => profileForm.permission_mode = 'plan'}
-							>
-								Plan
-							</button>
-							<button
-								type="button"
-								class="card-mode-btn"
-								class:card-mode-btn--active={profileForm.permission_mode === 'bypassPermissions'}
-								onclick={() => profileForm.permission_mode = 'bypassPermissions'}
-							>
-								Bypass
-							</button>
-						</div>
-						<p class="card-form-hint permission-hint">
-							{#if profileForm.permission_mode === 'default'}
-								Ask for confirmation before executing tools
-							{:else if profileForm.permission_mode === 'acceptEdits'}
-								Auto-approve file edits, ask for other tools
-							{:else if profileForm.permission_mode === 'plan'}
-								Create plans without executing - for review workflows
-							{:else if profileForm.permission_mode === 'bypassPermissions'}
-								Execute all tools without confirmation
-							{/if}
-						</p>
-					</div>
-
-					<!-- Max Turns -->
-					<div class="card-form-section">
-						<h3 class="card-form-title">Limits</h3>
+						<!-- Model -->
 						<div class="form-field">
-							<label class="card-form-label">Max Turns</label>
+							<label class="card-form-label">Model — {#if profileForm.model === 'haiku'}fastest and most compact, ideal for simple tasks{:else if profileForm.model === 'sonnet'}balanced performance, recommended for most use cases{:else if profileForm.model === 'sonnet-1m'}extended context (1M tokens) for large codebases{:else if profileForm.model === 'opus'}most capable, best for complex reasoning{/if}</label>
+							<div class="card-mode-selector">
+								<button
+									type="button"
+									class="card-mode-btn"
+									class:card-mode-btn--active={profileForm.model === 'haiku'}
+									onclick={() => profileForm.model = 'haiku'}
+								>
+									Haiku
+								</button>
+								<button
+									type="button"
+									class="card-mode-btn"
+									class:card-mode-btn--active={profileForm.model === 'sonnet'}
+									onclick={() => profileForm.model = 'sonnet'}
+								>
+									Sonnet
+								</button>
+								<button
+									type="button"
+									class="card-mode-btn"
+									class:card-mode-btn--active={profileForm.model === 'sonnet-1m'}
+									onclick={() => profileForm.model = 'sonnet-1m'}
+								>
+									Sonnet 1M
+								</button>
+								<button
+									type="button"
+									class="card-mode-btn"
+									class:card-mode-btn--active={profileForm.model === 'opus'}
+									onclick={() => profileForm.model = 'opus'}
+								>
+									Opus
+								</button>
+							</div>
+						</div>
+
+						<!-- Permission Mode -->
+						<div class="form-field">
+							<label class="card-form-label">Permission Mode — {#if profileForm.permission_mode === 'default'}ask for confirmation before executing tools{:else if profileForm.permission_mode === 'acceptEdits'}auto-approve file edits, ask for other tools{:else if profileForm.permission_mode === 'plan'}create plans without executing, for review workflows{:else if profileForm.permission_mode === 'bypassPermissions'}execute all tools without confirmation{/if}</label>
+							<div class="card-mode-selector">
+								<button
+									type="button"
+									class="card-mode-btn"
+									class:card-mode-btn--active={profileForm.permission_mode === 'default'}
+									onclick={() => profileForm.permission_mode = 'default'}
+								>
+									Default
+								</button>
+								<button
+									type="button"
+									class="card-mode-btn"
+									class:card-mode-btn--active={profileForm.permission_mode === 'acceptEdits'}
+									onclick={() => profileForm.permission_mode = 'acceptEdits'}
+								>
+									Accept Edits
+								</button>
+								<button
+									type="button"
+									class="card-mode-btn"
+									class:card-mode-btn--active={profileForm.permission_mode === 'plan'}
+									onclick={() => profileForm.permission_mode = 'plan'}
+								>
+									Plan
+								</button>
+								<button
+									type="button"
+									class="card-mode-btn"
+									class:card-mode-btn--active={profileForm.permission_mode === 'bypassPermissions'}
+									onclick={() => profileForm.permission_mode = 'bypassPermissions'}
+								>
+									Bypass
+								</button>
+							</div>
+						</div>
+
+						<!-- Extended Thinking -->
+						<div class="form-field">
+							<label class="card-form-label">Extended Thinking — {#if profileForm.thinking_mode === 'default'}no extended thinking, standard response mode{:else if profileForm.thinking_mode === 'think'}light reasoning (8K tokens), good for simple tasks{:else if profileForm.thinking_mode === 'think_harder'}substantial reasoning (24K tokens), good for complex tasks{:else if profileForm.thinking_mode === 'ultra_think'}deep reasoning (64K tokens), for multi-step problem solving{/if}</label>
+							<div class="card-mode-selector">
+								<button
+									type="button"
+									class="card-mode-btn"
+									class:card-mode-btn--active={profileForm.thinking_mode === 'default'}
+									onclick={() => updateThinkingMode('default')}
+								>
+									Default
+								</button>
+								<button
+									type="button"
+									class="card-mode-btn"
+									class:card-mode-btn--active={profileForm.thinking_mode === 'think'}
+									onclick={() => updateThinkingMode('think')}
+								>
+									Think
+								</button>
+								<button
+									type="button"
+									class="card-mode-btn"
+									class:card-mode-btn--active={profileForm.thinking_mode === 'think_harder'}
+									onclick={() => updateThinkingMode('think_harder')}
+								>
+									Think Harder
+								</button>
+								<button
+									type="button"
+									class="card-mode-btn"
+									class:card-mode-btn--active={profileForm.thinking_mode === 'ultra_think'}
+									onclick={() => updateThinkingMode('ultra_think')}
+								>
+									Ultra Think
+								</button>
+							</div>
+						</div>
+
+						<!-- Max Turns -->
+						<div class="form-field">
+							<label class="card-form-label">Max Turns — maximum agentic turns per query (leave empty for unlimited)</label>
 							<input
 								type="number"
 								bind:value={profileForm.max_turns}
 								class="card-form-input"
 								placeholder="Unlimited"
 							/>
-							<p class="card-form-hint">Maximum agentic turns per query (leave empty for unlimited)</p>
 						</div>
 					</div>
 
@@ -1000,57 +1015,6 @@
 									<p class="checkbox-desc">Create new session ID when resuming</p>
 								</div>
 							</label>						</div>
-					</div>
-
-					<!-- Thinking Mode Section -->
-					<div class="card-form-section">
-						<h3 class="card-form-title">Extended Thinking</h3>
-						<p class="card-form-hint">Configure Claude's extended thinking capability for deeper reasoning</p>
-						<div class="card-mode-selector">
-							<button
-								type="button"
-								class="card-mode-btn"
-								class:card-mode-btn--active={profileForm.thinking_mode === 'default'}
-								onclick={() => updateThinkingMode('default')}
-							>
-								Default
-							</button>
-							<button
-								type="button"
-								class="card-mode-btn"
-								class:card-mode-btn--active={profileForm.thinking_mode === 'think'}
-								onclick={() => updateThinkingMode('think')}
-							>
-								Think
-							</button>
-							<button
-								type="button"
-								class="card-mode-btn"
-								class:card-mode-btn--active={profileForm.thinking_mode === 'think_harder'}
-								onclick={() => updateThinkingMode('think_harder')}
-							>
-								Think Harder
-							</button>
-							<button
-								type="button"
-								class="card-mode-btn"
-								class:card-mode-btn--active={profileForm.thinking_mode === 'ultra_think'}
-								onclick={() => updateThinkingMode('ultra_think')}
-							>
-								Ultra Think
-							</button>
-						</div>
-						<p class="card-form-hint thinking-mode-hint">
-							{#if profileForm.thinking_mode === 'default'}
-								No extended thinking - standard response mode
-							{:else if profileForm.thinking_mode === 'think'}
-								Light reasoning (8K tokens) - good for simple tasks
-							{:else if profileForm.thinking_mode === 'think_harder'}
-								Substantial reasoning (24K tokens) - good for complex tasks
-							{:else if profileForm.thinking_mode === 'ultra_think'}
-								Deep reasoning (64K tokens) - for multi-step problem solving
-							{/if}
-						</p>
 					</div>
 				{:else if activeTab === 'tools'}
 					<!-- Tools Tab -->
