@@ -119,6 +119,7 @@ export interface ChatTab {
 	// Session overrides (override profile settings for this session)
 	modelOverride: string | null;  // null = use profile default
 	permissionModeOverride: string | null;  // null = use profile default
+	thinkingModeOverride: string | null;  // null = use profile default
 	// Permission requests queue
 	pendingPermissions: PermissionRequestType[];
 	// User questions queue (for AskUserQuestion tool)
@@ -218,6 +219,7 @@ interface PersistedTab {
 	project: string;
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
+	thinkingModeOverride: string | null;
 }
 
 interface PersistedTabsState {
@@ -272,7 +274,8 @@ function flushPendingTabsSave() {
 			profile: tab.profile,
 			project: tab.project,
 			modelOverride: tab.modelOverride,
-			permissionModeOverride: tab.permissionModeOverride
+			permissionModeOverride: tab.permissionModeOverride,
+			thinkingModeOverride: tab.thinkingModeOverride
 		})),
 		activeTabId: pendingTabsState.activeTabId
 	};
@@ -322,7 +325,8 @@ async function saveTabsToServer(state: TabsState) {
 					profile: tab.profile,
 					project: tab.project,
 					modelOverride: tab.modelOverride,
-					permissionModeOverride: tab.permissionModeOverride
+					permissionModeOverride: tab.permissionModeOverride,
+					thinkingModeOverride: tab.thinkingModeOverride
 				})),
 				activeTabId: pendingTabsState.activeTabId
 			};
@@ -3574,6 +3578,7 @@ function createTabsStore() {
 						contextMax: 200000,
 						modelOverride: pt.modelOverride ?? null,
 						permissionModeOverride: pt.permissionModeOverride ?? null,
+						thinkingModeOverride: pt.thinkingModeOverride ?? null,
 						pendingPermissions: [],
 						pendingQuestions: [],
 						todos: [],
@@ -3661,6 +3666,7 @@ function createTabsStore() {
 				contextMax: 200000,
 				modelOverride: null,
 				permissionModeOverride: null,
+				thinkingModeOverride: null,
 				pendingPermissions: [],
 				pendingQuestions: [],
 				todos: [],
@@ -3894,6 +3900,9 @@ function createTabsStore() {
 			if (tab.permissionModeOverride) {
 				overrides.permission_mode = tab.permissionModeOverride;
 			}
+			if (tab.thinkingModeOverride) {
+				overrides.thinking_mode = tab.thinkingModeOverride;
+			}
 
 			// Send query
 			// Update lastMessageTime BEFORE sending to prevent health check from
@@ -4088,6 +4097,9 @@ function createTabsStore() {
 			}
 			if (tab.permissionModeOverride) {
 				overrides.permission_mode = tab.permissionModeOverride;
+			}
+			if (tab.thinkingModeOverride) {
+				overrides.thinking_mode = tab.thinkingModeOverride;
 			}
 
 			// Send query with worktree_id - backend will create session linked to this worktree
@@ -4345,6 +4357,15 @@ function createTabsStore() {
 		},
 
 		/**
+		 * Set thinking mode override for a tab (null = use profile default)
+		 */
+		setTabThinkingModeOverride(tabId: string, thinkingMode: string | null) {
+			updateTab(tabId, { thinkingModeOverride: thinkingMode });
+			// Save tabs state (debounced) to persist the override
+			saveTabsToServer(get({ subscribe }));
+		},
+
+		/**
 		 * Set draft input text for a tab (preserved when switching cards)
 		 */
 		setTabDraft(tabId: string, draft: string) {
@@ -4459,6 +4480,7 @@ function createTabsStore() {
 				contextMax: 200000,
 				modelOverride: null,
 				permissionModeOverride: null,
+				thinkingModeOverride: null,
 				pendingPermissions: [],
 				pendingQuestions: [],
 				todos: [],

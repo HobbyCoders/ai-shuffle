@@ -168,6 +168,38 @@
 	let profileDropdownRef = $state<HTMLDivElement | null>(null);
 	let projectDropdownRef = $state<HTMLDivElement | null>(null);
 
+	// Override dropdown state
+	let showThinkingDropdown = $state(false);
+	let showPermissionDropdown = $state(false);
+	let thinkingDropdownRef = $state<HTMLDivElement | null>(null);
+	let permissionDropdownRef = $state<HTMLDivElement | null>(null);
+
+	// Thinking mode options
+	const thinkingModes = [
+		{ value: null, label: 'Default', description: 'Use profile setting' },
+		{ value: 'default', label: 'Off', description: 'No extended thinking' },
+		{ value: 'think', label: 'Think', description: '~8k tokens' },
+		{ value: 'think_harder', label: 'Think Harder', description: '~24k tokens' },
+		{ value: 'ultra_think', label: 'Ultra Think', description: '~64k tokens' }
+	];
+
+	// Permission mode options
+	const permissionModes = [
+		{ value: null, label: 'Default', description: 'Use profile setting' },
+		{ value: 'default', label: 'Ask', description: 'Confirm before tools' },
+		{ value: 'acceptEdits', label: 'Accept Edits', description: 'Auto-approve edits' },
+		{ value: 'plan', label: 'Plan Only', description: 'Plan without executing' },
+		{ value: 'bypassPermissions', label: 'Bypass', description: 'Execute all tools' }
+	];
+
+	// Get display labels for current overrides
+	const currentThinkingLabel = $derived(
+		thinkingModes.find(m => m.value === liveTab.thinkingModeOverride)?.label || 'Default'
+	);
+	const currentPermissionLabel = $derived(
+		permissionModes.find(m => m.value === liveTab.permissionModeOverride)?.label || 'Default'
+	);
+
 	// Get selected profile/project names for display
 	const selectedProfileName = $derived($profiles.find(p => p.id === liveTab.profile)?.name || 'Profile');
 	const selectedProjectName = $derived($projects.find(p => p.id === liveTab.project)?.name || 'Project');
@@ -202,6 +234,34 @@
 		showProjectDropdown = false;
 	}
 
+	// Toggle override dropdowns
+	function handleThinkingClick(e: MouseEvent) {
+		e.stopPropagation();
+		showPermissionDropdown = false;
+		showProfileDropdown = false;
+		showProjectDropdown = false;
+		showThinkingDropdown = !showThinkingDropdown;
+	}
+
+	function handlePermissionClick(e: MouseEvent) {
+		e.stopPropagation();
+		showThinkingDropdown = false;
+		showProfileDropdown = false;
+		showProjectDropdown = false;
+		showPermissionDropdown = !showPermissionDropdown;
+	}
+
+	// Select override values
+	function selectThinkingMode(value: string | null) {
+		tabs.setTabThinkingModeOverride(tab.id, value);
+		showThinkingDropdown = false;
+	}
+
+	function selectPermissionMode(value: string | null) {
+		tabs.setTabPermissionModeOverride(tab.id, value);
+		showPermissionDropdown = false;
+	}
+
 	// Close dropdowns when clicking outside
 	function handleClickOutside(e: MouseEvent) {
 		const target = e.target as Node;
@@ -211,6 +271,12 @@
 		if (projectDropdownRef && !projectDropdownRef.contains(target)) {
 			showProjectDropdown = false;
 		}
+		if (thinkingDropdownRef && !thinkingDropdownRef.contains(target)) {
+			showThinkingDropdown = false;
+		}
+		if (permissionDropdownRef && !permissionDropdownRef.contains(target)) {
+			showPermissionDropdown = false;
+		}
 	}
 
 	// Close dropdowns on escape
@@ -218,6 +284,8 @@
 		if (e.key === 'Escape') {
 			showProfileDropdown = false;
 			showProjectDropdown = false;
+			showThinkingDropdown = false;
+			showPermissionDropdown = false;
 		}
 	}
 
@@ -913,8 +981,91 @@
 						</div>
 					</div>
 
-					<!-- Right: Attach & Mic buttons -->
+					<!-- Right: Override buttons, Attach & Mic buttons -->
 					<div class="controls-right">
+						<!-- Thinking Mode Override -->
+						<div class="override-wrapper" bind:this={thinkingDropdownRef}>
+							<button
+								type="button"
+								class="override-btn"
+								class:active={liveTab.thinkingModeOverride !== null}
+								onclick={handleThinkingClick}
+								title="Thinking mode override (session only)"
+							>
+								<!-- Brain icon -->
+								<svg class="w-[16px] h-[16px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+								</svg>
+								{#if liveTab.thinkingModeOverride !== null}
+									<span class="override-indicator"></span>
+								{/if}
+							</button>
+
+							{#if showThinkingDropdown}
+								<div class="override-dropdown">
+									<div class="override-dropdown-header">Thinking Mode</div>
+									{#each thinkingModes as mode}
+										<button
+											type="button"
+											class="override-dropdown-item"
+											class:selected={liveTab.thinkingModeOverride === mode.value}
+											onclick={() => selectThinkingMode(mode.value)}
+										>
+											<span class="override-item-label">{mode.label}</span>
+											<span class="override-item-desc">{mode.description}</span>
+											{#if liveTab.thinkingModeOverride === mode.value}
+												<svg class="w-3.5 h-3.5 check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+												</svg>
+											{/if}
+										</button>
+									{/each}
+								</div>
+							{/if}
+						</div>
+
+						<!-- Permission Mode Override -->
+						<div class="override-wrapper" bind:this={permissionDropdownRef}>
+							<button
+								type="button"
+								class="override-btn"
+								class:active={liveTab.permissionModeOverride !== null}
+								onclick={handlePermissionClick}
+								title="Permission mode override (session only)"
+							>
+								<!-- Shield icon -->
+								<svg class="w-[16px] h-[16px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+								</svg>
+								{#if liveTab.permissionModeOverride !== null}
+									<span class="override-indicator"></span>
+								{/if}
+							</button>
+
+							{#if showPermissionDropdown}
+								<div class="override-dropdown">
+									<div class="override-dropdown-header">Permission Mode</div>
+									{#each permissionModes as mode}
+										<button
+											type="button"
+											class="override-dropdown-item"
+											class:selected={liveTab.permissionModeOverride === mode.value}
+											onclick={() => selectPermissionMode(mode.value)}
+										>
+											<span class="override-item-label">{mode.label}</span>
+											<span class="override-item-desc">{mode.description}</span>
+											{#if liveTab.permissionModeOverride === mode.value}
+												<svg class="w-3.5 h-3.5 check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+												</svg>
+											{/if}
+										</button>
+									{/each}
+								</div>
+							{/if}
+						</div>
+
+						<!-- Attach File Button -->
 						<button
 							type="button"
 							onclick={triggerFileUpload}
@@ -1382,11 +1533,8 @@
 		white-space: nowrap;
 	}
 
-	/* Mobile: show truncated first word only */
-	.selector-text.mobile {
-		display: block;
-	}
-
+	/* Mobile: hide text, show icons only */
+	.selector-text.mobile,
 	.selector-text.desktop {
 		display: none;
 	}
@@ -1763,5 +1911,144 @@
 	/* Active/pressed state */
 	.voice-btn:active:not(:disabled) {
 		transform: scale(0.95);
+	}
+
+	/* ===== OVERRIDE BUTTONS ===== */
+	.override-wrapper {
+		position: relative;
+	}
+
+	.override-btn {
+		position: relative;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 28px;
+		height: 28px;
+		background: transparent;
+		border: none;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
+		cursor: pointer;
+		color: var(--muted-foreground);
+		transition: all 0.15s ease;
+	}
+
+	.override-btn:hover {
+		background: var(--hover-overlay);
+		color: var(--foreground);
+	}
+
+	.override-btn.active {
+		background: var(--chip-primary-bg);
+		color: var(--primary);
+	}
+
+	.override-btn.active:hover {
+		background: color-mix(in oklch, var(--primary) 20%, transparent);
+	}
+
+	/* Active indicator dot */
+	.override-indicator {
+		position: absolute;
+		top: 2px;
+		right: 2px;
+		width: 6px;
+		height: 6px;
+		background: var(--primary);
+		border-radius: 50%;
+		border: 1px solid var(--background);
+	}
+
+	/* Override dropdown */
+	.override-dropdown {
+		position: absolute;
+		bottom: calc(100% + 6px);
+		right: 0;
+		min-width: 180px;
+		background: var(--popover);
+		border: 1px solid var(--border);
+		border-radius: var(--radius, 0.75rem);
+		box-shadow: var(--shadow-l);
+		z-index: 50;
+		padding: 4px;
+		animation: override-dropdown-fade-in 0.15s ease;
+	}
+
+	@keyframes override-dropdown-fade-in {
+		from {
+			opacity: 0;
+			transform: translateY(4px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
+	}
+
+	.override-dropdown-header {
+		padding: 6px 10px 4px;
+		font-size: 10px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--muted-foreground);
+	}
+
+	.override-dropdown-item {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		width: 100%;
+		padding: 8px 10px;
+		font-size: 13px;
+		color: var(--popover-foreground);
+		background: transparent;
+		border: none;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
+		cursor: pointer;
+		transition: background-color 0.15s;
+		text-align: left;
+	}
+
+	.override-dropdown-item:hover {
+		background: var(--hover-overlay);
+	}
+
+	.override-dropdown-item.selected {
+		background: var(--chip-primary-bg);
+	}
+
+	.override-item-label {
+		font-weight: 500;
+		flex-shrink: 0;
+	}
+
+	.override-item-desc {
+		font-size: 11px;
+		color: var(--muted-foreground);
+		flex: 1;
+		text-align: right;
+	}
+
+	.override-dropdown-item .check-icon {
+		flex-shrink: 0;
+		color: var(--primary);
+	}
+
+	/* Mobile: slightly more compact */
+	@media (max-width: 639px) {
+		.override-btn {
+			width: 26px;
+			height: 26px;
+		}
+
+		.override-btn svg {
+			width: 14px;
+			height: 14px;
+		}
+
+		.override-dropdown {
+			min-width: 160px;
+		}
 	}
 </style>
