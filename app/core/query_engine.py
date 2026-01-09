@@ -24,7 +24,7 @@ from claude_agent_sdk import (
     AssistantMessage, UserMessage, TextBlock, ToolUseBlock, ToolResultBlock,
     ResultMessage, SystemMessage
 )
-from claude_agent_sdk.types import StreamEvent, PermissionResultAllow
+from claude_agent_sdk.types import StreamEvent, PermissionResultAllow, PermissionResultDeny
 
 from app.db import database
 from app.core.config import settings
@@ -2513,6 +2513,10 @@ async def stream_to_websocket(
     logger.info(f"[WS] Permission mode for session {session_id}: {permission_mode} (profile config: {config.get('permission_mode')}, override: {overrides.get('permission_mode') if overrides else None})")
     logger.info(f"[WS] broadcast_func provided: {broadcast_func is not None}")
 
+    # Get tool restrictions for use in callback
+    allowed_tools = config.get("allowed_tools") or []
+    disallowed_tools = config.get("disallowed_tools") or []
+
     # Create canUseTool callback if we have broadcast_func
     # This handles both permission requests (in 'default' mode) and AskUserQuestion (in all modes)
     can_use_tool_callback = None
@@ -2529,6 +2533,15 @@ async def stream_to_websocket(
                 tool_input: Tool input parameters
                 context: ToolPermissionContext with signal and suggestions
             """
+            # Check profile-level tool restrictions FIRST (applies to all tools including AskUserQuestion)
+            # These are set by the user in the profile settings (Allow Only / Disallow modes)
+            if disallowed_tools and tool_name in disallowed_tools:
+                logger.info(f"[WS] Tool {tool_name} blocked by profile disallowed_tools")
+                return PermissionResultDeny(message=f"Tool '{tool_name}' is disabled in this profile")
+            if allowed_tools and tool_name not in allowed_tools:
+                logger.info(f"[WS] Tool {tool_name} blocked by profile allowed_tools (not in whitelist)")
+                return PermissionResultDeny(message=f"Tool '{tool_name}' is not enabled in this profile")
+
             # Handle AskUserQuestion specially - this is how the SDK expects it
             if tool_name == "AskUserQuestion":
                 questions = tool_input.get("questions", [])
