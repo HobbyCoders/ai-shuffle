@@ -165,6 +165,10 @@ async def chat_websocket(
         device_id = str(uuid.uuid4())
         logger.info(f"Generated device_id: {device_id}")
 
+    # Register user device for tab sync (if we have a user ID)
+    if api_user_id:
+        await sync_engine.register_user_device(api_user_id, device_id, websocket)
+
     current_session_id: Optional[str] = None
     query_task: Optional[asyncio.Task] = None
 
@@ -266,8 +270,10 @@ async def chat_websocket(
                 await live_session_store.cleanup_session(session_id)
                 return  # Exit early - connection is dead
 
-            # Start assistant message in live store
-            await live_session_store.start_assistant_message(session_id, message_id)
+            # NOTE: Don't call start_assistant_message here!
+            # Creating an empty text message before content arrives causes the "Claude [time]"
+            # header to appear even when the first content is a thinking block.
+            # Let append_text/append_thinking create messages lazily when content arrives.
 
             # Start heartbeat task
             heartbeat_task = asyncio.create_task(send_heartbeats())
@@ -1281,6 +1287,16 @@ async def chat_websocket(
                     elif msg_type == "pong":
                         pass  # Keep-alive response
 
+                    elif msg_type == "tabs_update":
+                        # Broadcast tab state update to other devices for this user
+                        if api_user_id:
+                            tabs_data = data.get("tabs_data", {})
+                            await sync_engine.broadcast_tabs_updated(
+                                user_id=api_user_id,
+                                tabs_data=tabs_data,
+                                source_device_id=device_id
+                            )
+
                 except asyncio.TimeoutError:
                     if websocket.client_state != WebSocketState.CONNECTED:
                         break
@@ -1300,6 +1316,10 @@ async def chat_websocket(
             # If the user wants to stop the query, they should use the "stop" message explicitly.
             if query_task and not query_task.done():
                 logger.info("WebSocket closed but query task still running for session - letting it continue for other devices")
+
+            # Unregister user device from tab sync
+            if api_user_id:
+                await sync_engine.unregister_user_device(api_user_id, device_id, websocket)
 
             # Unregister device from sync engine, but only if still using this websocket
             # This prevents race conditions where a new connection was established

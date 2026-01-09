@@ -56,6 +56,26 @@ class DeviceConnection:
 
 
 @dataclass
+class UserDeviceConnection:
+    """Represents a connected device for a user (for tab sync)"""
+    device_id: str
+    user_id: str
+    websocket: WebSocket
+    connected_at: datetime = field(default_factory=datetime.utcnow)
+    last_activity: datetime = field(default_factory=datetime.utcnow)
+
+    async def send_json(self, data: Dict[str, Any]) -> bool:
+        """Send JSON data to this device. Returns False if send failed."""
+        try:
+            await self.websocket.send_json(data)
+            self.last_activity = datetime.utcnow()
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to send to device {self.device_id}: {e}")
+            return False
+
+
+@dataclass
 class StreamingBuffer:
     """Buffer to store in-progress streaming content for a session"""
     session_id: str
@@ -237,6 +257,10 @@ class SyncEngine:
         self._streaming_buffers: Dict[str, StreamingBuffer] = {}
         # Session locks: session_id -> device_id that owns the lock
         self._session_locks: Dict[str, str] = {}
+        # User connections for tab sync: user_id -> {device_id -> UserDeviceConnection}
+        self._user_connections: Dict[str, Dict[str, UserDeviceConnection]] = {}
+        # Lock for user connection management
+        self._user_lock = asyncio.Lock()
 
     async def register_device(
         self,
@@ -693,6 +717,113 @@ class SyncEngine:
         for session_id, device_id in stale_devices:
             await self.unregister_device(device_id, session_id)
             logger.info(f"Cleaned up stale connection: {device_id} from {session_id}")
+
+    # ============= User-level connection management for tab sync =============
+
+    async def register_user_device(
+        self,
+        user_id: str,
+        device_id: str,
+        websocket: WebSocket
+    ) -> UserDeviceConnection:
+        """Register a device for a user (for tab sync across devices)."""
+        async with self._user_lock:
+            if user_id not in self._user_connections:
+                self._user_connections[user_id] = {}
+
+            # Close existing connection for this device if any
+            if device_id in self._user_connections[user_id]:
+                old_conn = self._user_connections[user_id][device_id]
+                try:
+                    # Don't close - it's the same websocket being re-registered
+                    pass
+                except Exception:
+                    pass
+
+            connection = UserDeviceConnection(
+                device_id=device_id,
+                user_id=user_id,
+                websocket=websocket
+            )
+            self._user_connections[user_id][device_id] = connection
+
+            logger.debug(f"User device registered: user={user_id[:8]}... device={device_id[:8]}...")
+            return connection
+
+    async def unregister_user_device(
+        self,
+        user_id: str,
+        device_id: str,
+        websocket: Optional[WebSocket] = None
+    ):
+        """Unregister a device from user connection tracking."""
+        async with self._user_lock:
+            if user_id in self._user_connections:
+                if device_id in self._user_connections[user_id]:
+                    # If websocket is provided, only unregister if it matches
+                    if websocket is not None:
+                        current_conn = self._user_connections[user_id][device_id]
+                        if current_conn.websocket is not websocket:
+                            logger.debug(f"User device {device_id[:8]} has new connection, skipping unregister")
+                            return
+
+                    del self._user_connections[user_id][device_id]
+                    logger.debug(f"User device unregistered: user={user_id[:8]}... device={device_id[:8]}...")
+
+                # Clean up empty user entries
+                if not self._user_connections[user_id]:
+                    del self._user_connections[user_id]
+
+    def get_user_device_count(self, user_id: str) -> int:
+        """Get number of devices connected for a user."""
+        return len(self._user_connections.get(user_id, {}))
+
+    async def broadcast_tabs_updated(
+        self,
+        user_id: str,
+        tabs_data: Dict[str, Any],
+        source_device_id: Optional[str] = None
+    ):
+        """Broadcast tab state update to all user's devices except the source.
+
+        Args:
+            user_id: The user whose tabs changed
+            tabs_data: The tab state to broadcast (matches PersistedTabsState)
+            source_device_id: Device that made the change (excluded from broadcast)
+        """
+        async with self._user_lock:
+            user_devices = self._user_connections.get(user_id, {})
+            if not user_devices:
+                return
+
+            message = {
+                "type": "tabs_sync",
+                "tabs": tabs_data.get("tabs", []),
+                "activeTabId": tabs_data.get("activeTabId"),
+                "source_device_id": source_device_id
+            }
+
+            failed_devices = []
+            for device_id, conn in user_devices.items():
+                # Don't send back to source device
+                if device_id == source_device_id:
+                    continue
+
+                success = await conn.send_json(message)
+                if not success:
+                    failed_devices.append(device_id)
+
+            # Clean up failed connections
+            for device_id in failed_devices:
+                if device_id in self._user_connections.get(user_id, {}):
+                    del self._user_connections[user_id][device_id]
+
+            if self._user_connections.get(user_id) and not self._user_connections[user_id]:
+                del self._user_connections[user_id]
+
+            sent_count = len(user_devices) - len(failed_devices) - (1 if source_device_id in user_devices else 0)
+            if sent_count > 0:
+                logger.debug(f"Broadcast tabs_sync to {sent_count} devices for user {user_id[:8]}...")
 
 
 # Global sync engine instance

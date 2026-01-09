@@ -53,6 +53,8 @@ interface StreamingBuffer {
 	usageUpdate: BatchedUpdate['usageUpdate'];
 	rafHandle: number | null;
 	lastFlushTime: number;
+	// Track the currently active block type to prevent cross-block delta mixing
+	activeBlockType: 'thinking' | 'text' | 'tool_use' | null;
 }
 
 // Global buffer storage - one per tab
@@ -86,7 +88,8 @@ function getOrCreateBuffer(tabId: string, sessionId?: string): StreamingBuffer {
 			discreteEvents: [],
 			usageUpdate: null,
 			rafHandle: null,
-			lastFlushTime: Date.now()
+			lastFlushTime: Date.now(),
+			activeBlockType: null
 		};
 		buffers.set(tabId, buffer);
 	}
@@ -124,13 +127,70 @@ export function pushEvent(tabId: string, type: string, data: Record<string, unkn
 	const buffer = getOrCreateBuffer(tabId, sessionId);
 	const event: BufferedEvent = { type, data, timestamp: Date.now() };
 
-	// Handle text deltas - accumulate without storing as discrete events
+	// Handle block start events FIRST - these control which delta type is active
+	// Flush any pending deltas before switching block types to prevent mixing
+	if (type === 'stream_block_start') {
+		const blockType = data.block_type as string;
+
+		// Flush any pending data before switching block types
+		// This ensures deltas from the previous block are applied before the transition
+		if (buffer.pendingTextDelta || buffer.pendingThinkingDelta || buffer.pendingToolInput.size > 0) {
+			flushNow(tabId);
+		}
+
+		// Update active block type BEFORE processing further events
+		if (blockType === 'thinking') {
+			buffer.activeBlockType = 'thinking';
+		} else if (blockType === 'text') {
+			buffer.activeBlockType = 'text';
+		} else if (blockType === 'tool_use') {
+			buffer.activeBlockType = 'tool_use';
+		}
+
+		if (DEBUG_BUFFER) {
+			console.log(`[Buffer ${tabId}] Block start: ${blockType}, activeBlockType set to: ${buffer.activeBlockType}`);
+		}
+
+		// Store the event for processing
+		buffer.discreteEvents.push(event);
+		scheduleFlush(tabId, true); // Immediate flush for block transitions
+		return;
+	}
+
+	// Handle block stop events - flush and clear active block type
+	if (type === 'stream_block_stop') {
+		// Flush any pending deltas first
+		if (buffer.pendingTextDelta || buffer.pendingThinkingDelta || buffer.pendingToolInput.size > 0) {
+			flushNow(tabId);
+		}
+
+		if (DEBUG_BUFFER) {
+			console.log(`[Buffer ${tabId}] Block stop, clearing activeBlockType (was: ${buffer.activeBlockType})`);
+		}
+
+		// Clear active block type since the block is complete
+		buffer.activeBlockType = null;
+
+		// Store the event for processing
+		buffer.discreteEvents.push(event);
+		scheduleFlush(tabId, true); // Immediate flush for block transitions
+		return;
+	}
+
+	// Handle text deltas - only accumulate if text block is active
 	if (type === 'stream_delta' && data.delta_type === 'text') {
 		const text = data.content as string;
+
+		// If we receive text delta but no block is active, set it as active
+		// This handles cases where block_start might be missed
+		if (buffer.activeBlockType === null) {
+			buffer.activeBlockType = 'text';
+		}
+
 		buffer.pendingTextDelta += text;
 
 		if (DEBUG_BUFFER) {
-			console.log(`[Buffer ${tabId}] Text delta: +${text.length} chars, total: ${buffer.pendingTextDelta.length}`);
+			console.log(`[Buffer ${tabId}] Text delta: +${text.length} chars, total: ${buffer.pendingTextDelta.length}, activeBlock: ${buffer.activeBlockType}`);
 		}
 
 		// Flush on threshold to ensure smooth updates
@@ -142,13 +202,19 @@ export function pushEvent(tabId: string, type: string, data: Record<string, unkn
 		return;
 	}
 
-	// Handle thinking deltas - accumulate separately from text
+	// Handle thinking deltas - only accumulate if thinking block is active
 	if (type === 'stream_delta' && data.delta_type === 'thinking') {
 		const thinking = data.content as string;
+
+		// If we receive thinking delta but no block is active, set it as active
+		if (buffer.activeBlockType === null) {
+			buffer.activeBlockType = 'thinking';
+		}
+
 		buffer.pendingThinkingDelta += thinking;
 
 		if (DEBUG_BUFFER) {
-			console.log(`[Buffer ${tabId}] Thinking delta: +${thinking.length} chars, total: ${buffer.pendingThinkingDelta.length}`);
+			console.log(`[Buffer ${tabId}] Thinking delta: +${thinking.length} chars, total: ${buffer.pendingThinkingDelta.length}, activeBlock: ${buffer.activeBlockType}`);
 		}
 
 		// Flush on threshold to ensure smooth updates
@@ -307,6 +373,7 @@ export function clearBuffer(tabId: string): void {
 	buffer.pendingToolInput.clear();
 	buffer.discreteEvents = [];
 	buffer.usageUpdate = null;
+	buffer.activeBlockType = null;
 
 	if (DEBUG_BUFFER) {
 		console.log(`[Buffer ${tabId}] Cleared`);
@@ -359,6 +426,24 @@ export function getBufferStats(tabId: string): {
 		eventCount: buffer.discreteEvents.length,
 		lastFlushTime: buffer.lastFlushTime
 	};
+}
+
+/**
+ * Get the currently active block type for a tab
+ */
+export function getActiveBlockType(tabId: string): 'thinking' | 'text' | 'tool_use' | null {
+	const buffer = buffers.get(tabId);
+	return buffer?.activeBlockType ?? null;
+}
+
+/**
+ * Set the active block type for a tab (used when recovering from polling)
+ */
+export function setActiveBlockType(tabId: string, blockType: 'thinking' | 'text' | 'tool_use' | null): void {
+	const buffer = buffers.get(tabId);
+	if (buffer) {
+		buffer.activeBlockType = blockType;
+	}
 }
 
 // Helper functions for applying batched updates to messages

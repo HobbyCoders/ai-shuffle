@@ -298,6 +298,23 @@ if (typeof window !== 'undefined') {
 }
 
 /**
+ * Broadcast tabs update via WebSocket for real-time cross-device sync
+ */
+function broadcastTabsUpdate(persistedState: PersistedTabsState) {
+	// Find any open WebSocket connection to send through
+	for (const [, ws] of tabConnections) {
+		if (ws.readyState === WebSocket.OPEN) {
+			ws.send(JSON.stringify({
+				type: 'tabs_update',
+				tabs_data: persistedState
+			}));
+			console.log('[Tabs] Broadcast tabs_update via WebSocket');
+			return; // Only need to send once, server will broadcast to all devices
+		}
+	}
+}
+
+/**
  * Save tabs state to backend (debounced)
  */
 async function saveTabsToServer(state: TabsState) {
@@ -331,11 +348,15 @@ async function saveTabsToServer(state: TabsState) {
 				activeTabId: pendingTabsState.activeTabId
 			};
 
+			// Save to backend (REST API for persistence)
 			await api.put('/preferences/open_tabs', {
 				key: 'open_tabs',
 				value: persistedState
 			});
 			console.log('[Tabs] Saved tabs state to server');
+
+			// Also broadcast via WebSocket for real-time sync to other devices
+			broadcastTabsUpdate(persistedState);
 		} catch (error) {
 			console.error('[Tabs] Failed to save tabs state:', error);
 		}
@@ -689,6 +710,11 @@ function createTabsStore() {
 	/**
 	 * Apply a batched update from the streaming buffer to the store.
 	 * This is called by the streaming-buffer module when it flushes.
+	 *
+	 * IMPORTANT: Discrete events (block_start, block_stop) are processed FIRST
+	 * to ensure proper state transitions before deltas are applied. The streaming
+	 * buffer ensures that blocks are flushed before transitions, so within a single
+	 * batch, all deltas belong to the same block type.
 	 */
 	function applyBatchedUpdate(tabId: string, batch: BatchedUpdate): void {
 		update(s => {
@@ -698,7 +724,13 @@ function createTabsStore() {
 			const tab = s.tabs[tabIndex];
 			const messages = [...tab.messages]; // Single copy per flush
 
-			// Apply all thinking deltas at once (before text, as thinking typically comes first)
+			// CRITICAL: Process discrete events FIRST to handle block transitions
+			// This ensures streaming state is properly set before deltas are applied
+			for (const event of batch.discreteEvents) {
+				processDiscreteEvent(messages, event, tab);
+			}
+
+			// Apply all thinking deltas at once
 			if (batch.thinkingDelta) {
 				appendToStreamingThinking(messages, batch.thinkingDelta);
 			}
@@ -711,11 +743,6 @@ function createTabsStore() {
 			// Apply all tool input deltas
 			for (const [toolId, delta] of batch.toolInputDeltas) {
 				appendToToolInput(messages, toolId, delta);
-			}
-
-			// Process discrete events
-			for (const event of batch.discreteEvents) {
-				processDiscreteEvent(messages, event, tab);
 			}
 
 			// Apply usage updates
@@ -1138,6 +1165,122 @@ function createTabsStore() {
 			tabLastUpdateId.delete(tabId);
 			console.log(`[Tab ${tabId}] Stopped polling`);
 		}
+	}
+
+	/**
+	 * Handle tabs_sync message from another device
+	 * This updates the local tabs to match the state from another device
+	 */
+	function handleTabsSyncMessage(data: Record<string, unknown>) {
+		const tabs = data.tabs as Array<{
+			id: string;
+			title: string;
+			sessionId: string | null;
+			profile: string;
+			project: string;
+			modelOverride?: string | null;
+			permissionModeOverride?: string | null;
+			thinkingModeOverride?: string | null;
+		}> | undefined;
+		const activeTabId = data.activeTabId as string | undefined;
+		const sourceDeviceId = data.source_device_id as string | undefined;
+
+		// Get our device ID to ignore messages from ourselves (shouldn't happen, but safety check)
+		const ourDeviceId = getDeviceId();
+		if (sourceDeviceId === ourDeviceId) {
+			console.log('[Tabs] Ignoring tabs_sync from our own device');
+			return;
+		}
+
+		if (!tabs) {
+			console.warn('[Tabs] Received tabs_sync with no tabs data');
+			return;
+		}
+
+		console.log(`[Tabs] Received tabs_sync from device ${sourceDeviceId?.slice(0, 8)}..., ${tabs.length} tabs`);
+
+		// Get current state to preserve messages and streaming state
+		const currentState = get({ subscribe });
+		const currentTabsMap = new Map(currentState.tabs.map(t => [t.id, t]));
+
+		// Merge synced tabs with existing state
+		// Keep messages and streaming state for tabs we already have
+		const mergedTabs: ChatTab[] = tabs.map(syncedTab => {
+			const existing = currentTabsMap.get(syncedTab.id);
+			if (existing) {
+				// Tab exists - update metadata but preserve messages and streaming state
+				return {
+					...existing,
+					title: syncedTab.title,
+					sessionId: syncedTab.sessionId,
+					profile: syncedTab.profile || existing.profile,
+					project: syncedTab.project || existing.project,
+					modelOverride: syncedTab.modelOverride ?? existing.modelOverride,
+					permissionModeOverride: syncedTab.permissionModeOverride ?? existing.permissionModeOverride,
+					thinkingModeOverride: syncedTab.thinkingModeOverride ?? existing.thinkingModeOverride
+				};
+			} else {
+				// New tab from another device - create with defaults
+				return {
+					id: syncedTab.id,
+					title: syncedTab.title,
+					sessionId: syncedTab.sessionId,
+					messages: [],
+					isStreaming: false,
+					wsConnected: false,
+					error: null,
+					profile: syncedTab.profile || currentState.tabs[0]?.profile || '',
+					project: syncedTab.project || currentState.tabs[0]?.project || '',
+					totalTokensIn: 0,
+					totalTokensOut: 0,
+					totalCacheCreationTokens: 0,
+					totalCacheReadTokens: 0,
+					contextUsed: null,
+					contextMax: 200000,
+					modelOverride: syncedTab.modelOverride ?? null,
+					permissionModeOverride: syncedTab.permissionModeOverride ?? null,
+					thinkingModeOverride: syncedTab.thinkingModeOverride ?? null,
+					pendingPermissions: [],
+					pendingQuestions: [],
+					todos: [],
+					draft: '',
+					scrollTop: 0,
+					streamStartTime: null,
+					executionMode: 'local' as const,
+					worktreeBranch: '',
+					worktreeBaseBranch: 'main',
+					worktreeId: null,
+					worktreeMode: 'new' as const,
+					selectedWorktreeBranch: null,
+					sessionLocked: false,
+					sessionLockedBy: undefined
+				};
+			}
+		});
+
+		// Find tabs that were closed on other device (exist locally but not in sync)
+		const syncedTabIds = new Set(tabs.map(t => t.id));
+		const closedTabs = currentState.tabs.filter(t => !syncedTabIds.has(t.id));
+
+		// Disconnect WebSocket for closed tabs
+		for (const closedTab of closedTabs) {
+			console.log(`[Tabs] Tab ${closedTab.id} was closed on another device, disconnecting`);
+			disconnectTab(closedTab.id);
+		}
+
+		// Connect WebSocket for new tabs
+		const newTabs = mergedTabs.filter(t => !currentTabsMap.has(t.id));
+		for (const newTab of newTabs) {
+			console.log(`[Tabs] Tab ${newTab.id} was created on another device, connecting`);
+			connectTab(newTab.id);
+		}
+
+		// Update state
+		update(s => ({
+			...s,
+			tabs: mergedTabs,
+			activeTabId: activeTabId || s.activeTabId
+		}));
 	}
 
 	/**
@@ -1853,6 +1996,13 @@ function createTabsStore() {
 		// Handle sync events from other devices
 		if (eventType) {
 			handleSyncEvent(tabId, data);
+			return;
+		}
+
+		// Handle tabs_sync message from another device
+		// This is NOT tab-specific, it updates all tabs for the user
+		if (msgType === 'tabs_sync') {
+			handleTabsSyncMessage(data);
 			return;
 		}
 
