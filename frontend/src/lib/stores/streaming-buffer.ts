@@ -185,6 +185,13 @@ export function pushEvent(tabId: string, type: string, data: Record<string, unkn
 		// This handles cases where block_start might be missed
 		if (buffer.activeBlockType === null) {
 			buffer.activeBlockType = 'text';
+		} else if (buffer.activeBlockType === 'thinking') {
+			// Block type is changing from thinking to text - flush thinking first
+			// This prevents thinking and text content from mixing in the same batch
+			if (buffer.pendingThinkingDelta) {
+				flushNow(tabId);
+			}
+			buffer.activeBlockType = 'text';
 		}
 
 		buffer.pendingTextDelta += text;
@@ -208,6 +215,13 @@ export function pushEvent(tabId: string, type: string, data: Record<string, unkn
 
 		// If we receive thinking delta but no block is active, set it as active
 		if (buffer.activeBlockType === null) {
+			buffer.activeBlockType = 'thinking';
+		} else if (buffer.activeBlockType === 'text') {
+			// Block type is changing from text to thinking - flush text first
+			// This prevents thinking and text content from mixing in the same batch
+			if (buffer.pendingTextDelta) {
+				flushNow(tabId);
+			}
 			buffer.activeBlockType = 'thinking';
 		}
 

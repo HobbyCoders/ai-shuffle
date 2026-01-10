@@ -380,7 +380,7 @@ async def chat_websocket(
                     elif delta_type == 'thinking':
                         # Thinking delta - update live store with thinking type
                         await live_session_store.append_thinking(session_id, content)
-                        # Broadcast with thinking delta_type
+                        # Broadcast with thinking chunk_type so StreamingBuffer handles it correctly
                         chunk_data = {
                             'content': content,
                             'delta_type': delta_type,
@@ -389,7 +389,7 @@ async def chat_websocket(
                         await sync_engine.broadcast_stream_chunk(
                             session_id=session_id,
                             message_id=message_id,
-                            chunk_type='text',
+                            chunk_type='thinking',  # Fixed: was 'text', causing thinking to mix with text
                             chunk_data=chunk_data,
                             source_device_id=None
                         )

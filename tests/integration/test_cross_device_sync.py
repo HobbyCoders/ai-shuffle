@@ -57,21 +57,22 @@ class TestStreamingBuffer:
         assert messages[0]["content"] == "Hello World!"
         assert messages[0]["streaming"] is True
 
-    def test_thinking_not_handled_by_streaming_buffer(self, streaming_buffer):
-        """StreamingBuffer does not handle 'thinking' type - it's handled by LiveSessionStore.
+    def test_thinking_creates_separate_message(self, streaming_buffer):
+        """Thinking should be in a separate message from text.
 
-        Note: This is the actual behavior. Thinking content is managed by LiveSessionStore
-        not StreamingBuffer. StreamingBuffer is for WebSocket event buffering for late-joiners.
+        StreamingBuffer now properly handles 'thinking' chunks to ensure
+        late-joining devices see thinking content separately from text.
         """
-        # StreamingBuffer ignores 'thinking' chunks - they're not in the implementation
         streaming_buffer.add_chunk("thinking", "Analyzing...")
         streaming_buffer.add_chunk("text", "Here is my answer")
 
         messages = streaming_buffer.get_messages()
-        # Only text message is created - thinking is ignored by StreamingBuffer
-        assert len(messages) == 1
-        assert messages[0]["type"] == "text"
-        assert messages[0]["content"] == "Here is my answer"
+        # Both thinking and text messages should be created separately
+        assert len(messages) == 2
+        assert messages[0]["type"] == "thinking"
+        assert messages[0]["content"] == "Analyzing..."
+        assert messages[1]["type"] == "text"
+        assert messages[1]["content"] == "Here is my answer"
 
     def test_tool_use_marks_text_complete(self, streaming_buffer):
         """Tool use should mark previous text as not streaming."""

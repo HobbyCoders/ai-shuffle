@@ -101,6 +101,19 @@ class StreamingBuffer:
                     'content': content,
                     'streaming': True
                 })
+        elif chunk_type == 'thinking':
+            # Find existing thinking message or create new one
+            # This ensures late-joining devices see thinking content separately from text
+            thinking_msg = next((m for m in self.messages if m.get('type') == 'thinking' and m.get('streaming')), None)
+            if thinking_msg:
+                thinking_msg['content'] = (thinking_msg.get('content') or '') + content
+            else:
+                self.messages.append({
+                    'type': 'thinking',
+                    'role': 'assistant',
+                    'content': content,
+                    'streaming': True
+                })
         elif chunk_type == 'tool_use':
             # Add tool use message
             self.messages.append({

@@ -23,6 +23,7 @@ import {
 	appendToStreamingText,
 	appendToStreamingThinking,
 	appendToToolInput,
+	hasPendingData,
 	type BatchedUpdate,
 	type BufferedEvent
 } from './streaming-buffer';
@@ -609,12 +610,20 @@ function createTabsStore() {
 	}
 
 	/**
-	 * Check if WebSocket is healthy (receiving messages recently)
-	 * Used to skip polling when WS is working well
+	 * Check if WebSocket is healthy (connected and receiving messages recently)
+	 * Used to skip polling when WS is working well.
+	 * Threshold increased to match STREAMING_HEALTH_TIMEOUT_MS to prevent race conditions
+	 * where both polling and WebSocket update state simultaneously.
 	 */
-	const WEBSOCKET_HEALTHY_THRESHOLD_MS = 2000;
+	const WEBSOCKET_HEALTHY_THRESHOLD_MS = 10000; // 10 seconds - generous to avoid race conditions
 
 	function isWebSocketHealthy(tabId: string): boolean {
+		// First check if WebSocket is actually connected
+		const ws = tabConnections.get(tabId);
+		if (!ws || ws.readyState !== WebSocket.OPEN) {
+			return false;
+		}
+		// Then check if we've received messages recently
 		const lastMessage = tabLastMessageTime.get(tabId);
 		if (!lastMessage) return false;
 		return Date.now() - lastMessage < WEBSOCKET_HEALTHY_THRESHOLD_MS;
@@ -1133,6 +1142,10 @@ function createTabsStore() {
 					})
 				}));
 
+				// Flush any pending deltas before clearing buffer (prevents losing characters)
+				if (hasPendingData(tabId)) {
+					flushNow(tabId);
+				}
 				// Clear streaming buffer after poll replaces state (avoid stale data)
 				clearBuffer(tabId);
 				invalidateStreamingIndexCache();
@@ -1406,7 +1419,38 @@ function createTabsStore() {
 				const content = eventData.content as string;
 				console.log(`[Tab ${tabId}] stream_chunk: type=${chunkType}, content="${content?.substring(0, 50)}..."`);
 
-				if (chunkType === 'text') {
+				if (chunkType === 'thinking') {
+					// Thinking chunk - append to existing thinking message or create new one
+					// This keeps thinking separate from text messages
+					update(s => ({
+						...s,
+						tabs: s.tabs.map(t => {
+							if (t.id !== tabId) return t;
+
+							const messages = [...t.messages];
+							const thinkingIdx = messages.findLastIndex(
+								m => m.type === 'thinking' && m.role === 'assistant' && m.streaming
+							);
+
+							if (thinkingIdx !== -1) {
+								messages[thinkingIdx] = {
+									...messages[thinkingIdx],
+									content: messages[thinkingIdx].content + (content || '')
+								};
+							} else {
+								messages.push({
+									id: `thinking-sync-${Date.now()}`,
+									role: 'assistant' as const,
+									content: content || '',
+									type: 'thinking' as const,
+									streaming: true
+								});
+							}
+
+							return { ...t, messages };
+						})
+					}));
+				} else if (chunkType === 'text') {
 					update(s => ({
 						...s,
 						tabs: s.tabs.map(t => {
