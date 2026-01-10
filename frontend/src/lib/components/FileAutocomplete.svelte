@@ -1,6 +1,7 @@
 <script lang="ts">
   import { getWorktreeFiles } from '$lib/api/git';
   import { getNotesAutocomplete } from '$lib/api/client';
+  import './autocomplete/autocomplete-design-system.css';
 
   export interface FileItem {
     name: string;
@@ -499,37 +500,71 @@
     } else if (diffDays === 1) {
       return 'Yesterday';
     } else if (diffDays < 7) {
-      return `${diffDays} days ago`;
+      return `${diffDays}d ago`;
     } else if (diffDays < 30) {
       const weeks = Math.floor(diffDays / 7);
-      return `${weeks} week${weeks > 1 ? 's' : ''} ago`;
+      return `${weeks}w ago`;
     } else {
       return date.toLocaleDateString();
     }
   }
+
+  function getIconClass(file: FileItem): string {
+    if (file.type === 'directory') {
+      if (file.name === CHAT_HISTORY_FOLDER) return 'autocomplete-icon-history';
+      if (file.name === NOTES_FOLDER) return 'autocomplete-icon-notes';
+      return 'autocomplete-icon-folder';
+    }
+    if (file.type === 'chat_history') return 'autocomplete-icon-history';
+    if (file.type === 'note') return 'autocomplete-icon-notes';
+    return 'autocomplete-icon-file';
+  }
+
+  function getBadgeClass(file: FileItem): string {
+    if (file.type === 'directory') {
+      if (file.name === CHAT_HISTORY_FOLDER) return 'type-history';
+      if (file.name === NOTES_FOLDER) return 'type-notes';
+      return 'type-folder';
+    }
+    if (file.type === 'chat_history') return 'type-chat';
+    if (file.type === 'note') return 'type-note';
+    return '';
+  }
+
+  function getBadgeText(file: FileItem): string {
+    if (file.type === 'directory') {
+      if (file.name === CHAT_HISTORY_FOLDER) return 'history';
+      if (file.name === NOTES_FOLDER) return 'notes';
+      return 'folder';
+    }
+    if (file.type === 'chat_history') return 'chat';
+    if (file.type === 'note') return 'note';
+    return '';
+  }
 </script>
 
 {#if visible && (filteredFiles.length > 0 || loading)}
-  <div class="absolute bottom-full left-0 right-0 mb-2 bg-popover border border-border rounded-lg shadow-xl max-h-64 overflow-hidden z-50">
-    <div class="px-3 py-2 border-b border-border bg-muted flex items-center justify-between">
-      <span class="text-xs text-muted-foreground">
+  <div class="autocomplete-panel file-autocomplete-panel">
+    <!-- Header -->
+    <div class="autocomplete-header">
+      <span class="autocomplete-count">
         {#if loading}
-          {inChatHistoryFolder ? 'Loading chat history...' : inNotesFolder ? 'Loading notes...' : 'Loading files...'}
+          {inChatHistoryFolder ? 'Loading history...' : inNotesFolder ? 'Loading notes...' : 'Loading...'}
         {:else if inChatHistoryFolder}
-          {filteredFiles.length} chat{filteredFiles.length !== 1 ? 's' : ''} in Chat History
+          {filteredFiles.length} chat{filteredFiles.length !== 1 ? 's' : ''}
         {:else if inNotesFolder}
-          {filteredFiles.length} note{filteredFiles.length !== 1 ? 's' : ''} in Notes
+          {filteredFiles.length} note{filteredFiles.length !== 1 ? 's' : ''}
         {:else}
-          {filteredFiles.length} file{filteredFiles.length !== 1 ? 's' : ''}
+          {filteredFiles.length} item{filteredFiles.length !== 1 ? 's' : ''}
           {#if currentPath}
-            in /{currentPath}
+            <span class="file-path-indicator">/{currentPath}</span>
           {/if}
         {/if}
       </span>
       {#if currentPath}
         <button
           type="button"
-          class="text-xs text-primary hover:opacity-80"
+          class="autocomplete-back-btn"
           onclick={goToRoot}
         >
           ← root
@@ -537,126 +572,132 @@
       {/if}
     </div>
 
-    {#if !loading}
-      <ul bind:this={listElement} class="overflow-y-auto max-h-48">
+    <!-- Loading state -->
+    {#if loading}
+      <div class="autocomplete-loading">
+        <div class="autocomplete-loading-spinner"></div>
+        <span>Loading...</span>
+      </div>
+    {:else}
+      <!-- File list -->
+      <ul bind:this={listElement} class="autocomplete-list file-autocomplete-list">
         {#each filteredFiles as file, index}
           <li>
             <button
               type="button"
-              class="w-full px-3 py-2 flex items-center gap-3 text-left hover:bg-accent transition-colors {index === selectedIndex ? 'bg-accent' : ''}"
+              class="autocomplete-item"
+              class:selected={index === selectedIndex}
               onclick={() => handleSelect(file)}
               onmouseenter={() => selectedIndex = index}
             >
               <!-- Icon -->
-              <div class="flex-shrink-0">
+              <div class="autocomplete-item-icon {getIconClass(file)}">
                 {#if file.type === 'directory'}
-                  <!-- Special icon for virtual folders -->
                   {#if file.name === CHAT_HISTORY_FOLDER}
-                    <svg class="w-4 h-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
                     </svg>
                   {:else if file.name === NOTES_FOLDER}
-                    <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                     </svg>
                   {:else}
-                    <svg class="w-4 h-4 text-warning" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
                     </svg>
                   {/if}
                 {:else if file.type === 'chat_history'}
-                  <svg class="w-4 h-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
                   </svg>
                 {:else if file.type === 'note'}
-                  <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                   </svg>
                 {:else}
-                  <svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                   </svg>
                 {/if}
               </div>
 
-              <!-- Name and details -->
-              <div class="flex-1 min-w-0">
-                {#if file.type === 'chat_history'}
-                  <span class="text-sm text-foreground truncate block">
-                    {file.name}
-                  </span>
-                  {#if file.preview}
-                    <span class="text-xs text-muted-foreground truncate block">
-                      {file.preview}
-                    </span>
-                  {/if}
-                {:else if file.type === 'note'}
-                  <span class="text-sm text-foreground truncate block">
-                    {file.name}
-                  </span>
-                  {#if file.preview}
-                    <span class="text-xs text-muted-foreground truncate block">
-                      {file.preview}
-                    </span>
-                  {/if}
-                {:else}
-                  <span class="text-sm text-foreground truncate block">
-                    {file.name}{file.type === 'directory' ? '/' : ''}
+              <!-- Content -->
+              <div class="autocomplete-item-content">
+                <span class="autocomplete-item-name">
+                  {file.name}{file.type === 'directory' ? '/' : ''}
+                </span>
+                {#if (file.type === 'chat_history' || file.type === 'note') && file.preview}
+                  <span class="autocomplete-item-description">
+                    {file.preview}
                   </span>
                 {/if}
               </div>
 
-              <!-- Size/count info -->
+              <!-- Meta info -->
               {#if file.type === 'file' && file.size}
-                <span class="text-xs text-muted-foreground flex-shrink-0">
+                <span class="autocomplete-item-meta">
                   {formatSize(file.size)}
                 </span>
               {:else if file.type === 'chat_history'}
-                <span class="text-xs text-muted-foreground flex-shrink-0">
-                  {file.message_count} msgs · {file.modified_at ? formatRelativeDate(file.modified_at) : ''}
+                <span class="autocomplete-item-meta">
+                  {file.message_count} msgs{file.modified_at ? ` · ${formatRelativeDate(file.modified_at)}` : ''}
                 </span>
               {:else if file.type === 'note' && file.note_tags && file.note_tags.length > 0}
-                <span class="text-xs text-muted-foreground flex-shrink-0 truncate max-w-24">
+                <span class="autocomplete-item-meta file-note-tags">
                   {file.note_tags.slice(0, 2).join(', ')}{file.note_tags.length > 2 ? '...' : ''}
                 </span>
               {/if}
 
               <!-- Type badge -->
-              <div class="flex-shrink-0">
-                {#if file.type === 'directory'}
-                  {#if file.name === CHAT_HISTORY_FOLDER}
-                    <span class="px-1.5 py-0.5 text-xs bg-purple-500/20 text-purple-400 rounded">
-                      history
-                    </span>
-                  {:else if file.name === NOTES_FOLDER}
-                    <span class="px-1.5 py-0.5 text-xs bg-green-500/20 text-green-400 rounded">
-                      notes
-                    </span>
-                  {:else}
-                    <span class="px-1.5 py-0.5 text-xs bg-warning/20 text-warning rounded">
-                      folder
-                    </span>
-                  {/if}
-                {:else if file.type === 'chat_history'}
-                  <span class="px-1.5 py-0.5 text-xs bg-purple-500/20 text-purple-400 rounded">
-                    chat
-                  </span>
-                {:else if file.type === 'note'}
-                  <span class="px-1.5 py-0.5 text-xs bg-green-500/20 text-green-400 rounded">
-                    note
-                  </span>
-                {/if}
-              </div>
+              {#if getBadgeText(file)}
+                <span class="autocomplete-badge {getBadgeClass(file)}">
+                  {getBadgeText(file)}
+                </span>
+              {/if}
             </button>
           </li>
         {/each}
       </ul>
     {/if}
 
-    <div class="px-3 py-1.5 border-t border-border bg-muted text-xs text-muted-foreground">
-      <kbd class="px-1 py-0.5 bg-secondary rounded mr-1">Tab</kbd> navigate/select
-      <kbd class="px-1 py-0.5 bg-secondary rounded mx-1">Enter</kbd> select
-      <kbd class="px-1 py-0.5 bg-secondary rounded mx-1">Esc</kbd> close
+    <!-- Footer -->
+    <div class="autocomplete-footer">
+      <span><kbd class="autocomplete-kbd">Tab</kbd> <span class="autocomplete-hint-text">nav/select</span></span>
+      <span><kbd class="autocomplete-kbd">Enter</kbd> <span class="autocomplete-hint-text">select</span></span>
+      <span><kbd class="autocomplete-kbd">Esc</kbd> <span class="autocomplete-hint-text">close</span></span>
     </div>
   </div>
 {/if}
+
+<style>
+  /* FileAutocomplete-specific positioning and sizing */
+  .file-autocomplete-panel {
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    right: 0;
+    margin-bottom: 8px;
+    max-height: 20rem;
+    z-index: 50;
+
+    /* Solid background since we're not portaled to body like CommandAutocomplete */
+    background: var(--card);
+  }
+
+  .file-autocomplete-list {
+    max-height: 14rem;
+  }
+
+  .file-path-indicator {
+    opacity: 0.6;
+    font-family: var(--card-font-mono, 'JetBrains Mono', ui-monospace, monospace);
+    margin-left: 4px;
+  }
+
+  .file-note-tags {
+    max-width: 6rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+</style>
