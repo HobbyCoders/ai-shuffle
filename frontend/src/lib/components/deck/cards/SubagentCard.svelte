@@ -388,28 +388,31 @@
 		importing = false;
 	}
 
+	/**
+	 * Opens the editor view populated with AI-generated subagent data.
+	 * User can review/edit the values before saving.
+	 */
+	function openEditorFromGenerated(data: SubagentExport) {
+		editingSubagent = null; // Creating new, not editing existing
+
+		const sub = data.subagent;
+		formId = sub.id;
+		formName = sub.name;
+		formDescription = sub.description;
+		formPrompt = sub.prompt;
+		formTools = sub.tools || [];
+		formModel = sub.model || '';
+		toolSelectionMode = sub.tools && sub.tools.length > 0 ? 'select' : 'all';
+
+		viewMode = 'editor';
+		activeTab = 'identity';
+	}
+
 	// Handle AI-generated subagent
-	async function handleGeneratedSubagent(data: SubagentExport | unknown) {
-		try {
-			const exportData = data as SubagentExport;
-			const subagentData = exportData.subagent;
-
-			// Create the subagent directly via API
-			await api.post('/subagents', {
-				id: subagentData.id,
-				name: subagentData.name,
-				description: subagentData.description,
-				prompt: subagentData.prompt,
-				tools: subagentData.tools,
-				model: subagentData.model
-			});
-
-			await loadSubagents();
-			alert(`Successfully created AI-generated subagent: ${subagentData.name}`);
-		} catch (e: unknown) {
-			const err = e as { detail?: string; message?: string };
-			error = 'Failed to save generated subagent: ' + (err.detail || err.message || 'Unknown error');
-		}
+	function handleGeneratedSubagent(data: SubagentExport | unknown) {
+		// Close the dialog and open the editor with generated data
+		showGenerateDialog = false;
+		openEditorFromGenerated(data as SubagentExport);
 	}
 
 	// Tool helpers
