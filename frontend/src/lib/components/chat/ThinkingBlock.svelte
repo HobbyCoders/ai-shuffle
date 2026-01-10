@@ -16,25 +16,16 @@
 
 	interface Props {
 		content: string;
-		timestamp?: Date;
 		streaming?: boolean;
 	}
 
 	let {
 		content,
-		timestamp,
 		streaming = false
 	}: Props = $props();
 
-	// Start collapsed by default, but expand while streaming
+	// Start collapsed by default
 	let isExpanded = $state(false);
-
-	// Auto-expand while streaming for visibility
-	$effect(() => {
-		if (streaming) {
-			isExpanded = true;
-		}
-	});
 
 	function renderMarkdown(text: string): string {
 		try {
@@ -48,12 +39,6 @@
 			return text;
 		}
 	}
-
-	function formatTime(date?: Date): string {
-		const d = date || new Date();
-		return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-	}
-
 </script>
 
 <div class="thinking-block" class:streaming>
@@ -62,13 +47,19 @@
 		onclick={() => isExpanded = !isExpanded}
 		class="thinking-header"
 	>
-		<!-- Brain icon -->
-		<svg class="thinking-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+		<span class="thinking-label">Assistant</span>
+		<!-- Brain/thinking icon -->
+		<svg class="thinking-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+			<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
+			<path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
+			<path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/>
+			<path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/>
+			<path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/>
+			<path d="M3.477 10.896a4 4 0 0 1 .585-.396"/>
+			<path d="M19.938 10.5a4 4 0 0 1 .585.396"/>
+			<path d="M6 18a4 4 0 0 1-1.967-.516"/>
+			<path d="M19.967 17.484A4 4 0 0 1 18 18"/>
 		</svg>
-
-		<span class="thinking-label">Thinking</span>
-		<span class="thinking-time">{formatTime(timestamp)}</span>
 
 		{#if streaming}
 			<StreamingIndicator />
@@ -125,23 +116,18 @@
 		background: var(--muted, hsl(var(--muted) / 0.3));
 	}
 
+	.thinking-label {
+		font-weight: 600;
+		font-size: 0.875rem;
+		color: #fb923c; /* orange-400 - matches assistant message header */
+	}
+
 	.thinking-icon {
 		width: 1rem;
 		height: 1rem;
 		flex-shrink: 0;
-		color: #22d3ee; /* cyan-400 */
-	}
-
-	.thinking-label {
-		font-weight: 600;
-		font-size: 0.875rem;
-		color: #22d3ee; /* cyan-400 */
-	}
-
-	.thinking-time {
-		font-size: 0.75rem;
 		color: var(--muted-foreground);
-		opacity: 0.8;
+		opacity: 0.7;
 	}
 
 	.thinking-chevron {
@@ -161,7 +147,6 @@
 		font-size: var(--text-sm, 0.875rem);
 		line-height: 1.6;
 		padding: 0.5rem 0;
-		margin-left: 1.5rem; /* Indent under icon */
 	}
 
 	/* Override prose styles to maintain italic + muted appearance */

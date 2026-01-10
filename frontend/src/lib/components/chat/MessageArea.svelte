@@ -284,7 +284,7 @@
 						</svg>
 					</div>
 					<h2 class="text-xl font-semibold text-foreground mb-2">Start a Conversation</h2>
-					<p class="text-muted-foreground mb-4">Ask Claude anything - code, questions, ideas, or just chat.</p>
+					<p class="text-muted-foreground mb-4">Ask anything - code, questions, ideas, or just chat.</p>
 					{#if currentProfile}
 						<div class="text-sm text-muted-foreground">
 							<span>Profile:</span>

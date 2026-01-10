@@ -288,7 +288,7 @@
 
 			<div class="bg-muted/50 rounded p-2 mb-4 text-sm text-foreground">
 				<span class="{messageRole === 'user' ? 'text-blue-400' : 'text-orange-400'} font-medium">
-					{messageRole === 'user' ? 'You:' : 'Claude:'}
+					{messageRole === 'user' ? 'You:' : 'Assistant:'}
 				</span>
 				<span class="ml-1">{getMessagePreview(messageContent)}</span>
 			</div>
