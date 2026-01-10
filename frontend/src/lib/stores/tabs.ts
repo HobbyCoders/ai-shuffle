@@ -10,6 +10,7 @@ import type { Session, Profile, PermissionRequest as PermissionRequestType, User
 import { api, searchSessionsPaginated } from '$lib/api/client';
 import { isNotificationsEnabled, notifySessionComplete, getPermission, type SessionCompleteInfo } from '$lib/services/notifications';
 import { deck } from './deck';
+import { getDeviceIdSync } from './device';
 import {
 	initStreamingBuffer,
 	pushEvent,
@@ -1202,7 +1203,7 @@ function createTabsStore() {
 		const sourceDeviceId = data.source_device_id as string | undefined;
 
 		// Get our device ID to ignore messages from ourselves (shouldn't happen, but safety check)
-		const ourDeviceId = getDeviceId();
+		const ourDeviceId = getDeviceIdSync();
 		if (sourceDeviceId === ourDeviceId) {
 			console.log('[Tabs] Ignoring tabs_sync from our own device');
 			return;

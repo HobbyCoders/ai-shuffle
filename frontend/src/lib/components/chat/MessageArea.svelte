@@ -335,6 +335,20 @@
 							</div>
 						</div>
 					{/if}
+				{:else if message.type === 'tool_use' && message.toolName === 'Task'}
+					<!-- Task tool_use - Skip rendering if a linked subagent message exists -->
+					<!-- The SubagentMessage component handles displaying the agent's work -->
+					{@const hasLinkedSubagent = tab.messages.some(m => m.type === 'subagent' && m.toolId === message.toolId)}
+					{#if !hasLinkedSubagent}
+						<ToolUseMessage
+							name={message.toolName || 'Tool'}
+							input={message.toolInput}
+							partialInput={message.partialToolInput}
+							result={message.toolResult}
+							status={message.toolStatus || 'running'}
+							streaming={message.streaming}
+						/>
+					{/if}
 				{:else if message.type === 'tool_use'}
 					<ToolUseMessage
 						name={message.toolName || 'Tool'}

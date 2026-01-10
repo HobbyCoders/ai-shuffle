@@ -231,6 +231,9 @@ class LiveSessionStore:
                         agent_type=m.get("agentType") or m.get("agent_type"),
                         agent_description=m.get("agentDescription") or m.get("agent_description"),
                         agent_status=m.get("agentStatus") or m.get("agent_status"),
+                        # System message fields
+                        system_subtype=m.get("systemSubtype") or m.get("subtype"),
+                        system_data=m.get("systemData") or m.get("data"),
                         metadata=m.get("metadata"),
                     )
                     messages.append(msg)
