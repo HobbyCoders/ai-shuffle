@@ -731,14 +731,8 @@ class SyncEngine:
             if user_id not in self._user_connections:
                 self._user_connections[user_id] = {}
 
-            # Close existing connection for this device if any
-            if device_id in self._user_connections[user_id]:
-                old_conn = self._user_connections[user_id][device_id]
-                try:
-                    # Don't close - it's the same websocket being re-registered
-                    pass
-                except Exception:
-                    pass
+            # Note: If device already registered, it's the same websocket being re-registered
+            # Just overwrite the entry - no need to close
 
             connection = UserDeviceConnection(
                 device_id=device_id,

@@ -3,7 +3,6 @@ AI Hub - Claude Code Web Interface and API
 Main FastAPI application entry point
 """
 
-import asyncio
 import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -18,7 +17,6 @@ from app.db import database
 from app.db.database import init_database
 from app.core.profiles import run_migrations
 from app.core.auth import auth_service
-from app.core.sync_engine import sync_engine
 from app.core import encryption
 
 # Import API routers

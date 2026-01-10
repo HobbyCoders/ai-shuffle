@@ -24,7 +24,7 @@ from app.core.slash_commands import (
     parse_command_input
 )
 # New V2 rewind services - direct JSONL manipulation
-from app.core.jsonl_rewind import jsonl_rewind_service, RewindResult
+from app.core.jsonl_rewind import jsonl_rewind_service
 from app.core.sync_engine import sync_engine
 from app.core.models import (
     RewindRequest, RewindCheckpoint, RewindCheckpointsResponse,

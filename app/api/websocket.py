@@ -18,7 +18,7 @@ from typing import Optional, Dict, Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from fastapi.websockets import WebSocketState
 
-from app.core.sync_engine import sync_engine, SyncEvent
+from app.core.sync_engine import sync_engine
 from app.core.live_session_store import live_session_store
 from app.db import database
 from app.core.webhook_service import dispatch_session_complete, dispatch_session_error
