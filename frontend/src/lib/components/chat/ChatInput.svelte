@@ -826,7 +826,7 @@
 								bind:value={inputValue}
 								oninput={handleInputChange}
 								onkeydown={handleKeyDown}
-								placeholder="Message Assistant..."
+								placeholder="Message {selectedProfileName}..."
 								class="chat-textarea"
 								rows="1"
 								disabled={!$claudeAuthenticated}
