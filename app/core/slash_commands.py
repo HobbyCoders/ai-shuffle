@@ -302,6 +302,10 @@ SDK_BUILTIN_COMMANDS = {
     "compact": {
         "description": "Compact conversation history to free up context space",
         "type": "sdk_builtin"
+    },
+    "context": {
+        "description": "Show current context window usage and token counts",
+        "type": "sdk_builtin"
     }
 }
 
