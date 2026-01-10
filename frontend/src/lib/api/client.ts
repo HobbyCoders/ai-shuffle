@@ -1459,3 +1459,73 @@ export async function testHook(hookId: string): Promise<HookTestResult> {
 export async function getPluginHooks(): Promise<PluginHookInfo[]> {
 	return api.get<PluginHookInfo[]>('/hooks/plugins/all');
 }
+
+// ============================================================================
+// AI Generation API Types and Functions
+// ============================================================================
+
+/**
+ * Request to generate a profile using AI
+ */
+export interface GenerateProfileRequest {
+	description: string;
+	model?: string;
+}
+
+/**
+ * Request to generate a subagent using AI
+ */
+export interface GenerateSubagentRequest {
+	description: string;
+	model?: string;
+}
+
+/**
+ * Subagent export data for AI-generated subagents
+ */
+export interface SubagentExportData {
+	id: string;
+	name: string;
+	description: string;
+	prompt: string;
+	tools: string[] | null;
+	model: string | null;
+}
+
+/**
+ * Subagent export format (same structure as AgentExport but for subagents)
+ */
+export interface SubagentExport {
+	version: string;
+	type: string;
+	exported_at: string;
+	subagent: SubagentExportData;
+}
+
+/**
+ * Generate a profile configuration using AI
+ * @param description Natural language description of the desired profile
+ * @param model Optional model to use for generation (haiku, sonnet, opus)
+ * @returns Generated profile in AgentExport format
+ */
+export async function generateProfile(description: string, model?: string): Promise<AgentExport> {
+	const body: GenerateProfileRequest = { description };
+	if (model) {
+		body.model = model;
+	}
+	return api.post<AgentExport>('/generate/profile', body);
+}
+
+/**
+ * Generate a subagent configuration using AI
+ * @param description Natural language description of the desired subagent
+ * @param model Optional model to use for generation (haiku, sonnet, opus)
+ * @returns Generated subagent in SubagentExport format
+ */
+export async function generateSubagent(description: string, model?: string): Promise<SubagentExport> {
+	const body: GenerateSubagentRequest = { description };
+	if (model) {
+		body.model = model;
+	}
+	return api.post<SubagentExport>('/generate/subagent', body);
+}

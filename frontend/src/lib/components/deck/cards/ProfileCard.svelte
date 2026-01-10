@@ -7,8 +7,9 @@
 	 * - Form view: Edit or create profiles with tabbed interface
 	 */
 	import BaseCard from './BaseCard.svelte';
+	import AIGenerateDialog from './AIGenerateDialog.svelte';
 	import type { DeckCard } from './types';
-	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile } from '$lib/api/client';
+	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
 	import { profiles as profilesStore, tabs as tabsStore } from '$lib/stores/tabs';
 	import { groups as groupsStore } from '$lib/stores/groups';
 	import { plugins, installedPlugins, fileBasedAgents } from '$lib/stores/plugins';
@@ -184,6 +185,7 @@
 	// Import handling
 	let profileImportInput: HTMLInputElement | undefined = $state();
 	let profileImporting = $state(false);
+	let showGenerateDialog = $state(false);
 
 	// Plugin management
 	let pluginAgents = $derived($fileBasedAgents);
@@ -706,6 +708,113 @@
 			input.value = '';
 			profileImporting = false;
 		}
+	}
+
+	/**
+	 * Opens the form view populated with AI-generated profile data.
+	 * User can review/edit the values before saving.
+	 */
+	function openFormFromGenerated(data: AgentExport) {
+		editingProfile = null; // Creating new, not editing existing
+
+		const agent = data.agent;
+
+		// Map AgentExportData fields to form fields
+		const allowedTools = agent.allowed_tools || [];
+		const disallowedTools = agent.disallowed_tools || [];
+
+		// Determine tool selection mode
+		if (allowedTools.length > 0) {
+			toolSelectionMode = 'allow';
+		} else if (disallowedTools.length > 0) {
+			toolSelectionMode = 'disallow';
+		} else {
+			toolSelectionMode = 'all';
+		}
+
+		// Build enabled AI tools array from ai_tools object
+		const aiTools = agent.ai_tools || {};
+		const enabledAITools: string[] = [];
+		if (aiTools.image_generation) enabledAITools.push('image_generation');
+		if (aiTools.image_editing) enabledAITools.push('image_editing');
+		if (aiTools.image_reference) enabledAITools.push('image_reference');
+		if (aiTools.video_generation) enabledAITools.push('video_generation');
+		if (aiTools.video_with_audio) enabledAITools.push('video_with_audio');
+		if (aiTools.image_to_video) enabledAITools.push('image_to_video');
+		if (aiTools.video_extend) enabledAITools.push('video_extend');
+		if (aiTools.video_bridge) enabledAITools.push('video_bridge');
+		if (aiTools.video_understanding) enabledAITools.push('video_understanding');
+		if (aiTools.text_to_3d) enabledAITools.push('text_to_3d');
+		if (aiTools.image_to_3d) enabledAITools.push('image_to_3d');
+		if (aiTools.retexture_3d) enabledAITools.push('retexture_3d');
+		if (aiTools.rig_3d) enabledAITools.push('rig_3d');
+		if (aiTools.animate_3d) enabledAITools.push('animate_3d');
+		if (aiTools.ai_collaborate) enabledAITools.push('ai_collaborate');
+		if (aiTools.ai_memory) enabledAITools.push('ai_memory');
+		if (aiTools.ai_review) enabledAITools.push('ai_review');
+		if (aiTools.ai_reason) enabledAITools.push('ai_reason');
+
+		// Determine AI tool selection mode
+		if (enabledAITools.length > 0) {
+			aiToolSelectionMode = 'custom';
+		} else {
+			aiToolSelectionMode = 'custom'; // Default to custom so user can add if needed
+		}
+
+		// Parse system prompt
+		let spType = 'preset';
+		let spPreset = 'claude_code';
+		let spAppend = '';
+		let spContent = '';
+		let spInjectEnv = false;
+
+		if (agent.system_prompt_type === 'custom') {
+			spType = 'custom';
+			spContent = agent.system_prompt_content || '';
+			spInjectEnv = agent.system_prompt_inject_env || false;
+		} else {
+			spType = 'preset';
+			spPreset = agent.system_prompt_preset || 'claude_code';
+			spAppend = agent.system_prompt_append || '';
+		}
+
+		profileForm = {
+			id: '', // User must provide unique ID for new profile
+			name: agent.name,
+			description: agent.description || '',
+			model: agent.model || 'sonnet',
+			permission_mode: agent.permission_mode || 'default',
+			max_turns: agent.max_turns || null,
+			allowed_tools: allowedTools,
+			disallowed_tools: disallowedTools,
+			enabled_agents: agent.enabled_agents || [],
+			include_partial_messages: agent.include_partial_messages !== false,
+			continue_conversation: agent.continue_conversation || false,
+			fork_session: agent.fork_session || false,
+			thinking_mode: (agent as any).thinking_mode || 'default',
+			system_prompt_type: spType,
+			system_prompt_preset: spPreset,
+			system_prompt_append: spAppend,
+			system_prompt_content: spContent,
+			system_prompt_inject_env: spInjectEnv,
+			enabled_ai_tools: enabledAITools,
+			setting_sources: agent.setting_sources || [],
+			cwd: '',
+			add_dirs: '',
+			user: '',
+			max_buffer_size: agent.max_buffer_size || null,
+			env_vars: agent.env ? Object.entries(agent.env).map(([key, value]) => ({ key, value: value as string })) : [],
+			enable_file_checkpointing: false
+		};
+
+		viewMode = 'form';
+		activeTab = 'general';
+	}
+
+	function handleGeneratedProfile(data: AgentExport | unknown) {
+		// Close the dialog and open the form with generated data
+		showGenerateDialog = false;
+		openFormFromGenerated(data as AgentExport);
 	}
 
 	async function confirmDeleteProfile() {
@@ -1832,6 +1941,11 @@
 					</svg>
 					New Profile
 				</button>
+				<button class="card-btn-secondary" onclick={() => showGenerateDialog = true} title="Generate with AI">
+					<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+					</svg>
+				</button>
 				<button class="card-btn-secondary" onclick={triggerImport} disabled={profileImporting} title="Import profile">
 					{#if profileImporting}
 						<span class="card-spinner card-spinner--small"></span>
@@ -1849,6 +1963,14 @@
 				</div>
 			</div>
 		{/if}
+
+		<!-- AI Generate Dialog -->
+		<AIGenerateDialog
+			type="profile"
+			isOpen={showGenerateDialog}
+			onClose={() => showGenerateDialog = false}
+			onGenerated={handleGeneratedProfile}
+		/>
 	</div>
 {/snippet}
 

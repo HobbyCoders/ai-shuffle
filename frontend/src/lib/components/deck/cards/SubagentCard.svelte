@@ -14,10 +14,11 @@
 	 * - Import/export JSON
 	 */
 	import BaseCard from './BaseCard.svelte';
+	import AIGenerateDialog from './AIGenerateDialog.svelte';
 	import type { DeckCard } from './types';
-	import { api } from '$lib/api/client';
+	import { api, type SubagentExport } from '$lib/api/client';
 	import { groups } from '$lib/stores/groups';
-	import { Search, Plus, Trash2, Download, Upload, X, ArrowLeft, Monitor, User, Settings, Terminal, Check, Lock, RotateCcw } from 'lucide-svelte';
+	import { Search, Plus, Trash2, Download, Upload, X, ArrowLeft, Monitor, User, Settings, Terminal, Check, Lock, RotateCcw, Zap } from 'lucide-svelte';
 	import GroupDropdown from '$lib/components/GroupDropdown.svelte';
 	import './card-design-system.css';
 
@@ -94,6 +95,7 @@
 	// Import state
 	let importInput: HTMLInputElement;
 	let importing = $state(false);
+	let showGenerateDialog = $state(false);
 
 	// Editor state
 	type EditorTab = 'identity' | 'config' | 'prompt';
@@ -386,6 +388,33 @@
 		importing = false;
 	}
 
+	/**
+	 * Opens the editor view populated with AI-generated subagent data.
+	 * User can review/edit the values before saving.
+	 */
+	function openEditorFromGenerated(data: SubagentExport) {
+		editingSubagent = null; // Creating new, not editing existing
+
+		const sub = data.subagent;
+		formId = sub.id;
+		formName = sub.name;
+		formDescription = sub.description;
+		formPrompt = sub.prompt;
+		formTools = sub.tools || [];
+		formModel = sub.model || '';
+		toolSelectionMode = sub.tools && sub.tools.length > 0 ? 'select' : 'all';
+
+		viewMode = 'editor';
+		activeTab = 'identity';
+	}
+
+	// Handle AI-generated subagent
+	function handleGeneratedSubagent(data: SubagentExport | unknown) {
+		// Close the dialog and open the editor with generated data
+		showGenerateDialog = false;
+		openEditorFromGenerated(data as SubagentExport);
+	}
+
 	// Tool helpers
 	function toggleTool(toolName: string) {
 		if (formTools.includes(toolName)) {
@@ -646,6 +675,13 @@
 				>
 					<Plus />
 					New Subagent
+				</button>
+				<button
+					onclick={() => showGenerateDialog = true}
+					class="card-btn-secondary"
+					title="Generate with AI"
+				>
+					<Zap />
 				</button>
 				<button
 					onclick={triggerImport}
@@ -950,6 +986,14 @@
 				</div>
 			</div>
 		{/if}
+
+		<!-- AI Generate Dialog -->
+		<AIGenerateDialog
+			type="subagent"
+			isOpen={showGenerateDialog}
+			onClose={() => showGenerateDialog = false}
+			onGenerated={handleGeneratedSubagent}
+		/>
 	</div>
 {/snippet}
 
