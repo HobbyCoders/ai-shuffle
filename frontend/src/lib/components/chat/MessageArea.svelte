@@ -315,7 +315,7 @@
 					<UserMessage
 						content={message.content}
 						sessionId={tab.sessionId}
-						messageUuid={message.id}
+						messageUuid={message.jsonlUuid || message.id}
 						{fileCheckpointingEnabled}
 						onRewindComplete={handleRewindComplete}
 					/>
@@ -331,7 +331,7 @@
 						content={message.content}
 						messageIndex={messageIndex}
 						messageId={message.id}
-						messageUuid={message.id}
+						messageUuid={message.jsonlUuid || message.id}
 						sessionId={tab.sessionId}
 						streaming={message.streaming && messageIndex === lastStreamingMessageIndex()}
 						{hasPartialMessages}

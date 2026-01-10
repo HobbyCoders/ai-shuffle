@@ -422,6 +422,7 @@ def parse_session_history(
 
             messages.append({
                 "id": uuid,
+                "uuid": uuid,  # Raw JSONL UUID for rewind
                 "role": "system",
                 "content": system_content,
                 "type": "system",
@@ -443,6 +444,7 @@ def parse_session_history(
                     msg_counter += 1
                     messages.append({
                         "id": uuid,
+                        "uuid": uuid,  # Raw JSONL UUID for rewind
                         "role": "system",
                         "content": local_output,
                         "type": "system",
@@ -457,6 +459,7 @@ def parse_session_history(
                     msg_counter += 1
                     messages.append({
                         "id": uuid,
+                        "uuid": uuid,  # Raw JSONL UUID for rewind
                         "role": "user",
                         "content": content,
                         "type": None,
@@ -567,6 +570,7 @@ def parse_session_history(
                             if not found_tool_use:
                                 messages.append({
                                     "id": f"result-{uuid}-{tool_use_id}",
+                                    "uuid": uuid,  # Raw JSONL UUID for rewind
                                     "role": "assistant",  # Display as assistant for UI consistency
                                     "content": output[:2000] if output else "",  # Truncate like streaming
                                     "type": "tool_result",
@@ -591,6 +595,7 @@ def parse_session_history(
                     msg_counter += 1
                     messages.append({
                         "id": uuid,
+                        "uuid": uuid,  # Raw JSONL UUID for rewind
                         "role": "user",
                         "content": combined_text,
                         "type": None,
@@ -616,6 +621,7 @@ def parse_session_history(
                     msg_counter += 1
                     messages.append({
                         "id": uuid,
+                        "uuid": uuid,  # Raw JSONL UUID for rewind
                         "role": "system",
                         "content": error_text,
                         "type": "system",
@@ -638,6 +644,7 @@ def parse_session_history(
                                 msg_counter += 1
                                 messages.append({
                                     "id": f"thinking-{uuid}-{msg_counter}",
+                                    "uuid": uuid,  # Raw JSONL UUID for rewind
                                     "role": "assistant",
                                     "content": thinking_text,
                                     "type": "thinking",
@@ -654,6 +661,7 @@ def parse_session_history(
                                 msg_counter += 1
                                 messages.append({
                                     "id": f"text-{uuid}-{msg_counter}",
+                                    "uuid": uuid,  # Raw JSONL UUID for rewind
                                     "role": "assistant",
                                     "content": text,
                                     "type": "text",
@@ -692,6 +700,7 @@ def parse_session_history(
                                 # Create a placeholder subagent message
                                 messages.append({
                                     "id": f"subagent-{tool_id}",
+                                    "uuid": uuid,  # Raw JSONL UUID for rewind
                                     "role": "assistant",
                                     "content": "",
                                     "type": "subagent",
@@ -708,6 +717,7 @@ def parse_session_history(
                             else:
                                 messages.append({
                                     "id": f"tool-{uuid}-{tool_id or msg_counter}",
+                                    "uuid": uuid,  # Raw JSONL UUID for rewind
                                     "role": "assistant",
                                     "content": "",
                                     "type": "tool_use",
@@ -724,6 +734,7 @@ def parse_session_history(
                 msg_counter += 1
                 messages.append({
                     "id": f"text-{uuid}",
+                    "uuid": uuid,  # Raw JSONL UUID for rewind
                     "role": "assistant",
                     "content": content,
                     "type": "text",

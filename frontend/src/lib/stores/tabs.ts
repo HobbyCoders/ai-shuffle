@@ -65,6 +65,7 @@ export interface TodoItem {
 
 export interface ChatMessage {
 	id: string;
+	jsonlUuid?: string; // Raw UUID from JSONL file - used for rewind (id may be preserved for Svelte keying)
 	role: 'user' | 'assistant' | 'system';
 	content: string;
 	type?: MessageType;
@@ -2096,6 +2097,7 @@ function createTabsStore() {
 					if (msgType === 'system' || m.role === 'system') {
 						messages.push({
 							id: String(m.id || `msg-${i}`),
+							jsonlUuid: m.uuid as string | undefined,  // Raw UUID from JSONL for rewind
 							role: 'system' as const,
 							content: m.content as string,
 							type: 'system' as const,
@@ -2120,6 +2122,7 @@ function createTabsStore() {
 					// Build the chat message with all fields
 					const chatMessage: ChatMessage = {
 						id: String(m.id || `msg-${i}`),
+						jsonlUuid: m.uuid as string | undefined,  // Raw UUID from JSONL for rewind
 						role: (m.role === 'tool_use' || m.role === 'tool_result' ? 'assistant' : m.role) as 'user' | 'assistant',
 						content: m.content as string,
 						type: msgType,
@@ -4389,6 +4392,7 @@ function createTabsStore() {
 					if (msgType === 'system' || m.role === 'system') {
 						return {
 							id: String(m.id || `msg-${i}`),
+							jsonlUuid: m.uuid as string | undefined,  // Raw UUID from JSONL for rewind
 							role: 'system' as const,
 							content: m.content as string,
 							type: 'system' as const,
@@ -4402,6 +4406,7 @@ function createTabsStore() {
 					// Build the chat message with all fields
 					const chatMessage: ChatMessage = {
 						id: String(m.id || `msg-${i}`),
+						jsonlUuid: m.uuid as string | undefined,  // Raw UUID from JSONL for rewind
 						role: (m.role === 'tool_use' || m.role === 'tool_result' ? 'assistant' : m.role) as 'user' | 'assistant',
 						content: m.content as string,
 						type: msgType,
