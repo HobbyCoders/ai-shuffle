@@ -7,8 +7,9 @@
 	 * - Form view: Edit or create profiles with tabbed interface
 	 */
 	import BaseCard from './BaseCard.svelte';
+	import AIGenerateDialog from './AIGenerateDialog.svelte';
 	import type { DeckCard } from './types';
-	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile } from '$lib/api/client';
+	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
 	import { profiles as profilesStore, tabs as tabsStore } from '$lib/stores/tabs';
 	import { groups as groupsStore } from '$lib/stores/groups';
 	import { plugins, installedPlugins, fileBasedAgents } from '$lib/stores/plugins';
@@ -184,6 +185,7 @@
 	// Import handling
 	let profileImportInput: HTMLInputElement | undefined = $state();
 	let profileImporting = $state(false);
+	let showGenerateDialog = $state(false);
 
 	// Plugin management
 	let pluginAgents = $derived($fileBasedAgents);
@@ -705,6 +707,17 @@
 		} finally {
 			input.value = '';
 			profileImporting = false;
+		}
+	}
+
+	async function handleGeneratedProfile(data: AgentExport | unknown) {
+		try {
+			// Import the generated profile
+			const profile = await importAgent(data as AgentExport);
+			await tabsStore.loadProfiles();
+			alert(`Successfully created AI-generated profile: ${profile.name}`);
+		} catch (err: any) {
+			alert('Failed to save generated profile: ' + (err.detail || err.message || 'Unknown error'));
 		}
 	}
 
@@ -1832,6 +1845,11 @@
 					</svg>
 					New Profile
 				</button>
+				<button class="card-btn-secondary" onclick={() => showGenerateDialog = true} title="Generate with AI">
+					<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+					</svg>
+				</button>
 				<button class="card-btn-secondary" onclick={triggerImport} disabled={profileImporting} title="Import profile">
 					{#if profileImporting}
 						<span class="card-spinner card-spinner--small"></span>
@@ -1849,6 +1867,14 @@
 				</div>
 			</div>
 		{/if}
+
+		<!-- AI Generate Dialog -->
+		<AIGenerateDialog
+			type="profile"
+			isOpen={showGenerateDialog}
+			onClose={() => showGenerateDialog = false}
+			onGenerated={handleGeneratedProfile}
+		/>
 	</div>
 {/snippet}
 
