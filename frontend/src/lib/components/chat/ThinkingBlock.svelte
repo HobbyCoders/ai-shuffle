@@ -168,7 +168,7 @@
 	.thinking-label {
 		font-weight: 600;
 		font-size: 0.875rem;
-		color: #fb923c; /* orange-400 - matches assistant message header */
+		color: var(--primary);
 	}
 
 	.thinking-icon {
