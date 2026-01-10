@@ -81,6 +81,59 @@ That's the generated config!'''
         assert result["tools"] == ["Read", "Write", "Bash"]
         assert result["model"] == "haiku"
 
+    def test_extract_json_with_braces_in_strings(self):
+        """Should correctly handle braces inside JSON string values."""
+        from app.api.generation import extract_json_from_response
+
+        # This is the bug case - braces inside string values should not
+        # affect the brace counting for finding JSON boundaries
+        text = '{"name": "Advanced {Pro} Profile", "description": "Uses {curly} braces"}'
+        result = extract_json_from_response(text)
+
+        assert result["name"] == "Advanced {Pro} Profile"
+        assert result["description"] == "Uses {curly} braces"
+
+    def test_extract_json_with_nested_braces_in_strings(self):
+        """Should handle multiple nested brace patterns in strings."""
+        from app.api.generation import extract_json_from_response
+
+        text = '{"prompt": "Format: {{name}} and {{value}}", "model": "sonnet"}'
+        result = extract_json_from_response(text)
+
+        assert result["prompt"] == "Format: {{name}} and {{value}}"
+        assert result["model"] == "sonnet"
+
+    def test_extract_json_with_escaped_quotes(self):
+        """Should handle escaped quotes in string values."""
+        from app.api.generation import extract_json_from_response
+
+        text = '{"name": "Test \\"Quoted\\" Name", "value": "ok"}'
+        result = extract_json_from_response(text)
+
+        assert result["name"] == 'Test "Quoted" Name'
+        assert result["value"] == "ok"
+
+    def test_extract_json_with_escaped_quotes_and_braces(self):
+        """Should handle both escaped quotes and braces in strings."""
+        from app.api.generation import extract_json_from_response
+
+        text = '{"prompt": "Use format \\"{name}\\": {value}", "model": "haiku"}'
+        result = extract_json_from_response(text)
+
+        assert result["prompt"] == 'Use format "{name}": {value}'
+        assert result["model"] == "haiku"
+
+    def test_extract_json_complex_nested_with_braces_in_strings(self):
+        """Should handle complex nested objects with braces in string values."""
+        from app.api.generation import extract_json_from_response
+
+        text = '''{"config": {"template": "Hello {user}!", "format": "{key}: {val}"}, "name": "Test"}'''
+        result = extract_json_from_response(text)
+
+        assert result["config"]["template"] == "Hello {user}!"
+        assert result["config"]["format"] == "{key}: {val}"
+        assert result["name"] == "Test"
+
 
 class TestGenerateWithClaude:
     """Test the Claude SDK integration."""

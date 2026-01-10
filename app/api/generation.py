@@ -190,7 +190,6 @@ def extract_json_from_response(text: str) -> dict:
     Raises:
         ValueError: If no valid JSON found
     """
-    # Try to parse as-is first
     text = text.strip()
 
     # Remove markdown code blocks if present
@@ -207,22 +206,44 @@ def extract_json_from_response(text: str) -> dict:
         text = "\n".join(lines[start_idx:end_idx]).strip()
 
     # Try to find JSON object in the text
-    # Look for opening { and find matching }
     start = text.find("{")
     if start == -1:
         raise ValueError("No JSON object found in response")
 
-    # Find the matching closing brace
+    # Find the matching closing brace, properly handling strings
+    # This correctly ignores braces inside quoted strings
     depth = 0
     end = start
+    in_string = False
+    escape_next = False
+
     for i in range(start, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                end = i + 1
-                break
+        char = text[i]
+
+        if escape_next:
+            # Skip this character, it's escaped
+            escape_next = False
+            continue
+
+        if char == "\\":
+            # Next character is escaped
+            escape_next = True
+            continue
+
+        if char == '"':
+            # Toggle string state
+            in_string = not in_string
+            continue
+
+        # Only count braces when not inside a string
+        if not in_string:
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
 
     json_str = text[start:end]
 
