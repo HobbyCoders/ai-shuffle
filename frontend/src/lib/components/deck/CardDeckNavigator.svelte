@@ -21,7 +21,7 @@
 	import {
 		MessageSquare, Terminal, Clock,
 		Settings, FolderOpen, X, Files, User, Users, Pencil, Check,
-		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronRight, Bot, Puzzle,
+		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronLeft, ChevronRight, Bot, Puzzle,
 		List, GitBranch, Key, Zap, StickyNote, BarChart3
 	} from 'lucide-svelte';
 	import { tabs, type ApiUser } from '$lib/stores/tabs';
@@ -710,6 +710,44 @@
 			confirmEditMode();
 		} else {
 			enterEditMode();
+		}
+	}
+
+	// Mobile reorder: move card left (towards start)
+	function moveCardLeft(cardId: string, e: Event) {
+		e.stopPropagation();
+		if (!isEditMode || pendingCardOrder.length === 0) return;
+
+		const currentIndex = pendingCardOrder.indexOf(cardId);
+		if (currentIndex <= 0) return; // Already at start
+
+		// Swap with previous card
+		const newOrder = [...pendingCardOrder];
+		[newOrder[currentIndex - 1], newOrder[currentIndex]] = [newOrder[currentIndex], newOrder[currentIndex - 1]];
+		pendingCardOrder = newOrder;
+
+		// Haptic feedback
+		if (window.navigator.vibrate) {
+			window.navigator.vibrate(30);
+		}
+	}
+
+	// Mobile reorder: move card right (towards end)
+	function moveCardRight(cardId: string, e: Event) {
+		e.stopPropagation();
+		if (!isEditMode || pendingCardOrder.length === 0) return;
+
+		const currentIndex = pendingCardOrder.indexOf(cardId);
+		if (currentIndex < 0 || currentIndex >= pendingCardOrder.length - 1) return; // Already at end
+
+		// Swap with next card
+		const newOrder = [...pendingCardOrder];
+		[newOrder[currentIndex], newOrder[currentIndex + 1]] = [newOrder[currentIndex + 1], newOrder[currentIndex]];
+		pendingCardOrder = newOrder;
+
+		// Haptic feedback
+		if (window.navigator.vibrate) {
+			window.navigator.vibrate(30);
 		}
 	}
 
@@ -1412,7 +1450,7 @@
 		<!-- Edit mode hint -->
 		{#if isEditMode}
 			<div class="edit-mode-hint" transition:fade={{ duration: 150 }}>
-				{isMobile ? 'Long press to drag • Tap for options' : 'Drag to reorder • Click for options'}
+				{isMobile ? 'Use arrows to reorder • Tap for options' : 'Drag to reorder • Click for options'}
 			</div>
 		{/if}
 
@@ -1499,12 +1537,31 @@
 									aria-label="{card.title}: {card.subtitle}"
 								>
 									{#if isEditMode && card.type !== 'add-deck'}
+										<!-- Mobile reorder buttons - simple tap to move -->
 										<!-- svelte-ignore a11y_no_static_element_interactions -->
-										<div
-											class="mobile-drag-handle"
-											onpointerdown={(e) => handleDragHandlePointerDown(e, card, index)}
-										>
-											<GripVertical size={20} />
+										<div class="mobile-reorder-controls">
+											<!-- svelte-ignore a11y_click_events_have_key_events -->
+											<div
+												class="mobile-reorder-btn"
+												class:disabled={pendingCardOrder.indexOf(card.id) <= 0}
+												onclick={(e) => moveCardLeft(card.id, e)}
+												role="button"
+												tabindex="-1"
+												aria-label="Move left"
+											>
+												<ChevronLeft size={18} strokeWidth={2.5} />
+											</div>
+											<!-- svelte-ignore a11y_click_events_have_key_events -->
+											<div
+												class="mobile-reorder-btn"
+												class:disabled={pendingCardOrder.indexOf(card.id) >= pendingCardOrder.length - 1}
+												onclick={(e) => moveCardRight(card.id, e)}
+												role="button"
+												tabindex="-1"
+												aria-label="Move right"
+											>
+												<ChevronRight size={18} strokeWidth={2.5} />
+											</div>
 										</div>
 									{/if}
 
@@ -3107,37 +3164,43 @@
 		transform: translateY(-50%) translateX(2px);
 	}
 
-	/* Mobile Drag Handle */
-	.mobile-drag-handle {
+	/* Mobile Reorder Controls */
+	.mobile-reorder-controls {
 		position: absolute;
 		top: 10px;
 		left: 10px;
-		padding: 10px;
-		color: var(--text-dim);
-		opacity: 0.7;
-		cursor: grab;
-		transition: all 0.15s ease;
-		border-radius: var(--radius-md);
-		touch-action: none;
+		right: 10px;
+		display: flex;
+		justify-content: space-between;
 		z-index: 5;
-		/* Larger touch target for mobile */
-		min-width: 44px;
-		min-height: 44px;
+		pointer-events: auto;
+	}
+
+	.mobile-reorder-btn {
+		width: 40px;
+		height: 40px;
+		border-radius: var(--radius-md);
+		background: var(--bg-overlay);
+		border: 1px solid var(--border-default);
+		color: var(--text-secondary);
 		display: flex;
 		align-items: center;
 		justify-content: center;
+		cursor: pointer;
+		transition: all 0.15s ease;
+		-webkit-tap-highlight-color: transparent;
 	}
 
-	.mobile-drag-handle:hover,
-	.mobile-drag-handle:active {
-		opacity: 1;
-		color: var(--ai-primary);
+	.mobile-reorder-btn:active:not(.disabled) {
 		background: var(--ai-subtle);
+		color: var(--ai-primary);
+		border-color: var(--ai-primary);
+		transform: scale(0.92);
 	}
 
-	.mobile-drag-handle:active {
-		cursor: grabbing;
-		transform: scale(0.95);
+	.mobile-reorder-btn.disabled {
+		opacity: 0.3;
+		cursor: not-allowed;
 	}
 
 	/* Mobile Dot Indicators */
