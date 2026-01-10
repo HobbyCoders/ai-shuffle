@@ -19,7 +19,6 @@ from app.db.database import init_database
 from app.core.profiles import run_migrations
 from app.core.auth import auth_service
 from app.core.sync_engine import sync_engine
-from app.core.cleanup_manager import cleanup_manager
 from app.core import encryption
 
 # Import API routers
@@ -61,65 +60,12 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
-class ActivityTrackingMiddleware(BaseHTTPMiddleware):
-    """Track user activity to manage sleep mode"""
-
-    # Paths that should NOT trigger activity tracking (internal/automated requests)
-    SKIP_PATHS = {"/health", "/api/v1/health"}
-
-    async def dispatch(self, request: Request, call_next):
-        # Record activity for API requests (indicates user interaction)
-        # Skip static file requests and health checks to avoid unnecessary tracking
-        if request.url.path.startswith("/api/") and request.url.path not in self.SKIP_PATHS:
-            cleanup_manager.record_activity()
-
-        return await call_next(request)
-
 # Configure logging
 logging.basicConfig(
     level=getattr(logging, settings.log_level.upper()),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
-
-# Background cleanup task reference
-_cleanup_task: asyncio.Task | None = None
-
-
-async def periodic_cleanup():
-    """
-    Background task that periodically cleans up stale resources.
-
-    This prevents CPU usage from orphaned tasks and memory leaks from
-    accumulated sessions/connections that were never properly closed.
-
-    IMPORTANT: Only cleans up inactive sessions - active/streaming sessions are preserved.
-
-    Configuration is loaded from cleanup_manager which reads from database settings.
-    """
-    logger.info("Background cleanup scheduler started")
-
-    while True:
-        try:
-            # Get cleanup interval from configuration (default 5 minutes)
-            interval_minutes = cleanup_manager.get_config("cleanup_interval_minutes")
-            await asyncio.sleep(interval_minutes * 60)
-
-            # Run cleanup cycle through cleanup manager
-            # This handles sleep mode, database cleanup (auth sessions, sync logs), and file cleanup
-            # Note: SDK session cleanup is now automatic when streaming ends, so we don't pass that callback
-            # WebSocket connection cleanup is a safety net for edge cases (connections that died silently)
-            await cleanup_manager.run_cleanup_cycle(
-                cleanup_sessions_callback=None,  # SDK sessions now cleanup automatically when streaming ends
-                cleanup_connections_callback=sync_engine.cleanup_stale_connections
-            )
-
-        except asyncio.CancelledError:
-            logger.info("Background cleanup scheduler stopped")
-            raise
-        except Exception as e:
-            # Log error but don't crash the cleanup loop
-            logger.error(f"Error during periodic cleanup: {e}")
 
 
 @asynccontextmanager
@@ -179,20 +125,9 @@ async def lifespan(app: FastAPI):
     logger.info(f"API docs: http://localhost:{settings.port}/docs")
     logger.info("=" * 60)
 
-    # Start background cleanup scheduler
-    global _cleanup_task
-    _cleanup_task = asyncio.create_task(periodic_cleanup())
-
     yield
 
-    # Stop background cleanup scheduler
     logger.info("Shutting down AI Hub...")
-    if _cleanup_task:
-        _cleanup_task.cancel()
-        try:
-            await _cleanup_task
-        except asyncio.CancelledError:
-            pass
 
 
 # Create FastAPI application
@@ -207,9 +142,6 @@ app = FastAPI(
 
 # Security headers middleware (runs first on response)
 app.add_middleware(SecurityHeadersMiddleware)
-
-# Activity tracking middleware for sleep mode
-app.add_middleware(ActivityTrackingMiddleware)
 
 # Request body size limit middleware
 class LimitRequestBodyMiddleware(BaseHTTPMiddleware):

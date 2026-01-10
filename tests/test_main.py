@@ -3,8 +3,7 @@ Comprehensive tests for app/main.py - FastAPI application entry point.
 
 Tests cover:
 - Application lifecycle (startup/shutdown via lifespan)
-- Middleware registration (SecurityHeaders, ActivityTracking, LimitRequestBody, CORS)
-- Periodic cleanup background task
+- Middleware registration (SecurityHeaders, LimitRequestBody, CORS)
 - Route mounting and static files
 - Health check endpoints
 - Exception handlers
@@ -54,12 +53,6 @@ class TestMainModuleImports:
         """Logger should be configured."""
         from app.main import logger
         assert logger is not None
-
-    def test_cleanup_task_variable_exists(self):
-        """Cleanup task variable should be defined."""
-        from app.main import _cleanup_task
-        # Initially None before app starts
-        assert _cleanup_task is None or isinstance(_cleanup_task, asyncio.Task)
 
 
 # =============================================================================
@@ -156,65 +149,6 @@ class TestSecurityHeadersMiddleware:
         assert "frame-ancestors 'self'" in csp
 
 
-class TestActivityTrackingMiddleware:
-    """Test ActivityTrackingMiddleware class."""
-
-    @pytest.fixture
-    def middleware(self):
-        """Create middleware instance."""
-        from app.main import ActivityTrackingMiddleware
-        mock_app = MagicMock()
-        return ActivityTrackingMiddleware(mock_app)
-
-    def test_skip_paths_defined(self):
-        """SKIP_PATHS should be defined."""
-        from app.main import ActivityTrackingMiddleware
-        assert "/health" in ActivityTrackingMiddleware.SKIP_PATHS
-        assert "/api/v1/health" in ActivityTrackingMiddleware.SKIP_PATHS
-
-    @pytest.mark.asyncio
-    async def test_records_activity_for_api_path(self, middleware):
-        """Should record activity for API paths."""
-        mock_request = MagicMock()
-        mock_request.url.path = "/api/v1/query"
-        mock_response = MagicMock()
-
-        async def mock_call_next(request):
-            return mock_response
-
-        with patch("app.main.cleanup_manager") as mock_cleanup:
-            response = await middleware.dispatch(mock_request, mock_call_next)
-            mock_cleanup.record_activity.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_skips_health_endpoint(self, middleware):
-        """Should not record activity for health endpoint."""
-        mock_request = MagicMock()
-        mock_request.url.path = "/api/v1/health"
-        mock_response = MagicMock()
-
-        async def mock_call_next(request):
-            return mock_response
-
-        with patch("app.main.cleanup_manager") as mock_cleanup:
-            response = await middleware.dispatch(mock_request, mock_call_next)
-            mock_cleanup.record_activity.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_skips_non_api_path(self, middleware):
-        """Should not record activity for non-API paths."""
-        mock_request = MagicMock()
-        mock_request.url.path = "/chat"
-        mock_response = MagicMock()
-
-        async def mock_call_next(request):
-            return mock_response
-
-        with patch("app.main.cleanup_manager") as mock_cleanup:
-            response = await middleware.dispatch(mock_request, mock_call_next)
-            mock_cleanup.record_activity.assert_not_called()
-
-
 class TestLimitRequestBodyMiddleware:
     """Test LimitRequestBodyMiddleware class."""
 
@@ -275,87 +209,6 @@ class TestLimitRequestBodyMiddleware:
 
 
 # =============================================================================
-# Periodic Cleanup Tests
-# =============================================================================
-
-class TestPeriodicCleanup:
-    """Test periodic_cleanup background task."""
-
-    @pytest.mark.asyncio
-    async def test_periodic_cleanup_runs(self):
-        """Periodic cleanup should run and call cleanup cycle."""
-        from app.main import periodic_cleanup
-
-        with patch("app.main.cleanup_manager") as mock_cleanup:
-            mock_cleanup.get_config.return_value = 0.001  # Very short interval for testing
-            mock_cleanup.run_cleanup_cycle = AsyncMock()
-
-            # Create and run task briefly
-            task = asyncio.create_task(periodic_cleanup())
-
-            # Wait a bit for one cycle
-            await asyncio.sleep(0.01)
-
-            # Cancel task
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-            # Verify cleanup was attempted
-            mock_cleanup.get_config.assert_called()
-
-    @pytest.mark.asyncio
-    async def test_periodic_cleanup_handles_cancel(self):
-        """Periodic cleanup should handle cancellation gracefully."""
-        from app.main import periodic_cleanup
-
-        with patch("app.main.cleanup_manager") as mock_cleanup:
-            mock_cleanup.get_config.return_value = 60  # Long interval
-
-            task = asyncio.create_task(periodic_cleanup())
-
-            # Cancel immediately
-            task.cancel()
-
-            with pytest.raises(asyncio.CancelledError):
-                await task
-
-    @pytest.mark.asyncio
-    async def test_periodic_cleanup_handles_errors(self):
-        """Periodic cleanup should continue after errors in cleanup cycle."""
-        from app.main import periodic_cleanup
-
-        # Track calls
-        call_count = [0]
-
-        async def mock_run_cleanup(*args, **kwargs):
-            call_count[0] += 1
-            raise Exception("Test error")
-
-        with patch("app.main.cleanup_manager") as mock_cleanup:
-            # Set interval to 0.0001 minutes = 0.006 seconds = 6ms
-            mock_cleanup.get_config.return_value = 0.0001
-            mock_cleanup.run_cleanup_cycle = mock_run_cleanup
-
-            task = asyncio.create_task(periodic_cleanup())
-
-            # Wait for a few cycles - enough time for at least one cycle
-            # Sleep needs to be > interval_minutes * 60 = 0.0001 * 60 = 0.006s
-            await asyncio.sleep(0.1)
-
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-            # Should have attempted at least one cleanup despite errors
-            assert call_count[0] >= 1, f"Expected at least 1 call, got {call_count[0]}"
-
-
-# =============================================================================
 # Lifespan Tests
 # =============================================================================
 
@@ -376,8 +229,7 @@ class TestLifespan:
              patch("app.main.database") as mock_database, \
              patch("app.main.load_workspace_from_database") as mock_load_workspace, \
              patch("app.main.settings") as mock_settings, \
-             patch("app.main.auth_service") as mock_auth, \
-             patch("app.main.periodic_cleanup", new_callable=AsyncMock):
+             patch("app.main.auth_service") as mock_auth:
 
             mock_settings.version = "4.0.0"
             mock_settings.port = 8000
@@ -408,8 +260,7 @@ class TestLifespan:
              patch("app.main.database") as mock_database, \
              patch("app.main.load_workspace_from_database"), \
              patch("app.main.settings") as mock_settings, \
-             patch("app.main.auth_service") as mock_auth, \
-             patch("app.main.periodic_cleanup", new_callable=AsyncMock):
+             patch("app.main.auth_service") as mock_auth:
 
             mock_settings.version = "4.0.0"
             mock_settings.port = 8000
@@ -438,8 +289,7 @@ class TestLifespan:
              patch("app.main.database") as mock_database, \
              patch("app.main.load_workspace_from_database"), \
              patch("app.main.settings") as mock_settings, \
-             patch("app.main.auth_service") as mock_auth, \
-             patch("app.main.periodic_cleanup", new_callable=AsyncMock):
+             patch("app.main.auth_service") as mock_auth:
 
             mock_settings.version = "4.0.0"
             mock_settings.port = 8000
@@ -828,45 +678,6 @@ class TestSecurityHeadersMiddlewareEdgeCases:
         assert "Cache-Control" not in response.headers
 
 
-class TestActivityTrackingMiddlewareEdgeCases:
-    """Additional tests for ActivityTrackingMiddleware."""
-
-    @pytest.fixture
-    def middleware(self):
-        """Create middleware instance."""
-        from app.main import ActivityTrackingMiddleware
-        mock_app = MagicMock()
-        return ActivityTrackingMiddleware(mock_app)
-
-    @pytest.mark.asyncio
-    async def test_base_health_path_skipped(self, middleware):
-        """Base /health path should be skipped."""
-        mock_request = MagicMock()
-        mock_request.url.path = "/health"
-        mock_response = MagicMock()
-
-        async def mock_call_next(request):
-            return mock_response
-
-        with patch("app.main.cleanup_manager") as mock_cleanup:
-            await middleware.dispatch(mock_request, mock_call_next)
-            mock_cleanup.record_activity.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_api_sessions_path_records_activity(self, middleware):
-        """API sessions path should record activity."""
-        mock_request = MagicMock()
-        mock_request.url.path = "/api/v1/sessions"
-        mock_response = MagicMock()
-
-        async def mock_call_next(request):
-            return mock_response
-
-        with patch("app.main.cleanup_manager") as mock_cleanup:
-            await middleware.dispatch(mock_request, mock_call_next)
-            mock_cleanup.record_activity.assert_called_once()
-
-
 class TestLimitRequestBodyMiddlewareEdgeCases:
     """Additional tests for LimitRequestBodyMiddleware."""
 
@@ -909,45 +720,6 @@ class TestLimitRequestBodyMiddlewareEdgeCases:
 
             response = await middleware.dispatch(mock_request, mock_call_next)
             assert response.status_code == 413
-
-
-class TestPeriodicCleanupAdditional:
-    """Additional tests for periodic cleanup."""
-
-    @pytest.mark.asyncio
-    async def test_cleanup_calls_cleanup_cycle(self):
-        """Periodic cleanup should call cleanup_cycle with connection callback only.
-
-        Note: SDK session cleanup callback was removed since SDK sessions now
-        cleanup automatically when streaming ends.
-        """
-        from app.main import periodic_cleanup
-
-        with patch("app.main.cleanup_manager") as mock_cleanup, \
-             patch("app.main.sync_engine") as mock_sync_engine:
-
-            # Set interval to 0.0001 minutes = 0.006 seconds = 6ms
-            mock_cleanup.get_config.return_value = 0.0001
-            mock_cleanup.run_cleanup_cycle = AsyncMock()
-
-            task = asyncio.create_task(periodic_cleanup())
-
-            # Wait for one cycle (needs to be > 0.006s)
-            await asyncio.sleep(0.1)
-
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-            # Verify run_cleanup_cycle was called
-            assert mock_cleanup.run_cleanup_cycle.called, "run_cleanup_cycle should have been called"
-
-            # Verify it was called with None for sessions callback (SDK cleanup is now automatic)
-            # and with sync_engine.cleanup_stale_connections for connections
-            call_kwargs = mock_cleanup.run_cleanup_cycle.call_args.kwargs
-            assert call_kwargs.get("cleanup_sessions_callback") is None
 
 
 class TestRouterRegistrationAdditional:

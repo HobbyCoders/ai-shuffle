@@ -194,39 +194,6 @@
 	let passwordChangeError = $state('');
 	let passwordChangeSuccess = $state('');
 
-	// Cleanup settings
-	interface CleanupConfig {
-		cleanup_interval_minutes: number;
-		sdk_session_max_age_minutes: number;
-		websocket_max_age_minutes: number;
-		sync_log_retention_hours: number;
-		cleanup_images_enabled: boolean;
-		cleanup_images_max_age_days: number;
-		cleanup_videos_enabled: boolean;
-		cleanup_videos_max_age_days: number;
-		cleanup_shared_files_enabled: boolean;
-		cleanup_shared_files_max_age_days: number;
-		cleanup_uploads_enabled: boolean;
-		cleanup_uploads_max_age_days: number;
-		cleanup_project_ids: string[];
-		sleep_mode_enabled: boolean;
-		sleep_timeout_minutes: number;
-	}
-	interface CleanupStatus {
-		is_sleeping: boolean;
-		idle_seconds: number;
-		last_activity: string;
-		sleep_mode_enabled: boolean;
-		sleep_timeout_minutes: number;
-		cleanup_interval_minutes: number;
-	}
-	let cleanupConfig: CleanupConfig | null = $state(null);
-	let cleanupStatus: CleanupStatus | null = $state(null);
-	let loadingCleanup = $state(true);
-	let savingCleanup = $state(false);
-	let cleanupSuccess = $state('');
-	let cleanupError = $state('');
-
 	// Notifications
 	let browserNotificationsEnabled = $state(false);
 	let browserNotificationsSupported = $state(false);
@@ -278,8 +245,7 @@
 			loadData(),
 			loadAuthStatus(),
 			loadWorkspaceConfig(),
-			loadIntegrationSettings(),
-			loadCleanupSettings()
+			loadIntegrationSettings()
 		]);
 	}
 
@@ -598,39 +564,6 @@
 		saving3DModel = false;
 	}
 
-	// Cleanup functions
-	async function loadCleanupSettings() {
-		loadingCleanup = true;
-		try {
-			const [config, status] = await Promise.all([
-				api.get<CleanupConfig>('/settings/cleanup'),
-				api.get<CleanupStatus>('/settings/cleanup/status')
-			]);
-			cleanupConfig = config;
-			cleanupStatus = status;
-		} catch (e) {
-			console.error('Failed to load cleanup settings:', e);
-		} finally {
-			loadingCleanup = false;
-		}
-	}
-
-	async function saveCleanupConfig() {
-		if (!cleanupConfig) return;
-		savingCleanup = true;
-		cleanupError = '';
-		cleanupSuccess = '';
-		try {
-			await api.post('/settings/cleanup', cleanupConfig);
-			cleanupSuccess = 'Settings saved';
-			setTimeout(() => cleanupSuccess = '', 3000);
-		} catch (e: any) {
-			cleanupError = e.detail || 'Failed to save';
-		} finally {
-			savingCleanup = false;
-		}
-	}
-
 	// Password change
 	async function handleChangePassword() {
 		if (newPassword !== confirmPassword) {
@@ -828,12 +761,6 @@
 	function isCurrentModelSteerable(): boolean {
 		const model = ALL_TTS_MODELS.find(m => m.id === currentTtsModel);
 		return model?.capabilities?.steerability ?? false;
-	}
-
-	function formatIdleTime(seconds: number): string {
-		if (seconds < 60) return `${seconds}s`;
-		if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
-		return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 	}
 
 	function groupModelsByProvider<T extends { provider: string }>(models: T[]): Record<string, T[]> {
@@ -1697,168 +1624,6 @@
 								</div>
 							{/if}
 						</section>
-
-						<!-- Cleanup Section -->
-						<section class="section">
-							<button class="section-header" onclick={() => toggleSection('cleanup')}>
-								<h3>Background Cleanup</h3>
-								<svg class="chevron" class:expanded={expandedSections.has('cleanup')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-									<polyline points="6 9 12 15 18 9"/>
-								</svg>
-							</button>
-							{#if expandedSections.has('cleanup')}
-								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
-									{#if loadingCleanup}
-										<div class="loading-text">Loading...</div>
-									{:else if cleanupConfig}
-										<!-- Status -->
-										<div class="cleanup-status" class:sleeping={cleanupStatus?.is_sleeping}>
-											<span class="status-icon">{cleanupStatus?.is_sleeping ? '😴' : '⚡'}</span>
-											<div class="status-info">
-												<strong>{cleanupStatus?.is_sleeping ? 'Sleeping' : 'Active'}</strong>
-												<span>Idle {formatIdleTime(cleanupStatus?.idle_seconds || 0)}</span>
-											</div>
-										</div>
-
-										<!-- Sleep Mode -->
-										<div class="setting-row">
-											<div class="setting-info">
-												<label>Sleep Mode</label>
-												<span class="setting-desc">Pause cleanup when inactive</span>
-											</div>
-											<button
-												onclick={() => cleanupConfig && (cleanupConfig.sleep_mode_enabled = !cleanupConfig.sleep_mode_enabled)}
-												class="toggle"
-												class:active={cleanupConfig.sleep_mode_enabled}
-											>
-												<span class="toggle-knob"></span>
-											</button>
-										</div>
-
-										{#if cleanupConfig.sleep_mode_enabled}
-											<div class="setting-row">
-												<label class="setting-label">Sleep after (min)</label>
-												<input type="number" min="1" max="60" bind:value={cleanupConfig.sleep_timeout_minutes} class="input compact number" />
-											</div>
-										{/if}
-
-										<hr class="divider" />
-
-										<!-- File Cleanup Toggles -->
-										<h4 class="subsection-title">File Cleanup</h4>
-
-										<div class="cleanup-grid">
-											<div class="cleanup-item">
-												<span>Images</span>
-												<div class="cleanup-controls">
-													{#if cleanupConfig.cleanup_images_enabled}
-														<input type="number" min="1" max="365" bind:value={cleanupConfig.cleanup_images_max_age_days} class="input compact number" />
-														<span class="unit">days</span>
-													{/if}
-													<button
-														onclick={() => cleanupConfig && (cleanupConfig.cleanup_images_enabled = !cleanupConfig.cleanup_images_enabled)}
-														class="toggle small"
-														class:active={cleanupConfig.cleanup_images_enabled}
-													>
-														<span class="toggle-knob"></span>
-													</button>
-												</div>
-											</div>
-
-											<div class="cleanup-item">
-												<span>Videos</span>
-												<div class="cleanup-controls">
-													{#if cleanupConfig.cleanup_videos_enabled}
-														<input type="number" min="1" max="365" bind:value={cleanupConfig.cleanup_videos_max_age_days} class="input compact number" />
-														<span class="unit">days</span>
-													{/if}
-													<button
-														onclick={() => cleanupConfig && (cleanupConfig.cleanup_videos_enabled = !cleanupConfig.cleanup_videos_enabled)}
-														class="toggle small"
-														class:active={cleanupConfig.cleanup_videos_enabled}
-													>
-														<span class="toggle-knob"></span>
-													</button>
-												</div>
-											</div>
-
-											<div class="cleanup-item">
-												<span>Shared Files</span>
-												<div class="cleanup-controls">
-													{#if cleanupConfig.cleanup_shared_files_enabled}
-														<input type="number" min="1" max="365" bind:value={cleanupConfig.cleanup_shared_files_max_age_days} class="input compact number" />
-														<span class="unit">days</span>
-													{/if}
-													<button
-														onclick={() => cleanupConfig && (cleanupConfig.cleanup_shared_files_enabled = !cleanupConfig.cleanup_shared_files_enabled)}
-														class="toggle small"
-														class:active={cleanupConfig.cleanup_shared_files_enabled}
-													>
-														<span class="toggle-knob"></span>
-													</button>
-												</div>
-											</div>
-
-											<div class="cleanup-item">
-												<span>Uploads</span>
-												<div class="cleanup-controls">
-													{#if cleanupConfig.cleanup_uploads_enabled}
-														<input type="number" min="1" max="365" bind:value={cleanupConfig.cleanup_uploads_max_age_days} class="input compact number" />
-														<span class="unit">days</span>
-													{/if}
-													<button
-														onclick={() => cleanupConfig && (cleanupConfig.cleanup_uploads_enabled = !cleanupConfig.cleanup_uploads_enabled)}
-														class="toggle small"
-														class:active={cleanupConfig.cleanup_uploads_enabled}
-													>
-														<span class="toggle-knob"></span>
-													</button>
-												</div>
-											</div>
-										</div>
-
-										<hr class="divider" />
-
-										<!-- Session Timeouts -->
-										<h4 class="subsection-title">Session Timeouts</h4>
-										<div class="timeout-grid">
-											<div class="timeout-item">
-												<label>SDK Session</label>
-												<div class="timeout-input">
-													<input type="number" min="5" max="480" bind:value={cleanupConfig.sdk_session_max_age_minutes} class="input compact number" />
-													<span class="unit">min</span>
-												</div>
-											</div>
-											<div class="timeout-item">
-												<label>WebSocket</label>
-												<div class="timeout-input">
-													<input type="number" min="1" max="60" bind:value={cleanupConfig.websocket_max_age_minutes} class="input compact number" />
-													<span class="unit">min</span>
-												</div>
-											</div>
-											<div class="timeout-item">
-												<label>Sync Logs</label>
-												<div class="timeout-input">
-													<input type="number" min="1" max="168" bind:value={cleanupConfig.sync_log_retention_hours} class="input compact number" />
-													<span class="unit">hrs</span>
-												</div>
-											</div>
-										</div>
-
-										{#if cleanupSuccess}<div class="success-msg">{cleanupSuccess}</div>{/if}
-										{#if cleanupError}<div class="error-msg">{cleanupError}</div>{/if}
-
-										<button
-											onclick={saveCleanupConfig}
-											disabled={savingCleanup}
-											class="btn primary mt-3"
-										>
-											{savingCleanup ? 'Saving...' : 'Save Cleanup Settings'}
-										</button>
-									{/if}
-								</div>
-							{/if}
-						</section>
 					</div>
 				{/if}
 			</div>
@@ -2609,92 +2374,6 @@
 		font-family: monospace;
 		font-size: 0.75rem;
 		word-break: break-all;
-	}
-
-	/* Cleanup */
-	.cleanup-status {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		padding: 12px;
-		background: color-mix(in oklch, var(--success) 10%, transparent);
-		border-radius: var(--radius);
-		margin-bottom: 8px;
-	}
-
-	.cleanup-status.sleeping {
-		background: var(--muted);
-	}
-
-	.status-icon {
-		font-size: 1.5rem;
-	}
-
-	.status-info {
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-	}
-
-	.status-info strong {
-		font-size: 0.875rem;
-	}
-
-	.status-info span {
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-	}
-
-	.cleanup-grid {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-	}
-
-	.cleanup-item {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 8px 0;
-	}
-
-	.cleanup-item span {
-		font-size: 0.875rem;
-	}
-
-	.cleanup-controls {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-	}
-
-	.unit {
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-		min-width: 28px;
-	}
-
-	.timeout-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-		gap: 12px;
-	}
-
-	.timeout-item {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
-
-	.timeout-item label {
-		font-size: 0.8125rem;
-		color: var(--muted-foreground);
-	}
-
-	.timeout-input {
-		display: flex;
-		align-items: center;
-		gap: 6px;
 	}
 
 	/* Utility */
