@@ -7,6 +7,7 @@
 	 */
 	import { marked } from 'marked';
 	import StreamingIndicator from './StreamingIndicator.svelte';
+	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
 
 	// Configure marked for markdown rendering
 	marked.setOptions({
@@ -17,15 +18,50 @@
 	interface Props {
 		content: string;
 		streaming?: boolean;
+		/** Override the default expand state (useful for restoring scroll position) */
+		initialExpanded?: boolean;
 	}
 
 	let {
 		content,
-		streaming = false
+		streaming = false,
+		initialExpanded
 	}: Props = $props();
 
-	// Start collapsed by default
-	let isExpanded = $state(false);
+	// Use prop override if provided, otherwise use preference
+	let isExpanded = $state(initialExpanded ?? chatPreferences.getValue('thinkingStartExpanded'));
+
+	// Subscribe to preferences for reactive updates
+	let prefs = $state<ChatPreferences | null>(null);
+	$effect(() => {
+		const unsubscribe = chatPreferences.subscribe(p => {
+			prefs = p;
+		});
+		return unsubscribe;
+	});
+
+	// Generate a summary of the thinking content (first ~100 chars of meaningful text)
+	function getSummary(text: string): string {
+		if (!text) return '';
+
+		// Strip markdown formatting for cleaner summary
+		let cleaned = text
+			.replace(/```[\s\S]*?```/g, '') // Remove code blocks
+			.replace(/`[^`]+`/g, '')        // Remove inline code
+			.replace(/#+\s*/g, '')          // Remove headers
+			.replace(/\*\*([^*]+)\*\*/g, '$1') // Bold to plain
+			.replace(/\*([^*]+)\*/g, '$1')    // Italic to plain
+			.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // Links to text
+			.replace(/\n+/g, ' ')            // Newlines to spaces
+			.trim();
+
+		// Get first ~120 chars, break at word boundary
+		if (cleaned.length <= 120) return cleaned;
+
+		const truncated = cleaned.substring(0, 120);
+		const lastSpace = truncated.lastIndexOf(' ');
+		return (lastSpace > 80 ? truncated.substring(0, lastSpace) : truncated) + '…';
+	}
 
 	function renderMarkdown(text: string): string {
 		try {
@@ -39,6 +75,9 @@
 			return text;
 		}
 	}
+
+	// Derived: should show summary when collapsed
+	const showSummary = $derived(!isExpanded && prefs?.showThinkingSummary && content);
 </script>
 
 <div class="thinking-block" class:streaming>
@@ -75,6 +114,13 @@
 			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 		</svg>
 	</button>
+
+	<!-- Summary when collapsed -->
+	{#if showSummary}
+		<div class="thinking-summary">
+			{getSummary(content)}
+		</div>
+	{/if}
 
 	<!-- Expandable Content -->
 	{#if isExpanded && content}
@@ -141,6 +187,19 @@
 
 	.thinking-chevron.expanded {
 		transform: rotate(180deg);
+	}
+
+	.thinking-summary {
+		font-size: 0.8125rem;
+		line-height: 1.5;
+		padding: 0.25rem 0.5rem;
+		margin: 0 -0.5rem;
+		color: var(--muted-foreground);
+		opacity: 0.7;
+		font-style: italic;
+		border-left: 2px solid var(--border);
+		margin-left: 0;
+		padding-left: 0.75rem;
 	}
 
 	.thinking-content {

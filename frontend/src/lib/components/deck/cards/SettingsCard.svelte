@@ -29,6 +29,7 @@
 	import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 	import { slide, fade } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
+	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
 	import {
 		getUserCredentialPolicies,
 		setUserCredentialPolicy,
@@ -200,6 +201,9 @@
 	let notificationPermission = $state<NotificationPermission | 'unsupported'>('default');
 	let requestingPermission = $state(false);
 
+	// Chat Behavior Preferences
+	let chatPrefs = $state<ChatPreferences | null>(null);
+
 	// API User form
 	let formData = $state({
 		name: '',
@@ -215,12 +219,24 @@
 			loadAllData();
 		}
 		loadNotificationSettings();
+		loadChatPreferences();
+
+		// Subscribe to chat preferences store
+		const unsubscribe = chatPreferences.subscribe(prefs => {
+			chatPrefs = prefs;
+		});
+
+		return () => unsubscribe();
 	});
 
 	function loadNotificationSettings() {
 		browserNotificationsSupported = isNotificationsSupported();
 		notificationPermission = getPermission();
 		browserNotificationsEnabled = isNotificationsEnabled();
+	}
+
+	async function loadChatPreferences() {
+		await chatPreferences.load();
 	}
 
 	async function toggleBrowserNotifications() {
@@ -1096,6 +1112,147 @@
 											{/if}
 										</div>
 									</div>
+								</div>
+							{/if}
+						</section>
+
+						<!-- Chat Behavior Section -->
+						<section class="section">
+							<button class="section-header" onclick={() => toggleSection('chat-behavior')}>
+								<h3>Chat Behavior</h3>
+								<svg class="chevron" class:expanded={expandedSections.has('chat-behavior')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<polyline points="6 9 12 15 18 9"/>
+								</svg>
+							</button>
+							{#if expandedSections.has('chat-behavior')}
+								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
+									{#if chatPrefs}
+										<!-- Show Thinking Blocks -->
+										<div class="setting-row">
+											<div class="setting-info">
+												<label>Show Thinking Blocks</label>
+												<span class="setting-desc">Display Claude's reasoning process</span>
+											</div>
+											<button
+												onclick={() => chatPreferences.setShowThinkingBlocks(!chatPrefs?.showThinkingBlocks)}
+												class="toggle"
+												class:active={chatPrefs.showThinkingBlocks}
+											>
+												<span class="toggle-knob"></span>
+											</button>
+										</div>
+
+										<!-- Thinking Blocks Start Expanded -->
+										<div class="setting-row">
+											<div class="setting-info">
+												<label>Expand Thinking by Default</label>
+												<span class="setting-desc">Thinking blocks start expanded</span>
+											</div>
+											<button
+												onclick={() => chatPreferences.setThinkingStartExpanded(!chatPrefs?.thinkingStartExpanded)}
+												class="toggle"
+												class:active={chatPrefs.thinkingStartExpanded}
+												disabled={!chatPrefs.showThinkingBlocks}
+											>
+												<span class="toggle-knob"></span>
+											</button>
+										</div>
+
+										<!-- Thinking Summary on Collapse -->
+										<div class="setting-row">
+											<div class="setting-info">
+												<label>Show Thinking Summary</label>
+												<span class="setting-desc">Preview thinking content when collapsed</span>
+											</div>
+											<button
+												onclick={() => chatPreferences.setShowThinkingSummary(!chatPrefs?.showThinkingSummary)}
+												class="toggle"
+												class:active={chatPrefs.showThinkingSummary}
+												disabled={!chatPrefs.showThinkingBlocks}
+											>
+												<span class="toggle-knob"></span>
+											</button>
+										</div>
+
+										<!-- Tools Start Expanded -->
+										<div class="setting-row">
+											<div class="setting-info">
+												<label>Expand Tools by Default</label>
+												<span class="setting-desc">Tool results start expanded</span>
+											</div>
+											<button
+												onclick={() => chatPreferences.setToolsStartExpanded(!chatPrefs?.toolsStartExpanded)}
+												class="toggle"
+												class:active={chatPrefs.toolsStartExpanded}
+											>
+												<span class="toggle-knob"></span>
+											</button>
+										</div>
+
+										<!-- Todo List Start Expanded -->
+										<div class="setting-row">
+											<div class="setting-info">
+												<label>Expand Todo List by Default</label>
+												<span class="setting-desc">Task list starts expanded</span>
+											</div>
+											<button
+												onclick={() => chatPreferences.setTodosStartExpanded(!chatPrefs?.todosStartExpanded)}
+												class="toggle"
+												class:active={chatPrefs.todosStartExpanded}
+											>
+												<span class="toggle-knob"></span>
+											</button>
+										</div>
+
+										<hr class="divider" />
+
+										<!-- Auto-scroll on new messages -->
+										<div class="setting-row">
+											<div class="setting-info">
+												<label>Auto-scroll on New Messages</label>
+												<span class="setting-desc">Automatically scroll to new content</span>
+											</div>
+											<button
+												onclick={() => chatPreferences.setAutoScrollOnNewMessage(!chatPrefs?.autoScrollOnNewMessage)}
+												class="toggle"
+												class:active={chatPrefs.autoScrollOnNewMessage}
+											>
+												<span class="toggle-knob"></span>
+											</button>
+										</div>
+
+										<!-- Show Message Timestamps -->
+										<div class="setting-row">
+											<div class="setting-info">
+												<label>Show Message Timestamps</label>
+												<span class="setting-desc">Display time on each message</span>
+											</div>
+											<button
+												onclick={() => chatPreferences.setShowMessageTimestamps(!chatPrefs?.showMessageTimestamps)}
+												class="toggle"
+												class:active={chatPrefs.showMessageTimestamps}
+											>
+												<span class="toggle-knob"></span>
+											</button>
+										</div>
+
+										<!-- Compact Message View -->
+										<div class="setting-row">
+											<div class="setting-info">
+												<label>Compact Message View</label>
+												<span class="setting-desc">Reduce spacing between messages</span>
+											</div>
+											<button
+												onclick={() => chatPreferences.setCompactMessageView(!chatPrefs?.compactMessageView)}
+												class="toggle"
+												class:active={chatPrefs.compactMessageView}
+											>
+												<span class="toggle-knob"></span>
+											</button>
+										</div>
+									{:else}
+										<div class="loading-text">Loading preferences...</div>
+									{/if}
 								</div>
 							{/if}
 						</section>

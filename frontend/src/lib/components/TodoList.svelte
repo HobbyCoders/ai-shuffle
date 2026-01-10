@@ -3,15 +3,18 @@
 	 * TodoList - Cursor-style minimal task progress display
 	 */
 	import type { TodoItem } from '$lib/stores/tabs';
+	import { chatPreferences } from '$lib/stores/chatPreferences';
 
 	interface Props {
 		todos: TodoItem[];
+		/** Override the default expand state */
+		initialExpanded?: boolean;
 	}
 
-	let { todos }: Props = $props();
+	let { todos, initialExpanded }: Props = $props();
 
-	// Track expanded state - start expanded by default
-	let isExpanded = $state(true);
+	// Track expanded state - use preference or prop override
+	let isExpanded = $state(initialExpanded ?? chatPreferences.getValue('todosStartExpanded'));
 
 	// Compute statistics
 	const stats = $derived(() => {
