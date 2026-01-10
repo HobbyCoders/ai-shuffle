@@ -180,7 +180,7 @@ class TestAnalyticsSummaryEndpoint:
             assert data["end_date"] == "2024-01-31"
 
             # Verify database was called with correct dates
-            mock_db.get_analytics_usage_stats.assert_called_with("2024-01-01", "2024-01-31")
+            mock_db.get_analytics_usage_stats.assert_called_with("2024-01-01", "2024-01-31", api_user_id=None)
 
     def test_get_summary_with_only_start_date(self, authenticated_client):
         """Should use default end date when only start date provided."""
@@ -666,7 +666,7 @@ class TestTopSessionsEndpoint:
 
             assert response.status_code == 200
             mock_db.get_analytics_top_sessions.assert_called_with(
-                "2024-01-01", "2024-01-31", limit=10
+                "2024-01-01", "2024-01-31", limit=10, api_user_id=None
             )
 
     def test_get_top_sessions_multiple_results(self, authenticated_client):

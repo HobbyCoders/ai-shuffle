@@ -2227,51 +2227,6 @@ class TestRateLimitOperations:
 
 
 # =============================================================================
-# Knowledge Document Tests
-# =============================================================================
-
-class TestKnowledgeDocuments:
-    """Test knowledge document operations."""
-
-    def test_create_knowledge_document(self, mock_db, setup_project):
-        """create_knowledge_document should create document."""
-        result = db.create_knowledge_document(
-            "doc-1", setup_project, "readme.md", "# Hello\n\nContent here",
-            content_type="text/markdown"
-        )
-
-        assert result["id"] == "doc-1"
-        assert result["filename"] == "readme.md"
-
-    def test_get_knowledge_document(self, mock_db, setup_project):
-        """get_knowledge_document should return document by ID."""
-        db.create_knowledge_document("doc-1", setup_project, "file.txt", "content")
-
-        result = db.get_knowledge_document("doc-1")
-
-        assert result is not None
-        assert result["id"] == "doc-1"
-
-    def test_get_knowledge_documents(self, mock_db, setup_project):
-        """get_knowledge_documents should return all documents for project."""
-        db.create_knowledge_document("doc-1", setup_project, "f1.txt", "content1")
-        db.create_knowledge_document("doc-2", setup_project, "f2.txt", "content2")
-
-        result = db.get_knowledge_documents(setup_project)
-
-        assert len(result) == 2
-
-    def test_delete_knowledge_document(self, mock_db, setup_project):
-        """delete_knowledge_document should delete document."""
-        db.create_knowledge_document("doc-1", setup_project, "file.txt", "content")
-
-        result = db.delete_knowledge_document("doc-1")
-
-        assert result is True
-        assert db.get_knowledge_document("doc-1") is None
-
-
-# =============================================================================
 # Request Log Tests
 # =============================================================================
 
@@ -2411,44 +2366,6 @@ class TestSessionWorktreeRelations:
         result = db.get_sessions_for_worktree(setup_worktree)
 
         assert len(result) == 2
-
-
-# =============================================================================
-# Knowledge Chunk Tests
-# =============================================================================
-
-class TestKnowledgeChunks:
-    """Test knowledge chunk operations."""
-
-    def test_create_knowledge_chunk(self, mock_db, setup_project):
-        """create_knowledge_chunk should create chunk."""
-        db.create_knowledge_document("doc-1", setup_project, "file.txt", "content")
-
-        result = db.create_knowledge_chunk("chunk-1", "doc-1", 0, "First chunk")
-
-        assert result["id"] == "chunk-1"
-        assert result["chunk_index"] == 0
-
-    def test_get_knowledge_chunks(self, mock_db, setup_project):
-        """get_knowledge_chunks should return chunks for document."""
-        db.create_knowledge_document("doc-1", setup_project, "file.txt", "content")
-        db.create_knowledge_chunk("chunk-1", "doc-1", 0, "First chunk")
-        db.create_knowledge_chunk("chunk-2", "doc-1", 1, "Second chunk")
-
-        result = db.get_knowledge_chunks("doc-1")
-
-        assert len(result) == 2
-
-    def test_delete_knowledge_chunks_for_document(self, mock_db, setup_project):
-        """delete_knowledge_chunks_for_document should delete all chunks."""
-        db.create_knowledge_document("doc-1", setup_project, "file.txt", "content")
-        db.create_knowledge_chunk("chunk-1", "doc-1", 0, "First")
-        db.create_knowledge_chunk("chunk-2", "doc-1", 1, "Second")
-
-        deleted = db.delete_knowledge_chunks_for_document("doc-1")
-
-        assert deleted == 2
-        assert len(db.get_knowledge_chunks("doc-1")) == 0
 
 
 # =============================================================================

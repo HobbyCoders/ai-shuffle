@@ -386,7 +386,7 @@ class TestRouterRegistration:
             api_users, websocket, commands, preferences, subagents,
             permission_rules, import_export, generated_images,
             generated_videos, shared_files, tags, analytics, search,
-            templates, webhooks, security, knowledge, rate_limits,
+            templates, webhooks, security, rate_limits,
             github, git, studio, plugins, user_self_service, meshy
         )
         # All imports successful
@@ -550,16 +550,6 @@ class TestMiddlewareOrder:
             for m in app.user_middleware
         )
         assert has_security
-
-    def test_activity_tracking_middleware_present(self):
-        """ActivityTrackingMiddleware should be registered."""
-        from app.main import app, ActivityTrackingMiddleware
-
-        has_activity = any(
-            m.cls == ActivityTrackingMiddleware
-            for m in app.user_middleware
-        )
-        assert has_activity
 
     def test_limit_request_body_middleware_present(self):
         """LimitRequestBodyMiddleware should be registered."""

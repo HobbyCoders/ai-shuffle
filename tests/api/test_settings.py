@@ -70,52 +70,6 @@ class TestMaskApiKey:
         assert result == ""
 
 
-class TestFormatBytes:
-    """Test bytes formatting helper function."""
-
-    def test_format_bytes_zero(self):
-        """Should format zero bytes."""
-        from app.api.settings import format_bytes
-        assert format_bytes(0) == "0.0 B"
-
-    def test_format_bytes_small(self):
-        """Should format bytes under 1KB."""
-        from app.api.settings import format_bytes
-        assert format_bytes(500) == "500.0 B"
-
-    def test_format_bytes_kilobytes(self):
-        """Should format kilobytes."""
-        from app.api.settings import format_bytes
-        assert format_bytes(1024) == "1.0 KB"
-        assert format_bytes(2048) == "2.0 KB"
-
-    def test_format_bytes_megabytes(self):
-        """Should format megabytes."""
-        from app.api.settings import format_bytes
-        assert format_bytes(1024 * 1024) == "1.0 MB"
-
-    def test_format_bytes_gigabytes(self):
-        """Should format gigabytes."""
-        from app.api.settings import format_bytes
-        assert format_bytes(1024 * 1024 * 1024) == "1.0 GB"
-
-    def test_format_bytes_terabytes(self):
-        """Should format terabytes."""
-        from app.api.settings import format_bytes
-        assert format_bytes(1024 * 1024 * 1024 * 1024) == "1.0 TB"
-
-    def test_format_bytes_fractional_kb(self):
-        """Should format fractional kilobytes."""
-        from app.api.settings import format_bytes
-        assert format_bytes(1536) == "1.5 KB"
-
-    def test_format_bytes_large_number(self):
-        """Should handle very large numbers (stops at TB)."""
-        from app.api.settings import format_bytes
-        # The function stops at TB level
-        assert format_bytes(1024 * 1024 * 1024 * 1024 * 1024) == "1024.0 TB"
-
-
 class TestGetDecryptedApiKey:
     """Test API key decryption helper function."""
 
@@ -385,17 +339,6 @@ class TestPydanticModels:
         from app.api.settings import OpenAIKeyRequest
         req = OpenAIKeyRequest(api_key="sk-test123")
         assert req.api_key == "sk-test123"
-
-    def test_file_cleanup_preview_response(self):
-        """FileCleanupPreviewResponse should have all fields."""
-        from app.api.settings import FileCleanupPreviewResponse
-        fields = FileCleanupPreviewResponse.model_fields.keys()
-        assert "images" in fields
-        assert "videos" in fields
-        assert "uploads" in fields
-        assert "total_count" in fields
-        assert "total_bytes" in fields
-        assert "total_bytes_formatted" in fields
 
 
 # =============================================================================
