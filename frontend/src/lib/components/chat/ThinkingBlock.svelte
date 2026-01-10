@@ -20,12 +20,15 @@
 		streaming?: boolean;
 		/** Override the default expand state (useful for restoring scroll position) */
 		initialExpanded?: boolean;
+		/** Profile name to display in header (defaults to "Assistant") */
+		profileName?: string;
 	}
 
 	let {
 		content,
 		streaming = false,
-		initialExpanded
+		initialExpanded,
+		profileName = 'Assistant'
 	}: Props = $props();
 
 	// Use prop override if provided, otherwise use preference
@@ -86,7 +89,7 @@
 		onclick={() => isExpanded = !isExpanded}
 		class="thinking-header"
 	>
-		<span class="thinking-label">Assistant</span>
+		<span class="thinking-label">{profileName}</span>
 		<!-- Brain/thinking icon -->
 		<svg class="thinking-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 			<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>

@@ -6,6 +6,7 @@
 	import { auth, isAuthenticated, setupRequired, claudeAuthenticated } from '$lib/stores/auth';
 	import { theme } from '$lib/stores/theme';
 	import { pwa, hasUpdate, isOnline } from '$lib/stores/pwa';
+	import { chatPreferences } from '$lib/stores/chatPreferences';
 	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
 	import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
 	import OfflineBanner from '$lib/components/OfflineBanner.svelte';
@@ -21,6 +22,12 @@
 
 		try {
 			await auth.checkAuth();
+
+			// Load user preferences after auth is verified
+			if ($isAuthenticated) {
+				await chatPreferences.load();
+			}
+
 			initialized = true;
 
 			// Handle redirects

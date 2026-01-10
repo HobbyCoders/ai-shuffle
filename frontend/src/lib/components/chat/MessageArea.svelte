@@ -15,6 +15,7 @@
 	 */
 	import { tick, onMount, onDestroy } from 'svelte';
 	import { tabs, profiles, type ChatTab, type ChatMessage, type TodoItem } from '$lib/stores/tabs';
+	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
 	import UserMessage from './UserMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import ToolUseMessage from './ToolUseMessage.svelte';
@@ -51,11 +52,23 @@
 	let isScrollingProgrammatically = $state(false);
 	let isMounted = $state(false);
 
-	// Current profile for message settings
+	// Current profile for message settings (uses current UI selection)
 	const currentProfile = $derived($profiles.find(p => p.id === tab.profile));
 	const hasPartialMessages = $derived(currentProfile?.config?.include_partial_messages !== false);
 	const fileCheckpointingEnabled = $derived(currentProfile?.config?.enable_file_checkpointing === true);
-	
+
+	// Session profile for message display (locked to the profile that created the session)
+	// Falls back to current profile for new sessions before first message is sent
+	const sessionProfile = $derived($profiles.find(p => p.id === (tab.sessionProfileId || tab.profile)));
+
+	// Chat preferences (reactive subscription)
+	let chatPrefs = $state<ChatPreferences | null>(null);
+	$effect(() => {
+		const unsubscribe = chatPreferences.subscribe(p => {
+			chatPrefs = p;
+		});
+		return unsubscribe;
+	});
 
 	// Find the last streaming message index - only that message should show the streaming indicator
 	// This prevents multiple bouncing dots from appearing after each tool call
@@ -306,11 +319,12 @@
 						{fileCheckpointingEnabled}
 						onRewindComplete={handleRewindComplete}
 					/>
-				{:else if message.type === 'thinking'}
-					<!-- Thinking block - always show when present -->
+				{:else if message.type === 'thinking' && chatPrefs?.showThinkingBlocks !== false}
+					<!-- Thinking block - shown based on user preference -->
 					<ThinkingBlock
 						content={message.content}
 						streaming={message.streaming}
+						profileName={sessionProfile?.name}
 					/>
 				{:else if message.type === 'text' || !message.type}
 					<AssistantMessage
@@ -324,6 +338,7 @@
 						{fileCheckpointingEnabled}
 						metadata={message.metadata}
 						onRewindComplete={handleRewindComplete}
+						profileName={sessionProfile?.name}
 					/>
 				{:else if message.type === 'tool_use' && message.toolName === 'TodoWrite'}
 					<!-- TodoWrite - Render as TodoList component (also handles streaming partial input) -->

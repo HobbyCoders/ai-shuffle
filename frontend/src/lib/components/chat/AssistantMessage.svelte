@@ -26,6 +26,8 @@
 		metadata?: Record<string, unknown>;
 		onCopy?: (content: string, messageId: string) => void;
 		onRewindComplete?: () => void;
+		/** Profile name to display in header (defaults to "Assistant") */
+		profileName?: string;
 	}
 
 	let {
@@ -40,7 +42,8 @@
 		fileCheckpointingEnabled = false,
 		metadata,
 		onCopy,
-		onRewindComplete
+		onRewindComplete,
+		profileName = 'Assistant'
 	}: Props = $props();
 
 	// Show Read button on any non-streaming assistant message with content
@@ -334,7 +337,7 @@
 >
 	<div class="min-w-0 max-w-full">
 		<div class="flex items-center gap-2 mb-1">
-			<span class="font-semibold text-sm text-orange-400">Assistant</span>
+			<span class="font-semibold text-sm text-orange-400">{profileName}</span>
 			<span class="text-xs text-muted-foreground">{formatTime(timestamp)}</span>
 			{#if streaming}
 				<StreamingIndicator />

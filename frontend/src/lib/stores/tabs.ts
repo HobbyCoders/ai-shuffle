@@ -108,7 +108,8 @@ export interface ChatTab {
 	isStreaming: boolean;
 	wsConnected: boolean;
 	error: string | null;
-	profile: string;
+	profile: string;  // Current UI selection for next query
+	sessionProfileId: string | null;  // Profile that created the session (for message display)
 	project: string;
 	totalTokensIn: number;
 	totalTokensOut: number;
@@ -1247,6 +1248,7 @@ function createTabsStore() {
 					wsConnected: false,
 					error: null,
 					profile: syncedTab.profile || currentState.tabs[0]?.profile || '',
+					sessionProfileId: null,  // Will be set when session is loaded
 					project: syncedTab.project || currentState.tabs[0]?.project || '',
 					totalTokensIn: 0,
 					totalTokensOut: 0,
@@ -2282,7 +2284,7 @@ function createTabsStore() {
 
 				console.log(`[Tab ${tabId}] Updating tab state - isStreaming:`, isStreaming, 'messageCount:', finalMessages.length, 'todoCount:', latestTodos.length);
 
-				// Extract token counts from session data if available (for context pill)
+				// Extract token counts and profile from session data if available
 				const session = data.session as Record<string, unknown> | undefined;
 				const tokenUpdates: Partial<ChatTab> = {};
 				if (session) {
@@ -2300,6 +2302,10 @@ function createTabsStore() {
 					}
 					if (typeof session.context_tokens === 'number') {
 						tokenUpdates.contextUsed = session.context_tokens;
+					}
+					// Set session profile for message display (locked to creating profile)
+					if (typeof session.profile_id === 'string') {
+						tokenUpdates.sessionProfileId = session.profile_id;
 					}
 					console.log(`[Tab ${tabId}] Token counts from session:`, tokenUpdates);
 				}
@@ -2412,7 +2418,8 @@ function createTabsStore() {
 					...s,
 					tabs: s.tabs.map(tab => {
 						if (tab.id !== tabId) return tab;
-						return { ...tab, sessionId };
+						// Lock sessionProfileId to current profile - this is the profile creating the session
+						return { ...tab, sessionId, sessionProfileId: tab.profile };
 					})
 				}));
 
@@ -3747,6 +3754,7 @@ function createTabsStore() {
 						error: null,
 						// Fall back to localStorage if server-saved profile/project is empty
 						profile: pt.profile || defaultProfile,
+						sessionProfileId: null,  // Will be set when session is loaded via WebSocket
 						project: pt.project || defaultProject,
 						totalTokensIn: 0,
 						totalTokensOut: 0,
@@ -3835,6 +3843,7 @@ function createTabsStore() {
 				wsConnected: false,
 				error: null,
 				profile,
+				sessionProfileId: null,  // Will be set when session is created/loaded
 				project,
 				totalTokensIn: 0,
 				totalTokensOut: 0,
@@ -4448,6 +4457,7 @@ function createTabsStore() {
 					totalCacheCreationTokens: session.cache_creation_tokens || 0,
 					totalCacheReadTokens: session.cache_read_tokens || 0,
 					profile: session.profile_id,
+					sessionProfileId: session.profile_id,  // Lock profile for message display
 					project: session.project_id || ''
 				});
 
@@ -4658,6 +4668,7 @@ function createTabsStore() {
 			disconnectTab(tabId);
 			updateTab(tabId, {
 				sessionId: null,
+				sessionProfileId: null,  // Reset profile lock for new session
 				messages: [],
 				isStreaming: false,
 				error: null,
@@ -4787,7 +4798,7 @@ function createTabsStore() {
 				...s,
 				tabs: s.tabs.map(tab =>
 					tab.sessionId === sessionId
-						? { ...tab, sessionId: null, messages: [], title: 'New Chat' }
+						? { ...tab, sessionId: null, sessionProfileId: null, messages: [], title: 'New Chat' }
 						: tab
 				)
 			}));
@@ -4891,7 +4902,7 @@ function createTabsStore() {
 				...s,
 				tabs: s.tabs.map(tab =>
 					sessionIds.includes(tab.sessionId || '')
-						? { ...tab, sessionId: null, messages: [], title: 'New Chat' }
+						? { ...tab, sessionId: null, sessionProfileId: null, messages: [], title: 'New Chat' }
 						: tab
 				),
 				// Exit selection mode and clear selections
