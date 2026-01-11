@@ -2269,7 +2269,7 @@
 		height: 100%;
 		background: var(--bg-card);
 		border: 1px solid var(--ai-primary);
-		border-radius: var(--radius-lg);
+		border-radius: calc(var(--radius, 0.75rem) * 1.167);
 		padding: 20px;
 		display: flex;
 		flex-direction: column;
@@ -2376,11 +2376,11 @@
 	.card-inner {
 		width: 100%;
 		height: 100%;
-		background: transparent;
-		border: none;
+		background: var(--bg-card);
+		border: 1px solid var(--border-subtle);
 		outline: none;
 		box-shadow: none;
-		border-radius: var(--radius-lg);
+		border-radius: calc(var(--radius, 0.75rem) * 1.167);
 		padding: 20px;
 		display: flex;
 		flex-direction: column;
