@@ -2391,7 +2391,9 @@
 
 	.card:hover .card-inner {
 		background: var(--bg-card-hover);
-		box-shadow: var(--shadow-m);
+		box-shadow:
+			var(--shadow-m),
+			0 0 20px color-mix(in srgb, var(--primary) 25%, transparent);
 	}
 
 	/* AI-active card glow */
