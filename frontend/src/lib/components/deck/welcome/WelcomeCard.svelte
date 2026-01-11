@@ -82,8 +82,8 @@
 		height: 200px;
 		padding: 1.25rem 1rem;
 
-		/* Use theme card color instead of hardcoded dark value */
-		background: var(--card-surface-welcome, var(--card));
+		/* Use theme card color */
+		background: var(--card);
 		border: 1px solid var(--border);
 		border-radius: var(--radius, 0.75rem);
 
