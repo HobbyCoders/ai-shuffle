@@ -180,7 +180,7 @@ export interface Worktree {
 
 export interface CreateWorktreeRequest {
     branch_name: string;
-    create_new?: boolean;
+    create_new_branch?: boolean;
     base_branch?: string;
     profile_id?: string;
     copy_uncommitted?: boolean;  // Copy uncommitted files from main repo to worktree

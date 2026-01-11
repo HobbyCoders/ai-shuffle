@@ -239,7 +239,7 @@
 
 			const result = await createWorktree(tab.project, {
 				branch_name: branch.remote ? branch.name.replace(/^[^/]+\//, '') : branch.name,
-				create_new: false
+				create_new_branch: false
 			});
 
 			if (result.worktree) {
@@ -269,7 +269,7 @@
 		try {
 			const result = await createWorktree(tab.project, {
 				branch_name: newBranchName.trim(),
-				create_new: true,
+				create_new_branch: true,
 				base_branch: baseBranch
 			});
 
