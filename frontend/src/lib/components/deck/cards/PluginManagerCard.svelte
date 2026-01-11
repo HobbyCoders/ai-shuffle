@@ -470,7 +470,7 @@
 		gap: 4px;
 		padding: 8px 16px;
 		border-bottom: 1px solid var(--border);
-		background: var(--secondary);
+		background: var(--surface-1);
 		overflow-x: auto;
 		flex-shrink: 0;
 	}
@@ -712,7 +712,7 @@
 		align-items: center;
 		padding: 12px 16px;
 		border-top: 1px solid var(--border);
-		background: var(--secondary);
+		background: var(--surface-1);
 		flex-shrink: 0;
 	}
 
