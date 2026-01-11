@@ -250,8 +250,8 @@
 		</button>
 	{/if}
 
-	<!-- Rewind button - available for both user and assistant messages -->
-	{#if sessionId && !isStreaming}
+	<!-- Rewind button - only available for user messages -->
+	{#if sessionId && !isStreaming && messageRole === 'user'}
 		<button
 			class="action-btn"
 			onclick={handleRewindClick}
