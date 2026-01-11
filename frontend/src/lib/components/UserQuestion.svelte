@@ -220,8 +220,8 @@
 <div
 	class="card-system question-panel rounded-2xl border shadow-lg overflow-hidden backdrop-blur-sm"
 	style="
-		border-color: color-mix(in oklch, var(--primary) 30%, var(--border));
-		background: linear-gradient(to bottom, color-mix(in oklch, var(--primary) 12%, var(--card)), color-mix(in oklch, var(--primary) 5%, var(--card)));
+		border-color: var(--border);
+		background: var(--card);
 	"
 	role="dialog"
 	aria-labelledby="question-title"
@@ -232,11 +232,11 @@
 		<div
 			class="flex-shrink-0 w-9 h-9 rounded-xl border flex items-center justify-center"
 			style="
-				background: color-mix(in oklch, var(--primary) 15%, var(--card));
-				border-color: color-mix(in oklch, var(--primary) 25%, var(--border));
+				background: color-mix(in oklch, var(--muted) 50%, var(--card));
+				border-color: var(--border);
 			"
 		>
-			<svg class="w-4.5 h-4.5" style="color: var(--primary);" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+			<svg class="w-4.5 h-4.5 text-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
 			</svg>
 		</div>
@@ -248,9 +248,9 @@
 				<span
 					class="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded-md border"
 					style="
-						background: color-mix(in oklch, var(--primary) 15%, transparent);
-						color: var(--primary);
-						border-color: color-mix(in oklch, var(--primary) 20%, transparent);
+						background: color-mix(in oklch, var(--muted-foreground) 15%, transparent);
+						color: var(--muted-foreground);
+						border-color: color-mix(in oklch, var(--muted-foreground) 20%, transparent);
 					"
 				>
 					Input Required
@@ -277,9 +277,9 @@
 						disabled={!canProceed(idx) && idx > currentStep}
 						class="w-2 h-2 rounded-full transition-all duration-200"
 						style={
-							isReviewStep ? 'background: var(--primary);' :
-							idx === currentStep ? 'background: var(--primary); transform: scale(1.25);' :
-							idx < currentStep ? 'background: color-mix(in oklch, var(--primary) 60%, transparent);' :
+							isReviewStep ? 'background: var(--accent);' :
+							idx === currentStep ? 'background: var(--accent); transform: scale(1.25);' :
+							idx < currentStep ? 'background: color-mix(in oklch, var(--accent) 60%, transparent);' :
 							'background: color-mix(in oklch, var(--muted-foreground) 30%, transparent);'
 						}
 						aria-label="Go to question {idx + 1}"
@@ -319,7 +319,7 @@
 								{#if question.header}
 									<span
 										class="inline-block px-2 py-0.5 text-[10px] font-medium rounded-md mb-1.5"
-										style="background: color-mix(in oklch, var(--primary) 15%, transparent); color: var(--primary);"
+										style="background: color-mix(in oklch, var(--accent) 15%, transparent); color: var(--accent);"
 									>
 										{question.header}
 									</span>
@@ -352,7 +352,7 @@
 					{#if currentQuestion.header}
 						<span
 							class="inline-block px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded-md mb-2"
-							style="background: color-mix(in oklch, var(--primary) 15%, transparent); color: var(--primary);"
+							style="background: color-mix(in oklch, var(--accent) 15%, transparent); color: var(--accent);"
 						>
 							{currentQuestion.header}
 						</span>
@@ -613,8 +613,8 @@
 	}
 
 	.option-card.selected {
-		border-color: var(--primary);
-		background: color-mix(in oklch, var(--primary) 8%, var(--card));
+		border-color: var(--accent);
+		background: color-mix(in oklch, var(--accent) 8%, var(--card));
 	}
 
 	/* Checkbox Indicator */
@@ -630,8 +630,8 @@
 	}
 
 	.checkbox-indicator.checked {
-		background: var(--primary);
-		border-color: var(--primary);
+		background: var(--accent);
+		border-color: var(--accent);
 	}
 
 	/* Radio Indicator */
@@ -647,14 +647,14 @@
 	}
 
 	.radio-indicator.checked {
-		border-color: var(--primary);
+		border-color: var(--accent);
 	}
 
 	.radio-dot {
 		width: 0.5rem;
 		height: 0.5rem;
 		border-radius: 50%;
-		background: var(--primary);
+		background: var(--accent);
 		animation: dot-pop 0.15s ease;
 	}
 
@@ -701,8 +701,8 @@
 
 	.other-textarea:focus {
 		outline: none;
-		border-color: color-mix(in oklch, var(--primary) 40%, var(--border));
-		box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 20%, transparent);
+		border-color: color-mix(in oklch, var(--accent) 40%, var(--border));
+		box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent) 20%, transparent);
 	}
 
 	@keyframes dot-pop {
