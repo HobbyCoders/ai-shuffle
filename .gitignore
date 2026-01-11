@@ -85,3 +85,4 @@ frontend/build.bat
 # Coverage
 .coverage
 htmlcov/
+build-frontend.bat

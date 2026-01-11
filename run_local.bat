@@ -86,7 +86,7 @@ if %errorlevel% equ 0 (
         cd ..
         if exist "frontend\build" (
             if exist "app\static" rmdir /s /q "app\static"
-            xcopy /e /i /q "frontend\build" "app\static"
+            robocopy "frontend\build" "app\static" /e /njh /njs /ndl /nc /ns /nfl >nul
             echo [OK] Frontend built
         )
     )
