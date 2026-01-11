@@ -2406,7 +2406,8 @@
 		width: 100%;
 		height: 100%;
 		background: var(--bg-card);
-		border: 1px solid transparent;
+		border: none;
+		outline: none;
 		border-radius: var(--radius);
 		padding: 20px;
 		display: flex;
@@ -2418,14 +2419,11 @@
 
 	.card:hover .card-inner {
 		background: var(--bg-card-hover);
-		border-color: var(--border-subtle);
-		box-shadow:
-			0 8px 32px var(--shadow-color);
+		box-shadow: 0 8px 32px var(--shadow-color);
 	}
 
 	/* AI-active card glow */
 	.card[data-ai-active="true"] .card-inner {
-		border-color: color-mix(in srgb, var(--ai-primary) 30%, transparent);
 		box-shadow:
 			0 0 20px var(--ai-glow),
 			0 8px 32px var(--shadow-color);
