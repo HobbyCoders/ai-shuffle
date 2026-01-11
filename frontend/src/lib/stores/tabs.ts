@@ -4504,7 +4504,13 @@ function createTabsStore() {
 					const canPreserveId = existingMsg &&
 						existingMsg.type === msg.type &&
 						existingMsg.role === msg.role;
-					return canPreserveId ? { ...msg, id: existingMsg.id } : msg;
+					// Map snake_case profile_id to camelCase profileId for frontend interface
+					// API returns snake_case, but our ChatMessage interface uses camelCase
+					const apiMsg = msg as ChatMessage & { profile_id?: string };
+					const profileId = apiMsg.profile_id || apiMsg.profileId;
+					return canPreserveId
+						? { ...msg, id: existingMsg.id, profileId }
+						: { ...msg, profileId };
 				});
 
 				// Load token totals from session history - single source of truth

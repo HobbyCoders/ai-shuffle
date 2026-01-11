@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 # v27: Remove agent execution engine (agent_runs, agent_tasks, agent_logs tables)
 # v28: Add notes table for project-scoped notes feature
 # v29: Add project_hooks table for per-project Claude Code event hooks
-SCHEMA_VERSION = 29
+# v30: Add profile_id to session_messages for per-query profile tracking
+SCHEMA_VERSION = 30
 
 
 # =============================================================================
