@@ -11,7 +11,8 @@ Key design principles:
 - Multiple sessions can use the same worktree (sequentially, not concurrently)
 - Worktree validity is determined by checking if the folder exists on disk
 
-Path pattern: {workspace_dir}/.worktrees/{project_id}/{branch_sanitized}
+Path pattern: {workspace_dir}/{repo_name}-{branch_sanitized}
+(Worktrees are adjacent to the main repo, not nested inside it)
 """
 
 import logging
@@ -45,30 +46,38 @@ class WorktreeManager:
     - get_available_worktrees(): Gets worktrees available for new sessions
     - is_worktree_valid(): Checks if worktree folder exists on disk
 
-    Path pattern: {workspace_dir}/.worktrees/{project_id}/{branch_sanitized}
+    Path pattern: {workspace_dir}/{repo_name}-{branch_sanitized}
+    (Worktrees are adjacent to the main repo, not nested inside it)
     """
 
     def __init__(self):
         self.git_service = git_service
-
-    def _get_worktree_base_dir(self, project_id: str) -> Path:
-        """Get base directory for project worktrees"""
-        return settings.workspace_dir / ".worktrees" / project_id
 
     def _sanitize_branch_name(self, branch: str) -> str:
         """Sanitize branch name for use in filesystem path"""
         # Replace common problematic characters
         return branch.replace("/", "-").replace("\\", "-").replace(":", "-").replace("*", "-")
 
-    def _get_worktree_path(self, project_id: str, branch: str) -> Path:
-        """Get full path for a worktree"""
-        sanitized = self._sanitize_branch_name(branch)
-        return self._get_worktree_base_dir(project_id) / sanitized
+    def _get_worktree_path(self, project_path: str, branch: str) -> Path:
+        """
+        Get full path for a worktree - adjacent to the main repo.
 
-    def _get_relative_worktree_path(self, project_id: str, branch: str) -> str:
-        """Get relative worktree path (relative to workspace_dir)"""
+        Example: If repo is at {workspace}/ai-shuffle and branch is "feature/auth",
+        worktree will be at {workspace}/ai-shuffle-feature-auth
+        """
+        repo_name = Path(project_path).name
         sanitized = self._sanitize_branch_name(branch)
-        return f".worktrees/{project_id}/{sanitized}"
+        return settings.workspace_dir / f"{repo_name}-{sanitized}"
+
+    def _get_relative_worktree_path(self, project_path: str, branch: str) -> str:
+        """
+        Get relative worktree path (relative to workspace_dir).
+
+        This is what gets stored in the database.
+        """
+        repo_name = Path(project_path).name
+        sanitized = self._sanitize_branch_name(branch)
+        return f"{repo_name}-{sanitized}"
 
     def _ensure_repository_record(self, project_id: str, project_path: str) -> Optional[Dict]:
         """
@@ -268,17 +277,14 @@ class WorktreeManager:
                 logger.error(f"Branch {branch_name} already exists")
                 raise WorktreeError(f"Branch '{branch_name}' already exists. Use existing branch mode.")
 
-        # Calculate worktree path
-        worktree_path = self._get_worktree_path(project_id, branch_name)
-        relative_worktree_path = self._get_relative_worktree_path(project_id, branch_name)
+        # Calculate worktree path (adjacent to repo)
+        worktree_path = self._get_worktree_path(project["path"], branch_name)
+        relative_worktree_path = self._get_relative_worktree_path(project["path"], branch_name)
 
         # Check if path already exists
         if worktree_path.exists():
             logger.error(f"Worktree path already exists: {worktree_path}")
             raise WorktreeError(f"Worktree directory already exists at '{worktree_path}'.")
-
-        # Ensure base directory exists
-        worktree_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Create git worktree
         success, error_msg = self.git_service.add_worktree(
@@ -439,17 +445,14 @@ class WorktreeManager:
                 logger.error(f"Branch {branch_name} already exists")
                 raise WorktreeError(f"Branch '{branch_name}' already exists. Use a different name or select 'existing branch' mode.")
 
-        # Calculate worktree path
-        worktree_path = self._get_worktree_path(project_id, branch_name)
-        relative_worktree_path = self._get_relative_worktree_path(project_id, branch_name)
+        # Calculate worktree path (adjacent to repo)
+        worktree_path = self._get_worktree_path(project["path"], branch_name)
+        relative_worktree_path = self._get_relative_worktree_path(project["path"], branch_name)
 
         # Check if path already exists
         if worktree_path.exists():
             logger.error(f"Worktree path already exists: {worktree_path}")
             raise WorktreeError(f"Worktree directory already exists at '{worktree_path}'. This may be from a previous worktree that wasn't cleaned up properly.")
-
-        # Ensure base directory exists
-        worktree_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Create git worktree
         success, error_msg = self.git_service.add_worktree(

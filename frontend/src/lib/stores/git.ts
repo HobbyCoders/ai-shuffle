@@ -284,7 +284,7 @@ function createGitStore() {
             update(s => ({ ...s, loading: true, error: null }));
 
             try {
-                const worktree = await gitApi.createWorktree(state.projectId, {
+                const response = await gitApi.createWorktree(state.projectId, {
                     branch_name: branchName,
                     create_new: createNew,
                     base_branch: baseBranch,
@@ -293,7 +293,7 @@ function createGitStore() {
                 await this.loadWorktrees();
                 await this.loadBranches();
                 update(s => ({ ...s, loading: false }));
-                return worktree;
+                return response.worktree || undefined;
             } catch (e) {
                 const error = e as { detail?: string };
                 update(s => ({

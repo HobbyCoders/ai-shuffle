@@ -144,6 +144,24 @@ export interface CommitGraphResponse {
 // Worktree Types
 // ============================================================================
 
+export interface StagedFile {
+    file: string;
+    status: string;  // A=added, M=modified, D=deleted, R=renamed, C=copied
+}
+
+export interface WorktreeGitStatus {
+    is_clean: boolean;
+    current_branch: string | null;
+    // File counts for quick display (e.g., "3 modified")
+    modified_count: number;
+    staged_count: number;
+    untracked_count: number;
+    // Full file lists (may be empty for list endpoint)
+    modified: string[];
+    staged: StagedFile[];
+    untracked: string[];
+}
+
 export interface Worktree {
     id: string;
     repository_id: string;
@@ -156,6 +174,8 @@ export interface Worktree {
     // New fields from worktree-session decoupling
     exists?: boolean;  // Whether worktree folder exists on disk
     session_count?: number;  // Number of sessions that have used this worktree
+    // Git status (dirty state)
+    git_status?: WorktreeGitStatus;
 }
 
 export interface CreateWorktreeRequest {
@@ -164,6 +184,14 @@ export interface CreateWorktreeRequest {
     base_branch?: string;
     profile_id?: string;
     copy_uncommitted?: boolean;  // Copy uncommitted files from main repo to worktree
+}
+
+export interface CreateWorktreeResponse {
+    success: boolean;
+    message: string;
+    worktree: Worktree | null;
+    session?: Record<string, unknown> | null;
+    errors?: string[];
 }
 
 // ============================================================================
@@ -278,8 +306,8 @@ export async function getWorktrees(projectId: string): Promise<Worktree[]> {
 /**
  * Create a new worktree
  */
-export async function createWorktree(projectId: string, data: CreateWorktreeRequest): Promise<Worktree> {
-    return api.post<Worktree>(`${BASE}/${projectId}/git/worktrees`, data);
+export async function createWorktree(projectId: string, data: CreateWorktreeRequest): Promise<CreateWorktreeResponse> {
+    return api.post<CreateWorktreeResponse>(`${BASE}/${projectId}/git/worktrees`, data);
 }
 
 /**

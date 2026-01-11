@@ -1,16 +1,17 @@
 <script lang="ts">
 	/**
-	 * ExecutionModeSelector - Mode selector for empty chat state
+	 * ExecutionModeSelector - Simplified Cursor-like branch selector
 	 *
-	 * Allows user to choose between Local mode (work on current branch)
-	 * or Worktree mode with:
-	 *   - Dropdown: Select existing worktree OR available branch to create new worktree from
-	 *   - Text input: Only shown when creating new worktree - enter new branch name
+	 * Just pick a branch - worktree creation is automatic.
 	 *
-	 * Only shown in empty state - disappears once chat starts.
+	 * Sections:
+	 * - Active Worktrees (reuse existing)
+	 * - Local Branches (auto-create worktree)
+	 * - Remote Branches (auto-create worktree)
+	 * - Create New Branch (modal for new branch name)
 	 */
 	import { tabs, type ChatTab, type ExecutionMode } from '$lib/stores/tabs';
-	import { getBranches, getWorktrees, syncWorktrees, getGitStatus, type Branch, type Worktree } from '$lib/api/git';
+	import { getBranches, getWorktrees, syncWorktrees, getGitStatus, createWorktree, type Branch, type Worktree } from '$lib/api/git';
 	import { onMount } from 'svelte';
 
 	interface Props {
@@ -23,21 +24,31 @@
 	let branches = $state<Branch[]>([]);
 	let worktrees = $state<Worktree[]>([]);
 	let loading = $state(false);
+	let creating = $state(false);
 	let error = $state<string | null>(null);
-	let lastLoadedProject = $state<string | null>(null);
 	let lastSyncedProject = $state<string | null>(null);
 	let isGitRepo = $state<boolean | null>(null);
 	let lastCheckedGitProject = $state<string | null>(null);
+	let dataLoadedAt = $state<number>(0);
+	let lastLoadedProject = $state<string | null>(null);
 
 	// UI state
 	let showDropdown = $state(false);
 	let dropdownRef = $state<HTMLDivElement | null>(null);
-	let newBranchName = $state('');
+	let searchQuery = $state('');
+	let searchInputRef = $state<HTMLInputElement | null>(null);
 
-	// Selection state - what user selected from dropdown
-	let selectedType = $state<'worktree' | 'branch' | null>(null);
-	let selectedWorktree = $state<Worktree | null>(null);
-	let selectedBranch = $state<Branch | null>(null);
+	// Create new branch modal
+	let showCreateModal = $state(false);
+	let newBranchName = $state('');
+	let baseBranch = $state<string>('main');
+
+	// Selected branch/worktree for display
+	let selectedBranchName = $state<string | null>(null);
+	let selectedWorktreeId = $state<string | null>(null);
+
+	// Data freshness threshold (30 seconds)
+	const DATA_STALE_MS = 30000;
 
 	// Check if project is a git repo when project changes
 	$effect(() => {
@@ -50,7 +61,7 @@
 		}
 	});
 
-	// Sync worktrees when project changes (clean up stale database records)
+	// Sync worktrees when project changes
 	$effect(() => {
 		const project = tab.project;
 		if (project && project !== lastSyncedProject) {
@@ -58,7 +69,7 @@
 		}
 	});
 
-	// Load branches and worktrees when switching to worktree mode
+	// Load data when switching to worktree mode or changing projects
 	$effect(() => {
 		const project = tab.project;
 		const mode = tab.executionMode;
@@ -67,96 +78,74 @@
 		}
 	});
 
-	// Sync selection state from tab (for resuming state)
+	// Sync selection from tab state
 	$effect(() => {
-		if (tab.worktreeId && worktrees.length > 0) {
-			// Existing worktree selected
+		if (tab.worktreeId) {
+			selectedWorktreeId = tab.worktreeId;
 			const wt = worktrees.find(w => w.id === tab.worktreeId);
-			if (wt && selectedWorktree?.id !== wt.id) {
-				selectedType = 'worktree';
-				selectedWorktree = wt;
-				selectedBranch = null;
-				newBranchName = '';
-			}
-		} else if (tab.worktreeBaseBranch && branches.length > 0) {
-			// Creating new worktree from a base branch
-			const br = branches.find(b => b.name === tab.worktreeBaseBranch);
-			if (br && selectedBranch?.name !== br.name) {
-				selectedType = 'branch';
-				selectedBranch = br;
-				selectedWorktree = null;
-				newBranchName = tab.worktreeBranch || '';
-			}
+			selectedBranchName = wt?.branch_name || null;
+		} else if (tab.worktreeBranch) {
+			selectedBranchName = tab.worktreeBranch;
+			selectedWorktreeId = null;
 		}
 	});
 
-	// Available branches (not already used by worktrees)
-	// Also filters out remote branches if we already have them locally (avoid duplicates)
-	const availableBranches = $derived(() => {
+	// Focus search input when dropdown opens
+	$effect(() => {
+		if (showDropdown && searchInputRef) {
+			setTimeout(() => searchInputRef?.focus(), 50);
+		}
+	});
+
+	// Filtered data based on search
+	const filteredWorktrees = $derived(() => {
+		if (!searchQuery.trim()) return worktrees;
+		const q = searchQuery.toLowerCase();
+		return worktrees.filter(w => w.branch_name.toLowerCase().includes(q));
+	});
+
+	const localBranches = $derived(() => {
 		const worktreeBranchNames = new Set(worktrees.map(w => w.branch_name));
-		// Get local branch names to filter out duplicate remotes
-		const localBranchNames = new Set(
-			branches.filter(b => !b.remote).map(b => b.name)
-		);
-
-		return branches.filter(b => {
-			// Skip if already has a worktree
-			if (worktreeBranchNames.has(b.name)) return false;
-
-			// Filter out remote branches
-			if (b.remote) {
-				// Skip HEAD refs and bare "origin"
-				if (b.name === 'origin' ||
-				    b.name === 'origin/HEAD' ||
-				    b.name.endsWith('/HEAD') ||
-				    b.name === 'HEAD') return false;
-
-				// Skip if we already have this branch locally
-				// Remote branches are "origin/branch-name", extract the branch name
-				const localName = b.name.replace(/^[^/]+\//, ''); // Remove "origin/" or any remote prefix
-				if (localBranchNames.has(localName)) return false;
-			}
-
-			return true;
-		});
+		return branches
+			.filter(b => !b.remote && !worktreeBranchNames.has(b.name))
+			.filter(b => !searchQuery.trim() || b.name.toLowerCase().includes(searchQuery.toLowerCase()));
 	});
 
-	// Display text for the dropdown
-	const dropdownDisplayText = $derived(() => {
-		if (selectedType === 'worktree' && selectedWorktree) {
-			return selectedWorktree.branch_name;
-		} else if (selectedType === 'branch' && selectedBranch) {
-			return selectedBranch.name;
-		}
+	const remoteBranches = $derived(() => {
+		const worktreeBranchNames = new Set(worktrees.map(w => w.branch_name));
+		const localBranchNames = new Set(branches.filter(b => !b.remote).map(b => b.name));
+
+		return branches
+			.filter(b => {
+				if (!b.remote) return false;
+				// Skip HEAD refs
+				if (b.name === 'origin' || b.name === 'origin/HEAD' || b.name.endsWith('/HEAD')) return false;
+				// Skip if already has worktree
+				if (worktreeBranchNames.has(b.name)) return false;
+				// Skip if we have it locally
+				const localName = b.name.replace(/^[^/]+\//, '');
+				if (localBranchNames.has(localName) || worktreeBranchNames.has(localName)) return false;
+				return true;
+			})
+			.filter(b => !searchQuery.trim() || b.name.toLowerCase().includes(searchQuery.toLowerCase()));
+	});
+
+	// Display text for the trigger button
+	const displayText = $derived(() => {
+		if (selectedBranchName) return selectedBranchName;
 		return '';
 	});
 
-	// Whether the new branch name input should be shown
-	const showNewBranchInput = $derived(() => {
-		return selectedType === 'branch' && selectedBranch !== null;
-	});
-
-	// Validation: is the new branch name valid?
-	const isValidNewBranch = $derived(() => {
-		if (!showNewBranchInput()) return true;
-		const name = newBranchName.trim();
-		if (!name) return false;
-		// Check it doesn't match any existing branch
-		return !branches.some(b => b.name.toLowerCase() === name.toLowerCase());
-	});
-
-	// Selection summary text
-	const selectionSummary = $derived(() => {
-		if (selectedType === 'worktree' && selectedWorktree) {
-			return 'Start session in existing worktree';
-		} else if (selectedType === 'branch' && selectedBranch) {
-			if (newBranchName.trim() && isValidNewBranch()) {
-				return `Create worktree with new branch "${newBranchName.trim()}" from ${selectedBranch.name}`;
-			}
-			return `Select a branch name to create from ${selectedBranch.name}`;
-		}
-		return '';
-	});
+	// Get dirty status text for a worktree
+	function getDirtyStatus(wt: Worktree): string {
+		if (!wt.git_status) return '';
+		if (wt.git_status.is_clean) return '✓';
+		const counts: string[] = [];
+		if (wt.git_status.modified_count > 0) counts.push(`${wt.git_status.modified_count}M`);
+		if (wt.git_status.staged_count > 0) counts.push(`${wt.git_status.staged_count}S`);
+		if (wt.git_status.untracked_count > 0) counts.push(`${wt.git_status.untracked_count}U`);
+		return counts.join(' ') || '●';
+	}
 
 	async function checkIfGitRepo(projectId: string) {
 		try {
@@ -175,28 +164,35 @@
 
 	async function syncProjectWorktrees(projectId: string) {
 		try {
-			const result = await syncWorktrees(projectId);
+			await syncWorktrees(projectId);
 			lastSyncedProject = projectId;
-			// Reload if we cleaned up stale worktrees
-			if (result.cleaned_up.length > 0 && lastLoadedProject === projectId) {
-				loadData(projectId);
-			}
 		} catch (e) {
 			console.warn('[WorktreeSync] Failed to sync worktrees:', e);
 		}
 	}
 
-	async function loadData(projectId: string) {
+	async function loadData(projectId: string, force: boolean = false) {
+		// Skip if data is fresh for the same project (unless forced)
+		const isSameProject = projectId === lastLoadedProject;
+		if (!force && isSameProject && dataLoadedAt > 0 && Date.now() - dataLoadedAt < DATA_STALE_MS) {
+			return;
+		}
+
 		loading = true;
 		error = null;
 		try {
 			const [branchResult, worktreeResult] = await Promise.all([
-				getBranches(projectId, true), // Include remote branches
+				getBranches(projectId, true),
 				getWorktrees(projectId)
 			]);
 			branches = branchResult;
 			worktrees = worktreeResult.filter(w => w.exists !== false);
+			dataLoadedAt = Date.now();
 			lastLoadedProject = projectId;
+
+			// Set default base branch for create modal
+			const mainBranch = branches.find(b => b.name === 'main' || b.name === 'master');
+			if (mainBranch) baseBranch = mainBranch.name;
 		} catch (e) {
 			console.error('Failed to load data:', e);
 			error = e instanceof Error ? e.message : 'Failed to load';
@@ -215,71 +211,109 @@
 	}
 
 	function clearSelection() {
-		selectedType = null;
-		selectedWorktree = null;
-		selectedBranch = null;
-		newBranchName = '';
-		tabs.setTabWorktreeBranch(tab.id, '');
+		selectedBranchName = null;
+		selectedWorktreeId = null;
 		tabs.clearWorktreeSelection(tab.id);
 	}
 
+	// Select an existing worktree (reuse)
 	function selectWorktree(worktree: Worktree) {
-		selectedType = 'worktree';
-		selectedWorktree = worktree;
-		selectedBranch = null;
-		newBranchName = '';
+		selectedWorktreeId = worktree.id;
+		selectedBranchName = worktree.branch_name;
 		showDropdown = false;
+		searchQuery = '';
 
-		// Update tab state
 		tabs.selectExistingWorktree(tab.id, worktree.id, worktree.branch_name);
 		tabs.setTabWorktreeMode(tab.id, 'existing');
 	}
 
-	function selectBranch(branch: Branch) {
-		selectedType = 'branch';
-		selectedBranch = branch;
-		selectedWorktree = null;
-		newBranchName = '';
+	// Select a branch (will auto-create worktree on first message)
+	async function selectBranch(branch: Branch) {
 		showDropdown = false;
+		searchQuery = '';
+		creating = true;
 
-		// Update tab state - branch selected as base, waiting for new branch name
-		tabs.clearWorktreeSelection(tab.id);
-		tabs.setTabWorktreeBaseBranch(tab.id, branch.name);
-		tabs.setTabWorktreeBranch(tab.id, ''); // Will be set when user types new branch name
-		tabs.setTabWorktreeMode(tab.id, 'new');
+		try {
+			// Auto-create worktree for this branch
+			if (!tab.project) throw new Error('No project selected');
+
+			const result = await createWorktree(tab.project, {
+				branch_name: branch.remote ? branch.name.replace(/^[^/]+\//, '') : branch.name,
+				create_new: false
+			});
+
+			if (result.worktree) {
+				selectedWorktreeId = result.worktree.id;
+				selectedBranchName = result.worktree.branch_name;
+				tabs.selectExistingWorktree(tab.id, result.worktree.id, result.worktree.branch_name);
+				tabs.setTabWorktreeMode(tab.id, 'existing');
+
+				// Refresh worktrees list
+				if (tab.project) await loadData(tab.project, true);
+			}
+		} catch (e) {
+			console.error('Failed to create worktree:', e);
+			error = e instanceof Error ? e.message : 'Failed to create worktree';
+		} finally {
+			creating = false;
+		}
 	}
 
-	function handleNewBranchInput(e: Event) {
-		const input = e.target as HTMLInputElement;
-		newBranchName = input.value;
-		// Update tab with the new branch name that will be created
-		// Store the new branch name in worktreeBranch (the branch to create)
-		// The base branch (selectedBranch) is stored in worktreeBaseBranch
-		if (selectedBranch) {
-			tabs.updateTab(tab.id, {
-				worktreeBranch: input.value.trim(),
-				worktreeBaseBranch: selectedBranch.name
+	// Create a new branch and worktree
+	async function createNewBranch() {
+		if (!newBranchName.trim() || !tab.project) return;
+
+		showCreateModal = false;
+		creating = true;
+
+		try {
+			const result = await createWorktree(tab.project, {
+				branch_name: newBranchName.trim(),
+				create_new: true,
+				base_branch: baseBranch
 			});
+
+			if (result.worktree) {
+				selectedWorktreeId = result.worktree.id;
+				selectedBranchName = result.worktree.branch_name;
+				tabs.selectExistingWorktree(tab.id, result.worktree.id, result.worktree.branch_name);
+				tabs.setTabWorktreeMode(tab.id, 'existing');
+
+				// Refresh data
+				await loadData(tab.project, true);
+			}
+
+			newBranchName = '';
+		} catch (e) {
+			console.error('Failed to create new branch:', e);
+			error = e instanceof Error ? e.message : 'Failed to create branch';
+		} finally {
+			creating = false;
 		}
 	}
 
 	function handleDropdownClick() {
-		if (!loading && tab.project) {
-			showDropdown = !showDropdown;
+		if (creating) return;
+
+		if (!showDropdown && tab.project) {
+			// Live refresh when opening dropdown
+			loadData(tab.project, true);
 		}
+		showDropdown = !showDropdown;
+		searchQuery = '';
 	}
 
 	function handleClickOutside(e: MouseEvent) {
 		if (dropdownRef && !dropdownRef.contains(e.target as Node)) {
 			showDropdown = false;
+			searchQuery = '';
 		}
 	}
 
-	function retryLoad() {
-		if (tab.project) {
-			lastLoadedProject = null;
-			loadData(tab.project);
-		}
+	function openCreateModal() {
+		showDropdown = false;
+		showCreateModal = true;
+		newBranchName = '';
 	}
 
 	onMount(() => {
@@ -321,7 +355,7 @@
 		{/if}
 	</div>
 
-	<!-- Worktree Options -->
+	<!-- Worktree Branch Selector -->
 	{#if tab.executionMode === 'worktree'}
 		<div class="worktree-options">
 			{#if !tab.project}
@@ -329,32 +363,36 @@
 			{:else if error}
 				<div class="error-state">
 					<span>{error}</span>
-					<button type="button" class="retry-btn" onclick={retryLoad}>Retry</button>
+					<button type="button" class="retry-btn" onclick={() => { error = null; if (tab.project) loadData(tab.project, true); }}>Retry</button>
 				</div>
 			{:else}
-				<!-- Branch/Worktree Dropdown -->
+				<!-- Branch Selector Dropdown -->
 				<div class="dropdown-wrapper" bind:this={dropdownRef}>
 					<button
-						id="branch-dropdown"
 						type="button"
 						class="dropdown-trigger"
 						onclick={handleDropdownClick}
-						disabled={loading}
+						disabled={creating}
 					>
-						{#if loading}
+						{#if creating}
 							<svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
 							</svg>
-							<span class="placeholder">Loading...</span>
-						{:else if dropdownDisplayText()}
-							<span class="selected-value">{dropdownDisplayText()}</span>
-							{#if selectedType === 'worktree'}
-								<span class="type-badge worktree">worktree</span>
-							{:else if selectedType === 'branch'}
-								<span class="type-badge branch">branch</span>
-							{/if}
+							<span class="placeholder">Creating worktree...</span>
+						{:else if loading && (dataLoadedAt === 0 || tab.project !== lastLoadedProject)}
+							<svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
+							</svg>
+							<span class="placeholder">Loading branches...</span>
+						{:else if displayText()}
+							<svg class="w-4 h-4 branch-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<circle cx="6" cy="6" r="2" stroke-width="2"/>
+								<circle cx="12" cy="18" r="2" stroke-width="2"/>
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 8v4c0 2 2 4 6 4v2" />
+							</svg>
+							<span class="selected-value">{displayText()}</span>
 						{:else}
-							<span class="placeholder">Select a branch or existing worktree...</span>
+							<span class="placeholder">Select a branch...</span>
 						{/if}
 						<svg class="w-4 h-4 chevron" class:open={showDropdown} fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
@@ -364,27 +402,49 @@
 					<!-- Dropdown Menu -->
 					{#if showDropdown}
 						<div class="dropdown-menu">
-							<!-- Existing Worktrees Section -->
-							{#if worktrees.length > 0}
+							<!-- Search Input -->
+							<div class="search-wrapper">
+								<svg class="w-3.5 h-3.5 search-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+								</svg>
+								<input
+									bind:this={searchInputRef}
+									type="text"
+									class="search-input"
+									placeholder="Search branches..."
+									bind:value={searchQuery}
+									onclick={(e) => e.stopPropagation()}
+								/>
+								{#if loading}
+									<svg class="w-3.5 h-3.5 animate-spin loading-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
+									</svg>
+								{/if}
+							</div>
+
+							<!-- Active Worktrees -->
+							{#if filteredWorktrees().length > 0}
 								<div class="dropdown-section">
 									<div class="section-header">
 										<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 										</svg>
-										<span>Existing Worktrees</span>
+										<span>Active Worktrees</span>
 									</div>
-									{#each worktrees as worktree}
+									{#each filteredWorktrees() as wt}
 										<button
 											type="button"
 											class="dropdown-item"
-											class:selected={selectedWorktree?.id === worktree.id}
-											onclick={() => selectWorktree(worktree)}
+											class:selected={selectedWorktreeId === wt.id}
+											onclick={() => selectWorktree(wt)}
 										>
-											<span class="item-name">{worktree.branch_name}</span>
-											{#if worktree.session_count && worktree.session_count > 0}
-												<span class="session-count">{worktree.session_count} sessions</span>
+											<span class="item-name">{wt.branch_name}</span>
+											{#if wt.git_status}
+												<span class="dirty-status" class:clean={wt.git_status.is_clean}>
+													{getDirtyStatus(wt)}
+												</span>
 											{/if}
-											{#if selectedWorktree?.id === worktree.id}
+											{#if selectedWorktreeId === wt.id}
 												<svg class="w-4 h-4 check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 												</svg>
@@ -394,83 +454,135 @@
 								</div>
 							{/if}
 
-							<!-- Available Branches Section (Create New Worktree) -->
-							{#if availableBranches().length > 0}
+							<!-- Local Branches -->
+							{#if localBranches().length > 0}
 								<div class="dropdown-section">
 									<div class="section-header">
 										<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+											<circle cx="6" cy="6" r="2" stroke-width="2"/>
+											<circle cx="12" cy="18" r="2" stroke-width="2"/>
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 8v4c0 2 2 4 6 4v2" />
 										</svg>
-										<span>Create New Worktree From</span>
+										<span>Local Branches</span>
 									</div>
-									{#each availableBranches() as branch}
+									{#each localBranches() as branch}
 										<button
 											type="button"
 											class="dropdown-item"
-											class:selected={selectedBranch?.name === branch.name}
 											onclick={() => selectBranch(branch)}
 										>
 											<span class="item-name">{branch.name}</span>
-											{#if branch.remote}
-												<span class="remote-badge">remote</span>
-											{/if}
-											{#if selectedBranch?.name === branch.name}
-												<svg class="w-4 h-4 check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-												</svg>
+											{#if branch.current}
+												<span class="current-badge">current</span>
 											{/if}
 										</button>
 									{/each}
 								</div>
 							{/if}
 
+							<!-- Remote Branches -->
+							{#if remoteBranches().length > 0}
+								<div class="dropdown-section">
+									<div class="section-header">
+										<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 004 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+										</svg>
+										<span>Remote Branches</span>
+									</div>
+									{#each remoteBranches() as branch}
+										<button
+											type="button"
+											class="dropdown-item"
+											onclick={() => selectBranch(branch)}
+										>
+											<span class="item-name">{branch.name}</span>
+											<span class="remote-badge">remote</span>
+										</button>
+									{/each}
+								</div>
+							{/if}
+
+							<!-- Create New Branch -->
+							<div class="dropdown-section create-section">
+								<button
+									type="button"
+									class="dropdown-item create-item"
+									onclick={openCreateModal}
+								>
+									<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+									</svg>
+									<span>Create new branch...</span>
+								</button>
+							</div>
+
 							<!-- Empty State -->
-							{#if worktrees.length === 0 && availableBranches().length === 0}
+							{#if filteredWorktrees().length === 0 && localBranches().length === 0 && remoteBranches().length === 0 && searchQuery.trim()}
 								<div class="dropdown-empty">
-									<span>No branches or worktrees available</span>
+									<span>No branches matching "{searchQuery}"</span>
 								</div>
 							{/if}
 						</div>
 					{/if}
 				</div>
 
-				<!-- New Branch Name Input (only shown when creating new worktree from branch) -->
-				{#if showNewBranchInput()}
-					<div class="new-branch-input-wrapper">
-						<input
-							id="new-branch-name"
-							type="text"
-							class="text-input"
-							class:invalid={newBranchName.trim() && !isValidNewBranch()}
-							placeholder="Enter new branch name..."
-							value={newBranchName}
-							oninput={handleNewBranchInput}
-						/>
-						{#if newBranchName.trim() && !isValidNewBranch()}
-							<span class="validation-error">Branch name already exists</span>
-						{/if}
-					</div>
-				{/if}
-
 				<!-- Selection Summary -->
-				{#if selectionSummary()}
-					<div class="selection-summary" class:ready={selectedType === 'worktree' || (selectedType === 'branch' && isValidNewBranch() && newBranchName.trim())}>
-						{#if selectedType === 'worktree'}
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-							</svg>
-						{:else}
-							<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-							</svg>
-						{/if}
-						<span>{selectionSummary()}</span>
+				{#if selectedBranchName}
+					<div class="selection-summary ready">
+						<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+						</svg>
+						<span>Ready to start in worktree</span>
 					</div>
 				{/if}
 			{/if}
 		</div>
 	{/if}
 </div>
+
+<!-- Create New Branch Modal -->
+{#if showCreateModal}
+	<div class="modal-backdrop" onclick={() => showCreateModal = false}>
+		<div class="modal-content" onclick={(e) => e.stopPropagation()}>
+			<h3 class="modal-title">Create New Branch</h3>
+
+			<div class="modal-field">
+				<label for="new-branch-name">Branch name</label>
+				<input
+					id="new-branch-name"
+					type="text"
+					class="modal-input"
+					placeholder="feature/my-feature"
+					bind:value={newBranchName}
+					onkeydown={(e) => { if (e.key === 'Enter' && newBranchName.trim()) createNewBranch(); }}
+				/>
+			</div>
+
+			<div class="modal-field">
+				<label for="base-branch">Base branch</label>
+				<select id="base-branch" class="modal-select" bind:value={baseBranch}>
+					{#each branches.filter(b => !b.remote) as branch}
+						<option value={branch.name}>{branch.name}</option>
+					{/each}
+				</select>
+			</div>
+
+			<div class="modal-actions">
+				<button type="button" class="modal-btn secondary" onclick={() => showCreateModal = false}>
+					Cancel
+				</button>
+				<button
+					type="button"
+					class="modal-btn primary"
+					disabled={!newBranchName.trim()}
+					onclick={createNewBranch}
+				>
+					Create & Select
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
 
 <style>
 	.mode-selector {
@@ -559,8 +671,8 @@
 	}
 
 	.dropdown-trigger:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
+		opacity: 0.7;
+		cursor: wait;
 	}
 
 	.dropdown-trigger .placeholder {
@@ -575,32 +687,19 @@
 		font-weight: 500;
 	}
 
+	.dropdown-trigger .branch-icon {
+		color: var(--primary);
+		flex-shrink: 0;
+	}
+
 	.dropdown-trigger .chevron {
 		transition: transform 0.2s;
 		color: var(--muted-foreground);
+		flex-shrink: 0;
 	}
 
 	.dropdown-trigger .chevron.open {
 		transform: rotate(180deg);
-	}
-
-	.type-badge {
-		font-size: 0.5625rem;
-		font-weight: 600;
-		padding: 0.125rem 0.375rem;
-		border-radius: calc(var(--radius, 0.75rem) * 0.33);
-		text-transform: uppercase;
-		letter-spacing: 0.025em;
-	}
-
-	.type-badge.worktree {
-		background: color-mix(in srgb, var(--primary) 15%, transparent);
-		color: var(--primary);
-	}
-
-	.type-badge.branch {
-		background: color-mix(in srgb, #22c55e 15%, transparent);
-		color: #22c55e;
 	}
 
 	/* Dropdown Menu */
@@ -614,8 +713,39 @@
 		border-radius: calc(var(--radius, 0.75rem) * 0.67);
 		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 		z-index: 50;
-		max-height: 280px;
+		max-height: 320px;
 		overflow-y: auto;
+	}
+
+	/* Search */
+	.search-wrapper {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.5rem 0.75rem;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.search-icon {
+		color: var(--muted-foreground);
+		flex-shrink: 0;
+	}
+
+	.search-input {
+		flex: 1;
+		border: none;
+		background: transparent;
+		font-size: 0.8125rem;
+		color: var(--foreground);
+		outline: none;
+	}
+
+	.search-input::placeholder {
+		color: var(--muted-foreground);
+	}
+
+	.loading-icon {
+		color: var(--muted-foreground);
 	}
 
 	.dropdown-section {
@@ -665,12 +795,21 @@
 		white-space: nowrap;
 	}
 
-	.dropdown-item .session-count {
+	.dirty-status {
 		font-size: 0.625rem;
-		color: var(--muted-foreground);
+		font-weight: 600;
+		padding: 0.125rem 0.375rem;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
+		background: color-mix(in srgb, #f59e0b 15%, transparent);
+		color: #f59e0b;
 	}
 
-	.dropdown-item .remote-badge {
+	.dirty-status.clean {
+		background: color-mix(in srgb, #22c55e 15%, transparent);
+		color: #22c55e;
+	}
+
+	.current-badge, .remote-badge {
 		font-size: 0.5625rem;
 		font-weight: 500;
 		padding: 0.125rem 0.25rem;
@@ -681,6 +820,19 @@
 
 	.dropdown-item .check-icon {
 		color: var(--primary);
+		flex-shrink: 0;
+	}
+
+	.create-section {
+		border-top: 1px solid var(--border);
+	}
+
+	.create-item {
+		color: var(--primary);
+	}
+
+	.create-item svg {
+		color: var(--primary);
 	}
 
 	.dropdown-empty {
@@ -688,47 +840,6 @@
 		text-align: center;
 		font-size: 0.75rem;
 		color: var(--muted-foreground);
-	}
-
-	/* New Branch Input */
-	.new-branch-input-wrapper {
-		display: flex;
-		flex-direction: column;
-		gap: 0.25rem;
-	}
-
-	.text-input {
-		width: 100%;
-		padding: 0.5rem 0.75rem;
-		background: var(--background);
-		border: 1px solid var(--border);
-		border-radius: calc(var(--radius, 0.75rem) * 0.67);
-		font-size: 0.8125rem;
-		color: var(--foreground);
-		transition: border-color 0.15s, box-shadow 0.15s;
-	}
-
-	.text-input:focus {
-		outline: none;
-		border-color: var(--primary);
-		box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 20%, transparent);
-	}
-
-	.text-input.invalid {
-		border-color: var(--destructive);
-	}
-
-	.text-input.invalid:focus {
-		box-shadow: 0 0 0 2px color-mix(in srgb, var(--destructive) 20%, transparent);
-	}
-
-	.text-input::placeholder {
-		color: var(--muted-foreground);
-	}
-
-	.validation-error {
-		font-size: 0.6875rem;
-		color: var(--destructive);
 	}
 
 	/* Selection Summary */
@@ -782,6 +893,100 @@
 
 	.retry-btn:hover {
 		opacity: 0.9;
+	}
+
+	/* Modal */
+	.modal-backdrop {
+		position: fixed;
+		inset: 0;
+		background: rgba(0, 0, 0, 0.5);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 100;
+	}
+
+	.modal-content {
+		background: var(--popover);
+		border: 1px solid var(--border);
+		border-radius: var(--radius, 0.75rem);
+		padding: 1.5rem;
+		width: 100%;
+		max-width: 400px;
+		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+	}
+
+	.modal-title {
+		font-size: 1rem;
+		font-weight: 600;
+		margin-bottom: 1rem;
+		color: var(--foreground);
+	}
+
+	.modal-field {
+		margin-bottom: 1rem;
+	}
+
+	.modal-field label {
+		display: block;
+		font-size: 0.75rem;
+		font-weight: 500;
+		color: var(--muted-foreground);
+		margin-bottom: 0.375rem;
+	}
+
+	.modal-input, .modal-select {
+		width: 100%;
+		padding: 0.5rem 0.75rem;
+		background: var(--background);
+		border: 1px solid var(--border);
+		border-radius: calc(var(--radius, 0.75rem) * 0.67);
+		font-size: 0.8125rem;
+		color: var(--foreground);
+	}
+
+	.modal-input:focus, .modal-select:focus {
+		outline: none;
+		border-color: var(--primary);
+		box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 20%, transparent);
+	}
+
+	.modal-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 0.5rem;
+		margin-top: 1.5rem;
+	}
+
+	.modal-btn {
+		padding: 0.5rem 1rem;
+		font-size: 0.8125rem;
+		font-weight: 500;
+		border-radius: calc(var(--radius, 0.75rem) * 0.67);
+		transition: all 0.15s;
+	}
+
+	.modal-btn.secondary {
+		background: var(--muted);
+		color: var(--muted-foreground);
+	}
+
+	.modal-btn.secondary:hover {
+		background: var(--accent);
+	}
+
+	.modal-btn.primary {
+		background: var(--primary);
+		color: var(--primary-foreground);
+	}
+
+	.modal-btn.primary:hover:not(:disabled) {
+		opacity: 0.9;
+	}
+
+	.modal-btn.primary:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
 	}
 
 	/* Animations */

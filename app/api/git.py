@@ -148,6 +148,11 @@ class WorktreeGitStatus(BaseModel):
     """Git status for a worktree"""
     is_clean: bool = True
     current_branch: Optional[str] = None
+    # File counts for quick display (e.g., "3 modified")
+    modified_count: int = 0
+    staged_count: int = 0
+    untracked_count: int = 0
+    # Full file lists (optional, can be omitted for list endpoint)
     modified: List[str] = []
     staged: List[StagedFile] = []
     untracked: List[str] = []
@@ -659,12 +664,17 @@ def _convert_worktree_to_info(wt: dict) -> WorktreeInfo:
             StagedFile(file=s["file"], status=s["status"])
             for s in gs.get("staged", [])
         ]
+        modified_list = gs.get("modified", [])
+        untracked_list = gs.get("untracked", [])
         git_status_info = WorktreeGitStatus(
             is_clean=gs.get("is_clean", True),
             current_branch=gs.get("current_branch"),
-            modified=gs.get("modified", []),
+            modified_count=len(modified_list),
+            staged_count=len(staged_files),
+            untracked_count=len(untracked_list),
+            modified=modified_list,
             staged=staged_files,
-            untracked=gs.get("untracked", [])
+            untracked=untracked_list
         )
 
     return WorktreeInfo(
@@ -691,12 +701,16 @@ def _convert_worktree_to_info(wt: dict) -> WorktreeInfo:
 async def list_worktrees(
     request: Request,
     project_id: str,
+    include_status: bool = True,
     token: str = Depends(require_auth)
 ):
     """
     List all worktrees for a project.
 
     Returns worktrees with their associated session information.
+
+    Query params:
+        include_status: If True (default), includes git status (dirty state) for each worktree
     """
     check_project_access(request, project_id)
     working_dir = get_project_path(project_id)
@@ -708,6 +722,17 @@ async def list_worktrees(
         )
 
     worktrees = worktree_manager.get_worktrees_for_project(project_id)
+
+    # Optionally fetch git status for each existing worktree
+    if include_status:
+        for wt in worktrees:
+            if wt.get("exists", True):  # Only fetch status for existing worktrees
+                worktree_full_path = str(settings.workspace_dir / wt["worktree_path"])
+                try:
+                    wt["git_status"] = git_service.get_status(worktree_full_path)
+                except Exception as e:
+                    logger.warning(f"Failed to get git status for worktree {wt['id']}: {e}")
+                    wt["git_status"] = None
 
     worktree_infos = [_convert_worktree_to_info(wt) for wt in worktrees]
 
