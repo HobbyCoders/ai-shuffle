@@ -2228,7 +2228,6 @@
 		border-radius: calc(var(--radius, 0.75rem) * 1.167);
 		/* Enable 3D transforms */
 		transform-style: preserve-3d;
-		perspective: 1000px;
 		transition: transform 0.15s ease-out, opacity 0.2s ease;
 	}
 
@@ -2255,14 +2254,18 @@
 		75% { transform: rotate(0.5deg); }
 	}
 
-	/* 3D tilt effect on hover */
+	/* 3D tilt effect on hover - must clear animation to enable transforms */
 	.card:hover {
-		transform: translateY(-8px) rotateY(var(--tilt-x)) rotateX(var(--tilt-y)) scale(1.02);
+		animation: none;
+		opacity: 1;
+		transform: perspective(800px) translateY(-8px) rotateY(var(--tilt-x)) rotateX(var(--tilt-y)) scale(1.02);
 		z-index: 10;
 	}
 
 	.card:active {
-		transform: translateY(-4px) scale(0.98);
+		animation: none;
+		opacity: 1;
+		transform: perspective(800px) translateY(-4px) scale(0.98);
 	}
 
 	/* In edit mode, don't apply hover transform - let cards stay in place */
