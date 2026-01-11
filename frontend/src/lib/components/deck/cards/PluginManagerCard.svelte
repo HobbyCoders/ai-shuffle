@@ -479,7 +479,7 @@
 		padding: 6px 12px;
 		font-size: 0.8125rem;
 		font-weight: 500;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		white-space: nowrap;
 		display: flex;
 		align-items: center;
@@ -493,7 +493,7 @@
 
 	.plugin-tab:hover {
 		color: var(--foreground);
-		background: var(--hover-overlay);
+		background: var(--accent);
 	}
 
 	.plugin-tab.active {
