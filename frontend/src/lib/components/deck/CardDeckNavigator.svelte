@@ -1933,9 +1933,9 @@
 		--card-height: 160px;
 		--card-gap: 16px;
 
-		--radius-sm: calc(var(--radius) * 0.67);
-		--radius-md: var(--radius);
-		--radius-lg: calc(var(--radius) * 1.33);
+		--radius-sm: calc(var(--radius, 0.75rem) * 0.5);
+		--radius-md: calc(var(--radius, 0.75rem) * 0.833);
+		--radius-lg: calc(var(--radius, 0.75rem) * 1.167);
 	}
 
 	/* ========================================
@@ -2269,7 +2269,7 @@
 		height: 100%;
 		background: var(--bg-card);
 		border: 1px solid var(--ai-primary);
-		border-radius: var(--radius);
+		border-radius: var(--radius-lg);
 		padding: 20px;
 		display: flex;
 		flex-direction: column;
@@ -2380,7 +2380,7 @@
 		border: none;
 		outline: none;
 		box-shadow: none;
-		border-radius: var(--radius);
+		border-radius: var(--radius-lg);
 		padding: 20px;
 		display: flex;
 		flex-direction: column;
