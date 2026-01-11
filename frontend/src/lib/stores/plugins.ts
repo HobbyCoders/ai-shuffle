@@ -512,7 +512,7 @@ export const marketplaceSyncing = derived(plugins, ($plugins) => $plugins.syncin
 // Installing state for plugins
 export const pluginInstalling = derived(plugins, ($plugins) => $plugins.installing);
 
-// Grouped by marketplace
+// Grouped by marketplace (all available)
 export const pluginsByMarketplace = derived(plugins, ($plugins) => {
 	const groups: Record<string, AvailablePlugin[]> = {};
 	for (const plugin of $plugins.available) {
@@ -524,10 +524,28 @@ export const pluginsByMarketplace = derived(plugins, ($plugins) => {
 	return groups;
 });
 
+// Uninstalled available plugins (for Available tab - hides already installed)
+export const uninstalledAvailablePlugins = derived(plugins, ($plugins) =>
+	$plugins.available.filter((p) => !p.installed)
+);
+
+// Grouped by marketplace (uninstalled only - for Available tab)
+export const uninstalledPluginsByMarketplace = derived(plugins, ($plugins) => {
+	const groups: Record<string, AvailablePlugin[]> = {};
+	for (const plugin of $plugins.available) {
+		if (plugin.installed) continue; // Skip installed plugins
+		if (!groups[plugin.marketplace]) {
+			groups[plugin.marketplace] = [];
+		}
+		groups[plugin.marketplace].push(plugin);
+	}
+	return groups;
+});
+
 // Stats
 export const pluginStats = derived(plugins, ($plugins) => ({
 	totalMarketplaces: $plugins.marketplaces.length,
-	totalAvailable: $plugins.available.length,
+	totalAvailable: $plugins.available.filter((p) => !p.installed).length, // Only count uninstalled
 	totalInstalled: $plugins.installed.length,
 	totalEnabled: $plugins.installed.filter((p) => p.enabled).length,
 	totalFileBasedAgents: $plugins.fileBasedAgents.length

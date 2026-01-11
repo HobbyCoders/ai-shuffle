@@ -15,14 +15,14 @@
 	import {
 		plugins,
 		marketplaces,
-		availablePlugins,
 		installedPlugins,
 		selectedPlugin,
 		pluginsLoading,
 		pluginsError,
 		marketplaceSyncing,
 		pluginInstalling,
-		pluginsByMarketplace,
+		uninstalledAvailablePlugins,
+		uninstalledPluginsByMarketplace,
 		pluginStats
 	} from '$lib/stores/plugins';
 	import type { AvailablePlugin, PluginInfo, MarketplaceInfo } from '$lib/api/plugins';
@@ -76,9 +76,9 @@
 		plugins.loadAll();
 	});
 
-	// Filter available plugins
+	// Filter available plugins (only uninstalled)
 	const filteredAvailable = $derived(() => {
-		let items = $availablePlugins;
+		let items = $uninstalledAvailablePlugins;
 
 		// Filter by marketplace
 		if (selectedMarketplaceFilter) {
@@ -298,7 +298,7 @@
 								{/if}
 							</div>
 						{:else}
-							{#each Object.entries($pluginsByMarketplace) as [marketplace, marketplacePlugins]}
+							{#each Object.entries($uninstalledPluginsByMarketplace) as [marketplace, marketplacePlugins]}
 								{@const filtered = marketplacePlugins.filter(p =>
 									(!selectedMarketplaceFilter || p.marketplace === selectedMarketplaceFilter) &&
 									(!searchQuery.trim() ||
