@@ -2947,9 +2947,11 @@
 		aspect-ratio: 3 / 4;
 		padding: 1.5rem 1rem;
 
-		background: var(--bg-card);
+		background: transparent;
 		border: none;
-		border-radius: calc(var(--radius-lg) * 1.67);
+		outline: none;
+		box-shadow: none;
+		border-radius: var(--radius);
 
 		display: flex;
 		flex-direction: column;
@@ -2961,16 +2963,10 @@
 		cursor: pointer;
 		scroll-snap-align: center;
 		/* scroll-snap-stop: normal (default) allows momentum to carry through cards naturally */
-		/* Split transitions: fast for glow/border (scroll response), smooth for transform (tap) */
 		transition:
-			border-color 0.1s ease-out,
 			box-shadow 0.15s ease-out,
 			transform 0.2s var(--ease-out);
 		-webkit-tap-highlight-color: transparent;
-
-		box-shadow:
-			0 8px 24px rgba(0, 0, 0, 0.4),
-			0 4px 8px rgba(0, 0, 0, 0.3);
 
 		opacity: 0;
 		animation: mobileCardEnter 0.5s var(--ease-out) forwards;
@@ -2989,35 +2985,21 @@
 	}
 
 	.mobile-card.active {
-		border-color: var(--ai-primary);
-		box-shadow:
-			0 12px 32px rgba(0, 0, 0, 0.5),
-			0 0 24px var(--ai-glow);
+		box-shadow: 0 0 24px var(--ai-glow);
 	}
 
 	.mobile-card:active {
 		transform: scale(0.97);
 	}
 
-	/* Deck card styling - match desktop: only icon gets deck color, not card border/glow */
-	.mobile-card.deck-card {
-		/* Use standard border, not deck-color based */
-		border-color: var(--border-default);
-	}
-
+	/* Deck card styling - icon only gets deck color */
 	.mobile-card.deck-card.active {
-		/* Use standard primary glow like other cards, not deck-color based */
-		border-color: var(--ai-primary);
-		box-shadow:
-			0 12px 32px rgba(0, 0, 0, 0.5),
-			0 0 24px var(--ai-glow);
+		box-shadow: 0 0 24px var(--ai-glow);
 	}
 
-	/* Add deck card styling */
+	/* Add deck card styling - keep dashed border for this special card */
 	.mobile-card.add-deck-card {
-		border-style: dashed;
-		border-color: var(--border-default);
-		background: transparent;
+		border: 1px dashed var(--border-default);
 	}
 
 	.mobile-card.add-deck-card.active {
@@ -3034,9 +3016,7 @@
 	/* Drop into deck feedback - use standard primary glow */
 	.mobile-card.drop-into-deck {
 		transform: scale(1.05);
-		border-color: var(--ai-primary);
-		box-shadow:
-			0 0 30px var(--ai-glow);
+		box-shadow: 0 0 30px var(--ai-glow);
 	}
 
 	/* Mobile Card Icon */
