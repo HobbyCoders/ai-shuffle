@@ -2950,7 +2950,7 @@
 		padding: 1.5rem 1rem;
 
 		background: var(--bg-card);
-		border: 1px solid var(--border-default);
+		border: none;
 		border-radius: calc(var(--radius-lg) * 1.67);
 
 		display: flex;
