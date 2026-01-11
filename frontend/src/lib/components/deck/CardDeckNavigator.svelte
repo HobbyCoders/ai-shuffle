@@ -2958,7 +2958,8 @@
 	.mobile-card.active {
 		box-shadow:
 			var(--shadow-l),
-			0 0 24px var(--ai-glow);
+			0 0 30px color-mix(in srgb, var(--primary) 50%, transparent),
+			0 0 60px var(--ai-glow);
 	}
 
 	.mobile-card:active {
@@ -2975,7 +2976,8 @@
 		/* Use standard primary glow like other cards, not deck-color based */
 		box-shadow:
 			var(--shadow-l),
-			0 0 24px var(--ai-glow);
+			0 0 30px color-mix(in srgb, var(--primary) 50%, transparent),
+			0 0 60px var(--ai-glow);
 	}
 
 	/* Add deck card styling */
@@ -3022,7 +3024,9 @@
 		background: var(--ai-subtle);
 		border-color: var(--ai-primary);
 		color: var(--icon-color, var(--ai-primary));
-		box-shadow: 0 0 20px var(--ai-glow);
+		box-shadow:
+			0 0 20px color-mix(in srgb, var(--primary) 50%, transparent),
+			0 0 40px var(--ai-glow);
 	}
 
 	.mobile-card.deck-card .mobile-card-icon {
