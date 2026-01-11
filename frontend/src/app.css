@@ -161,10 +161,10 @@
 		--status-pending-bg: oklch(0.55 0.03 260 / 0.15);
 		--status-pending-border: oklch(0.55 0.03 260 / 0.30);
 
-		/* Chip/badge colors */
-		--chip-primary-bg: oklch(0.72 0.14 180 / 0.15);
-		--chip-primary-text: oklch(0.72 0.14 180);
-		--chip-primary-border: oklch(0.72 0.14 180 / 0.30);
+		/* Chip/badge colors - derived from theme primary */
+		--chip-primary-bg: color-mix(in srgb, var(--primary) 15%, transparent);
+		--chip-primary-text: var(--primary);
+		--chip-primary-border: color-mix(in srgb, var(--primary) 30%, transparent);
 
 		/* Modal overlay */
 		--modal-overlay: oklch(0 0 0 / 0.6);
@@ -347,10 +347,10 @@
 		--status-pending-bg: oklch(0.45 0.03 260 / 0.12);
 		--status-pending-border: oklch(0.45 0.03 260 / 0.25);
 
-		/* Chip/badge colors - light theme */
-		--chip-primary-bg: oklch(0.55 0.16 180 / 0.12);
-		--chip-primary-text: oklch(0.45 0.16 180);
-		--chip-primary-border: oklch(0.55 0.16 180 / 0.25);
+		/* Chip/badge colors - derived from theme primary */
+		--chip-primary-bg: color-mix(in srgb, var(--primary) 12%, transparent);
+		--chip-primary-text: var(--primary);
+		--chip-primary-border: color-mix(in srgb, var(--primary) 25%, transparent);
 
 		/* Modal overlay - light theme */
 		--modal-overlay: oklch(0 0 0 / 0.5);
