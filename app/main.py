@@ -4,16 +4,8 @@ Main FastAPI application entry point
 """
 
 import logging
-import sys
 from pathlib import Path
 from contextlib import asynccontextmanager
-
-# Windows asyncio subprocess fix
-# asyncio.create_subprocess_exec() requires ProactorEventLoop on Windows
-# Uvicorn defaults to SelectorEventLoop which doesn't support subprocess
-if sys.platform == 'win32':
-    import asyncio
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
