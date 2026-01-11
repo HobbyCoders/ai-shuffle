@@ -2405,9 +2405,10 @@
 	.card-inner {
 		width: 100%;
 		height: 100%;
-		background: var(--bg-card);
+		background: transparent;
 		border: none;
 		outline: none;
+		box-shadow: none;
 		border-radius: var(--radius);
 		padding: 20px;
 		display: flex;
