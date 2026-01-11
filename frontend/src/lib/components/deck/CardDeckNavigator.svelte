@@ -2196,6 +2196,8 @@
 		opacity: 0;
 		transform: translateX(40px) scale(0.95);
 		animation: cardEnter 0.4s var(--ease-spring) forwards;
+		/* Ensure outer card matches inner radius to prevent clipping */
+		border-radius: calc(var(--radius, 0.75rem) * 1.167);
 	}
 
 	@keyframes cardEnter {
@@ -2385,7 +2387,6 @@
 		display: flex;
 		flex-direction: column;
 		position: relative;
-		overflow: hidden;
 		transition: all 0.2s var(--ease-out);
 	}
 
