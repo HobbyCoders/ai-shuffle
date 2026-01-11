@@ -1903,30 +1903,28 @@
 	   ======================================== */
 
 	.navigator {
-		/* Dark mode (default) */
-		--bg-deep: oklch(0.08 0.01 260);
-		--bg-base: oklch(0.10 0.01 260);
-		--bg-elevated: oklch(0.13 0.01 260);
-		--bg-card: oklch(0.15 0.01 260);
-		--bg-card-hover: oklch(0.17 0.01 260);
+		/* All colors from theme - no hardcoded values */
+		--bg-deep: var(--background);
+		--bg-base: var(--background);
+		--bg-elevated: var(--card);
+		--bg-card: var(--card);
+		--bg-card-hover: var(--muted);
 
-		--border-subtle: rgba(255, 255, 255, 0.06);
-		--border-default: rgba(255, 255, 255, 0.1);
-		--border-strong: rgba(255, 255, 255, 0.15);
+		--border-subtle: var(--border);
+		--border-default: var(--border);
+		--border-strong: var(--border);
 
-		--text-primary: var(--foreground, #f4f4f5);
-		--text-secondary: var(--muted-foreground, #a1a1aa);
-		--text-muted: #71717a;
-		--text-dim: #52525b;
+		--text-primary: var(--foreground);
+		--text-secondary: var(--muted-foreground);
+		--text-muted: var(--muted-foreground);
+		--text-dim: var(--muted-foreground);
 
 		--ai-primary: var(--primary);
 		--ai-secondary: var(--primary);
 		--ai-glow: color-mix(in srgb, var(--primary) 25%, transparent);
 		--ai-subtle: color-mix(in srgb, var(--primary) 8%, transparent);
 
-		--backdrop-bg: rgba(0, 0, 0, 0.85);
-		--shadow-color: rgba(0, 0, 0, 0.4);
-		--shadow-strong: rgba(0, 0, 0, 0.6);
+		--backdrop-bg: color-mix(in srgb, var(--background) 85%, transparent);
 
 		--ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 		--ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -1934,37 +1932,10 @@
 		--card-width: 220px;
 		--card-height: 160px;
 		--card-gap: 16px;
-		/* Inherit from theme --radius, scale accordingly (no fallback to respect theme) */
+
 		--radius-sm: calc(var(--radius) * 0.67);
 		--radius-md: var(--radius);
 		--radius-lg: calc(var(--radius) * 1.33);
-	}
-
-	/* Light mode overrides */
-	:global(.light) .navigator {
-		--bg-deep: oklch(0.94 0.005 260);
-		--bg-base: oklch(0.96 0.005 260);
-		--bg-elevated: oklch(0.98 0.003 260);
-		--bg-card: oklch(1 0 0);
-		--bg-card-hover: oklch(0.97 0.005 260);
-
-		--border-subtle: rgba(0, 0, 0, 0.06);
-		--border-default: rgba(0, 0, 0, 0.1);
-		--border-strong: rgba(0, 0, 0, 0.15);
-
-		--text-primary: var(--foreground, #18181b);
-		--text-secondary: var(--muted-foreground, #52525b);
-		--text-muted: #71717a;
-		--text-dim: #a1a1aa;
-
-		--ai-primary: var(--primary);
-		--ai-secondary: var(--primary);
-		--ai-glow: color-mix(in srgb, var(--primary) 20%, transparent);
-		--ai-subtle: color-mix(in srgb, var(--primary) 8%, transparent);
-
-		--backdrop-bg: rgba(255, 255, 255, 0.85);
-		--shadow-color: rgba(0, 0, 0, 0.1);
-		--shadow-strong: rgba(0, 0, 0, 0.15);
 	}
 
 	/* ========================================
@@ -2303,7 +2274,7 @@
 		display: flex;
 		flex-direction: column;
 		box-shadow:
-			0 20px 60px var(--shadow-strong),
+			var(--shadow-l),
 			0 0 30px var(--ai-glow),
 			0 0 0 2px color-mix(in srgb, var(--ai-primary) 30%, transparent);
 	}
@@ -2348,7 +2319,7 @@
 		justify-content: center;
 		gap: 0.75rem;
 		box-shadow:
-			0 20px 60px var(--shadow-strong),
+			var(--shadow-l),
 			0 0 30px var(--ai-glow),
 			0 0 0 2px color-mix(in srgb, var(--ai-primary) 30%, transparent);
 	}
@@ -2382,7 +2353,7 @@
 	@keyframes pickUp {
 		0% {
 			transform: rotate(0deg) scale(1);
-			box-shadow: 0 4px 16px var(--shadow-color);
+			box-shadow: var(--shadow-m);
 		}
 		100% {
 			transform: rotate(3deg) scale(1.08);
@@ -2398,7 +2369,7 @@
 		border-color: var(--ai-primary);
 		box-shadow:
 			0 0 20px var(--ai-glow),
-			0 8px 32px var(--shadow-color);
+			var(--shadow-l);
 		background: color-mix(in srgb, var(--ai-primary) 10%, var(--bg-card));
 	}
 
@@ -2420,14 +2391,14 @@
 
 	.card:hover .card-inner {
 		background: var(--bg-card-hover);
-		box-shadow: 0 8px 32px var(--shadow-color);
+		box-shadow: var(--shadow-m);
 	}
 
 	/* AI-active card glow */
 	.card[data-ai-active="true"] .card-inner {
 		box-shadow:
 			0 0 20px var(--ai-glow),
-			0 8px 32px var(--shadow-color);
+			var(--shadow-l);
 	}
 
 	/* Drag handle */
@@ -2686,7 +2657,7 @@
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-md);
 		padding: 6px;
-		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+		box-shadow: var(--shadow-l);
 	}
 
 	.context-menu-label {
@@ -2741,7 +2712,7 @@
 		position: fixed;
 		inset: 0;
 		z-index: 100003;
-		background: rgba(0, 0, 0, 0.5);
+		background: var(--backdrop-bg);
 	}
 
 	.dialog {
@@ -2756,7 +2727,7 @@
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-lg);
 		padding: 24px;
-		box-shadow: 0 16px 64px rgba(0, 0, 0, 0.5);
+		box-shadow: var(--shadow-l);
 	}
 
 	.dialog-title {
@@ -2949,7 +2920,7 @@
 
 		background: var(--bg-card);
 		border: none;
-		border-radius: calc(var(--radius-lg) * 1.67);
+		border-radius: var(--radius);
 
 		display: flex;
 		flex-direction: column;
@@ -2961,16 +2932,12 @@
 		cursor: pointer;
 		scroll-snap-align: center;
 		/* scroll-snap-stop: normal (default) allows momentum to carry through cards naturally */
-		/* Split transitions: fast for glow/border (scroll response), smooth for transform (tap) */
 		transition:
-			border-color 0.1s ease-out,
 			box-shadow 0.15s ease-out,
 			transform 0.2s var(--ease-out);
 		-webkit-tap-highlight-color: transparent;
 
-		box-shadow:
-			0 8px 24px rgba(0, 0, 0, 0.4),
-			0 4px 8px rgba(0, 0, 0, 0.3);
+		box-shadow: var(--shadow-m);
 
 		opacity: 0;
 		animation: mobileCardEnter 0.5s var(--ease-out) forwards;
@@ -2989,9 +2956,8 @@
 	}
 
 	.mobile-card.active {
-		border-color: var(--ai-primary);
 		box-shadow:
-			0 12px 32px rgba(0, 0, 0, 0.5),
+			var(--shadow-l),
 			0 0 24px var(--ai-glow);
 	}
 
@@ -3007,9 +2973,8 @@
 
 	.mobile-card.deck-card.active {
 		/* Use standard primary glow like other cards, not deck-color based */
-		border-color: var(--ai-primary);
 		box-shadow:
-			0 12px 32px rgba(0, 0, 0, 0.5),
+			var(--shadow-l),
 			0 0 24px var(--ai-glow);
 	}
 
