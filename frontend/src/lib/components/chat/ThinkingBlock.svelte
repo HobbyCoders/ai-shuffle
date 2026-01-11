@@ -168,7 +168,7 @@
 	.thinking-label {
 		font-weight: 600;
 		font-size: 0.875rem;
-		color: var(--muted-foreground);
+		color: var(--secondary);
 	}
 
 	.thinking-icon {
