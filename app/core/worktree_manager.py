@@ -154,17 +154,41 @@ class WorktreeManager:
         cleaned_up = []
         still_active = 0
 
+        main_dir = str(settings.workspace_dir / project["path"])
+
         for wt in active_worktrees:
             worktree_full_path = settings.workspace_dir / wt["worktree_path"]
 
             if not worktree_full_path.exists():
                 # Stale record - worktree was deleted outside the app
-                logger.info(f"Cleaning up stale worktree record: {wt['branch_name']} (path: {worktree_full_path})")
+                branch_name = wt["branch_name"]
+                logger.info(f"Cleaning up stale worktree record: {branch_name} (path: {worktree_full_path})")
                 database.update_worktree(wt["id"], status=WorktreeStatus.DELETED)
+
+                # Also try to delete the orphaned branch if it exists and is not the default branch
+                default_branch = repo.get("default_branch", "main")
+                branch_deleted = False
+                if branch_name and branch_name != default_branch:
+                    try:
+                        # Check if the branch exists before trying to delete
+                        branches = self.git_service.list_branches(main_dir, include_remote=False)
+                        local_branch_names = [b["name"] for b in branches if not b["is_remote"]]
+                        if branch_name in local_branch_names:
+                            # Delete the orphaned branch
+                            success = self.git_service.delete_branch(main_dir, branch_name, force=True)
+                            if success:
+                                logger.info(f"Deleted orphaned branch: {branch_name}")
+                                branch_deleted = True
+                            else:
+                                logger.warning(f"Failed to delete orphaned branch: {branch_name}")
+                    except Exception as e:
+                        logger.warning(f"Error cleaning up orphaned branch {branch_name}: {e}")
+
                 cleaned_up.append({
                     "id": wt["id"],
-                    "branch_name": wt["branch_name"],
-                    "reason": "path_not_found"
+                    "branch_name": branch_name,
+                    "reason": "path_not_found",
+                    "branch_deleted": branch_deleted
                 })
             else:
                 still_active += 1
