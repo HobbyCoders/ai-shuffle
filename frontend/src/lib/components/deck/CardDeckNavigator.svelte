@@ -1934,10 +1934,10 @@
 		--card-width: 220px;
 		--card-height: 160px;
 		--card-gap: 16px;
-		/* Inherit from theme --radius, scale accordingly */
-		--radius-sm: calc(var(--radius, 0.75rem) * 0.67);
-		--radius-md: var(--radius, 0.75rem);
-		--radius-lg: calc(var(--radius, 0.75rem) * 1.33);
+		/* Inherit from theme --radius, scale accordingly (no fallback to respect theme) */
+		--radius-sm: calc(var(--radius) * 0.67);
+		--radius-md: var(--radius);
+		--radius-lg: calc(var(--radius) * 1.33);
 	}
 
 	/* Light mode overrides */
