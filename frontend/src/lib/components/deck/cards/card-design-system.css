@@ -283,7 +283,6 @@
 
 .card-list-item:hover {
   border-color: var(--border-emphasis);
-  background: var(--surface-hover);
   box-shadow: var(--shadow-inset), var(--shadow-md);
   transform: translateY(-1px);
 }
@@ -318,6 +317,7 @@
 }
 
 .card-list-item:hover .card-item-icon {
+  background: var(--surface-hover);
   box-shadow: var(--shadow-sm), var(--shadow-glow-primary);
   transform: scale(1.02);
 }
