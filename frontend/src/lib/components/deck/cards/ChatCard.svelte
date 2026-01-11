@@ -125,12 +125,10 @@
 				<!-- Permission Queue -->
 				{#if tab.pendingPermissions && tab.pendingPermissions.length > 0}
 					<div class="max-w-5xl mx-auto px-4 sm:px-8 py-3">
-						<div class="permission-panel rounded-xl border border-warning/30 bg-warning/5 p-3">
-							<PermissionQueue
-								requests={tab.pendingPermissions}
-								on:respond={handlePermissionResponse}
-							/>
-						</div>
+						<PermissionQueue
+							requests={tab.pendingPermissions}
+							on:respond={handlePermissionResponse}
+						/>
 					</div>
 				{/if}
 
@@ -188,12 +186,10 @@
 					<!-- Permission Queue -->
 					{#if tab.pendingPermissions && tab.pendingPermissions.length > 0}
 						<div class="max-w-5xl mx-auto px-4 sm:px-8 py-3">
-							<div class="permission-panel rounded-xl border border-warning/30 bg-warning/5 p-3">
-								<PermissionQueue
-									requests={tab.pendingPermissions}
-									on:respond={handlePermissionResponse}
-								/>
-							</div>
+							<PermissionQueue
+								requests={tab.pendingPermissions}
+								on:respond={handlePermissionResponse}
+							/>
 						</div>
 					{/if}
 

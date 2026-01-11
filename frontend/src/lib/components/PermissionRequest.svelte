@@ -549,8 +549,8 @@
 	}
 
 	.remember-option:hover {
-		border-color: color-mix(in oklch, var(--border) 60%, var(--foreground));
-		background: color-mix(in oklch, var(--card) 95%, var(--foreground));
+		border-color: var(--accent);
+		background: color-mix(in oklch, var(--accent) 8%, var(--card));
 	}
 
 	.remember-option.selected {
@@ -610,8 +610,8 @@
 	}
 
 	.pattern-badge:hover {
-		background: color-mix(in oklch, var(--muted) 80%, var(--foreground));
-		border-color: var(--primary);
+		background: color-mix(in oklch, var(--accent) 15%, var(--muted));
+		border-color: var(--accent);
 	}
 
 	.pattern-badge code {
@@ -641,15 +641,15 @@
 		font-size: 0.875rem;
 		font-weight: 500;
 		border-radius: var(--radius, 0.75rem);
-		background: color-mix(in oklch, var(--muted-foreground) 10%, transparent);
-		color: var(--muted-foreground);
-		border: 1px solid color-mix(in oklch, var(--muted-foreground) 20%, transparent);
+		background: var(--secondary);
+		color: var(--secondary-foreground);
+		border: 1px solid var(--border);
 		transition: all 0.15s ease;
 	}
 
 	.deny-btn:hover {
-		background: color-mix(in oklch, var(--muted-foreground) 20%, transparent);
-		border-color: color-mix(in oklch, var(--muted-foreground) 30%, transparent);
+		background: color-mix(in oklch, var(--secondary) 80%, var(--foreground));
+		border-color: color-mix(in oklch, var(--border) 80%, var(--foreground));
 	}
 
 	.deny-btn:active {
@@ -658,7 +658,7 @@
 
 	.deny-btn:focus {
 		outline: none;
-		box-shadow: 0 0 0 2px color-mix(in oklch, var(--muted-foreground) 30%, transparent);
+		box-shadow: 0 0 0 2px color-mix(in oklch, var(--secondary) 50%, transparent);
 	}
 
 	.allow-btn {

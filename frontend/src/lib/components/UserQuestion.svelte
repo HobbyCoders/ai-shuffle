@@ -608,8 +608,8 @@
 	}
 
 	.option-card:hover {
-		border-color: color-mix(in oklch, var(--border) 60%, var(--foreground));
-		background: color-mix(in oklch, var(--card) 95%, var(--foreground));
+		border-color: var(--accent);
+		background: color-mix(in oklch, var(--accent) 8%, var(--card));
 	}
 
 	.option-card.selected {
