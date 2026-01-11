@@ -8,7 +8,7 @@
 import { writable, derived, get } from 'svelte/store';
 import type { Session, Profile, PermissionRequest as PermissionRequestType, UserQuestionRequest, PaginatedSessions, SessionSearchResult, PaginatedSessionSearchResults } from '$lib/api/client';
 import { api, searchSessionsPaginated } from '$lib/api/client';
-import { isNotificationsEnabled, notifySessionComplete, getPermission, type SessionCompleteInfo } from '$lib/services/notifications';
+import { isNotificationsEnabled, notifySessionComplete, notifyWaitingForResponse, getPermission, type SessionCompleteInfo } from '$lib/services/notifications';
 import { deck } from './deck';
 import { getDeviceIdSync } from './device';
 import {
@@ -3445,6 +3445,13 @@ function createTabsStore() {
 
 				console.log('[WS] Permission request:', request.tool_name, request.request_id);
 
+				// Send desktop notification if user is not focused on the window
+				if (isNotificationsEnabled()) {
+					notifyWaitingForResponse('permission', {
+						toolName: request.tool_name
+					});
+				}
+
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
@@ -3537,6 +3544,13 @@ function createTabsStore() {
 
 				console.log('[WS] User question request:', request.request_id, request.questions.length, 'questions');
 				console.log('[WS] User question data (full):', JSON.stringify(request.questions, null, 2));
+
+				// Send desktop notification if user is not focused on the window
+				if (isNotificationsEnabled()) {
+					notifyWaitingForResponse('question', {
+						questionCount: request.questions.length
+					});
+				}
 
 				update(s => ({
 					...s,

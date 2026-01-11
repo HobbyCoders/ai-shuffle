@@ -200,6 +200,53 @@ export function notifySessionError(
 }
 
 /**
+ * Show a notification when AI is waiting for user response (permission or question)
+ * Only shows if window is not focused (user is away)
+ *
+ * @param type - Type of waiting notification ('permission' or 'question')
+ * @param details - Additional context about what's being requested
+ */
+export function notifyWaitingForResponse(
+	type: 'permission' | 'question',
+	details?: {
+		toolName?: string;
+		questionCount?: number;
+		sessionTitle?: string;
+	}
+): Notification | null {
+	// Don't notify if window is focused - user can already see the request
+	if (typeof document !== 'undefined' && document.hasFocus()) {
+		return null;
+	}
+
+	const title = type === 'permission'
+		? 'Permission Required'
+		: 'Claude Has a Question';
+
+	let body: string;
+	if (type === 'permission') {
+		body = details?.toolName
+			? `AI wants to use: ${details.toolName}`
+			: 'AI is waiting for permission to proceed';
+	} else {
+		const count = details?.questionCount || 1;
+		body = count > 1
+			? `AI has ${count} questions for you`
+			: 'AI needs your input to continue';
+	}
+
+	return showNotification(title, {
+		body,
+		tag: `waiting-${type}-${Date.now()}`,
+		requireInteraction: true, // Keep notification visible until user interacts
+		onClick: () => {
+			// Focus the window when notification is clicked
+			window.focus();
+		}
+	});
+}
+
+/**
  * Check if notifications are enabled in localStorage
  */
 export function isNotificationsEnabled(): boolean {
