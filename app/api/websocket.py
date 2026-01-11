@@ -893,11 +893,12 @@ async def chat_websocket(
                             await sync_engine.register_device(device_id, session_id, websocket)
                             current_session_id = session_id
 
-                        # Store user message
+                        # Store user message with profile_id for per-query tracking
                         database.add_session_message(
                             session_id=session_id,
                             role="user",
-                            content=prompt
+                            content=prompt,
+                            profile_id=profile_id
                         )
 
                         # Broadcast user message to other devices
@@ -905,7 +906,8 @@ async def chat_websocket(
                             session_id=session_id,
                             message={
                                 "role": "user",
-                                "content": prompt
+                                "content": prompt,
+                                "profile_id": profile_id
                             },
                             source_device_id=device_id  # Exclude the sender
                         )
@@ -978,11 +980,12 @@ async def chat_websocket(
                                 except (asyncio.CancelledError, asyncio.TimeoutError):
                                     pass
 
-                        # Step 3: Store user message
+                        # Step 3: Store user message with profile_id for per-query tracking
                         database.add_session_message(
                             session_id=session_id,
                             role="user",
-                            content=prompt
+                            content=prompt,
+                            profile_id=profile_id
                         )
 
                         # Step 4: Broadcast user message to other devices
@@ -990,7 +993,8 @@ async def chat_websocket(
                             session_id=session_id,
                             message={
                                 "role": "user",
-                                "content": prompt
+                                "content": prompt,
+                                "profile_id": profile_id
                             },
                             source_device_id=device_id
                         )

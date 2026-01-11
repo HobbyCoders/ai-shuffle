@@ -1417,11 +1417,12 @@ async def execute_query(
         )
         resume_id = None
 
-    # Store user message
+    # Store user message with profile_id for per-query tracking
     database.add_session_message(
         session_id=session_id,
         role="user",
-        content=prompt
+        content=prompt,
+        profile_id=profile_id
     )
 
     # Build options with user-scoped credential resolution
@@ -1523,7 +1524,8 @@ async def execute_query(
                 content=f"Using tool: {tool_msg['name']}",
                 tool_name=tool_msg["name"],
                 tool_input=tool_msg.get("input"),
-                metadata={"tool_id": tool_msg.get("tool_id")}
+                metadata={"tool_id": tool_msg.get("tool_id")},
+                profile_id=profile_id
             )
         elif tool_msg["type"] == "tool_result":
             database.add_session_message(
@@ -1531,7 +1533,8 @@ async def execute_query(
                 role="tool_result",
                 content=tool_msg.get("output", ""),
                 tool_name=tool_msg["name"],
-                metadata={"tool_id": tool_msg.get("tool_id")}
+                metadata={"tool_id": tool_msg.get("tool_id")},
+                profile_id=profile_id
             )
 
     # Store assistant response
@@ -1540,7 +1543,8 @@ async def execute_query(
         session_id=session_id,
         role="assistant",
         content=full_response,
-        metadata=metadata
+        metadata=metadata,
+        profile_id=profile_id
     )
 
     # Log usage
@@ -1624,13 +1628,14 @@ async def stream_query(
     user_msg = database.add_session_message(
         session_id=session_id,
         role="user",
-        content=prompt
+        content=prompt,
+        profile_id=profile_id
     )
 
-    # Broadcast user message to other devices
+    # Broadcast user message to other devices (include profile_id for display)
     await sync_engine.broadcast_message_added(
         session_id=session_id,
-        message=user_msg,
+        message={**user_msg, "profile_id": profile_id},
         source_device_id=device_id
     )
 
@@ -1907,7 +1912,8 @@ async def stream_query(
                 content=f"Using tool: {tool_msg['name']}",
                 tool_name=tool_msg["name"],
                 tool_input=tool_msg.get("input"),
-                metadata={"tool_id": tool_msg.get("tool_id")}
+                metadata={"tool_id": tool_msg.get("tool_id")},
+                profile_id=profile_id
             )
         elif tool_msg["type"] == "tool_result":
             database.add_session_message(
@@ -1915,7 +1921,8 @@ async def stream_query(
                 role="tool_result",
                 content=tool_msg.get("output", ""),
                 tool_name=tool_msg["name"],
-                metadata={"tool_id": tool_msg.get("tool_id")}
+                metadata={"tool_id": tool_msg.get("tool_id")},
+                profile_id=profile_id
             )
 
     # Store assistant response
@@ -1925,7 +1932,8 @@ async def stream_query(
             session_id=session_id,
             role="assistant",
             content=full_response + ("\n[Interrupted]" if interrupted else ""),
-            metadata=metadata
+            metadata=metadata,
+            profile_id=profile_id
         )
 
         # Log stream end for polling fallback
@@ -1983,17 +1991,21 @@ async def _run_background_query(
 
     All events are broadcast via sync_engine for WebSocket delivery.
     """
+    # Extract profile_id for per-query tracking
+    profile_id = profile.get("id")
+
     # Store user message and broadcast to other devices
     user_msg = database.add_session_message(
         session_id=session_id,
         role="user",
-        content=prompt
+        content=prompt,
+        profile_id=profile_id
     )
 
-    # Broadcast user message to other devices
+    # Broadcast user message to other devices (include profile_id for display)
     await sync_engine.broadcast_message_added(
         session_id=session_id,
-        message=user_msg,
+        message={**user_msg, "profile_id": profile_id},
         source_device_id=device_id
     )
 
@@ -2252,7 +2264,8 @@ async def _run_background_query(
                 content=f"Using tool: {tool_msg['name']}",
                 tool_name=tool_msg["name"],
                 tool_input=tool_msg.get("input"),
-                metadata={"tool_id": tool_msg.get("tool_id")}
+                metadata={"tool_id": tool_msg.get("tool_id")},
+                profile_id=profile_id
             )
         elif tool_msg["type"] == "tool_result":
             database.add_session_message(
@@ -2260,7 +2273,8 @@ async def _run_background_query(
                 role="tool_result",
                 content=tool_msg.get("output", ""),
                 tool_name=tool_msg["name"],
-                metadata={"tool_id": tool_msg.get("tool_id")}
+                metadata={"tool_id": tool_msg.get("tool_id")},
+                profile_id=profile_id
             )
 
     # Store assistant response
@@ -2270,7 +2284,8 @@ async def _run_background_query(
             session_id=session_id,
             role="assistant",
             content=full_response + ("\n[Interrupted]" if interrupted else ""),
-            metadata=metadata
+            metadata=metadata,
+            profile_id=profile_id
         )
 
         # Log stream end for polling fallback
@@ -3068,7 +3083,8 @@ async def stream_to_websocket(
                 content=f"Using tool: {tool_msg['name']}",
                 tool_name=tool_msg["name"],
                 tool_input=tool_msg.get("input"),
-                metadata={"tool_id": tool_msg.get("tool_id")}
+                metadata={"tool_id": tool_msg.get("tool_id")},
+                profile_id=profile_id
             )
         elif tool_msg["type"] == "tool_result":
             database.add_session_message(
@@ -3076,7 +3092,8 @@ async def stream_to_websocket(
                 role="tool_result",
                 content=tool_msg.get("output", ""),
                 tool_name=tool_msg["name"],
-                metadata={"tool_id": tool_msg.get("tool_id")}
+                metadata={"tool_id": tool_msg.get("tool_id")},
+                profile_id=profile_id
             )
 
     # Store assistant response
@@ -3086,7 +3103,8 @@ async def stream_to_websocket(
             session_id=session_id,
             role="assistant",
             content=full_response + ("\n\n[Interrupted]" if interrupted else ""),
-            metadata=metadata
+            metadata=metadata,
+            profile_id=profile_id
         )
 
     # Log usage

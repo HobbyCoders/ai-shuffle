@@ -180,6 +180,7 @@ def _create_schema(cursor: sqlite3.Cursor):
             tool_name TEXT,
             tool_input JSON,
             metadata JSON,
+            profile_id TEXT,
             version INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -495,6 +496,12 @@ def _create_schema(cursor: sqlite3.Cursor):
         pass  # Column already exists
     try:
         cursor.execute("ALTER TABLE admin ADD COLUMN totp_verified_at TIMESTAMP")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
+    # Add profile_id column to session_messages (migration for per-query profile tracking)
+    try:
+        cursor.execute("ALTER TABLE session_messages ADD COLUMN profile_id TEXT")
     except sqlite3.OperationalError:
         pass  # Column already exists
 
@@ -1714,18 +1721,30 @@ def add_session_message(
     content: str,
     tool_name: Optional[str] = None,
     tool_input: Optional[Dict[str, Any]] = None,
-    metadata: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = None,
+    profile_id: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Add a message to a session"""
+    """Add a message to a session
+
+    Args:
+        session_id: The session ID
+        role: Message role (user, assistant, system)
+        content: Message content
+        tool_name: Optional tool name for tool_use messages
+        tool_input: Optional tool input for tool_use messages
+        metadata: Optional metadata dict
+        profile_id: Optional profile ID that created this message (for per-query tracking)
+    """
     now = datetime.utcnow().isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO session_messages (session_id, role, content, tool_name, tool_input, metadata, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO session_messages (session_id, role, content, tool_name, tool_input, metadata, profile_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, role, content, tool_name,
              json.dumps(tool_input) if tool_input else None,
              json.dumps(metadata) if metadata else None,
+             profile_id,
              now)
         )
         return {
@@ -1736,6 +1755,7 @@ def add_session_message(
             "tool_name": tool_name,
             "tool_input": tool_input,
             "metadata": metadata,
+            "profile_id": profile_id,
             "created_at": now
         }
 

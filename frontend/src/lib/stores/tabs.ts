@@ -80,6 +80,7 @@ export interface ChatMessage {
 	partialToolInput?: string; // Accumulator for streaming tool input JSON
 	systemSubtype?: string; // For system messages (e.g., 'context' for /context command)
 	systemData?: Record<string, unknown>; // Raw data from system message
+	profileId?: string; // Profile ID that was active when this message was created (for per-query tracking)
 	// Subagent-specific fields
 	agentId?: string; // The subagent's unique ID (e.g., '00ed8f4d')
 	agentType?: string; // The subagent type (e.g., 'Explore', 'Plan')
@@ -111,7 +112,8 @@ export interface ChatTab {
 	wsConnected: boolean;
 	error: string | null;
 	profile: string;  // Current UI selection for next query
-	sessionProfileId: string | null;  // Profile that created the session (for message display)
+	sessionProfileId: string | null;  // Profile that created the session (for fallback display)
+	currentQueryProfileId: string | null;  // Profile for the current streaming query
 	project: string;
 	totalTokensIn: number;
 	totalTokensOut: number;
@@ -668,7 +670,7 @@ function createTabsStore() {
 					if (thinkingIdx !== -1) {
 						messages[thinkingIdx] = { ...messages[thinkingIdx], streaming: false };
 					}
-					// Add tool use message
+					// Add tool use message with profileId for per-query tracking
 					messages.push({
 						id: `tool-${Date.now()}-${contentBlock.id || ''}`,
 						role: 'assistant',
@@ -678,7 +680,8 @@ function createTabsStore() {
 						toolId: contentBlock.id || '',
 						toolInput: {},
 						toolStatus: 'running',
-						streaming: true
+						streaming: true,
+						profileId: tab.currentQueryProfileId || undefined
 					});
 				}
 				break;
@@ -742,14 +745,14 @@ function createTabsStore() {
 				processDiscreteEvent(messages, event, tab);
 			}
 
-			// Apply all thinking deltas at once
+			// Apply all thinking deltas at once (with profileId for per-query tracking)
 			if (batch.thinkingDelta) {
-				appendToStreamingThinking(messages, batch.thinkingDelta);
+				appendToStreamingThinking(messages, batch.thinkingDelta, tab.currentQueryProfileId || undefined);
 			}
 
-			// Apply all text deltas at once
+			// Apply all text deltas at once (with profileId for per-query tracking)
 			if (batch.textDelta) {
-				appendToStreamingText(messages, batch.textDelta);
+				appendToStreamingText(messages, batch.textDelta, tab.currentQueryProfileId || undefined);
 			}
 
 			// Apply all tool input deltas
@@ -1263,6 +1266,7 @@ function createTabsStore() {
 					error: null,
 					profile: syncedTab.profile || currentState.tabs[0]?.profile || '',
 					sessionProfileId: null,  // Will be set when session is loaded
+					currentQueryProfileId: null,  // Will be set when query starts
 					project: syncedTab.project || currentState.tabs[0]?.project || '',
 					totalTokensIn: 0,
 					totalTokensOut: 0,
@@ -1581,7 +1585,7 @@ function createTabsStore() {
 								}
 							}
 
-							// Create the tool use message
+							// Create the tool use message with profileId for per-query tracking
 							messages.push({
 								id: `tool-sync-${Date.now()}-${toolId || ''}`,
 								role: 'assistant' as const,
@@ -1591,7 +1595,8 @@ function createTabsStore() {
 								toolId: toolId,
 								toolInput: toolInput,
 								toolStatus: 'running' as const,
-								streaming: true
+								streaming: true,
+								profileId: t.currentQueryProfileId || undefined
 							});
 
 							return { ...t, messages, todos };
@@ -2676,7 +2681,8 @@ function createTabsStore() {
 							toolId: toolId,
 							toolInput: data.input as Record<string, unknown>,
 							toolStatus: 'running',
-							streaming: true
+							streaming: true,
+							profileId: tab.currentQueryProfileId || undefined
 						});
 
 						return { ...tab, messages };
@@ -3802,6 +3808,7 @@ function createTabsStore() {
 						// Fall back to localStorage if server-saved profile/project is empty
 						profile: pt.profile || defaultProfile,
 						sessionProfileId: null,  // Will be set when session is loaded via WebSocket
+						currentQueryProfileId: null,  // Will be set when query starts
 						project: pt.project || defaultProject,
 						totalTokensIn: 0,
 						totalTokensOut: 0,
@@ -3891,6 +3898,7 @@ function createTabsStore() {
 				error: null,
 				profile,
 				sessionProfileId: null,  // Will be set when session is created/loaded
+				currentQueryProfileId: null,  // Will be set when query starts
 				project,
 				totalTokensIn: 0,
 				totalTokensOut: 0,
@@ -4055,12 +4063,15 @@ function createTabsStore() {
 				return;
 			}
 
-			// Add user message immediately
+			// Add user message immediately with profileId for per-query tracking
 			const userMsgId = `user-${Date.now()}`;
 			const isFirstMessage = tab.title === 'New Chat';
 			const newTitle = isFirstMessage
 				? prompt.substring(0, 100) + (prompt.length > 100 ? '...' : '')
 				: tab.title;
+
+			// Capture current profile for this query
+			const queryProfileId = tab.profile;
 
 			update(s => ({
 				...s,
@@ -4071,11 +4082,13 @@ function createTabsStore() {
 						messages: [...t.messages, {
 							id: userMsgId,
 							role: 'user' as const,
-							content: prompt
+							content: prompt,
+							profileId: queryProfileId  // Capture profile for this query
 						}],
 						isStreaming: true,
 						error: null,
-						title: newTitle
+						title: newTitle,
+						currentQueryProfileId: queryProfileId  // Track for streaming messages
 					};
 				})
 			}));
@@ -4495,7 +4508,8 @@ function createTabsStore() {
 				});
 
 				// Load token totals from session history - single source of truth
-				// Also restore profile and project from the saved session (they are locked once saved)
+				// Note: Don't reset profile to session.profile_id - preserve user's current selection
+				// sessionProfileId is for fallback display only (legacy messages without per-message profileId)
 				updateTab(tabId, {
 					sessionId: session.id,
 					messages: messagesWithPreservedIds,
@@ -4505,8 +4519,8 @@ function createTabsStore() {
 					totalTokensOut: session.total_tokens_out || 0,
 					totalCacheCreationTokens: session.cache_creation_tokens || 0,
 					totalCacheReadTokens: session.cache_read_tokens || 0,
-					profile: session.profile_id,
-					sessionProfileId: session.profile_id,  // Lock profile for message display
+					// profile: session.profile_id,  // REMOVED: Don't reset user's current selection
+					sessionProfileId: session.profile_id,  // Fallback for legacy messages without profileId
 					project: session.project_id || ''
 				});
 
@@ -4718,6 +4732,7 @@ function createTabsStore() {
 			updateTab(tabId, {
 				sessionId: null,
 				sessionProfileId: null,  // Reset profile lock for new session
+				currentQueryProfileId: null,  // Reset query profile
 				messages: [],
 				isStreaming: false,
 				error: null,
@@ -4847,7 +4862,7 @@ function createTabsStore() {
 				...s,
 				tabs: s.tabs.map(tab =>
 					tab.sessionId === sessionId
-						? { ...tab, sessionId: null, sessionProfileId: null, messages: [], title: 'New Chat' }
+						? { ...tab, sessionId: null, sessionProfileId: null, currentQueryProfileId: null, messages: [], title: 'New Chat' }
 						: tab
 				)
 			}));
@@ -4951,7 +4966,7 @@ function createTabsStore() {
 				...s,
 				tabs: s.tabs.map(tab =>
 					sessionIds.includes(tab.sessionId || '')
-						? { ...tab, sessionId: null, sessionProfileId: null, messages: [], title: 'New Chat' }
+						? { ...tab, sessionId: null, sessionProfileId: null, currentQueryProfileId: null, messages: [], title: 'New Chat' }
 						: tab
 				),
 				// Exit selection mode and clear selections
