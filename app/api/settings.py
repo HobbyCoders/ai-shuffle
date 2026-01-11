@@ -3151,3 +3151,93 @@ async def resolve_credential(
         "source": source,
         "credential_type": credential_type
     }
+
+
+# ============================================================================
+# Security Instructions (System Prompt)
+# ============================================================================
+
+class SecurityInstructionsResponse(BaseModel):
+    """Response model for security instructions."""
+    current: str
+    default: str
+    is_customized: bool
+
+
+class SecurityInstructionsUpdateRequest(BaseModel):
+    """Request model for updating security instructions."""
+    instructions: str
+
+
+# Import the default security instructions from query_engine
+from app.core.query_engine import DEFAULT_SECURITY_INSTRUCTIONS
+
+
+@router.get("/security-instructions", response_model=SecurityInstructionsResponse)
+async def get_security_instructions(token: str = Depends(require_admin)):
+    """
+    Get the current security instructions that are added to all system prompts.
+
+    Returns both the current active instructions (custom or default) and the
+    original default instructions for comparison/revert purposes.
+
+    Admin only.
+    """
+    custom_instructions = database.get_system_setting("security_instructions")
+
+    return SecurityInstructionsResponse(
+        current=custom_instructions if custom_instructions else DEFAULT_SECURITY_INSTRUCTIONS,
+        default=DEFAULT_SECURITY_INSTRUCTIONS,
+        is_customized=custom_instructions is not None
+    )
+
+
+@router.put("/security-instructions")
+async def update_security_instructions(
+    request: SecurityInstructionsUpdateRequest,
+    token: str = Depends(require_admin)
+):
+    """
+    Update the security instructions that are added to all system prompts.
+
+    The instructions are prepended to all system prompts sent to Claude.
+    This allows customizing the base behavior across all profiles.
+
+    Admin only.
+    """
+    instructions = request.instructions.strip()
+
+    if not instructions:
+        raise HTTPException(
+            status_code=400,
+            detail="Instructions cannot be empty. Use DELETE to revert to default."
+        )
+
+    database.set_system_setting("security_instructions", instructions)
+
+    return {
+        "success": True,
+        "message": "Security instructions updated successfully"
+    }
+
+
+@router.delete("/security-instructions")
+async def revert_security_instructions(token: str = Depends(require_admin)):
+    """
+    Revert security instructions to the default.
+
+    This removes any custom instructions and returns to using the built-in default.
+
+    Admin only.
+    """
+    # Delete the custom setting to revert to default
+    from app.db.database import get_db
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM system_settings WHERE key = ?", ("security_instructions",))
+
+    return {
+        "success": True,
+        "message": "Security instructions reverted to default"
+    }

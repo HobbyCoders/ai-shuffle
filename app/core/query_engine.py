@@ -399,8 +399,9 @@ async def cleanup_session(session_id: str) -> bool:
     return True
 
 
-# Instructions for displaying media and files in chat
-SECURITY_INSTRUCTIONS = """
+# Default instructions for displaying media and files in chat
+# Can be customized via admin settings API
+DEFAULT_SECURITY_INSTRUCTIONS = """
 Chat and its Capabilities:
 ## Displaying Media and Files in Chat
 
@@ -442,6 +443,18 @@ When the user references a chat history file (`.jsonl` file from `~/.claude/proj
 
 This helps the model understand past context without overwhelming the current conversation.
 """
+
+
+def get_security_instructions() -> str:
+    """
+    Get the active security instructions to prepend to system prompts.
+
+    Returns custom instructions if set by admin, otherwise returns the default.
+    """
+    custom_instructions = database.get_system_setting("security_instructions")
+    if custom_instructions:
+        return custom_instructions
+    return DEFAULT_SECURITY_INSTRUCTIONS
 
 
 def _is_git_repo(working_dir: str) -> bool:
@@ -1127,9 +1140,12 @@ def build_options_from_profile(
     # Get AI tools config from profile config (not system_prompt)
     ai_tools_config = config.get("ai_tools")
 
+    # Get the active security instructions (custom or default)
+    security_instructions = get_security_instructions()
+
     if system_prompt is None:
         # No preset - just security instructions as plain text
-        final_system_prompt = SECURITY_INSTRUCTIONS
+        final_system_prompt = security_instructions
 
         # Add AI tools section if any are enabled
         final_system_prompt += _build_ai_tools_section(ai_tools_config)
@@ -1146,7 +1162,7 @@ def build_options_from_profile(
             inject_env = system_prompt.get("inject_env_details", False)
 
             # Start building the prompt
-            prompt_parts = [SECURITY_INSTRUCTIONS]
+            prompt_parts = [security_instructions]
 
             # Add environment details if enabled (includes AI tools based on ai_tools_config)
             if inject_env:
@@ -1174,7 +1190,7 @@ def build_options_from_profile(
         else:
             # Preset system prompt - pass to SDK with append
             existing_append = system_prompt.get("append", "")
-            full_append = SECURITY_INSTRUCTIONS
+            full_append = security_instructions
             if existing_append:
                 full_append += "\n\n" + existing_append
             if override_append:
@@ -1190,7 +1206,7 @@ def build_options_from_profile(
             }
     else:
         # String system prompt - use it directly with security instructions
-        final_system_prompt = SECURITY_INSTRUCTIONS + "\n\n" + str(system_prompt)
+        final_system_prompt = security_instructions + "\n\n" + str(system_prompt)
 
         # Add AI tools section if any are enabled
         final_system_prompt += _build_ai_tools_section(ai_tools_config)

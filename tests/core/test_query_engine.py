@@ -69,7 +69,7 @@ from app.core.query_engine import (
     _active_sessions,
     MAX_TOOL_OUTPUT_SIZE,
     MAX_DISPLAY_OUTPUT_SIZE,
-    SECURITY_INSTRUCTIONS,
+    DEFAULT_SECURITY_INSTRUCTIONS,
 )
 
 
@@ -984,6 +984,7 @@ class TestBuildOptionsFromProfile:
         mock_settings.workspace_dir = Path("/workspace")
         mock_db.get_worktree_by_session.return_value = None
         mock_db.get_subagent.return_value = None
+        mock_db.get_system_setting.return_value = None  # Use default security instructions
 
         profile = {
             "id": "test-profile",
@@ -998,7 +999,7 @@ class TestBuildOptionsFromProfile:
 
         assert options.model == "claude-sonnet-4-20250514"
         assert options.permission_mode == "default"
-        assert SECURITY_INSTRUCTIONS in options.system_prompt
+        assert DEFAULT_SECURITY_INSTRUCTIONS in options.system_prompt
         assert agents is None
 
     @patch("app.core.query_engine.settings")
@@ -1033,6 +1034,7 @@ class TestBuildOptionsFromProfile:
         mock_deploy.return_value = DeploymentMode.LOCAL
         mock_settings.workspace_dir = Path("/workspace")
         mock_db.get_worktree_by_session.return_value = None
+        mock_db.get_system_setting.return_value = None  # Use default security instructions
 
         profile = {
             "id": "test-profile",
@@ -1049,7 +1051,7 @@ class TestBuildOptionsFromProfile:
         options, _ = build_options_from_profile(profile)
 
         assert "You are a helpful assistant." in options.system_prompt
-        assert SECURITY_INSTRUCTIONS in options.system_prompt
+        assert DEFAULT_SECURITY_INSTRUCTIONS in options.system_prompt
 
     @patch("app.core.query_engine.settings")
     @patch("app.core.query_engine.database")
@@ -1402,10 +1404,10 @@ class TestQueryEngineIntegration:
         _active_sessions.clear()
 
     def test_security_instructions_present(self):
-        """SECURITY_INSTRUCTIONS should be defined."""
-        assert SECURITY_INSTRUCTIONS is not None
-        assert len(SECURITY_INSTRUCTIONS) > 0
-        assert "Chat and its Capabilities" in SECURITY_INSTRUCTIONS
+        """DEFAULT_SECURITY_INSTRUCTIONS should be defined."""
+        assert DEFAULT_SECURITY_INSTRUCTIONS is not None
+        assert len(DEFAULT_SECURITY_INSTRUCTIONS) > 0
+        assert "Chat and its Capabilities" in DEFAULT_SECURITY_INSTRUCTIONS
 
     def test_max_sizes_defined(self):
         """Max size constants should be reasonable."""
