@@ -2298,7 +2298,7 @@
 		height: 100%;
 		background: var(--bg-card);
 		border: 1px solid var(--ai-primary);
-		border-radius: var(--radius-lg);
+		border-radius: var(--radius);
 		padding: 20px;
 		display: flex;
 		flex-direction: column;
@@ -2407,7 +2407,7 @@
 		height: 100%;
 		background: var(--bg-card);
 		border: 1px solid var(--border-default);
-		border-radius: var(--radius-lg);
+		border-radius: var(--radius);
 		padding: 20px;
 		display: flex;
 		flex-direction: column;
