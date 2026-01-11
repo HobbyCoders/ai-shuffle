@@ -177,6 +177,7 @@ class Profile(ProfileBase):
     """Full profile response"""
     id: str
     is_builtin: bool = False
+    session_count: Optional[int] = None  # Number of sessions using this profile
     created_at: datetime
     updated_at: datetime
 

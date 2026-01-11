@@ -45,6 +45,9 @@ async def list_profiles(request: Request, token: str = Depends(require_auth)):
     """List all agent profiles. API users only see their assigned profiles."""
     api_user = get_api_user_from_request(request)
 
+    # Get session counts for all profiles in one query
+    session_counts = database.get_all_profile_session_counts()
+
     profile_ids = api_user.get("profile_ids") if api_user else None
     if profile_ids:
         # API user with assigned profiles - only return those profiles
@@ -52,11 +55,14 @@ async def list_profiles(request: Request, token: str = Depends(require_auth)):
         for pid in profile_ids:
             profile = database.get_profile(pid)
             if profile:
+                profile["session_count"] = session_counts.get(pid, 0)
                 allowed_profiles.append(profile)
         return allowed_profiles
 
     # Admin or unrestricted API user - return all profiles
     profiles = database.get_all_profiles()
+    for profile in profiles:
+        profile["session_count"] = session_counts.get(profile["id"], 0)
     return profiles
 
 
@@ -80,6 +86,8 @@ async def get_profile(request: Request, profile_id: str, token: str = Depends(re
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Profile not found: {profile_id}"
         )
+    # Add session count
+    profile["session_count"] = database.get_profile_session_count(profile_id)
     return profile
 
 

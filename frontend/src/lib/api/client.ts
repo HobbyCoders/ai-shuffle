@@ -144,6 +144,7 @@ export interface Profile {
 	name: string;
 	description: string | null;
 	is_builtin: boolean;
+	session_count?: number;  // Number of conversations using this profile
 	config: ProfileConfig;
 	created_at: string;
 	updated_at: string;

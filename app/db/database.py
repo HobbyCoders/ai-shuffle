@@ -1255,6 +1255,26 @@ def delete_profile(profile_id: str) -> bool:
         return cursor.rowcount > 0
 
 
+def get_profile_session_count(profile_id: str) -> int:
+    """Get the number of sessions associated with a profile"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM sessions WHERE profile_id = ?", (profile_id,))
+        return cursor.fetchone()[0]
+
+
+def get_all_profile_session_counts() -> Dict[str, int]:
+    """Get session counts for all profiles in a single query"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT profile_id, COUNT(*) as count
+            FROM sessions
+            GROUP BY profile_id
+        """)
+        return {row["profile_id"]: row["count"] for row in cursor.fetchall()}
+
+
 def set_profile_builtin(profile_id: str, is_builtin: bool) -> bool:
     """Set the is_builtin flag for a profile"""
     with get_db() as conn:

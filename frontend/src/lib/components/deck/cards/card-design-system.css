@@ -782,6 +782,43 @@
   font-size: var(--text-sm);
 }
 
+/* Delete warning (when profile has sessions) */
+.delete-warning {
+  background: color-mix(in oklch, var(--destructive) 8%, transparent);
+  border: 1px solid color-mix(in oklch, var(--destructive) 25%, transparent);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.delete-warning-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--destructive);
+  margin-bottom: var(--space-2);
+}
+
+.delete-warning-header .warning-icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  stroke: var(--destructive);
+}
+
+.delete-warning-text {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin: 0;
+  line-height: 1.4;
+}
+
+.delete-warning-text strong {
+  color: var(--text-primary);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════════
    EMPTY STATE
    ═══════════════════════════════════════════════════════════════════════════════ */
