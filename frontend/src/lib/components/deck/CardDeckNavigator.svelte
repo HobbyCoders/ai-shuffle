@@ -2922,7 +2922,7 @@
 
 		background: var(--bg-card);
 		border: none;
-		border-radius: var(--radius);
+		border-radius: var(--radius-lg);
 
 		display: flex;
 		flex-direction: column;
