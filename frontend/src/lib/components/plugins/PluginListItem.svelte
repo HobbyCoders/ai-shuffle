@@ -47,7 +47,7 @@
 </script>
 
 <div
-	class="border border-border rounded-lg overflow-hidden bg-card hover:border-primary/30 transition-colors {selected ? 'ring-2 ring-primary' : ''}"
+	class="border border-border rounded-lg overflow-hidden bg-[var(--surface-1)] hover:border-primary/30 transition-colors {selected ? 'ring-2 ring-primary' : ''}"
 >
 	<div class="px-4 py-3">
 		<div class="flex items-start gap-3">
