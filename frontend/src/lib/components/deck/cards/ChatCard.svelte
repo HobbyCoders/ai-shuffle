@@ -573,6 +573,7 @@
 		align-items: center;
 		justify-content: center;
 		padding: 1rem;
+		overflow: hidden;
 		animation: modalFadeIn 0.2s ease-out;
 	}
 
@@ -589,18 +590,24 @@
 		z-index: 1;
 		width: 100%;
 		max-width: 40rem;
-		max-height: calc(100% - 2rem);
+		max-height: 100%;
 		overflow-y: auto;
 		display: flex;
 		flex-direction: column;
 		gap: 0.75rem;
+		/* Smooth scrolling for content */
+		overscroll-behavior: contain;
 	}
 
 	.modal-card-wrapper {
+		flex-shrink: 0;
 		background: var(--card);
 		border: 1px solid var(--border);
 		border-radius: 0.75rem;
 		box-shadow: var(--shadow-l);
+		/* Allow internal scrolling if content is too tall */
+		max-height: calc(100vh - 8rem);
+		overflow-y: auto;
 	}
 
 	@keyframes modalFadeIn {
