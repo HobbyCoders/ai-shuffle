@@ -602,7 +602,7 @@
 	.plugin-content {
 		flex: 1;
 		overflow-y: auto;
-		background: var(--background);
+		background: var(--surface-0);
 	}
 
 	.plugin-error {
