@@ -277,9 +277,9 @@
 						disabled={!canProceed(idx) && idx > currentStep}
 						class="w-2 h-2 rounded-full transition-all duration-200"
 						style={
-							isReviewStep ? 'background: var(--accent);' :
-							idx === currentStep ? 'background: var(--accent); transform: scale(1.25);' :
-							idx < currentStep ? 'background: color-mix(in oklch, var(--accent) 60%, transparent);' :
+							isReviewStep ? 'background: var(--primary);' :
+							idx === currentStep ? 'background: var(--primary); transform: scale(1.25);' :
+							idx < currentStep ? 'background: color-mix(in oklch, var(--primary) 60%, transparent);' :
 							'background: color-mix(in oklch, var(--muted-foreground) 30%, transparent);'
 						}
 						aria-label="Go to question {idx + 1}"
@@ -319,7 +319,7 @@
 								{#if question.header}
 									<span
 										class="inline-block px-2 py-0.5 text-[10px] font-medium rounded-md mb-1.5"
-										style="background: color-mix(in oklch, var(--accent) 15%, transparent); color: var(--accent);"
+										style="background: color-mix(in oklch, var(--primary) 15%, transparent); color: var(--primary);"
 									>
 										{question.header}
 									</span>
@@ -352,7 +352,7 @@
 					{#if currentQuestion.header}
 						<span
 							class="inline-block px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded-md mb-2"
-							style="background: color-mix(in oklch, var(--accent) 15%, transparent); color: var(--accent);"
+							style="background: color-mix(in oklch, var(--primary) 15%, transparent); color: var(--primary);"
 						>
 							{currentQuestion.header}
 						</span>
@@ -613,8 +613,8 @@
 	}
 
 	.option-card.selected {
-		border-color: var(--accent);
-		background: color-mix(in oklch, var(--accent) 8%, var(--card));
+		border-color: var(--primary);
+		background: color-mix(in oklch, var(--primary) 8%, var(--card));
 	}
 
 	/* Checkbox Indicator */
@@ -630,8 +630,8 @@
 	}
 
 	.checkbox-indicator.checked {
-		background: var(--accent);
-		border-color: var(--accent);
+		background: var(--primary);
+		border-color: var(--primary);
 	}
 
 	/* Radio Indicator */
@@ -647,14 +647,14 @@
 	}
 
 	.radio-indicator.checked {
-		border-color: var(--accent);
+		border-color: var(--primary);
 	}
 
 	.radio-dot {
 		width: 0.5rem;
 		height: 0.5rem;
 		border-radius: 50%;
-		background: var(--accent);
+		background: var(--primary);
 		animation: dot-pop 0.15s ease;
 	}
 
@@ -701,8 +701,8 @@
 
 	.other-textarea:focus {
 		outline: none;
-		border-color: color-mix(in oklch, var(--accent) 40%, var(--border));
-		box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent) 20%, transparent);
+		border-color: color-mix(in oklch, var(--primary) 40%, var(--border));
+		box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 20%, transparent);
 	}
 
 	@keyframes dot-pop {

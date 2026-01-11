@@ -554,8 +554,8 @@
 	}
 
 	.remember-option.selected {
-		border-color: var(--accent);
-		background: color-mix(in oklch, var(--accent) 8%, var(--card));
+		border-color: var(--primary);
+		background: color-mix(in oklch, var(--primary) 8%, var(--card));
 	}
 
 	.radio-indicator {
@@ -571,14 +571,14 @@
 	}
 
 	.remember-option.selected .radio-indicator {
-		border-color: var(--accent);
+		border-color: var(--primary);
 	}
 
 	.radio-dot {
 		width: 0.5rem;
 		height: 0.5rem;
 		border-radius: 50%;
-		background: var(--accent);
+		background: var(--primary);
 		animation: dot-pop 0.15s ease;
 	}
 
@@ -611,7 +611,7 @@
 
 	.pattern-badge:hover {
 		background: color-mix(in oklch, var(--muted) 80%, var(--foreground));
-		border-color: var(--accent);
+		border-color: var(--primary);
 	}
 
 	.pattern-badge code {
@@ -624,7 +624,7 @@
 		font-size: 0.7rem;
 		font-family: ui-monospace, 'Monaco', 'Menlo', monospace;
 		background: var(--input);
-		border: 1px solid var(--accent);
+		border: 1px solid var(--primary);
 		border-radius: 0.5rem;
 		color: var(--foreground);
 		outline: none;
