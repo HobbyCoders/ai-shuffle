@@ -148,6 +148,27 @@
 	let renameDeckId = $state<string | null>(null);
 	let renameDeckName = $state('');
 
+	// 3D tilt effect state (desktop cards)
+	let hoveredCardId = $state<string | null>(null);
+	let cardTilt = $state<{ x: number; y: number }>({ x: 0, y: 0 });
+
+	// Handle card mouse move for 3D tilt effect
+	function handleCardTiltMove(e: MouseEvent, cardId: string) {
+		if (isMobile || isEditMode) return;
+		const card = e.currentTarget as HTMLElement;
+		const rect = card.getBoundingClientRect();
+		const x = (e.clientX - rect.left) / rect.width - 0.5;
+		const y = (e.clientY - rect.top) / rect.height - 0.5;
+		hoveredCardId = cardId;
+		cardTilt = { x: x * 15, y: y * -15 };
+	}
+
+	// Reset tilt on mouse leave
+	function handleCardTiltLeave() {
+		hoveredCardId = null;
+		cardTilt = { x: 0, y: 0 };
+	}
+
 	// Card types for main deck
 	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins' | 'hooks' | 'notes' | 'stats' | 'user-settings';
 
@@ -1670,14 +1691,19 @@
 								class:add-deck-card={card.type === 'add-deck'}
 								class:is-being-dragged={isPointerDragging && card.id === draggedCardId}
 								class:drop-into-deck={card.type === 'deck' && card.deckId === dragOverDeckId}
+								class:card-tilting={hoveredCardId === card.id}
 								data-ai-active={card.isStreaming}
 								data-has-children={card.hasChildren}
 								data-card-id={card.id}
 								style:animation-delay="{index * 50}ms"
 								style:--deck-color={card.iconColor}
+								style:--tilt-x={hoveredCardId === card.id ? `${cardTilt.x}deg` : '0deg'}
+								style:--tilt-y={hoveredCardId === card.id ? `${cardTilt.y}deg` : '0deg'}
 								onclick={(e) => handleCardClick(card, e)}
 								oncontextmenu={(e) => isEditMode && showContextMenu(card.id, e)}
 								onkeydown={(e) => e.key === 'Enter' && handleCardClick(card, e as unknown as MouseEvent)}
+								onmousemove={(e) => handleCardTiltMove(e, card.id)}
+								onmouseleave={handleCardTiltLeave}
 								role="option"
 								tabindex="0"
 								aria-selected="false"
@@ -2188,16 +2214,22 @@
 	   CARDS
 	   ======================================== */
 	.card {
+		--tilt-x: 0deg;
+		--tilt-y: 0deg;
+
 		flex-shrink: 0;
 		width: var(--card-width);
 		height: var(--card-height);
 		cursor: pointer;
-		transition: transform 0.2s var(--ease-out), opacity 0.2s ease;
 		opacity: 0;
 		transform: translateX(40px) scale(0.95);
 		animation: cardEnter 0.4s var(--ease-spring) forwards;
 		/* Ensure outer card matches inner radius to prevent clipping */
 		border-radius: calc(var(--radius, 0.75rem) * 1.167);
+		/* Enable 3D transforms */
+		transform-style: preserve-3d;
+		perspective: 1000px;
+		transition: transform 0.15s ease-out, opacity 0.2s ease;
 	}
 
 	@keyframes cardEnter {
@@ -2223,8 +2255,10 @@
 		75% { transform: rotate(0.5deg); }
 	}
 
+	/* 3D tilt effect on hover */
 	.card:hover {
-		transform: translateY(-6px);
+		transform: translateY(-8px) rotateY(var(--tilt-x)) rotateX(var(--tilt-y)) scale(1.02);
+		z-index: 10;
 	}
 
 	.card:active {
@@ -2381,20 +2415,21 @@
 		background: var(--bg-card);
 		border: 1px solid var(--border-subtle);
 		outline: none;
-		box-shadow: none;
+		box-shadow: var(--shadow-m);
 		border-radius: calc(var(--radius, 0.75rem) * 1.167);
 		padding: 20px;
 		display: flex;
 		flex-direction: column;
 		position: relative;
-		transition: all 0.2s var(--ease-out);
+		transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.3s ease;
 	}
 
 	.card:hover .card-inner {
 		background: var(--bg-card-hover);
+		border-color: var(--primary);
 		box-shadow:
-			var(--shadow-m),
-			0 0 20px color-mix(in srgb, var(--primary) 25%, transparent);
+			var(--shadow-l),
+			0 0 30px color-mix(in srgb, var(--primary) 30%, transparent);
 	}
 
 	/* AI-active card glow */
@@ -2447,8 +2482,9 @@
 
 	.card:hover .card-icon {
 		background: var(--ai-subtle);
-		border-color: color-mix(in srgb, var(--ai-primary) 20%, transparent);
+		border-color: var(--primary);
 		color: var(--icon-color, var(--ai-primary));
+		box-shadow: 0 0 16px color-mix(in srgb, var(--primary) 25%, transparent);
 	}
 
 	/* Deck card styling */
