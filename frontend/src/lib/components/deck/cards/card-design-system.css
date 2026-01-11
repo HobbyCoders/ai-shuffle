@@ -626,8 +626,8 @@
   justify-content: center;
   gap: var(--space-2);
   padding: var(--space-3) var(--space-4);
-  background: var(--surface-1);
-  color: var(--text-primary);
+  background: var(--secondary);
+  color: var(--secondary-foreground);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
   font-size: var(--text-md);
@@ -638,13 +638,15 @@
 }
 
 .card-btn-secondary:hover {
-  background: var(--surface-2);
+  background: var(--secondary);
+  filter: brightness(1.1);
   border-color: var(--border-emphasis);
   box-shadow: var(--shadow-inset), var(--shadow-sm);
 }
 
 .card-btn-secondary:active {
-  background: var(--surface-active);
+  background: var(--secondary);
+  filter: brightness(0.95);
 }
 
 .card-btn-secondary:disabled {
