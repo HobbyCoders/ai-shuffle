@@ -675,7 +675,7 @@
 		if (!githubToken.trim()) return;
 		githubLoginLoading = true;
 		try {
-			await api.post('/auth/github/token', { token: githubToken });
+			await api.post('/auth/github/login', { token: githubToken });
 			await loadAuthStatus();
 			await auth.checkAuth();
 			githubToken = '';
@@ -688,7 +688,7 @@
 
 	async function disconnectGithub() {
 		try {
-			await api.delete('/auth/github/token');
+			await api.post('/auth/github/logout');
 			githubUser = null;
 			await auth.checkAuth();
 		} catch (e: any) {
