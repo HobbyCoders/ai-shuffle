@@ -149,24 +149,31 @@
 	let renameDeckName = $state('');
 
 	// 3D tilt effect state (desktop cards)
-	let hoveredCardId = $state<string | null>(null);
-	let cardTilt = $state<{ x: number; y: number }>({ x: 0, y: 0 });
+	// Track cards that have completed their entrance animation
+	let animationCompleteCards = $state<Set<string>>(new Set());
 
-	// Handle card mouse move for 3D tilt effect
-	function handleCardTiltMove(e: MouseEvent, cardId: string) {
+	// Handle card mouse move for 3D tilt effect (like WelcomeCard)
+	function handleCardTiltMove(e: MouseEvent) {
 		if (isMobile || isEditMode) return;
 		const card = e.currentTarget as HTMLElement;
 		const rect = card.getBoundingClientRect();
 		const x = (e.clientX - rect.left) / rect.width - 0.5;
 		const y = (e.clientY - rect.top) / rect.height - 0.5;
-		hoveredCardId = cardId;
-		cardTilt = { x: x * 15, y: y * -15 };
+		// Set CSS variables directly on element for smooth updates
+		card.style.setProperty('--tilt-x', `${x * 12}deg`);
+		card.style.setProperty('--tilt-y', `${y * -12}deg`);
 	}
 
-	// Reset tilt on mouse leave
-	function handleCardTiltLeave() {
-		hoveredCardId = null;
-		cardTilt = { x: 0, y: 0 };
+	// Reset tilt on mouse leave - smoothly animates back to 0
+	function handleCardTiltLeave(e: MouseEvent) {
+		const card = e.currentTarget as HTMLElement;
+		card.style.setProperty('--tilt-x', '0deg');
+		card.style.setProperty('--tilt-y', '0deg');
+	}
+
+	// Mark card animation as complete (called from animationend event)
+	function handleCardAnimationEnd(cardId: string) {
+		animationCompleteCards = new Set([...animationCompleteCards, cardId]);
 	}
 
 	// Card types for main deck
@@ -1691,19 +1698,18 @@
 								class:add-deck-card={card.type === 'add-deck'}
 								class:is-being-dragged={isPointerDragging && card.id === draggedCardId}
 								class:drop-into-deck={card.type === 'deck' && card.deckId === dragOverDeckId}
-								class:card-tilting={hoveredCardId === card.id}
+								class:animation-complete={animationCompleteCards.has(card.id)}
 								data-ai-active={card.isStreaming}
 								data-has-children={card.hasChildren}
 								data-card-id={card.id}
 								style:animation-delay="{index * 50}ms"
 								style:--deck-color={card.iconColor}
-								style:--tilt-x={hoveredCardId === card.id ? `${cardTilt.x}deg` : '0deg'}
-								style:--tilt-y={hoveredCardId === card.id ? `${cardTilt.y}deg` : '0deg'}
 								onclick={(e) => handleCardClick(card, e)}
 								oncontextmenu={(e) => isEditMode && showContextMenu(card.id, e)}
 								onkeydown={(e) => e.key === 'Enter' && handleCardClick(card, e as unknown as MouseEvent)}
-								onmousemove={(e) => handleCardTiltMove(e, card.id)}
+								onmousemove={handleCardTiltMove}
 								onmouseleave={handleCardTiltLeave}
+								onanimationend={() => handleCardAnimationEnd(card.id)}
 								role="option"
 								tabindex="0"
 								aria-selected="false"
@@ -2228,7 +2234,18 @@
 		border-radius: calc(var(--radius, 0.75rem) * 1.167);
 		/* Enable 3D transforms */
 		transform-style: preserve-3d;
-		transition: transform 0.15s ease-out, opacity 0.2s ease;
+		/* Spring-like transition for smooth card-from-hand feel */
+		transition-property: transform, border-color, box-shadow;
+		transition-duration: 0.4s, 0.2s, 0.3s;
+		transition-timing-function: cubic-bezier(0.34, 1.56, 0.64, 1), ease, ease;
+	}
+
+	/* After entrance animation completes, enable smooth tilt transitions */
+	.card.animation-complete {
+		animation: none;
+		opacity: 1;
+		/* Always include tilt in transform so returning to 0 is smooth */
+		transform: rotateY(var(--tilt-x)) rotateX(var(--tilt-y));
 	}
 
 	@keyframes cardEnter {
@@ -2254,18 +2271,16 @@
 		75% { transform: rotate(0.5deg); }
 	}
 
-	/* 3D tilt effect on hover - must clear animation to enable transforms */
-	.card:hover {
-		animation: none;
-		opacity: 1;
-		transform: perspective(800px) translateY(-8px) rotateY(var(--tilt-x)) rotateX(var(--tilt-y)) scale(1.02);
+	/* 3D tilt effect on hover - lift card up like pulling from hand */
+	.card.animation-complete:hover {
+		transform: rotateY(var(--tilt-x)) rotateX(var(--tilt-y)) translateY(-12px) scale(1.03);
 		z-index: 10;
 	}
 
-	.card:active {
-		animation: none;
-		opacity: 1;
-		transform: perspective(800px) translateY(-4px) scale(0.98);
+	.card.animation-complete:active {
+		transform: rotateY(var(--tilt-x)) rotateX(var(--tilt-y)) translateY(-6px) scale(0.98);
+		transition-duration: 0.1s;
+		transition-timing-function: ease-out;
 	}
 
 	/* In edit mode, don't apply hover transform - let cards stay in place */
