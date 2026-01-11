@@ -4520,8 +4520,10 @@ function createTabsStore() {
 						existingMsg.role === msg.role;
 					// Map snake_case profile_id to camelCase profileId for frontend interface
 					// API returns snake_case, but our ChatMessage interface uses camelCase
+					// Also preserve profileId from existing message if API doesn't have it
+					// (JSONL and DB have different message granularity, so index matching may fail)
 					const apiMsg = msg as ChatMessage & { profile_id?: string };
-					const profileId = apiMsg.profile_id || apiMsg.profileId;
+					const profileId = apiMsg.profile_id || apiMsg.profileId || (canPreserveId ? existingMsg.profileId : undefined);
 					return canPreserveId
 						? { ...msg, id: existingMsg.id, profileId }
 						: { ...msg, profileId };
