@@ -100,7 +100,11 @@
 	const filteredWorktrees = $derived(() => {
 		if (!searchQuery.trim()) return worktrees;
 		const q = searchQuery.toLowerCase();
-		return worktrees.filter(w => w.branch_name.toLowerCase().includes(q));
+		return worktrees.filter(w => {
+			// Search by branch name OR folder name
+			const folderName = getWorktreeDisplayName(w).toLowerCase();
+			return w.branch_name.toLowerCase().includes(q) || folderName.includes(q);
+		});
 	});
 
 	const localBranches = $derived(() => {
@@ -144,6 +148,15 @@
 		if (wt.git_status.staged_count > 0) counts.push(`${wt.git_status.staged_count}S`);
 		if (wt.git_status.untracked_count > 0) counts.push(`${wt.git_status.untracked_count}U`);
 		return counts.join(' ') || '●';
+	}
+
+	// Get display name for worktree (folder name from path)
+	function getWorktreeDisplayName(wt: Worktree): string {
+		// worktree_path is like "ai-shuffle-develop" or "ai-shuffle-develop-2"
+		// Extract just the folder name
+		const path = wt.worktree_path || '';
+		const folderName = path.split('/').pop() || path;
+		return folderName || wt.branch_name;
 	}
 
 	async function checkIfGitRepo(projectId: string) {
@@ -407,23 +420,39 @@
 										<span>Active Worktrees</span>
 									</div>
 									{#each filteredWorktrees() as wt}
+									{@const displayName = getWorktreeDisplayName(wt)}
+									{@const showBranchBadge = displayName !== wt.branch_name}
 										<button
 											type="button"
-											class="dropdown-item"
+											class="dropdown-item worktree-item"
 											class:selected={selectedWorktreeId === wt.id}
 											onclick={() => selectWorktree(wt)}
 										>
-											<span class="item-name">{wt.branch_name}</span>
-											{#if wt.git_status}
-												<span class="dirty-status" class:clean={wt.git_status.is_clean}>
-													{getDirtyStatus(wt)}
-												</span>
-											{/if}
-											{#if selectedWorktreeId === wt.id}
-												<svg class="w-4 h-4 check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-												</svg>
-											{/if}
+											<div class="worktree-info">
+												<span class="item-name">{displayName}</span>
+												{#if showBranchBadge}
+													<span class="branch-badge" title="Branch: {wt.branch_name}">
+														<svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<circle cx="6" cy="6" r="2" stroke-width="2"/>
+															<circle cx="12" cy="18" r="2" stroke-width="2"/>
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 8v4c0 2 2 4 6 4v2" />
+														</svg>
+														{wt.branch_name}
+													</span>
+												{/if}
+											</div>
+											<div class="worktree-status">
+												{#if wt.git_status}
+													<span class="dirty-status" class:clean={wt.git_status.is_clean}>
+														{getDirtyStatus(wt)}
+													</span>
+												{/if}
+												{#if selectedWorktreeId === wt.id}
+													<svg class="w-4 h-4 check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+													</svg>
+												{/if}
+											</div>
 										</button>
 									{/each}
 								</div>
@@ -777,6 +806,49 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+
+	/* Worktree item layout */
+	.dropdown-item.worktree-item {
+		flex-wrap: wrap;
+	}
+
+	.worktree-info {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		flex: 1;
+		min-width: 0;
+	}
+
+	.worktree-info .item-name {
+		font-weight: 500;
+	}
+
+	.worktree-status {
+		display: flex;
+		align-items: center;
+		gap: 0.375rem;
+		flex-shrink: 0;
+	}
+
+	.branch-badge {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.25rem;
+		font-size: 0.5625rem;
+		font-weight: 500;
+		padding: 0.125rem 0.375rem;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
+		background: color-mix(in srgb, var(--primary) 12%, transparent);
+		color: var(--primary);
+		max-width: 100%;
+		overflow: hidden;
+	}
+
+	.branch-badge svg {
+		flex-shrink: 0;
+		opacity: 0.7;
 	}
 
 	.dirty-status {
