@@ -1074,6 +1074,27 @@ def get_auth_session(token: str) -> Optional[Dict[str, Any]]:
                     f"expires_at={exact_match['expires_at']}, created_at={exact_match['created_at']}"
                 )
 
+            # CRITICAL: If total_tokens_in_db is 0, something catastrophic happened
+            # Log extensive diagnostics to help trace the root cause
+            if total_count == 0:
+                import traceback
+                import os
+                logger.error(
+                    f"CRITICAL: auth_sessions table is EMPTY! This should never happen during runtime.\n"
+                    f"Stack trace:\n{''.join(traceback.format_stack())}\n"
+                    f"Database file exists: {settings.db_path.exists()}\n"
+                    f"Database file size: {settings.db_path.stat().st_size if settings.db_path.exists() else 'N/A'}\n"
+                    f"Process ID: {os.getpid()}"
+                )
+                # Check if other tables have data (to rule out complete DB wipe)
+                cursor.execute("SELECT COUNT(*) as cnt FROM sessions")
+                sessions_count = cursor.fetchone()["cnt"]
+                cursor.execute("SELECT COUNT(*) as cnt FROM profiles")
+                profiles_count = cursor.fetchone()["cnt"]
+                logger.error(
+                    f"Other table counts - sessions: {sessions_count}, profiles: {profiles_count}"
+                )
+
         return result
 
 
