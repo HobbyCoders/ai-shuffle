@@ -198,6 +198,7 @@ class WorktreeSyncResponse(BaseModel):
     synced: int
     orphaned: int
     cleaned_up: int
+    imported: int = 0  # External worktrees imported into database
     errors: List[str] = []
 
 
@@ -1044,6 +1045,7 @@ async def sync_worktrees(
         synced=result.get("synced", 0),
         orphaned=result.get("orphaned", 0),
         cleaned_up=result.get("cleaned_up", 0),
+        imported=result.get("imported", 0),
         errors=result.get("errors", [])
     )
 

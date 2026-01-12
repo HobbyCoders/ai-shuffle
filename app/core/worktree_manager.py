@@ -747,12 +747,36 @@ class WorktreeManager:
                 database.delete_worktree(db_wt["id"])
                 result["cleaned_up"] += 1
 
-        # Check for git worktrees not in database (external worktrees)
+        # Import external worktrees (created outside the app) into our database
         db_paths = {str(settings.workspace_dir / wt["worktree_path"]) for wt in db_worktrees}
-        for git_path in git_worktree_paths:
-            if git_path not in db_paths:
-                logger.info(f"Found external worktree not tracked in database: {git_path}")
-                # We don't auto-add these - they might be managed externally
+        for git_wt in git_worktrees:
+            if git_wt.get("is_main"):
+                continue  # Skip main worktree
+
+            git_path = git_wt.get("path", "")
+            if git_path and git_path not in db_paths:
+                # External worktree found - import it
+                try:
+                    # Extract relative path (folder name) from absolute path
+                    worktree_folder = Path(git_path).name
+                    branch_name = git_wt.get("branch", "unknown")
+
+                    # Create database record for this external worktree
+                    worktree_id = f"wt-{uuid.uuid4().hex[:12]}"
+                    database.create_worktree(
+                        worktree_id=worktree_id,
+                        repository_id=repo["id"],
+                        branch_name=branch_name,
+                        worktree_path=worktree_folder,
+                        session_id=None,
+                        base_branch=None,
+                        status=WorktreeStatus.ACTIVE
+                    )
+                    logger.info(f"Imported external worktree: {worktree_folder} (branch: {branch_name})")
+                    result["imported"] = result.get("imported", 0) + 1
+                except Exception as e:
+                    logger.warning(f"Failed to import external worktree {git_path}: {e}")
+                    result["errors"].append(f"Failed to import worktree at {git_path}: {str(e)}")
 
         logger.info(f"Sync complete for project {project_id}: {result}")
         return result
