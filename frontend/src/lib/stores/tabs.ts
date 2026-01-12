@@ -146,6 +146,9 @@ export interface ChatTab {
 	worktreeId: string | null;   // Selected existing worktree ID (null = create new)
 	worktreeMode: 'new' | 'existing';  // Whether creating new or using existing worktree
 	selectedWorktreeBranch: string | null;  // Branch name of selected existing worktree (for display)
+	// Worktree creation state (for deferred creation on message send)
+	isCreatingWorktree: boolean;  // True while creating worktree before first message
+	worktreeError: string | null; // Specific error for worktree creation
 	// Session lock state (multi-device conflict)
 	sessionLocked: boolean;      // True if session is locked by another device
 	sessionLockedBy: string | undefined;  // Device ID that has the lock
@@ -239,6 +242,49 @@ const SAVE_DEBOUNCE_MS = 1000;
 
 // Flag to prevent saving during initial load
 let isInitializing = false;
+
+/**
+ * Format worktree error messages into user-friendly text
+ * Parses common git/worktree errors and provides helpful context
+ */
+function formatWorktreeError(rawError: string, branchName: string): string {
+	const lowerError = rawError.toLowerCase();
+
+	// Branch already has a worktree
+	if (lowerError.includes('already checked out') || lowerError.includes('is already used by worktree')) {
+		return `A worktree already exists for branch '${branchName}'. Select it from Active Worktrees instead.`;
+	}
+
+	// Branch doesn't exist
+	if (lowerError.includes('not a valid branch') || lowerError.includes('branch not found') ||
+	    lowerError.includes('unknown revision') || lowerError.includes('pathspec') && lowerError.includes('did not match')) {
+		return `Branch '${branchName}' doesn't exist. Try fetching from remote first or create a new branch.`;
+	}
+
+	// Path conflict - folder already exists
+	if (lowerError.includes('already exists') && (lowerError.includes('path') || lowerError.includes('folder') || lowerError.includes('directory'))) {
+		return `Cannot create worktree: a folder already exists at the target path. Try a different branch name.`;
+	}
+
+	// Git lock error
+	if (lowerError.includes('.lock') || lowerError.includes('unable to lock') || lowerError.includes('index.lock')) {
+		return `Git operation in progress. Please wait a moment and try again.`;
+	}
+
+	// Permission errors
+	if (lowerError.includes('permission denied') || lowerError.includes('access denied')) {
+		return `Permission denied while creating worktree. Check folder permissions.`;
+	}
+
+	// Network/fetch errors
+	if (lowerError.includes('could not resolve') || lowerError.includes('connection refused') ||
+	    lowerError.includes('network') || lowerError.includes('timeout')) {
+		return `Network error while creating worktree. Check your connection and try again.`;
+	}
+
+	// Generic fallback with original message
+	return `Failed to create worktree: ${rawError}`;
+}
 
 // Persistent device ID for multi-device sync
 // This ensures the same browser/device keeps the same ID across reconnections
@@ -1289,6 +1335,8 @@ function createTabsStore() {
 					worktreeId: null,
 					worktreeMode: 'new' as const,
 					selectedWorktreeBranch: null,
+					isCreatingWorktree: false,
+					worktreeError: null,
 					sessionLocked: false,
 					sessionLockedBy: undefined
 				};
@@ -3845,6 +3893,8 @@ function createTabsStore() {
 						worktreeId: null,
 						worktreeMode: 'new',
 						selectedWorktreeBranch: null,
+						isCreatingWorktree: false,
+						worktreeError: null,
 						sessionLocked: false,
 						sessionLockedBy: undefined
 					}));
@@ -3935,6 +3985,8 @@ function createTabsStore() {
 				worktreeId: null,
 				worktreeMode: 'new',
 				selectedWorktreeBranch: null,
+				isCreatingWorktree: false,
+				worktreeError: null,
 				sessionLocked: false,
 				sessionLockedBy: undefined
 			};
@@ -4193,17 +4245,20 @@ function createTabsStore() {
 
 			// Validate required fields
 			if (!tab.profile) {
-				updateTab(tabId, { error: 'Please select a profile before starting a worktree session' });
+				updateTab(tabId, { worktreeError: 'Please select a profile before starting a worktree session' });
 				return;
 			}
 			if (!tab.project) {
-				updateTab(tabId, { error: 'Please select a project before starting a worktree session' });
+				updateTab(tabId, { worktreeError: 'Please select a project before starting a worktree session' });
 				return;
 			}
 			if (!tab.worktreeBranch) {
-				updateTab(tabId, { error: 'Please enter a branch name for the worktree' });
+				updateTab(tabId, { worktreeError: 'Please select a branch for the worktree' });
 				return;
 			}
+
+			// Set loading state - this shows spinner on send button
+			updateTab(tabId, { isCreatingWorktree: true, worktreeError: null });
 
 			try {
 				// Create worktree session via API
@@ -4224,8 +4279,8 @@ function createTabsStore() {
 
 				console.log(`[Tab ${tabId}] Created worktree session: ${response.session_id}`);
 
-				// Update tab with new session ID
-				updateTab(tabId, { sessionId: response.session_id });
+				// Update tab with new session ID and clear loading state
+				updateTab(tabId, { sessionId: response.session_id, isCreatingWorktree: false });
 
 				// Add system message about worktree creation
 				const systemMsgId = `system-${Date.now()}`;
@@ -4259,10 +4314,16 @@ function createTabsStore() {
 				console.error('Failed to create worktree session:', error);
 				// API client throws { detail: string, status: number } on error
 				const err = error as { detail?: string; message?: string; status?: number };
-				const errorMessage = err.detail || err.message || 'Unknown error';
-				console.error('Worktree error detail:', errorMessage);
+				const rawError = err.detail || err.message || 'Unknown error';
+				console.error('Worktree error detail:', rawError);
+
+				// Parse and format user-friendly error message
+				const friendlyError = formatWorktreeError(rawError, tab.worktreeBranch);
+
+				// Clear loading state and set error
 				updateTab(tabId, {
-					error: `Failed to create worktree: ${errorMessage}`
+					isCreatingWorktree: false,
+					worktreeError: friendlyError
 				});
 			}
 		},
@@ -4720,8 +4781,23 @@ function createTabsStore() {
 			updateTab(tabId, {
 				worktreeId: null,
 				selectedWorktreeBranch: null,
-				worktreeMode: 'new'
+				worktreeMode: 'new',
+				worktreeError: null  // Clear any worktree error when changing selection
 			});
+		},
+
+		/**
+		 * Clear worktree-specific error
+		 */
+		clearWorktreeError(tabId: string) {
+			updateTab(tabId, { worktreeError: null });
+		},
+
+		/**
+		 * Set worktree-specific error
+		 */
+		setWorktreeError(tabId: string, error: string) {
+			updateTab(tabId, { worktreeError: error });
 		},
 
 		/**
@@ -4779,7 +4855,11 @@ function createTabsStore() {
 				worktreeBaseBranch: 'main',
 				worktreeId: null,
 				worktreeMode: 'new',
-				selectedWorktreeBranch: null
+				selectedWorktreeBranch: null,
+				isCreatingWorktree: false,
+				worktreeError: null,
+				sessionLocked: false,
+				sessionLockedBy: undefined
 			});
 			connectTab(tabId);
 			// Save tabs state (debounced)

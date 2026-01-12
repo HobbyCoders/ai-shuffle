@@ -2,16 +2,16 @@
 	/**
 	 * ExecutionModeSelector - Simplified Cursor-like branch selector
 	 *
-	 * Just pick a branch - worktree creation is automatic.
+	 * Just pick a branch - worktree creation is deferred to first message send.
 	 *
 	 * Sections:
 	 * - Active Worktrees (reuse existing)
-	 * - Local Branches (auto-create worktree)
-	 * - Remote Branches (auto-create worktree)
+	 * - Local Branches (worktree created on send)
+	 * - Remote Branches (worktree created on send)
 	 * - Create New Branch (modal for new branch name)
 	 */
 	import { tabs, type ChatTab, type ExecutionMode } from '$lib/stores/tabs';
-	import { getBranches, getWorktrees, syncWorktrees, getGitStatus, createWorktree, type Branch, type Worktree } from '$lib/api/git';
+	import { getBranches, getWorktrees, syncWorktrees, getGitStatus, type Branch, type Worktree } from '$lib/api/git';
 	import { onMount } from 'svelte';
 
 	interface Props {
@@ -24,7 +24,6 @@
 	let branches = $state<Branch[]>([]);
 	let worktrees = $state<Worktree[]>([]);
 	let loading = $state(false);
-	let creating = $state(false);
 	let error = $state<string | null>(null);
 	let lastSyncedProject = $state<string | null>(null);
 	let isGitRepo = $state<boolean | null>(null);
@@ -227,74 +226,52 @@
 		tabs.setTabWorktreeMode(tab.id, 'existing');
 	}
 
-	// Select a branch (will auto-create worktree on first message)
-	async function selectBranch(branch: Branch) {
+	// Select a branch (worktree will be created on first message send, not here)
+	function selectBranch(branch: Branch) {
 		showDropdown = false;
 		searchQuery = '';
-		creating = true;
 
-		try {
-			// Auto-create worktree for this branch
-			if (!tab.project) throw new Error('No project selected');
+		// Just store the branch name - worktree creation is deferred to message send
+		const branchName = branch.remote ? branch.name.replace(/^[^/]+\//, '') : branch.name;
+		selectedBranchName = branchName;
+		selectedWorktreeId = null;
 
-			const result = await createWorktree(tab.project, {
-				branch_name: branch.remote ? branch.name.replace(/^[^/]+\//, '') : branch.name,
-				create_new_branch: false
-			});
+		// Update tab state - keep as 'new' mode since worktree doesn't exist yet
+		tabs.setTabWorktreeBranch(tab.id, branchName);
+		tabs.setTabWorktreeMode(tab.id, 'new');
 
-			if (result.worktree) {
-				selectedWorktreeId = result.worktree.id;
-				selectedBranchName = result.worktree.branch_name;
-				tabs.selectExistingWorktree(tab.id, result.worktree.id, result.worktree.branch_name);
-				tabs.setTabWorktreeMode(tab.id, 'existing');
-
-				// Refresh worktrees list
-				if (tab.project) await loadData(tab.project, true);
-			}
-		} catch (e) {
-			console.error('Failed to create worktree:', e);
-			error = e instanceof Error ? e.message : 'Failed to create worktree';
-		} finally {
-			creating = false;
-		}
+		// Clear any previous worktree selection
+		tabs.clearWorktreeSelection(tab.id);
+		// Set the branch name again after clearing (clearWorktreeSelection resets it)
+		tabs.setTabWorktreeBranch(tab.id, branchName);
 	}
 
-	// Create a new branch and worktree
-	async function createNewBranch() {
-		if (!newBranchName.trim() || !tab.project) return;
+	// Set up for creating a new branch (actual creation deferred to message send)
+	function createNewBranch() {
+		if (!newBranchName.trim()) return;
 
 		showCreateModal = false;
-		creating = true;
 
-		try {
-			const result = await createWorktree(tab.project, {
-				branch_name: newBranchName.trim(),
-				create_new_branch: true,
-				base_branch: baseBranch
-			});
+		// Store branch name and base branch - actual creation happens on first message
+		const branchName = newBranchName.trim();
+		selectedBranchName = branchName;
+		selectedWorktreeId = null;
 
-			if (result.worktree) {
-				selectedWorktreeId = result.worktree.id;
-				selectedBranchName = result.worktree.branch_name;
-				tabs.selectExistingWorktree(tab.id, result.worktree.id, result.worktree.branch_name);
-				tabs.setTabWorktreeMode(tab.id, 'existing');
+		// Update tab state with new branch info
+		tabs.setTabWorktreeBranch(tab.id, branchName);
+		tabs.setTabWorktreeBaseBranch(tab.id, baseBranch);
+		tabs.setTabWorktreeMode(tab.id, 'new');
 
-				// Refresh data
-				await loadData(tab.project, true);
-			}
+		// Clear any previous worktree selection
+		tabs.clearWorktreeSelection(tab.id);
+		// Restore branch settings after clearing
+		tabs.setTabWorktreeBranch(tab.id, branchName);
+		tabs.setTabWorktreeBaseBranch(tab.id, baseBranch);
 
-			newBranchName = '';
-		} catch (e) {
-			console.error('Failed to create new branch:', e);
-			error = e instanceof Error ? e.message : 'Failed to create branch';
-		} finally {
-			creating = false;
-		}
+		newBranchName = '';
 	}
 
 	function handleDropdownClick() {
-		if (creating) return;
-
 		if (!showDropdown && tab.project) {
 			// Live refresh when opening dropdown
 			loadData(tab.project, true);
@@ -372,14 +349,8 @@
 						type="button"
 						class="dropdown-trigger"
 						onclick={handleDropdownClick}
-						disabled={creating}
 					>
-						{#if creating}
-							<svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
-							</svg>
-							<span class="placeholder">Creating worktree...</span>
-						{:else if loading && (dataLoadedAt === 0 || tab.project !== lastLoadedProject)}
+						{#if loading && (dataLoadedAt === 0 || tab.project !== lastLoadedProject)}
 							<svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
 							</svg>
@@ -527,12 +498,21 @@
 				</div>
 
 				<!-- Selection Summary -->
-				{#if selectedBranchName}
+				{#if selectedBranchName && !selectedWorktreeId}
+					<div class="selection-summary ready">
+						<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<circle cx="6" cy="6" r="2" stroke-width="2"/>
+							<circle cx="12" cy="18" r="2" stroke-width="2"/>
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 8v4c0 2 2 4 6 4v2" />
+						</svg>
+						<span>Worktree will be created on send</span>
+					</div>
+				{:else if selectedBranchName && selectedWorktreeId}
 					<div class="selection-summary ready">
 						<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 						</svg>
-						<span>Ready to start in worktree</span>
+						<span>Using existing worktree</span>
 					</div>
 				{/if}
 			{/if}

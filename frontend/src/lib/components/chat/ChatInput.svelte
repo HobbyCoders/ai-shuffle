@@ -757,6 +757,19 @@
 			</div>
 		{/if}
 
+		<!-- Worktree Error Message -->
+		{#if liveTab.worktreeError}
+			<div class="error-banner worktree-error">
+				<svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<circle cx="6" cy="6" r="2" stroke-width="2"/>
+					<circle cx="12" cy="18" r="2" stroke-width="2"/>
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 8v4c0 2 2 4 6 4v2" />
+				</svg>
+				<span>{liveTab.worktreeError}</span>
+				<button type="button" onclick={() => tabs.clearWorktreeError(tab.id)} class="error-close">&times;</button>
+			</div>
+		{/if}
+
 		<form onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}>
 			<!-- Main Island -->
 			<div class="chat-island" bind:this={islandRef}>
@@ -835,7 +848,14 @@
 
 						<!-- Send button only -->
 						<div class="send-button-wrapper">
-							{#if liveTab.isStreaming}
+							{#if liveTab.isCreatingWorktree}
+								<!-- Creating worktree - show spinner -->
+								<button type="button" class="send-btn creating-worktree" disabled title="Creating worktree...">
+									<svg class="w-[14px] h-[14px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
+									</svg>
+								</button>
+							{:else if liveTab.isStreaming}
 								{#if inputValue.trim()}
 									<button type="submit" class="send-btn" title="Send message (interrupts current response)">
 										<svg class="w-[14px] h-[14px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1186,6 +1206,17 @@
 		transition: opacity 0.15s;
 	}
 
+	/* Worktree-specific error styling */
+	.error-banner.worktree-error {
+		background: color-mix(in srgb, var(--warning) 10%, transparent);
+		border-color: color-mix(in srgb, var(--warning) 30%, transparent);
+		color: var(--warning);
+	}
+
+	.error-banner.worktree-error svg {
+		color: var(--warning);
+	}
+
 	.error-close:hover {
 		opacity: 1;
 	}
@@ -1381,6 +1412,16 @@
 
 	.send-btn:disabled svg {
 		color: var(--muted-foreground);
+	}
+
+	/* Creating worktree state - show primary color with spinner */
+	.send-btn.creating-worktree {
+		background: var(--button-primary-gradient);
+		cursor: wait;
+	}
+
+	.send-btn.creating-worktree svg {
+		color: var(--primary-foreground);
 	}
 
 	.stop-btn {
