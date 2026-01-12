@@ -68,39 +68,17 @@
 
 	function renderMarkdown(text: string): string {
 		try {
-			// Strip code blocks - they don't render well with italic styling
+			// Strip complete code blocks - they don't render well with italic styling
 			// Remove fenced code blocks (```...```)
 			let cleaned = text.replace(/```[\s\S]*?```/g, '');
 
-			// Handle incomplete code blocks during streaming
-			// If there's an unclosed code fence, strip from that point to end
-			// This prevents partial code fences from rendering as actual code blocks
-			const lastFenceIndex = cleaned.lastIndexOf('```');
-			if (lastFenceIndex !== -1) {
-				// Check if this is an unclosed opening fence
-				// Count complete pairs before this position
-				const beforeFence = cleaned.substring(0, lastFenceIndex);
-				const afterFence = cleaned.substring(lastFenceIndex);
-				// If afterFence starts with ``` and has no matching close, it's incomplete
-				if (afterFence.startsWith('```')) {
-					// Strip the incomplete code block
-					cleaned = beforeFence;
-				}
-			}
-
-			// Remove inline code (`...`)
+			// Remove complete inline code (`...`)
 			cleaned = cleaned.replace(/`[^`]+`/g, '');
 
-			// Handle incomplete inline code during streaming
-			// If there's an unclosed backtick at the end, strip it
-			const lastBacktick = cleaned.lastIndexOf('`');
-			if (lastBacktick !== -1 && lastBacktick === cleaned.length - 1) {
-				// Don't strip if it's at a word boundary (likely intentional)
-				const charBefore = lastBacktick > 0 ? cleaned[lastBacktick - 1] : ' ';
-				if (!/\s/.test(charBefore)) {
-					cleaned = cleaned.substring(0, lastBacktick);
-				}
-			}
+			// Remove any remaining backticks to prevent incomplete code blocks
+			// from rendering with code block styling during streaming
+			// This keeps the text content but removes the backticks themselves
+			cleaned = cleaned.replace(/`/g, '');
 
 			return marked.parse(cleaned) as string;
 		} catch {
