@@ -245,8 +245,8 @@
 <div
 	class="card-system permission-panel rounded-2xl border shadow-lg overflow-hidden backdrop-blur-sm"
 	style="
-		border-color: color-mix(in oklch, var(--primary) 30%, var(--border));
-		background: linear-gradient(to bottom, color-mix(in oklch, var(--primary) 12%, var(--card)), color-mix(in oklch, var(--primary) 5%, var(--card)));
+		border-color: var(--border);
+		background: var(--card);
 	"
 	role="dialog"
 	aria-labelledby="permission-title"
@@ -257,11 +257,11 @@
 		<div
 			class="flex-shrink-0 w-9 h-9 rounded-xl border flex items-center justify-center shadow-sm"
 			style="
-				background: color-mix(in oklch, var(--primary) 15%, var(--card));
-				border-color: color-mix(in oklch, var(--primary) 25%, var(--border));
+				background: color-mix(in oklch, var(--muted) 50%, var(--card));
+				border-color: var(--border);
 			"
 		>
-			<svg class="w-4.5 h-4.5" style="color: var(--primary);" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+			<svg class="w-4.5 h-4.5 text-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d={config.icon} />
 			</svg>
 		</div>
@@ -273,9 +273,9 @@
 				<span
 					class="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded-md border"
 					style="
-						background: color-mix(in oklch, var(--primary) 15%, transparent);
-						color: var(--primary);
-						border-color: color-mix(in oklch, var(--primary) 20%, transparent);
+						background: color-mix(in oklch, var(--muted-foreground) 15%, transparent);
+						color: var(--muted-foreground);
+						border-color: color-mix(in oklch, var(--muted-foreground) 20%, transparent);
 					"
 				>
 					Permission
@@ -289,15 +289,15 @@
 			<div
 				class="flex-shrink-0 flex items-center gap-1.5 px-2 py-1 rounded-lg border"
 				style="
-					background: color-mix(in oklch, var(--primary) 10%, transparent);
-					border-color: color-mix(in oklch, var(--primary) 20%, transparent);
+					background: color-mix(in oklch, var(--muted-foreground) 10%, transparent);
+					border-color: color-mix(in oklch, var(--muted-foreground) 20%, transparent);
 				"
 			>
 				<span class="relative flex h-2 w-2">
-					<span class="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style="background: color-mix(in oklch, var(--primary) 60%, transparent);"></span>
-					<span class="relative inline-flex rounded-full h-2 w-2" style="background: var(--primary);"></span>
+					<span class="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style="background: color-mix(in oklch, var(--muted-foreground) 60%, transparent);"></span>
+					<span class="relative inline-flex rounded-full h-2 w-2" style="background: var(--muted-foreground);"></span>
 				</span>
-				<span class="text-xs font-medium" style="color: var(--primary);">{queueCount}</span>
+				<span class="text-xs font-medium" style="color: var(--muted-foreground);">{queueCount}</span>
 			</div>
 		{/if}
 	</div>
@@ -549,8 +549,8 @@
 	}
 
 	.remember-option:hover {
-		border-color: color-mix(in oklch, var(--border) 60%, var(--foreground));
-		background: color-mix(in oklch, var(--card) 95%, var(--foreground));
+		border-color: var(--accent);
+		background: color-mix(in oklch, var(--accent) 8%, var(--card));
 	}
 
 	.remember-option.selected {
@@ -610,8 +610,8 @@
 	}
 
 	.pattern-badge:hover {
-		background: color-mix(in oklch, var(--muted) 80%, var(--foreground));
-		border-color: var(--primary);
+		background: color-mix(in oklch, var(--accent) 15%, var(--muted));
+		border-color: var(--accent);
 	}
 
 	.pattern-badge code {
@@ -641,15 +641,15 @@
 		font-size: 0.875rem;
 		font-weight: 500;
 		border-radius: var(--radius, 0.75rem);
-		background: color-mix(in oklch, var(--muted-foreground) 10%, transparent);
-		color: var(--muted-foreground);
-		border: 1px solid color-mix(in oklch, var(--muted-foreground) 20%, transparent);
+		background: var(--secondary);
+		color: var(--secondary-foreground);
+		border: 1px solid var(--border);
 		transition: all 0.15s ease;
 	}
 
 	.deny-btn:hover {
-		background: color-mix(in oklch, var(--muted-foreground) 20%, transparent);
-		border-color: color-mix(in oklch, var(--muted-foreground) 30%, transparent);
+		background: color-mix(in oklch, var(--secondary) 80%, var(--foreground));
+		border-color: color-mix(in oklch, var(--border) 80%, var(--foreground));
 	}
 
 	.deny-btn:active {
@@ -658,7 +658,7 @@
 
 	.deny-btn:focus {
 		outline: none;
-		box-shadow: 0 0 0 2px color-mix(in oklch, var(--muted-foreground) 30%, transparent);
+		box-shadow: 0 0 0 2px color-mix(in oklch, var(--secondary) 50%, transparent);
 	}
 
 	.allow-btn {

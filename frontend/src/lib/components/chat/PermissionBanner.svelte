@@ -38,13 +38,7 @@
 
 	.permission-panel {
 		border-radius: 0.75rem;
-		border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
-		background: linear-gradient(
-			to bottom,
-			color-mix(in oklch, var(--warning) 6%, var(--background)),
-			color-mix(in oklch, var(--warning) 3%, var(--background))
-		);
-		padding: 0.75rem;
+		padding: 0;
 	}
 
 	@keyframes banner-enter {

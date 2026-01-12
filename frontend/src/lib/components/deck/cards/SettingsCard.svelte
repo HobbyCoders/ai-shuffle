@@ -213,6 +213,16 @@
 		web_login_allowed: true
 	});
 
+	// Security Instructions (admin only)
+	let securityInstructions = $state('');
+	let defaultSecurityInstructions = $state('');
+	let originalSecurityInstructions = $state(''); // Track original to detect changes
+	let isSecurityInstructionsCustomized = $state(false);
+	let loadingSecurityInstructions = $state(false);
+	let savingSecurityInstructions = $state(false);
+	let securityInstructionsSuccess = $state('');
+	let securityInstructionsError = $state('');
+
 	// Load data on mount
 	$effect(() => {
 		if ($isAdmin) {
@@ -261,7 +271,8 @@
 			loadData(),
 			loadAuthStatus(),
 			loadWorkspaceConfig(),
-			loadIntegrationSettings()
+			loadIntegrationSettings(),
+			loadSecurityInstructions()
 		]);
 	}
 
@@ -380,6 +391,75 @@
 			console.error('Failed to load integration settings:', e);
 		}
 	}
+
+	// Security Instructions functions
+	async function loadSecurityInstructions() {
+		loadingSecurityInstructions = true;
+		securityInstructionsError = '';
+		try {
+			const response = await api.get<{
+				current: string;
+				default: string;
+				is_customized: boolean;
+			}>('/settings/security-instructions');
+			securityInstructions = response.current;
+			defaultSecurityInstructions = response.default;
+			originalSecurityInstructions = response.current;
+			isSecurityInstructionsCustomized = response.is_customized;
+		} catch (e: any) {
+			securityInstructionsError = e.detail || 'Failed to load security instructions';
+			console.error('Failed to load security instructions:', e);
+		} finally {
+			loadingSecurityInstructions = false;
+		}
+	}
+
+	async function saveSecurityInstructions() {
+		if (!securityInstructions.trim()) {
+			securityInstructionsError = 'Instructions cannot be empty. Use Revert to restore defaults.';
+			return;
+		}
+		savingSecurityInstructions = true;
+		securityInstructionsError = '';
+		securityInstructionsSuccess = '';
+		try {
+			await api.put('/settings/security-instructions', {
+				instructions: securityInstructions
+			});
+			originalSecurityInstructions = securityInstructions;
+			isSecurityInstructionsCustomized = true;
+			securityInstructionsSuccess = 'Saved successfully';
+			setTimeout(() => securityInstructionsSuccess = '', 3000);
+		} catch (e: any) {
+			securityInstructionsError = e.detail || 'Failed to save security instructions';
+		} finally {
+			savingSecurityInstructions = false;
+		}
+	}
+
+	async function revertSecurityInstructions() {
+		if (!confirm('Are you sure you want to revert to the default security instructions? This will discard any customizations.')) {
+			return;
+		}
+		savingSecurityInstructions = true;
+		securityInstructionsError = '';
+		securityInstructionsSuccess = '';
+		try {
+			await api.delete('/settings/security-instructions');
+			securityInstructions = defaultSecurityInstructions;
+			originalSecurityInstructions = defaultSecurityInstructions;
+			isSecurityInstructionsCustomized = false;
+			securityInstructionsSuccess = 'Reverted to default';
+			setTimeout(() => securityInstructionsSuccess = '', 3000);
+		} catch (e: any) {
+			securityInstructionsError = e.detail || 'Failed to revert security instructions';
+		} finally {
+			savingSecurityInstructions = false;
+		}
+	}
+
+	// Computed: check if instructions have changed
+	let securityInstructionsChanged = $derived(securityInstructions !== originalSecurityInstructions);
 
 	// API Key save functions
 	async function saveOpenaiApiKey() {
@@ -675,7 +755,7 @@
 		if (!githubToken.trim()) return;
 		githubLoginLoading = true;
 		try {
-			await api.post('/auth/github/token', { token: githubToken });
+			await api.post('/auth/github/login', { token: githubToken });
 			await loadAuthStatus();
 			await auth.checkAuth();
 			githubToken = '';
@@ -688,7 +768,7 @@
 
 	async function disconnectGithub() {
 		try {
-			await api.delete('/auth/github/token');
+			await api.post('/auth/github/logout');
 			githubUser = null;
 			await auth.checkAuth();
 		} catch (e: any) {
@@ -1739,6 +1819,75 @@
 							{/if}
 						</section>
 
+						<!-- Security Instructions Section -->
+						<section class="section">
+							<button class="section-header" onclick={() => toggleSection('security-instructions')}>
+								<h3>System Prompt Instructions</h3>
+								<svg class="chevron" class:expanded={expandedSections.has('security-instructions')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<polyline points="6 9 12 15 18 9"/>
+								</svg>
+							</button>
+							{#if expandedSections.has('security-instructions')}
+								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
+									<p class="setting-desc mb-3">
+										These instructions are prepended to all system prompts sent to Claude.
+										Use this to add custom instructions that apply across all profiles.
+									</p>
+
+									{#if loadingSecurityInstructions}
+										<div class="loading-text">Loading...</div>
+									{:else}
+										<div class="security-instructions-editor">
+											<textarea
+												bind:value={securityInstructions}
+												class="input security-textarea"
+												placeholder="Enter security instructions..."
+												rows="12"
+											></textarea>
+
+											<div class="security-instructions-footer">
+												<div class="security-status">
+													{#if isSecurityInstructionsCustomized}
+														<span class="badge primary">Customized</span>
+													{:else}
+														<span class="badge muted">Using Default</span>
+													{/if}
+													{#if securityInstructionsChanged}
+														<span class="badge warning">Unsaved changes</span>
+													{/if}
+												</div>
+
+												<div class="security-actions">
+													<button
+														onclick={revertSecurityInstructions}
+														class="btn secondary compact"
+														disabled={!isSecurityInstructionsCustomized || savingSecurityInstructions}
+														title="Revert to default instructions"
+													>
+														Revert to Default
+													</button>
+													<button
+														onclick={saveSecurityInstructions}
+														class="btn primary compact"
+														disabled={!securityInstructionsChanged || savingSecurityInstructions}
+													>
+														{savingSecurityInstructions ? 'Saving...' : 'Save Changes'}
+													</button>
+												</div>
+											</div>
+
+											{#if securityInstructionsError}
+												<p class="status error">{securityInstructionsError}</p>
+											{/if}
+											{#if securityInstructionsSuccess}
+												<p class="status success">{securityInstructionsSuccess}</p>
+											{/if}
+										</div>
+									{/if}
+								</div>
+							{/if}
+						</section>
+
 						<!-- Notifications Section -->
 						<section class="section">
 							<button class="section-header" onclick={() => toggleSection('notifications')}>
@@ -2169,6 +2318,46 @@
 	.badge.primary {
 		background: color-mix(in oklch, var(--primary) 15%, transparent);
 		color: var(--primary);
+	}
+
+	.badge.warning {
+		background: color-mix(in oklch, var(--warning) 15%, transparent);
+		color: var(--warning);
+	}
+
+	/* Security Instructions Editor */
+	.security-instructions-editor {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.security-textarea {
+		width: 100%;
+		min-height: 200px;
+		font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+		font-size: 0.8125rem;
+		line-height: 1.5;
+		resize: vertical;
+	}
+
+	.security-instructions-footer {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 12px;
+	}
+
+	.security-status {
+		display: flex;
+		gap: 8px;
+		align-items: center;
+	}
+
+	.security-actions {
+		display: flex;
+		gap: 8px;
 	}
 
 	/* Alerts & Messages */

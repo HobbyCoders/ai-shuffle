@@ -46,9 +46,13 @@
 		profileName = 'Assistant'
 	}: Props = $props();
 
-	// Show Read button on any non-streaming assistant message with content
-	// (The metadata-based approach doesn't work for history-loaded messages)
-	const canRead = $derived(Boolean(!streaming && content && content.length > 0));
+	// Determine if this is a final message with cost/duration metadata (query completion)
+	const hasFinalMetadata = $derived(Boolean(
+		metadata && (metadata.total_cost_usd || metadata.cost_usd || metadata.duration_ms)
+	));
+
+	// Show Read button only on final messages with content
+	const canRead = $derived(Boolean(!streaming && content && content.length > 0 && hasFinalMetadata));
 
 	let isHovered = $state(false);
 	let isTouchDevice = $state(false);
@@ -337,13 +341,13 @@
 >
 	<div class="min-w-0 max-w-full">
 		<div class="flex items-center gap-2 mb-1">
-			<span class="font-semibold text-sm text-orange-400">{profileName}</span>
+			<span class="font-semibold text-sm" style="color: var(--primary)">{profileName}</span>
 			<span class="text-xs text-muted-foreground">{formatTime(timestamp)}</span>
 			{#if streaming}
 				<StreamingIndicator />
 			{/if}
-			{#if showActions && content && !streaming}
-				<!-- Hover/touch action buttons -->
+			{#if showActions && content && !streaming && hasFinalMetadata}
+				<!-- Hover/touch action buttons - only shown on final messages with cost/duration -->
 				<div class="ml-auto">
 					<MessageActions
 						{sessionId}

@@ -893,11 +893,12 @@ async def chat_websocket(
                             await sync_engine.register_device(device_id, session_id, websocket)
                             current_session_id = session_id
 
-                        # Store user message
+                        # Store user message with profile_id for per-query tracking
                         database.add_session_message(
                             session_id=session_id,
                             role="user",
-                            content=prompt
+                            content=prompt,
+                            profile_id=profile_id
                         )
 
                         # Broadcast user message to other devices
@@ -905,7 +906,8 @@ async def chat_websocket(
                             session_id=session_id,
                             message={
                                 "role": "user",
-                                "content": prompt
+                                "content": prompt,
+                                "profile_id": profile_id
                             },
                             source_device_id=device_id  # Exclude the sender
                         )
@@ -978,11 +980,12 @@ async def chat_websocket(
                                 except (asyncio.CancelledError, asyncio.TimeoutError):
                                     pass
 
-                        # Step 3: Store user message
+                        # Step 3: Store user message with profile_id for per-query tracking
                         database.add_session_message(
                             session_id=session_id,
                             role="user",
-                            content=prompt
+                            content=prompt,
+                            profile_id=profile_id
                         )
 
                         # Step 4: Broadcast user message to other devices
@@ -990,7 +993,8 @@ async def chat_websocket(
                             session_id=session_id,
                             message={
                                 "role": "user",
-                                "content": prompt
+                                "content": prompt,
+                                "profile_id": profile_id
                             },
                             source_device_id=device_id
                         )
@@ -1048,6 +1052,24 @@ async def chat_websocket(
                                         messages = parse_session_history(sdk_session_id, working_dir)
                                         logger.info(f"Loaded {len(messages)} messages from JSONL for session {session_id}")
 
+                                        # Merge profile_id from database (same as sessions.py HTTP endpoint)
+                                        # JSONL files don't contain profile_id, but we need it for per-query profile tracking
+                                        # Use content-based matching for user messages (more robust than index-based)
+                                        db_messages = database.get_session_messages(session_id)
+                                        db_profile_map = {}
+                                        for db_msg in db_messages:
+                                            if db_msg.get("role") == "user" and db_msg.get("profile_id"):
+                                                # Use content as key for matching (unique per user message)
+                                                content = db_msg.get("content", "")
+                                                db_profile_map[content] = db_msg["profile_id"]
+
+                                        # Apply profile_id to matching JSONL messages
+                                        for msg in messages:
+                                            if msg.get("role") == "user":
+                                                content = msg.get("content", "")
+                                                if content in db_profile_map:
+                                                    msg["profile_id"] = db_profile_map[content]
+
                                         # Load context tokens from JSONL (same as sessions.py HTTP endpoint)
                                         usage_data = get_session_cost_from_jsonl(sdk_session_id, working_dir)
                                         if usage_data:
@@ -1091,6 +1113,7 @@ async def chat_websocket(
                                             "toolId": m.get("tool_id"),
                                             "toolInput": m.get("tool_input"),
                                             "metadata": m.get("metadata"),
+                                            "profile_id": m.get("profile_id"),
                                             "streaming": False
                                         })
                                     logger.info(f"Loaded {len(messages)} messages from DB for session {session_id}")

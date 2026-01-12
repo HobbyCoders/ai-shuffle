@@ -286,7 +286,7 @@ function createGitStore() {
             try {
                 const response = await gitApi.createWorktree(state.projectId, {
                     branch_name: branchName,
-                    create_new: createNew,
+                    create_new_branch: createNew,
                     base_branch: baseBranch,
                     profile_id: profileId
                 });

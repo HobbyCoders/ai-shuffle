@@ -57,9 +57,24 @@
 	const hasPartialMessages = $derived(currentProfile?.config?.include_partial_messages !== false);
 	const fileCheckpointingEnabled = $derived(currentProfile?.config?.enable_file_checkpointing === true);
 
-	// Session profile for message display (locked to the profile that created the session)
+	// Session profile for fallback display (legacy messages without profileId)
 	// Falls back to current profile for new sessions before first message is sent
 	const sessionProfile = $derived($profiles.find(p => p.id === (tab.sessionProfileId || tab.profile)));
+
+	/**
+	 * Get the profile name for a specific message.
+	 * Prioritizes the message's own profileId, then falls back to session profile.
+	 * This enables per-query profile tracking while supporting legacy messages.
+	 */
+	function getProfileName(message: ChatMessage): string {
+		// First check if the message has its own profileId
+		if (message.profileId) {
+			const profile = $profiles.find(p => p.id === message.profileId);
+			if (profile) return profile.name;
+		}
+		// Fallback to session profile for legacy messages
+		return sessionProfile?.name ?? 'Assistant';
+	}
 
 	// Chat preferences (reactive subscription)
 	let chatPrefs = $state<ChatPreferences | null>(null);
@@ -324,7 +339,7 @@
 					<ThinkingBlock
 						content={message.content}
 						streaming={message.streaming}
-						profileName={sessionProfile?.name}
+						profileName={getProfileName(message)}
 					/>
 				{:else if message.type === 'text' || !message.type}
 					<AssistantMessage
@@ -338,7 +353,7 @@
 						{fileCheckpointingEnabled}
 						metadata={message.metadata}
 						onRewindComplete={handleRewindComplete}
-						profileName={sessionProfile?.name}
+						profileName={getProfileName(message)}
 					/>
 				{:else if message.type === 'tool_use' && message.toolName === 'TodoWrite'}
 					<!-- TodoWrite - Render as TodoList component (also handles streaming partial input) -->

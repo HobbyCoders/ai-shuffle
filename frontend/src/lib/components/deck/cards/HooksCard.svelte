@@ -890,8 +890,8 @@
 		font-size: 0.875rem;
 		font-weight: 500;
 		border-radius: var(--radius, 8px);
-		background: var(--secondary);
-		color: var(--secondary-foreground);
+		background: var(--surface-1);
+		color: var(--foreground);
 		border: 1px solid var(--border);
 		cursor: pointer;
 		transition: all 150ms ease;
@@ -1068,7 +1068,7 @@
 	}
 
 	.selector-btn:hover {
-		background: var(--secondary);
+		background: var(--surface-hover);
 	}
 
 	.selector-btn .chevron {
@@ -1137,7 +1137,7 @@
 		gap: 4px;
 		padding: 8px 16px;
 		border-bottom: 1px solid var(--border);
-		background: var(--secondary);
+		background: var(--surface-1);
 		overflow-x: auto;
 		flex-shrink: 0;
 	}
@@ -1326,7 +1326,7 @@
 	.hooks-content {
 		flex: 1;
 		overflow-y: auto;
-		background: var(--background);
+		background: var(--surface-0);
 	}
 
 	.hooks-loading {
@@ -1400,7 +1400,7 @@
 		align-items: center;
 		padding: 12px 16px;
 		border-top: 1px solid var(--border);
-		background: var(--secondary);
+		background: var(--surface-1);
 		flex-shrink: 0;
 	}
 

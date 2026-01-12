@@ -373,24 +373,34 @@
 				{#each notes as note}
 					<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 					<div class="note-item" onclick={() => openNote(note)} role="button" tabindex="0" onkeydown={(e) => e.key === 'Enter' && openNote(note)}>
-						<div class="note-header">
-							{#if note.is_pinned}
-								<span class="pin-icon">
+						<div class="note-item-icon">
+							<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+								<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+								<polyline points="14 2 14 8 20 8"/>
+								<line x1="16" y1="13" x2="8" y2="13"/>
+								<line x1="16" y1="17" x2="8" y2="17"/>
+								<polyline points="10 9 9 9 8 9"/>
+							</svg>
+						</div>
+						<div class="note-item-content">
+							<div class="note-header">
+								{#if note.is_pinned}
+									<span class="pin-icon">
+										<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+											<line x1="12" y1="17" x2="12" y2="22"/>
+											<path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/>
+										</svg>
+									</span>
+								{/if}
+								<span class="note-title">{note.title}</span>
+								<button class="pin-btn" onclick={(e) => togglePin(note, e)} title={note.is_pinned ? 'Unpin' : 'Pin'}>
 									<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 										<line x1="12" y1="17" x2="12" y2="22"/>
 										<path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/>
 									</svg>
-								</span>
-							{/if}
-							<span class="note-title">{note.title}</span>
-							<button class="pin-btn" onclick={(e) => togglePin(note, e)} title={note.is_pinned ? 'Unpin' : 'Pin'}>
-								<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-									<line x1="12" y1="17" x2="12" y2="22"/>
-									<path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/>
-								</svg>
-							</button>
-						</div>
-						<div class="note-meta">
+								</button>
+							</div>
+							<div class="note-meta">
 							{#if note.tags.length > 0}
 								<span class="note-tags">
 									{#each note.tags.slice(0, 3) as tag}
@@ -405,6 +415,7 @@
 								<span class="linked-sessions">{note.linked_sessions.length} session{note.linked_sessions.length === 1 ? '' : 's'}</span>
 							{/if}
 							<span class="note-date">{formatRelativeTime(note.updated_at)}</span>
+							</div>
 						</div>
 					</div>
 				{/each}
@@ -666,22 +677,82 @@
 
 	.note-item {
 		display: flex;
-		flex-direction: column;
-		gap: calc(var(--space-1) * 1.5);
-		padding: var(--space-3);
+		align-items: flex-start;
+		gap: var(--space-3);
+		padding: var(--space-3) var(--space-4);
 		background: var(--surface-1);
-		border: 1px solid transparent;
-		border-radius: var(--radius-md);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-lg);
 		margin-bottom: var(--space-2);
 		text-align: left;
 		cursor: pointer;
 		transition: all var(--transition-smooth);
+		box-shadow: var(--shadow-inset), var(--shadow-xs);
+		position: relative;
+		overflow: hidden;
+	}
+
+	.note-item::before {
+		content: '';
+		position: absolute;
+		inset: 0;
+		background: linear-gradient(
+			135deg,
+			color-mix(in oklch, var(--primary) 4%, transparent) 0%,
+			transparent 50%
+		);
+		opacity: 0;
+		transition: opacity var(--transition-smooth);
+		pointer-events: none;
 	}
 
 	.note-item:hover {
-		border-color: var(--border-default);
-		background: var(--surface-hover);
-		box-shadow: var(--shadow-xs);
+		border-color: var(--border-emphasis);
+		box-shadow: var(--shadow-inset), var(--shadow-md);
+		transform: translateY(-1px);
+	}
+
+	.note-item:hover::before {
+		opacity: 1;
+	}
+
+	.note-item:active {
+		transform: translateY(0);
+		box-shadow: var(--shadow-inset), var(--shadow-sm);
+	}
+
+	/* Icon box for note items */
+	.note-item-icon {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 40px;
+		height: 40px;
+		flex-shrink: 0;
+		border-radius: var(--radius-md);
+		background: linear-gradient(
+			135deg,
+			color-mix(in oklch, var(--primary) 18%, transparent) 0%,
+			color-mix(in oklch, var(--primary) 8%, transparent) 100%
+		);
+		border: 1px solid color-mix(in oklch, var(--primary) 25%, transparent);
+		box-shadow: var(--shadow-xs), var(--shadow-glow-soft);
+		color: var(--primary);
+		transition: all var(--transition-smooth);
+	}
+
+	.note-item:hover .note-item-icon {
+		box-shadow: var(--shadow-sm), var(--shadow-glow-primary);
+		transform: scale(1.02);
+	}
+
+	/* Content wrapper */
+	.note-item-content {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: calc(var(--space-1) * 1.5);
 	}
 
 	.note-header {

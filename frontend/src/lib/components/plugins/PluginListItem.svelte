@@ -7,6 +7,7 @@
 	 * - installed: Shows enable/disable toggle, uninstall button
 	 */
 	import type { AvailablePlugin, PluginInfo } from '$lib/api/plugins';
+	import '$lib/components/deck/cards/card-design-system.css';
 
 	interface Props {
 		plugin: AvailablePlugin | PluginInfo;
@@ -34,163 +35,246 @@
 
 	// Check if this is an installed plugin
 	const isInstalled = $derived('enabled' in plugin);
-	const installedPlugin = $derived(isInstalled ? plugin as PluginInfo : null);
-	const availablePlugin = $derived(!isInstalled ? plugin as AvailablePlugin : null);
-
-	// Badge colors for plugin features
-	const featureBadges = [
-		{ key: 'has_commands', label: 'Commands', color: 'bg-blue-500/10 text-blue-500' },
-		{ key: 'has_agents', label: 'Agents', color: 'bg-purple-500/10 text-purple-500' },
-		{ key: 'has_skills', label: 'Skills', color: 'bg-green-500/10 text-green-500' },
-		{ key: 'has_hooks', label: 'Hooks', color: 'bg-orange-500/10 text-orange-500' }
-	] as const;
+	const installedPlugin = $derived(isInstalled ? (plugin as PluginInfo) : null);
+	const availablePlugin = $derived(!isInstalled ? (plugin as AvailablePlugin) : null);
 </script>
 
+<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 <div
-	class="border border-border rounded-lg overflow-hidden bg-card hover:border-primary/30 transition-colors {selected ? 'ring-2 ring-primary' : ''}"
+	class="card-list-item card-system {selected ? 'ring-2 ring-primary' : ''}"
+	onclick={onDetails}
 >
-	<div class="px-4 py-3">
-		<div class="flex items-start gap-3">
-			<!-- Checkbox for batch selection (available mode only) -->
-			{#if mode === 'available' && !availablePlugin?.installed}
-				<button
-					onclick={onSelect}
-					class="mt-0.5 w-5 h-5 rounded border-2 flex items-center justify-center transition-colors {selected ? 'bg-primary border-primary' : 'border-border hover:border-primary/50'}"
-				>
-					{#if selected}
-						<svg class="w-3 h-3 text-primary-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
-						</svg>
-					{/if}
-				</button>
-			{/if}
-
-			<!-- Plugin icon -->
-			<div class="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
-				<svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
+	<!-- Checkbox for batch selection (available mode only) -->
+	{#if mode === 'available' && !availablePlugin?.installed}
+		<button
+			onclick={(e) => { e.stopPropagation(); onSelect?.(); }}
+			class="batch-checkbox {selected ? 'selected' : ''}"
+		>
+			{#if selected}
+				<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
 				</svg>
-			</div>
+			{/if}
+		</button>
+	{/if}
 
-			<!-- Plugin info -->
-			<div class="flex-1 min-w-0">
-				<div class="flex items-center gap-2 flex-wrap">
-					<button
-						onclick={onDetails}
-						class="font-medium text-foreground hover:text-primary transition-colors text-left"
-					>
-						{plugin.name}
-					</button>
+	<!-- Plugin icon -->
+	<div class="card-item-icon">
+		<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
+		</svg>
+	</div>
 
-					<!-- Marketplace badge -->
-					<span class="px-1.5 py-0.5 text-xs bg-muted text-muted-foreground rounded">
-						{plugin.marketplace}
-					</span>
+	<!-- Plugin info -->
+	<div class="card-item-content">
+		<div class="card-item-header">
+			<span class="card-item-name">{plugin.name}</span>
+			<span class="card-badge card-badge--muted">{plugin.marketplace}</span>
+			{#if mode === 'installed' && installedPlugin}
+				<span class="card-badge {installedPlugin.enabled ? 'card-badge--success' : 'card-badge--muted'}">
+					{installedPlugin.enabled ? 'Enabled' : 'Disabled'}
+				</span>
+			{:else if mode === 'available' && availablePlugin?.installed}
+				<span class="card-badge card-badge--success">Installed</span>
+			{/if}
+		</div>
+		<p class="card-item-description">{plugin.description || 'No description available'}</p>
 
-					<!-- Status badges -->
-					{#if mode === 'installed' && installedPlugin}
-						<span class="px-1.5 py-0.5 text-xs rounded {installedPlugin.enabled ? 'bg-green-500/10 text-green-500' : 'bg-muted text-muted-foreground'}">
-							{installedPlugin.enabled ? 'Enabled' : 'Disabled'}
-						</span>
-					{:else if mode === 'available' && availablePlugin?.installed}
-						<span class="px-1.5 py-0.5 text-xs bg-green-500/10 text-green-500 rounded">
-							Installed
-						</span>
-					{/if}
-				</div>
-
-				<p class="text-sm text-muted-foreground mt-0.5 line-clamp-2">
-					{plugin.description || 'No description available'}
-				</p>
-
-				<!-- Feature badges -->
-				<div class="flex flex-wrap gap-1 mt-2">
-					{#each featureBadges as badge}
-						{#if plugin[badge.key]}
-							<span class="px-1.5 py-0.5 text-xs rounded {badge.color}">
-								{badge.label}
-							</span>
-						{/if}
-					{/each}
-
-					{#if mode === 'installed' && installedPlugin}
-						<span class="px-1.5 py-0.5 text-xs bg-muted text-muted-foreground rounded">
-							v{installedPlugin.version}
-						</span>
-					{/if}
-				</div>
-			</div>
-
-			<!-- Actions -->
-			<div class="flex items-center gap-1 flex-shrink-0">
-				{#if mode === 'available'}
-					{#if availablePlugin?.installed}
-						<!-- Already installed - show version info -->
-						<span class="text-xs text-muted-foreground px-2">
-							v{availablePlugin.installed_version}
-						</span>
-					{:else}
-						<button
-							onclick={onInstall}
-							disabled={installing}
-							class="px-3 py-1.5 text-sm font-medium text-primary-foreground bg-primary rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50 flex items-center gap-1"
-						>
-							{#if installing}
-								<svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
-									<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-									<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-								</svg>
-							{:else}
-								<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-								</svg>
-							{/if}
-							Install
-						</button>
-					{/if}
-				{:else if mode === 'installed' && installedPlugin}
-					<!-- Enable/Disable toggle -->
-					<button
-						onclick={onToggle}
-						class="relative w-11 h-6 rounded-full transition-colors {installedPlugin.enabled ? 'bg-primary' : 'bg-muted'}"
-						title={installedPlugin.enabled ? 'Disable plugin' : 'Enable plugin'}
-					>
-						<span
-							class="absolute top-1 w-4 h-4 rounded-full bg-white shadow transition-transform {installedPlugin.enabled ? 'left-6' : 'left-1'}"
-						></span>
-					</button>
-
-					<!-- Details button -->
-					<button
-						onclick={onDetails}
-						class="p-1.5 hover:bg-muted rounded-md transition-colors"
-						title="View details"
-					>
-						<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-						</svg>
-					</button>
-
-					<!-- Uninstall button -->
-					<button
-						onclick={onUninstall}
-						disabled={installing}
-						class="p-1.5 hover:bg-red-500/10 rounded-md transition-colors"
-						title="Uninstall"
-					>
-						{#if installing}
-							<svg class="w-4 h-4 text-muted-foreground animate-spin" fill="none" viewBox="0 0 24 24">
-								<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-								<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-							</svg>
-						{:else}
-							<svg class="w-4 h-4 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-							</svg>
-						{/if}
-					</button>
-				{/if}
-			</div>
+		<!-- Feature badges -->
+		<div class="feature-badges">
+			{#if plugin.has_commands}
+				<span class="card-badge card-badge--feature-commands">Commands</span>
+			{/if}
+			{#if plugin.has_agents}
+				<span class="card-badge card-badge--feature-agents">Agents</span>
+			{/if}
+			{#if plugin.has_skills}
+				<span class="card-badge card-badge--feature-skills">Skills</span>
+			{/if}
+			{#if plugin.has_hooks}
+				<span class="card-badge card-badge--feature-hooks">Hooks</span>
+			{/if}
+			{#if mode === 'installed' && installedPlugin}
+				<span class="card-badge card-badge--muted">v{installedPlugin.version}</span>
+			{/if}
 		</div>
 	</div>
+
+	<!-- Actions -->
+	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+	<div class="card-item-actions" onclick={(e) => e.stopPropagation()}>
+		{#if mode === 'available'}
+			{#if availablePlugin?.installed}
+				<span class="version-info">v{availablePlugin.installed_version}</span>
+			{:else}
+				<button
+					onclick={onInstall}
+					disabled={installing}
+					class="card-btn-primary card-btn-primary--small"
+				>
+					{#if installing}
+						<span class="card-spinner card-spinner--small"></span>
+					{:else}
+						<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+						</svg>
+					{/if}
+					Install
+				</button>
+			{/if}
+		{:else if mode === 'installed' && installedPlugin}
+			<!-- Enable/Disable toggle -->
+			<button
+				onclick={onToggle}
+				class="toggle-switch {installedPlugin.enabled ? 'enabled' : ''}"
+				title={installedPlugin.enabled ? 'Disable plugin' : 'Enable plugin'}
+			>
+				<span class="toggle-knob"></span>
+			</button>
+
+			<!-- Details button -->
+			<button
+				onclick={onDetails}
+				class="card-action-btn"
+				title="View details"
+			>
+				<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+				</svg>
+			</button>
+
+			<!-- Uninstall button -->
+			<button
+				onclick={onUninstall}
+				disabled={installing}
+				class="card-action-btn card-action-btn--destructive"
+				title="Uninstall"
+			>
+				{#if installing}
+					<span class="card-spinner card-spinner--small"></span>
+				{:else}
+					<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+					</svg>
+				{/if}
+			</button>
+		{/if}
+	</div>
 </div>
+
+<style>
+	/* Batch selection checkbox */
+	.batch-checkbox {
+		width: 20px;
+		height: 20px;
+		flex-shrink: 0;
+		border: 2px solid var(--border);
+		border-radius: 4px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: transparent;
+		cursor: pointer;
+		transition: all var(--transition-fast, 100ms);
+	}
+
+	.batch-checkbox:hover {
+		border-color: color-mix(in oklch, var(--primary) 50%, transparent);
+	}
+
+	.batch-checkbox.selected {
+		background: var(--primary);
+		border-color: var(--primary);
+	}
+
+	.batch-checkbox svg {
+		width: 12px;
+		height: 12px;
+		color: var(--primary-foreground);
+	}
+
+	/* Feature badges row */
+	.feature-badges {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+		margin-top: 6px;
+	}
+
+	/* Feature badge colors */
+	.card-badge--feature-commands {
+		background: color-mix(in oklch, var(--feature-commands, oklch(0.6 0.2 250)) 15%, transparent);
+		color: var(--feature-commands, oklch(0.6 0.2 250));
+	}
+
+	.card-badge--feature-agents {
+		background: color-mix(in oklch, var(--feature-agents, oklch(0.6 0.2 300)) 15%, transparent);
+		color: var(--feature-agents, oklch(0.6 0.2 300));
+	}
+
+	.card-badge--feature-skills {
+		background: color-mix(in oklch, var(--feature-skills, oklch(0.6 0.2 145)) 15%, transparent);
+		color: var(--feature-skills, oklch(0.6 0.2 145));
+	}
+
+	.card-badge--feature-hooks {
+		background: color-mix(in oklch, var(--feature-hooks, oklch(0.7 0.15 55)) 15%, transparent);
+		color: var(--feature-hooks, oklch(0.7 0.15 55));
+	}
+
+	/* Success badge */
+	.card-badge--success {
+		background: color-mix(in oklch, var(--success, oklch(0.6 0.2 145)) 15%, transparent);
+		color: var(--success, oklch(0.6 0.2 145));
+	}
+
+	/* Version info */
+	.version-info {
+		font-size: var(--text-xs, 0.6875rem);
+		color: var(--muted-foreground);
+		padding: 0 8px;
+	}
+
+	/* Small primary button */
+	.card-btn-primary--small {
+		padding: 6px 12px;
+		font-size: var(--text-sm, 0.75rem);
+	}
+
+	.card-btn-primary--small svg {
+		width: 14px;
+		height: 14px;
+	}
+
+	/* Toggle switch */
+	.toggle-switch {
+		position: relative;
+		width: 44px;
+		height: 24px;
+		border-radius: 12px;
+		background: var(--muted);
+		border: none;
+		cursor: pointer;
+		transition: background var(--transition-fast, 100ms);
+	}
+
+	.toggle-switch.enabled {
+		background: var(--primary);
+	}
+
+	.toggle-knob {
+		position: absolute;
+		top: 4px;
+		left: 4px;
+		width: 16px;
+		height: 16px;
+		border-radius: 50%;
+		background: var(--card, white);
+		box-shadow: 0 1px 3px color-mix(in oklch, var(--foreground, black) 20%, transparent);
+		transition: transform var(--transition-fast, 100ms);
+	}
+
+	.toggle-switch.enabled .toggle-knob {
+		transform: translateX(20px);
+	}
+</style>

@@ -1012,7 +1012,6 @@
 											onclick={() => selectThinkingMode(mode.value)}
 										>
 											<span class="override-item-label">{mode.label}</span>
-											<span class="override-item-desc">{mode.description}</span>
 											{#if liveTab.thinkingModeOverride === mode.value}
 												<svg class="w-3.5 h-3.5 check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
@@ -1053,7 +1052,6 @@
 											onclick={() => selectPermissionMode(mode.value)}
 										>
 											<span class="override-item-label">{mode.label}</span>
-											<span class="override-item-desc">{mode.description}</span>
 											{#if liveTab.permissionModeOverride === mode.value}
 												<svg class="w-3.5 h-3.5 check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
@@ -1964,7 +1962,7 @@
 		position: absolute;
 		bottom: calc(100% + 6px);
 		right: 0;
-		min-width: 180px;
+		min-width: 140px;
 		background: var(--popover);
 		border: 1px solid var(--border);
 		border-radius: var(--radius, 0.75rem);
@@ -2020,19 +2018,13 @@
 
 	.override-item-label {
 		font-weight: 500;
-		flex-shrink: 0;
-	}
-
-	.override-item-desc {
-		font-size: 11px;
-		color: var(--muted-foreground);
 		flex: 1;
-		text-align: right;
 	}
 
 	.override-dropdown-item .check-icon {
 		flex-shrink: 0;
 		color: var(--primary);
+		margin-left: auto;
 	}
 
 	/* Mobile: slightly more compact */
@@ -2048,7 +2040,7 @@
 		}
 
 		.override-dropdown {
-			min-width: 160px;
+			min-width: 120px;
 		}
 	}
 </style>

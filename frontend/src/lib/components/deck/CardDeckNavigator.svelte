@@ -148,6 +148,34 @@
 	let renameDeckId = $state<string | null>(null);
 	let renameDeckName = $state('');
 
+	// 3D tilt effect state (desktop cards)
+	// Track cards that have completed their entrance animation
+	let animationCompleteCards = $state<Set<string>>(new Set());
+
+	// Handle card mouse move for 3D tilt effect (like WelcomeCard)
+	function handleCardTiltMove(e: MouseEvent) {
+		if (isMobile || isEditMode) return;
+		const card = e.currentTarget as HTMLElement;
+		const rect = card.getBoundingClientRect();
+		const x = (e.clientX - rect.left) / rect.width - 0.5;
+		const y = (e.clientY - rect.top) / rect.height - 0.5;
+		// Set CSS variables directly on element for smooth updates
+		card.style.setProperty('--tilt-x', `${x * 12}deg`);
+		card.style.setProperty('--tilt-y', `${y * -12}deg`);
+	}
+
+	// Reset tilt on mouse leave - smoothly animates back to 0
+	function handleCardTiltLeave(e: MouseEvent) {
+		const card = e.currentTarget as HTMLElement;
+		card.style.setProperty('--tilt-x', '0deg');
+		card.style.setProperty('--tilt-y', '0deg');
+	}
+
+	// Mark card animation as complete (called from animationend event)
+	function handleCardAnimationEnd(cardId: string) {
+		animationCompleteCards = new Set([...animationCompleteCards, cardId]);
+	}
+
 	// Card types for main deck
 	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins' | 'hooks' | 'notes' | 'stats' | 'user-settings';
 
@@ -1670,6 +1698,7 @@
 								class:add-deck-card={card.type === 'add-deck'}
 								class:is-being-dragged={isPointerDragging && card.id === draggedCardId}
 								class:drop-into-deck={card.type === 'deck' && card.deckId === dragOverDeckId}
+								class:animation-complete={animationCompleteCards.has(card.id)}
 								data-ai-active={card.isStreaming}
 								data-has-children={card.hasChildren}
 								data-card-id={card.id}
@@ -1678,6 +1707,9 @@
 								onclick={(e) => handleCardClick(card, e)}
 								oncontextmenu={(e) => isEditMode && showContextMenu(card.id, e)}
 								onkeydown={(e) => e.key === 'Enter' && handleCardClick(card, e as unknown as MouseEvent)}
+								onmousemove={handleCardTiltMove}
+								onmouseleave={handleCardTiltLeave}
+								onanimationend={() => handleCardAnimationEnd(card.id)}
 								role="option"
 								tabindex="0"
 								aria-selected="false"
@@ -1903,30 +1935,28 @@
 	   ======================================== */
 
 	.navigator {
-		/* Dark mode (default) */
-		--bg-deep: oklch(0.08 0.01 260);
-		--bg-base: oklch(0.10 0.01 260);
-		--bg-elevated: oklch(0.13 0.01 260);
-		--bg-card: oklch(0.15 0.01 260);
-		--bg-card-hover: oklch(0.17 0.01 260);
+		/* All colors from theme - no hardcoded values */
+		--bg-deep: var(--background);
+		--bg-base: var(--background);
+		--bg-elevated: var(--card);
+		--bg-card: var(--card);
+		--bg-card-hover: var(--muted);
 
-		--border-subtle: rgba(255, 255, 255, 0.06);
-		--border-default: rgba(255, 255, 255, 0.1);
-		--border-strong: rgba(255, 255, 255, 0.15);
+		--border-subtle: var(--border);
+		--border-default: var(--border);
+		--border-strong: var(--border);
 
-		--text-primary: var(--foreground, #f4f4f5);
-		--text-secondary: var(--muted-foreground, #a1a1aa);
-		--text-muted: #71717a;
-		--text-dim: #52525b;
+		--text-primary: var(--foreground);
+		--text-secondary: var(--muted-foreground);
+		--text-muted: var(--muted-foreground);
+		--text-dim: var(--muted-foreground);
 
 		--ai-primary: var(--primary);
 		--ai-secondary: var(--primary);
 		--ai-glow: color-mix(in srgb, var(--primary) 25%, transparent);
 		--ai-subtle: color-mix(in srgb, var(--primary) 8%, transparent);
 
-		--backdrop-bg: rgba(0, 0, 0, 0.85);
-		--shadow-color: rgba(0, 0, 0, 0.4);
-		--shadow-strong: rgba(0, 0, 0, 0.6);
+		--backdrop-bg: color-mix(in srgb, var(--background) 85%, transparent);
 
 		--ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 		--ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -1934,37 +1964,10 @@
 		--card-width: 220px;
 		--card-height: 160px;
 		--card-gap: 16px;
-		/* Inherit from theme --radius, scale accordingly */
-		--radius-sm: calc(var(--radius, 0.75rem) * 0.67);
-		--radius-md: var(--radius, 0.75rem);
-		--radius-lg: calc(var(--radius, 0.75rem) * 1.33);
-	}
 
-	/* Light mode overrides */
-	:global(.light) .navigator {
-		--bg-deep: oklch(0.94 0.005 260);
-		--bg-base: oklch(0.96 0.005 260);
-		--bg-elevated: oklch(0.98 0.003 260);
-		--bg-card: oklch(1 0 0);
-		--bg-card-hover: oklch(0.97 0.005 260);
-
-		--border-subtle: rgba(0, 0, 0, 0.06);
-		--border-default: rgba(0, 0, 0, 0.1);
-		--border-strong: rgba(0, 0, 0, 0.15);
-
-		--text-primary: var(--foreground, #18181b);
-		--text-secondary: var(--muted-foreground, #52525b);
-		--text-muted: #71717a;
-		--text-dim: #a1a1aa;
-
-		--ai-primary: var(--primary);
-		--ai-secondary: var(--primary);
-		--ai-glow: color-mix(in srgb, var(--primary) 20%, transparent);
-		--ai-subtle: color-mix(in srgb, var(--primary) 8%, transparent);
-
-		--backdrop-bg: rgba(255, 255, 255, 0.85);
-		--shadow-color: rgba(0, 0, 0, 0.1);
-		--shadow-strong: rgba(0, 0, 0, 0.15);
+		--radius-sm: calc(var(--radius, 0.75rem) * 0.5);
+		--radius-md: calc(var(--radius, 0.75rem) * 0.833);
+		--radius-lg: calc(var(--radius, 0.75rem) * 1.167);
 	}
 
 	/* ========================================
@@ -2217,14 +2220,32 @@
 	   CARDS
 	   ======================================== */
 	.card {
+		--tilt-x: 0deg;
+		--tilt-y: 0deg;
+
 		flex-shrink: 0;
 		width: var(--card-width);
 		height: var(--card-height);
 		cursor: pointer;
-		transition: transform 0.2s var(--ease-out), opacity 0.2s ease;
 		opacity: 0;
 		transform: translateX(40px) scale(0.95);
 		animation: cardEnter 0.4s var(--ease-spring) forwards;
+		/* Ensure outer card matches inner radius to prevent clipping */
+		border-radius: calc(var(--radius, 0.75rem) * 1.167);
+		/* Enable 3D transforms */
+		transform-style: preserve-3d;
+		/* Spring-like transition for smooth card-from-hand feel */
+		transition-property: transform, border-color, box-shadow;
+		transition-duration: 0.4s, 0.2s, 0.3s;
+		transition-timing-function: cubic-bezier(0.34, 1.56, 0.64, 1), ease, ease;
+	}
+
+	/* After entrance animation completes, enable smooth tilt transitions */
+	.card.animation-complete {
+		animation: none;
+		opacity: 1;
+		/* Always include tilt in transform so returning to 0 is smooth */
+		transform: rotateY(var(--tilt-x)) rotateX(var(--tilt-y));
 	}
 
 	@keyframes cardEnter {
@@ -2250,12 +2271,16 @@
 		75% { transform: rotate(0.5deg); }
 	}
 
-	.card:hover {
-		transform: translateY(-6px);
+	/* 3D tilt effect on hover - lift card up like pulling from hand */
+	.card.animation-complete:hover {
+		transform: rotateY(var(--tilt-x)) rotateX(var(--tilt-y)) translateY(-12px) scale(1.03);
+		z-index: 10;
 	}
 
-	.card:active {
-		transform: translateY(-4px) scale(0.98);
+	.card.animation-complete:active {
+		transform: rotateY(var(--tilt-x)) rotateX(var(--tilt-y)) translateY(-6px) scale(0.98);
+		transition-duration: 0.1s;
+		transition-timing-function: ease-out;
 	}
 
 	/* In edit mode, don't apply hover transform - let cards stay in place */
@@ -2298,12 +2323,12 @@
 		height: 100%;
 		background: var(--bg-card);
 		border: 1px solid var(--ai-primary);
-		border-radius: var(--radius-lg);
+		border-radius: calc(var(--radius, 0.75rem) * 1.167);
 		padding: 20px;
 		display: flex;
 		flex-direction: column;
 		box-shadow:
-			0 20px 60px var(--shadow-strong),
+			var(--shadow-l),
 			0 0 30px var(--ai-glow),
 			0 0 0 2px color-mix(in srgb, var(--ai-primary) 30%, transparent);
 	}
@@ -2348,7 +2373,7 @@
 		justify-content: center;
 		gap: 0.75rem;
 		box-shadow:
-			0 20px 60px var(--shadow-strong),
+			var(--shadow-l),
 			0 0 30px var(--ai-glow),
 			0 0 0 2px color-mix(in srgb, var(--ai-primary) 30%, transparent);
 	}
@@ -2382,7 +2407,7 @@
 	@keyframes pickUp {
 		0% {
 			transform: rotate(0deg) scale(1);
-			box-shadow: 0 4px 16px var(--shadow-color);
+			box-shadow: var(--shadow-m);
 		}
 		100% {
 			transform: rotate(3deg) scale(1.08);
@@ -2398,7 +2423,7 @@
 		border-color: var(--ai-primary);
 		box-shadow:
 			0 0 20px var(--ai-glow),
-			0 8px 32px var(--shadow-color);
+			var(--shadow-l);
 		background: color-mix(in srgb, var(--ai-primary) 10%, var(--bg-card));
 	}
 
@@ -2406,30 +2431,30 @@
 		width: 100%;
 		height: 100%;
 		background: var(--bg-card);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-lg);
+		border: 1px solid var(--border-subtle);
+		outline: none;
+		box-shadow: var(--shadow-m);
+		border-radius: calc(var(--radius, 0.75rem) * 1.167);
 		padding: 20px;
 		display: flex;
 		flex-direction: column;
 		position: relative;
-		overflow: hidden;
-		transition: all 0.2s var(--ease-out);
+		transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.3s ease;
 	}
 
 	.card:hover .card-inner {
 		background: var(--bg-card-hover);
-		border-color: var(--border-strong);
+		border-color: var(--primary);
 		box-shadow:
-			0 8px 32px var(--shadow-color),
-			0 0 0 1px var(--border-subtle);
+			var(--shadow-l),
+			0 0 30px color-mix(in srgb, var(--primary) 30%, transparent);
 	}
 
 	/* AI-active card glow */
 	.card[data-ai-active="true"] .card-inner {
-		border-color: color-mix(in srgb, var(--ai-primary) 30%, transparent);
 		box-shadow:
 			0 0 20px var(--ai-glow),
-			0 8px 32px var(--shadow-color);
+			var(--shadow-l);
 	}
 
 	/* Drag handle */
@@ -2475,8 +2500,9 @@
 
 	.card:hover .card-icon {
 		background: var(--ai-subtle);
-		border-color: color-mix(in srgb, var(--ai-primary) 20%, transparent);
+		border-color: var(--primary);
 		color: var(--icon-color, var(--ai-primary));
+		box-shadow: 0 0 16px color-mix(in srgb, var(--primary) 25%, transparent);
 	}
 
 	/* Deck card styling */
@@ -2688,7 +2714,7 @@
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-md);
 		padding: 6px;
-		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+		box-shadow: var(--shadow-l);
 	}
 
 	.context-menu-label {
@@ -2743,7 +2769,7 @@
 		position: fixed;
 		inset: 0;
 		z-index: 100003;
-		background: rgba(0, 0, 0, 0.5);
+		background: var(--backdrop-bg);
 	}
 
 	.dialog {
@@ -2758,7 +2784,7 @@
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-lg);
 		padding: 24px;
-		box-shadow: 0 16px 64px rgba(0, 0, 0, 0.5);
+		box-shadow: var(--shadow-l);
 	}
 
 	.dialog-title {
@@ -2950,8 +2976,8 @@
 		padding: 1.5rem 1rem;
 
 		background: var(--bg-card);
-		border: 1px solid var(--border-default);
-		border-radius: calc(var(--radius-lg) * 1.67);
+		border: none;
+		border-radius: var(--radius-lg);
 
 		display: flex;
 		flex-direction: column;
@@ -2963,16 +2989,12 @@
 		cursor: pointer;
 		scroll-snap-align: center;
 		/* scroll-snap-stop: normal (default) allows momentum to carry through cards naturally */
-		/* Split transitions: fast for glow/border (scroll response), smooth for transform (tap) */
 		transition:
-			border-color 0.1s ease-out,
 			box-shadow 0.15s ease-out,
 			transform 0.2s var(--ease-out);
 		-webkit-tap-highlight-color: transparent;
 
-		box-shadow:
-			0 8px 24px rgba(0, 0, 0, 0.4),
-			0 4px 8px rgba(0, 0, 0, 0.3);
+		box-shadow: var(--shadow-m);
 
 		opacity: 0;
 		animation: mobileCardEnter 0.5s var(--ease-out) forwards;
@@ -2991,10 +3013,9 @@
 	}
 
 	.mobile-card.active {
-		border-color: var(--ai-primary);
 		box-shadow:
-			0 12px 32px rgba(0, 0, 0, 0.5),
-			0 0 24px var(--ai-glow);
+			var(--shadow-l),
+			0 0 28px color-mix(in srgb, var(--primary) 35%, transparent);
 	}
 
 	.mobile-card:active {
@@ -3009,10 +3030,9 @@
 
 	.mobile-card.deck-card.active {
 		/* Use standard primary glow like other cards, not deck-color based */
-		border-color: var(--ai-primary);
 		box-shadow:
-			0 12px 32px rgba(0, 0, 0, 0.5),
-			0 0 24px var(--ai-glow);
+			var(--shadow-l),
+			0 0 28px color-mix(in srgb, var(--primary) 35%, transparent);
 	}
 
 	/* Add deck card styling */
@@ -3059,7 +3079,7 @@
 		background: var(--ai-subtle);
 		border-color: var(--ai-primary);
 		color: var(--icon-color, var(--ai-primary));
-		box-shadow: 0 0 20px var(--ai-glow);
+		box-shadow: 0 0 24px color-mix(in srgb, var(--primary) 35%, transparent);
 	}
 
 	.mobile-card.deck-card .mobile-card-icon {

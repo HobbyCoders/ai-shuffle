@@ -281,7 +281,7 @@
 		position: absolute;
 		bottom: 16px;
 		left: 16px;
-		z-index: 10001;
+		z-index: 50000; /* Above all cards and overlays */
 		display: flex;
 		flex-direction: column-reverse;
 		align-items: flex-start;
@@ -307,15 +307,15 @@
 	}
 
 	.menu-indicator :global(.indicator-arrow) {
-		color: var(--muted-foreground);
-		opacity: 0.7;
+		color: var(--primary);
+		opacity: 0.85;
 		animation: bounce 2s ease-in-out infinite;
 	}
 
 	@keyframes bounce {
 		0%, 100% {
 			transform: translateY(0);
-			opacity: 0.7;
+			opacity: 0.85;
 		}
 		50% {
 			transform: translateY(-3px);

@@ -122,34 +122,38 @@
 					<MessageArea {tab} />
 				</div>
 
-				<!-- Permission Queue -->
-				{#if tab.pendingPermissions && tab.pendingPermissions.length > 0}
-					<div class="max-w-5xl mx-auto px-4 sm:px-8 py-3">
-						<div class="permission-panel rounded-xl border border-warning/30 bg-warning/5 p-3">
-							<PermissionQueue
-								requests={tab.pendingPermissions}
-								on:respond={handlePermissionResponse}
-							/>
-						</div>
-					</div>
-				{/if}
-
-				<!-- User Question Queue -->
-				{#if tab.pendingQuestions && tab.pendingQuestions.length > 0}
-					<div class="max-w-5xl mx-auto px-4 sm:px-8 py-3 space-y-3">
-						{#each tab.pendingQuestions as question (question.request_id)}
-							<UserQuestion
-								data={question}
-								on:respond={handleQuestionResponse}
-							/>
-						{/each}
-					</div>
-				{/if}
-
 				<!-- Input at the bottom -->
 				<div class="input-wrapper">
 					<ChatInput {tab} compact />
 				</div>
+
+				<!-- Modal Overlay for Permission/Question Queues -->
+				{#if (tab.pendingPermissions && tab.pendingPermissions.length > 0) || (tab.pendingQuestions && tab.pendingQuestions.length > 0)}
+					<div class="modal-overlay">
+						<div class="modal-backdrop"></div>
+						<div class="modal-content">
+							{#if tab.pendingPermissions && tab.pendingPermissions.length > 0}
+								<div class="modal-card-wrapper">
+									<PermissionQueue
+										requests={tab.pendingPermissions}
+										on:respond={handlePermissionResponse}
+									/>
+								</div>
+							{/if}
+
+							{#if tab.pendingQuestions && tab.pendingQuestions.length > 0}
+								<div class="modal-card-wrapper space-y-3">
+									{#each tab.pendingQuestions as question (question.request_id)}
+										<UserQuestion
+											data={question}
+											on:respond={handleQuestionResponse}
+										/>
+									{/each}
+								</div>
+							{/if}
+						</div>
+					</div>
+				{/if}
 			{/if}
 		{:else}
 			<div class="chat-loading">
@@ -185,34 +189,38 @@
 						<MessageArea {tab} />
 					</div>
 
-					<!-- Permission Queue -->
-					{#if tab.pendingPermissions && tab.pendingPermissions.length > 0}
-						<div class="max-w-5xl mx-auto px-4 sm:px-8 py-3">
-							<div class="permission-panel rounded-xl border border-warning/30 bg-warning/5 p-3">
-								<PermissionQueue
-									requests={tab.pendingPermissions}
-									on:respond={handlePermissionResponse}
-								/>
-							</div>
-						</div>
-					{/if}
-
-					<!-- User Question Queue -->
-					{#if tab.pendingQuestions && tab.pendingQuestions.length > 0}
-						<div class="max-w-5xl mx-auto px-4 sm:px-8 py-3 space-y-3">
-							{#each tab.pendingQuestions as question (question.request_id)}
-								<UserQuestion
-									data={question}
-									on:respond={handleQuestionResponse}
-								/>
-							{/each}
-						</div>
-					{/if}
-
 					<!-- Input area -->
 					<div class="input-wrapper">
 						<ChatInput {tab} compact />
 					</div>
+
+					<!-- Modal Overlay for Permission/Question Queues -->
+					{#if (tab.pendingPermissions && tab.pendingPermissions.length > 0) || (tab.pendingQuestions && tab.pendingQuestions.length > 0)}
+						<div class="modal-overlay">
+							<div class="modal-backdrop"></div>
+							<div class="modal-content">
+								{#if tab.pendingPermissions && tab.pendingPermissions.length > 0}
+									<div class="modal-card-wrapper">
+										<PermissionQueue
+											requests={tab.pendingPermissions}
+											on:respond={handlePermissionResponse}
+										/>
+									</div>
+								{/if}
+
+								{#if tab.pendingQuestions && tab.pendingQuestions.length > 0}
+									<div class="modal-card-wrapper space-y-3">
+										{#each tab.pendingQuestions as question (question.request_id)}
+											<UserQuestion
+												data={question}
+												on:respond={handleQuestionResponse}
+											/>
+										{/each}
+									</div>
+								{/if}
+							</div>
+						</div>
+					{/if}
 				{/if}
 			{:else}
 				<div class="chat-loading">
@@ -226,6 +234,7 @@
 
 <style>
 	.chat-card-content {
+		position: relative;
 		display: flex;
 		flex-direction: column;
 		height: 100%;
@@ -550,5 +559,70 @@
 	.chat-card-content :global([role="menuitem"]:hover) {
 		background-color: var(--accent);
 		color: var(--accent-foreground);
+	}
+
+	/* ========================================
+	   Modal Overlay for Permission/Question
+	   ======================================== */
+	.modal-overlay {
+		position: absolute;
+		inset: 0;
+		z-index: 50;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		padding: 1rem;
+		overflow: hidden;
+		animation: modalFadeIn 0.2s ease-out;
+	}
+
+	.modal-backdrop {
+		position: absolute;
+		inset: 0;
+		background: color-mix(in oklch, var(--background) 70%, transparent);
+		backdrop-filter: blur(8px);
+		-webkit-backdrop-filter: blur(8px);
+	}
+
+	.modal-content {
+		position: relative;
+		z-index: 1;
+		width: 100%;
+		max-width: 40rem;
+		max-height: 100%;
+		overflow-y: auto;
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+		/* Smooth scrolling for content */
+		overscroll-behavior: contain;
+	}
+
+	.modal-card-wrapper {
+		flex-shrink: 0;
+		background: var(--card);
+		border: 1px solid var(--border);
+		border-radius: 0.75rem;
+		box-shadow: var(--shadow-l);
+		/* Allow internal scrolling if content is too tall */
+		max-height: calc(100vh - 8rem);
+		overflow-y: auto;
+	}
+
+	@keyframes modalFadeIn {
+		from {
+			opacity: 0;
+		}
+		to {
+			opacity: 1;
+		}
+	}
+
+	/* Respect reduced motion preference */
+	@media (prefers-reduced-motion: reduce) {
+		.modal-overlay {
+			animation: none;
+		}
 	}
 </style>

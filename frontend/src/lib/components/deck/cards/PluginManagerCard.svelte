@@ -15,14 +15,14 @@
 	import {
 		plugins,
 		marketplaces,
-		availablePlugins,
 		installedPlugins,
 		selectedPlugin,
 		pluginsLoading,
 		pluginsError,
 		marketplaceSyncing,
 		pluginInstalling,
-		pluginsByMarketplace,
+		uninstalledAvailablePlugins,
+		uninstalledPluginsByMarketplace,
 		pluginStats
 	} from '$lib/stores/plugins';
 	import type { AvailablePlugin, PluginInfo, MarketplaceInfo } from '$lib/api/plugins';
@@ -76,9 +76,9 @@
 		plugins.loadAll();
 	});
 
-	// Filter available plugins
+	// Filter available plugins (only uninstalled)
 	const filteredAvailable = $derived(() => {
-		let items = $availablePlugins;
+		let items = $uninstalledAvailablePlugins;
 
 		// Filter by marketplace
 		if (selectedMarketplaceFilter) {
@@ -298,7 +298,7 @@
 								{/if}
 							</div>
 						{:else}
-							{#each Object.entries($pluginsByMarketplace) as [marketplace, marketplacePlugins]}
+							{#each Object.entries($uninstalledPluginsByMarketplace) as [marketplace, marketplacePlugins]}
 								{@const filtered = marketplacePlugins.filter(p =>
 									(!selectedMarketplaceFilter || p.marketplace === selectedMarketplaceFilter) &&
 									(!searchQuery.trim() ||
@@ -470,7 +470,7 @@
 		gap: 4px;
 		padding: 8px 16px;
 		border-bottom: 1px solid var(--border);
-		background: var(--secondary);
+		background: var(--surface-1);
 		overflow-x: auto;
 		flex-shrink: 0;
 	}
@@ -479,7 +479,7 @@
 		padding: 6px 12px;
 		font-size: 0.8125rem;
 		font-weight: 500;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		white-space: nowrap;
 		display: flex;
 		align-items: center;
@@ -493,7 +493,7 @@
 
 	.plugin-tab:hover {
 		color: var(--foreground);
-		background: var(--hover-overlay);
+		background: var(--accent);
 	}
 
 	.plugin-tab.active {
@@ -602,7 +602,7 @@
 	.plugin-content {
 		flex: 1;
 		overflow-y: auto;
-		background: var(--background);
+		background: var(--surface-0);
 	}
 
 	.plugin-error {
@@ -712,7 +712,7 @@
 		align-items: center;
 		padding: 12px 16px;
 		border-top: 1px solid var(--border);
-		background: var(--secondary);
+		background: var(--surface-1);
 		flex-shrink: 0;
 	}
 

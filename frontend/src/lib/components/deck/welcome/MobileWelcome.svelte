@@ -322,7 +322,7 @@
 		/* Use theme-aware card background */
 		background: var(--card);
 		border: 1px solid var(--border);
-		border-radius: var(--radius-lg, 20px);
+		border-radius: var(--radius-lg, calc(var(--radius, 0.75rem) * 1.167));
 
 		display: flex;
 		flex-direction: column;
@@ -373,7 +373,7 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		border-radius: var(--radius, 16px);
+		border-radius: var(--radius-lg, calc(var(--radius, 0.75rem) * 1.167));
 		background: color-mix(in oklch, var(--foreground) 4%, transparent);
 		border: 1px solid color-mix(in oklch, var(--foreground) 6%, transparent);
 		color: var(--muted-foreground);

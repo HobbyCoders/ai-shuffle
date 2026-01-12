@@ -508,7 +508,7 @@ export function invalidateStreamingIndexCache(): void {
 /**
  * Append text to the streaming message, or create one if it doesn't exist
  */
-export function appendToStreamingText(messages: ChatMessage[], text: string): boolean {
+export function appendToStreamingText(messages: ChatMessage[], text: string, profileId?: string): boolean {
 	const streamingIdx = findLastStreamingTextIndex(messages);
 
 	if (streamingIdx !== -1) {
@@ -519,13 +519,14 @@ export function appendToStreamingText(messages: ChatMessage[], text: string): bo
 		};
 		return true;
 	} else {
-		// Create new streaming message
+		// Create new streaming message with profileId for per-query tracking
 		messages.push({
 			id: `stream-${Date.now()}`,
 			role: 'assistant',
 			content: text,
 			type: 'text' as MessageType,
-			streaming: true
+			streaming: true,
+			profileId
 		});
 		// Update cache
 		cachedStreamingTextIdx = messages.length - 1;
@@ -550,7 +551,7 @@ export function findLastStreamingThinkingIndex(messages: ChatMessage[]): number 
 /**
  * Append thinking content to the streaming thinking message, or create one if it doesn't exist
  */
-export function appendToStreamingThinking(messages: ChatMessage[], thinking: string): boolean {
+export function appendToStreamingThinking(messages: ChatMessage[], thinking: string, profileId?: string): boolean {
 	const streamingIdx = findLastStreamingThinkingIndex(messages);
 
 	if (streamingIdx !== -1) {
@@ -561,13 +562,14 @@ export function appendToStreamingThinking(messages: ChatMessage[], thinking: str
 		};
 		return true;
 	} else {
-		// Create new streaming thinking message
+		// Create new streaming thinking message with profileId for per-query tracking
 		messages.push({
 			id: `thinking-${Date.now()}`,
 			role: 'assistant',
 			content: thinking,
 			type: 'thinking' as MessageType,
-			streaming: true
+			streaming: true,
+			profileId
 		});
 		return true;
 	}

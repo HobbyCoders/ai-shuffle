@@ -220,8 +220,8 @@
 <div
 	class="card-system question-panel rounded-2xl border shadow-lg overflow-hidden backdrop-blur-sm"
 	style="
-		border-color: color-mix(in oklch, var(--primary) 30%, var(--border));
-		background: linear-gradient(to bottom, color-mix(in oklch, var(--primary) 12%, var(--card)), color-mix(in oklch, var(--primary) 5%, var(--card)));
+		border-color: var(--border);
+		background: var(--card);
 	"
 	role="dialog"
 	aria-labelledby="question-title"
@@ -232,11 +232,11 @@
 		<div
 			class="flex-shrink-0 w-9 h-9 rounded-xl border flex items-center justify-center"
 			style="
-				background: color-mix(in oklch, var(--primary) 15%, var(--card));
-				border-color: color-mix(in oklch, var(--primary) 25%, var(--border));
+				background: color-mix(in oklch, var(--muted) 50%, var(--card));
+				border-color: var(--border);
 			"
 		>
-			<svg class="w-4.5 h-4.5" style="color: var(--primary);" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+			<svg class="w-4.5 h-4.5 text-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
 			</svg>
 		</div>
@@ -248,9 +248,9 @@
 				<span
 					class="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded-md border"
 					style="
-						background: color-mix(in oklch, var(--primary) 15%, transparent);
-						color: var(--primary);
-						border-color: color-mix(in oklch, var(--primary) 20%, transparent);
+						background: color-mix(in oklch, var(--muted-foreground) 15%, transparent);
+						color: var(--muted-foreground);
+						border-color: color-mix(in oklch, var(--muted-foreground) 20%, transparent);
 					"
 				>
 					Input Required
@@ -608,8 +608,8 @@
 	}
 
 	.option-card:hover {
-		border-color: color-mix(in oklch, var(--border) 60%, var(--foreground));
-		background: color-mix(in oklch, var(--card) 95%, var(--foreground));
+		border-color: var(--accent);
+		background: color-mix(in oklch, var(--accent) 8%, var(--card));
 	}
 
 	.option-card.selected {

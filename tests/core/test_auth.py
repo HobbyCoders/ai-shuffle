@@ -751,14 +751,21 @@ class TestGitHubAuthentication:
     """Test GitHub CLI authentication methods."""
 
     def test_is_github_authenticated_no_hosts_file(self, temp_dir):
-        """Should return False when no hosts.yml exists."""
+        """Should return False when gh auth status fails and no hosts.yml exists."""
         service = auth.AuthService()
         service.gh_config_dir = temp_dir
 
-        assert service.is_github_authenticated() is False
+        # gh auth status fails, no hosts.yml fallback
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stderr = "not authenticated"
+
+        with patch.object(auth, 'find_gh_executable', return_value='/usr/bin/gh'):
+            with patch('subprocess.run', return_value=mock_result):
+                assert service.is_github_authenticated() is False
 
     def test_is_github_authenticated_empty_hosts_file(self, temp_dir):
-        """Should return False when hosts.yml is empty."""
+        """Should return False when gh auth status fails and hosts.yml is empty."""
         service = auth.AuthService()
         service.gh_config_dir = temp_dir
         temp_dir.mkdir(exist_ok=True)
@@ -766,7 +773,14 @@ class TestGitHubAuthentication:
         hosts_file = temp_dir / 'hosts.yml'
         hosts_file.write_text('')
 
-        assert service.is_github_authenticated() is False
+        # gh auth status fails, fallback to empty hosts.yml
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stderr = "not authenticated"
+
+        with patch.object(auth, 'find_gh_executable', return_value='/usr/bin/gh'):
+            with patch('subprocess.run', return_value=mock_result):
+                assert service.is_github_authenticated() is False
 
     def test_is_github_authenticated_gh_not_found(self, temp_dir):
         """Should return False when gh CLI not found."""
@@ -796,8 +810,8 @@ class TestGitHubAuthentication:
             with patch('subprocess.run', return_value=mock_result):
                 assert service.is_github_authenticated() is True
 
-    def test_is_github_authenticated_auth_failed(self, temp_dir):
-        """Should return False when gh auth status fails."""
+    def test_is_github_authenticated_auth_failed_with_hosts_fallback(self, temp_dir):
+        """Should return True via hosts.yml fallback when gh auth status fails but hosts file exists."""
         service = auth.AuthService()
         service.gh_config_dir = temp_dir
         temp_dir.mkdir(exist_ok=True)
@@ -807,13 +821,41 @@ class TestGitHubAuthentication:
 
         mock_result = MagicMock()
         mock_result.returncode = 1
+        mock_result.stderr = "not logged in"
+
+        with patch.object(auth, 'find_gh_executable', return_value='/usr/bin/gh'):
+            with patch('subprocess.run', return_value=mock_result):
+                # Should fall back to hosts.yml check and return True
+                assert service.is_github_authenticated() is True
+
+    def test_is_github_authenticated_auth_failed_no_fallback(self, temp_dir):
+        """Should return False when gh auth status fails and no valid hosts file."""
+        service = auth.AuthService()
+        service.gh_config_dir = temp_dir
+        temp_dir.mkdir(exist_ok=True)
+        # Don't create hosts.yml - no fallback available
+
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stderr = "not logged in"
 
         with patch.object(auth, 'find_gh_executable', return_value='/usr/bin/gh'):
             with patch('subprocess.run', return_value=mock_result):
                 assert service.is_github_authenticated() is False
 
-    def test_is_github_authenticated_exception(self, temp_dir):
-        """Should return False on exception."""
+    def test_is_github_authenticated_exception_no_fallback(self, temp_dir):
+        """Should return False on exception when no hosts fallback."""
+        service = auth.AuthService()
+        service.gh_config_dir = temp_dir
+        temp_dir.mkdir(exist_ok=True)
+        # Don't create hosts.yml - no fallback available
+
+        with patch.object(auth, 'find_gh_executable', return_value='/usr/bin/gh'):
+            with patch('subprocess.run', side_effect=Exception("Error")):
+                assert service.is_github_authenticated() is False
+
+    def test_is_github_authenticated_exception_with_fallback(self, temp_dir):
+        """Should fall back to hosts.yml on exception when file exists."""
         service = auth.AuthService()
         service.gh_config_dir = temp_dir
         temp_dir.mkdir(exist_ok=True)
@@ -823,7 +865,23 @@ class TestGitHubAuthentication:
 
         with patch.object(auth, 'find_gh_executable', return_value='/usr/bin/gh'):
             with patch('subprocess.run', side_effect=Exception("Error")):
-                assert service.is_github_authenticated() is False
+                # Should fall back to hosts.yml and return True
+                assert service.is_github_authenticated() is True
+
+    def test_is_github_authenticated_timeout_with_fallback(self, temp_dir):
+        """Should fall back to hosts.yml on timeout."""
+        import subprocess
+        service = auth.AuthService()
+        service.gh_config_dir = temp_dir
+        temp_dir.mkdir(exist_ok=True)
+
+        hosts_file = temp_dir / 'hosts.yml'
+        hosts_file.write_text('github.com: test')
+
+        with patch.object(auth, 'find_gh_executable', return_value='/usr/bin/gh'):
+            with patch('subprocess.run', side_effect=subprocess.TimeoutExpired('gh', 10)):
+                # Should fall back to hosts.yml and return True
+                assert service.is_github_authenticated() is True
 
 
 class TestGetGitHubAuthInfo:

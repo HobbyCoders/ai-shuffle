@@ -131,6 +131,15 @@ def seed_builtin_subagents(force_update: bool = False) -> Dict[str, str]:
             logger.info(f"Updated defaults for built-in subagent: {subagent_id}")
             results[subagent_id] = "updated"
 
+        elif not existing.get("is_builtin"):
+            # FIX: Subagent exists with built-in ID but is_builtin=False
+            # This can happen if it was imported or created via API before built-ins were added
+            # Mark it as built-in and store defaults for revert functionality
+            database.set_subagent_builtin(subagent_id, True)
+            _update_builtin_defaults(subagent_id, definition)
+            logger.info(f"Promoted to built-in subagent: {subagent_id}")
+            results[subagent_id] = "promoted"
+
         else:
             results[subagent_id] = "exists"
 

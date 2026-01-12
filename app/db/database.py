@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 # v27: Remove agent execution engine (agent_runs, agent_tasks, agent_logs tables)
 # v28: Add notes table for project-scoped notes feature
 # v29: Add project_hooks table for per-project Claude Code event hooks
-SCHEMA_VERSION = 29
+# v30: Add profile_id to session_messages for per-query profile tracking
+SCHEMA_VERSION = 30
 
 
 # =============================================================================
@@ -180,6 +181,7 @@ def _create_schema(cursor: sqlite3.Cursor):
             tool_name TEXT,
             tool_input JSON,
             metadata JSON,
+            profile_id TEXT,
             version INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -495,6 +497,12 @@ def _create_schema(cursor: sqlite3.Cursor):
         pass  # Column already exists
     try:
         cursor.execute("ALTER TABLE admin ADD COLUMN totp_verified_at TIMESTAMP")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
+    # Add profile_id column to session_messages (migration for per-query profile tracking)
+    try:
+        cursor.execute("ALTER TABLE session_messages ADD COLUMN profile_id TEXT")
     except sqlite3.OperationalError:
         pass  # Column already exists
 
@@ -1066,6 +1074,27 @@ def get_auth_session(token: str) -> Optional[Dict[str, Any]]:
                     f"expires_at={exact_match['expires_at']}, created_at={exact_match['created_at']}"
                 )
 
+            # CRITICAL: If total_tokens_in_db is 0, something catastrophic happened
+            # Log extensive diagnostics to help trace the root cause
+            if total_count == 0:
+                import traceback
+                import os
+                logger.error(
+                    f"CRITICAL: auth_sessions table is EMPTY! This should never happen during runtime.\n"
+                    f"Stack trace:\n{''.join(traceback.format_stack())}\n"
+                    f"Database file exists: {settings.db_path.exists()}\n"
+                    f"Database file size: {settings.db_path.stat().st_size if settings.db_path.exists() else 'N/A'}\n"
+                    f"Process ID: {os.getpid()}"
+                )
+                # Check if other tables have data (to rule out complete DB wipe)
+                cursor.execute("SELECT COUNT(*) as cnt FROM sessions")
+                sessions_count = cursor.fetchone()["cnt"]
+                cursor.execute("SELECT COUNT(*) as cnt FROM profiles")
+                profiles_count = cursor.fetchone()["cnt"]
+                logger.error(
+                    f"Other table counts - sessions: {sessions_count}, profiles: {profiles_count}"
+                )
+
         return result
 
 
@@ -1245,6 +1274,26 @@ def delete_profile(profile_id: str) -> bool:
         # Now delete the profile
         cursor.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
         return cursor.rowcount > 0
+
+
+def get_profile_session_count(profile_id: str) -> int:
+    """Get the number of sessions associated with a profile"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM sessions WHERE profile_id = ?", (profile_id,))
+        return cursor.fetchone()[0]
+
+
+def get_all_profile_session_counts() -> Dict[str, int]:
+    """Get session counts for all profiles in a single query"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT profile_id, COUNT(*) as count
+            FROM sessions
+            GROUP BY profile_id
+        """)
+        return {row["profile_id"]: row["count"] for row in cursor.fetchall()}
 
 
 def set_profile_builtin(profile_id: str, is_builtin: bool) -> bool:
@@ -1714,18 +1763,30 @@ def add_session_message(
     content: str,
     tool_name: Optional[str] = None,
     tool_input: Optional[Dict[str, Any]] = None,
-    metadata: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = None,
+    profile_id: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Add a message to a session"""
+    """Add a message to a session
+
+    Args:
+        session_id: The session ID
+        role: Message role (user, assistant, system)
+        content: Message content
+        tool_name: Optional tool name for tool_use messages
+        tool_input: Optional tool input for tool_use messages
+        metadata: Optional metadata dict
+        profile_id: Optional profile ID that created this message (for per-query tracking)
+    """
     now = datetime.utcnow().isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO session_messages (session_id, role, content, tool_name, tool_input, metadata, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO session_messages (session_id, role, content, tool_name, tool_input, metadata, profile_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, role, content, tool_name,
              json.dumps(tool_input) if tool_input else None,
              json.dumps(metadata) if metadata else None,
+             profile_id,
              now)
         )
         return {
@@ -1736,6 +1797,7 @@ def add_session_message(
             "tool_name": tool_name,
             "tool_input": tool_input,
             "metadata": metadata,
+            "profile_id": profile_id,
             "created_at": now
         }
 

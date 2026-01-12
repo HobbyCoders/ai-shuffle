@@ -68,11 +68,18 @@
 
 	function renderMarkdown(text: string): string {
 		try {
-			// Strip code blocks - they don't render well with italic styling
+			// Strip complete code blocks - they don't render well with italic styling
 			// Remove fenced code blocks (```...```)
 			let cleaned = text.replace(/```[\s\S]*?```/g, '');
-			// Remove inline code (`...`)
+
+			// Remove complete inline code (`...`)
 			cleaned = cleaned.replace(/`[^`]+`/g, '');
+
+			// Remove any remaining backticks to prevent incomplete code blocks
+			// from rendering with code block styling during streaming
+			// This keeps the text content but removes the backticks themselves
+			cleaned = cleaned.replace(/`/g, '');
+
 			return marked.parse(cleaned) as string;
 		} catch {
 			return text;
@@ -168,7 +175,7 @@
 	.thinking-label {
 		font-weight: 600;
 		font-size: 0.875rem;
-		color: var(--primary);
+		color: var(--secondary);
 	}
 
 	.thinking-icon {

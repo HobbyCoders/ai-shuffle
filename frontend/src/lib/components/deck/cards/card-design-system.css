@@ -234,7 +234,6 @@
 
 .card-search-input:hover {
   border-color: var(--border-default);
-  background: var(--surface-2);
 }
 
 .card-search-input:focus {
@@ -283,7 +282,6 @@
 
 .card-list-item:hover {
   border-color: var(--border-emphasis);
-  background: var(--surface-hover);
   box-shadow: var(--shadow-inset), var(--shadow-md);
   transform: translateY(-1px);
 }
@@ -626,8 +624,8 @@
   justify-content: center;
   gap: var(--space-2);
   padding: var(--space-3) var(--space-4);
-  background: var(--surface-1);
-  color: var(--text-primary);
+  background: var(--secondary);
+  color: var(--secondary-foreground);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
   font-size: var(--text-md);
@@ -638,13 +636,15 @@
 }
 
 .card-btn-secondary:hover {
-  background: var(--surface-2);
+  background: var(--secondary);
+  filter: brightness(1.1);
   border-color: var(--border-emphasis);
   box-shadow: var(--shadow-inset), var(--shadow-sm);
 }
 
 .card-btn-secondary:active {
-  background: var(--surface-active);
+  background: var(--secondary);
+  filter: brightness(0.95);
 }
 
 .card-btn-secondary:disabled {
@@ -780,6 +780,43 @@
 .delete-confirm-actions .card-btn-destructive {
   padding: var(--space-2) var(--space-3);
   font-size: var(--text-sm);
+}
+
+/* Delete warning (when profile has sessions) */
+.delete-warning {
+  background: color-mix(in oklch, var(--destructive) 8%, transparent);
+  border: 1px solid color-mix(in oklch, var(--destructive) 25%, transparent);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.delete-warning-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--destructive);
+  margin-bottom: var(--space-2);
+}
+
+.delete-warning-header .warning-icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  stroke: var(--destructive);
+}
+
+.delete-warning-text {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin: 0;
+  line-height: 1.4;
+}
+
+.delete-warning-text strong {
+  color: var(--text-primary);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════

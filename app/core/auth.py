@@ -110,7 +110,18 @@ class AuthService:
             # Last resort fallback
             home = Path.home() if sys.platform == 'win32' else Path('/home/appuser')
         self.config_dir = home / '.claude'
-        self.gh_config_dir = home / '.config' / 'gh'
+
+        # GitHub CLI config location varies by platform
+        # Windows: %APPDATA%\GitHub CLI\
+        # Linux/Mac: ~/.config/gh/
+        if sys.platform == 'win32':
+            appdata = os.environ.get('APPDATA')
+            if appdata:
+                self.gh_config_dir = Path(appdata) / 'GitHub CLI'
+            else:
+                self.gh_config_dir = home / 'AppData' / 'Roaming' / 'GitHub CLI'
+        else:
+            self.gh_config_dir = home / '.config' / 'gh'
 
         # Note: OAuth state is now managed by direct_oauth module (app/core/oauth.py)
 
@@ -463,19 +474,11 @@ class AuthService:
 
     def is_github_authenticated(self) -> bool:
         """Check if GitHub CLI is authenticated"""
-        hosts_file = self.gh_config_dir / 'hosts.yml'
-
-        if not hosts_file.exists():
-            return False
-
-        # Check if file has content
-        if hosts_file.stat().st_size == 0:
-            return False
-
-        # Verify with gh auth status
+        # Primary check: run gh auth status (works for file and keyring auth)
         try:
             gh_cmd = find_gh_executable()
             if not gh_cmd:
+                logger.debug("GitHub CLI not found")
                 return False
 
             home_env = os.environ.get('HOME', str(Path.home()))
@@ -486,10 +489,23 @@ class AuthService:
                 timeout=10,
                 env={**os.environ, 'HOME': home_env}
             )
-            return result.returncode == 0
+            if result.returncode == 0:
+                return True
+
+            # Log the error for debugging
+            logger.debug(f"gh auth status returned non-zero: {result.stderr}")
+        except subprocess.TimeoutExpired:
+            logger.warning("GitHub auth status check timed out")
         except Exception as e:
             logger.warning(f"GitHub auth status check failed: {e}")
-            return False
+
+        # Fallback: check if hosts file exists with content
+        hosts_file = self.gh_config_dir / 'hosts.yml'
+        if hosts_file.exists() and hosts_file.stat().st_size > 0:
+            logger.debug(f"hosts.yml exists at {hosts_file}, assuming authenticated")
+            return True
+
+        return False
 
     def get_github_auth_info(self) -> Dict[str, Any]:
         """Get GitHub CLI authentication info"""
