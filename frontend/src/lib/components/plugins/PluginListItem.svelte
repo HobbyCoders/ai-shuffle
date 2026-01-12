@@ -224,8 +224,8 @@
 
 	/* Success badge */
 	.card-badge--success {
-		background: color-mix(in oklch, oklch(0.6 0.2 145) 15%, transparent);
-		color: oklch(0.6 0.2 145);
+		background: color-mix(in oklch, var(--success, oklch(0.6 0.2 145)) 15%, transparent);
+		color: var(--success, oklch(0.6 0.2 145));
 	}
 
 	/* Version info */
@@ -269,8 +269,8 @@
 		width: 16px;
 		height: 16px;
 		border-radius: 50%;
-		background: white;
-		box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+		background: var(--card, white);
+		box-shadow: 0 1px 3px color-mix(in oklch, var(--foreground, black) 20%, transparent);
 		transition: transform var(--transition-fast, 100ms);
 	}
 
