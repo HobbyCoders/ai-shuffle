@@ -28,8 +28,17 @@ from app.api.git import router, require_auth, get_api_user_from_request
 
 @pytest.fixture
 def mock_git_service():
-    """Create a mock git service."""
-    return MagicMock()
+    """Create a mock git service with proper return values."""
+    mock = MagicMock()
+    # Configure get_status to return a proper dict for Pydantic validation
+    mock.get_status.return_value = {
+        "is_clean": True,
+        "current_branch": "main",
+        "modified": [],
+        "staged": [],
+        "untracked": []
+    }
+    return mock
 
 
 @pytest.fixture

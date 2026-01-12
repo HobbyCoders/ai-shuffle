@@ -188,21 +188,17 @@ class TestPathSanitization:
         assert result == "simple-branch-name"
 
     def test_get_worktree_path(self, manager, mock_settings, temp_dir):
-        """Test worktree path generation"""
+        """Test worktree path generation - flat structure adjacent to repo"""
         result = manager._get_worktree_path("proj-123", "feature/test")
-        expected = temp_dir / ".worktrees" / "proj-123" / "feature-test"
+        # Flat structure: {workspace}/{repo_name}-{branch_sanitized}
+        expected = temp_dir / "proj-123-feature-test"
         assert result == expected
 
     def test_get_relative_worktree_path(self, manager):
-        """Test relative worktree path generation"""
+        """Test relative worktree path generation - flat structure"""
         result = manager._get_relative_worktree_path("proj-123", "feature/test")
-        assert result == ".worktrees/proj-123/feature-test"
-
-    def test_get_worktree_base_dir(self, manager, mock_settings, temp_dir):
-        """Test worktree base directory generation"""
-        result = manager._get_worktree_base_dir("proj-123")
-        expected = temp_dir / ".worktrees" / "proj-123"
-        assert result == expected
+        # Flat structure: {repo_name}-{branch_sanitized}
+        assert result == "proj-123-feature-test"
 
 
 # =============================================================================
@@ -355,8 +351,8 @@ class TestCreateWorktree:
 
     def test_create_worktree_path_already_exists(self, manager, mock_database, mock_git_service, mock_settings, temp_dir):
         """Test error when worktree path already exists on disk"""
-        # Create the directory first
-        worktree_path = temp_dir / ".worktrees" / "proj-test123" / "develop"
+        # Create the directory first - flat structure: {repo_name}-{branch}
+        worktree_path = temp_dir / "test-project-develop"
         worktree_path.mkdir(parents=True)
 
         with pytest.raises(WorktreeError) as excinfo:
@@ -516,12 +512,12 @@ class TestCreateWorktreeSession:
         existing_worktree = {
             "id": "wt-existing",
             "branch_name": "develop",
-            "worktree_path": ".worktrees/proj-test123/develop"
+            "worktree_path": "test-project-develop"
         }
         mock_database.get_active_worktrees_for_repository.return_value = [existing_worktree]
 
-        # Create the path so it's valid - this triggers the "already exists" error
-        (temp_dir / ".worktrees" / "proj-test123" / "develop").mkdir(parents=True)
+        # Create the path so it's valid - flat structure: {repo_name}-{branch}
+        (temp_dir / "test-project-develop").mkdir(parents=True)
 
         with pytest.raises(WorktreeError) as excinfo:
             manager.create_worktree_session("proj-test123", "develop")
@@ -1117,16 +1113,16 @@ class TestEdgeCases:
         # Should have cleaned up the git worktree we created
         mock_git_service.remove_worktree.assert_called()
 
-    def test_create_worktree_mkdir_creates_parents(self, manager, mock_database, mock_git_service, mock_settings, temp_dir):
-        """Test worktree creation creates parent directories"""
-        # Base directory doesn't exist yet
-        base_dir = temp_dir / ".worktrees" / "proj-test123"
-        assert not base_dir.exists()
-
+    def test_create_worktree_calls_git_add_worktree(self, manager, mock_database, mock_git_service, mock_settings, temp_dir):
+        """Test worktree creation calls git add_worktree with correct path"""
         manager.create_worktree("proj-test123", "develop")
 
-        # Parent directory should have been created
-        assert base_dir.exists()
+        # Verify git add_worktree was called - flat structure
+        mock_git_service.add_worktree.assert_called()
+        call_kwargs = mock_git_service.add_worktree.call_args.kwargs
+        worktree_path = call_kwargs["path"]
+        # Should be flat path: test-project-develop
+        assert "test-project-develop" in str(worktree_path)
 
     def test_get_worktree_details_legacy_session(self, manager, mock_database, mock_settings, temp_dir):
         """Test get_worktree_details handles legacy session_id relationship"""
@@ -1215,7 +1211,8 @@ class TestCreateWorktreeSessionAdditional:
 
     def test_create_worktree_session_path_already_exists(self, manager, mock_database, mock_git_service, mock_settings, temp_dir):
         """Test error when worktree path already exists on disk"""
-        worktree_path = temp_dir / ".worktrees" / "proj-test123" / "develop"
+        # Flat structure: {repo_name}-{branch}
+        worktree_path = temp_dir / "test-project-develop"
         worktree_path.mkdir(parents=True)
 
         with pytest.raises(WorktreeError) as excinfo:
