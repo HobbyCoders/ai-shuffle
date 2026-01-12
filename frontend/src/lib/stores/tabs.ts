@@ -140,11 +140,12 @@ export interface ChatTab {
 	streamStartTime: number | null;
 	// Execution mode settings (per-tab)
 	executionMode: ExecutionMode;
-	worktreeBranch: string;      // The new branch name for worktree mode
+	worktreeBranch: string;      // The branch name for worktree mode
 	worktreeBaseBranch: string;  // Branch to base from (and PR target)
+	worktreeCreateNewBranch: boolean;  // True if creating a new branch, false if using existing
 	// New worktree model: existing worktree selection
 	worktreeId: string | null;   // Selected existing worktree ID (null = create new)
-	worktreeMode: 'new' | 'existing';  // Whether creating new or using existing worktree
+	worktreeMode: 'new' | 'existing';  // Whether creating new worktree or using existing worktree
 	selectedWorktreeBranch: string | null;  // Branch name of selected existing worktree (for display)
 	// Worktree creation state (for deferred creation on message send)
 	isCreatingWorktree: boolean;  // True while creating worktree before first message
@@ -1332,6 +1333,7 @@ function createTabsStore() {
 					executionMode: 'local' as const,
 					worktreeBranch: '',
 					worktreeBaseBranch: 'main',
+					worktreeCreateNewBranch: false,
 					worktreeId: null,
 					worktreeMode: 'new' as const,
 					selectedWorktreeBranch: null,
@@ -3890,6 +3892,7 @@ function createTabsStore() {
 						executionMode: 'local',
 						worktreeBranch: '',
 						worktreeBaseBranch: 'main',
+						worktreeCreateNewBranch: false,
 						worktreeId: null,
 						worktreeMode: 'new',
 						selectedWorktreeBranch: null,
@@ -3982,6 +3985,7 @@ function createTabsStore() {
 				executionMode: 'local',
 				worktreeBranch: '',
 				worktreeBaseBranch: 'main',
+				worktreeCreateNewBranch: false,
 				worktreeId: null,
 				worktreeMode: 'new',
 				selectedWorktreeBranch: null,
@@ -4274,7 +4278,8 @@ function createTabsStore() {
 					project_id: tab.project,
 					branch_name: tab.worktreeBranch,
 					base_branch: tab.worktreeBaseBranch || 'main',
-					profile_id: tab.profile
+					profile_id: tab.profile,
+					create_new_branch: tab.worktreeCreateNewBranch
 				});
 
 				console.log(`[Tab ${tabId}] Created worktree session: ${response.session_id}`);
@@ -4749,6 +4754,13 @@ function createTabsStore() {
 		},
 
 		/**
+		 * Set whether to create a new branch (vs using existing)
+		 */
+		setTabWorktreeCreateNewBranch(tabId: string, createNew: boolean) {
+			updateTab(tabId, { worktreeCreateNewBranch: createNew });
+		},
+
+		/**
 		 * Set worktree ID for a tab (for selecting existing worktrees)
 		 */
 		setTabWorktreeId(tabId: string, worktreeId: string | null) {
@@ -4853,6 +4865,7 @@ function createTabsStore() {
 				executionMode: 'local',
 				worktreeBranch: '',
 				worktreeBaseBranch: 'main',
+				worktreeCreateNewBranch: false,
 				worktreeId: null,
 				worktreeMode: 'new',
 				selectedWorktreeBranch: null,

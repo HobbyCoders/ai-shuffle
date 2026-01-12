@@ -61,23 +61,37 @@ class WorktreeManager:
     def _get_worktree_path(self, project_path: str, branch: str) -> Path:
         """
         Get full path for a worktree - adjacent to the main repo.
+        Auto-generates unique suffix if path already exists.
 
         Example: If repo is at {workspace}/ai-shuffle and branch is "feature/auth",
         worktree will be at {workspace}/ai-shuffle-feature-auth
+        If that exists, tries ai-shuffle-feature-auth-2, -3, etc.
         """
         repo_name = Path(project_path).name
         sanitized = self._sanitize_branch_name(branch)
-        return settings.workspace_dir / f"{repo_name}-{sanitized}"
+        base_path = settings.workspace_dir / f"{repo_name}-{sanitized}"
 
-    def _get_relative_worktree_path(self, project_path: str, branch: str) -> str:
+        # If base path doesn't exist, use it
+        if not base_path.exists():
+            return base_path
+
+        # Otherwise, find a unique suffix
+        counter = 2
+        while True:
+            candidate = settings.workspace_dir / f"{repo_name}-{sanitized}-{counter}"
+            if not candidate.exists():
+                return candidate
+            counter += 1
+            # Safety limit
+            if counter > 100:
+                raise WorktreeError(f"Too many worktrees for branch '{branch}'")
+
+    def _get_relative_worktree_path_from_full(self, full_path: Path) -> str:
         """
-        Get relative worktree path (relative to workspace_dir).
-
+        Get relative worktree path from a full path.
         This is what gets stored in the database.
         """
-        repo_name = Path(project_path).name
-        sanitized = self._sanitize_branch_name(branch)
-        return f"{repo_name}-{sanitized}"
+        return full_path.name
 
     def _ensure_repository_record(self, project_id: str, project_path: str) -> Optional[Dict]:
         """
@@ -268,19 +282,13 @@ class WorktreeManager:
 
         main_dir = str(settings.workspace_dir / project["path"])
 
-        # Check if branch already has a worktree (and clean up stale records)
+        # Clean up stale worktree records (where the folder no longer exists)
         existing_worktrees = database.get_active_worktrees_for_repository(repo["id"])
         for wt in existing_worktrees:
-            if wt["branch_name"] == branch_name:
-                worktree_full_path = settings.workspace_dir / wt["worktree_path"]
-                if not worktree_full_path.exists():
-                    # Stale record - clean it up
-                    logger.info(f"Cleaning up stale worktree record for branch '{branch_name}'")
-                    database.update_worktree(wt["id"], status=WorktreeStatus.DELETED)
-                    continue
-                # Valid existing worktree - return it instead of creating new
-                logger.info(f"Branch '{branch_name}' already has an active worktree, returning existing")
-                return wt
+            worktree_full_path = settings.workspace_dir / wt["worktree_path"]
+            if not worktree_full_path.exists():
+                logger.info(f"Cleaning up stale worktree record: '{wt['worktree_path']}'")
+                database.update_worktree(wt["id"], status=WorktreeStatus.DELETED)
 
         # Verify the branch exists if not creating a new one
         if not create_new_branch:
@@ -301,14 +309,11 @@ class WorktreeManager:
                 logger.error(f"Branch {branch_name} already exists")
                 raise WorktreeError(f"Branch '{branch_name}' already exists. Use existing branch mode.")
 
-        # Calculate worktree path (adjacent to repo)
+        # Calculate worktree path (auto-generates unique name if needed)
         worktree_path = self._get_worktree_path(project["path"], branch_name)
-        relative_worktree_path = self._get_relative_worktree_path(project["path"], branch_name)
+        relative_worktree_path = self._get_relative_worktree_path_from_full(worktree_path)
 
-        # Check if path already exists
-        if worktree_path.exists():
-            logger.error(f"Worktree path already exists: {worktree_path}")
-            raise WorktreeError(f"Worktree directory already exists at '{worktree_path}'.")
+        logger.info(f"Creating worktree at: {worktree_path}")
 
         # Create git worktree
         success, error_msg = self.git_service.add_worktree(
@@ -433,21 +438,13 @@ class WorktreeManager:
 
         main_dir = str(settings.workspace_dir / project["path"])
 
-        # Check if branch already has a worktree
-        # Also clean up stale records where worktree no longer exists on disk
+        # Clean up stale worktree records (where the worktree is no longer valid on disk)
         existing_worktrees = database.get_active_worktrees_for_repository(repo["id"])
         for wt in existing_worktrees:
-            if wt["branch_name"] == branch_name:
-                # Verify the worktree is still valid on disk (not just folder exists)
-                if not self.is_worktree_valid(wt):
-                    # Stale/invalid record - worktree was deleted or corrupted
-                    worktree_full_path = settings.workspace_dir / wt["worktree_path"]
-                    logger.info(f"Cleaning up stale worktree record for branch '{branch_name}' (invalid worktree at: {worktree_full_path})")
-                    database.update_worktree(wt["id"], status=WorktreeStatus.DELETED)
-                    continue  # Allow creation to proceed
-
-                logger.error(f"Branch {branch_name} already has an active worktree")
-                raise WorktreeError(f"Branch '{branch_name}' already has an active worktree. Delete the existing worktree first or use a different branch name.")
+            if not self.is_worktree_valid(wt):
+                worktree_full_path = settings.workspace_dir / wt["worktree_path"]
+                logger.info(f"Cleaning up stale worktree record: '{wt['worktree_path']}' (invalid worktree)")
+                database.update_worktree(wt["id"], status=WorktreeStatus.DELETED)
 
         # Verify the branch exists if not creating a new one
         if not create_new_branch:
@@ -469,14 +466,11 @@ class WorktreeManager:
                 logger.error(f"Branch {branch_name} already exists")
                 raise WorktreeError(f"Branch '{branch_name}' already exists. Use a different name or select 'existing branch' mode.")
 
-        # Calculate worktree path (adjacent to repo)
+        # Calculate worktree path (auto-generates unique name if needed)
         worktree_path = self._get_worktree_path(project["path"], branch_name)
-        relative_worktree_path = self._get_relative_worktree_path(project["path"], branch_name)
+        relative_worktree_path = self._get_relative_worktree_path_from_full(worktree_path)
 
-        # Check if path already exists
-        if worktree_path.exists():
-            logger.error(f"Worktree path already exists: {worktree_path}")
-            raise WorktreeError(f"Worktree directory already exists at '{worktree_path}'. This may be from a previous worktree that wasn't cleaned up properly.")
+        logger.info(f"Creating worktree at: {worktree_path}")
 
         # Create git worktree
         success, error_msg = self.git_service.add_worktree(

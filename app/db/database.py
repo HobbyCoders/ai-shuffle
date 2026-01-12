@@ -130,6 +130,14 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
                 cursor.execute(sql)
                 migrations_applied.append(f"subagents.{col}")
 
+    # Drop unique index that prevented multiple worktrees on same branch
+    # (Users should be able to have multiple worktrees on the same branch)
+    try:
+        cursor.execute("DROP INDEX IF EXISTS idx_worktrees_active_branch")
+        migrations_applied.append("dropped idx_worktrees_active_branch")
+    except sqlite3.OperationalError:
+        pass  # Index doesn't exist, that's fine
+
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
 
@@ -731,13 +739,9 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_status ON worktrees(status)")
     # Composite index for efficient active worktree queries
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_repo_status ON worktrees(repository_id, status)")
-    # CRITICAL: Unique index to prevent race condition - only one active worktree per branch
-    # This enforces at database level that two concurrent requests cannot create worktrees for the same branch
-    cursor.execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_worktrees_active_branch
-        ON worktrees(repository_id, branch_name)
-        WHERE status = 'active'
-    """)
+    # NOTE: We intentionally do NOT create a unique index on (repository_id, branch_name)
+    # because users should be able to have multiple worktrees on the same branch.
+    # Each worktree is an independent workspace that can check out any branch.
 
     # =========================================================================
     # Notes - Project-scoped notes for ideas, bugs, planning

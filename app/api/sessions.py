@@ -1775,6 +1775,7 @@ class CreateWorktreeSessionRequest(BaseModel):
     branch_name: str
     base_branch: str = "main"
     profile_id: Optional[str] = None
+    create_new_branch: bool = False  # False = use existing branch, True = create new branch
 
 
 class WorktreeSessionResponse(BaseModel):
@@ -1838,7 +1839,7 @@ async def create_session_with_worktree(
         worktree, session = worktree_manager.create_worktree_session(
             project_id=body.project_id,
             branch_name=body.branch_name,
-            create_new_branch=True,
+            create_new_branch=body.create_new_branch,
             base_branch=body.base_branch,
             profile_id=body.profile_id
         )

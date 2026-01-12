@@ -239,11 +239,13 @@
 		// Update tab state - keep as 'new' mode since worktree doesn't exist yet
 		tabs.setTabWorktreeBranch(tab.id, branchName);
 		tabs.setTabWorktreeMode(tab.id, 'new');
+		tabs.setTabWorktreeCreateNewBranch(tab.id, false);  // Using existing branch
 
 		// Clear any previous worktree selection
 		tabs.clearWorktreeSelection(tab.id);
 		// Set the branch name again after clearing (clearWorktreeSelection resets it)
 		tabs.setTabWorktreeBranch(tab.id, branchName);
+		tabs.setTabWorktreeCreateNewBranch(tab.id, false);  // Using existing branch
 	}
 
 	// Set up for creating a new branch (actual creation deferred to message send)
@@ -261,12 +263,14 @@
 		tabs.setTabWorktreeBranch(tab.id, branchName);
 		tabs.setTabWorktreeBaseBranch(tab.id, baseBranch);
 		tabs.setTabWorktreeMode(tab.id, 'new');
+		tabs.setTabWorktreeCreateNewBranch(tab.id, true);  // Creating new branch
 
 		// Clear any previous worktree selection
 		tabs.clearWorktreeSelection(tab.id);
 		// Restore branch settings after clearing
 		tabs.setTabWorktreeBranch(tab.id, branchName);
 		tabs.setTabWorktreeBaseBranch(tab.id, baseBranch);
+		tabs.setTabWorktreeCreateNewBranch(tab.id, true);  // Creating new branch
 
 		newBranchName = '';
 	}
