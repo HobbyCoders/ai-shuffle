@@ -19,6 +19,7 @@ from app.db import database
 from app.api.auth import require_admin, require_auth
 from app.core import encryption
 from app.core.ai_tools import AI_TOOLS
+from app.core.query_engine import DEFAULT_SECURITY_INSTRUCTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -3167,10 +3168,6 @@ class SecurityInstructionsResponse(BaseModel):
 class SecurityInstructionsUpdateRequest(BaseModel):
     """Request model for updating security instructions."""
     instructions: str
-
-
-# Import the default security instructions from query_engine
-from app.core.query_engine import DEFAULT_SECURITY_INSTRUCTIONS
 
 
 @router.get("/security-instructions", response_model=SecurityInstructionsResponse)
