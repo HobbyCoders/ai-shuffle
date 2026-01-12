@@ -65,6 +65,75 @@ def get_db():
         conn.close()
 
 
+def column_exists(cursor: sqlite3.Cursor, table: str, column: str) -> bool:
+    """Check if a column exists in a table using PRAGMA table_info"""
+    cursor.execute(f"PRAGMA table_info({table})")
+    columns = [row["name"] for row in cursor.fetchall()]
+    return column in columns
+
+
+def table_exists(cursor: sqlite3.Cursor, table: str) -> bool:
+    """Check if a table exists in the database"""
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table,)
+    )
+    return cursor.fetchone() is not None
+
+
+def _run_column_migrations(cursor: sqlite3.Cursor):
+    """Run idempotent column migrations.
+
+    These migrations run on EVERY startup to ensure columns exist,
+    regardless of schema version. This handles cases where:
+    - Schema version was bumped but migration didn't run
+    - Database was restored from backup
+    - Docker volume has stale schema version
+    """
+    migrations_applied = []
+
+    # Admin 2FA columns
+    admin_2fa_cols = [
+        "totp_secret", "totp_enabled", "recovery_codes", "totp_verified_at"
+    ]
+    if table_exists(cursor, "admin"):
+        for col in admin_2fa_cols:
+            if not column_exists(cursor, "admin", col):
+                if col == "totp_enabled":
+                    col_type, default = "BOOLEAN", " DEFAULT FALSE"
+                elif col == "totp_verified_at":
+                    col_type, default = "TIMESTAMP", ""
+                else:
+                    col_type, default = "TEXT", ""
+                sql = f"ALTER TABLE admin ADD COLUMN {col} {col_type}{default}"
+                cursor.execute(sql)
+                migrations_applied.append(f"admin.{col}")
+
+    # Session messages profile tracking (v30)
+    if table_exists(cursor, "session_messages"):
+        if not column_exists(cursor, "session_messages", "profile_id"):
+            cursor.execute(
+                "ALTER TABLE session_messages ADD COLUMN profile_id TEXT"
+            )
+            migrations_applied.append("session_messages.profile_id")
+
+    # Built-in subagent columns (v26)
+    subagent_cols = [
+        "default_name", "default_description", "default_prompt",
+        "default_tools", "default_model"
+    ]
+    if table_exists(cursor, "subagents"):
+        for col in subagent_cols:
+            col_type = "JSON" if col == "default_tools" else "TEXT"
+            if not column_exists(cursor, "subagents", col):
+                sql = f"ALTER TABLE subagents ADD COLUMN {col} {col_type}"
+                cursor.execute(sql)
+                migrations_applied.append(f"subagents.{col}")
+
+    if migrations_applied:
+        logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
+
+
 def init_database():
     """Initialize the database with schema"""
     logger.info(f"Initializing database at {settings.db_path}")
@@ -92,6 +161,10 @@ def init_database():
             _create_schema(cursor)
             cursor.execute("DELETE FROM schema_version")
             cursor.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+
+        # Always run column migrations to handle edge cases where
+        # schema version is correct but columns are missing
+        _run_column_migrations(cursor)
 
     logger.info("Database initialized successfully")
 
