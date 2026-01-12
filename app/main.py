@@ -94,8 +94,11 @@ async def lifespan(app: FastAPI):
     from app.core.builtin_subagents import seed_builtin_subagents
     seed_results = seed_builtin_subagents()
     created = [k for k, v in seed_results.items() if v == "created"]
+    promoted = [k for k, v in seed_results.items() if v == "promoted"]
     if created:
         logger.info(f"Created built-in subagents: {', '.join(created)}")
+    if promoted:
+        logger.info(f"Promoted to built-in subagents: {', '.join(promoted)}")
 
     # Try to initialize encryption from ADMIN_PASSWORD env var
     # This enables headless operation without requiring admin login
