@@ -125,6 +125,14 @@ set HOST=0.0.0.0
 set PORT=8000
 set COOKIE_SECURE=false
 
+REM Set ADMIN_PASSWORD to persist encryption key across restarts
+REM This prevents session clearing on restart - users stay logged in
+REM The password is derived from machine-specific info for security
+if not defined ADMIN_PASSWORD (
+    REM Generate a stable password from machine name + username
+    set "ADMIN_PASSWORD=%COMPUTERNAME%_%USERNAME%_ai-shuffle-local"
+)
+
 REM Get LAN IP (the one with a default gateway, not virtual adapters)
 set "LOCAL_IP="
 for /f "tokens=2 delims=:" %%a in ('netsh interface ip show addresses "Ethernet" ^| findstr /c:"IP Address"') do (
