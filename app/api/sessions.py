@@ -370,11 +370,14 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
             if jsonl_messages:
                 # Get profile_id from database messages to merge with JSONL
                 # JSONL files don't contain profile_id, but we need it for per-query profile tracking
+                # Use content-based matching for user messages (more robust than index-based)
                 db_messages = database.get_session_messages(session_id)
                 db_profile_map = {}
-                for idx, db_msg in enumerate(db_messages):
-                    if db_msg.get("profile_id"):
-                        db_profile_map[idx] = db_msg["profile_id"]
+                for db_msg in db_messages:
+                    if db_msg.get("role") == "user" and db_msg.get("profile_id"):
+                        # Use content as key for matching (unique per user message)
+                        content = db_msg.get("content", "")
+                        db_profile_map[content] = db_msg["profile_id"]
 
                 # Transform to expected format for SessionWithMessages
                 # Use camelCase for frontend compatibility (toolName, toolInput, toolId)
@@ -398,7 +401,7 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                         "tool_name": m.get("toolName"),  # Also include snake_case for compatibility
                         "tool_input": m.get("toolInput"),  # Also include snake_case for compatibility
                         "metadata": m.get("metadata"),
-                        "profile_id": db_profile_map.get(i),  # Merge profile_id from database
+                        "profile_id": db_profile_map.get(m.get("content", "")) if m.get("role") == "user" else None,
                         "created_at": None  # Let Pydantic use default; timestamp is in metadata
                     }
                     # Include subagent-specific fields if present
