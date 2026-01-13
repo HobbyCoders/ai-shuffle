@@ -493,6 +493,72 @@ async def remove_deepseek_api_key(token: str = Depends(require_admin)):
 
 
 # ============================================================================
+# Gemini API Key
+# ============================================================================
+
+class GeminiKeyRequest(BaseModel):
+    api_key: str
+
+
+class GeminiKeyResponse(BaseModel):
+    success: bool
+    masked_key: str
+
+
+@router.post("/integrations/gemini", response_model=GeminiKeyResponse)
+async def set_gemini_api_key(
+    request: GeminiKeyRequest,
+    token: str = Depends(require_admin)
+):
+    """
+    Set the Google Gemini API key (admin only).
+
+    Get your API key from: https://aistudio.google.com/apikey
+    This key is used for Nano Banana image generation, Gemini TTS/STT, and Veo video.
+    """
+    api_key = request.api_key.strip()
+
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API key cannot be empty")
+
+    # Validate the key by making a test request to Google AI
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+            )
+            if response.status_code == 400 and "API_KEY_INVALID" in response.text:
+                raise HTTPException(status_code=400, detail="Invalid API key. Please check your Google AI API key.")
+            elif response.status_code == 403:
+                raise HTTPException(status_code=400, detail="API key doesn't have permission. Enable the Generative Language API.")
+            elif response.status_code not in [200, 401]:
+                logger.warning(f"Google AI API check returned status {response.status_code}: {response.text}")
+    except httpx.TimeoutException:
+        logger.warning("Google AI API validation timed out, saving key anyway")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"Error validating Google AI key: {e}")
+
+    # Save to database as image_api_key (used by Gemini services)
+    set_encrypted_api_key("image_api_key", api_key)
+
+    return GeminiKeyResponse(
+        success=True,
+        masked_key=mask_api_key(api_key)
+    )
+
+
+@router.delete("/integrations/gemini")
+async def remove_gemini_api_key(token: str = Depends(require_admin)):
+    """
+    Remove the Google Gemini API key (admin only).
+    """
+    database.delete_system_setting("image_api_key")
+    return {"success": True}
+
+
+# ============================================================================
 # Audio Settings (TTS/STT)
 # ============================================================================
 

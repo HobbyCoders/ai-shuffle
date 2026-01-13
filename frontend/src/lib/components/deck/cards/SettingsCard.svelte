@@ -525,10 +525,10 @@
 		geminiKeyError = '';
 		geminiKeySuccess = '';
 		try {
-			await api.post('/settings/integrations/api-key', {
-				key_name: 'gemini_api_key',
-				key_value: geminiApiKey
+			const result = await api.post<{success: boolean, masked_key: string}>('/settings/integrations/gemini', {
+				api_key: geminiApiKey
 			});
+			geminiApiKeyMasked = result.masked_key;
 			geminiKeySuccess = 'Saved';
 			geminiApiKey = '';
 			await loadIntegrationSettings();
