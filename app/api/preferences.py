@@ -101,6 +101,29 @@ async def set_preference(
     )
 
 
+@router.post("/{key}")
+async def set_preference_post(
+    request: Request,
+    key: str,
+    body: PreferenceValue,
+    token: str = Depends(require_auth)
+) -> PreferenceResponse:
+    """Set a preference value via POST.
+
+    This endpoint mirrors PUT functionality but accepts POST requests.
+    Needed for navigator.sendBeacon() which only supports POST method.
+    sendBeacon is used for reliable preference saves during page unload.
+    """
+    user_type, user_id = get_user_identity(request)
+
+    result = database.set_user_preference(user_type, user_id, key, body.value)
+    return PreferenceResponse(
+        key=result["key"],
+        value=result["value"],
+        updated_at=result.get("updated_at")
+    )
+
+
 @router.delete("/{key}")
 async def delete_preference(
     request: Request,
