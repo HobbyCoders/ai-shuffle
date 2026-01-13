@@ -2542,20 +2542,29 @@ async def stream_to_websocket(
                 # In non-default modes (bypassPermissions, acceptEdits), allow other tools
                 return PermissionResultAllow()
 
-    # No longer using hooks for AskUserQuestion - it's handled in canUseTool
-    hooks_config = None
-
-    # Build options with the callback, hooks, and user-scoped credential resolution
+    # Build options first without hooks (we need working_dir to build hooks)
     options, agents_dict = build_options_from_profile(
         profile=profile,
         project=project,
         overrides=overrides,
         resume_session_id=resume_id,
         can_use_tool=can_use_tool_callback,
-        hooks=hooks_config,
+        hooks=None,  # Will be set after we have working_dir
         api_user_id=api_user_id,
         session_id=session_id
     )
+
+    # Build hooks configuration from all sources (plugins, database)
+    # This enables plugin loops (like Ralph Loop) and database hooks to work
+    from app.core.hook_service import build_hooks_config
+    if options.cwd:
+        hooks_config = build_hooks_config(
+            working_dir=options.cwd,
+            project_id=project_id
+        )
+        if hooks_config:
+            options.hooks = hooks_config
+            logger.info(f"[WS] Hooks configured: {list(hooks_config.keys())}")
 
     # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
     # On Docker/Linux, agents are already passed via SDK's --agents flag
