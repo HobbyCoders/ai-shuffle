@@ -159,35 +159,56 @@ def extract_text_from_content(content: Any) -> str:
 
 def _is_system_content(content: str) -> bool:
     """
-    Check if content is a system/meta message that should be filtered out.
+    Check if content is empty or whitespace-only.
 
-    These include:
-    - Command-related tags like <command-name>, <command-message>, etc.
-    - Interrupt messages
-    - Empty XML tags
-
-    NOTE: <local-command-stdout> is NOT filtered - it contains actual command output
-    like /context and /compact results that should be displayed.
+    Previously this filtered out various system messages, but we now display
+    all content to the user. Slash commands are handled by _parse_slash_command(),
+    and other system content is shown as-is.
     """
-    if not content:
+    if not content or not content.strip():
         return True
-
-    # Check for system/meta content patterns
-    # NOTE: <local-command-stdout> is intentionally NOT in this list
-    system_patterns = [
-        "<command-name>",
-        "<command-message>",
-        "<command-args>",
-        "[Request interrupted by user]",
-        "Caveat: The messages below were generated",
-    ]
-
-    content_lower = content.strip()
-    for pattern in system_patterns:
-        if content_lower.startswith(pattern):
-            return True
-
     return False
+
+
+def _parse_slash_command(content: str) -> Optional[Dict[str, Any]]:
+    """
+    Parse slash command XML tags into structured data.
+
+    Slash commands from Claude SDK have this format:
+    <command-message>plugin:command</command-message>
+    <command-name>/plugin:command</command-name>
+    <command-args>arguments here</command-args>
+
+    Returns:
+        Dict with command_id, command_name, command_args, or None if not a slash command
+    """
+    import re
+
+    if not content or not content.strip().startswith("<command-"):
+        return None
+
+    result = {}
+
+    # Extract command-message (the internal command identifier)
+    msg_match = re.search(r'<command-message>(.*?)</command-message>', content, re.DOTALL)
+    if msg_match:
+        result["command_id"] = msg_match.group(1).strip()
+
+    # Extract command-name (the display name with slash prefix)
+    name_match = re.search(r'<command-name>(.*?)</command-name>', content, re.DOTALL)
+    if name_match:
+        result["command_name"] = name_match.group(1).strip()
+
+    # Extract command-args (the arguments passed to the command)
+    args_match = re.search(r'<command-args>(.*?)</command-args>', content, re.DOTALL)
+    if args_match:
+        result["command_args"] = args_match.group(1).strip()
+
+    # Must have at least command_name to be valid
+    if "command_name" in result:
+        return result
+
+    return None
 
 
 def _extract_local_command_output(content: str) -> Optional[str]:
@@ -438,6 +459,28 @@ def parse_session_history(
         if entry_type == "user" and role == "user":
             # User message - can be plain text, tool results, or array with text blocks
             if isinstance(content, str):
+                # Check for slash command (e.g., /commit, /ralph-loop)
+                slash_cmd = _parse_slash_command(content)
+                if slash_cmd is not None:
+                    msg_counter += 1
+                    # Format display content: "/command args" or just "/command"
+                    display_content = slash_cmd.get("command_name", "")
+                    if slash_cmd.get("command_args"):
+                        display_content = f"{display_content} {slash_cmd['command_args']}"
+                    messages.append({
+                        "id": uuid,
+                        "uuid": uuid,  # Raw JSONL UUID for rewind
+                        "role": "user",
+                        "content": display_content,
+                        "type": "command",
+                        "commandId": slash_cmd.get("command_id"),
+                        "commandName": slash_cmd.get("command_name"),
+                        "commandArgs": slash_cmd.get("command_args"),
+                        "metadata": {"timestamp": timestamp},
+                        "streaming": False
+                    })
+                    continue
+
                 # Check for local command output (e.g., /context, /compact)
                 local_output = _extract_local_command_output(content)
                 if local_output is not None:

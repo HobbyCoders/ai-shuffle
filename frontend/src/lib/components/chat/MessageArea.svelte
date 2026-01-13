@@ -20,6 +20,7 @@
 	import AssistantMessage from './AssistantMessage.svelte';
 	import ToolUseMessage from './ToolUseMessage.svelte';
 	import ThinkingBlock from './ThinkingBlock.svelte';
+	import CommandMessage from './CommandMessage.svelte';
 	// Note: ToolResultMessage is intentionally not imported - tool_result messages are
 	// always merged into tool_use messages to prevent flickering during streaming
 	import SystemMessage from '$lib/components/SystemMessage.svelte';
@@ -326,7 +327,14 @@
 		<!-- Messages -->
 		<div class="max-w-5xl mx-auto px-4 sm:px-8 py-4 space-y-4">
 			{#each tab.messages as message, messageIndex (message.id)}
-				{#if message.role === 'user'}
+				{#if message.type === 'command'}
+					<!-- Slash command invocation (e.g., /commit, /ralph-loop) -->
+					<CommandMessage
+						commandName={message.commandName || message.content}
+						commandArgs={message.commandArgs}
+						timestamp={message.metadata?.timestamp ? new Date(message.metadata.timestamp as string) : undefined}
+					/>
+				{:else if message.role === 'user'}
 					<UserMessage
 						content={message.content}
 						sessionId={tab.sessionId}
