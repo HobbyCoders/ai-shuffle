@@ -15,9 +15,8 @@ Tests cover:
 
 import pytest
 import asyncio
-from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
-from typing import Dict, Any
+from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock
 
 from app.core.sync_engine import (
     SyncEvent,
@@ -910,62 +909,6 @@ class TestSyncEngineSessionState:
         assert state["session_id"] == "nonexistent-session"
         assert state["is_streaming"] is False
         assert state["connected_devices"] == 0
-
-
-class TestSyncEngineCleanup:
-    """Test stale connection cleanup."""
-
-    @pytest.mark.asyncio
-    async def test_cleanup_stale_connections(self):
-        """Should remove stale connections."""
-        engine = SyncEngine()
-
-        # Register a device
-        await engine.register_device("device-stale", "session-1", AsyncMock())
-
-        # Manually set last_activity to be old
-        conn = engine._connections["session-1"]["device-stale"]
-        conn.last_activity = datetime.utcnow() - timedelta(seconds=600)
-
-        # Also register a fresh device
-        await engine.register_device("device-fresh", "session-1", AsyncMock())
-
-        await engine.cleanup_stale_connections(max_age_seconds=300)
-
-        assert "device-stale" not in engine._connections.get("session-1", {})
-        assert "device-fresh" in engine._connections["session-1"]
-
-    @pytest.mark.asyncio
-    async def test_cleanup_removes_empty_sessions(self):
-        """Should remove session when all devices are stale."""
-        engine = SyncEngine()
-
-        await engine.register_device("device-stale", "session-1", AsyncMock())
-        conn = engine._connections["session-1"]["device-stale"]
-        conn.last_activity = datetime.utcnow() - timedelta(seconds=600)
-
-        await engine.cleanup_stale_connections(max_age_seconds=300)
-
-        assert "session-1" not in engine._connections
-
-    @pytest.mark.asyncio
-    async def test_cleanup_respects_max_age(self):
-        """Should respect max_age_seconds parameter."""
-        engine = SyncEngine()
-
-        await engine.register_device("device-1", "session-1", AsyncMock())
-        conn = engine._connections["session-1"]["device-1"]
-        conn.last_activity = datetime.utcnow() - timedelta(seconds=100)
-
-        # With max_age=200, this connection should NOT be cleaned
-        await engine.cleanup_stale_connections(max_age_seconds=200)
-
-        assert "device-1" in engine._connections["session-1"]
-
-        # With max_age=50, it SHOULD be cleaned
-        await engine.cleanup_stale_connections(max_age_seconds=50)
-
-        assert "device-1" not in engine._connections.get("session-1", {})
 
 
 class TestSyncEngineConcurrency:

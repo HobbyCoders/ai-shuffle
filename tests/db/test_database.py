@@ -29,11 +29,10 @@ Tests cover:
 - Sync log operations
 """
 
-import json
 import pytest
 import sqlite3
 from datetime import datetime, timedelta
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from contextlib import contextmanager
 
 from app.db import database as db
@@ -1118,18 +1117,6 @@ class TestAuthSessionOperations:
         db.delete_auth_session("token123")
 
         assert db.get_auth_session("token123") is None
-
-    def test_cleanup_expired_sessions(self, mock_db):
-        """cleanup_expired_sessions should remove expired sessions."""
-        db.create_auth_session("valid", datetime.utcnow() + timedelta(hours=24))
-        db.create_auth_session("expired", datetime.utcnow() - timedelta(hours=1))
-
-        db.cleanup_expired_sessions()
-
-        # Check directly in database
-        cursor = mock_db.cursor()
-        cursor.execute("SELECT COUNT(*) as count FROM auth_sessions")
-        assert cursor.fetchone()["count"] == 1
 
 
 # =============================================================================
@@ -2387,57 +2374,3 @@ class TestSessionsByTag:
 
         assert len(result) == 1
         assert result[0]["id"] == "session-1"
-
-
-# =============================================================================
-# Cleanup Expired Lockouts Tests
-# =============================================================================
-
-class TestCleanupOperations:
-    """Test cleanup operations."""
-
-    def test_cleanup_expired_lockouts(self, mock_db):
-        """cleanup_expired_lockouts should remove expired lockouts."""
-        # Create an expired lockout by manually inserting with past date
-        mock_db.execute("""
-            INSERT INTO account_lockouts (ip_address, username, locked_until, reason, created_at)
-            VALUES ('192.168.1.1', NULL, '2020-01-01T00:00:00', 'Test', '2020-01-01T00:00:00')
-        """)
-        mock_db.commit()
-
-        db.cleanup_expired_lockouts()
-
-        assert db.is_ip_locked("192.168.1.1") is None
-
-    def test_cleanup_old_login_attempts(self, mock_db):
-        """cleanup_old_login_attempts should remove old attempts."""
-        # Add an old attempt manually
-        mock_db.execute("""
-            INSERT INTO login_attempts (ip_address, username, success, created_at)
-            VALUES ('192.168.1.1', 'test', 0, '2020-01-01T00:00:00')
-        """)
-        mock_db.commit()
-
-        db.cleanup_old_login_attempts(max_age_hours=1)
-
-        # Recent attempts should be counted, old ones removed
-        count = db.get_failed_attempts_count("192.168.1.1")
-        assert count == 0
-
-    def test_cleanup_expired_api_key_sessions(self, mock_db):
-        """cleanup_expired_api_key_sessions should remove expired sessions."""
-        db.create_api_user("user-1", "Test", "hash")
-        # Create expired session manually
-        mock_db.execute("""
-            INSERT INTO api_key_sessions (token, api_user_id, expires_at, created_at)
-            VALUES ('expired-token', 'user-1', '2020-01-01T00:00:00', '2020-01-01T00:00:00')
-        """)
-        mock_db.commit()
-
-        db.cleanup_expired_api_key_sessions()
-
-        # The expired token should be gone
-        result = mock_db.execute(
-            "SELECT * FROM api_key_sessions WHERE token = 'expired-token'"
-        ).fetchone()
-        assert result is None

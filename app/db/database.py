@@ -1084,16 +1084,6 @@ def delete_pending_2fa_session(token: str):
         cursor.execute("DELETE FROM pending_2fa_sessions WHERE token = ?", (token,))
 
 
-def cleanup_expired_2fa_sessions():
-    """Remove expired pending 2FA sessions"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "DELETE FROM pending_2fa_sessions WHERE expires_at < ?",
-            (datetime.utcnow().isoformat(),)
-        )
-
-
 # ============================================================================
 # Auth Session Operations
 # ============================================================================
@@ -1186,32 +1176,6 @@ def delete_auth_session(token: str):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
-
-
-def cleanup_expired_sessions():
-    """Remove expired auth sessions"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        now_iso = datetime.utcnow().isoformat()
-        # First, log what we're about to delete for debugging
-        cursor.execute(
-            "SELECT token, expires_at FROM auth_sessions WHERE expires_at < ?",
-            (now_iso,)
-        )
-        expired = cursor.fetchall()
-        if expired:
-            for row in expired:
-                logger.warning(
-                    f"cleanup_expired_sessions: Deleting token ...{row['token'][-4:]} "
-                    f"(expired_at={row['expires_at']}, now={now_iso})"
-                )
-        cursor.execute(
-            "DELETE FROM auth_sessions WHERE expires_at < ?",
-            (now_iso,)
-        )
-        deleted = cursor.rowcount
-        if deleted > 0:
-            logger.info(f"cleanup_expired_sessions: Deleted {deleted} expired sessions")
 
 
 def clear_all_sessions():
@@ -3058,19 +3022,6 @@ def get_latest_sync_id(session_id: str) -> int:
         return row["max_id"] or 0
 
 
-def cleanup_old_sync_logs(max_age_hours: int = 24):
-    """Remove sync log entries older than max_age_hours"""
-    from datetime import timedelta
-    cutoff = (datetime.utcnow() - timedelta(hours=max_age_hours)).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "DELETE FROM sync_log WHERE created_at < ?",
-            (cutoff,)
-        )
-        return cursor.rowcount
-
-
 def update_message_content(
     message_id: int,
     content: str,
@@ -3150,19 +3101,6 @@ def get_failed_attempts_for_username(username: str, window_minutes: int = 15) ->
         return row["count"]
 
 
-def cleanup_old_login_attempts(max_age_hours: int = 24):
-    """Remove old login attempt records"""
-    from datetime import timedelta
-    cutoff = (datetime.utcnow() - timedelta(hours=max_age_hours)).isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "DELETE FROM login_attempts WHERE created_at < ?",
-            (cutoff,)
-        )
-        return cursor.rowcount
-
-
 # ============================================================================
 # Account Lockout Operations
 # ============================================================================
@@ -3207,18 +3145,6 @@ def is_username_locked(username: str) -> Optional[Dict[str, Any]]:
             (username, now)
         )
         return row_to_dict(cursor.fetchone())
-
-
-def cleanup_expired_lockouts():
-    """Remove expired lockout records"""
-    now = datetime.utcnow().isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "DELETE FROM account_lockouts WHERE locked_until < ?",
-            (now,)
-        )
-        return cursor.rowcount
 
 
 # ============================================================================
@@ -3267,17 +3193,6 @@ def delete_api_key_sessions_for_user(api_user_id: str):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM api_key_sessions WHERE api_user_id = ?", (api_user_id,))
-
-
-def cleanup_expired_api_key_sessions():
-    """Remove expired API key sessions"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "DELETE FROM api_key_sessions WHERE expires_at < ?",
-            (datetime.utcnow().isoformat(),)
-        )
-        return cursor.rowcount
 
 
 # ============================================================================

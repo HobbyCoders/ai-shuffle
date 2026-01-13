@@ -715,22 +715,6 @@ class SyncEngine:
             state["streaming_messages"] = streaming_buffer
         return state
 
-    async def cleanup_stale_connections(self, max_age_seconds: int = 300):
-        """Remove connections that haven't been active recently"""
-        now = datetime.utcnow()
-        stale_devices = []
-
-        async with self._lock:
-            for session_id, devices in list(self._connections.items()):
-                for device_id, conn in list(devices.items()):
-                    age = (now - conn.last_activity).total_seconds()
-                    if age > max_age_seconds:
-                        stale_devices.append((session_id, device_id))
-
-        for session_id, device_id in stale_devices:
-            await self.unregister_device(device_id, session_id)
-            logger.info(f"Cleaned up stale connection: {device_id} from {session_id}")
-
     # ============= User-level connection management for tab sync =============
 
     async def register_user_device(

@@ -8,7 +8,6 @@ Tests cover:
 - _build_plugins_list function
 - SessionState dataclass
 - get_session_state function
-- cleanup_stale_sessions function
 - _is_git_repo function
 - _get_os_version function
 - _get_available_providers function
@@ -30,13 +29,10 @@ Tests cover:
 """
 
 import pytest
-import asyncio
-import tempfile
 import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from unittest.mock import MagicMock, AsyncMock, patch, PropertyMock
-from typing import Dict, Any
+from unittest.mock import MagicMock, AsyncMock, patch
 
 # Import the module under test
 from app.core.query_engine import (
@@ -46,8 +42,6 @@ from app.core.query_engine import (
     _build_plugins_list,
     SessionState,
     get_session_state,
-    cleanup_stale_sessions,
-    cleanup_session,
     _is_git_repo,
     _get_os_version,
     _get_available_providers,
@@ -372,7 +366,7 @@ class TestSessionState:
 
 
 # =============================================================================
-# get_session_state / cleanup_stale_sessions Tests
+# get_session_state Tests
 # =============================================================================
 
 class TestSessionManagement:
@@ -397,190 +391,6 @@ class TestSessionManagement:
 
         assert result == state
         assert result.is_connected is True
-
-    @pytest.mark.asyncio
-    async def test_cleanup_stale_sessions(self):
-        """Should cleanup stale sessions."""
-        mock_client = AsyncMock()
-
-        # Create a stale session
-        stale_state = SessionState(
-            client=mock_client,
-            is_connected=True,
-            is_streaming=False
-        )
-        stale_state.last_activity = datetime.now() - timedelta(hours=2)
-        _active_sessions["stale-session"] = stale_state
-
-        # Create a fresh session
-        fresh_state = SessionState(
-            client=MagicMock(),
-            is_connected=True,
-            is_streaming=False
-        )
-        fresh_state.last_activity = datetime.now()
-        _active_sessions["fresh-session"] = fresh_state
-
-        await cleanup_stale_sessions(max_age_seconds=3600)
-
-        assert "stale-session" not in _active_sessions
-        assert "fresh-session" in _active_sessions
-        mock_client.disconnect.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_cleanup_does_not_remove_streaming_sessions(self):
-        """Should not cleanup sessions that are currently streaming."""
-        mock_client = MagicMock()
-
-        # Create a stale but streaming session
-        streaming_state = SessionState(
-            client=mock_client,
-            is_connected=True,
-            is_streaming=True  # Currently streaming
-        )
-        streaming_state.last_activity = datetime.now() - timedelta(hours=2)
-        _active_sessions["streaming-session"] = streaming_state
-
-        await cleanup_stale_sessions(max_age_seconds=3600)
-
-        # Should not be removed because it's streaming
-        assert "streaming-session" in _active_sessions
-
-
-# =============================================================================
-# cleanup_session Tests
-# =============================================================================
-
-class TestCleanupSession:
-    """Test cleanup_session function for explicit session cleanup on tab close."""
-
-    def setup_method(self):
-        """Clear active sessions before each test."""
-        _active_sessions.clear()
-
-    @pytest.mark.asyncio
-    async def test_cleanup_session_not_found_returns_false(self):
-        """Should return False when session doesn't exist."""
-        result = await cleanup_session("nonexistent-session")
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_cleanup_session_removes_client_reference(self):
-        """Should remove SDK client reference when cleaning up session.
-
-        Note: We don't call client.disconnect() because SDK clients use anyio
-        cancel scopes which are task-bound. Calling disconnect from a different
-        task causes errors. The client will be garbage collected.
-        """
-        mock_client = AsyncMock()
-        state = SessionState(client=mock_client, is_connected=True)
-        _active_sessions["test-session"] = state
-
-        result = await cleanup_session("test-session")
-
-        assert result is True
-        assert "test-session" not in _active_sessions
-        # Client should NOT be disconnected (causes task context errors)
-        mock_client.disconnect.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_cleanup_session_cancels_background_task(self):
-        """Should cancel background task when cleaning up session."""
-        import asyncio
-
-        mock_client = AsyncMock()
-
-        # Create a real asyncio task that we can cancel
-        async def dummy_task():
-            await asyncio.sleep(100)
-
-        real_task = asyncio.create_task(dummy_task())
-
-        state = SessionState(
-            client=mock_client,
-            is_connected=True,
-            background_task=real_task
-        )
-        _active_sessions["test-session"] = state
-
-        # Verify the task is not done before cleanup
-        assert not real_task.done()
-
-        result = await cleanup_session("test-session")
-
-        assert result is True
-        # Task should be cancelled after cleanup
-        assert real_task.cancelled()
-
-    @pytest.mark.asyncio
-    async def test_cleanup_session_skips_done_background_task(self):
-        """Should not cancel background task if already done."""
-        mock_client = AsyncMock()
-
-        # Create a mock background task that's already done
-        mock_task = MagicMock()
-        mock_task.done.return_value = True
-
-        state = SessionState(
-            client=mock_client,
-            is_connected=True,
-            background_task=mock_task
-        )
-        _active_sessions["test-session"] = state
-
-        result = await cleanup_session("test-session")
-
-        assert result is True
-        mock_task.cancel.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_cleanup_session_cleans_agent_files(self):
-        """Should cleanup agent files when cleaning up session."""
-        mock_client = AsyncMock()
-        agents_dir = Path("/tmp/test-agents")
-        agent_ids = ["agent1", "agent2"]
-
-        state = SessionState(
-            client=mock_client,
-            is_connected=True,
-            agents_dir=agents_dir,
-            written_agent_ids=agent_ids
-        )
-        _active_sessions["test-session"] = state
-
-        with patch("app.core.query_engine.cleanup_agents_directory") as mock_cleanup:
-            result = await cleanup_session("test-session")
-
-            assert result is True
-            mock_cleanup.assert_called_once_with(agents_dir, agent_ids)
-
-    @pytest.mark.asyncio
-    async def test_cleanup_session_handles_disconnect_error(self):
-        """Should handle errors when disconnecting client gracefully."""
-        mock_client = AsyncMock()
-        mock_client.disconnect.side_effect = Exception("Connection error")
-
-        state = SessionState(client=mock_client, is_connected=True)
-        _active_sessions["test-session"] = state
-
-        # Should not raise, should return True (session was still cleaned up)
-        result = await cleanup_session("test-session")
-
-        assert result is True
-        assert "test-session" not in _active_sessions
-
-    @pytest.mark.asyncio
-    async def test_cleanup_session_removes_from_active_sessions(self):
-        """Should remove session from _active_sessions dict."""
-        mock_client = AsyncMock()
-        state = SessionState(client=mock_client, is_connected=True)
-        _active_sessions["session-to-remove"] = state
-
-        assert "session-to-remove" in _active_sessions
-
-        await cleanup_session("session-to-remove")
-
-        assert "session-to-remove" not in _active_sessions
 
 
 # =============================================================================
@@ -1615,38 +1425,6 @@ class TestIsGitRepoExtended:
         """Should return False for empty path."""
         result = _is_git_repo("")
         assert result is False
-
-
-# =============================================================================
-# Additional cleanup_stale_sessions Tests
-# =============================================================================
-
-class TestCleanupStaleSessionsExtended:
-    """Extended tests for cleanup_stale_sessions function."""
-
-    def setup_method(self):
-        """Clear active sessions before each test."""
-        _active_sessions.clear()
-
-    @pytest.mark.asyncio
-    async def test_handles_disconnect_exception(self):
-        """Should handle exception during disconnect gracefully."""
-        mock_client = AsyncMock()
-        mock_client.disconnect.side_effect = Exception("Disconnect failed")
-
-        state = SessionState(
-            client=mock_client,
-            is_connected=True,
-            is_streaming=False
-        )
-        state.last_activity = datetime.now() - timedelta(hours=2)
-        _active_sessions["error-session"] = state
-
-        # Should not raise even if disconnect fails
-        await cleanup_stale_sessions(max_age_seconds=3600)
-
-        # Session should still be removed
-        assert "error-session" not in _active_sessions
 
 
 # =============================================================================

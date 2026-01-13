@@ -25,7 +25,6 @@ from app.core.webhook_service import dispatch_session_complete, dispatch_session
 from app.core.cli_bridge import CLIBridge, RewindParser
 from app.core.permission_handler import permission_handler
 from app.core.user_question_handler import user_question_handler
-from app.core.query_engine import cleanup_session
 
 logger = logging.getLogger(__name__)
 
@@ -809,11 +808,6 @@ async def chat_websocket(
             if remaining_devices == 0:
                 logger.info(f"Query finished but no devices connected for session {session_id}, cleaning up resources")
 
-                from app.core.query_engine import cleanup_session as cleanup_query_session
-                cleaned = await cleanup_query_session(session_id)
-                if cleaned:
-                    logger.info(f"Cleaned up query engine resources for session {session_id}")
-
                 if live_session_store.has_session(session_id):
                     await live_session_store.cleanup_session(session_id)
                     logger.info(f"Cleaned up live session store for session {session_id}")
@@ -1219,14 +1213,6 @@ async def chat_websocket(
                                 device_id=device_id
                             )
 
-                            # If no other devices are connected to this session,
-                            # cleanup the SDK session to release file locks
-                            remaining_devices = sync_engine.get_device_count(old_session_id)
-                            if remaining_devices == 0:
-                                cleaned = await cleanup_session(old_session_id)
-                                if cleaned:
-                                    logger.info(f"Cleaned up SDK session {old_session_id} (no devices remaining)")
-
                             current_session_id = None
                             logger.info(f"Device {device_id} closed session {old_session_id}")
                             # Try to send confirmation, but don't worry if WebSocket is already closed
@@ -1360,12 +1346,6 @@ async def chat_websocket(
                 if remaining_devices == 0 and is_task_done:
                     # No more devices watching and no active query - cleanup session resources
                     logger.info(f"Last device disconnected from session {current_session_id}, cleaning up resources")
-
-                    # Cleanup query engine SDK resources (Claude Code process, etc.)
-                    from app.core.query_engine import cleanup_session as cleanup_query_session
-                    cleaned = await cleanup_query_session(current_session_id)
-                    if cleaned:
-                        logger.info(f"Cleaned up query engine resources for session {current_session_id}")
 
                     # Cleanup live session store (in-memory streaming state)
                     if live_session_store.has_session(current_session_id):
@@ -1529,11 +1509,6 @@ async def session_sync_websocket(
 
         if remaining_devices == 0 and is_task_done:
             logger.info(f"Last device disconnected from legacy sync session {session_id}, cleaning up resources")
-
-            from app.core.query_engine import cleanup_session as cleanup_query_session
-            cleaned = await cleanup_query_session(session_id)
-            if cleaned:
-                logger.info(f"Cleaned up query engine resources for session {session_id}")
 
             if live_session_store.has_session(session_id):
                 await live_session_store.cleanup_session(session_id)

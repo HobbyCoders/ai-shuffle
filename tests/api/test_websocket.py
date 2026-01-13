@@ -16,9 +16,8 @@ import json
 import pytest
 import uuid
 import hashlib
-from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
-from datetime import datetime
-from typing import Dict, Any, Optional
+from unittest.mock import patch, MagicMock, AsyncMock
+from typing import Optional
 
 
 # =============================================================================
@@ -916,16 +915,15 @@ class TestCloseSession:
         assert event["type"] == "session_closed"
         assert "session_id" in event
 
-    def test_close_session_should_cleanup_when_no_devices(self):
+    def test_close_session_unregisters_device(self):
         """
-        When close_session is received and no other devices are connected,
-        the SDK session should be cleaned up to release file locks.
+        When close_session is received, the device should be unregistered
+        and other devices notified.
 
         This test verifies the expected behavior flow:
         1. Device sends close_session message
         2. Device is unregistered from SyncEngine
-        3. If device_count == 0, cleanup_session is called
-        4. SDK client is disconnected
+        3. Other devices are notified via broadcast_session_closed
         """
         # This is a design/contract test - the actual implementation
         # is tested in integration tests. This documents expected behavior.
@@ -933,29 +931,8 @@ class TestCloseSession:
             "receive close_session message",
             "unregister_device from sync_engine",
             "broadcast_session_closed to other devices",
-            "check remaining device count",
-            "if device_count == 0: call cleanup_session",
-            "cleanup_session disconnects SDK client",
-            "cleanup_session cancels background tasks",
-            "cleanup_session removes from _active_sessions",
         ]
-        assert len(expected_flow) == 8
-
-    def test_close_session_should_not_cleanup_with_other_devices(self):
-        """
-        When close_session is received but other devices are still connected,
-        the SDK session should NOT be cleaned up (they may still need it).
-
-        This prevents killing active sessions when multiple browsers/tabs
-        are connected to the same session.
-        """
-        # This is a design/contract test
-        expected_behavior = {
-            "scenario": "device1 closes, device2 still connected",
-            "expected": "SDK session stays active for device2",
-            "cleanup_called": False
-        }
-        assert expected_behavior["cleanup_called"] is False
+        assert len(expected_flow) == 3
 
 
 # =============================================================================
@@ -2026,7 +2003,7 @@ class TestSessionSyncWebSocketEndpoint:
             try:
                 with client.websocket_connect("/api/v1/ws/sessions/nonexistent?token=valid"):
                     pass
-            except Exception as e:
+            except Exception:
                 # Expect 4004
                 pass
 
