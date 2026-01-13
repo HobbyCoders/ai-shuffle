@@ -11,11 +11,14 @@ to work properly through AI Shuffle by intercepting Claude's stop events and
 returning continuation prompts when appropriate.
 """
 
+import asyncio
 import json
 import logging
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable, Awaitable
+
+import yaml
 
 from claude_agent_sdk.types import (
     HookInput, HookContext, HookMatcher, SyncHookJSONOutput,
@@ -95,22 +98,9 @@ def _read_ralph_loop_state(working_dir: str) -> Optional[Dict[str, Any]]:
         if end_idx is None:
             return None
 
-        # Parse frontmatter
-        frontmatter = '\n'.join(lines[1:end_idx])
-        state = {}
-        for line in frontmatter.split('\n'):
-            if ':' in line:
-                key, value = line.split(':', 1)
-                key = key.strip()
-                value = value.strip()
-                # Remove quotes from values
-                if value.startswith('"') and value.endswith('"'):
-                    value = value[1:-1]
-                elif value == 'null':
-                    value = None
-                elif value.isdigit():
-                    value = int(value)
-                state[key] = value
+        # Parse frontmatter using yaml library for robust handling
+        frontmatter_text = '\n'.join(lines[1:end_idx])
+        state = yaml.safe_load(frontmatter_text) or {}
 
         # Get prompt (everything after closing ---)
         prompt = '\n'.join(lines[end_idx + 1:]).strip()
@@ -219,23 +209,23 @@ def create_stop_hook_handler(
     ) -> SyncHookJSONOutput:
         """Handle Stop hook for plugin loops and database hooks."""
 
-        # Only handle Stop events
-        if not isinstance(hook_input, StopHookInput):
+        # Only handle Stop events (TypedDict doesn't support isinstance, check event name)
+        if hook_input.get("hook_event_name") != "Stop":
             return SyncHookJSONOutput()
 
         logger.info(f"[HookService] Stop hook fired for {working_dir}")
 
-        # 1. Check for active plugin loops
-        plugin_state = detect_plugin_loop_state(working_dir)
+        # 1. Check for active plugin loops (run sync file I/O in thread to avoid blocking)
+        plugin_state = await asyncio.to_thread(detect_plugin_loop_state, working_dir)
         if plugin_state:
             plugin = plugin_state["plugin"]
             state = plugin_state["state"]
 
             logger.info(f"[HookService] Active {plugin} detected")
 
-            # Handle Ralph Loop specifically
+            # Handle Ralph Loop specifically (file I/O in thread)
             if plugin == "ralph-loop":
-                result = _handle_ralph_loop_stop(working_dir, state)
+                result = await asyncio.to_thread(_handle_ralph_loop_stop, working_dir, state)
                 if result:
                     return result
 
@@ -353,8 +343,8 @@ def build_hooks_config(
         try:
             db_hooks = database.get_hooks_for_project_and_event(project_id, "Stop")
             has_db_stop_hooks = bool(db_hooks)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to check for database Stop hooks: {e}")
 
     # Register Stop hook handler if needed
     if has_plugin_loop or has_db_stop_hooks:
