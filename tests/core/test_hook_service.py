@@ -147,12 +147,14 @@ Test
 class TestBuildHooksConfig:
     """Tests for building SDK hooks configuration."""
 
-    def test_no_hooks_needed(self, tmp_path):
-        """Should return None when no hooks are needed."""
-        with patch('app.core.hook_service.database') as mock_db:
-            mock_db.get_hooks_for_project_and_event.return_value = []
-            result = build_hooks_config(str(tmp_path), "test-project")
-        assert result is None
+    def test_always_registers_stop_hook(self, tmp_path):
+        """Should always register Stop hook (to catch plugins that start mid-query)."""
+        # Even with no active plugin loop or database hooks, we still register Stop hook
+        # because plugins like Ralph Loop create their state files DURING the query
+        result = build_hooks_config(str(tmp_path), "test-project")
+        assert result is not None
+        assert "Stop" in result
+        assert len(result["Stop"]) == 1
 
     def test_hooks_for_active_plugin_loop(self, tmp_path):
         """Should create Stop hook when plugin loop is active."""

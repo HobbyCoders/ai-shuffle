@@ -334,22 +334,13 @@ def build_hooks_config(
     """
     hooks_config: Dict[str, List[HookMatcher]] = {}
 
-    # Check if any plugin loops are active OR if there are database Stop hooks
-    has_plugin_loop = detect_plugin_loop_state(working_dir) is not None
+    # ALWAYS register the Stop hook handler.
+    # This is critical because plugin loops (like Ralph Loop) create their state files
+    # DURING the query execution, not before. If we only registered hooks when a state
+    # file exists, we'd miss plugins that start mid-query.
+    # The handler itself dynamically checks for plugin states when Stop fires.
+    stop_handler = create_stop_hook_handler(working_dir, project_id)
+    hooks_config["Stop"] = [HookMatcher(hooks=[stop_handler])]
+    logger.info(f"[HookService] Registered Stop hook handler for {working_dir}")
 
-    # Check for database Stop hooks (sync check for now)
-    has_db_stop_hooks = False
-    if project_id:
-        try:
-            db_hooks = database.get_hooks_for_project_and_event(project_id, "Stop")
-            has_db_stop_hooks = bool(db_hooks)
-        except Exception as e:
-            logger.debug(f"Failed to check for database Stop hooks: {e}")
-
-    # Register Stop hook handler if needed
-    if has_plugin_loop or has_db_stop_hooks:
-        stop_handler = create_stop_hook_handler(working_dir, project_id)
-        hooks_config["Stop"] = [HookMatcher(hooks=[stop_handler])]
-        logger.info(f"[HookService] Registered Stop hook (plugin_loop={has_plugin_loop}, db_hooks={has_db_stop_hooks})")
-
-    return hooks_config if hooks_config else None
+    return hooks_config
