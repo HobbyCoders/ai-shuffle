@@ -59,9 +59,10 @@ class TestBuildHooksConfig:
 
         # Should always return a config (never None)
         assert result is not None
-        # Should have at least a Stop hook to enable CLI
-        assert "Stop" in result
-        assert len(result["Stop"]) == 1
+        # Should have at least a PreCompact hook to enable CLI
+        # (We use PreCompact instead of Stop to avoid interfering with plugins like Ralph Loop)
+        assert "PreCompact" in result
+        assert len(result["PreCompact"]) == 1
 
     def test_with_database_hooks(self, tmp_path):
         """Should register handlers for events with database hooks."""
@@ -100,8 +101,9 @@ class TestBuildHooksConfig:
         result = build_hooks_config(str(tmp_path), None)
 
         # Should still return a config to enable CLI hook system
+        # (Uses PreCompact to avoid interfering with plugin Stop hooks like Ralph Loop)
         assert result is not None
-        assert "Stop" in result
+        assert "PreCompact" in result
 
 
 class TestCreateHookHandler:

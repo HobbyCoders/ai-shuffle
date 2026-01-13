@@ -209,8 +209,10 @@ def build_hooks_config(
         logger.info(f"[HookService] Registered {event} hook for database hooks")
 
     # CRITICAL: We must return a non-empty hooks config to enable the CLI's hook system.
-    # If no database hooks exist, register a minimal Stop hook handler that does nothing.
-    # This ensures plugin hooks (like Ralph Loop) work properly.
+    # If no database hooks exist, register a minimal handler that does nothing.
+    #
+    # IMPORTANT: We use PreCompact (not Stop!) to avoid interfering with plugin Stop hooks
+    # like Ralph Loop. Using Stop would conflict with plugins that need to block stopping.
     if not hooks_config:
         async def noop_handler(
             hook_input: HookInput,
@@ -220,7 +222,8 @@ def build_hooks_config(
             """No-op handler to enable CLI hook system."""
             return SyncHookJSONOutput()
 
-        hooks_config["Stop"] = [HookMatcher(hooks=[noop_handler])]
-        logger.info(f"[HookService] Registered minimal Stop hook to enable CLI hook system")
+        # Use PreCompact as it's rarely used and won't interfere with plugins
+        hooks_config["PreCompact"] = [HookMatcher(hooks=[noop_handler])]
+        logger.info(f"[HookService] Registered minimal PreCompact hook to enable CLI hook system")
 
     return hooks_config
