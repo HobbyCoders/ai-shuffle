@@ -1151,6 +1151,24 @@ export async function deletePreference(key: string): Promise<{ deleted: boolean 
 	return api.delete<{ deleted: boolean }>(`/preferences/${key}`) as Promise<{ deleted: boolean }>;
 }
 
+export interface AllPreferencesResponse {
+	preferences: Record<string, unknown>;
+}
+
+/**
+ * Get all user preferences in a single request.
+ * More efficient than fetching preferences individually on app startup.
+ */
+export async function getAllPreferences(): Promise<Record<string, unknown>> {
+	try {
+		const response = await api.get<AllPreferencesResponse>('/preferences/all');
+		return response.preferences;
+	} catch (e) {
+		console.error('[API] Failed to get all preferences:', e);
+		return {};
+	}
+}
+
 // =============================================================================
 // Rewind API
 // =============================================================================

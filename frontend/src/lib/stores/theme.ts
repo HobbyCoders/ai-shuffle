@@ -2,16 +2,18 @@
  * Theme store for dark/light mode management and theme presets
  *
  * Features:
- * - Persists preference in localStorage
+ * - Persists preference in localStorage (for instant load, no flash)
+ * - Syncs to server for cross-device persistence
  * - Detects system preference on first load
  * - Applies theme class to <html> element
  * - Provides reactive state for UI components
  * - Supports theme presets from tweakcn
  */
 
-import { writable, derived } from 'svelte/store';
+import { writable, derived, get } from 'svelte/store';
 import { browser } from '$app/environment';
 import { themePresets, getPresetById, type ThemePreset, type ThemeStyles } from '$lib/themes/presets';
+import { getPreference, setPreference } from '$lib/api/client';
 
 export type Theme = 'light' | 'dark' | 'system';
 
@@ -23,6 +25,98 @@ interface ThemeState {
 
 const STORAGE_KEY = 'ai-shuffle-theme';
 const PRESET_STORAGE_KEY = 'ai-shuffle-theme-preset';
+const SERVER_PREFERENCE_KEY = 'theme';
+const SERVER_SYNC_DEBOUNCE_MS = 500;
+
+// Server sync state
+let serverSyncTimer: ReturnType<typeof setTimeout> | null = null;
+let hasSyncedFromServer = false;
+let pendingThemeState: { preference: Theme; presetId: string | null } | null = null;
+
+// Server preference structure
+interface ServerThemePreference {
+	preference: Theme;
+	presetId: string | null;
+}
+
+/**
+ * Load theme preference from server
+ */
+async function loadFromServer(): Promise<ServerThemePreference | null> {
+	try {
+		const response = await getPreference<ServerThemePreference>(SERVER_PREFERENCE_KEY);
+		return response?.value as ServerThemePreference || null;
+	} catch (e) {
+		console.error('[Theme] Failed to load from server:', e);
+		return null;
+	}
+}
+
+/**
+ * Save theme preference to server (debounced)
+ */
+function saveToServer(preference: Theme, presetId: string | null) {
+	if (!browser) return;
+
+	// Track pending state for flush on unload
+	pendingThemeState = { preference, presetId };
+
+	// Don't write to server until initial sync is complete
+	// This prevents localStorage data from overwriting newer server data
+	if (!hasSyncedFromServer) {
+		console.log('[Theme] Skipping server save - initial sync not complete');
+		return;
+	}
+
+	if (serverSyncTimer) {
+		clearTimeout(serverSyncTimer);
+	}
+
+	serverSyncTimer = setTimeout(async () => {
+		try {
+			await setPreference(SERVER_PREFERENCE_KEY, { preference, presetId });
+			console.log('[Theme] Synced to server');
+			pendingThemeState = null;
+		} catch (e) {
+			console.error('[Theme] Failed to save to server:', e);
+		}
+		serverSyncTimer = null;
+	}, SERVER_SYNC_DEBOUNCE_MS);
+}
+
+/**
+ * Flush pending theme save immediately (for beforeunload)
+ */
+function flushPendingThemeSave() {
+	if (!pendingThemeState || !hasSyncedFromServer || !browser) return;
+
+	if (serverSyncTimer) {
+		clearTimeout(serverSyncTimer);
+		serverSyncTimer = null;
+	}
+
+	// Use sendBeacon for reliable delivery during page unload
+	const data = JSON.stringify({
+		key: SERVER_PREFERENCE_KEY,
+		value: pendingThemeState
+	});
+	navigator.sendBeacon(
+		'/api/v1/preferences/' + SERVER_PREFERENCE_KEY,
+		new Blob([data], { type: 'application/json' })
+	);
+	console.log('[Theme] Flushed pending state on unload');
+	pendingThemeState = null;
+}
+
+// Register beforeunload handler
+if (browser) {
+	window.addEventListener('beforeunload', flushPendingThemeSave);
+	document.addEventListener('visibilitychange', () => {
+		if (document.visibilityState === 'hidden') {
+			flushPendingThemeSave();
+		}
+	});
+}
 
 function getSystemTheme(): 'light' | 'dark' {
 	if (!browser) return 'dark';
@@ -255,6 +349,8 @@ function createThemeStore() {
 					// Re-apply preset for new theme mode
 					const preset = state.presetId ? getPresetById(state.presetId) : null;
 					applyPresetStyles(preset ?? null, resolved);
+					// Sync to server
+					saveToServer(preference, state.presetId);
 				}
 
 				return { ...state, preference, resolved };
@@ -275,6 +371,8 @@ function createThemeStore() {
 					// Re-apply preset for new theme mode
 					const preset = state.presetId ? getPresetById(state.presetId) : null;
 					applyPresetStyles(preset ?? null, newResolved);
+					// Sync to server
+					saveToServer(newPreference, state.presetId);
 				}
 
 				return { ...state, preference: newPreference, resolved: newResolved };
@@ -294,6 +392,8 @@ function createThemeStore() {
 					}
 					const preset = presetId ? getPresetById(presetId) : null;
 					applyPresetStyles(preset ?? null, state.resolved);
+					// Sync to server
+					saveToServer(state.preference, presetId);
 				}
 
 				return { ...state, presetId };
@@ -302,6 +402,7 @@ function createThemeStore() {
 
 		/**
 		 * Initialize theme on mount (call this in layout)
+		 * Applies theme from localStorage immediately to prevent flash
 		 */
 		init() {
 			if (browser) {
@@ -312,6 +413,57 @@ function createThemeStore() {
 				const preset = presetId ? getPresetById(presetId) : null;
 				applyPresetStyles(preset ?? null, resolved);
 				set({ preference, resolved, presetId });
+			}
+		},
+
+		/**
+		 * Sync theme from server (call after authentication)
+		 * Server is the source of truth - if server has different data, update local
+		 * If server is empty but local has data, push local to server (migration)
+		 */
+		async syncFromServer() {
+			if (!browser) return;
+
+			const serverState = await loadFromServer();
+			const localState = get({ subscribe });
+
+			if (serverState) {
+				// Server has data - it's the source of truth
+				const { preference, presetId } = serverState;
+
+				// Check if server differs from local
+				if (preference !== localState.preference || presetId !== localState.presetId) {
+					console.log('[Theme] Server state differs, updating local');
+
+					// Update localStorage
+					localStorage.setItem(STORAGE_KEY, preference);
+					if (presetId) {
+						localStorage.setItem(PRESET_STORAGE_KEY, presetId);
+					} else {
+						localStorage.removeItem(PRESET_STORAGE_KEY);
+					}
+
+					// Update store and apply
+					const resolved = resolveTheme(preference);
+					applyTheme(resolved);
+					const preset = presetId ? getPresetById(presetId) : null;
+					applyPresetStyles(preset ?? null, resolved);
+					set({ preference, resolved, presetId });
+				} else {
+					console.log('[Theme] Server and local in sync');
+				}
+			} else {
+				// No server data - push local data to server (migration)
+				console.log('[Theme] No server data, pushing local to server');
+				// Will be saved after hasSyncedFromServer is set
+			}
+
+			// Mark sync as complete - now server writes are allowed
+			hasSyncedFromServer = true;
+
+			// If there was pending local data and no server data, save it now
+			if (!serverState && (localState.preference !== 'system' || localState.presetId)) {
+				saveToServer(localState.preference, localState.presetId);
 			}
 		}
 	};

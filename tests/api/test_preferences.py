@@ -760,6 +760,157 @@ class TestSetPreference:
 
 
 # =============================================================================
+# POST Preference Tests (for sendBeacon support)
+# =============================================================================
+
+class TestSetPreferencePost:
+    """Test set_preference_post endpoint function.
+
+    This endpoint mirrors PUT functionality but accepts POST requests.
+    Needed for navigator.sendBeacon() which only supports POST method.
+    """
+
+    @pytest.mark.asyncio
+    async def test_set_preference_post_success(self, mock_request):
+        """Should set preference via POST successfully."""
+        from app.api.preferences import set_preference_post, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
+                mock_get_api_user.return_value = {
+                    "id": "test-api-user-id",
+                    "username": "test-user"
+                }
+                mock_database.set_user_preference.return_value = {
+                    "key": "theme_settings",
+                    "value": {"preset": "dark", "customColors": []},
+                    "updated_at": "2024-01-02T00:00:00"
+                }
+
+                body = PreferenceValue(
+                    key="theme_settings",
+                    value={"preset": "dark", "customColors": []}
+                )
+                result = await set_preference_post(
+                    request=mock_request,
+                    key="theme_settings",
+                    body=body,
+                    token="test-token"
+                )
+
+        assert result.key == "theme_settings"
+        assert result.value == {"preset": "dark", "customColors": []}
+        assert result.updated_at == "2024-01-02T00:00:00"
+        mock_database.set_user_preference.assert_called_once_with(
+            "api_user", "test-api-user-id", "theme_settings",
+            {"preset": "dark", "customColors": []}
+        )
+
+    @pytest.mark.asyncio
+    async def test_set_preference_post_complex_value(self, mock_request):
+        """Should handle complex values via POST (sendBeacon use case)."""
+        from app.api.preferences import set_preference_post, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
+                mock_get_api_user.return_value = {
+                    "id": "test-api-user-id",
+                    "username": "test-user"
+                }
+                # Simulates the kind of data sendBeacon would send on page unload
+                complex_value = {
+                    "openTabs": ["tab-1", "tab-2"],
+                    "activeTab": "tab-1",
+                    "scrollPositions": {"tab-1": 100, "tab-2": 200}
+                }
+                mock_database.set_user_preference.return_value = {
+                    "key": "session_state",
+                    "value": complex_value,
+                    "updated_at": "2024-01-02T00:00:00"
+                }
+
+                body = PreferenceValue(key="session_state", value=complex_value)
+                result = await set_preference_post(
+                    request=mock_request,
+                    key="session_state",
+                    body=body,
+                    token="test-token"
+                )
+
+        assert result.value["openTabs"] == ["tab-1", "tab-2"]
+        assert result.value["activeTab"] == "tab-1"
+
+    @pytest.mark.asyncio
+    async def test_set_preference_post_admin_user(self, mock_request):
+        """Should use admin identity for admin users via POST."""
+        from app.api.preferences import set_preference_post, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
+                with patch("app.api.preferences.auth_service") as mock_auth_service:
+                    mock_get_api_user.return_value = None
+                    mock_auth_service.get_admin_username.return_value = "admin_user"
+                    mock_database.set_user_preference.return_value = {
+                        "key": "admin_setting",
+                        "value": "value",
+                        "updated_at": "2024-01-02T00:00:00"
+                    }
+
+                    body = PreferenceValue(key="admin_setting", value="value")
+                    result = await set_preference_post(
+                        request=mock_request,
+                        key="admin_setting",
+                        body=body,
+                        token="test-token"
+                    )
+
+        mock_database.set_user_preference.assert_called_once_with(
+            "admin", "admin_user", "admin_setting", "value"
+        )
+
+    @pytest.mark.asyncio
+    async def test_set_preference_post_mirrors_put_behavior(self, mock_request):
+        """POST and PUT should produce identical results for same input."""
+        from app.api.preferences import set_preference, set_preference_post, PreferenceValue
+
+        with patch("app.api.preferences.database") as mock_database:
+            with patch("app.api.preferences.get_api_user_from_request") as mock_get_api_user:
+                mock_get_api_user.return_value = {
+                    "id": "test-api-user-id",
+                    "username": "test-user"
+                }
+                expected_result = {
+                    "key": "test_key",
+                    "value": {"data": "test"},
+                    "updated_at": "2024-01-02T00:00:00"
+                }
+                mock_database.set_user_preference.return_value = expected_result
+
+                body = PreferenceValue(key="test_key", value={"data": "test"})
+
+                # Call PUT
+                put_result = await set_preference(
+                    request=mock_request,
+                    key="test_key",
+                    body=body,
+                    token="test-token"
+                )
+
+                # Call POST
+                post_result = await set_preference_post(
+                    request=mock_request,
+                    key="test_key",
+                    body=body,
+                    token="test-token"
+                )
+
+        # Both should return identical results
+        assert put_result.key == post_result.key
+        assert put_result.value == post_result.value
+        assert put_result.updated_at == post_result.updated_at
+
+
+# =============================================================================
 # DELETE Preference Tests
 # =============================================================================
 
