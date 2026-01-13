@@ -3,10 +3,83 @@
  *
  * Handles requesting permission and showing browser notifications
  * for long-running task completion.
+ *
+ * Notification enabled state is persisted to localStorage (for instant access)
+ * and synced to server (for cross-device persistence).
  */
+
+import { getPreference, setPreference } from '$lib/api/client';
 
 // Notification permission state
 let permissionState: NotificationPermission | 'unsupported' = 'default';
+
+// Server sync state
+const SERVER_PREFERENCE_KEY = 'notifications';
+let hasSyncedFromServer = false;
+let serverSyncTimer: ReturnType<typeof setTimeout> | null = null;
+
+interface NotificationPreferences {
+	enabled: boolean;
+}
+
+/**
+ * Save notification preference to server (debounced)
+ */
+function saveToServer(enabled: boolean): void {
+	if (typeof window === 'undefined') return;
+
+	if (!hasSyncedFromServer) {
+		console.log('[Notifications] Skipping server save - initial sync not complete');
+		return;
+	}
+
+	if (serverSyncTimer) {
+		clearTimeout(serverSyncTimer);
+	}
+
+	serverSyncTimer = setTimeout(async () => {
+		try {
+			await setPreference(SERVER_PREFERENCE_KEY, { enabled });
+			console.log('[Notifications] Synced to server');
+		} catch (e) {
+			console.error('[Notifications] Failed to save to server:', e);
+		}
+		serverSyncTimer = null;
+	}, 500);
+}
+
+/**
+ * Sync notification preferences from server
+ */
+export async function syncNotificationsFromServer(): Promise<void> {
+	if (typeof window === 'undefined') return;
+
+	try {
+		const response = await getPreference<NotificationPreferences>(SERVER_PREFERENCE_KEY);
+		const serverPrefs = response?.value as NotificationPreferences | undefined;
+
+		if (serverPrefs) {
+			const localEnabled = localStorage.getItem('notifications_enabled') === 'true';
+			if (serverPrefs.enabled !== localEnabled) {
+				console.log('[Notifications] Server preference differs, updating local');
+				localStorage.setItem('notifications_enabled', serverPrefs.enabled ? 'true' : 'false');
+			}
+		} else {
+			// No server data - push local to server
+			const localEnabled = localStorage.getItem('notifications_enabled') === 'true';
+			console.log('[Notifications] No server data, pushing local');
+			hasSyncedFromServer = true;
+			if (localEnabled) {
+				saveToServer(localEnabled);
+			}
+			return;
+		}
+	} catch (e) {
+		console.error('[Notifications] Failed to sync from server:', e);
+	}
+
+	hasSyncedFromServer = true;
+}
 
 /**
  * Check if browser notifications are supported
@@ -255,11 +328,13 @@ export function isNotificationsEnabled(): boolean {
 }
 
 /**
- * Set notifications enabled state in localStorage
+ * Set notifications enabled state in localStorage and sync to server
  */
 export function setNotificationsEnabled(enabled: boolean): void {
 	if (typeof localStorage === 'undefined') return;
 	localStorage.setItem('notifications_enabled', enabled ? 'true' : 'false');
+	// Sync to server
+	saveToServer(enabled);
 }
 
 /**

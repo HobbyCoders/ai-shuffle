@@ -7,6 +7,8 @@
 	import { theme } from '$lib/stores/theme';
 	import { pwa, hasUpdate, isOnline } from '$lib/stores/pwa';
 	import { chatPreferences } from '$lib/stores/chatPreferences';
+	import { files } from '$lib/stores/files';
+	import { syncNotificationsFromServer } from '$lib/services/notifications';
 	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
 	import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
 	import OfflineBanner from '$lib/components/OfflineBanner.svelte';
@@ -14,7 +16,7 @@
 	let initialized = false;
 
 	onMount(async () => {
-		// Initialize theme on mount
+		// Initialize theme on mount (applies from localStorage immediately to prevent flash)
 		theme.init();
 
 		// Initialize PWA features
@@ -23,9 +25,16 @@
 		try {
 			await auth.checkAuth();
 
-			// Load user preferences after auth is verified
+			// Load and sync user preferences after auth is verified
 			if ($isAuthenticated) {
-				await chatPreferences.load();
+				// Sync all settings from server (database is source of truth)
+				// These run in parallel for faster startup
+				await Promise.all([
+					chatPreferences.load(),
+					theme.syncFromServer(),
+					files.syncFromServer(),
+					syncNotificationsFromServer()
+				]);
 			}
 
 			initialized = true;

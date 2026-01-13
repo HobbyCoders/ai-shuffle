@@ -6,9 +6,11 @@
  * - File listing and caching
  * - File operations (CRUD)
  * - Upload progress tracking
+ * - UI preferences (persisted to localStorage + server)
  */
 
 import { writable, derived, get } from 'svelte/store';
+import { getPreference, setPreference } from '$lib/api/client';
 
 // ============================================================================
 // Types
@@ -48,6 +50,96 @@ export interface FilesState {
 // ============================================================================
 
 const STORAGE_KEY = 'files_state';
+const SERVER_PREFERENCE_KEY = 'files_preferences';
+const SERVER_SYNC_DEBOUNCE_MS = 500;
+
+// Server sync state
+let serverSyncTimer: ReturnType<typeof setTimeout> | null = null;
+let hasSyncedFromServer = false;
+let pendingPrefs: FilesPreferences | null = null;
+
+// What we persist to server (subset of FilesState)
+interface FilesPreferences {
+	viewMode: 'grid' | 'list';
+	sortBy: 'name' | 'size' | 'modified';
+	sortAsc: boolean;
+	showHidden: boolean;
+}
+
+/**
+ * Load file preferences from server
+ */
+async function loadFromServer(): Promise<FilesPreferences | null> {
+	try {
+		const response = await getPreference<FilesPreferences>(SERVER_PREFERENCE_KEY);
+		return response?.value as FilesPreferences || null;
+	} catch (e) {
+		console.error('[Files] Failed to load preferences from server:', e);
+		return null;
+	}
+}
+
+/**
+ * Save file preferences to server (debounced)
+ */
+function saveToServer(prefs: FilesPreferences) {
+	if (typeof window === 'undefined') return;
+
+	pendingPrefs = prefs;
+
+	if (!hasSyncedFromServer) {
+		console.log('[Files] Skipping server save - initial sync not complete');
+		return;
+	}
+
+	if (serverSyncTimer) {
+		clearTimeout(serverSyncTimer);
+	}
+
+	serverSyncTimer = setTimeout(async () => {
+		try {
+			await setPreference(SERVER_PREFERENCE_KEY, prefs);
+			console.log('[Files] Synced preferences to server');
+			pendingPrefs = null;
+		} catch (e) {
+			console.error('[Files] Failed to save preferences to server:', e);
+		}
+		serverSyncTimer = null;
+	}, SERVER_SYNC_DEBOUNCE_MS);
+}
+
+/**
+ * Flush pending save on unload
+ */
+function flushPendingFilesSave() {
+	if (!pendingPrefs || !hasSyncedFromServer || typeof window === 'undefined') return;
+
+	if (serverSyncTimer) {
+		clearTimeout(serverSyncTimer);
+		serverSyncTimer = null;
+	}
+
+	const data = JSON.stringify({
+		key: SERVER_PREFERENCE_KEY,
+		value: pendingPrefs
+	});
+	navigator.sendBeacon(
+		'/api/v1/preferences/' + SERVER_PREFERENCE_KEY,
+		new Blob([data], { type: 'application/json' })
+	);
+	console.log('[Files] Flushed pending preferences on unload');
+	pendingPrefs = null;
+}
+
+// Register beforeunload handler
+if (typeof window !== 'undefined') {
+	window.addEventListener('beforeunload', flushPendingFilesSave);
+	document.addEventListener('visibilitychange', () => {
+		if (document.visibilityState === 'hidden') {
+			flushPendingFilesSave();
+		}
+	});
+}
 
 // ============================================================================
 // Helpers
@@ -86,6 +178,15 @@ function saveToStorage(state: FilesState) {
 			showHidden: state.showHidden
 		};
 		localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+
+		// Also sync preferences to server
+		const prefs: FilesPreferences = {
+			viewMode: state.viewMode,
+			sortBy: state.sortBy,
+			sortAsc: state.sortAsc,
+			showHidden: state.showHidden
+		};
+		saveToServer(prefs);
 	} catch (e) {
 		console.error('[Files] Failed to save state to localStorage:', e);
 	}
@@ -492,6 +593,65 @@ function createFilesStore() {
 
 		clearError(): void {
 			update((state) => ({ ...state, error: null }));
+		},
+
+		// ========================================================================
+		// Server Sync
+		// ========================================================================
+
+		/**
+		 * Sync preferences from server (call after authentication)
+		 * Server is the source of truth for UI preferences
+		 */
+		async syncFromServer(): Promise<void> {
+			if (typeof window === 'undefined') return;
+
+			const serverPrefs = await loadFromServer();
+			const localState = get({ subscribe });
+
+			if (serverPrefs) {
+				// Server has preferences - update local state
+				const needsUpdate =
+					serverPrefs.viewMode !== localState.viewMode ||
+					serverPrefs.sortBy !== localState.sortBy ||
+					serverPrefs.sortAsc !== localState.sortAsc ||
+					serverPrefs.showHidden !== localState.showHidden;
+
+				if (needsUpdate) {
+					console.log('[Files] Server preferences differ, updating local');
+
+					// Update localStorage
+					const toSave = {
+						selectedProjectId: localState.selectedProjectId,
+						...serverPrefs
+					};
+					localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+
+					// Update store
+					update((state) => ({
+						...state,
+						...serverPrefs
+					}));
+				} else {
+					console.log('[Files] Server and local preferences in sync');
+				}
+			} else {
+				// No server data - push local to server (migration)
+				console.log('[Files] No server preferences, pushing local');
+			}
+
+			hasSyncedFromServer = true;
+
+			// If no server data, save current local preferences to server
+			if (!serverPrefs) {
+				const prefs: FilesPreferences = {
+					viewMode: localState.viewMode,
+					sortBy: localState.sortBy,
+					sortAsc: localState.sortAsc,
+					showHidden: localState.showHidden
+				};
+				saveToServer(prefs);
+			}
 		},
 
 		// ========================================================================
