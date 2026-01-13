@@ -1,249 +1,199 @@
 """
-Tests for the unified hook service.
+Tests for the hook service.
+
+The hook service enables the CLI's hook system by passing a hooks config to the SDK.
+This allows:
+1. Plugin hooks (like Ralph Loop) to work natively via CLI
+2. Database hooks (from HooksCard) to work via SDK callbacks
 """
 
 import pytest
-import tempfile
-import os
-from pathlib import Path
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, AsyncMock
 
 from app.core.hook_service import (
-    detect_plugin_loop_state,
-    _read_ralph_loop_state,
-    _update_plugin_iteration,
-    _remove_plugin_state,
+    get_database_hooks_for_event,
     build_hooks_config,
-    create_stop_hook_handler,
+    create_hook_handler,
+    SUPPORTED_HOOK_EVENTS,
 )
 
 
-class TestRalphLoopStateDetection:
-    """Tests for Ralph Loop state file detection."""
+class TestGetDatabaseHooks:
+    """Tests for database hook retrieval."""
 
-    def test_no_state_file(self, tmp_path):
-        """Should return None if no state file exists."""
-        result = _read_ralph_loop_state(str(tmp_path))
-        assert result is None
+    @pytest.mark.asyncio
+    async def test_no_project_id(self):
+        """Should return empty list when no project ID."""
+        result = await get_database_hooks_for_event(None, "Stop")
+        assert result == []
 
-    def test_read_valid_state_file(self, tmp_path):
-        """Should correctly parse Ralph Loop state file."""
-        claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir()
-        state_file = claude_dir / "ralph-loop.local.md"
-        state_file.write_text("""---
-active: true
-iteration: 3
-max_iterations: 10
-completion_promise: "DONE"
-started_at: "2024-01-01T00:00:00Z"
----
+    @pytest.mark.asyncio
+    async def test_with_project_id(self):
+        """Should query database for hooks."""
+        with patch('app.core.hook_service.database') as mock_db:
+            mock_db.get_hooks_for_project_and_event.return_value = [
+                {"name": "test-hook", "command": "echo test"}
+            ]
+            result = await get_database_hooks_for_event("test-project", "Stop")
+            assert len(result) == 1
+            assert result[0]["name"] == "test-hook"
+            mock_db.get_hooks_for_project_and_event.assert_called_once_with("test-project", "Stop")
 
-Build a REST API for todos
-""")
-        result = _read_ralph_loop_state(str(tmp_path))
-
-        assert result is not None
-        assert result["iteration"] == 3
-        assert result["max_iterations"] == 10
-        assert result["completion_promise"] == "DONE"
-        assert result["prompt"] == "Build a REST API for todos"
-
-    def test_read_state_file_null_promise(self, tmp_path):
-        """Should handle null completion_promise."""
-        claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir()
-        state_file = claude_dir / "ralph-loop.local.md"
-        state_file.write_text("""---
-active: true
-iteration: 1
-max_iterations: 0
-completion_promise: null
----
-
-Some task
-""")
-        result = _read_ralph_loop_state(str(tmp_path))
-
-        assert result is not None
-        assert result["iteration"] == 1
-        assert result["max_iterations"] == 0
-        assert result["completion_promise"] is None
-
-    def test_read_malformed_state_file(self, tmp_path):
-        """Should return None for malformed state files."""
-        claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir()
-        state_file = claude_dir / "ralph-loop.local.md"
-        state_file.write_text("not a valid state file")
-
-        result = _read_ralph_loop_state(str(tmp_path))
-        assert result is None
-
-
-class TestPluginLoopDetection:
-    """Tests for generic plugin loop detection."""
-
-    def test_detect_ralph_loop(self, tmp_path):
-        """Should detect active Ralph Loop."""
-        claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir()
-        state_file = claude_dir / "ralph-loop.local.md"
-        state_file.write_text("""---
-active: true
-iteration: 1
-max_iterations: 5
-completion_promise: null
----
-
-Test prompt
-""")
-        result = detect_plugin_loop_state(str(tmp_path))
-
-        assert result is not None
-        assert result["plugin"] == "ralph-loop"
-        assert result["state"]["iteration"] == 1
-
-    def test_detect_no_plugin_loop(self, tmp_path):
-        """Should return None when no plugin loop is active."""
-        result = detect_plugin_loop_state(str(tmp_path))
-        assert result is None
-
-
-class TestPluginStateManagement:
-    """Tests for plugin state file management."""
-
-    def test_update_iteration(self, tmp_path):
-        """Should update iteration count in state file."""
-        claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir()
-        state_file = claude_dir / "ralph-loop.local.md"
-        state_file.write_text("""---
-active: true
-iteration: 1
-max_iterations: 5
----
-
-Test
-""")
-        result = _update_plugin_iteration(str(tmp_path), "ralph-loop", 2)
-        assert result is True
-
-        content = state_file.read_text()
-        assert "iteration: 2" in content
-
-    def test_remove_state(self, tmp_path):
-        """Should remove plugin state file."""
-        claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir()
-        state_file = claude_dir / "ralph-loop.local.md"
-        state_file.write_text("test")
-
-        result = _remove_plugin_state(str(tmp_path), "ralph-loop")
-        assert result is True
-        assert not state_file.exists()
+    @pytest.mark.asyncio
+    async def test_database_error(self):
+        """Should return empty list on database error."""
+        with patch('app.core.hook_service.database') as mock_db:
+            mock_db.get_hooks_for_project_and_event.side_effect = Exception("DB error")
+            result = await get_database_hooks_for_event("test-project", "Stop")
+            assert result == []
 
 
 class TestBuildHooksConfig:
     """Tests for building SDK hooks configuration."""
 
-    def test_always_registers_stop_hook(self, tmp_path):
-        """Should always register Stop hook (to catch plugins that start mid-query)."""
-        # Even with no active plugin loop or database hooks, we still register Stop hook
-        # because plugins like Ralph Loop create their state files DURING the query
-        result = build_hooks_config(str(tmp_path), "test-project")
-        assert result is not None
-        assert "Stop" in result
-        assert len(result["Stop"]) == 1
-
-    def test_hooks_for_active_plugin_loop(self, tmp_path):
-        """Should create Stop hook when plugin loop is active."""
-        claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir()
-        state_file = claude_dir / "ralph-loop.local.md"
-        state_file.write_text("""---
-active: true
-iteration: 1
-max_iterations: 5
----
-
-Test
-""")
+    def test_always_returns_config(self, tmp_path):
+        """Should always return a hooks config to enable CLI hook system."""
         with patch('app.core.hook_service.database') as mock_db:
             mock_db.get_hooks_for_project_and_event.return_value = []
             result = build_hooks_config(str(tmp_path), "test-project")
 
+        # Should always return a config (never None)
+        assert result is not None
+        # Should have at least a Stop hook to enable CLI
+        assert "Stop" in result
+        assert len(result["Stop"]) == 1
+
+    def test_with_database_hooks(self, tmp_path):
+        """Should register handlers for events with database hooks."""
+        with patch('app.core.hook_service.database') as mock_db:
+            # Simulate Stop hooks exist in database
+            def get_hooks(project_id, event):
+                if event == "Stop":
+                    return [{"name": "test-hook", "command": "echo test"}]
+                return []
+            mock_db.get_hooks_for_project_and_event.side_effect = get_hooks
+
+            result = build_hooks_config(str(tmp_path), "test-project")
+
+        assert result is not None
+        assert "Stop" in result
+        assert len(result["Stop"]) == 1
+
+    def test_multiple_event_types(self, tmp_path):
+        """Should register handlers for multiple event types with database hooks."""
+        with patch('app.core.hook_service.database') as mock_db:
+            # Simulate hooks for multiple events
+            def get_hooks(project_id, event):
+                if event in ["Stop", "PreToolUse"]:
+                    return [{"name": f"{event}-hook", "command": "echo test"}]
+                return []
+            mock_db.get_hooks_for_project_and_event.side_effect = get_hooks
+
+            result = build_hooks_config(str(tmp_path), "test-project")
+
+        assert result is not None
+        assert "Stop" in result
+        assert "PreToolUse" in result
+
+    def test_no_project_id(self, tmp_path):
+        """Should still return config when no project ID (to enable plugins)."""
+        result = build_hooks_config(str(tmp_path), None)
+
+        # Should still return a config to enable CLI hook system
         assert result is not None
         assert "Stop" in result
 
 
-class TestStopHookHandler:
-    """Tests for the unified Stop hook handler."""
+class TestCreateHookHandler:
+    """Tests for the generic hook handler factory."""
 
     @pytest.mark.asyncio
-    async def test_ralph_loop_continuation(self, tmp_path):
-        """Should return block decision for active Ralph Loop."""
-        claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir()
-        state_file = claude_dir / "ralph-loop.local.md"
-        state_file.write_text("""---
-active: true
-iteration: 1
-max_iterations: 5
-completion_promise: null
----
-
-Test prompt
-""")
-
-        handler = create_stop_hook_handler(str(tmp_path))
+    async def test_wrong_event_type(self, tmp_path):
+        """Should return empty output for mismatched event type."""
+        handler = create_hook_handler("Stop", str(tmp_path), "test-project")
         result = await handler(
-            {"hook_event_name": "Stop", "stop_hook_active": False},
+            {"hook_event_name": "PreToolUse"},
             None,
             {"signal": None}
         )
-
-        assert result.get("decision") == "block"
-        assert result.get("reason") == "Test prompt"
-        assert "iteration 2" in result.get("systemMessage", "")
+        assert result.get("decision") is None
 
     @pytest.mark.asyncio
-    async def test_ralph_loop_max_iterations(self, tmp_path):
-        """Should allow stop when max iterations reached."""
-        claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir()
-        state_file = claude_dir / "ralph-loop.local.md"
-        state_file.write_text("""---
-active: true
-iteration: 5
-max_iterations: 5
-completion_promise: null
----
-
-Test prompt
-""")
-
-        handler = create_stop_hook_handler(str(tmp_path))
-        result = await handler(
-            {"hook_event_name": "Stop", "stop_hook_active": False},
-            None,
-            {"signal": None}
-        )
-
-        # Should not block when max iterations reached
-        assert result.get("decision") != "block"
-
-    @pytest.mark.asyncio
-    async def test_no_active_loop(self, tmp_path):
-        """Should allow stop when no plugin loop is active."""
+    async def test_no_database_hooks(self, tmp_path):
+        """Should return empty output when no database hooks."""
         with patch('app.core.hook_service.get_database_hooks_for_event', new_callable=AsyncMock) as mock:
             mock.return_value = []
-            handler = create_stop_hook_handler(str(tmp_path))
+            handler = create_hook_handler("Stop", str(tmp_path), "test-project")
             result = await handler(
                 {"hook_event_name": "Stop", "stop_hook_active": False},
                 None,
                 {"signal": None}
             )
+        assert result.get("decision") is None
 
-        # Should not block
-        assert result.get("decision") != "block"
+    @pytest.mark.asyncio
+    async def test_database_hook_blocks(self, tmp_path):
+        """Should honor block decision from database hook."""
+        with patch('app.core.hook_service.get_database_hooks_for_event', new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = [{"name": "test-hook", "command": "echo test"}]
+            with patch('app.core.hook_service.execute_hook', new_callable=AsyncMock) as mock_exec:
+                mock_exec.return_value = {
+                    "success": True,
+                    "output": '{"decision": "block", "reason": "continue", "systemMessage": "test"}'
+                }
+                handler = create_hook_handler("Stop", str(tmp_path), "test-project")
+                result = await handler(
+                    {"hook_event_name": "Stop", "stop_hook_active": False},
+                    None,
+                    {"signal": None}
+                )
+        assert result.get("decision") == "block"
+        assert result.get("reason") == "continue"
+        assert result.get("systemMessage") == "test"
+
+    @pytest.mark.asyncio
+    async def test_database_hook_denies(self, tmp_path):
+        """Should honor deny decision from database hook (PreToolUse)."""
+        with patch('app.core.hook_service.get_database_hooks_for_event', new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = [{"name": "test-hook", "command": "echo test"}]
+            with patch('app.core.hook_service.execute_hook', new_callable=AsyncMock) as mock_exec:
+                mock_exec.return_value = {
+                    "success": True,
+                    "output": '{"decision": "deny", "reason": "not allowed"}'
+                }
+                handler = create_hook_handler("PreToolUse", str(tmp_path), "test-project")
+                result = await handler(
+                    {"hook_event_name": "PreToolUse", "tool_name": "Bash"},
+                    "tool-123",
+                    {"signal": None}
+                )
+        assert result.get("decision") == "deny"
+        assert result.get("reason") == "not allowed"
+
+    @pytest.mark.asyncio
+    async def test_database_hook_approves(self, tmp_path):
+        """Should honor approve decision from database hook (PreToolUse)."""
+        with patch('app.core.hook_service.get_database_hooks_for_event', new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = [{"name": "test-hook", "command": "echo test"}]
+            with patch('app.core.hook_service.execute_hook', new_callable=AsyncMock) as mock_exec:
+                mock_exec.return_value = {
+                    "success": True,
+                    "output": '{"decision": "approve"}'
+                }
+                handler = create_hook_handler("PreToolUse", str(tmp_path), "test-project")
+                result = await handler(
+                    {"hook_event_name": "PreToolUse", "tool_name": "Bash"},
+                    "tool-123",
+                    {"signal": None}
+                )
+        assert result.get("decision") == "approve"
+
+
+class TestSupportedHookEvents:
+    """Tests for supported hook events."""
+
+    def test_all_events_defined(self):
+        """Should have all expected hook events defined."""
+        expected = ["PreToolUse", "PostToolUse", "Stop", "SubagentStop", "PreCompact", "UserPromptSubmit"]
+        for event in expected:
+            assert event in SUPPORTED_HOOK_EVENTS
