@@ -2,7 +2,8 @@
 	/**
 	 * ToolUseMessage - Collapsible tool execution display
 	 */
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
+	import { get } from 'svelte/store';
 	import { chatPreferences, type ChatPreferences, DEFAULT_PREFERENCES } from '$lib/stores/chatPreferences';
 
 	interface Props {
@@ -25,7 +26,12 @@
 	let userExpandedChoice = $state(false);
 
 	// Subscribe to preferences on mount (client-side only)
-	onMount(() => {
+	onMount(async () => {
+		// Get current value immediately (may have been updated before mount)
+		prefs = get(chatPreferences);
+		await tick(); // Force re-render with current preferences
+
+		// Subscribe to future changes
 		const unsubscribe = chatPreferences.subscribe(p => {
 			prefs = p;
 		});
