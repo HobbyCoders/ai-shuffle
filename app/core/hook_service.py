@@ -157,7 +157,7 @@ async def execute_plugin_hook(
 
     try:
         logger.info(f"[HookService] Executing command: {command}")
-        logger.debug(f"[HookService] stdin: {stdin_data[:200]}...")
+        logger.info(f"[HookService] Hook input data: {stdin_data[:500]}")
 
         # Run the command
         process = await asyncio.wait_for(
