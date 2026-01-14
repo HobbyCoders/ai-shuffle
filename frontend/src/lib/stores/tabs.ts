@@ -3661,8 +3661,6 @@ function createTabsStore() {
 				const message = data.message as string;
 				const severity = data.severity as string;
 
-				console.log(`[Tab ${tabId}] Plugin message from ${plugin} (${severity}):`, message);
-
 				// Add as a system message with plugin_warning subtype
 				// This matches how it's loaded from hooks.jsonl for consistency
 				update(s => ({
