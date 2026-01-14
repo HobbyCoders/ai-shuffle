@@ -2,6 +2,7 @@
 	/**
 	 * ToolUseMessage - Collapsible tool execution display
 	 */
+	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
 
 	interface Props {
 		name: string;
@@ -13,6 +14,33 @@
 	}
 
 	let { name, input, partialInput, result, status, streaming = false }: Props = $props();
+
+	// Subscribe to preferences for reactive updates
+	let prefs = $state<ChatPreferences | null>(null);
+	$effect(() => {
+		const unsubscribe = chatPreferences.subscribe(p => {
+			prefs = p;
+		});
+		return unsubscribe;
+	});
+
+	// Track if user has manually toggled this details element
+	// Once toggled, user's choice takes precedence over preference
+	let userToggled = $state(false);
+	let userExpandedChoice = $state(false);
+
+	// Compute expanded state: user toggle > preference
+	const isExpanded = $derived(
+		userToggled
+			? userExpandedChoice
+			: (prefs?.toolsStartExpanded ?? false)
+	);
+
+	function handleToggle(event: Event) {
+		const details = event.target as HTMLDetailsElement;
+		userToggled = true;
+		userExpandedChoice = details.open;
+	}
 
 	// Extract field from partial JSON string using regex (for streaming)
 	// Handles multiline content with escaped characters
@@ -296,7 +324,7 @@
 
 <div class="w-full tool-use-message">
 	<div class="min-w-0">
-		<details class="w-full border border-border rounded-lg overflow-hidden group">
+		<details class="w-full border border-border rounded-lg overflow-hidden group" open={isExpanded} ontoggle={handleToggle}>
 			<summary class="w-full px-3 py-2 hover:bg-muted/30 flex items-center gap-2 cursor-pointer list-none transition-colors">
 				<!-- Status indicator - use toolStatus as primary, not streaming -->
 				{#if status === 'running'}

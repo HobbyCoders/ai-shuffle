@@ -31,9 +31,6 @@
 		profileName = 'Assistant'
 	}: Props = $props();
 
-	// Use prop override if provided, otherwise use preference
-	let isExpanded = $state(initialExpanded ?? chatPreferences.getValue('thinkingStartExpanded'));
-
 	// Subscribe to preferences for reactive updates
 	let prefs = $state<ChatPreferences | null>(null);
 	$effect(() => {
@@ -42,6 +39,25 @@
 		});
 		return unsubscribe;
 	});
+
+	// Track if user has manually toggled this block
+	// Once toggled, user's choice takes precedence over preference
+	let userToggled = $state(false);
+	let userExpandedChoice = $state(false);
+
+	// Compute expanded state: prop override > user toggle > preference
+	const isExpanded = $derived(
+		initialExpanded !== undefined
+			? initialExpanded
+			: userToggled
+				? userExpandedChoice
+				: (prefs?.thinkingStartExpanded ?? false)
+	);
+
+	function toggleExpanded() {
+		userToggled = true;
+		userExpandedChoice = !isExpanded;
+	}
 
 	// Generate a summary of the thinking content (first ~100 chars of meaningful text)
 	function getSummary(text: string): string {
@@ -68,19 +84,7 @@
 
 	function renderMarkdown(text: string): string {
 		try {
-			// Strip complete code blocks - they don't render well with italic styling
-			// Remove fenced code blocks (```...```)
-			let cleaned = text.replace(/```[\s\S]*?```/g, '');
-
-			// Remove complete inline code (`...`)
-			cleaned = cleaned.replace(/`[^`]+`/g, '');
-
-			// Remove any remaining backticks to prevent incomplete code blocks
-			// from rendering with code block styling during streaming
-			// This keeps the text content but removes the backticks themselves
-			cleaned = cleaned.replace(/`/g, '');
-
-			return marked.parse(cleaned) as string;
+			return marked.parse(text) as string;
 		} catch {
 			return text;
 		}
@@ -93,7 +97,7 @@
 <div class="thinking-block" class:streaming>
 	<!-- Collapsible Header -->
 	<button
-		onclick={() => isExpanded = !isExpanded}
+		onclick={toggleExpanded}
 		class="thinking-header"
 	>
 		<span class="thinking-label">{profileName}</span>

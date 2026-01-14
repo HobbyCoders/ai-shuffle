@@ -3,7 +3,7 @@
 	 * TodoList - Cursor-style minimal task progress display
 	 */
 	import type { TodoItem } from '$lib/stores/tabs';
-	import { chatPreferences } from '$lib/stores/chatPreferences';
+	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
 
 	interface Props {
 		todos: TodoItem[];
@@ -13,8 +13,33 @@
 
 	let { todos, initialExpanded }: Props = $props();
 
-	// Track expanded state - use preference or prop override
-	let isExpanded = $state(initialExpanded ?? chatPreferences.getValue('todosStartExpanded'));
+	// Subscribe to preferences for reactive updates
+	let prefs = $state<ChatPreferences | null>(null);
+	$effect(() => {
+		const unsubscribe = chatPreferences.subscribe(p => {
+			prefs = p;
+		});
+		return unsubscribe;
+	});
+
+	// Track if user has manually toggled this list
+	// Once toggled, user's choice takes precedence over preference
+	let userToggled = $state(false);
+	let userExpandedChoice = $state(false);
+
+	// Compute expanded state: prop override > user toggle > preference
+	const isExpanded = $derived(
+		initialExpanded !== undefined
+			? initialExpanded
+			: userToggled
+				? userExpandedChoice
+				: (prefs?.todosStartExpanded ?? true)
+	);
+
+	function toggleExpanded() {
+		userToggled = true;
+		userExpandedChoice = !isExpanded;
+	}
 
 	// Compute statistics
 	const stats = $derived(() => {
@@ -50,7 +75,7 @@
 	<div class="w-full">
 		<!-- Collapsed Header -->
 		<button
-			onclick={() => isExpanded = !isExpanded}
+			onclick={toggleExpanded}
 			class="w-full flex items-center gap-2 py-1.5 text-left hover:bg-muted/30 rounded px-2 -mx-2 transition-colors"
 		>
 			<!-- Circular Progress or Checkmark -->
