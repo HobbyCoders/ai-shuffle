@@ -126,11 +126,12 @@
 		return branch || null;
 	}
 
-	// Check if a worktree's branch is tracking a remote
-	function isRemoteBranch(branchName: string): boolean {
+	// Check if a worktree's branch has remote tracking (upstream)
+	function hasRemoteTracking(branchName: string): boolean {
 		const branch = getBranchInfo(branchName);
 		if (!branch) return false;
-		return branch.remote || !!branch.upstream;
+		// Has tracking if it has an upstream reference or matches a remote branch
+		return !!branch.upstream || branch.remote;
 	}
 
 	// Display text for the trigger button
@@ -439,7 +440,7 @@
 									bind:this={searchInputRef}
 									type="text"
 									class="search-input"
-									placeholder="Search branches..."
+									placeholder="Search worktrees..."
 									bind:value={searchQuery}
 									onclick={(e) => e.stopPropagation()}
 								/>
@@ -461,7 +462,7 @@
 									</div>
 									{#each filteredWorktrees() as wt}
 									{@const branchInfo = getBranchInfo(wt.branch_name)}
-									{@const isRemote = isRemoteBranch(wt.branch_name)}
+									{@const isTracked = hasRemoteTracking(wt.branch_name)}
 										<button
 											type="button"
 											class="dropdown-item worktree-item"
@@ -476,8 +477,8 @@
 														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 8v4c0 2 2 4 6 4v2" />
 													</svg>
 													<span class="branch-name">{wt.branch_name}</span>
-													<span class="location-badge" class:remote={isRemote}>
-														{isRemote ? 'remote' : 'local'}
+													<span class="location-badge" class:tracked={isTracked}>
+														{isTracked ? 'tracked' : 'local'}
 													</span>
 												</div>
 											</div>
@@ -876,13 +877,13 @@
 		font-weight: 600;
 		padding: 0.125rem 0.375rem;
 		border-radius: calc(var(--radius, 0.75rem) * 0.33);
-		background: color-mix(in srgb, #f59e0b 15%, transparent);
-		color: #f59e0b;
+		background: color-mix(in srgb, var(--warning) 15%, transparent);
+		color: var(--warning);
 	}
 
 	.dirty-status.clean {
-		background: color-mix(in srgb, #22c55e 15%, transparent);
-		color: #22c55e;
+		background: color-mix(in srgb, var(--success) 15%, transparent);
+		color: var(--success);
 	}
 
 	/* Worktree main row layout */
@@ -908,13 +909,13 @@
 		font-weight: 500;
 		padding: 0.125rem 0.375rem;
 		border-radius: calc(var(--radius, 0.75rem) * 0.33);
-		background: color-mix(in srgb, #22c55e 15%, transparent);
-		color: #22c55e;
+		background: color-mix(in srgb, var(--muted-foreground) 15%, transparent);
+		color: var(--muted-foreground);
 	}
 
-	.location-badge.remote {
-		background: color-mix(in srgb, #3b82f6 15%, transparent);
-		color: #3b82f6;
+	.location-badge.tracked {
+		background: color-mix(in srgb, var(--info) 15%, transparent);
+		color: var(--info);
 	}
 
 	/* Ahead/Behind counts */
@@ -927,11 +928,11 @@
 	}
 
 	.ahead-behind .ahead {
-		color: #22c55e;
+		color: var(--success);
 	}
 
 	.ahead-behind .behind {
-		color: #ef4444;
+		color: var(--destructive);
 	}
 
 	.current-badge, .remote-badge {
