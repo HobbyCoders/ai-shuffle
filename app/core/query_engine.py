@@ -34,6 +34,7 @@ from app.core.permission_handler import permission_handler
 from app.core.platform import detect_deployment_mode, DeploymentMode
 from app.core.user_question_handler import user_question_handler
 from app.core import encryption
+from app.core.jsonl_parser import write_hook_message
 
 logger = logging.getLogger(__name__)
 
@@ -2681,6 +2682,15 @@ async def stream_to_websocket(
             # Drain stderr queue and yield any plugin messages
             for stderr_msg in await drain_stderr_queue():
                 logger.info(f"[WS] Yielding plugin message to websocket: {stderr_msg.get('type')}")
+                # Write hook message to JSONL file for persistence across app restarts
+                if state.sdk_session_id and options.cwd:
+                    write_hook_message(
+                        sdk_session_id=state.sdk_session_id,
+                        working_dir=options.cwd,
+                        plugin=stderr_msg.get("plugin", "unknown"),
+                        message=stderr_msg.get("message", ""),
+                        severity=stderr_msg.get("severity", "warning")
+                    )
                 yield stderr_msg
 
             if isinstance(message, SystemMessage):
@@ -3011,6 +3021,15 @@ async def stream_to_websocket(
 
         # Final drain of stderr queue after streaming loop completes
         for stderr_msg in await drain_stderr_queue():
+            # Write hook message to JSONL file for persistence across app restarts
+            if state.sdk_session_id and options.cwd:
+                write_hook_message(
+                    sdk_session_id=state.sdk_session_id,
+                    working_dir=options.cwd,
+                    plugin=stderr_msg.get("plugin", "unknown"),
+                    message=stderr_msg.get("message", ""),
+                    severity=stderr_msg.get("severity", "warning")
+                )
             yield stderr_msg
 
     except asyncio.CancelledError:

@@ -4627,44 +4627,6 @@ function createTabsStore() {
 						: { ...msg, profileId };
 				});
 
-				// Preserve plugin_warning messages from current session that aren't in JSONL history
-				// Hook stderr warnings are ephemeral - not stored in session history files
-				// Insert them at their original positions relative to other messages
-				for (let i = 0; i < existingMessages.length; i++) {
-					const existingMsg = existingMessages[i];
-					if (existingMsg.type !== 'plugin_warning') continue;
-
-					// Find the preceding non-plugin_warning message in existing messages
-					let precedingMsg = null;
-					for (let j = i - 1; j >= 0; j--) {
-						if (existingMessages[j].type !== 'plugin_warning') {
-							precedingMsg = existingMessages[j];
-							break;
-						}
-					}
-
-					// Find where to insert in the new array
-					let insertIndex = messagesWithPreservedIds.length; // Default to end
-					if (precedingMsg) {
-						// Find the matching message in new array by type and content
-						const matchIndex = messagesWithPreservedIds.findIndex(m =>
-							m.type === precedingMsg!.type &&
-							m.role === precedingMsg!.role &&
-							(m.toolId === precedingMsg!.toolId || m.content === precedingMsg!.content)
-						);
-						if (matchIndex !== -1) {
-							insertIndex = matchIndex + 1;
-						}
-					} else {
-						// No preceding message - insert at beginning
-						insertIndex = 0;
-					}
-
-					// Insert the plugin warning at the correct position
-					messagesWithPreservedIds.splice(insertIndex, 0, existingMsg);
-					console.log(`[Tab ${tabId}] Preserved plugin_warning at position ${insertIndex}`);
-				}
-
 				// Load token totals from session history - single source of truth
 				// Note: Don't reset profile to session.profile_id - preserve user's current selection
 				// sessionProfileId is for fallback display only (legacy messages without per-message profileId)

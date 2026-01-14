@@ -118,6 +118,101 @@ def get_session_jsonl_path(sdk_session_id: str, working_dir: str = "/workspace")
     return None
 
 
+def get_hooks_jsonl_path(sdk_session_id: str, working_dir: str) -> Path:
+    """
+    Get the path to a session's hooks JSONL file.
+
+    This file stores hook stderr output (plugin warnings) that aren't captured
+    in the main session JSONL.
+
+    Args:
+        sdk_session_id: The Claude SDK session ID (UUID)
+        working_dir: The working directory for the project
+
+    Returns:
+        Path to the hooks JSONL file (may not exist yet)
+    """
+    claude_projects_dir = settings.get_claude_projects_dir
+    project_dir_name = get_project_dir_name(working_dir)
+    project_dir = claude_projects_dir / project_dir_name
+
+    # Ensure directory exists
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    return project_dir / f"{sdk_session_id}.hooks.jsonl"
+
+
+def write_hook_message(
+    sdk_session_id: str,
+    working_dir: str,
+    plugin: str,
+    message: str,
+    severity: str
+) -> None:
+    """
+    Append a hook message to the session's hooks JSONL file.
+
+    Args:
+        sdk_session_id: The Claude SDK session ID
+        working_dir: The working directory for the project
+        plugin: Name of the plugin that generated the message
+        message: The stderr output from the hook
+        severity: Severity level (warning, error, info)
+    """
+    hooks_path = get_hooks_jsonl_path(sdk_session_id, working_dir)
+
+    entry = {
+        "type": "plugin_warning",
+        "plugin": plugin,
+        "message": message,
+        "severity": severity,
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    }
+
+    try:
+        with open(hooks_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry) + '\n')
+        logger.debug(f"Wrote hook message to {hooks_path}")
+    except Exception as e:
+        logger.error(f"Failed to write hook message to {hooks_path}: {e}")
+
+
+def parse_hooks_jsonl(sdk_session_id: str, working_dir: str) -> List[Dict[str, Any]]:
+    """
+    Parse a session's hooks JSONL file and return plugin warning messages.
+
+    Args:
+        sdk_session_id: The Claude SDK session ID
+        working_dir: The working directory for the project
+
+    Returns:
+        List of plugin warning messages with: id, role, content, type, metadata
+    """
+    hooks_path = get_hooks_jsonl_path(sdk_session_id, working_dir)
+
+    if not hooks_path.exists():
+        return []
+
+    messages = []
+    for entry in parse_jsonl_file(hooks_path):
+        if entry.get("type") == "plugin_warning":
+            messages.append({
+                "id": f"plugin-{entry.get('timestamp', '')}",
+                "role": "system",
+                "content": entry.get("message", ""),
+                "type": "plugin_warning",
+                "metadata": {
+                    "plugin": entry.get("plugin"),
+                    "severity": entry.get("severity"),
+                    "timestamp": entry.get("timestamp")
+                },
+                "streaming": False
+            })
+
+    logger.debug(f"Parsed {len(messages)} hook messages from {hooks_path}")
+    return messages
+
+
 def parse_jsonl_file(jsonl_path: Path) -> Generator[Dict[str, Any], None, None]:
     """
     Parse a JSONL file line by line.
@@ -789,6 +884,24 @@ def parse_session_history(
                 })
 
     logger.info(f"Parsed {len(messages)} messages from JSONL history")
+
+    # Merge plugin warning messages from hooks JSONL file
+    hook_messages = parse_hooks_jsonl(sdk_session_id, working_dir)
+    if hook_messages:
+        logger.info(f"Merging {len(hook_messages)} hook messages from hooks.jsonl")
+        # Insert hook messages at their correct positions based on timestamp
+        for hook_msg in hook_messages:
+            hook_ts = hook_msg.get("metadata", {}).get("timestamp", "")
+            # Find insertion point - after the last message with earlier timestamp
+            insert_idx = len(messages)  # Default to end
+            for i, msg in enumerate(messages):
+                msg_ts = msg.get("metadata", {}).get("timestamp", "")
+                if msg_ts and hook_ts and msg_ts > hook_ts:
+                    insert_idx = i
+                    break
+            messages.insert(insert_idx, hook_msg)
+        logger.info(f"Total messages after merging hooks: {len(messages)}")
+
     return messages
 
 
