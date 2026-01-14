@@ -7,6 +7,7 @@
 	 */
 	import { marked } from 'marked';
 	import StreamingIndicator from './StreamingIndicator.svelte';
+	import { get } from 'svelte/store';
 	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
 
 	// Configure marked for markdown rendering
@@ -32,7 +33,8 @@
 	}: Props = $props();
 
 	// Subscribe to preferences for reactive updates
-	let prefs = $state<ChatPreferences | null>(null);
+	// Initialize with current store value (not null) to prevent flash of wrong state
+	let prefs = $state<ChatPreferences>(get(chatPreferences));
 	$effect(() => {
 		const unsubscribe = chatPreferences.subscribe(p => {
 			prefs = p;
@@ -51,7 +53,7 @@
 			? initialExpanded
 			: userToggled
 				? userExpandedChoice
-				: (prefs?.thinkingStartExpanded ?? false)
+				: prefs.thinkingStartExpanded
 	);
 
 	function toggleExpanded() {
@@ -91,7 +93,7 @@
 	}
 
 	// Derived: should show summary when collapsed
-	const showSummary = $derived(!isExpanded && prefs?.showThinkingSummary && content);
+	const showSummary = $derived(!isExpanded && prefs.showThinkingSummary && content);
 </script>
 
 <div class="thinking-block" class:streaming>

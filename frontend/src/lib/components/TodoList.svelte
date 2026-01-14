@@ -2,6 +2,7 @@
 	/**
 	 * TodoList - Cursor-style minimal task progress display
 	 */
+	import { get } from 'svelte/store';
 	import type { TodoItem } from '$lib/stores/tabs';
 	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
 
@@ -14,7 +15,8 @@
 	let { todos, initialExpanded }: Props = $props();
 
 	// Subscribe to preferences for reactive updates
-	let prefs = $state<ChatPreferences | null>(null);
+	// Initialize with current store value (not null) to prevent flash of wrong state
+	let prefs = $state<ChatPreferences>(get(chatPreferences));
 	$effect(() => {
 		const unsubscribe = chatPreferences.subscribe(p => {
 			prefs = p;
@@ -33,7 +35,7 @@
 			? initialExpanded
 			: userToggled
 				? userExpandedChoice
-				: (prefs?.todosStartExpanded ?? true)
+				: prefs.todosStartExpanded
 	);
 
 	function toggleExpanded() {
