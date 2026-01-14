@@ -9,7 +9,7 @@
 	 * - Create New Branch (modal with branch prefix tags)
 	 */
 	import { tabs, type ChatTab, type ExecutionMode } from '$lib/stores/tabs';
-	import { getBranches, getWorktrees, syncWorktrees, getGitStatus, type Branch, type Worktree } from '$lib/api/git';
+	import { getBranches, getWorktrees, syncWorktrees, fetchRemote, getGitStatus, type Branch, type Worktree } from '$lib/api/git';
 	import { onMount } from 'svelte';
 
 	interface Props {
@@ -184,6 +184,18 @@
 		loading = true;
 		error = null;
 		try {
+			// First, fetch from remote and prune stale branches
+			// This ensures we have the latest remote state and removes deleted branches
+			await fetchRemote(projectId).catch(e => {
+				console.warn('Failed to fetch remote (may be offline):', e);
+			});
+
+			// Sync worktrees to clean up stale database records
+			await syncWorktrees(projectId).catch(e => {
+				console.warn('Failed to sync worktrees:', e);
+			});
+
+			// Now fetch the latest branches and worktrees
 			const [branchResult, worktreeResult] = await Promise.all([
 				getBranches(projectId, true),
 				getWorktrees(projectId)
@@ -304,6 +316,12 @@
 		if (tab.project) {
 			modalLoading = true;
 			try {
+				// First fetch from remote and prune stale branches
+				await fetchRemote(tab.project).catch(e => {
+					console.warn('Failed to fetch remote (may be offline):', e);
+				});
+
+				// Then get fresh branch list
 				const branchResult = await getBranches(tab.project, true);
 				branches = branchResult;
 				// Set default base branch
