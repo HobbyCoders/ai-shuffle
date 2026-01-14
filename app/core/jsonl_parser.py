@@ -196,15 +196,27 @@ def parse_hooks_jsonl(sdk_session_id: str, working_dir: str) -> List[Dict[str, A
     messages = []
     for entry in parse_jsonl_file(hooks_path):
         if entry.get("type") == "plugin_warning":
+            plugin = entry.get("plugin", "Plugin")
+            message_content = entry.get("message", "")
+            severity = entry.get("severity", "warning")
+            timestamp = entry.get("timestamp", "")
+
             messages.append({
-                "id": f"plugin-{entry.get('timestamp', '')}",
+                "id": f"plugin-{timestamp}",
                 "role": "system",
-                "content": entry.get("message", ""),
-                "type": "plugin_warning",
+                "content": message_content,
+                "type": "system",
+                "subtype": "plugin_warning",
+                "systemSubtype": "plugin_warning",
+                "systemData": {
+                    "plugin": plugin,
+                    "message": message_content,
+                    "severity": severity
+                },
                 "metadata": {
-                    "plugin": entry.get("plugin"),
-                    "severity": entry.get("severity"),
-                    "timestamp": entry.get("timestamp")
+                    "plugin": plugin,
+                    "severity": severity,
+                    "timestamp": timestamp
                 },
                 "streaming": False
             })

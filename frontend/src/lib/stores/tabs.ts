@@ -3663,7 +3663,8 @@ function createTabsStore() {
 
 				console.log(`[Tab ${tabId}] Plugin message from ${plugin} (${severity}):`, message);
 
-				// Add as a system-like message with plugin_warning type
+				// Add as a system message with plugin_warning subtype
+				// This matches how it's loaded from hooks.jsonl for consistency
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
@@ -3674,7 +3675,9 @@ function createTabsStore() {
 								id: `plugin-${Date.now()}`,
 								role: 'system' as const,
 								content: message,
-								type: 'plugin_warning' as MessageType,
+								type: 'system' as MessageType,
+								systemSubtype: 'plugin_warning',
+								systemData: { plugin, message, severity },
 								metadata: { plugin, severity }
 							}]
 						};
