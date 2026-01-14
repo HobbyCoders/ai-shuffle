@@ -510,12 +510,13 @@ def create_plugin_hook_handler(
         context: HookContext
     ) -> SyncHookJSONOutput:
         """Execute all plugin hooks for this event."""
-        logger.info(f"[HookService] {event_name} hook fired for {working_dir}")
-
-        # For PreToolUse/PostToolUse, check tool name against matcher
+        # For PreToolUse/PostToolUse, get the tool name from the input
         tool_name = None
         if event_name in ("PreToolUse", "PostToolUse"):
+            # The SDK provides tool_name in the hook input
             tool_name = hook_input.get("tool_name", "")
+
+        logger.info(f"[HookService] {event_name} hook fired for {working_dir} (tool={tool_name})")
 
         # Build the input dict that gets passed to plugin scripts via stdin
         script_input = {
@@ -532,9 +533,10 @@ def create_plugin_hook_handler(
             # Skip if matcher doesn't match tool name
             if matcher_pattern and tool_name:
                 if not re.match(matcher_pattern, tool_name, re.IGNORECASE):
+                    logger.info(f"[HookService] Skipping hook - tool '{tool_name}' doesn't match pattern '{matcher_pattern}'")
                     continue
 
-            logger.debug(f"[HookService] Executing {event_name} hook: {hook_def.get('command')}")
+            logger.info(f"[HookService] Executing {event_name} hook: {hook_def.get('command')}")
 
             result = await execute_plugin_hook(hook_def, script_input, working_dir)
 
