@@ -332,7 +332,6 @@
 					<CommandMessage
 						commandName={message.commandName || message.content}
 						commandArgs={message.commandArgs}
-						timestamp={message.metadata?.timestamp ? new Date(message.metadata.timestamp as string) : undefined}
 					/>
 				{:else if message.role === 'user'}
 					<UserMessage

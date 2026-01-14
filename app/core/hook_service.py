@@ -29,8 +29,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable, Awaitable
 
 from claude_agent_sdk.types import (
-    HookInput, HookContext, HookMatcher, SyncHookJSONOutput,
-    StopHookInput, PreToolUseHookInput, PostToolUseHookInput
+    HookInput, HookContext, HookMatcher, SyncHookJSONOutput
 )
 
 from app.db import database
@@ -250,6 +249,11 @@ async def execute_plugin_hook(
 
     except asyncio.TimeoutError:
         logger.warning(f"Plugin hook timed out after {timeout}s: {command}")
+        try:
+            process.kill()
+            await process.wait()
+        except Exception:
+            pass
         return None
     except Exception as e:
         logger.warning(f"Plugin hook execution failed: {e}")
