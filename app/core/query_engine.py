@@ -2661,8 +2661,11 @@ async def stream_to_websocket(
             try:
                 msg = stderr_queue.get_nowait()
                 messages.append(msg)
+                logger.info(f"[WS] Drained plugin message from queue: {msg.get('type')}")
             except asyncio.QueueEmpty:
                 break
+        if messages:
+            logger.info(f"[WS] Drained {len(messages)} plugin message(s) from stderr queue")
         return messages
 
     try:
@@ -2677,6 +2680,7 @@ async def stream_to_websocket(
 
             # Drain stderr queue and yield any plugin messages
             for stderr_msg in await drain_stderr_queue():
+                logger.info(f"[WS] Yielding plugin message to websocket: {stderr_msg.get('type')}")
                 yield stderr_msg
 
             if isinstance(message, SystemMessage):
