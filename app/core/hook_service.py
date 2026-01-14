@@ -156,10 +156,11 @@ async def execute_plugin_hook(
     stdin_data = json.dumps(hook_input)
 
     try:
-        logger.debug(f"Executing plugin hook: {command}")
+        logger.info(f"[HookService] Executing command: {command}")
+        logger.debug(f"[HookService] stdin: {stdin_data[:200]}...")
 
         # Run the command
-        result = await asyncio.wait_for(
+        process = await asyncio.wait_for(
             asyncio.create_subprocess_shell(
                 command,
                 stdin=subprocess.PIPE,
@@ -172,21 +173,29 @@ async def execute_plugin_hook(
         )
 
         stdout, stderr = await asyncio.wait_for(
-            result.communicate(stdin_data.encode()),
+            process.communicate(stdin_data.encode()),
             timeout=timeout
         )
 
+        # Log return code and outputs for debugging
+        logger.info(f"[HookService] Command return code: {process.returncode}")
+
         if stderr:
-            logger.debug(f"Plugin hook stderr: {stderr.decode()}")
+            stderr_str = stderr.decode().strip()
+            if stderr_str:
+                logger.warning(f"[HookService] Plugin hook stderr: {stderr_str}")
 
         if stdout:
             output_str = stdout.decode().strip()
+            logger.info(f"[HookService] Plugin hook stdout: {output_str[:200] if output_str else '(empty)'}")
             if output_str:
                 try:
                     return json.loads(output_str)
                 except json.JSONDecodeError:
-                    logger.debug(f"Plugin hook output not JSON: {output_str}")
+                    logger.warning(f"[HookService] Plugin hook output not valid JSON: {output_str[:100]}")
                     return None
+        else:
+            logger.info("[HookService] Plugin hook produced no stdout")
 
         return None
 
