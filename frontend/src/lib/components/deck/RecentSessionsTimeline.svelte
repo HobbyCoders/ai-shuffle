@@ -9,8 +9,9 @@
 	 * - Streaming status indicators
 	 */
 
-	import { MessageSquare, Zap } from 'lucide-svelte';
+	import { MessageSquare, Zap, Loader2 } from 'lucide-svelte';
 	import type { Session } from '$lib/api/client';
+	import { tabs } from '$lib/stores/tabs';
 
 	interface Props {
 		sessions: Session[];
@@ -25,6 +26,26 @@
 		isSessionStreaming,
 		formatRelativeTime
 	}: Props = $props();
+
+	// Get pagination state from store
+	const sessionsHasMore = $derived($tabs.sessionsHasMore);
+	const sessionsLoadingMore = $derived($tabs.sessionsLoadingMore);
+
+	// Reference to the scrollable container for infinite scroll
+	let timelineContainer: HTMLDivElement | null = $state(null);
+
+	// Handle scroll for infinite loading
+	function handleScroll(e: Event) {
+		const target = e.target as HTMLDivElement;
+		const { scrollTop, scrollHeight, clientHeight } = target;
+
+		// Load more when 200px from bottom
+		if (scrollHeight - scrollTop - clientHeight < 200) {
+			if (sessionsHasMore && !sessionsLoadingMore) {
+				tabs.loadMoreSessions();
+			}
+		}
+	}
 
 	// Group sessions by time period
 	interface TimeGroup {
@@ -82,7 +103,7 @@
 	}
 </script>
 
-<div class="timeline-container">
+<div class="timeline-container" bind:this={timelineContainer} onscroll={handleScroll}>
 	<div class="timeline">
 		{#each groupedSessions as group, groupIndex}
 			<div class="timeline-group" style="--group-index: {groupIndex}">
@@ -133,6 +154,14 @@
 				{/each}
 			</div>
 		{/each}
+
+		<!-- Load more indicator -->
+		{#if sessionsLoadingMore}
+			<div class="loading-more">
+				<Loader2 size={16} class="spinner" />
+				<span>Loading more...</span>
+			</div>
+		{/if}
 
 		{#if sessions.length === 0}
 			<div class="empty-state">
@@ -346,6 +375,26 @@
 		gap: 4px;
 		font-size: 0.75rem;
 		color: var(--text-dim, #52525b);
+	}
+
+	/* Loading more indicator */
+	.loading-more {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 8px;
+		padding: 16px 20px;
+		color: var(--text-muted, #71717a);
+		font-size: 0.875rem;
+	}
+
+	:global(.spinner) {
+		animation: spin 1s linear infinite;
+	}
+
+	@keyframes spin {
+		from { transform: rotate(0deg); }
+		to { transform: rotate(360deg); }
 	}
 
 	/* Empty state */
