@@ -16,6 +16,7 @@ and enabling/disabling plugins.
 
 import json
 import logging
+import stat
 import subprocess
 import shutil
 from pathlib import Path
@@ -735,6 +736,12 @@ class PluginService:
         if cache_path.exists():
             shutil.rmtree(cache_path)
         shutil.copytree(plugin_source, cache_path)
+
+        # Ensure scripts have execute permissions
+        # This is needed because git may not preserve executable bits
+        for script in cache_path.rglob("*.sh"):
+            current_mode = script.stat().st_mode
+            script.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
         # Update installed_plugins.json
         installed = self._read_json_file(self.INSTALLED_FILE, {"version": 2, "plugins": {}})
