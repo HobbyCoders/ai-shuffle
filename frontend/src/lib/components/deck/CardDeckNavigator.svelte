@@ -206,6 +206,7 @@
 
 	// Get sessions from tabs store
 	const sessions = $derived($tabs.sessions);
+	const sessionsTotal = $derived($tabs.sessionsTotal);
 
 	// Get admin sessions and API users from tabs store (admin only)
 	const adminSessions = $derived($tabs.adminSessions);
@@ -284,7 +285,7 @@
 				type: 'category',
 				category: 'recent',
 				title: 'Recent',
-				subtitle: `${sessions.length} conversations`,
+				subtitle: `${sessionsTotal} conversations`,
 				icon: Clock,
 				hasChildren: true
 			},
