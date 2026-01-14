@@ -4627,6 +4627,16 @@ function createTabsStore() {
 						: { ...msg, profileId };
 				});
 
+				// Preserve plugin_warning messages from current session that aren't in JSONL history
+				// Hook stderr warnings are ephemeral - not stored in session history files
+				const preservedPluginWarnings = existingMessages.filter(m => m.type === 'plugin_warning');
+				if (preservedPluginWarnings.length > 0) {
+					console.log(`[Tab ${tabId}] Preserving ${preservedPluginWarnings.length} plugin_warning message(s) from streaming`);
+					// Insert plugin warnings at their approximate positions based on when they occurred
+					// For simplicity, append them to maintain chronological order from streaming
+					messagesWithPreservedIds.push(...preservedPluginWarnings);
+				}
+
 				// Load token totals from session history - single source of truth
 				// Note: Don't reset profile to session.profile_id - preserve user's current selection
 				// sessionProfileId is for fallback display only (legacy messages without per-message profileId)
