@@ -6,9 +6,8 @@
 	 * it from regular response content while keeping it readable.
 	 */
 	import { marked } from 'marked';
+	import { onMount } from 'svelte';
 	import StreamingIndicator from './StreamingIndicator.svelte';
-	import { browser } from '$app/environment';
-	import { get } from 'svelte/store';
 	import { chatPreferences, type ChatPreferences, DEFAULT_PREFERENCES } from '$lib/stores/chatPreferences';
 
 	// Configure marked for markdown rendering
@@ -33,40 +32,30 @@
 		profileName = 'Assistant'
 	}: Props = $props();
 
-	// Subscribe to preferences for reactive updates
-	// Use DEFAULT_PREFERENCES during SSR, actual store value on client
-	// This prevents SSR hydration mismatch where server renders with defaults
-	// but client has different localStorage values
-	let prefs = $state<ChatPreferences>(browser ? get(chatPreferences) : DEFAULT_PREFERENCES);
-
-	// Track if preferences have been applied on client (for SSR hydration)
-	let clientMounted = $state(false);
-
-	$effect(() => {
-		// Mark as mounted on client - this triggers re-evaluation of isExpanded
-		clientMounted = true;
-
-		const unsubscribe = chatPreferences.subscribe(p => {
-			prefs = p;
-		});
-		return unsubscribe;
-	});
+	// Current preferences - starts with defaults, updated reactively
+	let prefs = $state<ChatPreferences>(DEFAULT_PREFERENCES);
 
 	// Track if user has manually toggled this block
 	// Once toggled, user's choice takes precedence over preference
 	let userToggled = $state(false);
 	let userExpandedChoice = $state(false);
 
+	// Subscribe to preferences on mount (client-side only)
+	onMount(() => {
+		// Subscribe to preference changes
+		const unsubscribe = chatPreferences.subscribe(p => {
+			prefs = p;
+		});
+		return unsubscribe;
+	});
+
 	// Compute expanded state: prop override > user toggle > preference
-	// Only apply preference-based expansion after client mount to avoid SSR hydration issues
 	const isExpanded = $derived(
 		initialExpanded !== undefined
 			? initialExpanded
 			: userToggled
 				? userExpandedChoice
-				: clientMounted
-					? prefs.thinkingStartExpanded
-					: false  // Default to collapsed during SSR
+				: prefs.thinkingStartExpanded
 	);
 
 	function toggleExpanded() {

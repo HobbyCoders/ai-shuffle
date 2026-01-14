@@ -2,8 +2,7 @@
 	/**
 	 * TodoList - Cursor-style minimal task progress display
 	 */
-	import { get } from 'svelte/store';
-	import { browser } from '$app/environment';
+	import { onMount } from 'svelte';
 	import type { TodoItem } from '$lib/stores/tabs';
 	import { chatPreferences, type ChatPreferences, DEFAULT_PREFERENCES } from '$lib/stores/chatPreferences';
 
@@ -15,36 +14,29 @@
 
 	let { todos, initialExpanded }: Props = $props();
 
-	// Subscribe to preferences for reactive updates
-	// Use DEFAULT_PREFERENCES during SSR, actual store value on client
-	let prefs = $state<ChatPreferences>(browser ? get(chatPreferences) : DEFAULT_PREFERENCES);
-
-	// Track if preferences have been applied on client (for SSR hydration)
-	let clientMounted = $state(false);
-
-	$effect(() => {
-		clientMounted = true;
-		const unsubscribe = chatPreferences.subscribe(p => {
-			prefs = p;
-		});
-		return unsubscribe;
-	});
+	// Current preferences - starts with defaults, updated reactively
+	let prefs = $state<ChatPreferences>(DEFAULT_PREFERENCES);
 
 	// Track if user has manually toggled this list
 	// Once toggled, user's choice takes precedence over preference
 	let userToggled = $state(false);
 	let userExpandedChoice = $state(false);
 
+	// Subscribe to preferences on mount (client-side only)
+	onMount(() => {
+		const unsubscribe = chatPreferences.subscribe(p => {
+			prefs = p;
+		});
+		return unsubscribe;
+	});
+
 	// Compute expanded state: prop override > user toggle > preference
-	// Only apply preference-based expansion after client mount to avoid SSR hydration issues
 	const isExpanded = $derived(
 		initialExpanded !== undefined
 			? initialExpanded
 			: userToggled
 				? userExpandedChoice
-				: clientMounted
-					? prefs.todosStartExpanded
-					: true  // Default to expanded during SSR (todos are usually shown expanded)
+				: prefs.todosStartExpanded
 	);
 
 	function toggleExpanded() {

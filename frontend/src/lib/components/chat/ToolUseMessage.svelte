@@ -2,8 +2,7 @@
 	/**
 	 * ToolUseMessage - Collapsible tool execution display
 	 */
-	import { get } from 'svelte/store';
-	import { browser } from '$app/environment';
+	import { onMount } from 'svelte';
 	import { chatPreferences, type ChatPreferences, DEFAULT_PREFERENCES } from '$lib/stores/chatPreferences';
 
 	interface Props {
@@ -17,34 +16,27 @@
 
 	let { name, input, partialInput, result, status, streaming = false }: Props = $props();
 
-	// Subscribe to preferences for reactive updates
-	// Use DEFAULT_PREFERENCES during SSR, actual store value on client
-	let prefs = $state<ChatPreferences>(browser ? get(chatPreferences) : DEFAULT_PREFERENCES);
-
-	// Track if preferences have been applied on client (for SSR hydration)
-	let clientMounted = $state(false);
-
-	$effect(() => {
-		clientMounted = true;
-		const unsubscribe = chatPreferences.subscribe(p => {
-			prefs = p;
-		});
-		return unsubscribe;
-	});
+	// Current preferences - starts with defaults, updated reactively
+	let prefs = $state<ChatPreferences>(DEFAULT_PREFERENCES);
 
 	// Track if user has manually toggled this details element
 	// Once toggled, user's choice takes precedence over preference
 	let userToggled = $state(false);
 	let userExpandedChoice = $state(false);
 
+	// Subscribe to preferences on mount (client-side only)
+	onMount(() => {
+		const unsubscribe = chatPreferences.subscribe(p => {
+			prefs = p;
+		});
+		return unsubscribe;
+	});
+
 	// Compute expanded state: user toggle > preference
-	// Only apply preference-based expansion after client mount to avoid SSR hydration issues
 	const isExpanded = $derived(
 		userToggled
 			? userExpandedChoice
-			: clientMounted
-				? prefs.toolsStartExpanded
-				: false  // Default to collapsed during SSR
+			: prefs.toolsStartExpanded
 	);
 
 	function handleToggle(event: Event) {
