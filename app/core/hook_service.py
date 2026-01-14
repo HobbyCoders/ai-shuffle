@@ -209,7 +209,7 @@ async def execute_plugin_hook(
             timeout=timeout
         )
 
-        logger.debug(f"Plugin hook return code: {process.returncode}")
+        logger.info(f"[HookService] Hook return code: {process.returncode}")
 
         # Handle stderr - broadcast to frontend if callback provided
         if stderr:
@@ -222,19 +222,24 @@ async def execute_plugin_hook(
                 # Return code 2 typically indicates a warning in CLI hooks
                 severity = "warning" if process.returncode == 2 else "info"
 
-                logger.debug(f"Plugin hook stderr ({severity}): {stderr_str[:200]}")
+                logger.info(f"[HookService] Hook stderr ({severity}): {stderr_str[:200]}")
 
                 # Call the stderr callback to broadcast to frontend
                 if stderr_callback:
                     try:
                         await stderr_callback(plugin_name, stderr_str, severity)
+                        logger.info(f"[HookService] Broadcasted stderr to frontend")
                     except Exception as e:
-                        logger.warning(f"Failed to broadcast stderr: {e}")
+                        logger.warning(f"[HookService] Failed to broadcast stderr: {e}")
+                else:
+                    logger.warning(f"[HookService] No stderr_callback provided!")
+        else:
+            logger.info(f"[HookService] Hook produced no stderr")
 
         if stdout:
             output_str = stdout.decode().strip()
             if output_str:
-                logger.debug(f"Plugin hook stdout: {output_str[:200]}")
+                logger.info(f"[HookService] Hook stdout: {output_str[:200]}")
                 try:
                     return json.loads(output_str)
                 except json.JSONDecodeError:
@@ -447,10 +452,10 @@ def create_plugin_hook_handler(
             # Skip if matcher doesn't match tool name
             if matcher_pattern and tool_name:
                 if not re.match(matcher_pattern, tool_name, re.IGNORECASE):
-                    logger.debug(f"Skipping hook - tool '{tool_name}' doesn't match pattern '{matcher_pattern}'")
+                    logger.info(f"[HookService] Skipping - tool '{tool_name}' doesn't match pattern '{matcher_pattern}'")
                     continue
 
-            logger.debug(f"Executing {event_name} hook: {hook_def.get('command')}")
+            logger.info(f"[HookService] Executing hook: {hook_def.get('command')[:80]}")
 
             result = await execute_plugin_hook(hook_def, script_input, working_dir, stderr_callback)
 
