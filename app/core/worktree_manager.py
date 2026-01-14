@@ -11,10 +11,11 @@ Key design principles:
 - Multiple sessions can use the same worktree (sequentially, not concurrently)
 - Worktree validity is determined by checking if the folder exists on disk
 
-Path pattern: {workspace_dir}/{repo_name}-{branch_sanitized}
+Path pattern: {workspace_dir}/{branch_sanitized}-{short_hash}
 (Worktrees are adjacent to the main repo, not nested inside it)
 """
 
+import hashlib
 import logging
 import uuid
 from pathlib import Path
@@ -46,7 +47,7 @@ class WorktreeManager:
     - get_available_worktrees(): Gets worktrees available for new sessions
     - is_worktree_valid(): Checks if worktree folder exists on disk
 
-    Path pattern: {workspace_dir}/{repo_name}-{branch_sanitized}
+    Path pattern: {workspace_dir}/{branch_sanitized}-{short_hash}
     (Worktrees are adjacent to the main repo, not nested inside it)
     """
 
@@ -61,24 +62,28 @@ class WorktreeManager:
     def _get_worktree_path(self, project_path: str, branch: str) -> Path:
         """
         Get full path for a worktree - adjacent to the main repo.
-        Auto-generates unique suffix if path already exists.
+        Uses a short hash of the project path to ensure uniqueness across repos.
 
-        Example: If repo is at {workspace}/ai-shuffle and branch is "feature/auth",
-        worktree will be at {workspace}/ai-shuffle-feature-auth
-        If that exists, tries ai-shuffle-feature-auth-2, -3, etc.
+        Example: If branch is "feature/auth" and project is "ai-shuffle",
+        worktree will be at {workspace}/feature-auth-a7b3
+        If that exists, tries feature-auth-a7b3-2, -3, etc.
         """
-        repo_name = Path(project_path).name
         sanitized = self._sanitize_branch_name(branch)
-        base_path = settings.workspace_dir / f"{repo_name}-{sanitized}"
+
+        # Generate a short hash from the project path for uniqueness
+        # This ensures different repos with same branch names don't collide
+        path_hash = hashlib.md5(project_path.encode()).hexdigest()[:4]
+        base_name = f"{sanitized}-{path_hash}"
+        base_path = settings.workspace_dir / base_name
 
         # If base path doesn't exist, use it
         if not base_path.exists():
             return base_path
 
-        # Otherwise, find a unique suffix
+        # Otherwise, find a unique suffix (rare case - same repo, same branch, multiple worktrees)
         counter = 2
         while True:
-            candidate = settings.workspace_dir / f"{repo_name}-{sanitized}-{counter}"
+            candidate = settings.workspace_dir / f"{base_name}-{counter}"
             if not candidate.exists():
                 return candidate
             counter += 1

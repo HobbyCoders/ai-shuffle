@@ -1,17 +1,15 @@
 <script lang="ts">
 	/**
-	 * ExecutionModeSelector - Simplified Cursor-like branch selector
+	 * ExecutionModeSelector - Worktree execution mode selector
 	 *
-	 * Just pick a branch - worktree creation is deferred to first message send.
+	 * Select an active worktree or create a new one.
 	 *
 	 * Sections:
-	 * - Active Worktrees (reuse existing)
-	 * - Local Branches (worktree created on send)
-	 * - Remote Branches (worktree created on send)
-	 * - Create New Branch (modal for new branch name)
+	 * - Active Worktrees (local and remote with ahead/behind status)
+	 * - Create New Branch (modal with branch prefix tags)
 	 */
 	import { tabs, type ChatTab, type ExecutionMode } from '$lib/stores/tabs';
-	import { getBranches, getWorktrees, syncWorktrees, getGitStatus, type Branch, type Worktree } from '$lib/api/git';
+	import { getBranches, getWorktrees, syncWorktrees, fetchRemote, getGitStatus, type Branch, type Worktree } from '$lib/api/git';
 	import { onMount } from 'svelte';
 
 	interface Props {
@@ -41,6 +39,17 @@
 	let showCreateModal = $state(false);
 	let newBranchName = $state('');
 	let baseBranch = $state<string>('main');
+	let modalLoading = $state(false);
+
+	// Branch prefix tags for quick selection
+	const BRANCH_PREFIX_TAGS = [
+		{ label: 'feature/', value: 'feature/' },
+		{ label: 'fix/', value: 'fix/' },
+		{ label: 'hotfix/', value: 'hotfix/' },
+		{ label: 'docs/', value: 'docs/' },
+		{ label: 'chore/', value: 'chore/' },
+		{ label: 'refactor/', value: 'refactor/' }
+	];
 
 	// Selected branch/worktree for display
 	let selectedBranchName = $state<string | null>(null);
@@ -101,37 +110,29 @@
 		if (!searchQuery.trim()) return worktrees;
 		const q = searchQuery.toLowerCase();
 		return worktrees.filter(w => {
-			// Search by branch name OR folder name
-			const folderName = getWorktreeDisplayName(w).toLowerCase();
-			return w.branch_name.toLowerCase().includes(q) || folderName.includes(q);
+			// Search by branch name
+			return w.branch_name.toLowerCase().includes(q);
 		});
 	});
 
-	const localBranches = $derived(() => {
-		const worktreeBranchNames = new Set(worktrees.map(w => w.branch_name));
-		return branches
-			.filter(b => !b.remote && !worktreeBranchNames.has(b.name))
-			.filter(b => !searchQuery.trim() || b.name.toLowerCase().includes(searchQuery.toLowerCase()));
-	});
+	// Get branch info (ahead/behind, remote status) for a worktree
+	function getBranchInfo(branchName: string): Branch | null {
+		// First try exact match
+		let branch = branches.find(b => b.name === branchName);
+		if (branch) return branch;
 
-	const remoteBranches = $derived(() => {
-		const worktreeBranchNames = new Set(worktrees.map(w => w.branch_name));
-		const localBranchNames = new Set(branches.filter(b => !b.remote).map(b => b.name));
+		// Try with origin/ prefix for remote branches
+		branch = branches.find(b => b.name === `origin/${branchName}`);
+		return branch || null;
+	}
 
-		return branches
-			.filter(b => {
-				if (!b.remote) return false;
-				// Skip HEAD refs
-				if (b.name === 'origin' || b.name === 'origin/HEAD' || b.name.endsWith('/HEAD')) return false;
-				// Skip if already has worktree
-				if (worktreeBranchNames.has(b.name)) return false;
-				// Skip if we have it locally
-				const localName = b.name.replace(/^[^/]+\//, '');
-				if (localBranchNames.has(localName) || worktreeBranchNames.has(localName)) return false;
-				return true;
-			})
-			.filter(b => !searchQuery.trim() || b.name.toLowerCase().includes(searchQuery.toLowerCase()));
-	});
+	// Check if a worktree's branch has remote tracking (upstream)
+	function hasRemoteTracking(branchName: string): boolean {
+		const branch = getBranchInfo(branchName);
+		if (!branch) return false;
+		// Has tracking if it has an upstream reference or matches a remote branch
+		return !!branch.upstream || branch.remote;
+	}
 
 	// Display text for the trigger button
 	const displayText = $derived(() => {
@@ -148,15 +149,6 @@
 		if (wt.git_status.staged_count > 0) counts.push(`${wt.git_status.staged_count}S`);
 		if (wt.git_status.untracked_count > 0) counts.push(`${wt.git_status.untracked_count}U`);
 		return counts.join(' ') || '●';
-	}
-
-	// Get display name for worktree (folder name from path)
-	function getWorktreeDisplayName(wt: Worktree): string {
-		// worktree_path is like "ai-shuffle-develop" or "ai-shuffle-develop-2"
-		// Extract just the folder name
-		const path = wt.worktree_path || '';
-		const folderName = path.split('/').pop() || path;
-		return folderName || wt.branch_name;
 	}
 
 	async function checkIfGitRepo(projectId: string) {
@@ -193,6 +185,18 @@
 		loading = true;
 		error = null;
 		try {
+			// First, fetch from remote and prune stale branches
+			// This ensures we have the latest remote state and removes deleted branches
+			await fetchRemote(projectId).catch(e => {
+				console.warn('Failed to fetch remote (may be offline):', e);
+			});
+
+			// Sync worktrees to clean up stale database records
+			await syncWorktrees(projectId).catch(e => {
+				console.warn('Failed to sync worktrees:', e);
+			});
+
+			// Now fetch the latest branches and worktrees
 			const [branchResult, worktreeResult] = await Promise.all([
 				getBranches(projectId, true),
 				getWorktrees(projectId)
@@ -304,10 +308,47 @@
 		}
 	}
 
-	function openCreateModal() {
+	async function openCreateModal() {
 		showDropdown = false;
 		showCreateModal = true;
 		newBranchName = '';
+
+		// Refresh branches when opening the modal
+		if (tab.project) {
+			modalLoading = true;
+			try {
+				// First fetch from remote and prune stale branches
+				await fetchRemote(tab.project).catch(e => {
+					console.warn('Failed to fetch remote (may be offline):', e);
+				});
+
+				// Then get fresh branch list
+				const branchResult = await getBranches(tab.project, true);
+				branches = branchResult;
+				// Set default base branch
+				const mainBranch = branches.find(b => b.name === 'main' || b.name === 'master');
+				if (mainBranch) baseBranch = mainBranch.name;
+			} catch (e) {
+				console.error('Failed to refresh branches:', e);
+			} finally {
+				modalLoading = false;
+			}
+		}
+	}
+
+	function applyBranchPrefix(prefix: string) {
+		// If branch name already has a prefix, replace it
+		const currentName = newBranchName.trim();
+		const hasPrefix = BRANCH_PREFIX_TAGS.some(tag => currentName.startsWith(tag.value));
+
+		if (hasPrefix) {
+			// Replace existing prefix
+			const withoutPrefix = currentName.replace(/^[^/]+\//, '');
+			newBranchName = prefix + withoutPrefix;
+		} else {
+			// Add prefix to existing name
+			newBranchName = prefix + currentName;
+		}
 	}
 
 	onMount(() => {
@@ -399,7 +440,7 @@
 									bind:this={searchInputRef}
 									type="text"
 									class="search-input"
-									placeholder="Search branches..."
+									placeholder="Search worktrees..."
 									bind:value={searchQuery}
 									onclick={(e) => e.stopPropagation()}
 								/>
@@ -420,8 +461,8 @@
 										<span>Active Worktrees</span>
 									</div>
 									{#each filteredWorktrees() as wt}
-									{@const displayName = getWorktreeDisplayName(wt)}
-									{@const showBranchBadge = displayName !== wt.branch_name}
+									{@const branchInfo = getBranchInfo(wt.branch_name)}
+									{@const isTracked = hasRemoteTracking(wt.branch_name)}
 										<button
 											type="button"
 											class="dropdown-item worktree-item"
@@ -429,19 +470,27 @@
 											onclick={() => selectWorktree(wt)}
 										>
 											<div class="worktree-info">
-												<span class="item-name">{displayName}</span>
-												{#if showBranchBadge}
-													<span class="branch-badge" title="Branch: {wt.branch_name}">
-														<svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<circle cx="6" cy="6" r="2" stroke-width="2"/>
-															<circle cx="12" cy="18" r="2" stroke-width="2"/>
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 8v4c0 2 2 4 6 4v2" />
-														</svg>
-														{wt.branch_name}
+												<div class="worktree-main-row">
+													<svg class="w-3.5 h-3.5 branch-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<circle cx="6" cy="6" r="2" stroke-width="2"/>
+														<circle cx="12" cy="18" r="2" stroke-width="2"/>
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 8v4c0 2 2 4 6 4v2" />
+													</svg>
+													<span class="branch-name">{wt.branch_name}</span>
+													<span class="location-badge" class:tracked={isTracked}>
+														{isTracked ? 'tracked' : 'local'}
 													</span>
-												{/if}
+												</div>
 											</div>
 											<div class="worktree-status">
+												<!-- Ahead/Behind counts -->
+												{#if branchInfo?.ahead || branchInfo?.behind}
+													<span class="ahead-behind">
+														{#if branchInfo.ahead}<span class="ahead">↑{branchInfo.ahead}</span>{/if}
+														{#if branchInfo.behind}<span class="behind">↓{branchInfo.behind}</span>{/if}
+													</span>
+												{/if}
+												<!-- Git dirty status -->
 												{#if wt.git_status}
 													<span class="dirty-status" class:clean={wt.git_status.is_clean}>
 														{getDirtyStatus(wt)}
@@ -453,54 +502,6 @@
 													</svg>
 												{/if}
 											</div>
-										</button>
-									{/each}
-								</div>
-							{/if}
-
-							<!-- Local Branches -->
-							{#if localBranches().length > 0}
-								<div class="dropdown-section">
-									<div class="section-header">
-										<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<circle cx="6" cy="6" r="2" stroke-width="2"/>
-											<circle cx="12" cy="18" r="2" stroke-width="2"/>
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 8v4c0 2 2 4 6 4v2" />
-										</svg>
-										<span>Local Branches</span>
-									</div>
-									{#each localBranches() as branch}
-										<button
-											type="button"
-											class="dropdown-item"
-											onclick={() => selectBranch(branch)}
-										>
-											<span class="item-name">{branch.name}</span>
-											{#if branch.current}
-												<span class="current-badge">current</span>
-											{/if}
-										</button>
-									{/each}
-								</div>
-							{/if}
-
-							<!-- Remote Branches -->
-							{#if remoteBranches().length > 0}
-								<div class="dropdown-section">
-									<div class="section-header">
-										<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 004 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-										</svg>
-										<span>Remote Branches</span>
-									</div>
-									{#each remoteBranches() as branch}
-										<button
-											type="button"
-											class="dropdown-item"
-											onclick={() => selectBranch(branch)}
-										>
-											<span class="item-name">{branch.name}</span>
-											<span class="remote-badge">remote</span>
 										</button>
 									{/each}
 								</div>
@@ -521,9 +522,9 @@
 							</div>
 
 							<!-- Empty State -->
-							{#if filteredWorktrees().length === 0 && localBranches().length === 0 && remoteBranches().length === 0 && searchQuery.trim()}
+							{#if filteredWorktrees().length === 0 && searchQuery.trim()}
 								<div class="dropdown-empty">
-									<span>No branches matching "{searchQuery}"</span>
+									<span>No worktrees matching "{searchQuery}"</span>
 								</div>
 							{/if}
 						</div>
@@ -561,19 +562,39 @@
 
 			<div class="modal-field">
 				<label for="new-branch-name">Branch name</label>
+				<!-- Branch prefix tags -->
+				<div class="prefix-tags">
+					{#each BRANCH_PREFIX_TAGS as tag}
+						<button
+							type="button"
+							class="prefix-tag"
+							class:active={newBranchName.startsWith(tag.value)}
+							onclick={() => applyBranchPrefix(tag.value)}
+						>
+							{tag.label}
+						</button>
+					{/each}
+				</div>
 				<input
 					id="new-branch-name"
 					type="text"
 					class="modal-input"
-					placeholder="feature/my-feature"
+					placeholder="my-branch-name"
 					bind:value={newBranchName}
 					onkeydown={(e) => { if (e.key === 'Enter' && newBranchName.trim()) createNewBranch(); }}
 				/>
 			</div>
 
 			<div class="modal-field">
-				<label for="base-branch">Base branch</label>
-				<select id="base-branch" class="modal-select" bind:value={baseBranch}>
+				<label for="base-branch">
+					Base branch
+					{#if modalLoading}
+						<svg class="w-3 h-3 animate-spin inline-spinner" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
+						</svg>
+					{/if}
+				</label>
+				<select id="base-branch" class="modal-select" bind:value={baseBranch} disabled={modalLoading}>
 					{#each branches.filter(b => !b.remote) as branch}
 						<option value={branch.name}>{branch.name}</option>
 					{/each}
@@ -587,7 +608,7 @@
 				<button
 					type="button"
 					class="modal-btn primary"
-					disabled={!newBranchName.trim()}
+					disabled={!newBranchName.trim() || modalLoading}
 					onclick={createNewBranch}
 				>
 					Create & Select
@@ -856,13 +877,62 @@
 		font-weight: 600;
 		padding: 0.125rem 0.375rem;
 		border-radius: calc(var(--radius, 0.75rem) * 0.33);
-		background: color-mix(in srgb, #f59e0b 15%, transparent);
-		color: #f59e0b;
+		background: color-mix(in srgb, var(--warning) 15%, transparent);
+		color: var(--warning);
 	}
 
 	.dirty-status.clean {
-		background: color-mix(in srgb, #22c55e 15%, transparent);
-		color: #22c55e;
+		background: color-mix(in srgb, var(--success) 15%, transparent);
+		color: var(--success);
+	}
+
+	/* Worktree main row layout */
+	.worktree-main-row {
+		display: flex;
+		align-items: center;
+		gap: 0.375rem;
+	}
+
+	.worktree-main-row .branch-icon {
+		color: var(--primary);
+		flex-shrink: 0;
+	}
+
+	.worktree-main-row .branch-name {
+		font-weight: 500;
+		font-size: 0.8125rem;
+		color: var(--foreground);
+	}
+
+	.location-badge {
+		font-size: 0.5625rem;
+		font-weight: 500;
+		padding: 0.125rem 0.375rem;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
+		background: color-mix(in srgb, var(--muted-foreground) 15%, transparent);
+		color: var(--muted-foreground);
+	}
+
+	.location-badge.tracked {
+		background: color-mix(in srgb, var(--info) 15%, transparent);
+		color: var(--info);
+	}
+
+	/* Ahead/Behind counts */
+	.ahead-behind {
+		display: flex;
+		align-items: center;
+		gap: 0.25rem;
+		font-size: 0.625rem;
+		font-weight: 600;
+	}
+
+	.ahead-behind .ahead {
+		color: var(--success);
+	}
+
+	.ahead-behind .behind {
+		color: var(--destructive);
 	}
 
 	.current-badge, .remote-badge {
@@ -984,11 +1054,45 @@
 	}
 
 	.modal-field label {
-		display: block;
+		display: flex;
+		align-items: center;
+		gap: 0.375rem;
 		font-size: 0.75rem;
 		font-weight: 500;
 		color: var(--muted-foreground);
 		margin-bottom: 0.375rem;
+	}
+
+	.inline-spinner {
+		margin-left: 0.25rem;
+	}
+
+	/* Branch prefix tags */
+	.prefix-tags {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.375rem;
+		margin-bottom: 0.5rem;
+	}
+
+	.prefix-tag {
+		padding: 0.25rem 0.5rem;
+		font-size: 0.6875rem;
+		font-weight: 500;
+		background: color-mix(in srgb, var(--muted) 50%, transparent);
+		color: var(--muted-foreground);
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
+		transition: all 0.15s ease;
+	}
+
+	.prefix-tag:hover {
+		background: var(--accent);
+		color: var(--foreground);
+	}
+
+	.prefix-tag.active {
+		background: color-mix(in srgb, var(--primary) 15%, transparent);
+		color: var(--primary);
 	}
 
 	.modal-input, .modal-select {
