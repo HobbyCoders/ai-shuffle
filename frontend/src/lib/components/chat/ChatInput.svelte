@@ -902,10 +902,58 @@
 						</div>
 					</div>
 
-					<!-- Center: Profile & Project selectors OR Worktree badge -->
+					<!-- Center: Profile selector + Project selector OR Worktree badge -->
 					<div class="controls-center">
+						<!-- Profile Selector - always visible -->
+						<div class="selector-wrapper" bind:this={profileDropdownRef}>
+							<button
+								type="button"
+								class="context-selector-btn {liveTab.profile ? '' : 'unset'}"
+								onclick={handleProfileClick}
+								title="Change profile"
+							>
+								<div class="selector-icon">
+									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+									</svg>
+								</div>
+								<span class="selector-text desktop">{selectedProfileName}</span>
+								<span class="selector-text mobile">{selectedProfileNameMobile}</span>
+								<svg class="w-3 h-3 opacity-50 chevron" class:open={showProfileDropdown} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+								</svg>
+							</button>
+
+							{#if showProfileDropdown}
+								<div class="selector-dropdown">
+									{#if $profiles.length === 0}
+										<div class="dropdown-empty">No profiles available</div>
+									{:else}
+										{#each $profiles as profile}
+											<button
+												type="button"
+												class="dropdown-item"
+												class:selected={profile.id === liveTab.profile}
+												onclick={() => selectProfile(profile.id)}
+											>
+												<svg class="w-3.5 h-3.5 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+												</svg>
+												<span>{profile.name}</span>
+												{#if profile.id === liveTab.profile}
+													<svg class="w-3.5 h-3.5 ml-auto text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+													</svg>
+												{/if}
+											</button>
+										{/each}
+									{/if}
+								</div>
+							{/if}
+						</div>
+
 						{#if liveTab.executionMode === 'worktree' && liveTab.messages.length > 0}
-							<!-- Worktree Badge - replaces selectors after session starts -->
+							<!-- Worktree Badge - replaces project selector after session starts -->
 							<div class="worktree-badge" title="Working in git worktree">
 								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
@@ -913,54 +961,6 @@
 								<span class="worktree-branch">{liveTab.selectedWorktreeBranch || liveTab.worktreeBranch || 'worktree'}</span>
 							</div>
 						{:else}
-							<!-- Profile Selector -->
-							<div class="selector-wrapper" bind:this={profileDropdownRef}>
-								<button
-									type="button"
-									class="context-selector-btn {liveTab.profile ? '' : 'unset'}"
-									onclick={handleProfileClick}
-									title="Change profile"
-								>
-									<div class="selector-icon">
-										<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-										</svg>
-									</div>
-									<span class="selector-text desktop">{selectedProfileName}</span>
-									<span class="selector-text mobile">{selectedProfileNameMobile}</span>
-									<svg class="w-3 h-3 opacity-50 chevron" class:open={showProfileDropdown} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-									</svg>
-								</button>
-
-								{#if showProfileDropdown}
-									<div class="selector-dropdown">
-										{#if $profiles.length === 0}
-											<div class="dropdown-empty">No profiles available</div>
-										{:else}
-											{#each $profiles as profile}
-												<button
-													type="button"
-													class="dropdown-item"
-													class:selected={profile.id === liveTab.profile}
-													onclick={() => selectProfile(profile.id)}
-												>
-													<svg class="w-3.5 h-3.5 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-													</svg>
-													<span>{profile.name}</span>
-													{#if profile.id === liveTab.profile}
-														<svg class="w-3.5 h-3.5 ml-auto text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-														</svg>
-													{/if}
-												</button>
-											{/each}
-										{/if}
-									</div>
-								{/if}
-							</div>
-
 							<!-- Project Selector -->
 							<div class="selector-wrapper" bind:this={projectDropdownRef}>
 								<button

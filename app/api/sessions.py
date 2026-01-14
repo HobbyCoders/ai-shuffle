@@ -393,6 +393,8 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                         "content": m.get("content", ""),
                         "type": m.get("type"),  # Critical for tool_use/tool_result rendering
                         "subtype": m.get("subtype"),  # For system messages (e.g., local_command)
+                        "systemSubtype": m.get("systemSubtype"),  # Frontend-compatible system subtype
+                        "systemData": m.get("systemData"),  # Structured data for system messages
                         "toolName": m.get("toolName"),  # camelCase for frontend
                         "toolInput": m.get("toolInput"),  # camelCase for frontend
                         "toolId": m.get("toolId"),
@@ -497,6 +499,20 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
     session["tags"] = database.get_session_tags(session_id)
     session["has_forks"] = database.session_has_forks(session_id)
 
+    # Add worktree info if session is linked to a worktree
+    worktree_id = session.get("worktree_id")
+    if worktree_id:
+        worktree = database.get_worktree(worktree_id)
+        if worktree:
+            session["worktree_id"] = worktree_id
+            session["worktree_branch"] = worktree.get("branch_name")
+            session["worktree_path"] = worktree.get("worktree_path")
+        else:
+            # Worktree was deleted but session still has reference
+            session["worktree_id"] = None
+            session["worktree_branch"] = None
+            session["worktree_path"] = None
+
     logger.info(f"Returning session {session_id} with {len(messages)} messages")
     try:
         return session
@@ -589,6 +605,13 @@ async def get_live_session(
                         "content": m.get("content", ""),
                         "streaming": False,
                     }
+                    # System message fields
+                    if m.get("subtype"):
+                        msg["subtype"] = m.get("subtype")
+                    if m.get("systemSubtype"):
+                        msg["systemSubtype"] = m.get("systemSubtype")
+                    if m.get("systemData"):
+                        msg["systemData"] = m.get("systemData")
                     # Tool fields
                     if m.get("toolName"):
                         msg["toolName"] = m.get("toolName")
