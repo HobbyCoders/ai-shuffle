@@ -918,7 +918,8 @@ class PluginService:
                 version = "1.0.0"
                 if plugin_json.exists():
                     try:
-                        data = json.load(open(plugin_json))
+                        with open(plugin_json) as f:
+                            data = json.load(f)
                         version = data.get("version", version)
                     except (json.JSONDecodeError, IOError):
                         pass
@@ -945,8 +946,8 @@ class PluginService:
                 has_hooks = (plugin_dir / "hooks").exists() or (plugin_dir / "hooks.json").exists()
 
                 # Get file timestamps
-                stat = plugin_dir.stat()
-                installed_at = datetime.fromtimestamp(stat.st_ctime)
+                dir_stat = plugin_dir.stat()
+                installed_at = datetime.fromtimestamp(dir_stat.st_ctime)
 
                 plugins.append(PluginInfo(
                     id=plugin_id,
@@ -1071,6 +1072,10 @@ class PluginService:
             raise ValueError(f"Invalid plugin ID format: {plugin_id}")
 
         plugin_name, scope_marker = parts
+
+        # Validate plugin_name to prevent path traversal
+        if '/' in plugin_name or '\\' in plugin_name or '..' in plugin_name:
+            raise ValueError(f"Invalid plugin name: {plugin_name}")
 
         # Determine scope from marker
         if scope_marker == "project-local":

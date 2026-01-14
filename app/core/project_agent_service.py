@@ -238,6 +238,11 @@ class ProjectAgentService:
         Returns:
             ProjectAgentDetail or None if not found
         """
+        # Validate name to prevent path traversal
+        if not self._validate_agent_name(name):
+            logger.warning(f"Invalid agent name format: {name}")
+            return None
+
         agent_file = self.agents_dir / f"{name}.md"
 
         if not agent_file.exists():
@@ -247,7 +252,7 @@ class ProjectAgentService:
             content = agent_file.read_text(encoding='utf-8')
             parsed = self._parse_frontmatter(content)
 
-            stat = agent_file.stat()
+            file_stat = agent_file.stat()
 
             return ProjectAgentDetail(
                 name=name,
@@ -255,8 +260,8 @@ class ProjectAgentService:
                 model=parsed["model"],
                 tools=parsed["tools"],
                 file_path=str(agent_file.relative_to(self.project_path)),
-                created_at=datetime.fromtimestamp(stat.st_ctime),
-                updated_at=datetime.fromtimestamp(stat.st_mtime),
+                created_at=datetime.fromtimestamp(file_stat.st_ctime),
+                updated_at=datetime.fromtimestamp(file_stat.st_mtime),
                 prompt=parsed["prompt"],
                 raw_content=content,
             )
@@ -341,8 +346,12 @@ class ProjectAgentService:
             Updated ProjectAgent
 
         Raises:
-            ValueError: If agent doesn't exist
+            ValueError: If agent doesn't exist or name is invalid
         """
+        # Validate name to prevent path traversal
+        if not self._validate_agent_name(name):
+            raise ValueError(f"Invalid agent name format: {name}")
+
         agent_file = self.agents_dir / f"{name}.md"
 
         if not agent_file.exists():
@@ -366,7 +375,7 @@ class ProjectAgentService:
         # Write file
         agent_file.write_text(content, encoding='utf-8')
 
-        stat = agent_file.stat()
+        file_stat = agent_file.stat()
 
         return ProjectAgent(
             name=name,
@@ -374,8 +383,8 @@ class ProjectAgentService:
             model=new_model,
             tools=new_tools,
             file_path=str(agent_file.relative_to(self.project_path)),
-            created_at=datetime.fromtimestamp(stat.st_ctime),
-            updated_at=datetime.fromtimestamp(stat.st_mtime),
+            created_at=datetime.fromtimestamp(file_stat.st_ctime),
+            updated_at=datetime.fromtimestamp(file_stat.st_mtime),
         )
 
     def delete_agent(self, name: str) -> bool:
@@ -389,8 +398,12 @@ class ProjectAgentService:
             True if deleted
 
         Raises:
-            ValueError: If agent doesn't exist
+            ValueError: If agent doesn't exist or name is invalid
         """
+        # Validate name to prevent path traversal
+        if not self._validate_agent_name(name):
+            raise ValueError(f"Invalid agent name format: {name}")
+
         agent_file = self.agents_dir / f"{name}.md"
 
         if not agent_file.exists():
@@ -411,8 +424,12 @@ class ProjectAgentService:
             Renamed ProjectAgent
 
         Raises:
-            ValueError: If old agent doesn't exist or new name is invalid/taken
+            ValueError: If old agent doesn't exist or names are invalid/taken
         """
+        # Validate both names to prevent path traversal
+        if not self._validate_agent_name(old_name):
+            raise ValueError(f"Invalid agent name format: {old_name}")
+
         if not self._validate_agent_name(new_name):
             raise ValueError(
                 f"Invalid agent name: '{new_name}'. Must start with a letter and "
@@ -431,7 +448,10 @@ class ProjectAgentService:
         old_file.rename(new_file)
 
         # Return updated agent info
-        return self.get_agent(new_name)
+        agent = self.get_agent(new_name)
+        if not agent:
+            raise ValueError(f"Failed to read renamed agent: {new_name}")
+        return agent
 
 
 # Service instance cache (keyed by project_path)
