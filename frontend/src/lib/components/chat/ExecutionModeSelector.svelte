@@ -150,15 +150,6 @@
 		return counts.join(' ') || '●';
 	}
 
-	// Get display name for worktree (folder name from path)
-	function getWorktreeDisplayName(wt: Worktree): string {
-		// worktree_path is like "ai-shuffle-develop" or "ai-shuffle-develop-2"
-		// Extract just the folder name
-		const path = wt.worktree_path || '';
-		const folderName = path.split('/').pop() || path;
-		return folderName || wt.branch_name;
-	}
-
 	async function checkIfGitRepo(projectId: string) {
 		try {
 			const status = await getGitStatus(projectId);
@@ -497,7 +488,7 @@
 								</div>
 							{/if}
 
-								<!-- Create New Branch -->
+							<!-- Create New Branch -->
 							<div class="dropdown-section create-section">
 								<button
 									type="button"

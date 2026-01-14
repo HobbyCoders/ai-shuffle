@@ -11,7 +11,7 @@ Key design principles:
 - Multiple sessions can use the same worktree (sequentially, not concurrently)
 - Worktree validity is determined by checking if the folder exists on disk
 
-Path pattern: {workspace_dir}/{repo_name}-{branch_sanitized}
+Path pattern: {workspace_dir}/{branch_sanitized}
 (Worktrees are adjacent to the main repo, not nested inside it)
 """
 
@@ -46,7 +46,7 @@ class WorktreeManager:
     - get_available_worktrees(): Gets worktrees available for new sessions
     - is_worktree_valid(): Checks if worktree folder exists on disk
 
-    Path pattern: {workspace_dir}/{repo_name}-{branch_sanitized}
+    Path pattern: {workspace_dir}/{branch_sanitized}
     (Worktrees are adjacent to the main repo, not nested inside it)
     """
 
