@@ -2556,6 +2556,20 @@ async def stream_to_websocket(
     # IMPORTANT: The SDK does NOT auto-execute plugin hooks from hooks.json!
     # We must execute them ourselves via this hook configuration.
     from app.core.hook_service import build_hooks_config
+
+    # Create a queue for plugin stderr messages to be broadcast to frontend
+    # Plugin hooks run in the SDK's async loop but need to send messages to our streaming loop
+    stderr_queue: asyncio.Queue = asyncio.Queue()
+
+    async def stderr_callback(plugin_name: str, stderr_output: str, severity: str):
+        """Callback for plugin hooks to broadcast stderr to frontend."""
+        await stderr_queue.put({
+            "type": "plugin_message",
+            "plugin": plugin_name,
+            "message": stderr_output,
+            "severity": severity
+        })
+
     if options.cwd:
         # Extract plugin paths from options.plugins (list of {"type": "local", "path": str})
         plugin_paths = []
@@ -2567,11 +2581,12 @@ async def stream_to_websocket(
         hooks_config = build_hooks_config(
             working_dir=options.cwd,
             project_id=project_id,
-            plugin_paths=plugin_paths
+            plugin_paths=plugin_paths,
+            stderr_callback=stderr_callback
         )
         if hooks_config:
             options.hooks = hooks_config
-            logger.info(f"[WS] Hooks configured: {list(hooks_config.keys())}")
+            logger.debug(f"[WS] Hooks configured: {list(hooks_config.keys())}")
 
     # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
     # On Docker/Linux, agents are already passed via SDK's --agents flag
@@ -2638,6 +2653,18 @@ async def stream_to_websocket(
     interrupted = False
     include_partial = options.include_partial_messages  # Track if streaming events are enabled
 
+    # Helper to drain stderr queue and yield plugin messages
+    async def drain_stderr_queue():
+        """Drain all pending stderr messages from plugin hooks."""
+        messages = []
+        while True:
+            try:
+                msg = stderr_queue.get_nowait()
+                messages.append(msg)
+            except asyncio.QueueEmpty:
+                break
+        return messages
+
     try:
         await state.client.query(prompt)
 
@@ -2647,6 +2674,10 @@ async def stream_to_websocket(
                 logger.info(f"[WS] Interrupt flag detected for session {session_id}, breaking out of loop")
                 interrupted = True
                 break
+
+            # Drain stderr queue and yield any plugin messages
+            for stderr_msg in await drain_stderr_queue():
+                yield stderr_msg
 
             if isinstance(message, SystemMessage):
                 logger.info(f"[WS] SystemMessage received: subtype={message.subtype}, data_keys={list(message.data.keys()) if message.data else []}, data_preview={str(message.data)[:500] if message.data else 'None'}")
@@ -2973,6 +3004,10 @@ async def stream_to_websocket(
                     metadata["tokens_out"] = message.usage.get("output_tokens", 0)
                     metadata["cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                     metadata["cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
+
+        # Final drain of stderr queue after streaming loop completes
+        for stderr_msg in await drain_stderr_queue():
+            yield stderr_msg
 
     except asyncio.CancelledError:
         interrupted = True

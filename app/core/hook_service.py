@@ -27,9 +27,13 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Callable, Awaitable
+from typing import Any, Dict, List, Optional, Callable, Awaitable, Union
 
 import yaml
+
+# Type alias for stderr callback
+# Callback receives (plugin_name, stderr_output, severity) where severity is "warning" or "info"
+StderrCallback = Optional[Callable[[str, str, str], Awaitable[None]]]
 
 from claude_agent_sdk.types import (
     HookInput, HookContext, HookMatcher, SyncHookJSONOutput,
@@ -121,7 +125,8 @@ def _fix_python_command_for_windows(command: str) -> str:
 async def execute_plugin_hook(
     hook_def: Dict[str, Any],
     hook_input: Dict[str, Any],
-    working_dir: str
+    working_dir: str,
+    stderr_callback: StderrCallback = None
 ) -> Optional[Dict[str, Any]]:
     """
     Execute a plugin hook command and return its output.
@@ -156,8 +161,8 @@ async def execute_plugin_hook(
     stdin_data = json.dumps(hook_input)
 
     try:
-        logger.info(f"[HookService] Executing command: {command}")
-        logger.info(f"[HookService] Hook input data: {stdin_data[:500]}")
+        logger.debug(f"[HookService] Executing command: {command}")
+        logger.debug(f"[HookService] Hook input data: {stdin_data[:500]}")
 
         # Run the command
         process = await asyncio.wait_for(
@@ -177,25 +182,40 @@ async def execute_plugin_hook(
             timeout=timeout
         )
 
-        # Log return code and outputs for debugging
-        logger.info(f"[HookService] Command return code: {process.returncode}")
+        # Log return code for debugging
+        logger.debug(f"[HookService] Command return code: {process.returncode}")
 
+        # Handle stderr - broadcast to frontend if callback provided
         if stderr:
             stderr_str = stderr.decode().strip()
             if stderr_str:
-                logger.warning(f"[HookService] Plugin hook stderr: {stderr_str}")
+                # Extract plugin name from path for display
+                plugin_name = Path(plugin_path).name if plugin_path else "unknown-plugin"
+
+                # Determine severity based on return code
+                # Return code 2 typically indicates a warning in CLI hooks
+                severity = "warning" if process.returncode == 2 else "info"
+
+                logger.debug(f"[HookService] Plugin hook stderr ({severity}): {stderr_str}")
+
+                # Call the stderr callback to broadcast to frontend
+                if stderr_callback:
+                    try:
+                        await stderr_callback(plugin_name, stderr_str, severity)
+                    except Exception as e:
+                        logger.warning(f"[HookService] Failed to broadcast stderr: {e}")
 
         if stdout:
             output_str = stdout.decode().strip()
-            logger.info(f"[HookService] Plugin hook stdout: {output_str[:200] if output_str else '(empty)'}")
+            logger.debug(f"[HookService] Plugin hook stdout: {output_str[:200] if output_str else '(empty)'}")
             if output_str:
                 try:
                     return json.loads(output_str)
                 except json.JSONDecodeError:
-                    logger.warning(f"[HookService] Plugin hook output not valid JSON: {output_str[:100]}")
+                    logger.debug(f"[HookService] Plugin hook output not valid JSON: {output_str[:100]}")
                     return None
         else:
-            logger.info("[HookService] Plugin hook produced no stdout")
+            logger.debug("[HookService] Plugin hook produced no stdout")
 
         return None
 
@@ -361,7 +381,8 @@ async def get_database_hooks_for_event(
 def create_stop_hook_handler(
     working_dir: str,
     project_id: Optional[str] = None,
-    plugin_stop_hooks: Optional[List[Dict[str, Any]]] = None
+    plugin_stop_hooks: Optional[List[Dict[str, Any]]] = None,
+    stderr_callback: StderrCallback = None
 ) -> Callable[[HookInput, Optional[str], HookContext], Awaitable[SyncHookJSONOutput]]:
     """
     Create a unified Stop hook handler that supports:
@@ -376,6 +397,7 @@ def create_stop_hook_handler(
         working_dir: The working directory for the session
         project_id: Optional project ID for database hooks
         plugin_stop_hooks: List of plugin Stop hook definitions
+        stderr_callback: Optional async callback for broadcasting stderr to frontend
 
     Returns:
         Async hook handler function compatible with SDK
@@ -392,7 +414,7 @@ def create_stop_hook_handler(
         if hook_input.get("hook_event_name") != "Stop":
             return SyncHookJSONOutput()
 
-        logger.info(f"[HookService] Stop hook fired for {working_dir}")
+        logger.debug(f"[HookService] Stop hook fired")
 
         # Build the input dict for plugin scripts
         script_input = {
@@ -404,14 +426,14 @@ def create_stop_hook_handler(
 
         # 1. Execute plugin Stop hooks from hooks.json
         for hook_def in (plugin_stop_hooks or []):
-            logger.info(f"[HookService] Executing plugin Stop hook: {hook_def.get('command')}")
+            logger.debug(f"[HookService] Executing plugin Stop hook: {hook_def.get('command')}")
 
-            result = await execute_plugin_hook(hook_def, script_input, working_dir)
+            result = await execute_plugin_hook(hook_def, script_input, working_dir, stderr_callback)
 
             if result:
                 decision = result.get("decision")
                 if decision:
-                    logger.info(f"[HookService] Plugin Stop hook returned decision: {decision}")
+                    logger.debug(f"[HookService] Plugin Stop hook returned decision: {decision}")
                     return SyncHookJSONOutput(
                         decision=decision,
                         reason=result.get("reason", ""),
@@ -426,7 +448,7 @@ def create_stop_hook_handler(
             plugin = plugin_state["plugin"]
             state = plugin_state["state"]
 
-            logger.info(f"[HookService] Active {plugin} loop detected")
+            logger.debug(f"[HookService] Active {plugin} loop detected")
 
             # Handle Ralph Loop specifically (file I/O in thread)
             if plugin == "ralph-loop":
@@ -437,7 +459,7 @@ def create_stop_hook_handler(
         # 3. Check for database Stop hooks
         db_hooks = await get_database_hooks_for_event(project_id, "Stop")
         for hook in db_hooks:
-            logger.info(f"[HookService] Executing database Stop hook: {hook.get('name')}")
+            logger.debug(f"[HookService] Executing database Stop hook: {hook.get('name')}")
 
             # Execute the hook and check if it wants to block
             result = await execute_hook(hook, {
@@ -483,11 +505,11 @@ def _handle_ralph_loop_stop(working_dir: str, state: Dict[str, Any]) -> Optional
     completion_promise = state.get('completion_promise')
     prompt = state.get('prompt', '')
 
-    logger.info(f"[RalphLoop] Stop hook - iteration {iteration}, max={max_iterations}")
+    logger.debug(f"[RalphLoop] Stop hook - iteration {iteration}, max={max_iterations}")
 
     # Check if max iterations reached
     if max_iterations > 0 and iteration >= max_iterations:
-        logger.info(f"[RalphLoop] Max iterations ({max_iterations}) reached, stopping")
+        logger.debug(f"[RalphLoop] Max iterations ({max_iterations}) reached, stopping")
         _remove_plugin_state(working_dir, "ralph-loop")
         return None
 
@@ -505,7 +527,7 @@ def _handle_ralph_loop_stop(working_dir: str, state: Dict[str, Any]) -> Optional
     else:
         system_msg = f"🔄 Ralph iteration {next_iteration} | No completion promise set"
 
-    logger.info(f"[RalphLoop] Continuing to iteration {next_iteration}")
+    logger.debug(f"[RalphLoop] Continuing to iteration {next_iteration}")
 
     return SyncHookJSONOutput(
         decision="block",
@@ -522,7 +544,8 @@ def _handle_ralph_loop_stop(working_dir: str, state: Dict[str, Any]) -> Optional
 def create_plugin_hook_handler(
     event_name: str,
     hook_defs: List[Dict[str, Any]],
-    working_dir: str
+    working_dir: str,
+    stderr_callback: StderrCallback = None
 ) -> Callable[[HookInput, Optional[str], HookContext], Awaitable[SyncHookJSONOutput]]:
     """
     Create a handler that executes all plugin hooks for an event.
@@ -534,6 +557,7 @@ def create_plugin_hook_handler(
         event_name: The hook event name (PreToolUse, PostToolUse, etc.)
         hook_defs: List of hook definitions to execute
         working_dir: Working directory for execution
+        stderr_callback: Optional async callback for broadcasting stderr to frontend
 
     Returns:
         Async hook handler function compatible with SDK
@@ -551,7 +575,7 @@ def create_plugin_hook_handler(
             # The SDK provides tool_name in the hook input
             tool_name = hook_input.get("tool_name", "")
 
-        logger.info(f"[HookService] {event_name} hook fired for {working_dir} (tool={tool_name})")
+        logger.debug(f"[HookService] {event_name} hook fired (tool={tool_name})")
 
         # Build the input dict that gets passed to plugin scripts via stdin
         # On Windows, normalize paths to Unix-style for cross-platform compatibility
@@ -578,15 +602,15 @@ def create_plugin_hook_handler(
             # Skip if matcher doesn't match tool name
             if matcher_pattern and tool_name:
                 if not re.match(matcher_pattern, tool_name, re.IGNORECASE):
-                    logger.info(f"[HookService] Skipping hook - tool '{tool_name}' doesn't match pattern '{matcher_pattern}'")
+                    logger.debug(f"[HookService] Skipping hook - tool '{tool_name}' doesn't match pattern '{matcher_pattern}'")
                     continue
 
-            logger.info(f"[HookService] Executing {event_name} hook: {hook_def.get('command')}")
+            logger.debug(f"[HookService] Executing {event_name} hook: {hook_def.get('command')}")
 
-            result = await execute_plugin_hook(hook_def, script_input, working_dir)
+            result = await execute_plugin_hook(hook_def, script_input, working_dir, stderr_callback)
 
             if result:
-                logger.info(f"[HookService] {event_name} hook returned: {result}")
+                logger.debug(f"[HookService] {event_name} hook returned: {result}")
 
                 # Check for any meaningful response (decision, systemMessage, reason)
                 decision = result.get("decision")
@@ -596,7 +620,7 @@ def create_plugin_hook_handler(
 
                 # Return response if hook returned anything meaningful
                 if decision or system_message or reason:
-                    logger.info(f"[HookService] {event_name} hook response: decision={decision}, systemMessage={system_message[:50] if system_message else None}...")
+                    logger.debug(f"[HookService] {event_name} hook response: decision={decision}")
                     return SyncHookJSONOutput(
                         decision=decision,
                         reason=reason,
@@ -604,7 +628,7 @@ def create_plugin_hook_handler(
                         continue_=continue_
                     )
             else:
-                logger.info(f"[HookService] {event_name} hook returned nothing or empty")
+                logger.debug(f"[HookService] {event_name} hook returned nothing or empty")
 
         return SyncHookJSONOutput()
 
@@ -614,7 +638,8 @@ def create_plugin_hook_handler(
 def build_hooks_config(
     working_dir: str,
     project_id: Optional[str] = None,
-    plugin_paths: Optional[List[str]] = None
+    plugin_paths: Optional[List[str]] = None,
+    stderr_callback: StderrCallback = None
 ) -> Optional[Dict[str, List[HookMatcher]]]:
     """
     Build SDK hooks configuration from all sources.
@@ -632,6 +657,7 @@ def build_hooks_config(
         working_dir: Working directory for the session
         project_id: Optional project ID for database hooks
         plugin_paths: List of enabled plugin paths
+        stderr_callback: Optional async callback for broadcasting stderr to frontend
 
     Returns:
         Dict of hook configurations for SDK, or None if no hooks needed
@@ -643,7 +669,7 @@ def build_hooks_config(
 
     # Log what hooks we found
     for event_name, hooks in plugin_hooks.items():
-        logger.info(f"[HookService] Found {len(hooks)} {event_name} hook(s) from plugins")
+        logger.debug(f"[HookService] Found {len(hooks)} {event_name} hook(s) from plugins")
 
     # Create handlers for each hook event type
     for event_name, hook_defs in plugin_hooks.items():
@@ -652,9 +678,9 @@ def build_hooks_config(
             continue  # Handled below
 
         if hook_defs:
-            handler = create_plugin_hook_handler(event_name, hook_defs, working_dir)
+            handler = create_plugin_hook_handler(event_name, hook_defs, working_dir, stderr_callback)
             hooks_config[event_name] = [HookMatcher(hooks=[handler])]
-            logger.info(f"[HookService] Registered {event_name} handler with {len(hook_defs)} plugin hook(s)")
+            logger.debug(f"[HookService] Registered {event_name} handler with {len(hook_defs)} plugin hook(s)")
 
     # ALWAYS register the Stop hook handler.
     # This is critical because:
@@ -662,8 +688,8 @@ def build_hooks_config(
     # 2. Plugin Stop hooks from hooks.json also need to be executed
     # The handler dynamically checks for plugin states and executes scripts when Stop fires.
     stop_plugin_hooks = plugin_hooks.get("Stop", [])
-    stop_handler = create_stop_hook_handler(working_dir, project_id, stop_plugin_hooks)
+    stop_handler = create_stop_hook_handler(working_dir, project_id, stop_plugin_hooks, stderr_callback)
     hooks_config["Stop"] = [HookMatcher(hooks=[stop_handler])]
-    logger.info(f"[HookService] Registered Stop hook handler with {len(stop_plugin_hooks)} plugin hook(s)")
+    logger.debug(f"[HookService] Registered Stop hook handler with {len(stop_plugin_hooks)} plugin hook(s)")
 
     return hooks_config
