@@ -42,7 +42,7 @@ export interface ApiUser {
 	last_used_at?: string;
 }
 
-export type MessageType = 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'system' | 'subagent' | 'command';
+export type MessageType = 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'system' | 'subagent' | 'command' | 'plugin_warning';
 
 // Subagent child message - represents a single tool call or text from a subagent
 export interface SubagentChildMessage {
@@ -3650,6 +3650,34 @@ function createTabsStore() {
 					tabs: s.tabs.map(tab => {
 						if (tab.id !== tabId) return tab;
 						return { ...tab, pendingQuestions: questions };
+					})
+				}));
+				break;
+			}
+
+			case 'plugin_message': {
+				// Plugin hook message (warnings, info from security-guidance, etc.)
+				const plugin = data.plugin as string;
+				const message = data.message as string;
+				const severity = data.severity as string;
+
+				console.log(`[Tab ${tabId}] Plugin message from ${plugin} (${severity}):`, message);
+
+				// Add as a system-like message with plugin_warning type
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+						return {
+							...tab,
+							messages: [...tab.messages, {
+								id: `plugin-${Date.now()}`,
+								role: 'system' as const,
+								content: message,
+								type: 'plugin_warning' as MessageType,
+								metadata: { plugin, severity }
+							}]
+						};
 					})
 				}));
 				break;
