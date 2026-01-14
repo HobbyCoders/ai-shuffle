@@ -541,16 +541,25 @@ def create_plugin_hook_handler(
             result = await execute_plugin_hook(hook_def, script_input, working_dir)
 
             if result:
-                # Check for decisions (block, allow, etc.)
+                logger.info(f"[HookService] {event_name} hook returned: {result}")
+
+                # Check for any meaningful response (decision, systemMessage, reason)
                 decision = result.get("decision")
-                if decision:
-                    logger.info(f"[HookService] {event_name} hook returned decision: {decision}")
+                system_message = result.get("systemMessage", "")
+                reason = result.get("reason", "")
+                continue_ = result.get("continue", False)
+
+                # Return response if hook returned anything meaningful
+                if decision or system_message or reason:
+                    logger.info(f"[HookService] {event_name} hook response: decision={decision}, systemMessage={system_message[:50] if system_message else None}...")
                     return SyncHookJSONOutput(
                         decision=decision,
-                        reason=result.get("reason", ""),
-                        systemMessage=result.get("systemMessage", ""),
-                        continue_=result.get("continue", False)
+                        reason=reason,
+                        systemMessage=system_message,
+                        continue_=continue_
                     )
+            else:
+                logger.info(f"[HookService] {event_name} hook returned nothing or empty")
 
         return SyncHookJSONOutput()
 
