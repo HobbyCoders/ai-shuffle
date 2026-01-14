@@ -2552,12 +2552,22 @@ async def stream_to_websocket(
     )
 
     # Build hooks configuration from all sources (plugins, database)
-    # This enables plugin loops (like Ralph Loop) and database hooks to work
+    # This enables plugin hooks (PreToolUse, Stop, etc.) and database hooks to work
+    # IMPORTANT: The SDK does NOT auto-execute plugin hooks from hooks.json!
+    # We must execute them ourselves via this hook configuration.
     from app.core.hook_service import build_hooks_config
     if options.cwd:
+        # Extract plugin paths from options.plugins (list of {"type": "local", "path": str})
+        plugin_paths = []
+        if options.plugins:
+            for plugin_entry in options.plugins:
+                if isinstance(plugin_entry, dict) and plugin_entry.get("path"):
+                    plugin_paths.append(plugin_entry["path"])
+
         hooks_config = build_hooks_config(
             working_dir=options.cwd,
-            project_id=project_id
+            project_id=project_id,
+            plugin_paths=plugin_paths
         )
         if hooks_config:
             options.hooks = hooks_config
