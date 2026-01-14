@@ -63,7 +63,9 @@ def load_plugin_hooks(plugin_paths: List[str]) -> Dict[str, List[Dict[str, Any]]
     for plugin_path in plugin_paths:
         hooks_file = Path(plugin_path) / "hooks" / "hooks.json"
         if not hooks_file.exists():
+            logger.debug(f"No hooks.json found at {hooks_file}")
             continue
+        logger.info(f"[HookService] Found hooks.json at {hooks_file}")
 
         try:
             with open(hooks_file, 'r') as f:
@@ -88,7 +90,7 @@ def load_plugin_hooks(plugin_paths: List[str]) -> Dict[str, List[Dict[str, Any]]
                                 "timeout": hook_def.get("timeout", 30),
                                 "plugin_path": plugin_path
                             })
-                            logger.debug(f"Loaded {event_name} hook from {plugin_path}: {command}")
+                            logger.info(f"[HookService] Loaded {event_name} hook: {command[:80]}")
 
         except Exception as e:
             logger.warning(f"Failed to load hooks from {plugin_path}: {e}")
@@ -418,7 +420,7 @@ def create_plugin_hook_handler(
             # The SDK provides tool_name in the hook input
             tool_name = hook_input.get("tool_name", "")
 
-        logger.debug(f"{event_name} hook fired (tool={tool_name})")
+        logger.info(f"[HookService] {event_name} hook fired for tool={tool_name}")
 
         # Build the input dict that gets passed to plugin scripts via stdin
         # On Windows, normalize paths to Unix-style for cross-platform compatibility
@@ -507,8 +509,8 @@ def build_hooks_config(
     plugin_hooks = load_plugin_hooks(plugin_paths or [])
 
     # Log what hooks we found
-    for event_name, hooks in plugin_hooks.items():
-        logger.debug(f"Found {len(hooks)} {event_name} hook(s) from plugins")
+    total_hooks = sum(len(hooks) for hooks in plugin_hooks.values())
+    logger.info(f"[HookService] Loaded {total_hooks} hooks from {len(plugin_paths or [])} plugins: {list(plugin_hooks.keys())}")
 
     # Create handlers for each hook event type
     for event_name, hook_defs in plugin_hooks.items():
@@ -519,12 +521,12 @@ def build_hooks_config(
         if hook_defs:
             handler = create_plugin_hook_handler(event_name, hook_defs, working_dir, stderr_callback)
             hooks_config[event_name] = [HookMatcher(hooks=[handler])]
-            logger.debug(f"Registered {event_name} handler with {len(hook_defs)} plugin hook(s)")
+            logger.info(f"[HookService] Registered {event_name} handler with {len(hook_defs)} hook(s)")
 
     # ALWAYS register the Stop hook handler for database hooks support
     stop_plugin_hooks = plugin_hooks.get("Stop", [])
     stop_handler = create_stop_hook_handler(working_dir, project_id, stop_plugin_hooks, stderr_callback)
     hooks_config["Stop"] = [HookMatcher(hooks=[stop_handler])]
-    logger.debug(f"Registered Stop hook handler with {len(stop_plugin_hooks)} plugin hook(s)")
+    logger.info(f"[HookService] Registered Stop handler with {len(stop_plugin_hooks)} plugin hook(s)")
 
     return hooks_config
