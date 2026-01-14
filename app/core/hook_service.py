@@ -161,8 +161,8 @@ async def execute_plugin_hook(
     stdin_data = json.dumps(hook_input)
 
     try:
-        logger.debug(f"[HookService] Executing command: {command}")
-        logger.debug(f"[HookService] Hook input data: {stdin_data[:500]}")
+        logger.info(f"[HookService] Executing command: {command}")
+        logger.info(f"[HookService] Hook input data: {stdin_data[:500]}")
 
         # Run the command
         process = await asyncio.wait_for(
@@ -183,7 +183,7 @@ async def execute_plugin_hook(
         )
 
         # Log return code for debugging
-        logger.debug(f"[HookService] Command return code: {process.returncode}")
+        logger.info(f"[HookService] Command return code: {process.returncode}")
 
         # Handle stderr - broadcast to frontend if callback provided
         if stderr:
@@ -196,7 +196,7 @@ async def execute_plugin_hook(
                 # Return code 2 typically indicates a warning in CLI hooks
                 severity = "warning" if process.returncode == 2 else "info"
 
-                logger.debug(f"[HookService] Plugin hook stderr ({severity}): {stderr_str}")
+                logger.info(f"[HookService] Plugin hook stderr ({severity}): {stderr_str}")
 
                 # Call the stderr callback to broadcast to frontend
                 if stderr_callback:
@@ -207,15 +207,15 @@ async def execute_plugin_hook(
 
         if stdout:
             output_str = stdout.decode().strip()
-            logger.debug(f"[HookService] Plugin hook stdout: {output_str[:200] if output_str else '(empty)'}")
+            logger.info(f"[HookService] Plugin hook stdout: {output_str[:500] if output_str else '(empty)'}")
             if output_str:
                 try:
                     return json.loads(output_str)
                 except json.JSONDecodeError:
-                    logger.debug(f"[HookService] Plugin hook output not valid JSON: {output_str[:100]}")
+                    logger.info(f"[HookService] Plugin hook output not valid JSON: {output_str[:200]}")
                     return None
         else:
-            logger.debug("[HookService] Plugin hook produced no stdout")
+            logger.info("[HookService] Plugin hook produced no stdout")
 
         return None
 
@@ -414,7 +414,7 @@ def create_stop_hook_handler(
         if hook_input.get("hook_event_name") != "Stop":
             return SyncHookJSONOutput()
 
-        logger.debug(f"[HookService] Stop hook fired")
+        logger.info(f"[HookService] Stop hook fired for {working_dir}")
 
         # Build the input dict for plugin scripts
         script_input = {
@@ -426,14 +426,16 @@ def create_stop_hook_handler(
 
         # 1. Execute plugin Stop hooks from hooks.json
         for hook_def in (plugin_stop_hooks or []):
-            logger.debug(f"[HookService] Executing plugin Stop hook: {hook_def.get('command')}")
+            logger.info(f"[HookService] Executing plugin Stop hook: {hook_def.get('command')}")
 
             result = await execute_plugin_hook(hook_def, script_input, working_dir, stderr_callback)
+
+            logger.info(f"[HookService] Plugin Stop hook result: {result}")
 
             if result:
                 decision = result.get("decision")
                 if decision:
-                    logger.debug(f"[HookService] Plugin Stop hook returned decision: {decision}")
+                    logger.info(f"[HookService] Plugin Stop hook returned decision: {decision}")
                     return SyncHookJSONOutput(
                         decision=decision,
                         reason=result.get("reason", ""),
@@ -444,11 +446,12 @@ def create_stop_hook_handler(
         # 2. Check for active plugin loops (run sync file I/O in thread to avoid blocking)
         # This is for plugins like Ralph Loop that use state files
         plugin_state = await asyncio.to_thread(detect_plugin_loop_state, working_dir)
+        logger.info(f"[HookService] Plugin loop state check: {plugin_state}")
         if plugin_state:
             plugin = plugin_state["plugin"]
             state = plugin_state["state"]
 
-            logger.debug(f"[HookService] Active {plugin} loop detected")
+            logger.info(f"[HookService] Active {plugin} loop detected with state: {state}")
 
             # Handle Ralph Loop specifically (file I/O in thread)
             if plugin == "ralph-loop":
@@ -505,11 +508,11 @@ def _handle_ralph_loop_stop(working_dir: str, state: Dict[str, Any]) -> Optional
     completion_promise = state.get('completion_promise')
     prompt = state.get('prompt', '')
 
-    logger.debug(f"[RalphLoop] Stop hook - iteration {iteration}, max={max_iterations}")
+    logger.info(f"[RalphLoop] Stop hook - iteration {iteration}, max={max_iterations}, promise={completion_promise}")
 
     # Check if max iterations reached
     if max_iterations > 0 and iteration >= max_iterations:
-        logger.debug(f"[RalphLoop] Max iterations ({max_iterations}) reached, stopping")
+        logger.info(f"[RalphLoop] Max iterations ({max_iterations}) reached, stopping")
         _remove_plugin_state(working_dir, "ralph-loop")
         return None
 
@@ -527,7 +530,7 @@ def _handle_ralph_loop_stop(working_dir: str, state: Dict[str, Any]) -> Optional
     else:
         system_msg = f"🔄 Ralph iteration {next_iteration} | No completion promise set"
 
-    logger.debug(f"[RalphLoop] Continuing to iteration {next_iteration}")
+    logger.info(f"[RalphLoop] Continuing to iteration {next_iteration} with prompt: {prompt[:100]}...")
 
     return SyncHookJSONOutput(
         decision="block",
@@ -669,7 +672,9 @@ def build_hooks_config(
 
     # Log what hooks we found
     for event_name, hooks in plugin_hooks.items():
-        logger.debug(f"[HookService] Found {len(hooks)} {event_name} hook(s) from plugins")
+        logger.info(f"[HookService] Found {len(hooks)} {event_name} hook(s) from plugins")
+        for hook in hooks:
+            logger.info(f"[HookService]   - {hook.get('command', 'unknown')}")
 
     # Create handlers for each hook event type
     for event_name, hook_defs in plugin_hooks.items():
@@ -680,7 +685,7 @@ def build_hooks_config(
         if hook_defs:
             handler = create_plugin_hook_handler(event_name, hook_defs, working_dir, stderr_callback)
             hooks_config[event_name] = [HookMatcher(hooks=[handler])]
-            logger.debug(f"[HookService] Registered {event_name} handler with {len(hook_defs)} plugin hook(s)")
+            logger.info(f"[HookService] Registered {event_name} handler with {len(hook_defs)} plugin hook(s)")
 
     # ALWAYS register the Stop hook handler.
     # This is critical because:
@@ -690,6 +695,6 @@ def build_hooks_config(
     stop_plugin_hooks = plugin_hooks.get("Stop", [])
     stop_handler = create_stop_hook_handler(working_dir, project_id, stop_plugin_hooks, stderr_callback)
     hooks_config["Stop"] = [HookMatcher(hooks=[stop_handler])]
-    logger.debug(f"[HookService] Registered Stop hook handler with {len(stop_plugin_hooks)} plugin hook(s)")
+    logger.info(f"[HookService] Registered Stop hook handler with {len(stop_plugin_hooks)} plugin hook(s)")
 
     return hooks_config
