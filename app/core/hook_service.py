@@ -464,11 +464,14 @@ def create_stop_hook_handler(
                 decision = result.get("decision")
                 if decision:
                     logger.info(f"[HookService] Plugin Stop hook returned decision: {decision}")
+                    # When decision is "block", default continue_ to True (to continue the loop)
+                    # The script may not include "continue" field explicitly
+                    default_continue = decision == "block"
                     return SyncHookJSONOutput(
                         decision=decision,
                         reason=result.get("reason", ""),
                         systemMessage=result.get("systemMessage", ""),
-                        continue_=result.get("continue", False)
+                        continue_=result.get("continue", default_continue)
                     )
 
         # 2. Check for active plugin loops (run sync file I/O in thread to avoid blocking)
