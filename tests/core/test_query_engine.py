@@ -235,86 +235,127 @@ class TestCleanupAgentsDirectory:
 # =============================================================================
 
 class TestBuildPluginsList:
-    """Test _build_plugins_list function."""
+    """Test _build_plugins_list function.
 
-    def test_none_returns_none(self):
-        """Should return None for None plugins list."""
-        result = _build_plugins_list(None)
-        assert result is None
+    Note: This function now loads plugins from TWO sources:
+    1. Claude's settings.json (enabledPlugins)
+    2. Profile config (enabled_plugins)
 
-    def test_empty_list_returns_none(self):
-        """Should return None for empty plugins list."""
-        result = _build_plugins_list([])
-        assert result is None
+    All tests must mock get_enabled_plugins() to isolate test behavior.
+    """
 
-    def test_skips_plugins_when_auto_loaded(self):
-        """Should skip plugins when setting_sources includes user/project."""
-        # Plugin IDs (not direct paths) are auto-loaded when setting_sources
-        # includes "user" or "project". The function returns None early in this case.
-        result = _build_plugins_list(
-            ["plugin-name@marketplace"],
-            setting_sources=["user", "project"]
-        )
+    def _mock_plugin_service(self, enabled_plugins=None, installed_plugins=None):
+        """Create a mock plugin service with configurable responses."""
+        if enabled_plugins is None:
+            enabled_plugins = {}
+        if installed_plugins is None:
+            installed_plugins = {}
 
-        # Should return None since plugins will be auto-loaded
-        assert result is None
+        mock_service = MagicMock()
+        mock_service.get_enabled_plugins.return_value = enabled_plugins
+        mock_service.INSTALLED_FILE = Path("/nonexistent/installed_plugins.json")
+        return mock_service
 
-    def test_direct_path_plugins_included(self, temp_dir):
-        """Should include direct path plugins even with auto-loading."""
+    def test_none_profile_and_no_settings_returns_none(self):
+        """Should return None when no plugins in profile or settings."""
+        with patch("app.core.plugin_service.get_plugin_service") as mock_get_service:
+            mock_get_service.return_value = self._mock_plugin_service(enabled_plugins={})
+            result = _build_plugins_list(None)
+            assert result is None
+
+    def test_empty_list_and_no_settings_returns_none(self):
+        """Should return None when empty profile list and no settings plugins."""
+        with patch("app.core.plugin_service.get_plugin_service") as mock_get_service:
+            mock_get_service.return_value = self._mock_plugin_service(enabled_plugins={})
+            result = _build_plugins_list([])
+            assert result is None
+
+    def test_loads_plugins_from_settings(self, temp_dir):
+        """Should load plugins enabled in Claude's settings.json."""
         # Create a real plugin directory
         plugin_dir = temp_dir / "my-plugin"
         plugin_dir.mkdir()
         plugin_path = str(plugin_dir)
 
-        # The function filters for paths starting with / or . or not containing @
-        # When setting_sources includes user/project, only direct paths are processed
-        result = _build_plugins_list(
-            [plugin_path],
-            setting_sources=["user", "project"]
-        )
-
-        # Direct paths should be included
-        assert result is not None
-        assert len(result) == 1
-        assert result[0]["type"] == "local"
-        assert result[0]["path"] == plugin_path
-
-    def test_relative_path_plugins_included(self, temp_dir):
-        """Should include relative path plugins when they exist."""
-        # Create a plugin directory that looks like a relative path
-        plugin_dir = temp_dir / "my-local-plugin"
-        plugin_dir.mkdir()
-        plugin_path = str(plugin_dir)
-
-        # Use full path but pretend it's relative for the test
-        result = _build_plugins_list(
-            [plugin_path],
-            setting_sources=["user", "project"]
-        )
-
-        assert result is not None
-        assert len(result) == 1
-        assert result[0]["type"] == "local"
-        assert result[0]["path"] == plugin_path
-
-    def test_no_setting_sources_processes_all(self, temp_dir):
-        """Should process all plugins when no setting_sources."""
-        # Create a real plugin directory
-        plugin_dir = temp_dir / "plugin"
-        plugin_dir.mkdir()
-        plugin_path = str(plugin_dir)
-
-        # When setting_sources is None/empty, all plugins are processed
-        # but we need to mock the plugin service for ID resolution
         with patch("app.core.plugin_service.get_plugin_service") as mock_get_service:
-            mock_service = MagicMock()
-            mock_service.INSTALLED_FILE = Path("/nonexistent/installed_plugins.json")
+            # Mock a plugin enabled in settings with its install path
+            mock_service = self._mock_plugin_service(
+                enabled_plugins={"my-plugin@marketplace": True}
+            )
+            # Also mock the installed_plugins.json file
+            mock_service.INSTALLED_FILE = temp_dir / "installed_plugins.json"
+            (temp_dir / "installed_plugins.json").write_text(
+                f'{{"plugins": {{"my-plugin@marketplace": [{{"installPath": "{plugin_path}"}}]}}}}'
+            )
             mock_get_service.return_value = mock_service
 
-            result = _build_plugins_list([plugin_path])
+            result = _build_plugins_list(None)
 
             assert result is not None
             assert len(result) == 1
+            assert result[0]["type"] == "local"
+            assert result[0]["path"] == plugin_path
+
+    def test_direct_path_plugins_included(self, temp_dir):
+        """Should include direct path plugins from profile config."""
+        # Create a real plugin directory
+        plugin_dir = temp_dir / "my-plugin"
+        plugin_dir.mkdir()
+        plugin_path = str(plugin_dir)
+
+        with patch("app.core.plugin_service.get_plugin_service") as mock_get_service:
+            mock_get_service.return_value = self._mock_plugin_service(enabled_plugins={})
+
+            result = _build_plugins_list([plugin_path])
+
+            # Direct paths should be included
+            assert result is not None
+            assert len(result) == 1
+            assert result[0]["type"] == "local"
+            assert result[0]["path"] == plugin_path
+
+    def test_combines_settings_and_profile_plugins(self, temp_dir):
+        """Should combine plugins from both settings.json and profile config."""
+        # Create two plugin directories
+        plugin1_dir = temp_dir / "plugin1"
+        plugin1_dir.mkdir()
+        plugin2_dir = temp_dir / "plugin2"
+        plugin2_dir.mkdir()
+
+        with patch("app.core.plugin_service.get_plugin_service") as mock_get_service:
+            mock_service = self._mock_plugin_service(
+                enabled_plugins={"plugin1@marketplace": True}
+            )
+            mock_service.INSTALLED_FILE = temp_dir / "installed_plugins.json"
+            (temp_dir / "installed_plugins.json").write_text(
+                f'{{"plugins": {{"plugin1@marketplace": [{{"installPath": "{plugin1_dir}"}}]}}}}'
+            )
+            mock_get_service.return_value = mock_service
+
+            # Profile also specifies a plugin
+            result = _build_plugins_list([str(plugin2_dir)])
+
+            assert result is not None
+            assert len(result) == 2
+
+    def test_disabled_plugins_not_loaded(self, temp_dir):
+        """Should not load plugins that are disabled in settings."""
+        plugin_dir = temp_dir / "disabled-plugin"
+        plugin_dir.mkdir()
+
+        with patch("app.core.plugin_service.get_plugin_service") as mock_get_service:
+            mock_service = self._mock_plugin_service(
+                enabled_plugins={"disabled-plugin@marketplace": False}  # Disabled!
+            )
+            mock_service.INSTALLED_FILE = temp_dir / "installed_plugins.json"
+            (temp_dir / "installed_plugins.json").write_text(
+                f'{{"plugins": {{"disabled-plugin@marketplace": [{{"installPath": "{plugin_dir}"}}]}}}}'
+            )
+            mock_get_service.return_value = mock_service
+
+            result = _build_plugins_list(None)
+
+            assert result is None  # No plugins loaded
 
 
 # =============================================================================

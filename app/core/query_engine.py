@@ -182,48 +182,39 @@ def cleanup_agents_directory(agents_dir: Path, agent_ids: list) -> None:
 
 
 def _build_plugins_list(
-    enabled_plugins: Optional[list],
+    profile_enabled_plugins: Optional[list],
     setting_sources: Optional[list] = None
 ) -> Optional[list]:
     """
-    Build the plugins list for ClaudeAgentOptions from profile's enabled_plugins.
+    Build the plugins list for ClaudeAgentOptions.
+
+    IMPORTANT: The Agent SDK does NOT auto-load plugins from settings.json!
+    Unlike the terminal CLI, the SDK requires explicit plugin paths via options.plugins.
+    See: https://platform.claude.com/docs/en/agent-sdk/plugins
+
+    This function loads plugins from TWO sources:
+    1. Claude's settings.json (enabledPlugins) - plugins enabled via CLI
+    2. Profile config (enabled_plugins) - additional plugins specified per-profile
 
     According to the Claude Agent SDK documentation, plugins are specified as:
     [{"type": "local", "path": "./my-plugin"}, ...]
 
-    IMPORTANT: When setting_sources includes "user" or "project", Claude Code CLI
-    automatically loads plugins from ~/.claude/settings.json (enabledPlugins).
-    To avoid duplication, we only return explicit plugins here when:
-    1. setting_sources doesn't include "user" or "project", OR
-    2. enabled_plugins contains paths (not plugin IDs) that wouldn't be auto-loaded
-
-    Supports two formats for enabled_plugins entries:
+    Supports two formats for plugin entries:
     1. Plugin IDs: "plugin-name@marketplace" - resolved via installed_plugins.json
     2. Direct paths: "/path/to/plugin" or "relative/path" - used directly
 
     Args:
-        enabled_plugins: List of plugin IDs or paths from profile config
-        setting_sources: List of setting sources (e.g., ["user", "project"])
+        profile_enabled_plugins: List of plugin IDs or paths from profile config
+        setting_sources: List of setting sources (unused, kept for API compatibility)
 
     Returns:
         List of plugin dicts for SDK, or None if no plugins enabled/needed
     """
-    if not enabled_plugins:
-        return None
-
-    # IMPORTANT: The Agent SDK does NOT auto-load plugins from settings.json!
-    # Unlike the terminal CLI, the SDK requires explicit plugin paths via options.plugins.
-    # See: https://platform.claude.com/docs/en/agent-sdk/plugins
-    #
-    # "If you installed a plugin via the CLI (e.g., /plugin install my-plugin@marketplace),
-    # you can still use it in the SDK by providing its installation path."
-    #
-    # Therefore, we ALWAYS resolve and pass plugin paths explicitly, regardless of setting_sources.
-
-    # Try to load installed plugins registry to resolve plugin IDs
     # Import here to avoid circular imports
     from app.core.plugin_service import get_plugin_service
     service = get_plugin_service()
+
+    # Load installed plugins registry to resolve plugin IDs
     installed_plugins = {}
     installed_plugins_file = service.INSTALLED_FILE
     try:
@@ -235,10 +226,32 @@ def _build_plugins_list(
     except Exception as e:
         logger.warning(f"Failed to load installed_plugins.json: {e}")
 
+    # Get plugins enabled in Claude's settings.json
+    settings_enabled = service.get_enabled_plugins()  # Returns Dict[str, bool]
+    logger.info(f"Plugins enabled in settings.json: {list(settings_enabled.keys())}")
+
+    # Combine plugins from settings.json and profile config
+    all_plugin_entries = []
+
+    # Add plugins enabled in Claude's settings.json
+    for plugin_id, is_enabled in settings_enabled.items():
+        if is_enabled:
+            all_plugin_entries.append(plugin_id)
+
+    # Add plugins from profile config (may be paths or IDs)
+    if profile_enabled_plugins:
+        for entry in profile_enabled_plugins:
+            if entry and entry not in all_plugin_entries:
+                all_plugin_entries.append(entry)
+
+    if not all_plugin_entries:
+        logger.info("No plugins enabled in settings.json or profile config")
+        return None
+
     plugins = []
     seen_paths = set()  # Avoid duplicates
 
-    for plugin_entry in enabled_plugins:
+    for plugin_entry in all_plugin_entries:
         if not plugin_entry:
             continue
 
