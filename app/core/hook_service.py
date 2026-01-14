@@ -554,11 +554,21 @@ def create_plugin_hook_handler(
         logger.info(f"[HookService] {event_name} hook fired for {working_dir} (tool={tool_name})")
 
         # Build the input dict that gets passed to plugin scripts via stdin
+        # Normalize Windows paths to Unix-style for cross-platform compatibility
+        # (Many plugins like security-guidance check for patterns like ".github/workflows/")
+        normalized_input = dict(hook_input)
+        if "tool_input" in normalized_input and isinstance(normalized_input["tool_input"], dict):
+            tool_input = dict(normalized_input["tool_input"])
+            if "file_path" in tool_input:
+                # Convert Windows backslashes to forward slashes
+                tool_input["file_path"] = tool_input["file_path"].replace("\\", "/")
+            normalized_input["tool_input"] = tool_input
+
         script_input = {
             "hook_event_name": event_name,
             "session_id": context.get("session_id"),
             "cwd": working_dir,
-            **hook_input
+            **normalized_input
         }
 
         # Execute each hook
