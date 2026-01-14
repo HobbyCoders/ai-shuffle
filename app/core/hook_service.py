@@ -227,13 +227,13 @@ async def execute_plugin_hook(
                 if stderr_callback:
                     try:
                         await stderr_callback(plugin_name, stderr_str, severity)
-                        logger.debug(f"[HookService] Broadcasted stderr to frontend")
+                        logger.debug("[HookService] Broadcasted stderr to frontend")
                     except Exception as e:
                         logger.warning(f"[HookService] Failed to broadcast stderr: {e}")
                 else:
-                    logger.warning(f"[HookService] No stderr_callback provided!")
+                    logger.warning("[HookService] No stderr_callback provided!")
         else:
-            logger.debug(f"[HookService] Hook produced no stderr")
+            logger.debug("[HookService] Hook produced no stderr")
 
         if stdout:
             output_str = stdout.decode().strip()

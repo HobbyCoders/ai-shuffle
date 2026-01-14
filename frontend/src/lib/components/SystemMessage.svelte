@@ -174,8 +174,15 @@
 
 			case 'plugin_warning': {
 				// Plugin hook stderr output (security warnings, etc.)
-				const pluginName = (data.plugin as string) || message.metadata?.plugin || 'Plugin';
-				const warningContent = (data.message as string) || message.content || 'Plugin warning';
+				const metadataPlugin = message.metadata?.plugin;
+				const pluginName: string =
+					(typeof data.plugin === 'string' ? data.plugin : null) ||
+					(typeof metadataPlugin === 'string' ? metadataPlugin : null) ||
+					'Plugin';
+				const warningContent: string =
+					(typeof data.message === 'string' ? data.message : null) ||
+					(typeof message.content === 'string' ? message.content : null) ||
+					'Plugin warning';
 				return {
 					title: pluginName,
 					content: warningContent,
