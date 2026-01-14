@@ -11,7 +11,7 @@ Key design principles:
 - Multiple sessions can use the same worktree (sequentially, not concurrently)
 - Worktree validity is determined by checking if the folder exists on disk
 
-Path pattern: {workspace_dir}/{repo_name}-{branch_sanitized}
+Path pattern: {workspace_dir}/{branch_sanitized}
 (Worktrees are adjacent to the main repo, not nested inside it)
 """
 
@@ -46,7 +46,7 @@ class WorktreeManager:
     - get_available_worktrees(): Gets worktrees available for new sessions
     - is_worktree_valid(): Checks if worktree folder exists on disk
 
-    Path pattern: {workspace_dir}/{repo_name}-{branch_sanitized}
+    Path pattern: {workspace_dir}/{branch_sanitized}
     (Worktrees are adjacent to the main repo, not nested inside it)
     """
 
@@ -63,13 +63,11 @@ class WorktreeManager:
         Get full path for a worktree - adjacent to the main repo.
         Auto-generates unique suffix if path already exists.
 
-        Example: If repo is at {workspace}/ai-shuffle and branch is "feature/auth",
-        worktree will be at {workspace}/ai-shuffle-feature-auth
-        If that exists, tries ai-shuffle-feature-auth-2, -3, etc.
+        Example: If branch is "feature/auth", worktree will be at {workspace}/feature-auth
+        If that exists, tries feature-auth-2, -3, etc.
         """
-        repo_name = Path(project_path).name
         sanitized = self._sanitize_branch_name(branch)
-        base_path = settings.workspace_dir / f"{repo_name}-{sanitized}"
+        base_path = settings.workspace_dir / sanitized
 
         # If base path doesn't exist, use it
         if not base_path.exists():
@@ -78,7 +76,7 @@ class WorktreeManager:
         # Otherwise, find a unique suffix
         counter = 2
         while True:
-            candidate = settings.workspace_dir / f"{repo_name}-{sanitized}-{counter}"
+            candidate = settings.workspace_dir / f"{sanitized}-{counter}"
             if not candidate.exists():
                 return candidate
             counter += 1
