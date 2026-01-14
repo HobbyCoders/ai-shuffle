@@ -157,6 +157,34 @@ async def execute_plugin_hook(
     env = os.environ.copy()
     env["CLAUDE_PLUGIN_ROOT"] = plugin_path
 
+    # On Windows, add common jq install locations to PATH for shell scripts
+    # This is needed because Git Bash subprocess doesn't always inherit Windows PATH properly
+    if sys.platform == "win32":
+        import shutil
+        # Check if jq is already in PATH
+        if not shutil.which("jq"):
+            # Common jq installation paths on Windows
+            user_home = os.path.expanduser("~")
+            common_jq_paths = [
+                os.path.join(user_home, "AppData", "Local", "Microsoft", "WinGet", "Packages"),
+                os.path.join(user_home, "scoop", "shims"),
+                r"C:\ProgramData\chocolatey\bin",
+                r"C:\tools",
+            ]
+            # Search for jq.exe in common paths
+            for base_path in common_jq_paths:
+                if os.path.exists(base_path):
+                    # For WinGet, search subdirectories
+                    if "WinGet" in base_path:
+                        for root, dirs, files in os.walk(base_path):
+                            if "jq.exe" in files:
+                                env["PATH"] = root + os.pathsep + env.get("PATH", "")
+                                logger.debug(f"[HookService] Added jq path to env: {root}")
+                                break
+                    elif os.path.exists(os.path.join(base_path, "jq.exe")):
+                        env["PATH"] = base_path + os.pathsep + env.get("PATH", "")
+                        logger.debug(f"[HookService] Added jq path to env: {base_path}")
+
     # Prepare stdin JSON
     stdin_data = json.dumps(hook_input)
 
