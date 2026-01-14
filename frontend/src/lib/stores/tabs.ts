@@ -2205,7 +2205,7 @@ function createTabsStore() {
 							content: m.content as string,
 							type: 'system' as const,
 							systemSubtype: m.subtype as string | undefined,
-							systemData: { content: m.content } as Record<string, unknown>,
+							systemData: (m.systemData as Record<string, unknown>) || { content: m.content },
 							metadata: m.metadata as Record<string, unknown>,
 							streaming: false
 						});
@@ -4577,7 +4577,7 @@ function createTabsStore() {
 							content: m.content as string,
 							type: 'system' as const,
 							systemSubtype: m.subtype as string | undefined,
-							systemData: { content: m.content } as Record<string, unknown>,
+							systemData: (m.systemData as Record<string, unknown>) || { content: m.content },
 							metadata: m.metadata as Record<string, unknown>,
 							streaming: false
 						};
