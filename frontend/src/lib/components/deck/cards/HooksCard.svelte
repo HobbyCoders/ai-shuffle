@@ -22,7 +22,7 @@
 		hookStats
 	} from '$lib/stores/hooks';
 	import { projects, profiles } from '$lib/stores/tabs';
-	import { chat, selectedProject, selectedProfile } from '$lib/stores/chat';
+	import { chat, selectedProject, selectedProfile } from '$lib/stores/appState';
 	import type { Hook, HookCreate, HookUpdate, HookTestResult } from '$lib/api/client';
 	import HookListItem from '$lib/components/hooks/HookListItem.svelte';
 	import HookForm from '$lib/components/hooks/HookForm.svelte';

@@ -1,16 +1,15 @@
 <script lang="ts">
 	/**
-	 * NotesCard - Project-scoped notes for ideas, bugs, planning
+	 * NotesCard - Global notes for ideas, bugs, planning
 	 *
 	 * Provides list view with search/filter, and editor view for editing notes.
 	 */
 
 	import BaseCard from './BaseCard.svelte';
 	import type { DeckCard } from './types';
-	import { selectedProject } from '$lib/stores/chat';
 	import './card-design-system.css';
 	import {
-		getProjectNotes,
+		getNotes,
 		createNote,
 		updateNote,
 		deleteNote,
@@ -59,28 +58,18 @@
 	let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 	let hasUnsavedChanges = $state(false);
 
-	// Derived - selectedProject is already the project ID string
-	const projectId = $derived($selectedProject || null);
-
 	// Load notes and tags
 	async function loadData() {
-		if (!projectId) {
-			notes = [];
-			tags = [];
-			loading = false;
-			return;
-		}
-
 		loading = true;
 		error = null;
 
 		try {
 			const [notesData, tagsData] = await Promise.all([
-				getProjectNotes(projectId, {
+				getNotes({
 					search: searchQuery || undefined,
 					tag: selectedTag || undefined
 				}),
-				getNoteTags(projectId)
+				getNoteTags()
 			]);
 			notes = notesData;
 			tags = tagsData;
@@ -91,11 +80,14 @@
 		}
 	}
 
-	// Watch for project change
-	$effect(() => {
-		if (projectId) {
-			loadData();
-		}
+	// Load data on mount
+	onMount(() => {
+		loadData();
+		return () => {
+			if (saveTimeout) {
+				clearTimeout(saveTimeout);
+			}
+		};
 	});
 
 	// Reload when search/filter changes
@@ -104,7 +96,7 @@
 		searchQuery;
 		selectedTag;
 
-		if (projectId && !editingNote && !isCreatingNew) {
+		if (!editingNote && !isCreatingNew) {
 			// Debounce search
 			const timeout = setTimeout(loadData, 300);
 			return () => clearTimeout(timeout);
@@ -145,13 +137,13 @@
 
 	// Save the current note (create or update)
 	async function saveNote() {
-		if (!projectId || !editorTitle.trim()) return;
+		if (!editorTitle.trim()) return;
 
 		saving = true;
 		try {
 			if (isCreatingNew) {
 				// Create new note and switch to editing mode
-				const newNote = await createNote(projectId, {
+				const newNote = await createNote({
 					title: editorTitle.trim(),
 					content: editorContent,
 					tags: editorTags,
@@ -162,7 +154,7 @@
 				editingNote = newNote;
 			} else if (editingNote) {
 				// Update existing note and stay in editor
-				const updatedNote = await updateNote(projectId, editingNote.id, {
+				const updatedNote = await updateNote(editingNote.id, {
 					title: editorTitle.trim(),
 					content: editorContent,
 					tags: editorTags,
@@ -182,11 +174,11 @@
 
 	// Delete the current note
 	async function handleDelete() {
-		if (!projectId || !editingNote) return;
+		if (!editingNote) return;
 		if (!confirm('Delete this note? This cannot be undone.')) return;
 
 		try {
-			await deleteNote(projectId, editingNote.id);
+			await deleteNote(editingNote.id);
 			editingNote = null;
 			isCreatingNew = false;
 			loadData();
@@ -198,10 +190,9 @@
 	// Toggle pin status
 	async function togglePin(note: Note, e: Event) {
 		e.stopPropagation();
-		if (!projectId) return;
 
 		try {
-			await updateNote(projectId, note.id, { is_pinned: !note.is_pinned });
+			await updateNote(note.id, { is_pinned: !note.is_pinned });
 			loadData();
 		} catch (e) {
 			// Silent fail for pin toggle
@@ -224,15 +215,6 @@
 			}, 1000); // Autosave after 1 second of inactivity
 		}
 	}
-
-	// Cleanup timeout on component destroy
-	onMount(() => {
-		return () => {
-			if (saveTimeout) {
-				clearTimeout(saveTimeout);
-			}
-		};
-	});
 
 	// Add a tag
 	function addTag() {
@@ -308,7 +290,7 @@
 					class="search-input"
 				/>
 			</div>
-			<button class="new-note-btn" onclick={startNewNote} disabled={!projectId}>
+			<button class="new-note-btn" onclick={startNewNote}>
 				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 					<line x1="12" y1="5" x2="12" y2="19"/>
 					<line x1="5" y1="12" x2="19" y2="12"/>
@@ -346,17 +328,6 @@
 				<div class="loading-state">Loading notes...</div>
 			{:else if error}
 				<div class="error-state">{error}</div>
-			{:else if !projectId}
-				<div class="empty-state">
-					<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-						<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-						<polyline points="14 2 14 8 20 8"/>
-						<line x1="16" y1="13" x2="8" y2="13"/>
-						<line x1="16" y1="17" x2="8" y2="17"/>
-						<polyline points="10 9 9 9 8 9"/>
-					</svg>
-					<p>Select a project to view notes</p>
-				</div>
 			{:else if notes.length === 0}
 				<div class="empty-state">
 					<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -410,9 +381,6 @@
 										<span class="note-tag more">+{note.tags.length - 3}</span>
 									{/if}
 								</span>
-							{/if}
-							{#if note.linked_sessions.length > 0}
-								<span class="linked-sessions">{note.linked_sessions.length} session{note.linked_sessions.length === 1 ? '' : 's'}</span>
 							{/if}
 							<span class="note-date">{formatRelativeTime(note.updated_at)}</span>
 							</div>

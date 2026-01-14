@@ -15,7 +15,7 @@
 	import { api } from '$lib/api/client';
 	import { theme, themePreference, isDark, currentPresetId, themePresets, type Theme } from '$lib/stores/theme';
 	import type { ApiUser, ApiUserWithKey, Profile, WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
-	import type { Project } from '$lib/stores/chat';
+	import type { Project } from '$lib/stores/appState';
 	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig, changePassword } from '$lib/api/auth';
 	import {
 		isSupported as isNotificationsSupported,

@@ -1231,16 +1231,14 @@ export async function executeRewind(
 }
 
 // =============================================================================
-// Notes API
+// Notes API (Global notes - not project-scoped)
 // =============================================================================
 
 export interface Note {
 	id: string;
-	project_id: string;
 	title: string;
 	content: string;
 	tags: string[];
-	linked_sessions: string[];
 	is_pinned: boolean;
 	created_at: string;
 	updated_at: string;
@@ -1250,7 +1248,6 @@ export interface NoteCreate {
 	title: string;
 	content?: string;
 	tags?: string[];
-	linked_sessions?: string[];
 	is_pinned?: boolean;
 }
 
@@ -1258,7 +1255,6 @@ export interface NoteUpdate {
 	title?: string;
 	content?: string;
 	tags?: string[];
-	linked_sessions?: string[];
 	is_pinned?: boolean;
 }
 
@@ -1276,10 +1272,9 @@ export interface NoteAutocomplete {
 }
 
 /**
- * Get all notes for a project
+ * Get all notes globally
  */
-export async function getProjectNotes(
-	projectId: string,
+export async function getNotes(
 	options: { search?: string; tag?: string; limit?: number; offset?: number } = {}
 ): Promise<Note[]> {
 	const params = new URLSearchParams();
@@ -1289,49 +1284,48 @@ export async function getProjectNotes(
 	if (options.offset) params.set('offset', options.offset.toString());
 
 	const query = params.toString();
-	return api.get<Note[]>(`/projects/${projectId}/notes${query ? `?${query}` : ''}`);
+	return api.get<Note[]>(`/notes${query ? `?${query}` : ''}`);
 }
 
 /**
- * Create a new note in a project
+ * Create a new note
  */
-export async function createNote(projectId: string, data: NoteCreate): Promise<Note> {
-	return api.post<Note>(`/projects/${projectId}/notes`, data);
+export async function createNote(data: NoteCreate): Promise<Note> {
+	return api.post<Note>(`/notes`, data);
 }
 
 /**
  * Get a single note by ID
  */
-export async function getNote(projectId: string, noteId: string): Promise<Note> {
-	return api.get<Note>(`/projects/${projectId}/notes/${noteId}`);
+export async function getNote(noteId: string): Promise<Note> {
+	return api.get<Note>(`/notes/${noteId}`);
 }
 
 /**
  * Update a note
  */
-export async function updateNote(projectId: string, noteId: string, data: NoteUpdate): Promise<Note> {
-	return api.patch<Note>(`/projects/${projectId}/notes/${noteId}`, data);
+export async function updateNote(noteId: string, data: NoteUpdate): Promise<Note> {
+	return api.patch<Note>(`/notes/${noteId}`, data);
 }
 
 /**
  * Delete a note
  */
-export async function deleteNote(projectId: string, noteId: string): Promise<void> {
-	await api.delete(`/projects/${projectId}/notes/${noteId}`);
+export async function deleteNote(noteId: string): Promise<void> {
+	await api.delete(`/notes/${noteId}`);
 }
 
 /**
- * Get all unique tags used in notes for a project
+ * Get all unique tags used in notes
  */
-export async function getNoteTags(projectId: string): Promise<NoteTag[]> {
-	return api.get<NoteTag[]>(`/projects/${projectId}/notes/tags`);
+export async function getNoteTags(): Promise<NoteTag[]> {
+	return api.get<NoteTag[]>(`/notes/tags`);
 }
 
 /**
  * Get notes for autocomplete (simplified response with preview)
  */
 export async function getNotesAutocomplete(
-	projectId: string,
 	search?: string,
 	limit: number = 20
 ): Promise<NoteAutocomplete[]> {
@@ -1339,7 +1333,7 @@ export async function getNotesAutocomplete(
 	if (search) params.set('search', search);
 	params.set('limit', limit.toString());
 
-	return api.get<NoteAutocomplete[]>(`/projects/${projectId}/notes/autocomplete?${params.toString()}`);
+	return api.get<NoteAutocomplete[]>(`/notes/autocomplete?${params.toString()}`);
 }
 
 // ============================================================================

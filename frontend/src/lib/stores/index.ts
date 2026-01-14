@@ -11,8 +11,8 @@
 // Auth and User
 export * from './auth';
 
-// Chat and Sessions
-export * from './chat';
+// App State (global preferences, connection state)
+export * from './appState';
 
 // Git integration
 export * from './git';

@@ -24,7 +24,8 @@ logger = logging.getLogger(__name__)
 # v28: Add notes table for project-scoped notes feature
 # v29: Add project_hooks table for per-project Claude Code event hooks
 # v30: Add profile_id to session_messages for per-query profile tracking
-SCHEMA_VERSION = 30
+# v31: Make notes global (remove project_id FK), remove linked_sessions
+SCHEMA_VERSION = 31
 
 
 # =============================================================================
@@ -137,6 +138,32 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
         migrations_applied.append("dropped idx_worktrees_active_branch")
     except sqlite3.OperationalError:
         pass  # Index doesn't exist, that's fine
+
+    # Migrate notes table to global (remove project_id and linked_sessions) (v31)
+    # SQLite doesn't support DROP COLUMN directly, so we recreate the table
+    if table_exists(cursor, "notes") and column_exists(cursor, "notes", "project_id"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notes_new (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                content TEXT DEFAULT '',
+                tags JSON DEFAULT '[]',
+                is_pinned BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            INSERT INTO notes_new (id, title, content, tags, is_pinned, created_at, updated_at)
+            SELECT id, title, content, tags, is_pinned, created_at, updated_at
+            FROM notes
+        """)
+        cursor.execute("DROP TABLE notes")
+        cursor.execute("ALTER TABLE notes_new RENAME TO notes")
+        # Recreate indexes (project index no longer needed)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_notes_pinned ON notes(is_pinned DESC, updated_at DESC)")
+        migrations_applied.append("notes_table_global")
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
@@ -744,26 +771,22 @@ def _create_schema(cursor: sqlite3.Cursor):
     # Each worktree is an independent workspace that can check out any branch.
 
     # =========================================================================
-    # Notes - Project-scoped notes for ideas, bugs, planning
+    # Notes - Global notes for ideas, bugs, planning (not project-scoped)
     # =========================================================================
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS notes (
             id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL,
             title TEXT NOT NULL,
             content TEXT DEFAULT '',
             tags JSON DEFAULT '[]',
-            linked_sessions JSON DEFAULT '[]',
             is_pinned BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
     # Indexes for efficient queries
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_notes_project ON notes(project_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_notes_pinned ON notes(is_pinned DESC, updated_at DESC)")
 
@@ -4888,30 +4911,25 @@ def get_note(note_id: str) -> Optional[Dict[str, Any]]:
         row = row_to_dict(cursor.fetchone())
         if row:
             row["tags"] = json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
-            row["linked_sessions"] = json.loads(row["linked_sessions"]) if isinstance(row["linked_sessions"], str) else row["linked_sessions"]
         return row
 
 
-def get_notes_for_project(
-    project_id: str,
+def get_all_notes(
     search: Optional[str] = None,
     tag: Optional[str] = None,
     limit: int = 100,
     offset: int = 0
 ) -> List[Dict[str, Any]]:
     """
-    Get all notes for a project with optional search and tag filtering.
+    Get all notes with optional search and tag filtering.
     Notes are ordered by pinned status (pinned first) then by updated_at descending.
     """
     with get_db() as conn:
         cursor = conn.cursor()
 
         # Build query with filters
-        query = """
-            SELECT * FROM notes
-            WHERE project_id = ?
-        """
-        params: List[Any] = [project_id]
+        query = "SELECT * FROM notes WHERE 1=1"
+        params: List[Any] = []
 
         if search:
             query += " AND (title LIKE ? OR content LIKE ?)"
@@ -4932,18 +4950,15 @@ def get_notes_for_project(
         # Parse JSON fields
         for row in rows:
             row["tags"] = json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
-            row["linked_sessions"] = json.loads(row["linked_sessions"]) if isinstance(row["linked_sessions"], str) else row["linked_sessions"]
 
         return rows
 
 
 def create_note(
     note_id: str,
-    project_id: str,
     title: str,
     content: str = "",
     tags: Optional[List[str]] = None,
-    linked_sessions: Optional[List[str]] = None,
     is_pinned: bool = False
 ) -> Dict[str, Any]:
     """Create a new note"""
@@ -4951,15 +4966,13 @@ def create_note(
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO notes (id, project_id, title, content, tags, linked_sessions, is_pinned, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO notes (id, title, content, tags, is_pinned, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
                 note_id,
-                project_id,
                 title,
                 content,
                 json.dumps(tags or []),
-                json.dumps(linked_sessions or []),
                 is_pinned,
                 now,
                 now
@@ -4973,7 +4986,6 @@ def update_note(
     title: Optional[str] = None,
     content: Optional[str] = None,
     tags: Optional[List[str]] = None,
-    linked_sessions: Optional[List[str]] = None,
     is_pinned: Optional[bool] = None
 ) -> Optional[Dict[str, Any]]:
     """Update a note"""
@@ -4993,9 +5005,6 @@ def update_note(
     if tags is not None:
         updates.append("tags = ?")
         values.append(json.dumps(tags))
-    if linked_sessions is not None:
-        updates.append("linked_sessions = ?")
-        values.append(json.dumps(linked_sessions))
     if is_pinned is not None:
         updates.append("is_pinned = ?")
         values.append(is_pinned)
@@ -5023,18 +5032,15 @@ def delete_note(note_id: str) -> bool:
         return cursor.rowcount > 0
 
 
-def get_note_tags_for_project(project_id: str) -> List[Dict[str, Any]]:
+def get_all_note_tags() -> List[Dict[str, Any]]:
     """
-    Get all unique tags used in notes for a project with their counts.
+    Get all unique tags used in notes with their counts.
     Returns list of {name: str, count: int}.
     """
     with get_db() as conn:
         cursor = conn.cursor()
-        # Get all notes for this project
-        cursor.execute(
-            "SELECT tags FROM notes WHERE project_id = ?",
-            (project_id,)
-        )
+        # Get all notes
+        cursor.execute("SELECT tags FROM notes")
         rows = cursor.fetchall()
 
         # Count tags
@@ -5052,7 +5058,6 @@ def get_note_tags_for_project(project_id: str) -> List[Dict[str, Any]]:
 
 
 def get_notes_autocomplete(
-    project_id: str,
     search: Optional[str] = None,
     limit: int = 20
 ) -> List[Dict[str, Any]]:
@@ -5063,11 +5068,8 @@ def get_notes_autocomplete(
     with get_db() as conn:
         cursor = conn.cursor()
 
-        query = """
-            SELECT id, title, content, tags FROM notes
-            WHERE project_id = ?
-        """
-        params: List[Any] = [project_id]
+        query = "SELECT id, title, content, tags FROM notes WHERE 1=1"
+        params: List[Any] = []
 
         if search:
             query += " AND (title LIKE ? OR content LIKE ?)"
@@ -5095,11 +5097,11 @@ def get_notes_autocomplete(
         return result
 
 
-def count_notes_for_project(project_id: str) -> int:
-    """Count total notes for a project"""
+def count_all_notes() -> int:
+    """Count total notes"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) as count FROM notes WHERE project_id = ?", (project_id,))
+        cursor.execute("SELECT COUNT(*) as count FROM notes")
         row = cursor.fetchone()
         return row["count"] if row else 0
 

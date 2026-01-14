@@ -932,7 +932,6 @@ class NoteBase(BaseModel):
     title: str = Field(..., min_length=1, max_length=255)
     content: str = Field(default="")
     tags: List[str] = Field(default_factory=list)  # User-defined tag names
-    linked_sessions: List[str] = Field(default_factory=list)  # Session IDs
     is_pinned: bool = False
 
 
@@ -946,14 +945,12 @@ class NoteUpdate(BaseModel):
     title: Optional[str] = Field(None, min_length=1, max_length=255)
     content: Optional[str] = None
     tags: Optional[List[str]] = None
-    linked_sessions: Optional[List[str]] = None
     is_pinned: Optional[bool] = None
 
 
 class Note(NoteBase):
     """Full note response"""
     id: str
-    project_id: str
     created_at: datetime
     updated_at: datetime
 

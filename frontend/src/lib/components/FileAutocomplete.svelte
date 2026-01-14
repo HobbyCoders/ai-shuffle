@@ -354,10 +354,8 @@
   }
 
   async function fetchNotes(search: string = '') {
-    if (!projectId) return;
-
     try {
-      const notes = await getNotesAutocomplete(projectId, search || undefined, 30);
+      const notes = await getNotesAutocomplete(search || undefined, 30);
       files = notes.map((note) => ({
         name: note.title,
         type: 'note' as const,

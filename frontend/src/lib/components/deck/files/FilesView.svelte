@@ -35,7 +35,7 @@
 	import { files, sortedFiles, breadcrumbs, hasSelection, selectionCount } from '$lib/stores/files';
 	import type { FileItem } from '$lib/stores/files';
 	import { api } from '$lib/api/client';
-	import type { Project } from '$lib/stores/chat';
+	import type { Project } from '$lib/stores/appState';
 
 	// State
 	let projects: Project[] = $state([]);

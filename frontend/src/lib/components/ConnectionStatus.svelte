@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { connectionState, deviceId, connectedDevices } from '$lib/stores/chat';
+	import { connectionState, deviceId, connectedDevices } from '$lib/stores/appState';
 	import { claudeAuthenticated } from '$lib/stores/auth';
 
 	interface Props {
