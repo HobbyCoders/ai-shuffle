@@ -3,8 +3,9 @@
 	 * TodoList - Cursor-style minimal task progress display
 	 */
 	import { get } from 'svelte/store';
+	import { browser } from '$app/environment';
 	import type { TodoItem } from '$lib/stores/tabs';
-	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
+	import { chatPreferences, type ChatPreferences, DEFAULT_PREFERENCES } from '$lib/stores/chatPreferences';
 
 	interface Props {
 		todos: TodoItem[];
@@ -15,9 +16,14 @@
 	let { todos, initialExpanded }: Props = $props();
 
 	// Subscribe to preferences for reactive updates
-	// Initialize with current store value (not null) to prevent flash of wrong state
-	let prefs = $state<ChatPreferences>(get(chatPreferences));
+	// Use DEFAULT_PREFERENCES during SSR, actual store value on client
+	let prefs = $state<ChatPreferences>(browser ? get(chatPreferences) : DEFAULT_PREFERENCES);
+
+	// Track if preferences have been applied on client (for SSR hydration)
+	let clientMounted = $state(false);
+
 	$effect(() => {
+		clientMounted = true;
 		const unsubscribe = chatPreferences.subscribe(p => {
 			prefs = p;
 		});
@@ -30,12 +36,15 @@
 	let userExpandedChoice = $state(false);
 
 	// Compute expanded state: prop override > user toggle > preference
+	// Only apply preference-based expansion after client mount to avoid SSR hydration issues
 	const isExpanded = $derived(
 		initialExpanded !== undefined
 			? initialExpanded
 			: userToggled
 				? userExpandedChoice
-				: prefs.todosStartExpanded
+				: clientMounted
+					? prefs.todosStartExpanded
+					: true  // Default to expanded during SSR (todos are usually shown expanded)
 	);
 
 	function toggleExpanded() {

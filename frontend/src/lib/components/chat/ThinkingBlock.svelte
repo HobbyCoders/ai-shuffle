@@ -7,8 +7,9 @@
 	 */
 	import { marked } from 'marked';
 	import StreamingIndicator from './StreamingIndicator.svelte';
+	import { browser } from '$app/environment';
 	import { get } from 'svelte/store';
-	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
+	import { chatPreferences, type ChatPreferences, DEFAULT_PREFERENCES } from '$lib/stores/chatPreferences';
 
 	// Configure marked for markdown rendering
 	marked.setOptions({
@@ -33,9 +34,18 @@
 	}: Props = $props();
 
 	// Subscribe to preferences for reactive updates
-	// Initialize with current store value (not null) to prevent flash of wrong state
-	let prefs = $state<ChatPreferences>(get(chatPreferences));
+	// Use DEFAULT_PREFERENCES during SSR, actual store value on client
+	// This prevents SSR hydration mismatch where server renders with defaults
+	// but client has different localStorage values
+	let prefs = $state<ChatPreferences>(browser ? get(chatPreferences) : DEFAULT_PREFERENCES);
+
+	// Track if preferences have been applied on client (for SSR hydration)
+	let clientMounted = $state(false);
+
 	$effect(() => {
+		// Mark as mounted on client - this triggers re-evaluation of isExpanded
+		clientMounted = true;
+
 		const unsubscribe = chatPreferences.subscribe(p => {
 			prefs = p;
 		});
@@ -48,12 +58,15 @@
 	let userExpandedChoice = $state(false);
 
 	// Compute expanded state: prop override > user toggle > preference
+	// Only apply preference-based expansion after client mount to avoid SSR hydration issues
 	const isExpanded = $derived(
 		initialExpanded !== undefined
 			? initialExpanded
 			: userToggled
 				? userExpandedChoice
-				: prefs.thinkingStartExpanded
+				: clientMounted
+					? prefs.thinkingStartExpanded
+					: false  // Default to collapsed during SSR
 	);
 
 	function toggleExpanded() {

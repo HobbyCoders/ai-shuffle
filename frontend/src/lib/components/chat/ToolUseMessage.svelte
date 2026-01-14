@@ -3,7 +3,8 @@
 	 * ToolUseMessage - Collapsible tool execution display
 	 */
 	import { get } from 'svelte/store';
-	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
+	import { browser } from '$app/environment';
+	import { chatPreferences, type ChatPreferences, DEFAULT_PREFERENCES } from '$lib/stores/chatPreferences';
 
 	interface Props {
 		name: string;
@@ -17,9 +18,14 @@
 	let { name, input, partialInput, result, status, streaming = false }: Props = $props();
 
 	// Subscribe to preferences for reactive updates
-	// Initialize with current store value (not null) to prevent flash of wrong state
-	let prefs = $state<ChatPreferences>(get(chatPreferences));
+	// Use DEFAULT_PREFERENCES during SSR, actual store value on client
+	let prefs = $state<ChatPreferences>(browser ? get(chatPreferences) : DEFAULT_PREFERENCES);
+
+	// Track if preferences have been applied on client (for SSR hydration)
+	let clientMounted = $state(false);
+
 	$effect(() => {
+		clientMounted = true;
 		const unsubscribe = chatPreferences.subscribe(p => {
 			prefs = p;
 		});
@@ -32,10 +38,13 @@
 	let userExpandedChoice = $state(false);
 
 	// Compute expanded state: user toggle > preference
+	// Only apply preference-based expansion after client mount to avoid SSR hydration issues
 	const isExpanded = $derived(
 		userToggled
 			? userExpandedChoice
-			: prefs.toolsStartExpanded
+			: clientMounted
+				? prefs.toolsStartExpanded
+				: false  // Default to collapsed during SSR
 	);
 
 	function handleToggle(event: Event) {
