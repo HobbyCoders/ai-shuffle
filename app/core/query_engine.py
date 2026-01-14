@@ -211,30 +211,14 @@ def _build_plugins_list(
     if not enabled_plugins:
         return None
 
-    # Check if Claude Code will auto-load plugins from settings
-    # When "user" or "project" is in setting_sources, Claude reads settings.json
-    # which contains enabledPlugins - those plugins are loaded automatically
-    auto_loads_from_settings = setting_sources and (
-        "user" in setting_sources or "project" in setting_sources
-    )
-
-    if auto_loads_from_settings:
-        # Filter to only include direct path entries (not plugin IDs)
-        # Plugin IDs (name@marketplace) are already in settings.json and will be auto-loaded
-        # Direct paths won't be auto-loaded, so we need to pass them explicitly
-        direct_path_plugins = [
-            p for p in enabled_plugins
-            if p and (p.startswith("/") or p.startswith(".") or "@" not in p)
-        ]
-
-        if not direct_path_plugins:
-            # All plugins are IDs that will be auto-loaded from settings
-            logger.info("Skipping explicit plugins list - Claude Code will auto-load from settings.json")
-            return None
-
-        # Only process direct paths
-        enabled_plugins = direct_path_plugins
-        logger.info(f"Setting sources includes user/project - only passing {len(direct_path_plugins)} direct path plugin(s)")
+    # IMPORTANT: The Agent SDK does NOT auto-load plugins from settings.json!
+    # Unlike the terminal CLI, the SDK requires explicit plugin paths via options.plugins.
+    # See: https://platform.claude.com/docs/en/agent-sdk/plugins
+    #
+    # "If you installed a plugin via the CLI (e.g., /plugin install my-plugin@marketplace),
+    # you can still use it in the SDK by providing its installation path."
+    #
+    # Therefore, we ALWAYS resolve and pass plugin paths explicitly, regardless of setting_sources.
 
     # Try to load installed plugins registry to resolve plugin IDs
     # Import here to avoid circular imports
