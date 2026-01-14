@@ -854,6 +854,276 @@ class PluginService:
         return settings.get("enabledPlugins", {})
 
     # =========================================================================
+    # Project-Scoped Plugins
+    # =========================================================================
+
+    def _get_project_settings_file(self) -> Optional[Path]:
+        """Get the project-local settings file path"""
+        if self.project_dir:
+            return self.project_dir / ".claude" / "settings.json"
+        return None
+
+    def _read_project_settings(self) -> Dict[str, Any]:
+        """Read project-local settings"""
+        settings_file = self._get_project_settings_file()
+        if settings_file:
+            return self._read_json_file(settings_file, {})
+        return {}
+
+    def _write_project_settings(self, data: Dict[str, Any]) -> bool:
+        """Write project-local settings"""
+        settings_file = self._get_project_settings_file()
+        if settings_file:
+            settings_file.parent.mkdir(parents=True, exist_ok=True)
+            return self._write_json_file(settings_file, data)
+        return False
+
+    def get_project_installed_plugins(self) -> List[PluginInfo]:
+        """
+        Get all plugins installed in the project's LOCAL and PROJECT scope directories.
+
+        This discovers plugins by scanning the directories, not from a manifest.
+        """
+        plugins = []
+
+        if not self.project_dir:
+            return plugins
+
+        project_settings = self._read_project_settings()
+        enabled_plugins = project_settings.get("enabledPlugins", {})
+
+        # Scan both LOCAL and PROJECT scope directories
+        scope_dirs = [
+            (PluginScope.LOCAL, self.LOCAL_PLUGINS_DIR),
+            (PluginScope.PROJECT, self.PROJECT_PLUGINS_DIR),
+        ]
+
+        for scope, plugins_dir in scope_dirs:
+            if not plugins_dir or not plugins_dir.exists():
+                continue
+
+            for plugin_dir in plugins_dir.iterdir():
+                if not plugin_dir.is_dir():
+                    continue
+
+                # Skip hidden directories
+                if plugin_dir.name.startswith('.'):
+                    continue
+
+                plugin_name = plugin_dir.name
+                plugin_id = f"{plugin_name}@project-{scope.value}"
+
+                # Read plugin.json for metadata if exists
+                plugin_json = plugin_dir / "plugin.json"
+                version = "1.0.0"
+                if plugin_json.exists():
+                    try:
+                        data = json.load(open(plugin_json))
+                        version = data.get("version", version)
+                    except (json.JSONDecodeError, IOError):
+                        pass
+
+                # Read description from README
+                description = ""
+                readme_path = plugin_dir / "README.md"
+                if readme_path.exists():
+                    try:
+                        content = readme_path.read_text(encoding='utf-8')
+                        lines = content.strip().split("\n")
+                        for line in lines:
+                            line = line.strip()
+                            if line and not line.startswith("#"):
+                                description = line[:200]
+                                break
+                    except (IOError, UnicodeDecodeError):
+                        pass
+
+                # Check components
+                has_commands = (plugin_dir / "commands").exists()
+                has_agents = (plugin_dir / "agents").exists()
+                has_skills = (plugin_dir / "skills").exists()
+                has_hooks = (plugin_dir / "hooks").exists() or (plugin_dir / "hooks.json").exists()
+
+                # Get file timestamps
+                stat = plugin_dir.stat()
+                installed_at = datetime.fromtimestamp(stat.st_ctime)
+
+                plugins.append(PluginInfo(
+                    id=plugin_id,
+                    name=plugin_name,
+                    marketplace="project",
+                    description=description,
+                    version=version,
+                    scope=scope.value,
+                    install_path=str(plugin_dir),
+                    installed_at=installed_at,
+                    enabled=enabled_plugins.get(plugin_id, True),  # Default enabled
+                    has_commands=has_commands,
+                    has_agents=has_agents,
+                    has_skills=has_skills,
+                    has_hooks=has_hooks
+                ))
+
+        return plugins
+
+    def install_plugin_to_project(
+        self,
+        plugin_id: str,
+        scope: PluginScope = PluginScope.LOCAL
+    ) -> PluginInfo:
+        """
+        Install a plugin from a marketplace to the project directory.
+
+        Args:
+            plugin_id: Plugin ID in format "name@marketplace"
+            scope: LOCAL (.claude/plugins/) or PROJECT (plugins/)
+
+        Returns:
+            PluginInfo for the installed plugin
+        """
+        if not self.project_dir:
+            raise ValueError("No project directory configured")
+
+        if scope not in (PluginScope.LOCAL, PluginScope.PROJECT):
+            raise ValueError(f"Invalid scope for project plugin: {scope}")
+
+        parts = plugin_id.rsplit("@", 1)
+        if len(parts) != 2:
+            raise ValueError(f"Invalid plugin ID format: {plugin_id}")
+
+        plugin_name, marketplace_id = parts
+
+        # Find the plugin in marketplace
+        marketplaces = self._read_json_file(self.MARKETPLACES_FILE, {})
+        if marketplace_id not in marketplaces:
+            raise ValueError(f"Marketplace not found: {marketplace_id}")
+
+        mp_location = marketplaces[marketplace_id].get("installLocation")
+        plugin_source = Path(mp_location) / "plugins" / plugin_name
+
+        if not plugin_source.exists():
+            raise ValueError(f"Plugin not found in marketplace: {plugin_name}")
+
+        # Determine target directory
+        target_dir = self.get_plugins_dir_for_scope(scope)
+        if not target_dir:
+            raise ValueError(f"Cannot get directory for scope: {scope}")
+
+        target_path = target_dir / plugin_name
+
+        # Create target directory
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        # Copy plugin to target
+        if target_path.exists():
+            shutil.rmtree(target_path)
+        shutil.copytree(plugin_source, target_path)
+
+        # Ensure scripts have execute permissions
+        for script in target_path.rglob("*.sh"):
+            current_mode = script.stat().st_mode
+            script.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+        # Enable by default in project settings
+        project_plugin_id = f"{plugin_name}@project-{scope.value}"
+        self.enable_project_plugin(project_plugin_id)
+
+        # Return plugin info
+        plugins = self.get_project_installed_plugins()
+        for p in plugins:
+            if p.id == project_plugin_id:
+                return p
+
+        # Fallback: construct plugin info
+        stat_info = target_path.stat()
+        return PluginInfo(
+            id=project_plugin_id,
+            name=plugin_name,
+            marketplace="project",
+            description="",
+            version="1.0.0",
+            scope=scope.value,
+            install_path=str(target_path),
+            installed_at=datetime.fromtimestamp(stat_info.st_ctime),
+            enabled=True,
+            has_commands=(target_path / "commands").exists(),
+            has_agents=(target_path / "agents").exists(),
+            has_skills=(target_path / "skills").exists(),
+            has_hooks=(target_path / "hooks").exists() or (target_path / "hooks.json").exists()
+        )
+
+    def uninstall_project_plugin(self, plugin_id: str) -> bool:
+        """
+        Uninstall a plugin from the project directory.
+
+        Args:
+            plugin_id: Plugin ID in format "name@project-local" or "name@project-project"
+
+        Returns:
+            True if successful
+        """
+        if not self.project_dir:
+            raise ValueError("No project directory configured")
+
+        # Parse plugin_id to get name and scope
+        parts = plugin_id.rsplit("@", 1)
+        if len(parts) != 2:
+            raise ValueError(f"Invalid plugin ID format: {plugin_id}")
+
+        plugin_name, scope_marker = parts
+
+        # Determine scope from marker
+        if scope_marker == "project-local":
+            scope = PluginScope.LOCAL
+        elif scope_marker == "project-project":
+            scope = PluginScope.PROJECT
+        else:
+            raise ValueError(f"Invalid project plugin ID: {plugin_id}")
+
+        # Get plugin directory
+        plugins_dir = self.get_plugins_dir_for_scope(scope)
+        if not plugins_dir:
+            raise ValueError(f"Cannot get directory for scope: {scope}")
+
+        plugin_path = plugins_dir / plugin_name
+
+        if not plugin_path.exists():
+            raise ValueError(f"Plugin not found: {plugin_name}")
+
+        # Remove plugin directory
+        shutil.rmtree(plugin_path)
+
+        # Remove from enabled plugins in project settings
+        settings = self._read_project_settings()
+        enabled = settings.get("enabledPlugins", {})
+        enabled.pop(plugin_id, None)
+        settings["enabledPlugins"] = enabled
+        self._write_project_settings(settings)
+
+        return True
+
+    def enable_project_plugin(self, plugin_id: str) -> bool:
+        """Enable a plugin in project scope"""
+        settings = self._read_project_settings()
+        if "enabledPlugins" not in settings:
+            settings["enabledPlugins"] = {}
+        settings["enabledPlugins"][plugin_id] = True
+        return self._write_project_settings(settings)
+
+    def disable_project_plugin(self, plugin_id: str) -> bool:
+        """Disable a plugin in project scope"""
+        settings = self._read_project_settings()
+        if "enabledPlugins" not in settings:
+            settings["enabledPlugins"] = {}
+        settings["enabledPlugins"][plugin_id] = False
+        return self._write_project_settings(settings)
+
+    def get_project_enabled_plugins(self) -> Dict[str, bool]:
+        """Get all project plugin enable/disable states"""
+        settings = self._read_project_settings()
+        return settings.get("enabledPlugins", {})
+
+    # =========================================================================
     # File-based Agents (from plugins)
     # =========================================================================
 

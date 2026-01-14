@@ -4,6 +4,10 @@
 	 *
 	 * Features:
 	 * - Project list with name, path display
+	 * - Click project to view detail with tabs:
+	 *   - Plugins (LOCAL and PROJECT scope)
+	 *   - Agents (file-based in .claude/agents/)
+	 *   - Hooks (project-scoped custom hooks)
 	 * - Group badge display
 	 * - Delete with inline confirmation
 	 * - Create form that toggles in place
@@ -13,8 +17,11 @@
 	import type { DeckCard } from './types';
 	import { tabs, projects } from '$lib/stores/tabs';
 	import { groups } from '$lib/stores/groups';
-	import { Search, Plus, Trash2, FolderOpen, X, Download } from 'lucide-svelte';
+	import { Search, Plus, Trash2, FolderOpen, X, ChevronLeft, Package, Bot, Zap } from 'lucide-svelte';
 	import GroupDropdown from '$lib/components/GroupDropdown.svelte';
+	import ProjectPluginsTab from './ProjectPluginsTab.svelte';
+	import ProjectAgentsTab from './ProjectAgentsTab.svelte';
+	import ProjectHooksTab from './ProjectHooksTab.svelte';
 	import './card-design-system.css';
 
 	interface Props {
@@ -41,6 +48,15 @@
 		mobile = false
 	}: Props = $props();
 
+	// View mode: list or detail
+	type ViewMode = 'list' | 'detail';
+	let viewMode = $state<ViewMode>('list');
+	let selectedProjectId = $state<string | null>(null);
+
+	// Detail view tab
+	type DetailTab = 'plugins' | 'agents' | 'hooks';
+	let activeTab = $state<DetailTab>('plugins');
+
 	// Form state
 	let showCreateForm = $state(false);
 	let newProjectId = $state('');
@@ -56,6 +72,9 @@
 	let deletingId = $state<string | null>(null);
 	let deleteLoading = $state(false);
 
+	// Get selected project
+	const selectedProject = $derived($projects.find(p => p.id === selectedProjectId));
+
 	// Filtered projects
 	const filteredProjects = $derived(() => {
 		if (!searchQuery.trim()) return $projects;
@@ -67,6 +86,19 @@
 				p.path.toLowerCase().includes(q)
 		);
 	});
+
+	// Handle project click - open detail view
+	function handleProjectClick(projectId: string) {
+		selectedProjectId = projectId;
+		viewMode = 'detail';
+		activeTab = 'plugins';
+	}
+
+	// Back to list view
+	function handleBack() {
+		viewMode = 'list';
+		selectedProjectId = null;
+	}
 
 	// Create project handler
 	async function handleCreateProject() {
@@ -124,192 +156,255 @@
 
 {#snippet content()}
 	<div class="card-system project-card" class:maximized={card.maximized}>
-		<!-- Header -->
-		<div class="card-header">
-			<div class="card-header-info">
-				{#if mobile}
-					<span class="card-header-title">Projects</span>
-				{/if}
-				<span class="card-header-subtitle">
-					{$projects.length} project{$projects.length !== 1 ? 's' : ''} configured
-				</span>
-			</div>
-		</div>
+		{#if viewMode === 'detail' && selectedProject}
+			<!-- Detail View -->
+			<div class="detail-view">
+				<!-- Detail Header -->
+				<div class="detail-header">
+					<button onclick={handleBack} class="back-btn">
+						<ChevronLeft class="w-5 h-5" />
+					</button>
+					<div class="detail-header-info">
+						<span class="detail-header-title">{selectedProject.name}</span>
+						<span class="detail-header-path">/workspace/{selectedProject.path}/</span>
+					</div>
+				</div>
 
-		<!-- Search (show if > 3 projects) -->
-		{#if $projects.length > 3}
-			<div class="card-search-wrapper">
-				<div class="card-search-container">
-					<Search class="card-search-icon" />
-					<input
-						type="text"
-						bind:value={searchQuery}
-						placeholder="Search projects..."
-						class="card-search-input"
-					/>
+				<!-- Detail Tabs -->
+				<div class="detail-tabs">
+					<button
+						class="detail-tab"
+						class:active={activeTab === 'plugins'}
+						onclick={() => (activeTab = 'plugins')}
+					>
+						<Package class="w-4 h-4" />
+						Plugins
+					</button>
+					<button
+						class="detail-tab"
+						class:active={activeTab === 'agents'}
+						onclick={() => (activeTab = 'agents')}
+					>
+						<Bot class="w-4 h-4" />
+						Agents
+					</button>
+					<button
+						class="detail-tab"
+						class:active={activeTab === 'hooks'}
+						onclick={() => (activeTab = 'hooks')}
+					>
+						<Zap class="w-4 h-4" />
+						Hooks
+					</button>
+				</div>
+
+				<!-- Tab Content -->
+				<div class="detail-content">
+					{#if activeTab === 'plugins'}
+						<ProjectPluginsTab projectId={selectedProject.id} />
+					{:else if activeTab === 'agents'}
+						<ProjectAgentsTab projectId={selectedProject.id} />
+					{:else if activeTab === 'hooks'}
+						<ProjectHooksTab projectId={selectedProject.id} />
+					{/if}
+				</div>
+			</div>
+		{:else}
+			<!-- List View -->
+			<!-- Header -->
+			<div class="card-header">
+				<div class="card-header-info">
+					{#if mobile}
+						<span class="card-header-title">Projects</span>
+					{/if}
+					<span class="card-header-subtitle">
+						{$projects.length} project{$projects.length !== 1 ? 's' : ''} configured
+					</span>
+				</div>
+			</div>
+
+			<!-- Search (show if > 3 projects) -->
+			{#if $projects.length > 3}
+				<div class="card-search-wrapper">
+					<div class="card-search-container">
+						<Search class="card-search-icon" />
+						<input
+							type="text"
+							bind:value={searchQuery}
+							placeholder="Search projects..."
+							class="card-search-input"
+						/>
+					</div>
+				</div>
+			{/if}
+
+			<!-- Content -->
+			<div class="card-content">
+				<div class="centered-content">
+				{#if error}
+					<div class="card-error-banner">
+						<span class="flex-1">{error}</span>
+						<button onclick={() => (error = null)}>
+							<X class="w-4 h-4" />
+						</button>
+					</div>
+				{/if}
+
+				<!-- Project list -->
+				{#if filteredProjects().length === 0}
+					<div class="card-empty-state">
+						{#if searchQuery}
+							<Search class="card-empty-icon" />
+							<p class="card-empty-title">No projects match "{searchQuery}"</p>
+							<button onclick={() => (searchQuery = '')} class="card-empty-action">
+								Clear search
+							</button>
+						{:else}
+							<FolderOpen class="card-empty-icon" />
+							<p class="card-empty-title">No projects configured yet</p>
+							<p class="card-empty-description">
+								Projects organize your work into separate workspaces with their own settings.
+							</p>
+						{/if}
+					</div>
+				{:else}
+					{#each filteredProjects() as project (project.id)}
+						{#if deletingId === project.id}
+							<!-- Inline delete confirmation -->
+							<div class="card-list-item card-list-item--deleting">
+								<div class="card-item-icon card-item-icon--destructive">
+									<Trash2 />
+								</div>
+								<div class="card-item-content">
+									<p class="delete-confirm-text">
+										Delete <strong>{project.name}</strong>? This cannot be undone.
+									</p>
+									<div class="delete-confirm-actions">
+										<button
+											onclick={() => (deletingId = null)}
+											disabled={deleteLoading}
+											class="card-btn-secondary"
+										>
+											Cancel
+										</button>
+										<button
+											onclick={handleDeleteProject}
+											disabled={deleteLoading}
+											class="card-btn-destructive"
+										>
+											{#if deleteLoading}
+												<div class="card-spinner card-spinner--small"></div>
+											{/if}
+											Delete
+										</button>
+									</div>
+								</div>
+							</div>
+						{:else}
+							<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+							<div
+								class="card-list-item card-list-item--clickable"
+								onclick={() => handleProjectClick(project.id)}
+								role="button"
+								tabindex="0"
+								onkeydown={(e) => e.key === 'Enter' && handleProjectClick(project.id)}
+							>
+								<div class="card-item-icon">
+									<FolderOpen />
+								</div>
+								<div class="card-item-content">
+									<div class="card-item-header">
+										<span class="card-item-name">{project.name}</span>
+										{#if $groups.projects.assignments[project.id]}
+											<span class="card-badge card-badge--primary">
+												{$groups.projects.assignments[project.id]}
+											</span>
+										{/if}
+									</div>
+									<span class="card-item-id">/workspace/{project.path}/</span>
+								</div>
+								<div class="card-item-actions" onclick={(e) => e.stopPropagation()}>
+									<!-- Group dropdown (portal-based to escape overflow:hidden) -->
+									<GroupDropdown entityType="projects" entityId={project.id} />
+									<button
+										onclick={(e) => { e.stopPropagation(); deletingId = project.id; }}
+										class="card-action-btn card-action-btn--destructive"
+										title="Delete project"
+									>
+										<Trash2 />
+									</button>
+								</div>
+							</div>
+						{/if}
+					{/each}
+				{/if}
+				</div>
+			</div>
+
+			<!-- Footer -->
+			<div class="card-footer">
+				<div class="card-footer-content">
+				{#if showCreateForm}
+					<div class="create-form">
+						<div class="form-row">
+							<div class="form-field">
+								<label class="card-form-label">ID</label>
+								<input
+									bind:value={newProjectId}
+									class="card-form-input card-form-input--mono"
+									placeholder="my-project"
+								/>
+							</div>
+							<div class="form-field">
+								<label class="card-form-label">Name</label>
+								<input
+									bind:value={newProjectName}
+									class="card-form-input"
+									placeholder="My Project"
+								/>
+							</div>
+						</div>
+						<div class="form-field">
+							<label class="card-form-label">Description</label>
+							<textarea
+								bind:value={newProjectDescription}
+								class="card-form-input card-form-textarea"
+								rows="2"
+								placeholder="Optional description..."
+							></textarea>
+						</div>
+						<div class="form-actions">
+							<button
+								onclick={cancelCreate}
+								disabled={creating}
+								class="card-btn-secondary"
+							>
+								Cancel
+							</button>
+							<button
+								onclick={handleCreateProject}
+								disabled={creating || !newProjectId.trim() || !newProjectName.trim()}
+								class="card-btn-primary"
+							>
+								{#if creating}
+									<div class="card-spinner card-spinner--small"></div>
+								{/if}
+								Create
+							</button>
+						</div>
+					</div>
+				{:else}
+					<button
+						onclick={() => (showCreateForm = true)}
+						class="card-btn-primary"
+					>
+						<Plus />
+						New Project
+					</button>
+				{/if}
 				</div>
 			</div>
 		{/if}
-
-		<!-- Content -->
-		<div class="card-content">
-			<div class="centered-content">
-			{#if error}
-				<div class="card-error-banner">
-					<span class="flex-1">{error}</span>
-					<button onclick={() => (error = null)}>
-						<X class="w-4 h-4" />
-					</button>
-				</div>
-			{/if}
-
-			<!-- Project list -->
-			{#if filteredProjects().length === 0}
-				<div class="card-empty-state">
-					{#if searchQuery}
-						<Search class="card-empty-icon" />
-						<p class="card-empty-title">No projects match "{searchQuery}"</p>
-						<button onclick={() => (searchQuery = '')} class="card-empty-action">
-							Clear search
-						</button>
-					{:else}
-						<FolderOpen class="card-empty-icon" />
-						<p class="card-empty-title">No projects configured yet</p>
-						<p class="card-empty-description">
-							Projects organize your work into separate workspaces with their own settings.
-						</p>
-					{/if}
-				</div>
-			{:else}
-				{#each filteredProjects() as project (project.id)}
-					{#if deletingId === project.id}
-						<!-- Inline delete confirmation -->
-						<div class="card-list-item card-list-item--deleting">
-							<div class="card-item-icon card-item-icon--destructive">
-								<Trash2 />
-							</div>
-							<div class="card-item-content">
-								<p class="delete-confirm-text">
-									Delete <strong>{project.name}</strong>? This cannot be undone.
-								</p>
-								<div class="delete-confirm-actions">
-									<button
-										onclick={() => (deletingId = null)}
-										disabled={deleteLoading}
-										class="card-btn-secondary"
-									>
-										Cancel
-									</button>
-									<button
-										onclick={handleDeleteProject}
-										disabled={deleteLoading}
-										class="card-btn-destructive"
-									>
-										{#if deleteLoading}
-											<div class="card-spinner card-spinner--small"></div>
-										{/if}
-										Delete
-									</button>
-								</div>
-							</div>
-						</div>
-					{:else}
-						<div class="card-list-item">
-							<div class="card-item-icon">
-								<FolderOpen />
-							</div>
-							<div class="card-item-content">
-								<div class="card-item-header">
-									<span class="card-item-name">{project.name}</span>
-									{#if $groups.projects.assignments[project.id]}
-										<span class="card-badge card-badge--primary">
-											{$groups.projects.assignments[project.id]}
-										</span>
-									{/if}
-								</div>
-								<span class="card-item-id">/workspace/{project.path}/</span>
-							</div>
-							<div class="card-item-actions">
-								<!-- Group dropdown (portal-based to escape overflow:hidden) -->
-								<GroupDropdown entityType="projects" entityId={project.id} />
-								<button
-									onclick={() => (deletingId = project.id)}
-									class="card-action-btn card-action-btn--destructive"
-									title="Delete project"
-								>
-									<Trash2 />
-								</button>
-							</div>
-						</div>
-					{/if}
-				{/each}
-			{/if}
-			</div>
-		</div>
-
-		<!-- Footer -->
-		<div class="card-footer">
-			<div class="card-footer-content">
-			{#if showCreateForm}
-				<div class="create-form">
-					<div class="form-row">
-						<div class="form-field">
-							<label class="card-form-label">ID</label>
-							<input
-								bind:value={newProjectId}
-								class="card-form-input card-form-input--mono"
-								placeholder="my-project"
-							/>
-						</div>
-						<div class="form-field">
-							<label class="card-form-label">Name</label>
-							<input
-								bind:value={newProjectName}
-								class="card-form-input"
-								placeholder="My Project"
-							/>
-						</div>
-					</div>
-					<div class="form-field">
-						<label class="card-form-label">Description</label>
-						<textarea
-							bind:value={newProjectDescription}
-							class="card-form-input card-form-textarea"
-							rows="2"
-							placeholder="Optional description..."
-						></textarea>
-					</div>
-					<div class="form-actions">
-						<button
-							onclick={cancelCreate}
-							disabled={creating}
-							class="card-btn-secondary"
-						>
-							Cancel
-						</button>
-						<button
-							onclick={handleCreateProject}
-							disabled={creating || !newProjectId.trim() || !newProjectName.trim()}
-							class="card-btn-primary"
-						>
-							{#if creating}
-								<div class="card-spinner card-spinner--small"></div>
-							{/if}
-							Create
-						</button>
-					</div>
-				</div>
-			{:else}
-				<button
-					onclick={() => (showCreateForm = true)}
-					class="card-btn-primary"
-				>
-					<Plus />
-					New Project
-				</button>
-			{/if}
-			</div>
-		</div>
 	</div>
 {/snippet}
 
@@ -376,6 +471,110 @@
 		padding: 0 var(--space-4) var(--space-3);
 		border-bottom: 1px solid var(--border-subtle);
 		background: linear-gradient(180deg, transparent 0%, color-mix(in oklch, var(--muted) 20%, transparent) 100%);
+	}
+
+	/* Detail view styles */
+	.detail-view {
+		display: flex;
+		flex-direction: column;
+		height: 100%;
+	}
+
+	.detail-header {
+		display: flex;
+		align-items: center;
+		gap: var(--space-3);
+		padding: var(--space-3) var(--space-4);
+		border-bottom: 1px solid var(--border);
+	}
+
+	.back-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 32px;
+		height: 32px;
+		border-radius: var(--radius);
+		background: var(--muted);
+		border: none;
+		cursor: pointer;
+		color: var(--muted-foreground);
+		transition: all 0.15s ease;
+	}
+
+	.back-btn:hover {
+		background: var(--accent);
+		color: var(--foreground);
+	}
+
+	.detail-header-info {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+
+	.detail-header-title {
+		font-weight: 600;
+		font-size: var(--text-base);
+	}
+
+	.detail-header-path {
+		font-size: var(--text-xs);
+		color: var(--muted-foreground);
+		font-family: var(--font-mono);
+	}
+
+	.detail-tabs {
+		display: flex;
+		gap: var(--space-1);
+		padding: var(--space-2) var(--space-4);
+		border-bottom: 1px solid var(--border);
+		background: var(--muted);
+	}
+
+	.detail-tab {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		padding: var(--space-2) var(--space-3);
+		font-size: var(--text-sm);
+		border-radius: var(--radius);
+		background: transparent;
+		border: none;
+		cursor: pointer;
+		color: var(--muted-foreground);
+		transition: all 0.15s ease;
+	}
+
+	.detail-tab:hover {
+		color: var(--foreground);
+	}
+
+	.detail-tab.active {
+		background: var(--background);
+		color: var(--foreground);
+		font-weight: 500;
+	}
+
+	.detail-content {
+		flex: 1;
+		overflow: hidden;
+		display: flex;
+		flex-direction: column;
+	}
+
+	/* Clickable list item */
+	.card-list-item--clickable {
+		cursor: pointer;
+		width: 100%;
+		text-align: left;
+		background: transparent;
+		border: none;
+	}
+
+	.card-list-item--clickable:hover {
+		background: var(--muted);
 	}
 
 	/* Create form styles */
