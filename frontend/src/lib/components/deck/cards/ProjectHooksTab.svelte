@@ -245,7 +245,7 @@
 							saving={$hookSaving[hook.id] || false}
 							onEdit={() => handleEdit(hook)}
 							onDelete={() => handleDeleteHook(hook.id)}
-							onToggle={(enabled: boolean) => handleToggleHook(hook.id, enabled)}
+							onToggle={() => handleToggleHook(hook.id, !hook.enabled)}
 							onTest={() => handleTestHook(hook.id)}
 						/>
 					{/each}

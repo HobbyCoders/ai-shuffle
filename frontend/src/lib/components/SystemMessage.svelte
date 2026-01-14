@@ -26,7 +26,7 @@
 	// Get formatted content based on subtype
 	function getFormattedContent(): { title: string; content: string; badge?: string; badgeColor?: string } {
 		const subtype = message.systemSubtype || 'system';
-		const data = message.systemData || {};
+		const data: Record<string, unknown> = message.systemData || {};
 
 		switch (subtype) {
 			case 'status': {
@@ -174,7 +174,7 @@
 
 			case 'plugin_warning': {
 				// Plugin hook stderr output (security warnings, etc.)
-				const pluginName = (data.plugin as string) || message.metadata?.plugin || 'Plugin';
+				const pluginName = (data.plugin as string) || (message.metadata?.plugin as string) || 'Plugin';
 				const warningContent = (data.message as string) || message.content || 'Plugin warning';
 				return {
 					title: pluginName,
