@@ -95,6 +95,29 @@ def load_plugin_hooks(plugin_paths: List[str]) -> Dict[str, List[Dict[str, Any]]
     return all_hooks
 
 
+def _fix_python_command_for_windows(command: str) -> str:
+    """
+    Fix Python commands for Windows compatibility.
+
+    On Windows, 'python3' often doesn't work (opens MS Store instead).
+    This function replaces 'python3' with the current Python executable.
+
+    Args:
+        command: The original command string
+
+    Returns:
+        Fixed command string for the current platform
+    """
+    if sys.platform == "win32":
+        # Replace python3 with the current Python executable
+        # This handles cases like "python3 script.py" -> "C:\...\python.exe script.py"
+        if command.startswith("python3 "):
+            python_exe = sys.executable
+            command = f'"{python_exe}" {command[8:]}'  # 8 = len("python3 ")
+            logger.debug(f"Fixed Windows Python command: {command}")
+    return command
+
+
 async def execute_plugin_hook(
     hook_def: Dict[str, Any],
     hook_input: Dict[str, Any],
@@ -121,6 +144,9 @@ async def execute_plugin_hook(
 
     if not command:
         return None
+
+    # Fix python3 -> python on Windows
+    command = _fix_python_command_for_windows(command)
 
     # Prepare environment with plugin root
     env = os.environ.copy()
